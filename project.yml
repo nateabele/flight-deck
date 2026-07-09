@@ -1,0 +1,21 @@
+name: FlightDeck
+options:
+  bundleIdPrefix: dev.flightdeck
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+targets:
+  FlightDeck:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/FlightDeck
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Sources/FlightDeck/FlightDeck.entitlements
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        INFOPLIST_KEY_CFBundleDisplayName: Flight Deck
+        GENERATE_INFOPLIST_FILE: "YES"
