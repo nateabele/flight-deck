@@ -6,7 +6,9 @@
 
 ## 1. Concept
 
-Flight Deck is a from-scratch macOS app: an **orchestration-native terminal** for running many coding agents across repos and projects. It embeds Ghostty's engine for real terminal fidelity, runs *external* agent harnesses (Claude Code, opencode) as observable workers behind a per-harness adapter, wraps them in a **context engine you own and can inspect**, and presents every agent's live status in one nested **mission-control sidebar**: session → repo/folder → project.
+Flight Deck is a from-scratch macOS app: an **orchestration-native terminal** for running many coding agents across repos and projects. It **reuses Ghostty as much as possible — both its engine (`libghostty`) and, where it fits, its actual macOS *application* code** (the Swift terminal surface, Metal renderer, and input encoding) — for real terminal fidelity without rebuilding a terminal from scratch. It runs *external* agent harnesses (Claude Code, opencode) as observable workers behind a per-harness adapter, wraps them in a **context engine you own and can inspect**, and presents every agent's live status in one nested **mission-control sidebar**: session → repo/folder → project.
+
+**Reuse principle:** Flight Deck is the same stack as Ghostty's macOS app (Swift + AppKit/SwiftUI + Metal). Wherever Ghostty already solves a terminal problem — surface view, GPU renderer, key/mouse encoding, config, OSC handling, selection, scrollback — **prefer forking/reusing Ghostty's application code over reimplementing it.** Flight Deck's own code should concentrate on what Ghostty does *not* do: the block model, the harness adapters, the context engine, and the mission-control sidebar. Ghostty is permissively licensed (MIT), so reuse/forking of app-layer code is fine (verify current license terms before shipping).
 
 The bet: with frontier models converged, the value is not another agent — it's the *chrome* around any agent (fast terminal, owned context, live fleet visibility). Flight Deck owns that chrome and orchestrates the loops it doesn't own.
 
@@ -14,7 +16,7 @@ The bet: with frontier models converged, the value is not another agent — it's
 
 | Decision | Choice |
 |---|---|
-| App | From-scratch, **macOS-native**: Swift + AppKit/SwiftUI + **Metal**, linking **libghostty** (C API) |
+| App | From-scratch, **macOS-native**: Swift + AppKit/SwiftUI + **Metal**. **Reuse Ghostty's application code** (terminal surface, renderer, input) where relevant, over `libghostty` (C API) |
 | Agent execution | **Orchestrate external harnesses** (v1: Claude Code + opencode) via a per-harness **adapter** |
 | Drive mode | **Interactive** — the harness owns its context window; Flight Deck influences it via four levers |
 | Context engine | **Task-scoped auto-assembly + shared code index + persistent memory + inspectable compaction** (of Flight Deck's own layer) |
@@ -31,7 +33,7 @@ Each unit has one purpose, a defined interface, and can be understood/tested ind
 
 | Unit | Purpose | Depends on | Owns |
 |---|---|---|---|
-| **Terminal Core** | Embed `libghostty`; Swift/Metal renderer; block model on OSC 133 semantic zones | libghostty | grid, scrollback, blocks, input |
+| **Terminal Core** | **Fork/reuse Ghostty's macOS terminal surface** (Swift view + Metal renderer + input encoding, over its internal C API); add the block model on OSC 133 semantic zones | Ghostty app code + `libghostty` | grid, scrollback, blocks, input |
 | **Harness Adapter** | Per-harness driver: launch, observe, inject | Terminal Core (PTY) | normalized `AgentEvent` stream + `injectContext()` |
 | **Context Engine** | Auto-assembly, memory, compaction, provenance — all inspectable | Adapter events, Index | Flight Deck's authoritative context layer |
 | **Index Service** | Shared incremental code index (qartez-style), MCP-exposed | git, fs watcher | symbols, refs, call graph, embeddings |
@@ -43,6 +45,7 @@ Each unit has one purpose, a defined interface, and can be understood/tested ind
 - The **Store** is the single source of truth; the **Sidebar** only renders it.
 - The **Adapter** is the only component that talks to a harness. Adding a harness = writing one Adapter; nothing else changes.
 - The **Context Engine** never reaches inside a harness's private window; it operates its own layer and the four levers below.
+- **Terminal Core is a thin delta over Ghostty's app**, not a reimplementation. New Flight Deck code here should be limited to the block model, harness/PTY wiring, and any surface hooks the sidebar/context engine need — everything else is reused Ghostty application code. If the delta starts growing, that is a signal to push the change upstream or reconsider the boundary.
 
 ## 4. Context engine under interactive orchestration
 
@@ -90,6 +93,7 @@ On-demand. A session runs in the repo working dir by default. Opting a session i
 ## 8. Known risks / honest hard parts
 
 - **libghostty is early and unversioned** — the public C API is "coming"; v1 may ride the internal macOS C API and track churn.
+- **Reusing Ghostty's *app* code ties Flight Deck to Ghostty's app internals**, which are not a stable public API — upstream refactors can break the fork. This is an accepted trade: the time saved by not rebuilding a terminal surface outweighs the maintenance of tracking upstream. Mitigate by keeping the Terminal Core delta small (see §3), pinning to a known-good Ghostty revision, and isolating Flight Deck-specific changes so they rebase cleanly. Confirm Ghostty's license terms before distribution.
 - **Interactive injection depends on harness hook stability** — if Claude Code / opencode change hook contracts, adapters break; isolate that surface.
 - **Harness-internal compaction is not inspectable** — mitigated by owning a parallel authoritative context layer.
 - **Index as a shared service** — qartez is a strong substrate but is per-user MCP today; productizing means running it standalone and handling multi-worktree writers (single-writer SQLite WAL).
@@ -98,7 +102,7 @@ On-demand. A session runs in the repo working dir by default. Opting a session i
 
 Six subsystems; build a vertical slice first, then layer. Each phase is independently shippable/testable.
 
-1. **MVP (vertical spine):** Terminal Core (libghostty in a Swift/Metal window) + one repo + **Claude Code adapter (observe + inject)** + a **minimal index** feeding `UserPromptSubmit` injection + Session/Project Store + **nested sidebar** (attention + run-state + context budget). Proves the whole spine — including "intelligent" injection — end to end.
+1. **MVP (vertical spine):** Terminal Core — **stand up Ghostty's macOS terminal surface (reused app code) in a Flight Deck window** — + one repo + **Claude Code adapter (observe + inject)** + a **minimal index** feeding `UserPromptSubmit` injection + Session/Project Store + **nested sidebar** (attention + run-state + context budget). The first task of phase 1 is literally "get a reused-Ghostty terminal rendering in our shell," before any orchestration. Proves the whole spine — including "intelligent" injection — end to end.
 2. **Full Index Service** (qartez-style, MCP-exposed, incremental) + richer task-scoped auto-assembly + MCP pull tools.
 3. **Memory** (auto-extract, user-curated) + layered session→repo→project scope + **provenance/inspection UI**.
 4. **opencode adapter** (validates the harness abstraction) + **worktrees**.
