@@ -3,3 +3,7 @@ target/
 *.xcuserstate
 build/
 .build/
+vendor/ghostty-artifacts/
+DerivedData/
+*.xcodeproj
+vendor/.zig-toolchain/
