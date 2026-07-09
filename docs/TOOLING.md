@@ -38,9 +38,9 @@ This requirement is not specific to the `v1.3.1` tag — `origin/main` (`tip`) a
 
 To resolve, Zig **0.15.2** (`aarch64-macos` tarball) was downloaded directly from https://ziglang.org/download/0.15.2/zig-aarch64-macos-0.15.2.tar.xz (sha256 `3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b`, verified) and extracted to `vendor/.zig-toolchain/zig-aarch64-macos-0.15.2/` (git-ignored; NOT installed via Homebrew, so it does not disturb the pinned brew `zig 0.16.0`).
 
-### BLOCKER: Zig 0.15.2 cannot link on this host (upstream Zig bug)
+### Zig 0.15.2 linker bug and the MacOSX15.4 SDK workaround (RESOLVED)
 
-With the correct Zig version (0.15.2) in hand, `zig build -Demit-macos-app=false` still fails — not with a version error, but with dozens of Mach-O linker errors for basic libSystem symbols, e.g.:
+With the correct Zig version (0.15.2) in hand, `zig build -Demit-macos-app=false` initially still failed — not with a version error, but with dozens of Mach-O linker errors for basic libSystem symbols, e.g.:
 
 ```
 error: undefined symbol: __availability_version_check
@@ -54,15 +54,26 @@ error: undefined symbol: _dispatch_queue_create
 
 **Root-cause isolation performed:**
 
-1. Retried with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` (full Xcode, not just Command Line Tools) — identical failure. Both the Command Line Tools SDK and the Xcode.app-bundled SDKs on this host report SDK version `26.5` (`SDKSettings.plist`); there is no older SDK available locally to fall back to.
-2. Isolated the failure to the Zig toolchain itself, independent of Ghostty: compiling a trivial `hello world` with `zig build-exe` reproduces the exact same undefined-symbol errors under the downloaded **Zig 0.15.2**, while the same trivial program builds and runs fine under the Homebrew **Zig 0.16.0**. This confirms the break is in Zig 0.15.2's self-hosted Mach-O linker, not in Ghostty's build graph or this repo's environment setup.
-3. Confirmed via web search this is a known, already-reported upstream issue: **ziglang/zig #31658**, "MacOS Builds Are Failing w/ XCode 26.4" (https://codeberg.org/ziglang/zig/issues/31658). Triggered by an SDK/toolchain change introduced in Xcode 26.4+ (this host has Xcode 26.6 / CLT 26.6). Affects Zig 0.15.2 and some 0.16.0-dev builds. Fixed by PR #31673 (https://codeberg.org/ziglang/zig/pulls/31673), **targeting the 0.16.0 milestone** — there is no confirmed 0.15.x patch release with the backport as of this writing.
+1. Retried with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` (full Xcode, not just Command Line Tools) — identical failure. Both the Command Line Tools SDK and the Xcode.app-bundled SDKs on this host report SDK version `26.5` (`SDKSettings.plist`).
+2. Isolated the failure to the Zig toolchain itself, independent of Ghostty: compiling a trivial `hello world` with `zig build-exe` reproduces the exact same undefined-symbol errors under the downloaded **Zig 0.15.2**, while the same trivial program builds and runs fine under the Homebrew **Zig 0.16.0**. This confirms the break is in Zig 0.15.2's self-hosted Mach-O linker's parsing of the macOS 26.5 SDK's `libSystem.tbd`, not in Ghostty's build graph or this repo's environment setup.
+3. Confirmed via web search this is a known, already-reported upstream issue: **ziglang/zig #31658**, "MacOS Builds Are Failing w/ XCode 26.4" (https://codeberg.org/ziglang/zig/issues/31658). Fixed by PR #31673 (https://codeberg.org/ziglang/zig/pulls/31673), **targeting the 0.16.0 milestone** — there is no confirmed 0.15.x patch release with the backport as of this writing, and Ghostty's `requireZig()` still rejects Zig 0.16.
 4. Checked for an escape hatch via `-flld` (force LLD instead of Zig's self-hosted linker): rejected outright by Zig 0.15.2 — `error: using LLD to link macho files is unsupported` for Mach-O targets.
-5. The one documented community workaround (installing older Xcode 26.3 Command Line Tools and running `sudo xcode-select --switch`) requires a system-wide developer-tools change and `sudo`, which is out of scope for this task (and would conflict with the Xcode 26.6 pin recorded above for later tasks) — not attempted.
+5. `DEVELOPER_DIR=/dev/null` was also tried, to make Zig fall back to some minimal/no SDK. This does **not** work for the full library: it hides the real frameworks (AppKit, CoreText, Metal, etc.) that libghostty links against, so the build fails differently (missing frameworks) rather than succeeding.
 
-**Status:** libghostty could not be built on this host as of 2026-07-09. `vendor/ghostty-artifacts/` was not produced. This is an environment/upstream-toolchain blocker, not a mistake in the submodule pin, Zig version selection, or build invocation.
+**Working fix:** this host's Command Line Tools `SDKs/` directory retains an older `MacOSX15.4.sdk` alongside the current `MacOSX26.5.sdk`. A thin `xcrun` shim script is placed first on `PATH` that intercepts only `xcrun --show-sdk-path ...macosx...` calls and echoes the path to `MacOSX15.4.sdk` instead of delegating to the real `xcrun` (which would resolve to the 26.5 SDK); every other `xcrun` invocation passes through unchanged to `/usr/bin/xcrun`. `DEVELOPER_DIR` is still set to the real, full Xcode install, so real frameworks are still found and linked correctly — only the SDK path used for `libSystem.tbd` resolution is redirected to the older, correctly-parsed SDK. Build command (run with cwd `vendor/ghostty`):
 
-**Unblock options (not executed, for whoever picks this up):**
-- Wait for an official Zig 0.15.x patch release (0.15.3+) containing the PR #31673 backport, or for Ghostty to bump `minimum_zig_version` to 0.16.x (which already works on this host).
-- Build a patched Zig 0.15.2 from source with PR #31673 cherry-picked (self-contained under `vendor/.zig-toolchain/`, no system changes needed, but untried here — see "do not thrash" guidance in the task brief).
-- With explicit user approval: install Xcode 26.3 Command Line Tools and temporarily `sudo xcode-select --switch` to them for the libghostty build step only, then switch back.
+```
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  PATH="vendor/.build-shim:$PATH" \
+  vendor/.zig-toolchain/zig-aarch64-macos-0.15.2/zig build \
+    -Demit-macos-app=false -Dxcframework-target=native
+```
+
+This is automated by `scripts/build-libghostty.sh`, which also downloads/verifies the Zig 0.15.2 toolchain if missing and creates the shim (at the git-ignored `vendor/.build-shim/xcrun`) on each run.
+
+**Status:** libghostty builds successfully on this host as of 2026-07-09. Output artifact: `vendor/ghostty-artifacts/GhosttyKit.xcframework`, containing `Info.plist`, `macos-arm64/libghostty-fat.a` (a fat static archive, ~197 MB, 282 objects), and `macos-arm64/Headers/ghostty.h` (the C API, including `ghostty_app_new`, `ghostty_surface_new`, `ghostty_surface_draw`).
+
+**If this workaround stops applying** (e.g. on a host without an `MacOSX15.4.sdk` under the Command Line Tools' `SDKs/` directory): `scripts/build-libghostty.sh` fails fast with a clear error rather than falling back to `/dev/null` (which does not work). Alternatives at that point:
+- Wait for an official Zig 0.15.x patch release (0.15.3+) containing the PR #31673 backport, or for Ghostty to bump `minimum_zig_version` to 0.16.x.
+- Build a patched Zig 0.15.2 from source with PR #31673 cherry-picked (self-contained under `vendor/.zig-toolchain/`, no system changes needed).
+- With explicit user approval: install Xcode 26.3 Command Line Tools (which ship an older SDK) alongside the current toolchain and point the shim at that SDK instead.

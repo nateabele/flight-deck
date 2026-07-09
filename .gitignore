@@ -7,3 +7,4 @@ vendor/ghostty-artifacts/
 DerivedData/
 *.xcodeproj
 vendor/.zig-toolchain/
+vendor/.build-shim/
