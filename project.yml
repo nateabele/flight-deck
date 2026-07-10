@@ -27,3 +27,11 @@ targets:
         # libghostty (GhosttyKit) statically bundles C++ (glslang); link the C++
         # stdlib so its std::* symbols resolve. Matches Ghostty's own project.
         OTHER_LDFLAGS: -lstdc++
+  FlightDeckTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [Tests/FlightDeckTests]
+    dependencies:
+      - target: FlightDeck
+    settings:
+      base: { GENERATE_INFOPLIST_FILE: "YES" }
