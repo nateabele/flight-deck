@@ -3,7 +3,7 @@ import SwiftUI
 struct RootWindow: Scene {
     var body: some Scene {
         WindowGroup {
-            Text("Flight Deck")
+            TerminalContainer(workingDirectory: NSHomeDirectory())
                 .frame(minWidth: 800, minHeight: 500)
         }
     }
