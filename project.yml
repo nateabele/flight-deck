@@ -35,3 +35,11 @@ targets:
       - target: FlightDeck
     settings:
       base: { GENERATE_INFOPLIST_FILE: "YES" }
+  FlightDeckUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources: [UITests/FlightDeckUITests]
+    dependencies:
+      - target: FlightDeck
+    settings:
+      base: { GENERATE_INFOPLIST_FILE: "YES" }
