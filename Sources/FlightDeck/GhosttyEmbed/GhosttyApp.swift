@@ -40,7 +40,10 @@ final class GhosttyApp {
         // Build a finalized configuration from the user's default config files.
         // A full embedding would wrap this in a richer type (see Ghostty.Config);
         // the skeleton only needs a valid finalized handle.
-        let cfg = ghostty_config_new()
+        guard let cfg = ghostty_config_new() else {
+            Ghostty.logger.critical("ghostty_config_new failed")
+            return nil
+        }
         ghostty_config_load_default_files(cfg)
         ghostty_config_load_recursive_files(cfg)
         ghostty_config_finalize(cfg)

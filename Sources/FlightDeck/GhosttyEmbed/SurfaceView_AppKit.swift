@@ -129,9 +129,6 @@ extension Ghostty {
         // Whether the cursor is currently visible (not hidden by typing, etc.)
         @Published private(set) var cursorVisible: Bool = true
 
-        /// The configuration derived from the Ghostty config so we don't need to rely on references.
-        @Published private(set) var derivedConfig: DerivedConfig
-
         /// The background color within the color palette of the surface. This is only set if it is
         /// dynamically updated. Otherwise, the background color is the default background color.
         @Published private(set) var backgroundColor: Color?
@@ -259,10 +256,6 @@ extension Ghostty {
         init(_ app: ghostty_app_t, baseConfig: SurfaceConfiguration? = nil, uuid: UUID? = nil) {
             self.markedText = NSMutableAttributedString()
             self.id = uuid ?? .init()
-
-            // Flight Deck: skeleton has no app-wide config source (was
-            // `AppDelegate.ghostty.config`); use the default derived config.
-            self.derivedConfig = DerivedConfig()
 
             // We need to initialize this so it does something but we want to set
             // it back up later so we can reference `self`. This is a hack we should
@@ -1241,20 +1234,6 @@ extension Ghostty {
 
             // If this is a binding then we want to perform it.
             if let bindingFlags {
-                // Attempt to trigger a menu item for this key binding. We only do this if:
-                //   - We're not in a key sequence or table (those are separate bindings)
-                //   - The binding is NOT `all` (menu uses FirstResponder chain)
-                //   - The binding is NOT `performable` (menu will always consume)
-                //   - The binding is `consumed` (unconsumed bindings should pass through
-                //     to the terminal, so we must not intercept them for the menu)
-                if keySequence.isEmpty,
-                   keyTables.isEmpty,
-                   bindingFlags.isDisjoint(with: [.all, .performable]),
-                   bindingFlags.contains(.consumed) {
-                    // Flight Deck: dropped app-menu key-equivalent forwarding
-                    // (used the app-shell `AppDelegate`); no global menu in the skeleton.
-                }
-
                 self.keyDown(with: event)
                 return true
             }
