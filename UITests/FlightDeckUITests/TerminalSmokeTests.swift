@@ -3,6 +3,12 @@ import XCTest
 final class TerminalSmokeTests: XCTestCase {
     func testAppLaunchesAndShowsTerminalSurface() {
         let app = XCUIApplication()
+        // XCUITest spawns the app via a raw exec, not LaunchServices, so the
+        // macOS window-restoration handshake that normally creates the initial
+        // WindowGroup window never completes and no window is made. Bypassing
+        // restoration matches real-user (LaunchServices) launch semantics and
+        // changes no shipped behavior.
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
         app.launch()
         app.activate()
         // The app window must exist and contain a rendered content view.
@@ -13,6 +19,9 @@ final class TerminalSmokeTests: XCTestCase {
 
     func testClosingSeededSessionKeepsAppAlive() {
         let app = XCUIApplication()
+        // See testAppLaunchesAndShowsTerminalSurface: bypass window restoration
+        // so the initial window is created under XCUITest's raw-exec launch.
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
         app.launch()
         app.activate()
         let window = app.windows.firstMatch

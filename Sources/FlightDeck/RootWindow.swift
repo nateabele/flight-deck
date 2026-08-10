@@ -8,5 +8,7 @@ struct RootWindow: Scene {
             RootView(ghostty: ghostty)
                 .frame(minWidth: 800, minHeight: 500)
         }
+        .defaultSize(width: 1000, height: 700)
+        .defaultPosition(.center)
     }
 }
