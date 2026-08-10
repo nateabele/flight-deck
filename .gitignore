@@ -8,3 +8,4 @@ DerivedData/
 *.xcodeproj
 vendor/.zig-toolchain/
 vendor/.build-shim/
+*.profraw
