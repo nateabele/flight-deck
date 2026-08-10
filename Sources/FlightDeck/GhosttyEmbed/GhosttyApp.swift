@@ -22,6 +22,10 @@ final class GhosttyApp {
     /// The underlying libghostty app handle.
     private(set) var app: ghostty_app_t!
 
+    /// True while the underlying libghostty app handle is valid. Used by the
+    /// surface-lifetime regression test to prove the app outlives surface frees.
+    var hasValidApp: Bool { app != nil }
+
     /// The finalized libghostty configuration backing `app`.
     private var config: ghostty_config_t!
 
