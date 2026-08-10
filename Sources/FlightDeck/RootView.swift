@@ -1,0 +1,18 @@
+import SwiftUI
+
+/// Root of the window. Owns the SessionStore for the window's lifetime and,
+/// for now, renders just the selected terminal. The sidebar is added in the
+/// next task.
+struct RootView: View {
+    @StateObject private var store: SessionStore
+
+    init(ghostty: GhosttyApp?) {
+        // StateObject's autoclosure runs exactly once, so the seed happens once.
+        _store = StateObject(wrappedValue: SessionStore(ghostty: ghostty))
+    }
+
+    var body: some View {
+        TerminalPane(store: store)
+            .frame(minWidth: 400, minHeight: 300)
+    }
+}
