@@ -1,8 +1,17 @@
 # Flight Deck — Session Handoff
 
-**Date:** 2026-07-10 · **Branch:** `master` · **Tip:** `4f70ad0` · **Status:** walking skeleton complete, merged, green.
+**Date:** 2026-08-10 · **Branch:** `multi-session-foundation` (off `master`) · **Tip:** `ffe4d58` · **Status:** Multi-Session Foundation COMPLETE (all 6 tasks implemented & reviewed) — smoke gate GREEN; branch ready to finish.
 
 Start here if you're picking up Flight Deck fresh. This is the map; the linked docs have the detail.
+
+> **✅ Multi-Session Foundation is done and green.**
+> The plan is fully built and reviewed on branch `multi-session-foundation`, and the XCUITest smoke
+> gate now passes (both UI tests). One subtle macOS gotcha was resolved along the way — under
+> XCUITest's raw-exec launch the initial window is gated behind the window-restoration handshake that
+> only LaunchServices completes; the tests now pass `-ApplePersistenceIgnoreState YES` to match
+> real-user launch semantics. Full postmortem: [HANDOFF-smoke-gate.md](HANDOFF-smoke-gate.md).
+> - **Plan (what was built):** [superpowers/plans/2026-08-09-multi-session-foundation.md](superpowers/plans/2026-08-09-multi-session-foundation.md) — 6 TDD tasks with full code, commands, interfaces.
+> - **Design spec (the why):** [superpowers/specs/2026-08-08-multi-session-foundation-design.md](superpowers/specs/2026-08-08-multi-session-foundation-design.md).
 
 ---
 
@@ -54,8 +63,17 @@ Both are documented in **[TOOLING.md](TOOLING.md)**:
 
 Immediate + phased next steps live in **[FOLLOWUPS.md](FOLLOWUPS.md)**. The short version:
 
-- **Before adding multi-window/multi-session:** fix the teardown-lifetime hazard — make `GhosttyApp` an app-level singleton (it's currently per-view; closing a window could free the app before the deferred surface-free runs). Details in FOLLOWUPS.
-- **Then the design's phase-1 remainder**, each its own spec→plan→build: the **harness adapter** (Claude Code hooks + `stream-json`, opencode's server/events), the **shared code index** (qartez is a ready substrate, MCP-exposed), the **context engine** (auto-assembly + memory + inspectable compaction), and the **mission-control sidebar** (nested tree, inline live status). See [design spec §9](superpowers/specs/2026-07-09-flight-deck-design.md).
+- **NOW (planned & approved — just execute):** the **Multi-Session Foundation**. This is the design's
+  phase-1 continuation *before* the harness adapter. It folds the teardown-lifetime (UAF) fix into
+  building real multi-session support — an app-wide singleton `GhosttyApp` owned by an `AppDelegate`
+  (so the deferred `ghostty_surface_free` can never race a freed app), a `Session`/`Repo` model, a
+  `@MainActor SessionStore` as single source of truth, and a repo→session sidebar with
+  create/switch/close where surfaces are Store-retained and re-parented on switch (only close frees).
+  The full breakdown is in the
+  **[plan](superpowers/plans/2026-08-09-multi-session-foundation.md)** (6 TDD tasks, ready to run
+  subagent-driven); the rationale and scope in/out is in the
+  **[design spec](superpowers/specs/2026-08-08-multi-session-foundation-design.md)**.
+- **Then the design's phase-1 remainder**, each its own spec→plan→build: the **harness adapter** (Claude Code hooks + `stream-json`, opencode's server/events), the **shared code index** (qartez is a ready substrate, MCP-exposed), the **context engine** (auto-assembly + memory + inspectable compaction), and the **mission-control sidebar** live-status columns (needs the adapter's event stream). See [design spec §9](superpowers/specs/2026-07-09-flight-deck-design.md).
 - **Known limitation:** CI / other-host builds are blocked on the upstream Zig fix (see TOOLING.md / FOLLOWUPS.md).
 
 ## How this was built (process record)
@@ -69,5 +87,7 @@ See **[docs/README.md](README.md)** for the full index. In short:
 - [BUILD.md](BUILD.md) — build / run / test / troubleshoot
 - [TOOLING.md](TOOLING.md) — toolchain versions + the SDK-shim workaround
 - [FOLLOWUPS.md](FOLLOWUPS.md) — known limitations & prioritized next fixes
-- [superpowers/specs/2026-07-09-flight-deck-design.md](superpowers/specs/2026-07-09-flight-deck-design.md) — the design (why)
-- [superpowers/plans/2026-07-09-flight-deck-walking-skeleton.md](superpowers/plans/2026-07-09-flight-deck-walking-skeleton.md) — the executed plan
+- [superpowers/specs/2026-07-09-flight-deck-design.md](superpowers/specs/2026-07-09-flight-deck-design.md) — the overall design (why)
+- [superpowers/plans/2026-07-09-flight-deck-walking-skeleton.md](superpowers/plans/2026-07-09-flight-deck-walking-skeleton.md) — the executed walking-skeleton plan
+- [superpowers/specs/2026-08-08-multi-session-foundation-design.md](superpowers/specs/2026-08-08-multi-session-foundation-design.md) — **next phase** design spec
+- [superpowers/plans/2026-08-09-multi-session-foundation.md](superpowers/plans/2026-08-09-multi-session-foundation.md) — **next phase** implementation plan (ready to execute)
