@@ -12,7 +12,26 @@ struct RootView: View {
     }
 
     var body: some View {
-        TerminalPane(store: store)
-            .frame(minWidth: 400, minHeight: 300)
+        NavigationSplitView {
+            SessionSidebar(store: store)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 240)
+        } detail: {
+            if store.selectedSessionID.flatMap({ store.surface(for: $0) }) != nil {
+                TerminalPane(store: store)
+                    .frame(minWidth: 400, minHeight: 300)
+            } else {
+                ContentUnavailableView {
+                    Label("No Session", systemImage: "terminal")
+                } description: {
+                    Text("Create a session to get started.")
+                } actions: {
+                    Button("New Session") {
+                        if let url = FolderPicker.choose() {
+                            store.newSession(in: url)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
