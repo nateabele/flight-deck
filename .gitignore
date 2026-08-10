@@ -9,3 +9,4 @@ DerivedData/
 vendor/.zig-toolchain/
 vendor/.build-shim/
 *.profraw
+scripts/.smoke.log
