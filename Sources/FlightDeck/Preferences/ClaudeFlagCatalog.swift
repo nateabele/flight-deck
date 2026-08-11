@@ -97,7 +97,7 @@ enum ClaudeFlagCatalog {
               help: "Makes bypassing available without enabling it by default."),
         .init("--tools", kind: .list,
               section: .permissionsTools, label: "Available tools",
-              help: #""" disables all; "default" uses all."#),
+              help: #"Built-in tools to expose. "" disables all; "default" uses all."#),
         .init("--allowedTools", aliases: ["--allowed-tools"], kind: .list,
               section: .permissionsTools, label: "Allowed tools",
               help: #"Tools allowed without asking, e.g. "Bash(git *)" Edit."#),
