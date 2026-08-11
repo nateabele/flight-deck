@@ -35,32 +35,18 @@ final class SessionStore: ObservableObject {
 
     private let persistence: SessionPersisting?
 
-    /// Set once the first `init(ghostty:resetState:)` in the process has run. A second
-    /// `WindowGroup` window (File ▸ New Window) would otherwise construct another
-    /// `SessionStore` that restores the *same* persisted snapshot as the first window,
-    /// so two shells resume the same Claude session against one transcript. Only the
-    /// first store in the process may restore; every later one seeds a fresh session
-    /// with its own new UUID, exactly as it did before restore existed.
-    private static var hasRestoredInProcess = false
-
     init(provider: SurfaceProvider?, persistence: SessionPersisting? = nil) {
         self.provider = provider
         self.persistence = persistence
     }
 
-    /// Production entry point: build from the app singleton, restore the last run's
-    /// sessions if any, and otherwise seed one.
-    ///
-    /// `resetState` skips `restore()` entirely. UITests launch the app multiple
-    /// times within a single `smoke.sh` run, so sessions persisted by an earlier
-    /// test case would otherwise survive (via UserDefaults) into a later one and
-    /// make tests order-dependent. Every UITest passes the `-FlightDeckResetState
-    /// YES` launch argument, which `RootView.init` translates into this flag.
+    /// `resetState` comes from the `-FlightDeckResetState YES` launch argument: `smoke.sh`
+    /// wipes defaults once per run, but the UITest bundle launches the app once per test
+    /// case, so a session persisted by an earlier case would otherwise survive into a later
+    /// one and make tests order-dependent.
     convenience init(ghostty: GhosttyApp?, resetState: Bool = false) {
         self.init(provider: ghostty, persistence: UserDefaultsSessionPersistence())
-        let isFirstInProcess = !Self.hasRestoredInProcess
-        Self.hasRestoredInProcess = true
-        if resetState || !isFirstInProcess || !restore() { seedInitialSession() }
+        if resetState || !restore() { seedInitialSession() }
     }
 
     func seedInitialSession(
