@@ -35,9 +35,15 @@ final class SessionStore: ObservableObject {
 
     /// Production entry point: build from the app singleton, restore the last run's
     /// sessions if any, and otherwise seed one.
-    convenience init(ghostty: GhosttyApp?) {
+    ///
+    /// `resetState` skips `restore()` entirely. UITests launch the app multiple
+    /// times within a single `smoke.sh` run, so sessions persisted by an earlier
+    /// test case would otherwise survive (via UserDefaults) into a later one and
+    /// make tests order-dependent. Every UITest passes the `-FlightDeckResetState
+    /// YES` launch argument, which `RootView.init` translates into this flag.
+    convenience init(ghostty: GhosttyApp?, resetState: Bool = false) {
         self.init(provider: ghostty, persistence: UserDefaultsSessionPersistence())
-        if !restore() { seedInitialSession() }
+        if resetState || !restore() { seedInitialSession() }
     }
 
     func seedInitialSession(
