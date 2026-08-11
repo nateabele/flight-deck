@@ -1,7 +1,7 @@
 # Session Name Sync (Flight Deck ⇄ Claude Code) — Design
 
 **Date:** 2026-08-10 · **Status:** design approved, ready for planning
-**Supersedes the open questions in** `docs/HANDOFF-session-name-sync.md` §6.
+**Supersedes the open questions in** `docs/done/HANDOFF-session-name-sync.md` §6.
 
 ## 1. Goal
 

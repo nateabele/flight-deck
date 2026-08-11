@@ -1,20 +1,28 @@
 # Flight Deck — Known Limitations & Follow-ups
 
-Captured from the walking-skeleton whole-branch review (2026-07-10). None block the
-walking skeleton (a from-scratch macOS app rendering a reused-Ghostty terminal running
-a shell), which is complete and verified. These are for the phases that follow.
+Originally captured from the walking-skeleton whole-branch review (2026-07-10); kept current
+as work lands. Last audited against the tree on **2026-08-11** (master, post session-name-sync
+and menu-key-equivalent merges) — every entry below was re-checked against the code, not
+carried forward on trust.
 
-## Deferred to the multi-session / window-lifecycle phase (spec §9 phase 1 cont.)
+## Resolved (kept for the reasoning trail)
 
-- **Teardown UAF hazard once window-close is exercised.** `GhosttyApp.deinit` frees the
-  libghostty app *synchronously*, but `Ghostty.Surface.deinit` defers `ghostty_surface_free`
-  to a later main-actor `Task`. Today `TerminalContainer.Coordinator` owns a `GhosttyApp`
-  **per view**; closing a `WindowGroup` window (which does not quit the app) would release
-  the Coordinator → free the app → then the deferred surface-free runs against an already-freed
-  app. The skeleton never closes a window before process quit, so it does not bite now.
-  **Fix when adding multi-session/multi-window:** make `GhosttyApp` an app-level singleton
-  (mirroring Ghostty's own `AppDelegate` ownership) so it outlives all surfaces, or order the
-  app free on a main-actor task after all surface frees.
+- **Teardown UAF hazard on window close — FIXED** in the multi-session foundation. The
+  hazard was that `GhosttyApp.deinit` frees the libghostty app synchronously while
+  `Ghostty.Surface.deinit` defers `ghostty_surface_free` to a later main-actor `Task`, so a
+  per-view `GhosttyApp` could be freed before its surfaces. `GhosttyApp` is now a
+  process-wide singleton owned by `AppDelegate` (`Sources/FlightDeck/AppDelegate.swift`) and
+  is not constructed per view, so it outlives every surface free. Guarded by
+  `Tests/FlightDeckTests/SurfaceLifecycleTests.swift`.
+- **XCUITest saw no window — FIXED.** The initial `WindowGroup` window was gated behind the
+  macOS window-restoration handshake, which only a LaunchServices launch completes; XCUITest
+  raw-execs the binary. All UITests now pass `-ApplePersistenceIgnoreState YES`. Full
+  postmortem: [done/HANDOFF-smoke-gate.md](done/HANDOFF-smoke-gate.md).
+- **⌘Q (and any menu shortcut) swallowed by the terminal — FIXED.** AppKit runs a view's
+  `performKeyEquivalent` ahead of the main menu, and the vendored Ghostty surface claimed
+  every libghostty binding. `Sources/FlightDeck/MenuKeyEquivalents.swift` now offers consumed
+  bindings to `NSApp.mainMenu` first; it is keyed to no specific shortcut, so menu items
+  added later are covered automatically.
 
 ## Deferred to the harness-adapter / block-model phase
 
