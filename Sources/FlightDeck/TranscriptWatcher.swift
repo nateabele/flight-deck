@@ -13,6 +13,8 @@ final class TranscriptWatcher {
     private let onTitle: (String) -> Void
 
     private var offset: UInt64 = 0
+    /// Whether `offset` has been seeded to the file's size yet. See `drain()`.
+    private var hasSeekedToEnd = false
     private var timer: DispatchSourceTimer?
 
     init(sessionID: UUID, url: URL, onTitle: @escaping (String) -> Void) {
@@ -39,18 +41,30 @@ final class TranscriptWatcher {
 
     /// Reads everything appended since the last call and reports the last title found.
     /// Synchronous so tests need no expectations.
-    /// Reads everything appended since the last call and reports the last title found.
-    /// Synchronous so tests need no expectations.
     func drain() {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return }
         defer { try? handle.close() }
 
-        // A shorter file means it was replaced; start over. This only detects a
-        // *smaller* replacement — a same-or-larger replacement at the same path would
-        // be treated as a continuation. That's acceptable here because the URL is
-        // keyed to one session UUID for the watcher's whole lifetime.
         let size = (try? handle.seekToEnd()) ?? 0
-        if size < offset { offset = 0 }
+
+        // On the first time we ever manage to open the file, start tailing from its
+        // current end rather than from 0. A restored session points at a transcript
+        // that already exists and may be huge (a whole prior conversation); without
+        // this, the first drain would replay every old `custom-title` record — most
+        // recently clobbering a rename made while `claude` wasn't running — and would
+        // parse the entire file on the main thread. A brand-new session's file doesn't
+        // exist yet at this point, so seeding to its (empty) size here is a no-op and
+        // every subsequent drain still sees only genuinely new bytes.
+        if !hasSeekedToEnd {
+            hasSeekedToEnd = true
+            offset = size
+        } else if size < offset {
+            // A shorter file means it was replaced; start over. This only detects a
+            // *smaller* replacement — a same-or-larger replacement at the same path would
+            // be treated as a continuation. That's acceptable here because the URL is
+            // keyed to one session UUID for the watcher's whole lifetime.
+            offset = 0
+        }
         guard size > offset else { return }
 
         try? handle.seek(toOffset: offset)
