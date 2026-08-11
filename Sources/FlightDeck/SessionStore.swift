@@ -93,6 +93,26 @@ final class SessionStore: ObservableObject {
         newSession(in: url)
     }
 
+    /// The ⌘N / sidebar-button action. Routes to Add Project when nothing is open, which is
+    /// why the menu item can stay enabled in both states.
+    @discardableResult
+    func createFromMenu(chooseFolder: () -> URL? = { FolderPicker.choose() }) -> Session? {
+        switch SessionCreateAction.forState(hasSessions: !repos.isEmpty) {
+        case .newSession:
+            return newSessionBelowActive()
+        case .addProject:
+            guard let url = chooseFolder() else { return nil }
+            return addProject(at: url)
+        }
+    }
+
+    /// ⌘⇧A. Always prompts, regardless of what is open.
+    @discardableResult
+    func addProjectFromMenu(chooseFolder: () -> URL? = { FolderPicker.choose() }) -> Session? {
+        guard let url = chooseFolder() else { return nil }
+        return addProject(at: url)
+    }
+
     /// Shared by `newSession` and `restore`. `initialInput` is the only difference:
     /// a fresh session starts `claude`, a restored one resumes it.
     @discardableResult
