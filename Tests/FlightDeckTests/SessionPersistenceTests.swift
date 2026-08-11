@@ -160,4 +160,33 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertFalse(store.restore(directoryExists: allDirsExist))
         XCTAssertTrue(store.repos.isEmpty)
     }
+
+    /// `resetState` is only reachable via the production `init(ghostty:resetState:)` path
+    /// (it needs `UserDefaultsSessionPersistence`'s real-defaults storage, which the
+    /// designated `init(provider:persistence:)` used elsewhere in this file can bypass
+    /// entirely). Save/restore the raw key around the assertion so this doesn't leak
+    /// state into other tests or pollute the real domain permanently.
+    func testResetStateSkipsRestoreEvenWithAStoredSnapshot() {
+        let defaults = UserDefaults.standard
+        let key = "sessions.snapshot.v1"
+        let previous = defaults.data(forKey: key)
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        let stale = SessionSnapshot(
+            sessions: [.init(id: UUID(), title: "stale", workingDirectory: "/work/foo")],
+            selectedSessionID: nil,
+            sessionCounter: 1
+        )
+        defaults.set(try! JSONEncoder().encode(stale), forKey: key)
+
+        let store = SessionStore(ghostty: nil, resetState: true)
+
+        XCTAssertFalse(store.repos.flatMap(\.sessions).map(\.title).contains("stale"))
+    }
 }

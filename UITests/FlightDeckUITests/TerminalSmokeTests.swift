@@ -56,24 +56,22 @@ final class TerminalSmokeTests: XCTestCase {
         app.launchArguments += ["-FlightDeckResetState", "YES"]
         app.launch()
 
-        let row = app.staticTexts.matching(identifier: "session-title-field").firstMatch
         _ = app.windows.firstMatch.waitForExistence(timeout: 15)
-        // SwiftUI's List(selection:) exposes as an Outline (not a Table) here, with
-        // the section header ("nate") as cell 0 and the seeded session as cell 1.
-        // -FlightDeckResetState guarantees exactly one repo/session, so this is
-        // deterministic. Double-click the row's title text specifically: the
-        // onTapGesture(count: 2) is attached to the Text, not the whole row, and
-        // the cell's own center falls in the Spacer between the title and the
-        // close button.
-        let first = app.outlines.cells.element(boundBy: 1).staticTexts.firstMatch
-        first.doubleClick()
+        // Targeted by its own accessibility identifier rather than outline position:
+        // a positional lookup (e.g. "cell at index 1") would silently break the
+        // moment a second repo/session exists or SwiftUI changes how it flattens
+        // sections into the outline.
+        let title = app.staticTexts["session-row-title"].firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        title.doubleClick()
 
         let field = app.textFields["session-title-field"]
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.typeKey("a", modifierFlags: .command)
+        // "renamed" was never on screen before this point (the seeded title is
+        // "session 1"), so the assertion below cannot pass vacuously.
         field.typeText("renamed\n")
 
         XCTAssertTrue(app.staticTexts["renamed"].waitForExistence(timeout: 5))
-        _ = row
     }
 }
