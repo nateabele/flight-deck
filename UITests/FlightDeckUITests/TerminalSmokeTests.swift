@@ -37,10 +37,15 @@ final class TerminalSmokeTests: XCTestCase {
 
         // Close the seeded session; this frees its surface while the app lives —
         // the exact use-after-free path the singleton fix protects.
+        let row = app.staticTexts.matching(identifier: "session-row-title").firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
         let close = app.buttons["close-session"].firstMatch
-        if close.waitForExistence(timeout: 5) {
-            close.click()
-        }
+        // The close button is hover-gated (see SessionRow), so the row must be hovered
+        // before it exists. Without this the guarded click below silently never fires
+        // and the test degrades to a launch smoke check.
+        row.hover()
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+        close.click()
 
         // The app must survive: still running, window still present.
         XCTAssertEqual(app.state, .runningForeground)
