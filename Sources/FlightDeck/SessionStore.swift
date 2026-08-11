@@ -77,19 +77,6 @@ final class SessionStore: ObservableObject {
         self.init(provider: ghostty, persistence: UserDefaultsSessionPersistence())
         if resetState || !restore() { seedInitialSession() }
         startStatusWatching()
-        // `UNUserNotificationCenter.current()` traps when the calling binary is not a
-        // signed bundle. This convenience init is also the one pre-existing
-        // SessionPersistenceTests exercises directly (not through the
-        // `init(provider:persistence:)` test seam), so without this guard every unit
-        // test run crashes the whole process the moment this init runs under `xctest`.
-        // `scripts/test-unit.sh` invokes `xcrun xctest` directly rather than through
-        // `xcodebuild test`, so the usual `XCTestConfigurationFilePath` environment
-        // variable is not set; checking for the loaded XCTest framework instead works
-        // regardless of how the bundle was launched.
-        guard NSClassFromString("XCTestCase") == nil else { return }
-        let notifier = SessionNotifier()
-        notifier.requestAuthorization()
-        self.notifier = notifier
     }
 
     func seedInitialSession(
