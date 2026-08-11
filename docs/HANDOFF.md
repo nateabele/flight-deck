@@ -1,17 +1,26 @@
 # Flight Deck — Session Handoff
 
-**Date:** 2026-08-10 · **Branch:** `multi-session-foundation` (off `master`) · **Tip:** `ffe4d58` · **Status:** Multi-Session Foundation COMPLETE (all 6 tasks implemented & reviewed) — smoke gate GREEN; branch ready to finish.
+**Date:** 2026-08-11 · **Branch:** `master` · **Tip:** `4684bf1` · **Status:** Multi-Session Foundation **and** Session Name Sync both merged to `master`; unit + smoke gates GREEN (66 unit tests, 4 UITests).
 
 Start here if you're picking up Flight Deck fresh. This is the map; the linked docs have the detail.
 
-> **✅ Multi-Session Foundation is done and green.**
-> The plan is fully built and reviewed on branch `multi-session-foundation`, and the XCUITest smoke
-> gate now passes (both UI tests). One subtle macOS gotcha was resolved along the way — under
-> XCUITest's raw-exec launch the initial window is gated behind the window-restoration handshake that
-> only LaunchServices completes; the tests now pass `-ApplePersistenceIgnoreState YES` to match
-> real-user launch semantics. Full postmortem: [HANDOFF-smoke-gate.md](HANDOFF-smoke-gate.md).
-> - **Plan (what was built):** [superpowers/plans/2026-08-09-multi-session-foundation.md](superpowers/plans/2026-08-09-multi-session-foundation.md) — 6 TDD tasks with full code, commands, interfaces.
-> - **Design spec (the why):** [superpowers/specs/2026-08-08-multi-session-foundation-design.md](superpowers/specs/2026-08-08-multi-session-foundation-design.md).
+> **✅ Two phases are merged to `master` and green.**
+>
+> **Multi-Session Foundation** — repo-grouped session sidebar with create/switch/close, a
+> single `SessionStore` as source of truth, and a process-wide `GhosttyApp`. One macOS gotcha
+> was resolved along the way: under XCUITest's raw-exec launch the initial window is gated
+> behind the window-restoration handshake that only LaunchServices completes, so the tests
+> pass `-ApplePersistenceIgnoreState YES` to match real-user launch semantics. Full
+> postmortem: [done/HANDOFF-smoke-gate.md](done/HANDOFF-smoke-gate.md).
+> - **Plan:** [superpowers/plans/2026-08-09-multi-session-foundation.md](superpowers/plans/2026-08-09-multi-session-foundation.md) · **Spec:** [superpowers/specs/2026-08-08-multi-session-foundation-design.md](superpowers/specs/2026-08-08-multi-session-foundation-design.md)
+>
+> **Session Name Sync** — session names stay in sync with the `claude` running in each
+> terminal, in both directions, and sessions now survive relaunch (each terminal reattaches to
+> its own Claude conversation via `--resume`). Double-click a sidebar row to rename.
+> - **Plan:** [superpowers/plans/2026-08-10-session-name-sync.md](superpowers/plans/2026-08-10-session-name-sync.md) · **Spec:** [superpowers/specs/2026-08-10-session-name-sync-design.md](superpowers/specs/2026-08-10-session-name-sync-design.md)
+>
+> Also fixed: ⌘Q and any other menu shortcut were being swallowed by the terminal
+> (`Sources/FlightDeck/MenuKeyEquivalents.swift`).
 
 ---
 
@@ -63,17 +72,12 @@ Both are documented in **[TOOLING.md](TOOLING.md)**:
 
 Immediate + phased next steps live in **[FOLLOWUPS.md](FOLLOWUPS.md)**. The short version:
 
-- **NOW (planned & approved — just execute):** the **Multi-Session Foundation**. This is the design's
-  phase-1 continuation *before* the harness adapter. It folds the teardown-lifetime (UAF) fix into
-  building real multi-session support — an app-wide singleton `GhosttyApp` owned by an `AppDelegate`
-  (so the deferred `ghostty_surface_free` can never race a freed app), a `Session`/`Repo` model, a
-  `@MainActor SessionStore` as single source of truth, and a repo→session sidebar with
-  create/switch/close where surfaces are Store-retained and re-parented on switch (only close frees).
-  The full breakdown is in the
-  **[plan](superpowers/plans/2026-08-09-multi-session-foundation.md)** (6 TDD tasks, ready to run
-  subagent-driven); the rationale and scope in/out is in the
-  **[design spec](superpowers/specs/2026-08-08-multi-session-foundation-design.md)**.
-- **Then the design's phase-1 remainder**, each its own spec→plan→build: the **harness adapter** (Claude Code hooks + `stream-json`, opencode's server/events), the **shared code index** (qartez is a ready substrate, MCP-exposed), the **context engine** (auto-assembly + memory + inspectable compaction), and the **mission-control sidebar** live-status columns (needs the adapter's event stream). See [design spec §9](superpowers/specs/2026-07-09-flight-deck-design.md).
+- **DONE (merged to `master`):** the **Multi-Session Foundation** — singleton `GhosttyApp` owned
+  by `AppDelegate` (so a deferred `ghostty_surface_free` can never race a freed app), the
+  `Session`/`Repo` model, `@MainActor SessionStore` as single source of truth, and the
+  repo→session sidebar. Followed by **Session Name Sync** — bidirectional naming with `claude`
+  plus session persistence/restore. Both have their plan and spec linked at the top of this file.
+- **NOW — the design's phase-1 remainder**, each its own spec→plan→build: the **harness adapter** (Claude Code hooks + `stream-json`, opencode's server/events), the **shared code index** (qartez is a ready substrate, MCP-exposed), the **context engine** (auto-assembly + memory + inspectable compaction), and the **mission-control sidebar** live-status columns (needs the adapter's event stream). See [design spec §9](superpowers/specs/2026-07-09-flight-deck-design.md).
 - **Known limitation:** CI / other-host builds are blocked on the upstream Zig fix (see TOOLING.md / FOLLOWUPS.md).
 
 ## How this was built (process record)
