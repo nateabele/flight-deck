@@ -91,6 +91,23 @@ final class ClaudeFlagParserTests: XCTestCase {
         XCTAssertTrue(result.diagnostics.contains { $0.message.contains("managed by Flight Deck") })
     }
 
+    func testUnknownFlagInEqualsFormIsReassembledIntoPassthrough() {
+        let result = ClaudeFlagParser.parse("--not-real=foo --verbose")
+        XCTAssertEqual(result.flags.passthrough, ["--not-real=foo"])
+        XCTAssertEqual(result.flags.values["--verbose"], .on)
+    }
+
+    func testAppManagedFlagInEqualsFormIsReassembledIntoPassthrough() {
+        let result = ClaudeFlagParser.parse("--session-id=abc")
+        XCTAssertNil(result.flags.values["--session-id"])
+        XCTAssertEqual(result.flags.passthrough, ["--session-id=abc"])
+        XCTAssertTrue(result.diagnostics.contains { $0.message.contains("managed by Flight Deck") })
+    }
+
+    func testKnownFlagInEqualsFormWithEmptyValueRecordsEmptyString() {
+        XCTAssertEqual(ClaudeFlagParser.parse("--model=").flags.values["--model"], .value(""))
+    }
+
     // MARK: duplicates
 
     func testDuplicateFlagWarnsAndLastValueWins() {
