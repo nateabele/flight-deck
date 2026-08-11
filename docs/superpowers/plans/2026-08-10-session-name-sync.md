@@ -1058,7 +1058,10 @@ Add restore and persistence:
             )
         }
 
-        let restoredIDs = Set(repos.flatMap(\.sessions).map(\.id))
+        // Ordered, NOT a Set: the fallback below must mean "first surviving session in
+        // restored order". `Set.first` is hash-ordered, which would make the selection
+        // after a relaunch nondeterministic.
+        let restoredIDs = repos.flatMap(\.sessions).map(\.id)
         selectedSessionID = snapshot.selectedSessionID.flatMap {
             restoredIDs.contains($0) ? $0 : nil
         } ?? restoredIDs.first
