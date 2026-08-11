@@ -180,12 +180,18 @@ final class TerminalSmokeTests: XCTestCase {
         XCTAssertEqual(rows.count, 2)
 
         // Re-select the first row so the second ⌘N is a genuine mid-list insert — this is
-        // what actually distinguishes "below the active row" from "append to the end". The
-        // row's accessible `session-row-title` text carries its own (double-tap-only) gesture
-        // recognizer, which swallows a plain click before it reaches the List's row-selection
-        // handling; clicking the row's `Cell` (index 1 — index 0 is the "nate" section header)
-        // lands on blank row space instead and reliably selects it.
-        app.cells.element(boundBy: 1).click()
+        // what actually distinguishes "below the active row" from "append to the end".
+        //
+        // Deliberately clicks the row's TITLE TEXT, not blank row space. The title carries
+        // the rename recognizer, and while that was an exclusive `onTapGesture(count: 2)` it
+        // swallowed single clicks so the row never selected — the one part of the row users
+        // aim at was the one part that did not work. `SessionRow.handleTitleTap()` now
+        // detects the double click itself, and this click is the regression guard for it.
+        rows.element(boundBy: 0).click()
+        XCTAssertTrue(
+            app.cells.element(boundBy: 1).isSelected,
+            "clicking a row's title text must select that row"
+        )
 
         // Second ⌘N: insert below the now-active first row.
         app.typeKey("n", modifierFlags: .command)

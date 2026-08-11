@@ -96,14 +96,21 @@ reader doesn't re-derive them.
   defensive fix (clear the marker for spawned sessions) is available if this proves to be
   more than a development-time footgun.
 
-## Deferred from session creation UX (2026-08-11)
+## From session creation UX (2026-08-11)
 
-- **A single click on a sidebar row's *title text* does not reselect that row.** The
-  `Text` in `SessionRow` carries `.onTapGesture(count: 2)` for inline rename, and that
-  recognizer swallows the single click before the enclosing `List(selection:)` sees it.
-  Clicking the blank space around the title in the same row selects normally, so the row
-  is inconsistently hit-tested on the part users aim at most. Found while writing the ⌘N
-  UITest, which had to click the row's `Cell` rather than its title to reselect. Minor —
-  every other selection path works — but worth fixing with a
-  `simultaneousGesture`/`highPriorityGesture` arrangement that lets the single click fall
-  through to selection while the double click still starts a rename.
+- **A single click on a sidebar row's title text did not select the row — FIXED.** The
+  `Text` in `SessionRow` carried `.onTapGesture(count: 2)` for inline rename, and that
+  recognizer swallowed the single click before the enclosing `List(selection:)` saw it, so
+  the one part of the row users aim at was the one part that did not work.
+
+  Two plausible-looking fixes are **not** fixes, both confirmed by test rather than
+  argument: `simultaneousGesture(TapGesture(count: 2))` still does not let the click reach
+  the List, and pairing a count-2 with a count-1 recognizer leaves the count-1 handler never
+  firing at all — an explicit handler assigning `selectedSessionID` did not run. Don't
+  re-attempt either.
+
+  `SessionRow.handleTitleTap()` now uses a single tap recognizer and detects the second
+  click itself against `NSEvent.doubleClickInterval`, which takes SwiftUI's gesture
+  arbitration out of the problem entirely. Guarded by an assertion in
+  `testCommandNAddsASessionBelowTheActiveOne` that clicks the title and requires the row to
+  become selected, plus `testDoubleClickRenamesSession` for the rename path.
