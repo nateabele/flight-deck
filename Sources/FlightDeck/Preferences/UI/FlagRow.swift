@@ -62,7 +62,7 @@ struct FlagRow: View {
 
         case .negatable:
             Picker("", selection: negatableBinding) {
-                Text(inheritedLabel("Default")).tag("")
+                Text(defaultItemLabel("Default")).tag("")
                 Text("On").tag("on")
                 Text("Off").tag("off")
             }
@@ -73,7 +73,7 @@ struct FlagRow: View {
         case .choice(let options, let allowsCustom):
             HStack(spacing: 6) {
                 Picker("", selection: choiceBinding(options, allowsCustom: allowsCustom)) {
-                    Text(inheritedLabel("Default")).tag("")
+                    Text(defaultItemLabel("Default")).tag("")
                     ForEach(options, id: \.self) { Text($0).tag($0) }
                     if allowsCustom { Text("Custom…").tag(customTag) }
                     // `allowsCustom == false` specs (`--effort`, `--permission-mode`) have
@@ -84,7 +84,15 @@ struct FlagRow: View {
                     // touch would silently overwrite the value with whatever tag reads as
                     // selected. Surfacing it (still editable only by picking something
                     // else, not by typing) keeps it visible and prevents that clobber.
-                    if !allowsCustom, case .value(let raw)? = value, !options.contains(raw) {
+                    //
+                    // `!raw.isEmpty` matters: `.value("")` (e.g. `--effort ''` typed into the
+                    // command field) is not in `options` either, but `.tag("")` is already
+                    // claimed by the Default item above. Without this guard the two items
+                    // would collide on the same tag, leaving selection between them
+                    // undefined. `.value("")` is functionally indistinguishable from unset
+                    // for a picker anyway (nothing sensible to show as "the value"), so
+                    // falling through to Default's tag/behavior for it is correct, not a gap.
+                    if !allowsCustom, case .value(let raw)? = value, !raw.isEmpty, !options.contains(raw) {
                         Text("\(raw) — not a known value").tag(raw)
                     }
                 }
@@ -108,8 +116,8 @@ struct FlagRow: View {
                         .disabled(value == nil)
                         .accessibilityIdentifier("\(spec.label).text")
                 }
-                if value == nil, let inherited {
-                    Text(inheritedLabel("")).font(.caption).foregroundStyle(.secondary)
+                if value == nil, inherited != nil {
+                    Text(defaultItemLabel("")).font(.caption).foregroundStyle(.secondary)
                 }
             }
 
@@ -134,8 +142,8 @@ struct FlagRow: View {
                     .frame(width: 320, height: 64)
                     .border(.separator)
                     .accessibilityIdentifier(spec.label)
-                if value == nil, let inherited {
-                    Text(inheritedLabel("")).font(.caption).foregroundStyle(.secondary)
+                if value == nil, inherited != nil {
+                    Text(defaultItemLabel("")).font(.caption).foregroundStyle(.secondary)
                 }
             }
 
@@ -144,11 +152,21 @@ struct FlagRow: View {
                 .frame(width: 320)
                 .accessibilityIdentifier(spec.label)
                 .onAppear { listDraft = listTextFromModel }
-                .onChange(of: listDraft) { newDraft in
+                .onChange(of: listDraft) { _, newDraft in
                     let items = newDraft.split(whereSeparator: \.isWhitespace).map(String.init)
+                    // Seeding and re-seeding both set `listDraft` programmatically, which
+                    // re-enters this handler. Without this guard, appearing with (or being
+                    // re-seeded to) a value this field cannot faithfully represent — an item
+                    // containing whitespace, e.g. `.list(["/Users/nate/My Projects"])`, still
+                    // fully valid and round-trippable through the model/serializer/parser —
+                    // would get silently split into several bogus items purely from
+                    // rendering the pane, with no user interaction at all. Editing such an
+                    // item by hand still splits it on whitespace; that representational limit
+                    // is real and stays, but merely displaying the row must not trigger it.
+                    guard items.joined(separator: " ") != listTextFromModel else { return }
                     value = items.isEmpty ? (value == nil ? nil : .list([])) : .list(items)
                 }
-                .onChange(of: listTextFromModel) { fromModel in
+                .onChange(of: listTextFromModel) { _, fromModel in
                     // Re-seed only on a genuine external change (a revert, a switch to a
                     // different project's binding, …). Comparing against the draft's
                     // *parsed* form — not the raw draft — is what lets a trailing space
@@ -163,25 +181,36 @@ struct FlagRow: View {
 
     private var customTag: String { "\u{1}custom" }
 
-    /// Used two ways: as the "Default" Picker item's label (always describes what
-    /// `inherited` actually is, whether or not this row is currently overridden — a user
-    /// opening the menu wants to know what selecting Default would produce), and as a
-    /// `TextField` placeholder (where it must NOT claim inheritance once the row is
-    /// overridden — see `isExplicitlyEmpty`).
-    private func inheritedLabel(_ fallback: String) -> String {
-        if value != nil {
-            // Overridden: never describe this row as inheriting. A present-but-empty
-            // override (`.value("")` / `.list([])`) would otherwise render through an
-            // empty `fallback` exactly like an unset field showing "Inherited: X" — the
-            // one-way trap this exists to make visible instead of silently indistinguishable.
-            return isExplicitlyEmpty ? "(explicitly empty)" : fallback
-        }
+    /// The "Default" Picker item's label, and the inherited-value caption on `.toggle`/
+    /// `.multiline`/`.optionalValue`. Always describes what `inherited` actually is,
+    /// regardless of whether this row is currently overridden — a user opening the menu (or
+    /// reading the caption while unset) wants to know what selecting Default would produce,
+    /// not a description of whatever is currently selected (the row's other controls already
+    /// show that). Every call site that uses this already guards on `value == nil` itself
+    /// where that distinction matters, so this function does not need to.
+    private func defaultItemLabel(_ fallback: String) -> String {
         guard let inherited else { return fallback }
         switch inherited {
         case .on: return "Inherited: on"
         case .value(let raw): return "Inherited: \(raw)"
         case .list(let items): return "Inherited: \(items.joined(separator: " "))"
         }
+    }
+
+    /// A `TextField`/placeholder label for `.string`, `.path`, and `.list`. Unlike
+    /// `defaultItemLabel`, this must NOT claim inheritance once the row is overridden — an
+    /// overridden field showing "Inherited: X" as its (empty-field) placeholder would look
+    /// exactly like an unset field inheriting that same value, which is the one thing this
+    /// row exists to keep distinguishable. See `isExplicitlyEmpty`.
+    private func inheritedLabel(_ fallback: String) -> String {
+        guard value == nil else {
+            // Overridden: never describe this row as inheriting. A present-but-empty
+            // override (`.value("")` / `.list([])`) would otherwise render through an
+            // empty `fallback` exactly like an unset field showing "Inherited: X" — the
+            // one-way trap this exists to make visible instead of silently indistinguishable.
+            return isExplicitlyEmpty ? "(explicitly empty)" : fallback
+        }
+        return defaultItemLabel(fallback)
     }
 
     /// True when `value` is present but renders as empty — `.value("")` or `.list([])`.
