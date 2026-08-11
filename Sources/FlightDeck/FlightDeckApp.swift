@@ -14,5 +14,6 @@ struct FlightDeckApp: App {
 
     var body: some Scene {
         RootWindow(store: store)
+            .commands { SessionCommands(store: store) }
     }
 }

@@ -125,4 +125,28 @@ final class TerminalSmokeTests: XCTestCase {
             "a session is selected but the detail pane shows the empty-state view"
         )
     }
+
+    /// The File menu carries both creation commands and no longer offers New Window.
+    ///
+    /// New Window is the item `WindowGroup` used to contribute, and it is what was claiming
+    /// ⌘N. Asserting its absence here is what proves the single-window scene swap actually
+    /// freed the shortcut, rather than us assuming it did.
+    func testFileMenuOffersBothCreationCommandsAndNoNewWindow() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        app.launchArguments += ["-FlightDeckResetState", "YES"]
+        app.launch()
+        app.activate()
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15))
+
+        let file = app.menuBarItems["File"]
+        XCTAssertTrue(file.waitForExistence(timeout: 5))
+        file.click()
+
+        XCTAssertTrue(app.menuItems["New Session"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.menuItems["Add Project…"].exists)
+        XCTAssertFalse(app.menuItems["New Window"].exists, "WindowGroup's New Window should be gone")
+
+        app.typeKey(.escape, modifierFlags: [])   // close the menu
+    }
 }

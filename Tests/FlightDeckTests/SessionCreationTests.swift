@@ -85,4 +85,46 @@ final class SessionCreationTests: XCTestCase {
         XCTAssertEqual(store.repos[0].sessions.last?.id, created.id)
         XCTAssertEqual(store.selectedSessionID, created.id)
     }
+
+    func testCreateFromMenuAddsBelowActiveWhenSessionsExist() {
+        let store = makeStore()
+        let url = URL(fileURLWithPath: "/work/foo", isDirectory: true)
+        _ = store.newSession(in: url)
+        var prompted = false
+        let created = store.createFromMenu(chooseFolder: { prompted = true; return nil })
+
+        XCTAssertFalse(prompted, "⌘N must not prompt for a folder when a session is active")
+        XCTAssertEqual(store.repos[0].sessions.count, 2)
+        XCTAssertEqual(store.selectedSessionID, created?.id)
+    }
+
+    /// The reroute: with nothing open, ⌘N behaves as Add Project.
+    func testCreateFromMenuPromptsAndAddsProjectWhenEmpty() {
+        let store = makeStore()
+        var prompted = false
+        let created = store.createFromMenu(chooseFolder: {
+            prompted = true
+            return URL(fileURLWithPath: "/work/bar", isDirectory: true)
+        })
+
+        XCTAssertTrue(prompted)
+        XCTAssertEqual(store.repos.map(\.displayName), ["bar"])
+        XCTAssertEqual(store.selectedSessionID, created?.id)
+    }
+
+    func testCancellingTheFolderPickerCreatesNothing() {
+        let store = makeStore()
+        XCTAssertNil(store.createFromMenu(chooseFolder: { nil }))
+        XCTAssertTrue(store.repos.isEmpty)
+    }
+
+    func testAddProjectFromMenuAlwaysPromptsEvenWithSessionsOpen() {
+        let store = makeStore()
+        _ = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        let created = store.addProjectFromMenu(chooseFolder: {
+            URL(fileURLWithPath: "/work/bar", isDirectory: true)
+        })
+        XCTAssertEqual(store.repos.map(\.displayName), ["foo", "bar"])
+        XCTAssertEqual(store.selectedSessionID, created?.id)
+    }
 }
