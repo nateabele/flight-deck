@@ -23,7 +23,7 @@ inferred from docs. They replace the speculative material in the handoff.
 | Reattach to a conversation | `claude -r/--resume <session-id>` restores it across processes | CONFIRMED (round-trip test) |
 | Resume of a missing transcript | exits `1`, so a `\|\|` shell fallback fires | CONFIRMED (exit-code test) |
 | Transcript location | `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` | CONFIRMED |
-| cwd encoding | every non-alphanumeric character → `-`, one-for-one, no collapsing (`/private/tmp/x/-Users-nate` → `-private-tmp-x--Users-nate`) | CONFIRMED |
+| cwd encoding | every non-`[0-9A-Za-z]` **UTF-16 code unit** → `-`, one-for-one, no collapsing | CONFIRMED |
 | Rename record shape | a JSONL line `{"type":"custom-title","customTitle":"<name>","sessionId":"<uuid>"}` | CONFIRMED |
 | Rename push notification (hook/env) | none exists — must watch the transcript | CONFIRMED |
 | OSC title carrying the name | not needed; the transcript path is strictly better | dropped from scope |
@@ -52,10 +52,26 @@ No I/O, no state. Two responsibilities:
 
 Kept pure so the encoding rule and the parse are unit-testable without a filesystem.
 
-**Path robustness.** The encoding rule is confirmed for alphanumerics, `/`, `.`, and `-`, but
-not for every possible character (e.g. `_`). So the computed path is a *hypothesis*: if the
-file is absent when the watcher starts, fall back to a single bounded scan of
-`~/.claude/projects/*/<uuid>.jsonl`. The UUID is unique, so the fallback is unambiguous.
+**The encoding rule, exactly.** Replace every UTF-16 code unit that is not an ASCII
+alphanumeric (`0-9`, `A-Z`, `a-z`) with `-`. Runs are not collapsed.
+
+This is narrower than it first appears, and getting it wrong is silent. Swift's
+`Character.isLetter` is Unicode-aware and would keep `é`, `Ω`, and CJK characters —
+Claude does not. Verified by creating real sessions and reading back the directories
+Claude created:
+
+| cwd | directory Claude created |
+|---|---|
+| `…/scratchpad/café-Ω-probe` | `…-scratchpad-caf----probe` |
+| `…/scratchpad/emo🎈dir` | `…-scratchpad-emo--dir` |
+
+The emoji becoming **two** dashes is the decisive case: the replacement is per UTF-16
+code unit, so a surrogate pair yields two dashes. That matches a JavaScript
+`.replace(/[^a-zA-Z0-9]/g, '-')` without the `u` flag.
+
+Getting this wrong doesn't crash — it computes a path that doesn't exist, and inbound
+sync just never fires. That failure is invisible, which is why it is pinned by test
+rather than left to inference.
 
 ### 3.2 `TranscriptWatcher` — inbound (new file)
 

@@ -152,10 +152,21 @@ enum ClaudeSession {
             .appendingPathComponent(".claude/projects", isDirectory: true)
     }
 
-    /// Claude encodes the cwd by replacing every non-alphanumeric character with `-`,
-    /// one for one. Runs are not collapsed: `/private/tmp/x/-Users` → `-private-tmp-x--Users`.
+    /// Claude replaces every UTF-16 code unit that is not an ASCII alphanumeric with `-`,
+    /// one for one, without collapsing runs.
+    ///
+    /// Verified against real `claude` output: `café-Ω-probe` → `caf----probe`, and
+    /// `emo🎈dir` → `emo--dir`. The emoji yielding TWO dashes is what pins this to UTF-16
+    /// code units rather than scalars or Swift `Character`s. Note Swift's Unicode-aware
+    /// `isLetter`/`isNumber` would wrongly *keep* `é` and `Ω`, producing a transcript path
+    /// that does not exist — a failure that is silent rather than loud.
     static func encodedProjectDirName(for workingDirectory: String) -> String {
-        String(workingDirectory.map { $0.isLetter || $0.isNumber ? $0 : "-" })
+        String(workingDirectory.utf16.map { unit in
+            let isASCIIAlphanumeric = (0x30...0x39).contains(unit)   // 0-9
+                || (0x41...0x5A).contains(unit)                      // A-Z
+                || (0x61...0x7A).contains(unit)                      // a-z
+            return isASCIIAlphanumeric ? Character(UnicodeScalar(UInt8(unit))) : "-"
+        })
     }
 
     static func transcriptURL(
