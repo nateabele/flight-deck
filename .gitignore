@@ -3,10 +3,11 @@ target/
 *.xcuserstate
 build/
 .build/
-vendor/ghostty-artifacts/
+vendor/ghostty-artifacts
 DerivedData/
 *.xcodeproj
-vendor/.zig-toolchain/
-vendor/.build-shim/
+vendor/.zig-toolchain
+vendor/.build-shim
 *.profraw
 scripts/.smoke.log
+.superpowers/
