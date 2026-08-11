@@ -9,6 +9,10 @@ final class TerminalSmokeTests: XCTestCase {
         // restoration matches real-user (LaunchServices) launch semantics and
         // changes no shipped behavior.
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        // smoke.sh launches this test bundle multiple times in one run; without
+        // this, a session persisted by an earlier test case would be restored
+        // into a later one via UserDefaults and make tests order-dependent.
+        app.launchArguments += ["-FlightDeckResetState", "YES"]
         app.launch()
         app.activate()
         // The app window must exist and contain a rendered content view.
@@ -22,6 +26,10 @@ final class TerminalSmokeTests: XCTestCase {
         // See testAppLaunchesAndShowsTerminalSurface: bypass window restoration
         // so the initial window is created under XCUITest's raw-exec launch.
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        // smoke.sh launches this test bundle multiple times in one run; without
+        // this, a session persisted by an earlier test case would be restored
+        // into a later one via UserDefaults and make tests order-dependent.
+        app.launchArguments += ["-FlightDeckResetState", "YES"]
         app.launch()
         app.activate()
         let window = app.windows.firstMatch
@@ -51,6 +59,10 @@ final class TerminalSmokeTests: XCTestCase {
         // See testAppLaunchesAndShowsTerminalSurface: bypass window restoration
         // so the initial window is created under XCUITest's raw-exec launch.
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        // smoke.sh launches this test bundle multiple times in one run; without
+        // this, a session persisted by an earlier test case would be restored
+        // into a later one via UserDefaults and make tests order-dependent.
+        app.launchArguments += ["-FlightDeckResetState", "YES"]
         app.launch()
         app.activate()
         XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15))
@@ -61,5 +73,33 @@ final class TerminalSmokeTests: XCTestCase {
         let exited = NSPredicate(format: "state == %d", XCUIApplication.State.notRunning.rawValue)
         expectation(for: exited, evaluatedWith: app)
         waitForExpectations(timeout: 10)
+    }
+
+    func testDoubleClickRenamesSession() {
+        let app = XCUIApplication()
+        // See testAppLaunchesAndShowsTerminalSurface: bypass window restoration
+        // and force a clean session slate so this test doesn't inherit a
+        // session from an earlier test case in the same smoke.sh run.
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        app.launchArguments += ["-FlightDeckResetState", "YES"]
+        app.launch()
+
+        _ = app.windows.firstMatch.waitForExistence(timeout: 15)
+        // Targeted by its own accessibility identifier rather than outline position:
+        // a positional lookup (e.g. "cell at index 1") would silently break the
+        // moment a second repo/session exists or SwiftUI changes how it flattens
+        // sections into the outline.
+        let title = app.staticTexts["session-row-title"].firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        title.doubleClick()
+
+        let field = app.textFields["session-title-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeKey("a", modifierFlags: .command)
+        // "renamed" was never on screen before this point (the seeded title is
+        // "session 1"), so the assertion below cannot pass vacuously.
+        field.typeText("renamed\n")
+
+        XCTAssertTrue(app.staticTexts["renamed"].waitForExistence(timeout: 5))
     }
 }
