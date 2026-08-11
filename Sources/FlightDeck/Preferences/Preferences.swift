@@ -1,0 +1,44 @@
+import Foundation
+
+/// The shell and environment new sessions are spawned into.
+struct ShellPreferences: Codable, Equatable {
+    /// nil means "use `$SHELL`", which is `ShellResolver`'s existing behaviour.
+    var shellOverride: String?
+    /// Extra variables merged into every new session's environment.
+    var environment: [String: String]
+    /// Blanks an inherited `CLAUDE_CODE_CHILD_SESSION`. Claude Code sets that marker for
+    /// nested sessions, and it turns transcript saving off — which silently kills the
+    /// sidebar's inbound rename sync, since the watcher tails a file that is never
+    /// written. See docs/FOLLOWUPS.md. Defaults on.
+    var clearChildSessionMarker: Bool
+
+    init(
+        shellOverride: String? = nil,
+        environment: [String: String] = [:],
+        clearChildSessionMarker: Bool = true
+    ) {
+        self.shellOverride = shellOverride
+        self.environment = environment
+        self.clearChildSessionMarker = clearChildSessionMarker
+    }
+}
+
+/// Everything the Preferences window edits.
+struct Preferences: Codable, Equatable {
+    var globalFlags: FlagSet
+    /// Keyed by standardized project path. Kept here rather than on `Repo` because a
+    /// `Repo` is removed from `SessionStore` when its last session closes, and an
+    /// override must outlive that.
+    var projectFlags: [String: FlagSet]
+    var shell: ShellPreferences
+
+    init(
+        globalFlags: FlagSet = FlagSet(),
+        projectFlags: [String: FlagSet] = [:],
+        shell: ShellPreferences = ShellPreferences()
+    ) {
+        self.globalFlags = globalFlags
+        self.projectFlags = projectFlags
+        self.shell = shell
+    }
+}
