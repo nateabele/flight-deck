@@ -124,11 +124,12 @@ struct FlightDeckApp: App {
 
     init() {
         // Read the launch argument here rather than in a view: with a single window the
-        // store is app-scoped, and `.commands` needs to reach it.
-        let delegate = AppDelegate.shared
+        // store is app-scoped, and `.commands` needs to reach it. The libghostty app comes
+        // from a process-wide static, NOT from the delegate — the delegate does not exist
+        // yet at this point (see Step 2).
         let resetState = UserDefaults.standard.bool(forKey: "FlightDeckResetState")
         _store = StateObject(
-            wrappedValue: SessionStore(ghostty: delegate?.ghostty, resetState: resetState)
+            wrappedValue: SessionStore(ghostty: GhosttyApp.shared, resetState: resetState)
         )
     }
 
@@ -138,20 +139,31 @@ struct FlightDeckApp: App {
 }
 ```
 
-- [ ] **Step 2: Expose the delegate's ghostty app before SwiftUI builds the scene**
+- [ ] **Step 2: Make the libghostty app a process-wide static**
 
-`@NSApplicationDelegateAdaptor` is not available inside `App.init`, so `AppDelegate` publishes itself. Add to `Sources/FlightDeck/AppDelegate.swift`:
+`@NSApplicationDelegateAdaptor` does **not** construct its delegate before `App.init` runs, so
+reaching the delegate from there yields nil. Do not try to publish the delegate; remove the
+ordering dependency instead. Add to `Sources/FlightDeck/GhosttyEmbed/GhosttyApp.swift`:
 
 ```swift
-    /// Set in `init` so `FlightDeckApp.init` can reach the one libghostty app before
-    /// SwiftUI has wired up the delegate adaptor.
-    private(set) static weak var shared: AppDelegate?
-
-    override init() {
-        super.init()
-        AppDelegate.shared = self
-    }
+    /// The one libghostty app for the process.
+    ///
+    /// A lazy static rather than something owned by a particular object: created on first
+    /// access, never freed, and therefore impossible for a surface to outlive — the same
+    /// teardown-lifetime guarantee `AppDelegate` ownership gave us, minus any dependency on
+    /// *when* the delegate happens to be constructed.
+    static let shared: GhosttyApp? = GhosttyApp()
 ```
+
+and in `Sources/FlightDeck/AppDelegate.swift` change the stored property to share it:
+
+```swift
+    let ghostty: GhosttyApp? = GhosttyApp.shared
+```
+
+This second edit is load-bearing: if `AppDelegate` kept calling `GhosttyApp()` directly there
+would be **two** libghostty apps in one process — `ghostty_init`'s one-time guard does not
+stop a second `ghostty_app_new`.
 
 - [ ] **Step 3: Thread the store through the scene and view**
 
