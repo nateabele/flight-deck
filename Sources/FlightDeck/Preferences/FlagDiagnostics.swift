@@ -20,9 +20,7 @@ enum FlagDiagnostics {
             diagnostics.append(.warning("--tmux requires --worktree; claude will reject it on its own."))
         }
 
-        // --tmux implies --worktree is expected and intentional, so only warn about the
-        // working-directory move when --worktree shows up on its own.
-        if flags.values["--worktree"] != nil, flags.values["--tmux"] == nil {
+        if flags.values["--worktree"] != nil {
             diagnostics.append(.warning(
                 "--worktree moves the session's working directory out of the project root, so its transcript and sidebar grouping follow the worktree."
             ))
