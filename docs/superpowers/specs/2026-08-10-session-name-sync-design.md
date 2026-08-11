@@ -75,17 +75,25 @@ rather than left to inference.
 
 ### 3.2 `TranscriptWatcher` — inbound (new file)
 
-Owns one session's transcript file. Watches with a `DispatchSource` file-system monitor,
-reading only the bytes appended since the last offset, and emits the **last** `customTitle`
-seen in that batch via a callback on the main actor.
+Owns one session's transcript file. Polls on a 500 ms main-queue timer, reading only the
+bytes appended since the last offset, and emits the **last** `customTitle` seen in that
+batch via a callback on the main actor. Polling rather than a filesystem event source
+keeps it synchronous and testable: `drain()` is callable directly, so tests need no
+expectations.
 
-Because `claude` creates the file slightly after launch, the watcher starts in a
-"waiting" state watching the parent directory, then promotes itself to watching the file once
-it appears.
+Three details here are load-bearing rather than incidental, each pinned by a test:
 
-Failure is non-fatal by design: if the file never appears (e.g. `claude` is not running), the
-watcher stays idle and the name remains a plain local label — exactly the behaviour agreed in
-handoff §5.
+- **It tails from the end, not the beginning.** On the first successful open of an
+  existing file the offset is seeded to the file's current size. Without this a
+  *restored* session replays its whole previous transcript on the first tick: the last
+  `custom-title` from the old run clobbers the just-restored title — so quitting the app
+  could silently undo a rename — and parsing tens of MB of JSONL on the main thread
+  stalls startup, once per restored session.
+- **It consumes only through the last newline.** `claude` appends while we read, so a
+  tick can land mid-write. Leaving the trailing partial line unread lets the next tick
+  see it whole; consuming it would drop that rename permanently.
+- **A missing file is silence, not an error.** It means `claude` isn't running in that
+  pane, and the name stays a plain local label — the behaviour agreed in handoff §5.
 
 ### 3.3 `SessionStore` — the sync spine
 
