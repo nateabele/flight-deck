@@ -7,6 +7,15 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let ghostty: GhosttyApp? = GhosttyApp()
 
+    /// Set in `init` so `FlightDeckApp.init` can reach the one libghostty app before
+    /// SwiftUI has wired up the delegate adaptor.
+    private(set) static weak var shared: AppDelegate?
+
+    override init() {
+        super.init()
+        AppDelegate.shared = self
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }

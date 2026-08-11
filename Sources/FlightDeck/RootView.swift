@@ -4,14 +4,7 @@ import SwiftUI
 /// for now, renders just the selected terminal. The sidebar is added in the
 /// next task.
 struct RootView: View {
-    @StateObject private var store: SessionStore
-
-    init(ghostty: GhosttyApp?) {
-        // StateObject's autoclosure runs exactly once, so the seed happens once.
-        // See SessionStore.init(ghostty:resetState:) for why UITests need this.
-        let resetState = UserDefaults.standard.bool(forKey: "FlightDeckResetState")
-        _store = StateObject(wrappedValue: SessionStore(ghostty: ghostty, resetState: resetState))
-    }
+    @ObservedObject var store: SessionStore
 
     var body: some View {
         NavigationSplitView {
