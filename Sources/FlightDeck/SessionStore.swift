@@ -8,6 +8,12 @@ import SwiftUI
 @MainActor
 final class SessionStore: ObservableObject {
     @Published private(set) var repos: [Repo] = []
+
+    /// Live activity per session, merged from two sources: the status registry supplies
+    /// `activity`/`waitingFor`, the transcript watchers supply `subagentCount`.
+    /// A session with no entry is absent from the map — that renders no icon, which is
+    /// deliberately distinct from `.idle`.
+    @Published private(set) var statuses: [UUID: SessionStatus] = [:]
     /// `didSet` persists every change, including one made through `SessionSidebar`'s
     /// `List(selection:)` binding — the only way selection actually changes in
     /// production, since that binding writes here directly rather than through
@@ -31,6 +37,14 @@ final class SessionStore: ObservableObject {
     /// Injectable so tests can point at a temp directory.
     var projectsRoot: URL = ClaudeSession.defaultProjectsRoot
 
+    /// Injectable so tests can point at a temp directory.
+    var sessionsRoot: URL = SessionStatusWatcher.defaultRoot
+
+    /// Sub-agent counts kept separately so one arriving before the registry has been
+    /// read is not lost, and so a registry refresh never clobbers it.
+    private var subagentCounts: [UUID: Int] = [:]
+    private var statusWatcher: SessionStatusWatcher?
+
     private var sessionCounter = 0
 
     private let persistence: SessionPersisting?
@@ -47,6 +61,7 @@ final class SessionStore: ObservableObject {
     convenience init(ghostty: GhosttyApp?, resetState: Bool = false) {
         self.init(provider: ghostty, persistence: UserDefaultsSessionPersistence())
         if resetState || !restore() { seedInitialSession() }
+        startStatusWatching()
     }
 
     func seedInitialSession(
@@ -242,6 +257,8 @@ final class SessionStore: ObservableObject {
         surfaces[id] = nil
         watchers[id]?.stop()
         watchers.removeValue(forKey: id)
+        statuses.removeValue(forKey: id)
+        subagentCounts.removeValue(forKey: id)
         if repos[repoIndex].sessions.isEmpty {
             repos.remove(at: repoIndex)
         }
@@ -293,6 +310,48 @@ final class SessionStore: ObservableObject {
         persist()
     }
 
+    func status(for id: UUID) -> SessionStatus? { statuses[id] }
+
+    /// Starts registry polling. Called from the production convenience init only, so
+    /// tests using `init(provider:persistence:)` never touch the real registry or spin
+    /// a timer.
+    func startStatusWatching() {
+        guard statusWatcher == nil else { return }
+        let watcher = SessionStatusWatcher(root: sessionsRoot) { [weak self] entries in
+            self?.applyRegistry(entries)
+        }
+        watcher.start()
+        statusWatcher = watcher
+    }
+
+    /// Rebuilds `statuses` from a registry scan. Entries for sessions Flight Deck does
+    /// not own are dropped: the registry lists every `claude` on the machine.
+    func applyRegistry(_ entries: [UUID: ClaudeStatusFile.Entry]) {
+        var next: [UUID: SessionStatus] = [:]
+        for repo in repos {
+            for session in repo.sessions {
+                guard let entry = entries[session.id] else { continue }
+                next[session.id] = SessionStatus(
+                    activity: entry.activity,
+                    waitingFor: entry.waitingFor,
+                    subagentCount: subagentCounts[session.id] ?? 0
+                )
+            }
+        }
+        guard next != statuses else { return }
+        statuses = next
+    }
+
+    /// Applied from a transcript watcher. Stored even when the registry has not yet
+    /// reported this session, so the next `applyRegistry` picks it up.
+    func applySubagentCount(_ id: UUID, _ count: Int) {
+        guard subagentCounts[id] != count else { return }
+        subagentCounts[id] = count
+        guard var status = statuses[id] else { return }
+        status.subagentCount = count
+        statuses[id] = status
+    }
+
     private func injector(for id: UUID) -> TextInjecting? {
         injectorOverride ?? surfaces[id]
     }
@@ -313,6 +372,8 @@ final class SessionStore: ObservableObject {
             )
         ) { [weak self] title in
             self?.applyExternalTitle(session.id, title)
+        } onSubagentCount: { [weak self] count in
+            self?.applySubagentCount(session.id, count)
         }
         watcher.start()
         watchers[session.id] = watcher
