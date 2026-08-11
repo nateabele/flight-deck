@@ -9,13 +9,14 @@ private struct SessionRow: View {
     @State private var isEditing = false
     @State private var draft = ""
     @FocusState private var focused: Bool
+    @State private var isHovered = false
 
     /// When the title was last clicked, for the hand-rolled double-click detection in
     /// `handleTitleTap()`.
     @State private var lastTitleTap: Date?
 
     var body: some View {
-        HStack {
+        HStack(spacing: 4) {
             if isEditing {
                 TextField("", text: $draft)
                     .textFieldStyle(.plain)
@@ -32,14 +33,45 @@ private struct SessionRow: View {
                     .onTapGesture(perform: handleTitleTap)
             }
             Spacer()
-            Button {
-                store.closeSession(session.id)
-            } label: {
-                Image(systemName: "xmark")
+            SessionStatusIcon(status: store.status(for: session.id))
+            // The close button is absent, not merely hidden, until hover: inserting it
+            // is what pushes the status icon left. No manual offset needed.
+            if isHovered {
+                Button {
+                    store.closeSession(session.id)
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("close-session")
             }
-            .buttonStyle(.borderless)
-            .accessibilityIdentifier("close-session")
         }
+        // Hover is tracked on a transparent layer BEHIND the row, not by putting
+        // `.contentShape(Rectangle())` + `.onHover` on the HStack itself. Applied to the
+        // HStack, that pair joins SwiftUI's hit-testing for the row and competes with the
+        // title's own `.onTapGesture`: it intermittently swallowed the second click of a
+        // double click, so `handleTitleTap` never saw one and rename broke. Measured at
+        // 4 failures in 5 runs of `testDoubleClickRenamesSession`, against 9/9 before
+        // these two changes met.
+        //
+        // `.onHover` alone is safe; it was `.contentShape(Rectangle())` that made the
+        // HStack a hit-test participant and let it take the click. Dropping the
+        // contentShape costs hovering the empty gap between the title and the icon —
+        // hover now follows the row's actual content — which is a smaller price than an
+        // intermittently broken rename.
+        //
+        // Two alternatives were measured and rejected. An `NSViewRepresentable` tracking
+        // area in `.background()` is worse than either: a real `NSView` takes over the
+        // row's hit-test geometry and makes the title unhittable outright (6 of 6 runs
+        // failed, "Not hittable: StaticText ... session-row-title"). Putting
+        // `.contentShape` + `.onHover` on a transparent SwiftUI layer behind the row fixes
+        // the click theft (6 of 6 rename runs passed) but breaks hover itself, since the
+        // content in front of it swallows the hover the layer needs to see.
+        //
+        // Known wart, unchanged: `.onHover` does not fire while a trackpad scroll is in
+        // flight, so a row can hold a stale hover state after scrolling.
+        .onHover { isHovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: isHovered)
     }
 
     /// Selects on the first click, starts a rename on a second click that lands within the

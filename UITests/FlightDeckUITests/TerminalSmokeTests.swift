@@ -37,10 +37,15 @@ final class TerminalSmokeTests: XCTestCase {
 
         // Close the seeded session; this frees its surface while the app lives —
         // the exact use-after-free path the singleton fix protects.
+        let row = app.staticTexts.matching(identifier: "session-row-title").firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
         let close = app.buttons["close-session"].firstMatch
-        if close.waitForExistence(timeout: 5) {
-            close.click()
-        }
+        // The close button is hover-gated (see SessionRow), so the row must be hovered
+        // before it exists. Without this the guarded click below silently never fires
+        // and the test degrades to a launch smoke check.
+        row.hover()
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+        close.click()
 
         // The app must survive: still running, window still present.
         XCTAssertEqual(app.state, .runningForeground)
@@ -238,5 +243,42 @@ final class TerminalSmokeTests: XCTestCase {
         let button = app.buttons["new-session"]
         XCTAssertTrue(button.waitForExistence(timeout: 5))
         XCTAssertTrue(button.label.contains("New Session"), "got: \(button.label)")
+    }
+
+    /// The close button is hover-gated now, so it must be absent at rest and present
+    /// once the pointer is over the row.
+    ///
+    /// This does not also assert the status icon (`SessionStatusIcon`) despite the icon
+    /// sitting right beside the close button: the smoke environment has no live `claude`,
+    /// so `store.status(for:)` is nil and the icon renders nothing. Asserting it would
+    /// require a live session, which is out of scope for this test.
+    func testHoverRevealsCloseButton() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-FlightDeckResetState", "YES"]
+        app.launch()
+
+        let row = app.staticTexts.matching(
+            identifier: "session-row-title"
+        ).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 30))
+
+        // Park the pointer on a neutral, non-row element before the negative assertion.
+        // testClosingSeededSessionKeepsAppAlive leaves the physical pointer parked over a
+        // sidebar row when it ends, and every test relaunches the app at that same
+        // on-screen position. The negative assertion below only passes today because
+        // SwiftUI's `.onHover` is edge-triggered on cursor movement and does not fire for
+        // a pointer that is already stationary when a new window appears under it — so
+        // the row never reports itself hovered even though the pointer sits on top of it.
+        // That is an accident of window-creation timing, not a real assertion that hover
+        // starts false; moving the pointer here first makes the "hidden at rest" claim
+        // actually true regardless of where a previous test case left the cursor.
+        app.buttons["new-session"].hover()
+
+        XCTAssertFalse(app.buttons["close-session"].exists,
+                       "close button should be hidden until hover")
+
+        row.hover()
+
+        XCTAssertTrue(app.buttons["close-session"].waitForExistence(timeout: 5))
     }
 }

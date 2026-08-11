@@ -100,4 +100,66 @@ enum ClaudeSession {
         let name = sanitizedName(title) ?? "session"
         return "claude --resume \(id) || claude --session-id \(id) --name \(shellQuoted(name))\n"
     }
+
+    /// One state-bearing thing that happened in the transcript.
+    ///
+    /// `agentFinished` is emitted for *every* tool_result, not just `Agent` ones —
+    /// the record does not name the tool it answers. `TranscriptWatcher` keeps a set
+    /// of outstanding `Agent` ids, so an unrelated id is a harmless no-op there and
+    /// this parser stays free of cross-record state.
+    enum TranscriptEvent: Equatable {
+        case title(String)
+        case agentStarted(String)
+        case agentFinished(String)
+        case turnEnded
+    }
+
+    /// Parses one JSONL line into zero or more events. A single assistant record can
+    /// carry several `tool_use` blocks, hence the array.
+    ///
+    /// Only `custom-title` is filtered by `sessionID` (preserving `customTitle`'s
+    /// existing rule). The tool records need no such filter: this file is already
+    /// scoped to one session, and sub-agent records live in a separate
+    /// `subagents/agent-*.jsonl` file, so only top-level agents are ever seen here.
+    static func events(inLine line: String, sessionID: UUID) -> [TranscriptEvent] {
+        guard let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = obj["type"] as? String
+        else { return [] }
+
+        switch type {
+        case "custom-title":
+            return customTitle(inLine: line, sessionID: sessionID).map { [.title($0)] } ?? []
+
+        case "system":
+            return obj["subtype"] as? String == "turn_duration" ? [.turnEnded] : []
+
+        case "assistant":
+            return contentBlocks(obj).compactMap { block in
+                guard block["type"] as? String == "tool_use",
+                      block["name"] as? String == "Agent",
+                      let id = block["id"] as? String
+                else { return nil }
+                return .agentStarted(id)
+            }
+
+        case "user":
+            return contentBlocks(obj).compactMap { block in
+                guard block["type"] as? String == "tool_result",
+                      let id = block["tool_use_id"] as? String
+                else { return nil }
+                return .agentFinished(id)
+            }
+
+        default:
+            return []
+        }
+    }
+
+    private static func contentBlocks(_ obj: [String: Any]) -> [[String: Any]] {
+        guard let message = obj["message"] as? [String: Any],
+              let content = message["content"] as? [[String: Any]]
+        else { return [] }
+        return content
+    }
 }
