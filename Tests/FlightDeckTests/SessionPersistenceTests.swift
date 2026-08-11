@@ -23,7 +23,9 @@ final class SessionPersistenceTests: XCTestCase {
     private let allDirsExist: (String) -> Bool = { _ in true }
 
     func testSnapshotRoundTripsThroughUserDefaults() {
-        let defaults = UserDefaults(suiteName: "test.\(UUID().uuidString)")!
+        let suiteName = "test.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = UserDefaultsSessionPersistence(defaults: defaults)
         XCTAssertNil(store.load())
 
@@ -130,6 +132,27 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
         let fresh = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         XCTAssertEqual(fresh.title, "session 4")
+    }
+
+    /// When the persisted selection's directory is gone, the fallback must be the FIRST
+    /// surviving session in restored order — not an arbitrary one. A `Set` here would
+    /// make this nondeterministic.
+    func testRestoreSelectsFirstSurvivingSessionWhenSelectionIsDropped() {
+        let fake = FakePersistence()
+        let gone = UUID(), first = UUID(), second = UUID()
+        fake.stored = SessionSnapshot(
+            sessions: [
+                .init(id: gone, title: "gone", workingDirectory: "/work/deleted"),
+                .init(id: first, title: "first", workingDirectory: "/work/foo"),
+                .init(id: second, title: "second", workingDirectory: "/work/bar"),
+            ],
+            selectedSessionID: gone,
+            sessionCounter: 3
+        )
+
+        let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        XCTAssertTrue(store.restore(directoryExists: { $0 != "/work/deleted" }))
+        XCTAssertEqual(store.selectedSessionID, first)
     }
 
     func testRestoreReturnsFalseWhenNothingStored() {
