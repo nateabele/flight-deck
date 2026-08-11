@@ -1,6 +1,27 @@
 import AppKit
 import SwiftUI
 
+/// `NSTextView` subclass that intercepts ⌘↩ before AppKit's standard key-binding machinery
+/// gets a chance to swallow it.
+///
+/// ⌘↩ commits without leaving the field. It has to be caught here rather than in
+/// `NSTextViewDelegate.doCommandBy`: Command-modified keys are offered to
+/// `performKeyEquivalent(with:)` up the responder chain before `keyDown:` runs, so the
+/// standard key-binding dictionary (which maps unmodified Return to `insertNewline:`) never
+/// produces a selector for the Command-modified case, and `doCommandBy` never sees it.
+final class CommandFieldTextView: NSTextView {
+    var onCommandReturn: (() -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == .command, event.charactersIgnoringModifiers == "\r" {
+            onCommandReturn?()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 /// The command field: an `NSTextView` whose leading `lockedPrefix` cannot be edited,
 /// selected into, or deleted.
 ///
@@ -11,6 +32,9 @@ import SwiftUI
 /// Sync is asymmetric by design: `tail` is pushed in immediately whenever a control
 /// changes, but `onCommit` only fires on blur or ⌘↩, so the field is never re-canonicalized
 /// under a live cursor.
+///
+/// Plain Return is left alone — it inserts a literal newline into the tail, which is fine
+/// since the tokenizer treats `\n` as ordinary whitespace, so a wrapped command still parses.
 struct LockedPrefixCommandField: NSViewRepresentable {
     let lockedPrefix: String
     @Binding var tail: String
@@ -19,8 +43,27 @@ struct LockedPrefixCommandField: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSTextView.scrollableTextView()
-        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.borderType = .bezelBorder
+
+        let textContainer = NSTextContainer()
+        textContainer.widthTracksTextView = true
+        textContainer.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+
+        let layoutManager = NSLayoutManager()
+        layoutManager.addTextContainer(textContainer)
+
+        let textStorage = NSTextStorage()
+        textStorage.addLayoutManager(layoutManager)
+
+        let textView = CommandFieldTextView(frame: .zero, textContainer: textContainer)
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = .width
 
         textView.delegate = context.coordinator
         textView.isRichText = false
@@ -32,11 +75,15 @@ struct LockedPrefixCommandField: NSViewRepresentable {
         textView.textContainerInset = NSSize(width: 4, height: 6)
         textView.allowsUndo = true
 
-        scrollView.hasVerticalScroller = true
-        scrollView.borderType = .bezelBorder
+        let coordinator = context.coordinator
+        textView.onCommandReturn = { [weak coordinator] in
+            coordinator?.commit()
+        }
 
-        context.coordinator.textView = textView
-        context.coordinator.render(prefix: lockedPrefix, tail: tail)
+        scrollView.documentView = textView
+
+        coordinator.textView = textView
+        coordinator.render(prefix: lockedPrefix, tail: tail)
         return scrollView
     }
 
@@ -56,6 +103,13 @@ struct LockedPrefixCommandField: NSViewRepresentable {
         private(set) var currentPrefix = ""
         private(set) var currentTail = ""
 
+        /// Set for the duration of `render`'s programmatic `textStorage` replacement.
+        /// `textDidChange` checks this so that a future AppKit change which starts routing
+        /// programmatic storage edits through the normal change notification (today it does
+        /// not) can't push a re-render's own output back into the `tail` binding mid view
+        /// update.
+        private var isRendering = false
+
         init(_ parent: LockedPrefixCommandField) {
             self.parent = parent
         }
@@ -66,6 +120,11 @@ struct LockedPrefixCommandField: NSViewRepresentable {
 
         func render(prefix: String, tail: String) {
             guard let textView else { return }
+            // Yanking the storage out from under an in-progress IME composition (e.g.
+            // Japanese/Chinese input) would abort it. Skip this pass; `currentTail` is left
+            // stale on purpose so the next `updateNSView` retries once composition ends.
+            guard !textView.hasMarkedText() else { return }
+
             currentPrefix = prefix
             currentTail = tail
 
@@ -80,8 +139,27 @@ struct LockedPrefixCommandField: NSViewRepresentable {
                 [.foregroundColor: NSColor.secondaryLabelColor],
                 range: NSRange(location: 0, length: min(lockedLength, (full as NSString).length))
             )
+
+            // The storage is replaced wholesale, so every previously registered undo action
+            // refers to ranges in a string that no longer exists. Applying one would either
+            // throw or rewrite inside the locked prefix.
+            textView.undoManager?.removeAllActions()
+
+            isRendering = true
             textView.textStorage?.setAttributedString(attributed)
+            isRendering = false
+
+            // The locked range ends with the separator space, and NSTextView inherits
+            // typingAttributes from the character before the insertion point — so without
+            // this, the first character the user types is painted as if it were locked.
+            textView.typingAttributes = [.font: font, .foregroundColor: NSColor.labelColor]
+
             clampSelection()
+        }
+
+        /// Shared by blur (`textDidEndEditing`) and ⌘↩ (`CommandFieldTextView.onCommandReturn`).
+        func commit() {
+            parent.onCommit(currentTail)
         }
 
         // MARK: NSTextViewDelegate
@@ -99,6 +177,7 @@ struct LockedPrefixCommandField: NSViewRepresentable {
         }
 
         func textDidChange(_ notification: Notification) {
+            guard !isRendering else { return }
             guard let textView else { return }
             let full = textView.string as NSString
             guard full.length >= lockedLength else { return }
@@ -107,20 +186,7 @@ struct LockedPrefixCommandField: NSViewRepresentable {
         }
 
         func textDidEndEditing(_ notification: Notification) {
-            parent.onCommit(currentTail)
-        }
-
-        /// ⌘↩ commits without leaving the field.
-        func textView(
-            _ textView: NSTextView,
-            doCommandBy selector: Selector
-        ) -> Bool {
-            if selector == #selector(NSResponder.insertNewline(_:)),
-               NSEvent.modifierFlags.contains(.command) {
-                parent.onCommit(currentTail)
-                return true
-            }
-            return false
+            commit()
         }
 
         private func clampSelection() {
