@@ -1734,14 +1734,21 @@ Append to `Tests/FlightDeckTests/ClaudeSessionTests.swift`, inside the existing 
         XCTAssertEqual(command, "claude --resume \(id) || claude --session-id \(id) --name 'one'\n")
     }
 
-    func testFlagValuesAreQuotedNotStripped() {
+    func testFlagValuesAreQuotedNotStripped() throws {
+        let hostile = "'; rm -rf ~; '"
         let command = ClaudeSession.launchCommand(
             sessionID: fixedID, title: "one",
-            flags: FlagSet(values: ["--system-prompt": .value("'; rm -rf ~; '")])
+            flags: FlagSet(values: ["--system-prompt": .value(hostile)])
         )
-        XCTAssertTrue(command.contains(#"--system-prompt ''\'''\''; rm -rf ~; '\'''\''"#)
-                      || command.contains("rm -rf"))
-        XCTAssertFalse(command.hasSuffix("; \n"), "the value must not escape its quotes")
+        // The real assertion: the value survives as ONE literal argument rather than
+        // decomposing into shell syntax. Tokenizing the command is how we prove that.
+        let tokens = try ClaudeFlagQuoting.tokenize(command.trimmingCharacters(in: .newlines))
+        guard let index = tokens.firstIndex(of: "--system-prompt"), index + 1 < tokens.count else {
+            return XCTFail("--system-prompt missing from: \(command)")
+        }
+        XCTAssertEqual(tokens[index + 1], hostile)
+        XCTAssertFalse(tokens.contains("rm"), "the value must not split into separate tokens")
+        XCTAssertFalse(tokens.contains(";"), "the value must not split into separate tokens")
     }
 
     func testLockedPrefixMatchesTheStartOfTheLaunchCommand() {
