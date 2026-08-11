@@ -161,6 +161,23 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertTrue(store.repos.isEmpty)
     }
 
+    /// A repeat call must not duplicate sessions. There is no production path that makes
+    /// one, but `restore()` stays internal (not `private`) for testability, so nothing
+    /// stops a second call from happening; the `repos.isEmpty` guard is what makes that safe.
+    func testRestoreIsIdempotent() {
+        let fake = FakePersistence()
+        fake.stored = SessionSnapshot(
+            sessions: [.init(id: UUID(), title: "one", workingDirectory: "/work/foo")],
+            selectedSessionID: nil,
+            sessionCounter: 1
+        )
+
+        let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        XCTAssertTrue(store.restore(directoryExists: allDirsExist))
+        XCTAssertFalse(store.restore(directoryExists: allDirsExist), "second call must be a no-op")
+        XCTAssertEqual(store.repos.flatMap(\.sessions).map(\.title), ["one"])
+    }
+
     /// `resetState` is only reachable via the production `init(ghostty:resetState:)` path
     /// (it needs `UserDefaultsSessionPersistence`'s real-defaults storage, which the
     /// designated `init(provider:persistence:)` used elsewhere in this file can bypass
