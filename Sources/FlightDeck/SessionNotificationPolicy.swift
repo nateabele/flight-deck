@@ -1,5 +1,3 @@
-import Foundation
-
 /// Decides whether a status transition should raise, withdraw, or ignore a notification.
 ///
 /// Pure and total so the whole policy is testable without `UNUserNotificationCenter`,
@@ -7,13 +5,17 @@ import Foundation
 enum SessionNotificationPolicy {
     enum Action: Equatable {
         case none
-        case notify(waitingFor: String?)
+        case notify
         case withdraw
     }
 
     /// Fires only on the *edge* into `waiting`, so a session that stays blocked does not
     /// re-notify on every poll. Withdrawal ignores `appActive`: once the prompt is gone
     /// the banner is stale regardless of where focus was.
+    ///
+    /// `.notify` carries no payload — the caller (`SessionStore.deliverNotifications`)
+    /// builds the notification body from `status.tooltip`, which reads better than the
+    /// bare `waitingFor` text this case used to carry.
     static func action(
         old: SessionStatus?, new: SessionStatus?, appActive: Bool
     ) -> Action {
@@ -21,7 +23,7 @@ enum SessionNotificationPolicy {
         let isWaiting = new?.activity == .waiting
 
         if isWaiting, !wasWaiting {
-            return appActive ? .none : .notify(waitingFor: new?.waitingFor)
+            return appActive ? .none : .notify
         }
         if wasWaiting, !isWaiting {
             return .withdraw

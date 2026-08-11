@@ -8,10 +8,7 @@ final class SessionNotificationPolicyTests: XCTestCase {
     private let waiting = SessionStatus(activity: .waiting, waitingFor: "permission prompt")
 
     func testNotifiesOnEnteringWaitingWhileBackgrounded() {
-        XCTAssertEqual(
-            Policy.action(old: busy, new: waiting, appActive: false),
-            .notify(waitingFor: "permission prompt")
-        )
+        XCTAssertEqual(Policy.action(old: busy, new: waiting, appActive: false), .notify)
     }
 
     func testSuppressedWhileAppIsFrontmost() {
@@ -36,10 +33,7 @@ final class SessionNotificationPolicyTests: XCTestCase {
     }
 
     func testNotifiesWhenSessionAppearsAlreadyWaiting() {
-        XCTAssertEqual(
-            Policy.action(old: nil, new: waiting, appActive: false),
-            .notify(waitingFor: "permission prompt")
-        )
+        XCTAssertEqual(Policy.action(old: nil, new: waiting, appActive: false), .notify)
     }
 
     func testNoActionForUnrelatedTransitions() {
@@ -50,12 +44,5 @@ final class SessionNotificationPolicyTests: XCTestCase {
             .none
         )
         XCTAssertEqual(Policy.action(old: nil, new: nil, appActive: false), .none)
-    }
-
-    func testNotifyCarriesNilReasonWhenAbsent() {
-        XCTAssertEqual(
-            Policy.action(old: busy, new: SessionStatus(activity: .waiting), appActive: false),
-            .notify(waitingFor: nil)
-        )
     }
 }

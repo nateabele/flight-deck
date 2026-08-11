@@ -36,6 +36,7 @@ You should see a "Flight Deck" window with a live shell prompt.
 |---|---|---|
 | `scripts/build-libghostty.sh` | Builds `libghostty` from the pinned submodule → stages `vendor/ghostty-artifacts/GhosttyKit.xcframework` | Downloads Zig 0.15.2 if missing; creates the `xcrun` SDK shim in `vendor/.build-shim/`; builds via the 15.4 SDK; `git clean`s the submodule after staging. Idempotent. Re-run only if the xcframework is missing or you re-pin Ghostty. |
 | `scripts/build.sh` | `export DEVELOPER_DIR` → `xcodegen generate` → `xcodebuild ... build` | Builds the app. Assumes the xcframework already exists (run `build-libghostty.sh` once first). |
+| `scripts/test-unit.sh` | Runs the headless unit test suite (`FlightDeckTests`) | The actually-working path for unit tests — see below. Needs the xcframework staged first, same as `build.sh`. |
 | `scripts/smoke.sh` | Clears saved window state → `build.sh` → `xcodegen generate` → runs the UI smoke test → prints `SMOKE PASS` | See "One-time UI-automation grant" below. |
 
 ## Running tests
@@ -43,10 +44,8 @@ You should see a "Flight Deck" window with a live shell prompt.
 **Unit tests** (fast, no special permission):
 
 ```bash
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  xcodebuild -project FlightDeck.xcodeproj -scheme FlightDeck \
-  -destination 'platform=macOS' test -only-testing:FlightDeckTests
-# → 3/3 ShellResolverTests pass
+./scripts/test-unit.sh
+# → all FlightDeckTests pass (count grows over time; see the script's own output)
 ```
 
 **Smoke test** (launches the app, asserts the window renders):

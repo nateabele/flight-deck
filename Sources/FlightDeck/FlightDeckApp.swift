@@ -16,14 +16,16 @@ struct FlightDeckApp: App {
     @MainActor
     private static func makeStore() -> SessionStore {
         let resetState = UserDefaults.standard.bool(forKey: "FlightDeckResetState")
-        let store = SessionStore(ghostty: GhosttyApp.shared, resetState: resetState)
-        // Injected here rather than built inside the store: `UNUserNotificationCenter`
-        // traps outside a signed bundle, and `SessionStore`'s convenience init is
-        // reachable from tests (SessionPersistenceTests). This factory is not.
+        // Built here rather than inside the store: `UNUserNotificationCenter` traps
+        // outside a signed bundle, and `SessionStore`'s convenience init is reachable
+        // from tests (SessionPersistenceTests). This factory is not.
+        //
+        // Constructed and authorized BEFORE the store, then passed in, so `notifier` is
+        // set before the convenience init's `startStatusWatching()` runs — see the
+        // comment on that initializer.
         let notifier = SessionNotifier()
         notifier.requestAuthorization()
-        store.notifier = notifier
-        return store
+        return SessionStore(ghostty: GhosttyApp.shared, resetState: resetState, notifier: notifier)
     }
 
     var body: some Scene {

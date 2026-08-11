@@ -108,9 +108,17 @@ Three guards:
 - **Torn reads** — a decode failure keeps the last known status rather than dropping to
   "gone". Given §1.2 this will happen occasionally.
 - **Dead processes** — `kill(pid, 0)` filters files leaked by a crash. Claude unlinks only
-  on clean exit. Full `procStart` PID-reuse verification is deliberately *not* implemented:
-  lookups are keyed by `sessionId`, so a reused PID would also have to carry our exact
-  session UUID to mislead us.
+  on clean exit. Full `procStart` PID-reuse verification is deliberately *not* implemented.
+  **Accepted limitation, not a non-issue:** the file left behind by a hard-killed `claude`
+  *is* ours and carries our exact session UUID, so `sessionId`-keying does not protect
+  against it. The actual failure sequence is: our `claude` takes `SIGKILL` without
+  unlinking its status file → the OS later reassigns that pid to an unrelated process →
+  `kill(pid, 0)` reports it alive → the row shows a permanently spinning "Working" for a
+  session with no `claude` running. This is bounded, though: restarting `claude` in that
+  pane writes a new status file with a higher `startedAt`, which wins the duplicate
+  resolution below and displaces the stale entry — so the wrong icon is only visible while
+  that pane has no live `claude` attached. If this proves annoying in practice, the fix is
+  to decode and compare `procStart` against the live process's actual start time.
 - **Duplicates** — if two files claim one `sessionId` (crash, then resume), take the
   highest `startedAt`.
 
@@ -269,3 +277,10 @@ scope.
   `SendMessage`/`ListAgents`. Do not reach for it here.
 - **Notification entitlement.** Requires a signed bundle; the release build is signed, but
   a raw `swift build` binary is not. The protocol seam keeps that out of the test path.
+- **PID reuse after a hard kill.** No `procStart` verification (see §3). A `claude` that
+  takes `SIGKILL` leaves behind a status file carrying our exact session UUID; if the OS
+  later reassigns that pid, the row shows a stale "Working" for a session with no live
+  `claude`. Bounded: restarting `claude` in that pane produces a higher `startedAt` that
+  displaces the stale entry via the duplicate-resolution rule, so the wrong icon is only
+  visible while the pane has no live `claude`. Fix if it proves annoying: decode and
+  compare `procStart`.
