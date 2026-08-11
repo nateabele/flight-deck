@@ -127,4 +127,48 @@ final class SessionCreationTests: XCTestCase {
         XCTAssertEqual(store.repos.map(\.displayName), ["foo", "bar"])
         XCTAssertEqual(store.selectedSessionID, created?.id)
     }
+
+    /// `projectDirectory(for:)` resolves against the real filesystem (see
+    /// `SessionCreationHelperTests`), so the dropped URLs must be real directories, not the
+    /// literal `/work/foo`-style paths used elsewhere in this file for sessions created directly.
+    func testDroppingTwoFoldersCreatesAProjectEachAndActivatesTheLast() throws {
+        let store = makeStore()
+        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let foo = root.appendingPathComponent("foo", isDirectory: true)
+        let bar = root.appendingPathComponent("bar", isDirectory: true)
+        try FileManager.default.createDirectory(at: foo, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: bar, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let created = store.acceptDroppedURLs([foo, bar])
+
+        XCTAssertEqual(store.repos.map(\.displayName), ["foo", "bar"])
+        XCTAssertEqual(store.repos.flatMap(\.sessions).count, 2)
+        XCTAssertEqual(store.selectedSessionID, created?.id)
+        XCTAssertEqual(store.repos[1].sessions.last?.id, created?.id)
+    }
+
+    /// Dropping a folder that is already a project adds another session to it.
+    func testDroppingAKnownFolderAddsASessionToThatProject() throws {
+        let store = makeStore()
+        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let url = root.appendingPathComponent("foo", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        _ = store.newSession(in: url)
+        let created = store.acceptDroppedURLs([url])
+
+        XCTAssertEqual(store.repos.count, 1)
+        XCTAssertEqual(store.repos[0].sessions.count, 2)
+        XCTAssertEqual(store.selectedSessionID, created?.id)
+    }
+
+    func testDroppingNothingCreatesNothing() {
+        let store = makeStore()
+        XCTAssertNil(store.acceptDroppedURLs([]))
+        XCTAssertTrue(store.repos.isEmpty)
+    }
 }

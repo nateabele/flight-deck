@@ -113,6 +113,18 @@ final class SessionStore: ObservableObject {
         return addProject(at: url)
     }
 
+    /// Folder drop. Each URL becomes a project with one session; the last is activated.
+    /// A file resolves to its containing folder, so dropping a file out of a repo adds
+    /// that repo — see `SessionCreateAction.projectDirectory(for:)`.
+    @discardableResult
+    func acceptDroppedURLs(_ urls: [URL]) -> Session? {
+        var last: Session?
+        for url in urls {
+            last = addProject(at: SessionCreateAction.projectDirectory(for: url))
+        }
+        return last
+    }
+
     /// Shared by `newSession` and `restore`. `initialInput` is the only difference:
     /// a fresh session starts `claude`, a restored one resumes it.
     @discardableResult
