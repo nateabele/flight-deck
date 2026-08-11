@@ -3,6 +3,8 @@ set -euo pipefail
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 cd "$(dirname "$0")/.."
 
+. scripts/throttle.sh
+
 # Fresh-launch guard: the UI tests assert the window is present on the primary
 # display. RootWindow pins the initial placement with .defaultPosition(.center),
 # but SwiftUI only applies a default position when there is NO saved window
