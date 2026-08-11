@@ -66,6 +66,9 @@ struct SessionSidebar: View {
                 }
             }
         }
+        .dropDestination(for: URL.self) { urls, _ in
+            store.acceptDroppedURLs(urls) != nil
+        }
         .safeAreaInset(edge: .bottom) {
             Button {
                 store.createFromMenu()
