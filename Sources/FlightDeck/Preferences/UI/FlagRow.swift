@@ -153,17 +153,12 @@ struct FlagRow: View {
                 .accessibilityIdentifier(spec.label)
                 .onAppear { listDraft = listTextFromModel }
                 .onChange(of: listDraft) { _, newDraft in
+                    // Seeding and re-seeding assign `listTextFromModel` verbatim, so raw
+                    // equality identifies that echo exactly. Comparing the *parsed* form
+                    // instead would miss any item whose whitespace is not a single space —
+                    // a tab, a double space, a leading space — and rewrite it on mere appear.
+                    guard newDraft != listTextFromModel else { return }
                     let items = newDraft.split(whereSeparator: \.isWhitespace).map(String.init)
-                    // Seeding and re-seeding both set `listDraft` programmatically, which
-                    // re-enters this handler. Without this guard, appearing with (or being
-                    // re-seeded to) a value this field cannot faithfully represent — an item
-                    // containing whitespace, e.g. `.list(["/Users/nate/My Projects"])`, still
-                    // fully valid and round-trippable through the model/serializer/parser —
-                    // would get silently split into several bogus items purely from
-                    // rendering the pane, with no user interaction at all. Editing such an
-                    // item by hand still splits it on whitespace; that representational limit
-                    // is real and stays, but merely displaying the row must not trigger it.
-                    guard items.joined(separator: " ") != listTextFromModel else { return }
                     value = items.isEmpty ? (value == nil ? nil : .list([])) : .list(items)
                 }
                 .onChange(of: listTextFromModel) { _, fromModel in
@@ -181,13 +176,16 @@ struct FlagRow: View {
 
     private var customTag: String { "\u{1}custom" }
 
-    /// The "Default" Picker item's label, and the inherited-value caption on `.toggle`/
-    /// `.multiline`/`.optionalValue`. Always describes what `inherited` actually is,
-    /// regardless of whether this row is currently overridden — a user opening the menu (or
-    /// reading the caption while unset) wants to know what selecting Default would produce,
-    /// not a description of whatever is currently selected (the row's other controls already
-    /// show that). Every call site that uses this already guards on `value == nil` itself
-    /// where that distinction matters, so this function does not need to.
+    /// The `.negatable`/`.choice` Pickers' "Default" item label, and the inherited-value
+    /// caption on `.multiline`/`.optionalValue` (`.toggle`'s caption is a hardcoded
+    /// `"Inherited: on"` above, since `.toggle` can only ever inherit `.on`, and doesn't call
+    /// this). Always describes what `inherited` actually is, regardless of whether this row
+    /// is currently overridden — a user opening the menu wants to know what selecting Default
+    /// would produce, not a description of whatever is currently selected (the row's other
+    /// controls already show that). The two Picker call sites render this item unconditionally
+    /// and don't guard on `value == nil` themselves — the Default item is always present in the
+    /// menu, selected or not; only the `.multiline`/`.optionalValue` captions gate on
+    /// `value == nil` at their call site, since those render inline only while unset.
     private func defaultItemLabel(_ fallback: String) -> String {
         guard let inherited else { return fallback }
         switch inherited {
