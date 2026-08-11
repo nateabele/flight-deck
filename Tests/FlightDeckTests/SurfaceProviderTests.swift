@@ -3,7 +3,11 @@ import XCTest
 
 final class SurfaceProviderTests: XCTestCase {
     func testGhosttyAppConformsToSurfaceProvider() throws {
-        guard let app = GhosttyApp() else {
+        // Use the process-wide instance rather than constructing a second `GhosttyApp()`:
+        // this test process only ever holds one libghostty app (see
+        // testAppDelegateSharesTheProcessWideGhosttyApp), and a second instance would get
+        // `ghostty_app_free`d out from under the shared one at its own teardown.
+        guard let app = GhosttyApp.shared else {
             throw XCTSkip("GhosttyApp could not initialize in this environment")
         }
         // Conformance is the assertion: this must compile and hold at runtime.
