@@ -57,7 +57,7 @@ final class SessionStore: ObservableObject {
     }
 
     @discardableResult
-    func newSession(in url: URL) -> Session {
+    func newSession(in url: URL, at index: Int? = nil) -> Session {
         sessionCounter += 1
         let session = Session(
             title: "session \(sessionCounter)", workingDirectory: url.path
@@ -67,18 +67,37 @@ final class SessionStore: ObservableObject {
             in: url,
             initialInput: ClaudeSession.launchCommand(
                 sessionID: session.id, title: session.title
-            )
+            ),
+            at: index
         )
         selectedSessionID = session.id
         persist()
         return session
     }
 
+    /// ⌘N. Creates a session in the ACTIVE session's project, directly below it, and
+    /// activates it. Returns nil when nothing is active — the caller routes that case to
+    /// `addProject` instead (see `SessionCreateAction`).
+    @discardableResult
+    func newSessionBelowActive() -> Session? {
+        guard let activeID = selectedSessionID, let at = locate(activeID) else { return nil }
+        let active = repos[at.repo].sessions[at.session]
+        let url = URL(fileURLWithPath: active.workingDirectory, isDirectory: true)
+        return newSession(in: url, at: at.session + 1)
+    }
+
+    /// ⌘⇧A and folder drops. A new folder becomes a project; a known one gains another
+    /// session. Either way the new session is appended to its project and activated.
+    @discardableResult
+    func addProject(at url: URL) -> Session {
+        newSession(in: url)
+    }
+
     /// Shared by `newSession` and `restore`. `initialInput` is the only difference:
     /// a fresh session starts `claude`, a restored one resumes it.
     @discardableResult
     private func insertSession(
-        _ session: Session, in url: URL, initialInput: String
+        _ session: Session, in url: URL, initialInput: String, at index: Int? = nil
     ) -> Session {
         let repoIndex: Int
         if let existing = indexOfRepo(for: url) {
@@ -87,7 +106,13 @@ final class SessionStore: ObservableObject {
             repos.append(Repo(url: url))
             repoIndex = repos.count - 1
         }
-        repos[repoIndex].sessions.append(session)
+        // `index` is a position within this repo's sessions; out-of-range falls back to
+        // appending so a stale index can never trap.
+        if let index, index >= 0, index <= repos[repoIndex].sessions.count {
+            repos[repoIndex].sessions.insert(session, at: index)
+        } else {
+            repos[repoIndex].sessions.append(session)
+        }
 
         var config = Ghostty.SurfaceConfiguration()
         config.command = ShellResolver.resolve()
