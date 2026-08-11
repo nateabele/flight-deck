@@ -208,18 +208,21 @@ final class SessionStore: ObservableObject {
     /// Sidebar → Claude. Updates the title, then types `/rename <name>` into the pty
     /// so the *running* interactive session renames itself and records it.
     ///
-    /// The command is terminated with a carriage return, not a line feed. Pressing Return in
-    /// a terminal sends CR (`\r`); LF (`\n`) is Ctrl+J, which a full-screen TUI like Claude's
-    /// input bar inserts as a literal newline instead of submitting. With `\n` the command
-    /// appeared in the input bar and just sat there. Ghostty encodes Return the same way —
-    /// see `SurfaceView_AppKit.swift`'s `case "\r"`.
+    /// The command text and the Return are sent separately, and that split is load-bearing.
+    /// `sendText` is a *paste* in libghostty, and Claude Code enables bracketed-paste mode, so
+    /// any line terminator inside the text is delivered between `\u{1b}[200~` and
+    /// `\u{1b}[201~` and treated as pasted content — it lands in the input bar as a literal
+    /// newline and never submits. Return has to arrive after the paste closes, as a real key
+    /// event. See `TextInjecting.sendReturn()`.
     func rename(_ id: UUID, to newTitle: String) {
         guard let at = locate(id),
               let name = ClaudeSession.sanitizedName(newTitle)
         else { return }
 
         repos[at.repo].sessions[at.session].title = name
-        injector(for: id)?.sendText("/rename \(name)\r")
+        let injector = injector(for: id)
+        injector?.sendText("/rename \(name)")
+        injector?.sendReturn()
         persist()
     }
 
