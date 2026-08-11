@@ -4,7 +4,12 @@ import SwiftUI
 /// `NSMenuItem` does not fire its key equivalent, and ⌘N specifically must work when there
 /// are no sessions (it reroutes to Add Project).
 struct SessionCommands: Commands {
-    @ObservedObject var store: SessionStore
+    // Plain `let`, not `@ObservedObject`: no published property is read here, so observing
+    // would invalidate and rebuild the menu on every unrelated `SessionStore` mutation —
+    // including `applyExternalTitle` firing from the transcript watcher's 500ms poll —
+    // potentially while the menu is open. The actions below close over the same
+    // reference-type instance either way.
+    let store: SessionStore
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
