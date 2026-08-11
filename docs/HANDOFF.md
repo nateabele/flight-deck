@@ -42,8 +42,8 @@ That was deliberately the smallest self-contained slice that also retired the bi
 cd ~/Projects/Protos-n-Tools/flight-deck
 git submodule update --init          # fetch vendored Ghostty @ v1.3.1
 ./scripts/build-libghostty.sh        # build GhosttyKit.xcframework (~10 min first run)
-./scripts/build.sh                   # generate project + build FlightDeck.app
-open DerivedData/Build/Products/Debug/FlightDeck.app   # a live terminal
+./scripts/build.sh                   # generate project + build "Flight Deck.app"
+open "DerivedData/Build/Products/Debug/Flight Deck.app"   # a live terminal
 ```
 
 Full details, prerequisites, and troubleshooting: **[BUILD.md](BUILD.md)**.
