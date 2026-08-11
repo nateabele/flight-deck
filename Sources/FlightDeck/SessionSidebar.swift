@@ -9,13 +9,14 @@ private struct SessionRow: View {
     @State private var isEditing = false
     @State private var draft = ""
     @FocusState private var focused: Bool
+    @State private var isHovered = false
 
     /// When the title was last clicked, for the hand-rolled double-click detection in
     /// `handleTitleTap()`.
     @State private var lastTitleTap: Date?
 
     var body: some View {
-        HStack {
+        HStack(spacing: 4) {
             if isEditing {
                 TextField("", text: $draft)
                     .textFieldStyle(.plain)
@@ -32,14 +33,25 @@ private struct SessionRow: View {
                     .onTapGesture(perform: handleTitleTap)
             }
             Spacer()
-            Button {
-                store.closeSession(session.id)
-            } label: {
-                Image(systemName: "xmark")
+            SessionStatusIcon(status: store.status(for: session.id))
+            // The close button is absent, not merely hidden, until hover: inserting it
+            // is what pushes the status icon left. No manual offset needed.
+            if isHovered {
+                Button {
+                    store.closeSession(session.id)
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("close-session")
             }
-            .buttonStyle(.borderless)
-            .accessibilityIdentifier("close-session")
         }
+        // Known wart: .onHover does not fire while a trackpad scroll is in flight, so a
+        // row can hold a stale hover state after scrolling. Fixing it needs a tracking-area
+        // NSViewRepresentable; out of scope here.
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: isHovered)
     }
 
     /// Selects on the first click, starts a rename on a second click that lands within the
