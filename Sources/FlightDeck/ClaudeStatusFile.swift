@@ -31,7 +31,8 @@ enum ClaudeStatusFile {
     /// hand-edited file.
     static func decode(_ data: Data, expectedPID: pid_t) -> Entry? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let rawPID = obj["pid"] as? Int, pid_t(rawPID) == expectedPID,
+              let rawPID = obj["pid"] as? Int,
+              let pid = pid_t(exactly: rawPID), pid == expectedPID,
               let rawSession = obj["sessionId"] as? String,
               let sessionID = UUID(uuidString: rawSession),
               let rawStatus = obj["status"] as? String,
