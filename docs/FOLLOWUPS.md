@@ -95,3 +95,15 @@ reader doesn't re-derive them.
   status line first. `Ghostty.SurfaceConfiguration` exposes `environmentVariables`, so the
   defensive fix (clear the marker for spawned sessions) is available if this proves to be
   more than a development-time footgun.
+
+## Deferred from session creation UX (2026-08-11)
+
+- **A single click on a sidebar row's *title text* does not reselect that row.** The
+  `Text` in `SessionRow` carries `.onTapGesture(count: 2)` for inline rename, and that
+  recognizer swallows the single click before the enclosing `List(selection:)` sees it.
+  Clicking the blank space around the title in the same row selects normally, so the row
+  is inconsistently hit-tested on the part users aim at most. Found while writing the ⌘N
+  UITest, which had to click the row's `Cell` rather than its title to reselect. Minor —
+  every other selection path works — but worth fixing with a
+  `simultaneousGesture`/`highPriorityGesture` arrangement that lets the single click fall
+  through to selection while the double click still starts a rename.
