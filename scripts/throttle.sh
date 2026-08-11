@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Run-rate guard, sourced by test-unit.sh and smoke.sh.
+# Run-rate guard, sourced by smoke.sh only.
 #
-# Both scripts build the app and load or launch it. The UI suite in particular
-# spawns Flight Deck and takes over the foreground, so a loop of agents each
-# re-running the suite makes the machine unusable. This caps ALL test runs —
-# unit and UI share one stamp — at one per $FLIGHTDECK_TEST_THROTTLE seconds
-# (default 180).
+# The UI suite spawns Flight Deck, seizes the foreground, and fires key events
+# into whatever holds focus, so a loop of agents each re-running it makes the
+# machine unusable. This caps UI runs at one per $FLIGHTDECK_TEST_THROTTLE
+# seconds (default 180).
+#
+# test-unit.sh is deliberately NOT throttled: it runs headless via `xcrun
+# xctest` and never takes the foreground, so implementers keep a normal
+# red/green TDD cycle.
 #
 # The stamp is written BEFORE the run, not after, so a long or crashed run
 # still counts against the window.
