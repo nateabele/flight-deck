@@ -40,9 +40,9 @@ final class ClaudeFlagSerializerTests: XCTestCase {
         XCTAssertEqual(ClaudeFlagSerializer.serialize(flags), "--model opus --verbose")
     }
 
-    func testPassthroughIsAppendedAsATailVerbatim() {
+    func testPassthroughLeadsSoAListFlagCannotAbsorbIt() {
         let flags = FlagSet(values: ["--verbose": .on], passthrough: ["--not-real", "a b"])
-        XCTAssertEqual(ClaudeFlagSerializer.serialize(flags), "--verbose --not-real 'a b'")
+        XCTAssertEqual(ClaudeFlagSerializer.serialize(flags), "--not-real 'a b' --verbose")
     }
 
     func testEmptySetSerializesToEmptyString() {
@@ -83,6 +83,26 @@ final class ClaudeFlagSerializerTests: XCTestCase {
 
     func testRoundTripIsCleanOfDiagnostics() {
         let flags = FlagSet(values: ["--model": .value("opus"), "--verbose": .on])
+        XCTAssertTrue(ClaudeFlagParser.parse(ClaudeFlagSerializer.serialize(flags)).diagnostics.isEmpty)
+    }
+
+    func testRoundTripOfAValueThatLooksLikeAFlag() {
+        let flags = FlagSet(values: ["--system-prompt": .value("--verbose")])
+        XCTAssertEqual(ClaudeFlagParser.parse(ClaudeFlagSerializer.serialize(flags)).flags, flags)
+    }
+
+    func testRoundTripOfAListItemThatLooksLikeAFlag() {
+        let flags = FlagSet(values: ["--add-dir": .list(["-foo", "--bar"])])
+        XCTAssertEqual(ClaudeFlagParser.parse(ClaudeFlagSerializer.serialize(flags)).flags, flags)
+    }
+
+    func testRoundTripOfPlainPassthroughAlongsideAListFlag() {
+        let flags = FlagSet(values: ["--add-dir": .list(["a"])], passthrough: ["orphan"])
+        XCTAssertEqual(ClaudeFlagParser.parse(ClaudeFlagSerializer.serialize(flags)).flags, flags)
+    }
+
+    func testRoundTripOfAValueThatLooksLikeAFlagProducesNoDiagnostics() {
+        let flags = FlagSet(values: ["--system-prompt": .value("--verbose")])
         XCTAssertTrue(ClaudeFlagParser.parse(ClaudeFlagSerializer.serialize(flags)).diagnostics.isEmpty)
     }
 }

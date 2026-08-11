@@ -2,14 +2,22 @@ import Foundation
 
 /// Renders a `FlagSet` back to the editable tail of the command field.
 ///
-/// Order is catalog order, which makes output stable and therefore diffable: the field
-/// does not reshuffle itself when an unrelated control changes. `passthrough` is appended
-/// last, verbatim.
+/// `passthrough` leads, and catalog flags follow in catalog order. This ordering is
+/// load-bearing for the round trip, not cosmetic: a list flag (`--add-dir a b`)
+/// greedily consumes every following non-flag token, so a passthrough token placed
+/// after it would be swallowed into the list instead of surviving as passthrough.
+/// Putting passthrough first means its own run always terminates at the first
+/// (unquoted) catalog flag, and no list flag ever has passthrough trailing it to
+/// absorb. Do not reorder this back to "passthrough last" — that undoes the fix.
+///
+/// Order among the catalog flags themselves is catalog order, which makes that part of
+/// the output stable and therefore diffable: the field does not reshuffle itself when
+/// an unrelated control changes.
 ///
 /// `ClaudeFlagParser.parse(serialize(x)) == x` is the invariant this type exists to hold up.
 enum ClaudeFlagSerializer {
     static func serialize(_ flags: FlagSet) -> String {
-        var parts: [String] = []
+        var parts: [String] = flags.passthrough.map(ClaudeFlagQuoting.quoteIfNeeded)
 
         for spec in ClaudeFlagCatalog.all {
             guard let value = flags.values[spec.canonical] else { continue }
@@ -20,15 +28,21 @@ enum ClaudeFlagSerializer {
                 parts.append(spec.canonical)
             case (_, .value(let raw)):
                 parts.append(spec.canonical)
-                parts.append(ClaudeFlagQuoting.quoteIfNeeded(raw))
+                parts.append(quotedValue(raw))
             case (_, .list(let items)):
                 guard !items.isEmpty else { continue }
                 parts.append(spec.canonical)
-                parts.append(contentsOf: items.map(ClaudeFlagQuoting.quoteIfNeeded))
+                parts.append(contentsOf: items.map(quotedValue))
             }
         }
 
-        parts.append(contentsOf: flags.passthrough.map(ClaudeFlagQuoting.quoteIfNeeded))
         return parts.joined(separator: " ")
+    }
+
+    /// `quoteIfNeeded` leaves `-` unquoted because it is a safe character, but a value
+    /// that begins with `-` would reparse as a flag. Force quotes for exactly that case.
+    private static func quotedValue(_ raw: String) -> String {
+        guard raw.hasPrefix("-") else { return ClaudeFlagQuoting.quoteIfNeeded(raw) }
+        return "'" + raw.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

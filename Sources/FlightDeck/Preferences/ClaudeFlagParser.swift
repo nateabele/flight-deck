@@ -13,7 +13,7 @@ enum ClaudeFlagParser {
     }
 
     static func parse(_ input: String) -> ParseResult {
-        let tokens: [String]
+        let tokens: [ClaudeFlagQuoting.Token]
         do {
             tokens = try ClaudeFlagQuoting.tokenize(input)
         } catch {
@@ -28,13 +28,18 @@ enum ClaudeFlagParser {
         var seen: Set<String> = []
         var index = 0
 
-        func isFlag(_ token: String) -> Bool { token.hasPrefix("-") && token != "-" }
+        // A quoted token is never a flag, even if its text starts with `-` — that is
+        // what lets a value like `--verbose` round-trip through the command field
+        // instead of reparsing as the flag of the same name.
+        func isFlag(_ token: ClaudeFlagQuoting.Token) -> Bool {
+            !token.wasQuoted && token.text.hasPrefix("-") && token.text != "-"
+        }
 
         /// Consumes following tokens until the next flag.
         func takeValues() -> [String] {
             var values: [String] = []
             while index < tokens.count, !isFlag(tokens[index]) {
-                values.append(tokens[index])
+                values.append(tokens[index].text)
                 index += 1
             }
             return values
@@ -54,7 +59,7 @@ enum ClaudeFlagParser {
             if let inlineValue { return .value(inlineValue) }
             if index < tokens.count, !isFlag(tokens[index]) {
                 defer { index += 1 }
-                return .value(tokens[index])
+                return .value(tokens[index].text)
             }
             return nil
         }
@@ -66,13 +71,15 @@ enum ClaudeFlagParser {
         }
 
         while index < tokens.count {
-            var token = tokens[index]
+            let rawToken = tokens[index]
             index += 1
 
-            guard isFlag(token) else {
-                flags.passthrough.append(token)
+            guard isFlag(rawToken) else {
+                flags.passthrough.append(rawToken.text)
                 continue
             }
+
+            var token = rawToken.text
 
             // Split `--flag=value` before lookup.
             var inlineValue: String?

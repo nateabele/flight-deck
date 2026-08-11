@@ -10,6 +10,16 @@ import Foundation
 enum ClaudeFlagQuoting {
     enum TokenizeError: Error, Equatable { case unterminatedQuote }
 
+    /// A word produced by `tokenize`.
+    struct Token: Equatable {
+        let text: String
+        /// True when any part of this token came from inside single or double quotes,
+        /// including an empty `''`. The parser uses this to refuse to treat a quoted
+        /// token as a flag — which is what makes a value like `--verbose` survive a
+        /// round trip instead of reparsing as a different flag.
+        let wasQuoted: Bool
+    }
+
     /// Characters safe to emit unquoted. Anything else forces single quotes.
     private static let safe = CharacterSet(
         charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_./:=@%+,"
@@ -17,16 +27,18 @@ enum ClaudeFlagQuoting {
 
     /// POSIX-ish word splitting. Adjacent quoted and unquoted runs concatenate into one
     /// token (`'a'b` → `ab`), matching `sh`.
-    static func tokenize(_ input: String) throws -> [String] {
-        var tokens: [String] = []
+    static func tokenize(_ input: String) throws -> [Token] {
+        var tokens: [Token] = []
         var current = ""
         var started = false          // distinguishes `''` (a real empty token) from no token
+        var quoted = false           // true once any quoted run has contributed to `current`
         var iterator = input.startIndex
 
         func flush() {
-            if started { tokens.append(current) }
+            if started { tokens.append(Token(text: current, wasQuoted: quoted)) }
             current = ""
             started = false
+            quoted = false
         }
 
         while iterator < input.endIndex {
@@ -36,6 +48,7 @@ enum ClaudeFlagQuoting {
                 flush()
             case "'":
                 started = true
+                quoted = true
                 iterator = input.index(after: iterator)
                 var closed = false
                 while iterator < input.endIndex {
@@ -46,6 +59,7 @@ enum ClaudeFlagQuoting {
                 guard closed else { throw TokenizeError.unterminatedQuote }
             case "\"":
                 started = true
+                quoted = true
                 iterator = input.index(after: iterator)
                 var closed = false
                 while iterator < input.endIndex {
