@@ -8,8 +8,15 @@ final class SessionCreationTests: XCTestCase {
         func tick() {}
     }
 
+    // `SessionStore.provider` is `weak`; a `StubProvider` that isn't held anywhere else
+    // deallocates immediately and `makeSurface`/`tick` silently never run. Retain one per
+    // test here so the provider stays alive for the store's lifetime.
+    private var retainedProviders: [StubProvider] = []
+
     private func makeStore() -> SessionStore {
-        SessionStore(provider: StubProvider())
+        let provider = StubProvider()
+        retainedProviders.append(provider)
+        return SessionStore(provider: provider)
     }
 
     private func titles(_ store: SessionStore) -> [String] {
@@ -64,6 +71,26 @@ final class SessionCreationTests: XCTestCase {
         let store = makeStore()
         XCTAssertNil(store.newSessionBelowActive())
         XCTAssertTrue(store.repos.isEmpty)
+    }
+
+    /// Clicking below the last row clears the List's selection while repos remain.
+    /// ⌘N must still create something rather than silently doing nothing.
+    func testCreateFromMenuWithReposButNoSelectionStillCreatesASession() throws {
+        let store = makeStore()
+        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        _ = store.newSession(in: root)
+        store.selectedSessionID = nil
+
+        var prompted = false
+        let created = store.createFromMenu(chooseFolder: { prompted = true; return nil })
+
+        XCTAssertNotNil(created, "⌘N silently did nothing with a cleared selection")
+        XCTAssertFalse(prompted, "there is a project to create in; no folder prompt is needed")
+        XCTAssertEqual(store.selectedSessionID, created?.id)
     }
 
     func testAddProjectCreatesANewRepo() {

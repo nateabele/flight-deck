@@ -99,7 +99,18 @@ final class SessionStore: ObservableObject {
     func createFromMenu(chooseFolder: () -> URL? = { FolderPicker.choose() }) -> Session? {
         switch SessionCreateAction.forState(hasSessions: !repos.isEmpty) {
         case .newSession:
-            return newSessionBelowActive()
+            if let created = newSessionBelowActive() {
+                return created
+            }
+            // `newSessionBelowActive` needs a selection, not just a non-empty `repos` — and
+            // selection can be nil with sessions still present (e.g. clicking below the last
+            // row in the sidebar's List clears it). Fall back to the first project rather than
+            // silently doing nothing; only prompt for a folder when there is truly nothing.
+            if let first = repos.first {
+                return addProject(at: first.url)
+            }
+            guard let url = chooseFolder() else { return nil }
+            return addProject(at: url)
         case .addProject:
             guard let url = chooseFolder() else { return nil }
             return addProject(at: url)
