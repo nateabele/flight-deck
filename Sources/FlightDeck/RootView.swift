@@ -20,11 +20,7 @@ struct RootView: View {
                 } description: {
                     Text("Create a session to get started.")
                 } actions: {
-                    Button("New Session") {
-                        if let url = FolderPicker.choose() {
-                            store.newSession(in: url)
-                        }
-                    }
+                    Button("Add Project") { store.addProjectFromMenu() }
                 }
             }
         }

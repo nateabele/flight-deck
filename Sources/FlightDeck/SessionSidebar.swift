@@ -52,6 +52,9 @@ private struct SessionRow: View {
 struct SessionSidebar: View {
     @ObservedObject var store: SessionStore
 
+    /// Drives both the label and which shortcut the button claims.
+    private var isEmpty: Bool { store.repos.isEmpty }
+
     var body: some View {
         List(selection: $store.selectedSessionID) {
             ForEach(store.repos) { repo in
@@ -65,14 +68,23 @@ struct SessionSidebar: View {
         }
         .safeAreaInset(edge: .bottom) {
             Button {
-                if let url = FolderPicker.choose() {
-                    store.newSession(in: url)
-                }
+                store.createFromMenu()
             } label: {
-                Label("New Session", systemImage: "plus")
-                    .frame(maxWidth: .infinity)
+                HStack {
+                    Label(isEmpty ? "Add Project" : "New Session", systemImage: "plus")
+                    Spacer()
+                    // Apple's HIG puts shortcuts on menu items, not buttons. Shown here
+                    // deliberately so the binding is discoverable without opening the menu;
+                    // the File menu carries the same two shortcuts.
+                    Text(isEmpty ? "⇧⌘A" : "⌘N")
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                }
+                .frame(maxWidth: .infinity)
             }
             .accessibilityIdentifier("new-session")
+            .keyboardShortcut(isEmpty ? .init("a", modifiers: [.command, .shift])
+                                     : .init("n", modifiers: .command))
             .padding(8)
         }
     }

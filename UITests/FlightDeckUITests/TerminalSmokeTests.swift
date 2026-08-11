@@ -149,4 +149,39 @@ final class TerminalSmokeTests: XCTestCase {
 
         app.typeKey(.escape, modifierFlags: [])   // close the menu
     }
+
+    /// ⌘N adds a session below the active one. Asserts on row count so an implementation
+    /// that opens a folder picker instead (the pre-feature behaviour) fails here.
+    func testCommandNAddsASessionBelowTheActiveOne() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        app.launchArguments += ["-FlightDeckResetState", "YES"]
+        app.launch()
+        app.activate()
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15))
+
+        let rows = app.staticTexts.matching(identifier: "session-row-title")
+        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(rows.count, 1)
+
+        app.typeKey("n", modifierFlags: .command)
+
+        let two = NSPredicate(format: "count == 2")
+        expectation(for: two, evaluatedWith: rows)
+        waitForExpectations(timeout: 10)
+    }
+
+    /// The button's label follows state: with a seeded session it offers New Session.
+    func testSidebarButtonOffersNewSessionWhenASessionExists() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        app.launchArguments += ["-FlightDeckResetState", "YES"]
+        app.launch()
+        app.activate()
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15))
+
+        let button = app.buttons["new-session"]
+        XCTAssertTrue(button.waitForExistence(timeout: 5))
+        XCTAssertTrue(button.label.contains("New Session"), "got: \(button.label)")
+    }
 }
