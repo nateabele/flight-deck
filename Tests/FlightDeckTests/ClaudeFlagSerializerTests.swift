@@ -23,8 +23,8 @@ final class ClaudeFlagSerializerTests: XCTestCase {
                        "--add-dir a b")
     }
 
-    func testOmitsEmptyList() {
-        XCTAssertEqual(ClaudeFlagSerializer.serialize(FlagSet(values: ["--add-dir": .list([])])), "")
+    func testEmptyListSerializesToTheBareFlag() {
+        XCTAssertEqual(ClaudeFlagSerializer.serialize(FlagSet(values: ["--add-dir": .list([])])), "--add-dir")
     }
 
     func testQuotesValuesThatNeedIt() {
@@ -42,7 +42,9 @@ final class ClaudeFlagSerializerTests: XCTestCase {
 
     func testPassthroughLeadsSoAListFlagCannotAbsorbIt() {
         let flags = FlagSet(values: ["--verbose": .on], passthrough: ["--not-real", "a b"])
-        XCTAssertEqual(ClaudeFlagSerializer.serialize(flags), "--not-real 'a b' --verbose")
+        // Passthrough that looks like a flag is force-quoted (see testRoundTripOfPassthroughNamingACatalogFlag):
+        // '--not-real' still leads, ahead of the catalog flag, just quoted.
+        XCTAssertEqual(ClaudeFlagSerializer.serialize(flags), "'--not-real' 'a b' --verbose")
     }
 
     func testEmptySetSerializesToEmptyString() {
@@ -104,5 +106,27 @@ final class ClaudeFlagSerializerTests: XCTestCase {
     func testRoundTripOfAValueThatLooksLikeAFlagProducesNoDiagnostics() {
         let flags = FlagSet(values: ["--system-prompt": .value("--verbose")])
         XCTAssertTrue(ClaudeFlagParser.parse(ClaudeFlagSerializer.serialize(flags)).diagnostics.isEmpty)
+    }
+
+    func testRoundTripOfPassthroughNamingACatalogFlag() {
+        let flags = ClaudeFlagParser.parse("'--verbose'").flags
+        XCTAssertEqual(flags.passthrough, ["--verbose"])
+        XCTAssertEqual(ClaudeFlagParser.parse(ClaudeFlagSerializer.serialize(flags)).flags, flags)
+    }
+
+    func testRoundTripOfPassthroughNamingAValueTakingCatalogFlag() {
+        let flags = ClaudeFlagParser.parse("'--model'").flags
+        XCTAssertEqual(ClaudeFlagParser.parse(ClaudeFlagSerializer.serialize(flags)).flags, flags)
+    }
+
+    func testRoundTripOfAnEmptyList() {
+        let flags = ClaudeFlagParser.parse("--add-dir").flags
+        XCTAssertEqual(flags.values["--add-dir"], .list([]))
+        XCTAssertEqual(ClaudeFlagParser.parse(ClaudeFlagSerializer.serialize(flags)).flags, flags)
+    }
+
+    func testRoundTripOfAnEmptyListFollowedByAnotherFlag() {
+        let flags = ClaudeFlagParser.parse("--add-dir --verbose").flags
+        XCTAssertEqual(ClaudeFlagParser.parse(ClaudeFlagSerializer.serialize(flags)).flags, flags)
     }
 }

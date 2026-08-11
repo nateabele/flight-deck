@@ -81,6 +81,11 @@ enum ClaudeFlagQuoting {
                 guard closed else { throw TokenizeError.unterminatedQuote }
             case "\\":
                 started = true
+                // A backslash-escaped character is exempted from word-splitting the
+                // same way a quoted one is, so it must count as quoted too — otherwise
+                // `\--verbose` tokenizes to `--verbose` with `wasQuoted: false` and
+                // `isFlag` reads it as the flag, not as inert literal text.
+                quoted = true
                 let next = input.index(after: iterator)
                 if next < input.endIndex {
                     current.append(input[next])

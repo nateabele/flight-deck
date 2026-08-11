@@ -17,7 +17,12 @@ import Foundation
 /// `ClaudeFlagParser.parse(serialize(x)) == x` is the invariant this type exists to hold up.
 enum ClaudeFlagSerializer {
     static func serialize(_ flags: FlagSet) -> String {
-        var parts: [String] = flags.passthrough.map(ClaudeFlagQuoting.quoteIfNeeded)
+        // Passthrough must go through `quotedValue`, not bare `quoteIfNeeded`: a
+        // passthrough element can be the literal text of a catalog flag name (e.g. the
+        // user typed `'--verbose'`), and `isFlag` now refuses to read a quoted token as
+        // a flag on reparse. Bare `quoteIfNeeded` leaves `-` unquoted, so `--verbose`
+        // would come back out unquoted and reparse as the toggle instead of passthrough.
+        var parts: [String] = flags.passthrough.map(quotedValue)
 
         for spec in ClaudeFlagCatalog.all {
             guard let value = flags.values[spec.canonical] else { continue }
@@ -30,7 +35,10 @@ enum ClaudeFlagSerializer {
                 parts.append(spec.canonical)
                 parts.append(quotedValue(raw))
             case (_, .list(let items)):
-                guard !items.isEmpty else { continue }
+                // An empty list is parse-producible (`--add-dir` alone yields
+                // `.list([])`) and is the state the Preferences UI produces when a
+                // list flag is turned on with no values yet, so it must round-trip:
+                // emit the bare flag rather than omitting it.
                 parts.append(spec.canonical)
                 parts.append(contentsOf: items.map(quotedValue))
             }

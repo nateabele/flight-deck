@@ -67,6 +67,18 @@ final class ClaudeFlagQuotingTests: XCTestCase {
         XCTAssertEqual(tokens.map(\.wasQuoted), [true])
     }
 
+    func testBackslashEscapedTokenCountsAsQuoted() throws {
+        let tokens = try ClaudeFlagQuoting.tokenize("\\--verbose")
+        XCTAssertEqual(tokens.map(\.text), ["--verbose"])
+        XCTAssertEqual(tokens.map(\.wasQuoted), [true])
+    }
+
+    func testPartiallyQuotedConcatenationCountsAsQuoted() throws {
+        let tokens = try ClaudeFlagQuoting.tokenize("a'b'")
+        XCTAssertEqual(tokens.map(\.text), ["ab"])
+        XCTAssertEqual(tokens.map(\.wasQuoted), [true])
+    }
+
     // MARK: quoteIfNeeded
 
     func testSafeValueIsNotQuoted() {
