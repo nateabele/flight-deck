@@ -59,6 +59,11 @@ final class ClaudeStatusFileTests: XCTestCase {
         XCTAssertNil(ClaudeStatusFile.decode(json(pid: 4242), expectedPID: 9999))
     }
 
+    /// An out-of-range pid must fail closed, not trap. `pid_t` is Int32.
+    func testOutOfRangePIDYieldsNil() {
+        XCTAssertNil(ClaudeStatusFile.decode(json(pid: 99_999_999_999), expectedPID: 4242))
+    }
+
     func testNonUUIDSessionIDYieldsNil() {
         let obj: [String: Any] = ["pid": 4242, "sessionId": "not-a-uuid", "status": "idle"]
         let data = try! JSONSerialization.data(withJSONObject: obj)
