@@ -8,9 +8,20 @@ final class SessionRenameTests: XCTestCase {
         func tick() {}
     }
 
+    /// Records text and Return in one ordered transcript, because their *order* is the
+    /// contract: Return must arrive after the paste closes, not inside it.
     final class SpyInjector: TextInjecting {
-        var sent: [String] = []
-        func sendText(_ text: String) { sent.append(text) }
+        enum Event: Equatable {
+            case text(String)
+            case ret
+        }
+
+        var events: [Event] = []
+        /// Convenience for assertions that only care about the text payloads.
+        var sent: [String] { events.compactMap { if case .text(let t) = $0 { return t } else { return nil } } }
+
+        func sendText(_ text: String) { events.append(.text(text)) }
+        func sendReturn() { events.append(.ret) }
     }
 
     private func makeStore() -> (SessionStore, SpyInjector, UUID) {
@@ -18,7 +29,7 @@ final class SessionRenameTests: XCTestCase {
         let spy = SpyInjector()
         store.injectorOverride = spy
         let session = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
-        spy.sent.removeAll()          // ignore anything emitted at creation
+        spy.events.removeAll()          // ignore anything emitted at creation
         return (store, spy, session.id)
     }
 
@@ -28,20 +39,29 @@ final class SessionRenameTests: XCTestCase {
         XCTAssertEqual(store.title(of: id), "my session")
     }
 
-    /// The terminator must be CR, not LF. Return sends `\r`; `\n` is Ctrl+J, which Claude's
-    /// input bar inserts as a literal newline — the command shows up unsubmitted.
-    func testRenameInjectsExactlyOneRenameCommandTerminatedByCarriageReturn() {
+    /// The command text carries NO line terminator, and Return follows as a separate key
+    /// event. `sendText` is a paste in libghostty; with bracketed-paste mode on (Claude Code
+    /// enables it) a terminator inside the text arrives between `ESC[200~`/`ESC[201~` and is
+    /// inserted as literal content instead of submitting.
+    func testRenameSendsTextThenReturnAsSeparateEvents() {
         let (store, spy, id) = makeStore()
         store.rename(id, to: "my session")
-        XCTAssertEqual(spy.sent, ["/rename my session\r"])
-        XCTAssertFalse(spy.sent[0].contains("\n"), "LF would not submit the command")
+        XCTAssertEqual(spy.events, [.text("/rename my session"), .ret])
+    }
+
+    func testRenameTextCarriesNoLineTerminator() {
+        let (store, spy, id) = makeStore()
+        store.rename(id, to: "my session")
+        let text = spy.sent.first ?? ""
+        XCTAssertFalse(text.contains("\r"), "a CR inside the paste is inserted, not submitted")
+        XCTAssertFalse(text.contains("\n"), "an LF inside the paste is inserted, not submitted")
     }
 
     func testRenameSanitizesBeforeInjecting() {
         let (store, spy, id) = makeStore()
         store.rename(id, to: "  bad\nname  ")
         XCTAssertEqual(store.title(of: id), "badname")
-        XCTAssertEqual(spy.sent, ["/rename badname\r"])
+        XCTAssertEqual(spy.events, [.text("/rename badname"), .ret])
     }
 
     func testEmptyRenameIsIgnored() {
@@ -49,29 +69,29 @@ final class SessionRenameTests: XCTestCase {
         let before = store.title(of: id)
         store.rename(id, to: "   ")
         XCTAssertEqual(store.title(of: id), before)
-        XCTAssertTrue(spy.sent.isEmpty)
+        XCTAssertTrue(spy.events.isEmpty)
     }
 
     func testUnknownSessionIsIgnored() {
         let (store, spy, _) = makeStore()
         store.rename(UUID(), to: "x")
-        XCTAssertTrue(spy.sent.isEmpty)
+        XCTAssertTrue(spy.events.isEmpty)
     }
 
     func testApplyExternalTitleUpdatesWithoutInjecting() {
         let (store, spy, id) = makeStore()
         store.applyExternalTitle(id, "from claude")
         XCTAssertEqual(store.title(of: id), "from claude")
-        XCTAssertTrue(spy.sent.isEmpty, "inbound must never inject")
+        XCTAssertTrue(spy.events.isEmpty, "inbound must never inject")
     }
 
     /// Loop suppression: the transcript line our own rename caused must not bounce back.
     func testApplyExternalTitleIsNoOpWhenUnchanged() {
         let (store, spy, id) = makeStore()
         store.rename(id, to: "same")
-        spy.sent.removeAll()
+        spy.events.removeAll()
         store.applyExternalTitle(id, "same")
         XCTAssertEqual(store.title(of: id), "same")
-        XCTAssertTrue(spy.sent.isEmpty)
+        XCTAssertTrue(spy.events.isEmpty)
     }
 }
