@@ -87,4 +87,18 @@ final class SessionStatusStoreTests: XCTestCase {
 
         XCTAssertEqual(store.status(for: session.id)?.waitingFor, "input needed")
     }
+
+    /// A pane can outlive its `claude`. When a new process reuses the same session
+    /// UUID, it must not inherit the dead one's sub-agent count.
+    func testDisappearingSessionAlsoClearsItsSubagentCount() {
+        let store = makeStore()
+        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+
+        store.applyRegistry([session.id: entry(session.id, .busy)])
+        store.applySubagentCount(session.id, 3)
+        store.applyRegistry([:])                                     // claude exited
+        store.applyRegistry([session.id: entry(session.id, .busy)])  // restarted, same UUID
+
+        XCTAssertEqual(store.status(for: session.id)?.subagentCount, 0)
+    }
 }
