@@ -54,6 +54,11 @@ final class SessionStore: ObservableObject {
         var config = Ghostty.SurfaceConfiguration()
         config.command = ShellResolver.resolve()
         config.workingDirectory = url.path
+        // Bind `claude` to our own UUID so the transcript path is deterministic,
+        // and seed it with the sidebar's title. See ClaudeSession.
+        config.initialInput = ClaudeSession.launchCommand(
+            sessionID: session.id, title: session.title
+        )
         if let surface = provider?.makeSurface(config) {
             surfaces[session.id] = surface
         }
