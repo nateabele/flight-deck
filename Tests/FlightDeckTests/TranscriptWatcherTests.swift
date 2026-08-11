@@ -74,4 +74,27 @@ final class TranscriptWatcherTests: XCTestCase {
         watcher.drain()
         XCTAssertEqual(seen, ["late"])
     }
+
+    /// A drain that lands mid-write must not consume the partial line: the next drain
+    /// has to see the completed line and report it.
+    func testRecoversATitleSplitAcrossTwoDrains() throws {
+        let sid = UUID()
+        let url = dir.appendingPathComponent("t.jsonl")
+        FileManager.default.createFile(atPath: url.path, contents: Data())
+
+        var seen: [String] = []
+        let watcher = TranscriptWatcher(sessionID: sid, url: url) { seen.append($0) }
+        watcher.start()
+
+        let full = line("split", sid)                      // includes trailing newline
+        let cut = full.index(full.startIndex, offsetBy: full.count / 2)
+
+        try String(full[..<cut]).data(using: .utf8)!.write(to: url)
+        watcher.drain()
+        XCTAssertTrue(seen.isEmpty, "a partial line must not be reported")
+
+        try full.data(using: .utf8)!.write(to: url)        // now complete
+        watcher.drain()
+        XCTAssertEqual(seen, ["split"], "the completed line must be recovered")
+    }
 }
