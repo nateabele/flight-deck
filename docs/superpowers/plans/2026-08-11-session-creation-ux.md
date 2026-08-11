@@ -771,6 +771,18 @@ git commit -m "feat: sidebar button follows session state and shows its shortcut
 
 - [ ] **Step 1: Write the failing tests**
 
+> **Correction — the fixtures below are wrong; use real temp directories instead.**
+> `acceptDroppedURLs` resolves every URL through `SessionCreateAction.projectDirectory(for:)`,
+> which consults the real filesystem and sends a *nonexistent* path to its parent. The literal
+> `/work/foo` and `/work/bar` used here do not exist, so **both resolve to the same parent
+> `/work`** — producing one merged repo rather than two, and failing the very assertion the
+> test exists to make. The known-folder test diverges too: `newSession(in:)` bypasses the
+> resolver and stores the repo at `/work/foo`, while the drop path resolves the same URL to
+> `/work`, so `indexOfRepo` misses and a second repo appears instead of a second session.
+> Create real temp directories named `foo` and `bar` under a UUID root (mirroring
+> `SessionCreationHelperTests`) and `defer` a recursive cleanup. The assertions themselves are
+> correct as written — only the paths need to be real.
+
 Append to `Tests/FlightDeckTests/SessionCreationTests.swift`:
 
 ```swift
