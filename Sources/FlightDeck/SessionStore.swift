@@ -17,8 +17,8 @@ final class SessionStore: ObservableObject {
         didSet { persist() }
     }
 
-    /// Weak: the process-wide `GhosttyApp` is owned by the AppDelegate for the
-    /// whole process; the Store must not co-own its lifetime.
+    /// Weak: `GhosttyApp.shared` is a process-wide static that owns itself for the life of
+    /// the process (see `GhosttyApp.shared`'s doc comment); the store must not co-own it.
     private weak var provider: SurfaceProvider?
 
     /// Live surfaces retained here (not by the SwiftUI view tree) so switching
