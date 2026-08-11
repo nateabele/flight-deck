@@ -18,6 +18,12 @@ final class SessionStore: ObservableObject {
     /// sessions re-parents rather than recreates. Dropping an entry frees it.
     private var surfaces: [UUID: Ghostty.SurfaceView] = [:]
 
+    /// One transcript watcher per session, torn down with the session.
+    private var watchers: [UUID: TranscriptWatcher] = [:]
+
+    /// Injectable so tests can point at a temp directory.
+    var projectsRoot: URL = ClaudeSession.defaultProjectsRoot
+
     private var sessionCounter = 0
 
     init(provider: SurfaceProvider?) {
@@ -64,6 +70,7 @@ final class SessionStore: ObservableObject {
         }
         provider?.tick()
 
+        startWatching(session, workingDirectory: url.path)
         selectedSessionID = session.id
         return session
     }
@@ -80,6 +87,8 @@ final class SessionStore: ObservableObject {
         // defers ghostty_surface_free to a main-actor task. The singleton app
         // outlives that free, so there is no use-after-free.
         surfaces[id] = nil
+        watchers[id]?.stop()
+        watchers.removeValue(forKey: id)
         if repos[repoIndex].sessions.isEmpty {
             repos.remove(at: repoIndex)
         }
@@ -128,6 +137,21 @@ final class SessionStore: ObservableObject {
     func tick() { provider?.tick() }
 
     // MARK: - Helpers
+
+    private func startWatching(_ session: Session, workingDirectory: String) {
+        let watcher = TranscriptWatcher(
+            sessionID: session.id,
+            url: ClaudeSession.transcriptURL(
+                sessionID: session.id,
+                workingDirectory: workingDirectory,
+                projectsRoot: projectsRoot
+            )
+        ) { [weak self] title in
+            self?.applyExternalTitle(session.id, title)
+        }
+        watcher.start()
+        watchers[session.id] = watcher
+    }
 
     private func indexOfRepo(for url: URL) -> Int? {
         let target = url.standardizedFileURL.path
