@@ -102,4 +102,27 @@ final class TerminalSmokeTests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["renamed"].waitForExistence(timeout: 5))
     }
+
+    /// The seeded session must render an actual terminal, not the empty-state view.
+    ///
+    /// The other tests assert only that a window exists and is tall enough, which the
+    /// "No Session" ContentUnavailableView satisfies just as well — that is exactly how a
+    /// nil libghostty provider once shipped with a green smoke gate.
+    func testSelectedSessionShowsATerminalNotTheEmptyState() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        app.launchArguments += ["-FlightDeckResetState", "YES"]
+        app.launch()
+        app.activate()
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15))
+
+        // A session row exists...
+        let rows = app.staticTexts.matching(identifier: "session-row-title")
+        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 5))
+        // ...so the detail pane must NOT be showing the empty state.
+        XCTAssertFalse(
+            app.staticTexts["No Session"].exists,
+            "a session is selected but the detail pane shows the empty-state view"
+        )
+    }
 }

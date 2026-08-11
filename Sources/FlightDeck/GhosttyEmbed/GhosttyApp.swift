@@ -19,6 +19,14 @@ import GhosttyKit
 
 /// Minimal owner of a libghostty `ghostty_app_t` for a single embedded surface.
 final class GhosttyApp {
+    /// The one libghostty app for the process.
+    ///
+    /// A lazy static rather than something owned by a particular object: it is created on
+    /// first access, is never freed, and therefore cannot be outlived by a surface — which
+    /// is the same teardown-lifetime guarantee `AppDelegate` ownership was giving us, minus
+    /// any dependency on *when* the app delegate happens to be constructed.
+    static let shared: GhosttyApp? = GhosttyApp()
+
     /// The underlying libghostty app handle.
     private(set) var app: ghostty_app_t!
 
