@@ -14,10 +14,24 @@ enum ClaudeSession {
             .appendingPathComponent(".claude/projects", isDirectory: true)
     }
 
-    /// Claude encodes the cwd by replacing every non-alphanumeric character with `-`,
-    /// one for one. Runs are not collapsed: `/private/tmp/x/-Users` → `-private-tmp-x--Users`.
+    /// Claude encodes the cwd per **UTF-16 code unit**, not per Unicode scalar or Swift
+    /// `Character`: keep a unit only if it is ASCII alphanumeric (`0-9A-Za-z`), replace every
+    /// other unit with `-`. Runs are not collapsed: `/private/tmp/x/-Users` →
+    /// `-private-tmp-x--Users`.
+    ///
+    /// Verified against real `claude` output, including non-ASCII letters (`é`, `Ω` both become
+    /// `-`, not kept — unlike Swift's Unicode-aware `isLetter`) and astral-plane characters
+    /// (an emoji surrogate pair becomes **two** dashes, since each UTF-16 code unit is replaced
+    /// independently). Consistent with a JavaScript `.replace(/[^a-zA-Z0-9]/g, '-')` without the
+    /// `u` flag.
     static func encodedProjectDirName(for workingDirectory: String) -> String {
-        String(workingDirectory.map { $0.isLetter || $0.isNumber ? $0 : "-" })
+        let scalars: [Unicode.Scalar] = workingDirectory.utf16.map { unit in
+            let isASCIIAlphanumeric = (0x30...0x39).contains(unit) // 0-9
+                || (0x41...0x5A).contains(unit) // A-Z
+                || (0x61...0x7A).contains(unit) // a-z
+            return isASCIIAlphanumeric ? Unicode.Scalar(unit)! : "-"
+        }
+        return String(String.UnicodeScalarView(scalars))
     }
 
     static func transcriptURL(
