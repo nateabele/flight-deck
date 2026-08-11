@@ -48,6 +48,23 @@ enum ClaudeFlagParser {
             flags.values[canonical] = value
         }
 
+        // Consumes the inline `--flag=value` form, else the next token when it is not
+        // itself a flag. Returns nil when neither is available.
+        func takeInlineOrNext(_ inlineValue: String?) -> FlagValue? {
+            if let inlineValue { return .value(inlineValue) }
+            if index < tokens.count, !isFlag(tokens[index]) {
+                defer { index += 1 }
+                return .value(tokens[index])
+            }
+            return nil
+        }
+
+        func rejectToPassthrough(token: String, inlineValue: String?, message: String) {
+            diagnostics.append(.warning(message))
+            flags.passthrough.append(inlineValue.map { "\(token)=\($0)" } ?? token)
+            flags.passthrough.append(contentsOf: takeValues())
+        }
+
         while index < tokens.count {
             var token = tokens[index]
             index += 1
@@ -65,16 +82,18 @@ enum ClaudeFlagParser {
             }
 
             if ClaudeFlagCatalog.appManaged.contains(token) {
-                diagnostics.append(.warning("\(token) is managed by Flight Deck and cannot be set here."))
-                flags.passthrough.append(inlineValue.map { "\(token)=\($0)" } ?? token)
-                flags.passthrough.append(contentsOf: takeValues())
+                rejectToPassthrough(
+                    token: token, inlineValue: inlineValue,
+                    message: "\(token) is managed by Flight Deck and cannot be set here."
+                )
                 continue
             }
 
             guard let spec = ClaudeFlagCatalog.spec(for: token) else {
-                diagnostics.append(.warning("\(token) is not a known claude option. It will still be passed through."))
-                flags.passthrough.append(inlineValue.map { "\(token)=\($0)" } ?? token)
-                flags.passthrough.append(contentsOf: takeValues())
+                rejectToPassthrough(
+                    token: token, inlineValue: inlineValue,
+                    message: "\(token) is not a known claude option. It will still be passed through."
+                )
                 continue
             }
 
@@ -96,21 +115,11 @@ enum ClaudeFlagParser {
                 }
 
             case .optionalValue:
-                if let inlineValue {
-                    record(spec.canonical, .value(inlineValue))
-                } else if index < tokens.count, !isFlag(tokens[index]) {
-                    record(spec.canonical, .value(tokens[index]))
-                    index += 1
-                } else {
-                    record(spec.canonical, .on)
-                }
+                record(spec.canonical, takeInlineOrNext(inlineValue) ?? .on)
 
             case .choice, .string, .multiline, .path:
-                if let inlineValue {
-                    record(spec.canonical, .value(inlineValue))
-                } else if index < tokens.count, !isFlag(tokens[index]) {
-                    record(spec.canonical, .value(tokens[index]))
-                    index += 1
+                if let value = takeInlineOrNext(inlineValue) {
+                    record(spec.canonical, value)
                 } else {
                     diagnostics.append(.warning("\(spec.canonical) needs a value; it was ignored."))
                 }
