@@ -26,14 +26,18 @@ final class SessionStore: ObservableObject {
 
     private var sessionCounter = 0
 
-    init(provider: SurfaceProvider?) {
+    private let persistence: SessionPersisting?
+
+    init(provider: SurfaceProvider?, persistence: SessionPersisting? = nil) {
         self.provider = provider
+        self.persistence = persistence
     }
 
-    /// Production entry point: build from the app singleton and seed one session.
+    /// Production entry point: build from the app singleton, restore the last run's
+    /// sessions if any, and otherwise seed one.
     convenience init(ghostty: GhosttyApp?) {
-        self.init(provider: ghostty)
-        seedInitialSession()
+        self.init(provider: ghostty, persistence: UserDefaultsSessionPersistence())
+        if !restore() { seedInitialSession() }
     }
 
     func seedInitialSession(
@@ -45,6 +49,28 @@ final class SessionStore: ObservableObject {
 
     @discardableResult
     func newSession(in url: URL) -> Session {
+        sessionCounter += 1
+        let session = Session(
+            title: "session \(sessionCounter)", workingDirectory: url.path
+        )
+        insertSession(
+            session,
+            in: url,
+            initialInput: ClaudeSession.launchCommand(
+                sessionID: session.id, title: session.title
+            )
+        )
+        selectedSessionID = session.id
+        persist()
+        return session
+    }
+
+    /// Shared by `newSession` and `restore`. `initialInput` is the only difference:
+    /// a fresh session starts `claude`, a restored one resumes it.
+    @discardableResult
+    private func insertSession(
+        _ session: Session, in url: URL, initialInput: String
+    ) -> Session {
         let repoIndex: Int
         if let existing = indexOfRepo(for: url) {
             repoIndex = existing
@@ -52,32 +78,73 @@ final class SessionStore: ObservableObject {
             repos.append(Repo(url: url))
             repoIndex = repos.count - 1
         }
-
-        sessionCounter += 1
-        let session = Session(title: "session \(sessionCounter)", workingDirectory: url.path)
         repos[repoIndex].sessions.append(session)
 
         var config = Ghostty.SurfaceConfiguration()
         config.command = ShellResolver.resolve()
         config.workingDirectory = url.path
-        // Bind `claude` to our own UUID so the transcript path is deterministic,
-        // and seed it with the sidebar's title. See ClaudeSession.
-        config.initialInput = ClaudeSession.launchCommand(
-            sessionID: session.id, title: session.title
-        )
+        config.initialInput = initialInput
         if let surface = provider?.makeSurface(config) {
             surfaces[session.id] = surface
         }
         provider?.tick()
 
         startWatching(session, workingDirectory: url.path)
-        selectedSessionID = session.id
         return session
+    }
+
+    /// Rebuilds sessions from the last run. Returns false when there was nothing to
+    /// restore, which is the caller's signal to seed a first session instead.
+    /// Sessions whose working directory has since disappeared are dropped rather
+    /// than resurrected as broken terminals.
+    @discardableResult
+    func restore(
+        directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> Bool {
+        guard let snapshot = persistence?.load(), !snapshot.sessions.isEmpty else {
+            return false
+        }
+
+        sessionCounter = snapshot.sessionCounter
+        for entry in snapshot.sessions where directoryExists(entry.workingDirectory) {
+            let url = URL(fileURLWithPath: entry.workingDirectory, isDirectory: true)
+            let session = Session(
+                id: entry.id, title: entry.title, workingDirectory: entry.workingDirectory
+            )
+            insertSession(
+                session,
+                in: url,
+                initialInput: ClaudeSession.resumeCommand(
+                    sessionID: entry.id, title: entry.title
+                )
+            )
+        }
+
+        let restoredIDs = Set(repos.flatMap(\.sessions).map(\.id))
+        selectedSessionID = snapshot.selectedSessionID.flatMap {
+            restoredIDs.contains($0) ? $0 : nil
+        } ?? restoredIDs.first
+        persist()
+        return !restoredIDs.isEmpty
+    }
+
+    /// Saved on every mutation rather than at terminate, so a crash cannot lose the list.
+    private func persist() {
+        persistence?.save(
+            SessionSnapshot(
+                sessions: repos.flatMap(\.sessions).map {
+                    .init(id: $0.id, title: $0.title, workingDirectory: $0.workingDirectory)
+                },
+                selectedSessionID: selectedSessionID,
+                sessionCounter: sessionCounter
+            )
+        )
     }
 
     func selectSession(_ id: UUID) {
         guard locate(id) != nil else { return }
         selectedSessionID = id
+        persist()
     }
 
     func closeSession(_ id: UUID) {
@@ -95,6 +162,7 @@ final class SessionStore: ObservableObject {
         if selectedSessionID == id {
             selectedSessionID = repos.first?.sessions.first?.id
         }
+        persist()
     }
 
     /// Test seam. Production leaves this nil and injection goes to the live surface.
@@ -114,6 +182,7 @@ final class SessionStore: ObservableObject {
 
         repos[at.repo].sessions[at.session].title = name
         injector(for: id)?.sendText("/rename \(name)\n")
+        persist()
     }
 
     /// Claude → sidebar. Applied from the transcript watcher; never injects.
@@ -126,6 +195,7 @@ final class SessionStore: ObservableObject {
         else { return }
 
         repos[at.repo].sessions[at.session].title = name
+        persist()
     }
 
     private func injector(for id: UUID) -> TextInjecting? {
