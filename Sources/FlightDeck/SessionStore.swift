@@ -35,17 +35,32 @@ final class SessionStore: ObservableObject {
 
     private let persistence: SessionPersisting?
 
-    init(provider: SurfaceProvider?, persistence: SessionPersisting? = nil) {
+    /// Read at session-creation time only. Preferences configure *new* sessions; a
+    /// running `claude` is never reconfigured, because its command line is already spent.
+    private let preferences: PreferencesStore?
+
+    init(
+        provider: SurfaceProvider?,
+        persistence: SessionPersisting? = nil,
+        preferences: PreferencesStore? = nil
+    ) {
         self.provider = provider
         self.persistence = persistence
+        self.preferences = preferences
     }
 
     /// `resetState` comes from the `-FlightDeckResetState YES` launch argument: `smoke.sh`
     /// wipes defaults once per run, but the UITest bundle launches the app once per test
     /// case, so a session persisted by an earlier case would otherwise survive into a later
     /// one and make tests order-dependent.
-    convenience init(ghostty: GhosttyApp?, resetState: Bool = false) {
-        self.init(provider: ghostty, persistence: UserDefaultsSessionPersistence())
+    convenience init(
+        ghostty: GhosttyApp?, resetState: Bool = false, preferences: PreferencesStore? = nil
+    ) {
+        self.init(
+            provider: ghostty,
+            persistence: UserDefaultsSessionPersistence(),
+            preferences: preferences
+        )
         if resetState || !restore() { seedInitialSession() }
     }
 
@@ -66,7 +81,9 @@ final class SessionStore: ObservableObject {
             session,
             in: url,
             initialInput: ClaudeSession.launchCommand(
-                sessionID: session.id, title: session.title
+                sessionID: session.id,
+                title: session.title,
+                flags: preferences?.resolvedFlags(forProject: url.path) ?? FlagSet()
             ),
             at: index
         )
@@ -158,9 +175,10 @@ final class SessionStore: ObservableObject {
         }
 
         var config = Ghostty.SurfaceConfiguration()
-        config.command = ShellResolver.resolve()
+        config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
         config.workingDirectory = url.path
         config.initialInput = initialInput
+        config.environmentVariables = preferences?.sessionEnvironment() ?? [:]
         if let surface = provider?.makeSurface(config) {
             surfaces[session.id] = surface
         }
@@ -201,7 +219,9 @@ final class SessionStore: ObservableObject {
                 session,
                 in: url,
                 initialInput: ClaudeSession.resumeCommand(
-                    sessionID: entry.id, title: entry.title
+                    sessionID: entry.id,
+                    title: entry.title,
+                    flags: preferences?.resolvedFlags(forProject: entry.workingDirectory) ?? FlagSet()
                 )
             )
         }
