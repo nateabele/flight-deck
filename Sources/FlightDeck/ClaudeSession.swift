@@ -57,11 +57,23 @@ enum ClaudeSession {
         return title
     }
 
-    /// Trims, strips control characters, and caps length. Returns nil when nothing usable
-    /// remains, which callers treat as "revert to the previous title".
+    /// Characters stripped from a sanitized name in addition to control characters, so a
+    /// name typed into the sidebar (or received from Claude) cannot act as shell syntax
+    /// when injected as `/rename <name>` to a pty that has no `claude` running — an
+    /// explicitly supported degradation where the text goes straight to a shell prompt.
+    /// Kept minimal: only characters with special meaning to `sh`/`bash`/`zsh` are removed;
+    /// ordinary punctuation people use in names is left alone.
+    private static let shellMetacharacters = CharacterSet(charactersIn: ";&|`$()<>")
+
+    /// Trims, strips control and shell-metacharacters, and caps length. Returns nil when
+    /// nothing usable remains, which callers treat as "revert to the previous title".
+    ///
+    /// This is the *only* sanitization point: `rename` sets the stored title from this
+    /// same output before injecting it, so the injected text and the stored title stay
+    /// byte-identical and the loop-suppression check in `applyExternalTitle` keeps working.
     static func sanitizedName(_ raw: String) -> String? {
         let stripped = raw.unicodeScalars
-            .filter { !CharacterSet.controlCharacters.contains($0) }
+            .filter { !CharacterSet.controlCharacters.contains($0) && !shellMetacharacters.contains($0) }
             .reduce(into: "") { $0.unicodeScalars.append($1) }
         let trimmed = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
