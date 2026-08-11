@@ -1701,10 +1701,16 @@ Replace `Sources/FlightDeck/AppDelegate.swift` with:
 import AppKit
 import UserNotifications
 
-/// Owns the one libghostty app for the whole process. Because the delegate
-/// outlives every window and surface, the deferred ghostty_surface_free in
-/// Ghostty.Surface.deinit can never race a freed app — this is the fix for the
-/// documented teardown-lifetime hazard.
+/// App-level delegate: notification handling and the last-window-closed policy.
+///
+/// This type does NOT own libghostty. `GhosttyApp.shared` is a process-wide static that
+/// owns itself for the life of the process, which is what keeps the deferred
+/// `ghostty_surface_free` in `Ghostty.Surface.deinit` from racing a freed app. The
+/// property below is a convenience handle, not ownership.
+///
+/// (The previous comment here claimed this type owned the libghostty app. Master
+/// corrected the same stale claim in `RootView` and `SessionStore` in 6717cc5; this
+/// file was missed. Corrected here since we are rewriting the file anyway.)
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let ghostty: GhosttyApp? = GhosttyApp.shared
 
