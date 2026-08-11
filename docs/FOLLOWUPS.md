@@ -114,3 +114,32 @@ reader doesn't re-derive them.
   arbitration out of the problem entirely. Guarded by an assertion in
   `testCommandNAddsASessionBelowTheActiveOne` that clicks the title and requires the row to
   become selected, plus `testDoubleClickRenamesSession` for the rename path.
+
+## Sidebar row hover no longer covers the full row width
+
+`SessionRow` reveals its close button on hover. That hover is `.onHover` on the row's
+HStack with **no** `.contentShape(Rectangle())`, so it follows the row's actual content:
+the empty gap between the session title and the trailing status icon does not trigger it,
+and sweeping the pointer across a row can flicker rather than hold.
+
+The contentShape was removed deliberately (see `b5d4a07`). With it, the HStack became a
+hit-test participant and competed with the title's `.onTapGesture` for click ownership,
+intermittently swallowing the second click of a double click and breaking rename — 4
+failures in 5 runs of `testDoubleClickRenamesSession`, against 9/9 before this branch met
+master's hand-rolled double-click detection in `66cb7f2`.
+
+Two fixes were measured and rejected, so don't re-try them blind:
+
+- **`NSTrackingArea` via `NSViewRepresentable` in `.background()`** — worse. A real
+  `NSView` takes over the row's hit-test geometry: 6 of 6 runs failed with
+  `Not hittable: StaticText ... session-row-title`.
+- **`.contentShape` + `.onHover` on a transparent SwiftUI layer behind the row** — fixes
+  the click theft (6 of 6 rename runs passed) but breaks hover itself, because the content
+  in front swallows the hover the layer needs to see. Both hover tests failed.
+
+Restoring full-width hover needs a mechanism that does not join SwiftUI's hit-testing and
+does not sit in front of or behind the row's content in a way that intercepts either
+clicks or hover. Worth revisiting if the flicker proves annoying in practice.
+
+Related, still open: `.onHover` does not fire while a trackpad scroll is in flight, so a
+row can hold a stale hover state after scrolling.
