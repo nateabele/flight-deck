@@ -13,6 +13,12 @@ final class CommandFieldTextView: NSTextView {
     var onCommandReturn: (() -> Void)?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // NSWindow offers key equivalents to the whole view hierarchy, not just the focused
+        // view, so without this the field would commit from anywhere in the window and would
+        // permanently pre-empt ⌘↩ for any control added later.
+        guard window?.firstResponder === self else {
+            return super.performKeyEquivalent(with: event)
+        }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if modifiers == .command, event.charactersIgnoringModifiers == "\r" {
             onCommandReturn?()
@@ -110,9 +116,16 @@ struct LockedPrefixCommandField: NSViewRepresentable {
         /// update.
         private var isRendering = false
 
+        /// Scopes undo to this field. Without it, `undoManager` resolves up the responder
+        /// chain to the window's, and `render`'s removeAllActions() would discard undo for
+        /// every other control in the Preferences window too.
+        private let fieldUndoManager = UndoManager()
+
         init(_ parent: LockedPrefixCommandField) {
             self.parent = parent
         }
+
+        func undoManager(for view: NSTextView) -> UndoManager? { fieldUndoManager }
 
         /// The locked region is `prefix` plus the single space separating it from the tail,
         /// so the user cannot delete that separator and glue their first flag onto `--name`.
@@ -135,9 +148,14 @@ struct LockedPrefixCommandField: NSViewRepresentable {
                 [.font: font, .foregroundColor: NSColor.labelColor],
                 range: NSRange(location: 0, length: (full as NSString).length)
             )
+            // The separator space is deliberately left undimmed (dim only `currentPrefix`, not
+            // `lockedLength`) so the character before the insertion point always carries the
+            // editable attributes, regardless of `isRichText`. `lockedLength` itself is
+            // unchanged and still governs edit rejection with its +1.
+            let prefixLength = (currentPrefix as NSString).length
             attributed.addAttributes(
                 [.foregroundColor: NSColor.secondaryLabelColor],
-                range: NSRange(location: 0, length: min(lockedLength, (full as NSString).length))
+                range: NSRange(location: 0, length: min(prefixLength, (full as NSString).length))
             )
 
             // The storage is replaced wholesale, so every previously registered undo action
