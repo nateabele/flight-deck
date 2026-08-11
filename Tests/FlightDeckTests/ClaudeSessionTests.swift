@@ -116,4 +116,104 @@ final class ClaudeSessionTests: XCTestCase {
             "claude --resume \(id) || claude --session-id \(id) --name 'my work'\n"
         )
     }
+
+    private var fixedID: UUID { UUID(uuidString: "4F3A0000-0000-0000-0000-000000000001")! }
+
+    func testLaunchCommandWithNoFlagsIsUnchanged() {
+        let command = ClaudeSession.launchCommand(sessionID: fixedID, title: "one")
+        XCTAssertEqual(
+            command,
+            "claude --session-id 4f3a0000-0000-0000-0000-000000000001 --name 'one'\n"
+        )
+    }
+
+    func testLaunchCommandAppendsFlagsAfterAppManagedOnes() {
+        let command = ClaudeSession.launchCommand(
+            sessionID: fixedID, title: "one",
+            flags: FlagSet(values: ["--model": .value("opus")])
+        )
+        XCTAssertEqual(
+            command,
+            "claude --session-id 4f3a0000-0000-0000-0000-000000000001 --name 'one' --model opus\n"
+        )
+    }
+
+    func testResumeCommandAppliesFlagsToBothBranches() {
+        let command = ClaudeSession.resumeCommand(
+            sessionID: fixedID, title: "one",
+            flags: FlagSet(values: ["--model": .value("opus")])
+        )
+        // The fallback branch must be configured too, or a pruned transcript silently
+        // launches an unconfigured session.
+        XCTAssertEqual(command.components(separatedBy: "--model opus").count - 1, 2)
+    }
+
+    func testResumeCommandWithNoFlagsIsUnchanged() {
+        let command = ClaudeSession.resumeCommand(sessionID: fixedID, title: "one")
+        let id = "4f3a0000-0000-0000-0000-000000000001"
+        XCTAssertEqual(command, "claude --resume \(id) || claude --session-id \(id) --name 'one'\n")
+    }
+
+    func testFlagValuesAreQuotedNotStripped() throws {
+        let hostile = "'; rm -rf ~; '"
+        let command = ClaudeSession.launchCommand(
+            sessionID: fixedID, title: "one",
+            flags: FlagSet(values: ["--system-prompt": .value(hostile)])
+        )
+        // The real assertion: the value survives as ONE literal argument rather than
+        // decomposing into shell syntax. Tokenizing the command is how we prove that.
+        // `tokenize` returns `[ClaudeFlagQuoting.Token]` (Task 4 added `wasQuoted`), so
+        // compare against `.text`.
+        let texts = try ClaudeFlagQuoting.tokenize(
+            command.trimmingCharacters(in: .newlines)
+        ).map(\.text)
+        guard let index = texts.firstIndex(of: "--system-prompt"), index + 1 < texts.count else {
+            return XCTFail("--system-prompt missing from: \(command)")
+        }
+        XCTAssertEqual(texts[index + 1], hostile)
+        XCTAssertFalse(texts.contains("rm"), "the value must not split into separate tokens")
+        XCTAssertFalse(texts.contains(";"), "the value must not split into separate tokens")
+    }
+
+    func testLockedPrefixMatchesTheStartOfTheLaunchCommand() {
+        let prefix = ClaudeSession.lockedPrefix(sessionID: fixedID, title: "one")
+        let command = ClaudeSession.launchCommand(
+            sessionID: fixedID, title: "one",
+            flags: FlagSet(values: ["--model": .value("opus")])
+        )
+        XCTAssertTrue(command.hasPrefix(prefix))
+    }
+
+    func testLockedPrefixIsTheWholeCommandWhenThereAreNoFlags() {
+        let prefix = ClaudeSession.lockedPrefix(sessionID: fixedID, title: "one")
+        XCTAssertEqual(
+            ClaudeSession.launchCommand(sessionID: fixedID, title: "one"),
+            prefix + "\n"
+        )
+    }
+
+    func testLaunchCommandDropsEmptyListFlags() {
+        let command = ClaudeSession.launchCommand(
+            sessionID: fixedID, title: "one",
+            flags: FlagSet(values: ["--add-dir": .list([]), "--model": .value("opus")])
+        )
+        XCTAssertFalse(command.contains("--add-dir"))
+        XCTAssertTrue(command.contains("--model opus"))
+    }
+
+    func testResumeCommandDropsEmptyListFlags() {
+        let command = ClaudeSession.resumeCommand(
+            sessionID: fixedID, title: "one",
+            flags: FlagSet(values: ["--add-dir": .list([])])
+        )
+        XCTAssertFalse(command.contains("--add-dir"))
+    }
+
+    func testNonEmptyListFlagsStillLaunch() {
+        let command = ClaudeSession.launchCommand(
+            sessionID: fixedID, title: "one",
+            flags: FlagSet(values: ["--add-dir": .list(["../shared"])])
+        )
+        XCTAssertTrue(command.contains("--add-dir ../shared"))
+    }
 }
