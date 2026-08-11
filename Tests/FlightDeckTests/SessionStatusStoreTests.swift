@@ -66,15 +66,28 @@ final class SessionStatusStoreTests: XCTestCase {
         XCTAssertNil(store.status(for: session.id))
     }
 
+    /// Also covers withdrawal: closing a waiting session is the "prompt that will never
+    /// resolve" case that `applyRegistry` cannot observe on its own, since both its
+    /// before/after snapshots already lack the closed id.
     func testClosingSessionDropsItsStatus() {
         let store = makeStore()
+        let spy = SpyNotifier()
+        store.notifier = spy
         let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
 
-        store.applyRegistry([session.id: entry(session.id, .busy)])
+        store.applyRegistry([
+            session.id: entry(session.id, .waiting, waitingFor: "permission prompt"),
+        ])
         store.applySubagentCount(session.id, 2)
         store.closeSession(session.id)
 
         XCTAssertNil(store.status(for: session.id))
+        // subagentCounts has no public reader; the only externally observable proof it
+        // was cleared is that a restart under the same UUID starts back at 0 rather than
+        // inheriting 2 — this is exactly what testDisappearingSessionAlsoClearsItsSubagentCount
+        // covers for the registry-disappearance path, so here we assert what we can reach
+        // directly: the withdrawal.
+        XCTAssertEqual(spy.withdrawn, [session.id])
     }
 
     func testWaitingReasonIsCarriedThrough() {

@@ -73,8 +73,18 @@ final class SessionStore: ObservableObject {
     /// wipes defaults once per run, but the UITest bundle launches the app once per test
     /// case, so a session persisted by an earlier case would otherwise survive into a later
     /// one and make tests order-dependent.
-    convenience init(ghostty: GhosttyApp?, resetState: Bool = false) {
+    /// `notifier` is assigned before `startStatusWatching()` runs, deliberately: the
+    /// watcher's first drain is what can reach `deliverNotifications`, and that must never
+    /// see a nil notifier land on a live `waiting` session at launch. It happens to be
+    /// safe today even when the caller assigns `notifier` after construction (as
+    /// `FlightDeckApp.makeStore()` used to) — `startStatusWatching()`'s first fire is an
+    /// async main-queue hop that lands after this initializer returns — but that safety
+    /// is incidental to the timer's current implementation, not guaranteed by this
+    /// method's contract. Taking `notifier` as a parameter here removes the dependency on
+    /// that timing.
+    convenience init(ghostty: GhosttyApp?, resetState: Bool = false, notifier: Notifying? = nil) {
         self.init(provider: ghostty, persistence: UserDefaultsSessionPersistence())
+        self.notifier = notifier
         if resetState || !restore() { seedInitialSession() }
         startStatusWatching()
     }
@@ -274,6 +284,10 @@ final class SessionStore: ObservableObject {
         watchers.removeValue(forKey: id)
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
+        // Closing the row is the most literal case of "a prompt that will never resolve",
+        // and applyRegistry cannot observe the waiting -> gone edge here because both its
+        // before and after snapshots already lack this id.
+        notifier?.withdraw(sessionID: id)
         if repos[repoIndex].sessions.isEmpty {
             repos.remove(at: repoIndex)
         }
