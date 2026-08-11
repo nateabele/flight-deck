@@ -38,4 +38,28 @@ final class TerminalSmokeTests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground)
         XCTAssertTrue(window.exists)
     }
+
+    /// ⌘Q must quit while the terminal has focus.
+    ///
+    /// AppKit gives a view's `performKeyEquivalent` first refusal, ahead of the main menu,
+    /// and the Ghostty surface claims every shortcut libghostty treats as a binding — so
+    /// before `MenuKeyEquivalents` this keystroke was swallowed and the app just sat there.
+    /// The assertion is deliberately "the process exits", because that is the only evidence
+    /// that the menu item actually fired rather than the key reaching the pty.
+    func testCommandQQuitsWhileTerminalHasFocus() {
+        let app = XCUIApplication()
+        // See testAppLaunchesAndShowsTerminalSurface: bypass window restoration
+        // so the initial window is created under XCUITest's raw-exec launch.
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        app.launch()
+        app.activate()
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15))
+        XCTAssertEqual(app.state, .runningForeground)
+
+        app.typeKey("q", modifierFlags: .command)
+
+        let exited = NSPredicate(format: "state == %d", XCUIApplication.State.notRunning.rawValue)
+        expectation(for: exited, evaluatedWith: app)
+        waitForExpectations(timeout: 10)
+    }
 }

@@ -18,9 +18,12 @@ a shell), which is complete and verified. These are for the phases that follow.
 
 ## Deferred to the harness-adapter / block-model phase
 
-- **`close_surface_cb` and `action_cb` in `GhosttyApp` are no-ops.** A shell `exit` leaves a
-  dead surface on screen; title/notification/clipboard/OSC actions are dropped. Wire these when
-  building the block model and the harness adapters (they are the surface's event surface).
+- **`close_surface_cb` is still a no-op, and `action_cb` handles only `quit`.** A shell `exit`
+  leaves a dead surface on screen; title/notification/clipboard/OSC actions are still dropped.
+  Wire the rest when building the block model and the harness adapters (they are the surface's
+  event surface). `action_cb` gained a `quit` case with the menu-key-equivalent fix — see
+  `MenuKeyEquivalents` — because a Ghostty keybind can resolve to `quit` with no menu item
+  involved.
 
 ## Build reproducibility (known limitation)
 
