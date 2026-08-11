@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// One sidebar row. Owns only its transient edit state; the title itself lives in the Store.
@@ -8,6 +9,10 @@ private struct SessionRow: View {
     @State private var isEditing = false
     @State private var draft = ""
     @FocusState private var focused: Bool
+
+    /// When the title was last clicked, for the hand-rolled double-click detection in
+    /// `handleTitleTap()`.
+    @State private var lastTitleTap: Date?
 
     var body: some View {
         HStack {
@@ -22,11 +27,9 @@ private struct SessionRow: View {
             } else {
                 Text(session.title)
                     .accessibilityIdentifier("session-row-title")
-                    .onTapGesture(count: 2) {
-                        draft = session.title
-                        isEditing = true
-                        focused = true
-                    }
+                    // A single recognizer, with the double click detected by hand. See
+                    // `handleTitleTap()` for why this isn't `onTapGesture(count: 2)`.
+                    .onTapGesture(perform: handleTitleTap)
             }
             Spacer()
             Button {
@@ -36,6 +39,38 @@ private struct SessionRow: View {
             }
             .buttonStyle(.borderless)
             .accessibilityIdentifier("close-session")
+        }
+    }
+
+    /// Selects on the first click, starts a rename on a second click that lands within the
+    /// system double-click interval.
+    ///
+    /// This is deliberately *not* `.onTapGesture(count: 2)`, and not a count-2 plus count-1
+    /// pair either. An exclusive count-2 recognizer swallows the single click, so clicking
+    /// the title — the part of the row people actually aim at — never reached the enclosing
+    /// `List(selection:)` and the row would not select. Two things that look like fixes are
+    /// not: `simultaneousGesture` still does not let the click through to the List, and
+    /// pairing a count-2 with a count-1 recognizer leaves the count-1 one never firing at
+    /// all (verified — an explicit handler assigning `selectedSessionID` did not run).
+    ///
+    /// Detecting the second click ourselves removes SwiftUI's gesture arbitration from the
+    /// problem entirely: one recognizer, always delivered. `NSEvent.doubleClickInterval`
+    /// honours the user's Trackpad/Mouse setting rather than hard-coding a threshold.
+    ///
+    /// Selecting on the first click of a double click is intended — double-clicking a row
+    /// should both activate it and begin editing it.
+    private func handleTitleTap() {
+        let now = Date()
+        defer { lastTitleTap = now }
+
+        store.selectedSessionID = session.id
+
+        // No need to reset the timestamp after starting a rename: the `Text` is replaced by
+        // the `TextField` while editing, so it cannot receive a third tap.
+        if let last = lastTitleTap, now.timeIntervalSince(last) <= NSEvent.doubleClickInterval {
+            draft = session.title
+            isEditing = true
+            focused = true
         }
     }
 
