@@ -35,6 +35,14 @@ final class SessionStore: ObservableObject {
 
     private let persistence: SessionPersisting?
 
+    /// Set once the first `init(ghostty:resetState:)` in the process has run. A second
+    /// `WindowGroup` window (File ▸ New Window) would otherwise construct another
+    /// `SessionStore` that restores the *same* persisted snapshot as the first window,
+    /// so two shells resume the same Claude session against one transcript. Only the
+    /// first store in the process may restore; every later one seeds a fresh session
+    /// with its own new UUID, exactly as it did before restore existed.
+    private static var hasRestoredInProcess = false
+
     init(provider: SurfaceProvider?, persistence: SessionPersisting? = nil) {
         self.provider = provider
         self.persistence = persistence
@@ -50,7 +58,9 @@ final class SessionStore: ObservableObject {
     /// YES` launch argument, which `RootView.init` translates into this flag.
     convenience init(ghostty: GhosttyApp?, resetState: Bool = false) {
         self.init(provider: ghostty, persistence: UserDefaultsSessionPersistence())
-        if resetState || !restore() { seedInitialSession() }
+        let isFirstInProcess = !Self.hasRestoredInProcess
+        Self.hasRestoredInProcess = true
+        if resetState || !isFirstInProcess || !restore() { seedInitialSession() }
     }
 
     func seedInitialSession(
