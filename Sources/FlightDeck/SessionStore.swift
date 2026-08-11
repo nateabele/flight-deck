@@ -120,10 +120,19 @@ final class SessionStore: ObservableObject {
     /// restore, which is the caller's signal to seed a first session instead.
     /// Sessions whose working directory has since disappeared are dropped rather
     /// than resurrected as broken terminals.
+    ///
+    /// Kept internal rather than `private`: `SessionPersistenceTests` calls it directly
+    /// to exercise restore in isolation, and `@testable import` only lifts `internal`
+    /// access — a `private` method stays invisible even to `@testable` callers outside
+    /// this file. Idempotency is guarded instead, on `repos.isEmpty`: a second call
+    /// (there is no production path that makes one, but nothing stops a test or a
+    /// future caller from trying) would otherwise re-insert every restored session on
+    /// top of the ones already there.
     @discardableResult
     func restore(
         directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> Bool {
+        guard repos.isEmpty else { return false }
         guard let snapshot = persistence?.load(), !snapshot.sessions.isEmpty else {
             return false
         }
