@@ -24,8 +24,8 @@ Exact recorded versions: [TOOLING.md](TOOLING.md).
 git clone <flight-deck remote or path> flight-deck && cd flight-deck
 git submodule update --init            # checks out vendor/ghostty at pinned v1.3.1
 ./scripts/build-libghostty.sh          # ~10 min first run (builds libghostty from source)
-./scripts/build.sh                     # xcodegen generate + xcodebuild → FlightDeck.app
-open DerivedData/Build/Products/Debug/FlightDeck.app
+./scripts/build.sh                     # xcodegen generate + xcodebuild → "Flight Deck.app"
+open "DerivedData/Build/Products/Debug/Flight Deck.app"
 ```
 
 You should see a "Flight Deck" window with a live shell prompt.
