@@ -283,12 +283,21 @@ enum ClaudeStatusFile {
     /// hand-edited file.
     static func decode(_ data: Data, expectedPID: pid_t) -> Entry? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let rawPID = obj["pid"] as? Int, pid_t(rawPID) == expectedPID,
+              // `pid_t(exactly:)`, not `pid_t(_:)` — the non-failable conversion traps
+              // on an out-of-range value, which would crash on exactly the malformed
+              // input this decoder exists to absorb.
+              let rawPID = obj["pid"] as? Int,
+              let pid = pid_t(exactly: rawPID), pid == expectedPID,
               let rawSession = obj["sessionId"] as? String,
               let sessionID = UUID(uuidString: rawSession),
               let rawStatus = obj["status"] as? String,
               let activity = SessionActivity(rawValue: rawStatus)
         else { return nil }
+
+        // Also add a regression test for the out-of-range pid path:
+        //   func testOutOfRangePIDYieldsNil() {
+        //       XCTAssertNil(ClaudeStatusFile.decode(json(pid: 99_999_999_999), expectedPID: 4242))
+        //   }
 
         return Entry(
             pid: expectedPID,
