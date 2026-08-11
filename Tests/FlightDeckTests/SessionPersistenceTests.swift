@@ -206,4 +206,73 @@ final class SessionPersistenceTests: XCTestCase {
 
         XCTAssertFalse(store.repos.flatMap(\.sessions).map(\.title).contains("stale"))
     }
+
+    /// Pumps the run loop long enough for a `TranscriptWatcher`'s real 500ms polling
+    /// timer to fire at least once.
+    private func waitForWatcher() {
+        let exp = expectation(description: "watcher tick")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { exp.fulfill() }
+        wait(for: [exp], timeout: 2.0)
+    }
+
+    /// End-to-end regression for the restore bug: reaches the watcher only through the
+    /// store (as production does), so the store↔watcher↔`applyExternalTitle` wiring is
+    /// actually exercised. `SessionStore.projectsRoot` exists precisely for this.
+    ///
+    /// Restores a session whose transcript already contains a `custom-title` line with a
+    /// *different* title (as if a rename had happened in a prior run, or the file were
+    /// just large) and confirms the first drain does not clobber the restored title with
+    /// it. Then appends a genuinely new `custom-title` line and confirms that one IS
+    /// applied, proving tailing still works after the seek-to-end seed.
+    func testRestoredWatcherDoesNotReplayStaleTitleButStillTailsNewOnes() throws {
+        let sid = UUID()
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("swsync-workdir-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        let projectsRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("swsync-projects-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: projectsRoot) }
+
+        let transcriptURL = ClaudeSession.transcriptURL(
+            sessionID: sid, workingDirectory: workDir.path, projectsRoot: projectsRoot
+        )
+        try FileManager.default.createDirectory(
+            at: transcriptURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+
+        func customTitleLine(_ title: String) -> String {
+            #"{"type":"custom-title","customTitle":"\#(title)","sessionId":"\#(sid.uuidString.lowercased())"}"#
+                + "\n"
+        }
+
+        // The transcript already contains a stale rename, as if it were a large
+        // pre-existing conversation from a previous run.
+        try customTitleLine("stale title").data(using: .utf8)!.write(to: transcriptURL)
+
+        let fake = FakePersistence()
+        fake.stored = SessionSnapshot(
+            sessions: [.init(id: sid, title: "restored title", workingDirectory: workDir.path)],
+            selectedSessionID: sid,
+            sessionCounter: 1
+        )
+
+        let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        store.projectsRoot = projectsRoot
+        XCTAssertTrue(store.restore(directoryExists: allDirsExist))
+        XCTAssertEqual(store.title(of: sid), "restored title")
+
+        waitForWatcher()
+        XCTAssertEqual(
+            store.title(of: sid), "restored title",
+            "the stale on-disk title must not clobber the restored one"
+        )
+
+        try (customTitleLine("stale title") + customTitleLine("fresh title"))
+            .data(using: .utf8)!.write(to: transcriptURL)
+
+        waitForWatcher()
+        XCTAssertEqual(store.title(of: sid), "fresh title")
+    }
 }
