@@ -77,6 +77,14 @@ reader doesn't re-derive them.
   `List(selection:)` binds `selectedSessionID` directly, and persistence now hangs off that
   property's `didSet`. The method is still exercised by `SessionStoreTests`; left in place
   rather than deleted, but it is dead weight if nothing adopts it.
+- **If a sidebar rename ever intermittently fails to submit, add a small delay before the
+  Return.** `SessionStore.rename` sends the command text (a paste, via `sendText`) and then
+  Return (a key event, via `sendReturn`) back to back. Ordering is preserved through
+  libghostty's IO queue, so no delay is needed today and none is shipped — but the two travel
+  different paths, and a program that debounces paste input could in principle still be
+  assembling the paste when the keypress lands. A ~50 ms gap before `sendReturn()` is the
+  first thing to try; do **not** "fix" it by putting the terminator back inside the text,
+  which is the bug that `TextInjecting.sendReturn()` exists to avoid.
 - **`CLAUDE_CODE_CHILD_SESSION` in the inherited environment turns transcript saving off**,
   which silently kills inbound rename sync — the watcher tails a file that is never written.
   Claude Code sets this marker for nested sessions; a `claude` inheriting it prints
