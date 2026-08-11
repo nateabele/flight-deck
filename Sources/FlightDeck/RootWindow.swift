@@ -4,11 +4,11 @@ import SwiftUI
 /// frees ⌘N — `WindowGroup` claims it for File ▸ New Window. Closing this window quits,
 /// because `AppDelegate.applicationShouldTerminateAfterLastWindowClosed` returns true.
 struct RootWindow: Scene {
-    let ghostty: GhosttyApp?
+    @ObservedObject var store: SessionStore
 
     var body: some Scene {
         Window("Flight Deck", id: "main") {
-            RootView(ghostty: ghostty)
+            RootView(store: store)
                 .frame(minWidth: 800, minHeight: 500)
         }
         .defaultSize(width: 1000, height: 700)
