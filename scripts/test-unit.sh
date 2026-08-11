@@ -22,8 +22,6 @@ cd "$(dirname "$0")/.."
 # scripts/smoke.sh + a one-time UI-automation TCC grant; this script is only for
 # the headless unit suite.
 
-. scripts/throttle.sh
-
 CONFIG=Debug
 PRODUCTS="DerivedData/Build/Products/${CONFIG}"
 
