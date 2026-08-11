@@ -83,6 +83,41 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Test seam. Production leaves this nil and injection goes to the live surface.
+    var injectorOverride: TextInjecting?
+
+    func title(of id: UUID) -> String? {
+        guard let at = locate(id) else { return nil }
+        return repos[at.repo].sessions[at.session].title
+    }
+
+    /// Sidebar → Claude. Updates the title, then types `/rename <name>` into the pty
+    /// so the *running* interactive session renames itself and records it.
+    func rename(_ id: UUID, to newTitle: String) {
+        guard let at = locate(id),
+              let name = ClaudeSession.sanitizedName(newTitle)
+        else { return }
+
+        repos[at.repo].sessions[at.session].title = name
+        injector(for: id)?.sendText("/rename \(name)\n")
+    }
+
+    /// Claude → sidebar. Applied from the transcript watcher; never injects.
+    /// The equality check is the loop guard: a `custom-title` line caused by our own
+    /// `rename` matches the title we already set and stops here.
+    func applyExternalTitle(_ id: UUID, _ title: String) {
+        guard let at = locate(id),
+              let name = ClaudeSession.sanitizedName(title),
+              repos[at.repo].sessions[at.session].title != name
+        else { return }
+
+        repos[at.repo].sessions[at.session].title = name
+    }
+
+    private func injector(for id: UUID) -> TextInjecting? {
+        injectorOverride ?? surfaces[id]
+    }
+
     func surface(for id: UUID) -> Ghostty.SurfaceView? { surfaces[id] }
 
     func tick() { provider?.tick() }
