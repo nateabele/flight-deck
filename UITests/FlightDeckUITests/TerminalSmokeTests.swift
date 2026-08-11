@@ -239,4 +239,24 @@ final class TerminalSmokeTests: XCTestCase {
         XCTAssertTrue(button.waitForExistence(timeout: 5))
         XCTAssertTrue(button.label.contains("New Session"), "got: \(button.label)")
     }
+
+    /// The close button is hover-gated now, so it must be absent at rest and present
+    /// once the pointer is over the row.
+    func testHoverRevealsCloseButtonBesideStatusIcon() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-FlightDeckResetState", "YES"]
+        app.launch()
+
+        let row = app.staticTexts.matching(
+            identifier: "session-row-title"
+        ).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 30))
+
+        XCTAssertFalse(app.buttons["close-session"].exists,
+                       "close button should be hidden until hover")
+
+        row.hover()
+
+        XCTAssertTrue(app.buttons["close-session"].waitForExistence(timeout: 5))
+    }
 }
