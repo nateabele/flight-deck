@@ -20,6 +20,8 @@ inferred from docs. They replace the speculative material in the handoff.
 |---|---|---|
 | Bind a session to its transcript | `claude --session-id <uuid>` accepts a caller-chosen UUID | CONFIRMED (`claude --help`) |
 | Set a name at launch | `claude -n/--name <name>` | CONFIRMED (`claude --help`) |
+| Reattach to a conversation | `claude -r/--resume <session-id>` restores it across processes | CONFIRMED (round-trip test) |
+| Resume of a missing transcript | exits `1`, so a `\|\|` shell fallback fires | CONFIRMED (exit-code test) |
 | Transcript location | `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` | CONFIRMED |
 | cwd encoding | every non-alphanumeric character → `-`, one-for-one, no collapsing (`/private/tmp/x/-Users-nate` → `-private-tmp-x--Users-nate`) | CONFIRMED |
 | Rename record shape | a JSONL line `{"type":"custom-title","customTitle":"<name>","sessionId":"<uuid>"}` | CONFIRMED |
@@ -100,6 +102,39 @@ an empty or whitespace-only value reverts to the previous title. The field carri
 `accessibilityIdentifier("session-title-field")` for UITests, alongside the existing
 `close-session` / `new-session` identifiers.
 
+### 3.5 `SessionPersistence` — surviving relaunch
+
+Sessions persist so every tab returns after a restart, each reattached to its own Claude
+conversation. This falls out of the same decision that enables sync: because *we* choose
+the session UUID and persist it, restore is just `--resume <that id>`.
+
+A `SessionSnapshot: Codable` holds the ordered sessions (`id`, `title`,
+`workingDirectory`), the selection, and the session counter — the counter so a newly
+created session cannot reuse a restored session's number. Repos are *derived* from
+`workingDirectory`, so only sessions are stored and the grouping rebuilds on load.
+
+Storage is behind a `SessionPersisting` protocol (same seam style as `SurfaceProvider`
+and `TextInjecting`), with a `UserDefaults` implementation and an in-memory fake for
+tests. It writes to the app's standard defaults domain, which `scripts/smoke.sh:14`
+already wipes via `defaults delete dev.flightdeck.FlightDeck` — so the UITest gate stays
+hermetic with no new plumbing.
+
+Saving happens on every mutation rather than at terminate, so a crash cannot lose the
+list. The list is a handful of small structs; the cost is irrelevant.
+
+Two degradations, both deliberate:
+
+- A session whose `workingDirectory` no longer exists is **dropped** on restore rather
+  than resurrected as a broken terminal.
+- A session whose transcript has been deleted or pruned still returns: the restore
+  command is `claude --resume <id> || claude --session-id <id> --name '<title>'`, so it
+  comes back as a fresh conversation with the right id and name instead of a dead pane
+  showing a resume error. This relies on `--resume` exiting non-zero, which is confirmed
+  in §2.
+
+Closing a session removes it from the snapshot. It does **not** delete the underlying
+Claude transcript — closing a tab is not deleting a conversation.
+
 ## 4. Data flow
 
 **Outbound.** double-click → edit → commit → `store.rename(id, to:)` → title updated →
@@ -145,7 +180,8 @@ Enter, assert the row shows it.
 
 ## 7. Explicitly out of scope
 
-- Persisting names across relaunch — sessions remain in-memory, per the foundation spec.
+- Restoring terminal *scrollback*. `--resume` restores the conversation; the pane starts
+  with a fresh screen.
 - OSC/terminal-title plumbing and the `action_cb` no-op in `docs/FOLLOWUPS.md`.
 - Reading or writing `sessions-index.json`.
 - Non-Claude programs in the terminal; per handoff §5 we assume `claude`, and degrade to a

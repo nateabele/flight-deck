@@ -13,7 +13,8 @@
 - Target module is `FlightDeck`; tests live in `Tests/FlightDeckTests/` and use `XCTest` with `@testable import FlightDeck`.
 - Unit tests run with `./scripts/test-unit.sh`. Do not invoke `xcodebuild` directly.
 - `SessionStore` is `@MainActor`. Anything it calls synchronously must be main-actor safe.
-- Sessions remain in-memory. Do not add persistence.
+- Sessions persist across relaunch via `UserDefaults` in the app's standard domain
+  (bundle id `dev.flightdeck.FlightDeck`). `scripts/smoke.sh:14` already wipes it.
 - Do not read or write `~/.claude/projects/*/sessions-index.json`.
 - Never launch a real `claude` process from a unit test.
 - Transcript path root is `~/.claude/projects`; it must be injectable so tests use a temp dir.
@@ -36,7 +37,8 @@ Path encoding, transcript-line parsing, and name sanitization. No I/O, no state 
   - `ClaudeSession.defaultProjectsRoot: URL`
   - `ClaudeSession.customTitle(inLine: String, sessionID: UUID) -> String?`
   - `ClaudeSession.sanitizedName(_ raw: String) -> String?` (nil when unusable)
-  - `ClaudeSession.launchCommand(sessionID: UUID, title: String) -> String`
+  - `ClaudeSession.launchCommand(sessionID: UUID, title: String) -> String` (fresh session)
+  - `ClaudeSession.resumeCommand(sessionID: UUID, title: String) -> String` (restored session)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -110,6 +112,16 @@ final class ClaudeSessionTests: XCTestCase {
         XCTAssertEqual(
             cmd,
             "claude --session-id \(sid.uuidString.lowercased()) --name 'it'\\''s mine'\n"
+        )
+    }
+
+    /// Restore falls back to a fresh session when the transcript is gone.
+    /// Verified empirically: `claude --resume <unknown-uuid>` exits 1, so `||` fires.
+    func testResumeCommandFallsBackToFreshSession() {
+        let id = sid.uuidString.lowercased()
+        XCTAssertEqual(
+            ClaudeSession.resumeCommand(sessionID: sid, title: "my work"),
+            "claude --resume \(id) || claude --session-id \(id) --name 'my work'\n"
         )
     }
 }
@@ -190,6 +202,15 @@ enum ClaudeSession {
         let name = sanitizedName(title) ?? "session"
         return "claude --session-id \(sessionID.uuidString.lowercased()) "
             + "--name \(shellQuoted(name))\n"
+    }
+
+    /// The command for a session restored from a previous app launch. Reattaches to the
+    /// existing conversation, falling back to a fresh session with the same id and name
+    /// when the transcript has been deleted or pruned (`--resume` exits 1 in that case).
+    static func resumeCommand(sessionID: UUID, title: String) -> String {
+        let id = sessionID.uuidString.lowercased()
+        let name = sanitizedName(title) ?? "session"
+        return "claude --resume \(id) || claude --session-id \(id) --name \(shellQuoted(name))\n"
     }
 }
 ```
@@ -648,14 +669,16 @@ Wire it into `SessionStore`. Add the storage next to `surfaces`:
     var projectsRoot: URL = ClaudeSession.defaultProjectsRoot
 ```
 
-At the end of `newSession(in:)`, immediately before `selectedSessionID = session.id`:
+Add a private helper (Task 5 reuses it from the restore path, so it must be a method,
+not inline code):
 
 ```swift
+    private func startWatching(_ session: Session, workingDirectory: String) {
         let watcher = TranscriptWatcher(
             sessionID: session.id,
             url: ClaudeSession.transcriptURL(
                 sessionID: session.id,
-                workingDirectory: url.path,
+                workingDirectory: workingDirectory,
                 projectsRoot: projectsRoot
             )
         ) { [weak self] title in
@@ -663,6 +686,13 @@ At the end of `newSession(in:)`, immediately before `selectedSessionID = session
         }
         watcher.start()
         watchers[session.id] = watcher
+    }
+```
+
+Call it from `newSession(in:)` immediately before `selectedSessionID = session.id`:
+
+```swift
+        startWatching(session, workingDirectory: url.path)
 ```
 
 In `closeSession(_:)`, alongside the existing `surfaces` removal:
@@ -686,7 +716,376 @@ git commit -m "feat: watch claude transcripts for external renames"
 
 ---
 
-### Task 5: Sidebar inline edit
+### Task 5: Persistence and restore
+
+Sessions survive relaunch: every row comes back, each reattached to its own Claude
+conversation via `--resume`. This is the reason Task 1 built `resumeCommand`.
+
+**Files:**
+- Create: `Sources/FlightDeck/SessionPersistence.swift`
+- Modify: `Sources/FlightDeck/SessionStore.swift`
+- Modify: `Sources/FlightDeck/FlightDeckApp.swift` (pass persistence into the Store)
+- Test: `Tests/FlightDeckTests/SessionPersistenceTests.swift`
+
+**Interfaces:**
+- Consumes: `ClaudeSession.resumeCommand(sessionID:title:)` and
+  `ClaudeSession.launchCommand(sessionID:title:)` from Task 1.
+- Produces:
+  - `struct SessionSnapshot: Codable, Equatable` with `sessions: [Entry]`,
+    `selectedSessionID: UUID?`, `sessionCounter: Int`
+  - `SessionSnapshot.Entry` — `{ id: UUID, title: String, workingDirectory: String }`
+  - `protocol SessionPersisting: AnyObject { func load() -> SessionSnapshot?; func save(_:) }`
+  - `final class UserDefaultsSessionPersistence: SessionPersisting`
+  - `SessionStore.init(provider:persistence:)`
+  - `SessionStore.restore(directoryExists:) -> Bool`
+
+- [ ] **Step 1: Write the failing tests**
+
+```swift
+// Tests/FlightDeckTests/SessionPersistenceTests.swift
+import XCTest
+@testable import FlightDeck
+
+@MainActor
+final class SessionPersistenceTests: XCTestCase {
+    final class CapturingProvider: SurfaceProvider {
+        var configs: [Ghostty.SurfaceConfiguration] = []
+        func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? {
+            configs.append(config)
+            return nil
+        }
+        func tick() {}
+    }
+
+    /// In-memory stand-in for UserDefaults.
+    final class FakePersistence: SessionPersisting {
+        var stored: SessionSnapshot?
+        var saveCount = 0
+        func load() -> SessionSnapshot? { stored }
+        func save(_ snapshot: SessionSnapshot) { stored = snapshot; saveCount += 1 }
+    }
+
+    private let allDirsExist: (String) -> Bool = { _ in true }
+
+    func testSnapshotRoundTripsThroughUserDefaults() {
+        let defaults = UserDefaults(suiteName: "test.\(UUID().uuidString)")!
+        let store = UserDefaultsSessionPersistence(defaults: defaults)
+        XCTAssertNil(store.load())
+
+        let snap = SessionSnapshot(
+            sessions: [.init(id: UUID(), title: "a", workingDirectory: "/w")],
+            selectedSessionID: nil,
+            sessionCounter: 3
+        )
+        store.save(snap)
+        XCTAssertEqual(store.load(), snap)
+    }
+
+    func testCreatingASessionPersistsIt() {
+        let fake = FakePersistence()
+        let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        let session = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+
+        XCTAssertEqual(fake.stored?.sessions.map(\.id), [session.id])
+        XCTAssertEqual(fake.stored?.selectedSessionID, session.id)
+    }
+
+    func testRenamePersistsTheNewTitle() {
+        let fake = FakePersistence()
+        let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        let session = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        store.rename(session.id, to: "renamed")
+        XCTAssertEqual(fake.stored?.sessions.first?.title, "renamed")
+    }
+
+    func testClosePersistsRemoval() {
+        let fake = FakePersistence()
+        let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        let session = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        store.closeSession(session.id)
+        XCTAssertEqual(fake.stored?.sessions.count, 0)
+    }
+
+    func testRestoreRebuildsReposGroupedAndOrdered() {
+        let fake = FakePersistence()
+        let a = UUID(), b = UUID(), c = UUID()
+        fake.stored = SessionSnapshot(
+            sessions: [
+                .init(id: a, title: "one", workingDirectory: "/work/foo"),
+                .init(id: b, title: "two", workingDirectory: "/work/bar"),
+                .init(id: c, title: "three", workingDirectory: "/work/foo"),
+            ],
+            selectedSessionID: b,
+            sessionCounter: 3
+        )
+
+        let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        XCTAssertTrue(store.restore(directoryExists: allDirsExist))
+
+        XCTAssertEqual(store.repos.map(\.displayName), ["foo", "bar"])
+        XCTAssertEqual(store.repos[0].sessions.map(\.title), ["one", "three"])
+        XCTAssertEqual(store.repos[1].sessions.map(\.title), ["two"])
+        XCTAssertEqual(store.selectedSessionID, b)
+    }
+
+    func testRestoreResumesEachClaudeConversation() {
+        let provider = CapturingProvider()
+        let fake = FakePersistence()
+        let a = UUID()
+        fake.stored = SessionSnapshot(
+            sessions: [.init(id: a, title: "one", workingDirectory: "/work/foo")],
+            selectedSessionID: a,
+            sessionCounter: 1
+        )
+
+        let store = SessionStore(provider: provider, persistence: fake)
+        XCTAssertTrue(store.restore(directoryExists: allDirsExist))
+        XCTAssertEqual(
+            provider.configs.first?.initialInput,
+            ClaudeSession.resumeCommand(sessionID: a, title: "one")
+        )
+    }
+
+    func testRestoreDropsSessionsWhoseDirectoryIsGone() {
+        let fake = FakePersistence()
+        fake.stored = SessionSnapshot(
+            sessions: [
+                .init(id: UUID(), title: "gone", workingDirectory: "/work/deleted"),
+                .init(id: UUID(), title: "kept", workingDirectory: "/work/foo"),
+            ],
+            selectedSessionID: nil,
+            sessionCounter: 2
+        )
+
+        let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        XCTAssertTrue(store.restore(directoryExists: { $0 != "/work/deleted" }))
+        XCTAssertEqual(store.repos.flatMap(\.sessions).map(\.title), ["kept"])
+    }
+
+    /// The counter must survive so a new session cannot collide with a restored name.
+    func testRestoredCounterAvoidsTitleCollision() {
+        let fake = FakePersistence()
+        fake.stored = SessionSnapshot(
+            sessions: [.init(id: UUID(), title: "session 3", workingDirectory: "/work/foo")],
+            selectedSessionID: nil,
+            sessionCounter: 3
+        )
+
+        let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        XCTAssertTrue(store.restore(directoryExists: allDirsExist))
+        let fresh = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        XCTAssertEqual(fresh.title, "session 4")
+    }
+
+    func testRestoreReturnsFalseWhenNothingStored() {
+        let store = SessionStore(provider: CapturingProvider(), persistence: FakePersistence())
+        XCTAssertFalse(store.restore(directoryExists: allDirsExist))
+        XCTAssertTrue(store.repos.isEmpty)
+    }
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `./scripts/test-unit.sh 2>&1 | tail -20`
+Expected: FAIL — `cannot find type 'SessionSnapshot'`, no `persistence:` initializer.
+
+- [ ] **Step 3: Write the persistence types**
+
+```swift
+// Sources/FlightDeck/SessionPersistence.swift
+import Foundation
+
+/// What survives a relaunch. Repos are derived from `workingDirectory`, so only
+/// sessions are stored and the grouping rebuilds on restore.
+struct SessionSnapshot: Codable, Equatable {
+    struct Entry: Codable, Equatable {
+        let id: UUID
+        var title: String
+        let workingDirectory: String
+    }
+
+    var sessions: [Entry] = []
+    var selectedSessionID: UUID?
+    /// Persisted so a new session cannot reuse a restored session's number.
+    var sessionCounter: Int = 0
+}
+
+@MainActor
+protocol SessionPersisting: AnyObject {
+    func load() -> SessionSnapshot?
+    func save(_ snapshot: SessionSnapshot)
+}
+
+/// Stores the snapshot in the app's standard defaults domain
+/// (`dev.flightdeck.FlightDeck`), which `scripts/smoke.sh` already wipes so the
+/// UITest gate stays hermetic.
+@MainActor
+final class UserDefaultsSessionPersistence: SessionPersisting {
+    private let defaults: UserDefaults
+    private let key = "sessions.snapshot.v1"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func load() -> SessionSnapshot? {
+        guard let data = defaults.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(SessionSnapshot.self, from: data)
+    }
+
+    func save(_ snapshot: SessionSnapshot) {
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        defaults.set(data, forKey: key)
+    }
+}
+```
+
+- [ ] **Step 4: Wire the Store**
+
+Add the stored property and initializer alongside the existing ones:
+
+```swift
+    private let persistence: SessionPersisting?
+
+    init(provider: SurfaceProvider?, persistence: SessionPersisting? = nil) {
+        self.provider = provider
+        self.persistence = persistence
+    }
+```
+
+Update the production convenience initializer so restore runs ahead of seeding:
+
+```swift
+    convenience init(ghostty: GhosttyApp?) {
+        self.init(provider: ghostty, persistence: UserDefaultsSessionPersistence())
+        if !restore() { seedInitialSession() }
+    }
+```
+
+Extract the shared insert path so create and restore share one code path:
+
+```swift
+    /// Shared by `newSession` and `restore`. `initialInput` is the only difference:
+    /// a fresh session starts `claude`, a restored one resumes it.
+    @discardableResult
+    private func insertSession(
+        _ session: Session, in url: URL, initialInput: String
+    ) -> Session {
+        let repoIndex: Int
+        if let existing = indexOfRepo(for: url) {
+            repoIndex = existing
+        } else {
+            repos.append(Repo(url: url))
+            repoIndex = repos.count - 1
+        }
+        repos[repoIndex].sessions.append(session)
+
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = ShellResolver.resolve()
+        config.workingDirectory = url.path
+        config.initialInput = initialInput
+        if let surface = provider?.makeSurface(config) {
+            surfaces[session.id] = surface
+        }
+        provider?.tick()
+
+        startWatching(session, workingDirectory: url.path)
+        return session
+    }
+```
+
+`newSession(in:)` becomes:
+
+```swift
+    @discardableResult
+    func newSession(in url: URL) -> Session {
+        sessionCounter += 1
+        let session = Session(
+            title: "session \(sessionCounter)", workingDirectory: url.path
+        )
+        insertSession(
+            session,
+            in: url,
+            initialInput: ClaudeSession.launchCommand(
+                sessionID: session.id, title: session.title
+            )
+        )
+        selectedSessionID = session.id
+        persist()
+        return session
+    }
+```
+
+Add restore and persistence:
+
+```swift
+    /// Rebuilds sessions from the last run. Returns false when there was nothing to
+    /// restore, which is the caller's signal to seed a first session instead.
+    /// Sessions whose working directory has since disappeared are dropped rather
+    /// than resurrected as broken terminals.
+    @discardableResult
+    func restore(
+        directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> Bool {
+        guard let snapshot = persistence?.load(), !snapshot.sessions.isEmpty else {
+            return false
+        }
+
+        sessionCounter = snapshot.sessionCounter
+        for entry in snapshot.sessions where directoryExists(entry.workingDirectory) {
+            let url = URL(fileURLWithPath: entry.workingDirectory, isDirectory: true)
+            let session = Session(
+                id: entry.id, title: entry.title, workingDirectory: entry.workingDirectory
+            )
+            insertSession(
+                session,
+                in: url,
+                initialInput: ClaudeSession.resumeCommand(
+                    sessionID: entry.id, title: entry.title
+                )
+            )
+        }
+
+        let restoredIDs = Set(repos.flatMap(\.sessions).map(\.id))
+        selectedSessionID = snapshot.selectedSessionID.flatMap {
+            restoredIDs.contains($0) ? $0 : nil
+        } ?? restoredIDs.first
+        persist()
+        return !restoredIDs.isEmpty
+    }
+
+    /// Saved on every mutation rather than at terminate, so a crash cannot lose the list.
+    private func persist() {
+        persistence?.save(
+            SessionSnapshot(
+                sessions: repos.flatMap(\.sessions).map {
+                    .init(id: $0.id, title: $0.title, workingDirectory: $0.workingDirectory)
+                },
+                selectedSessionID: selectedSessionID,
+                sessionCounter: sessionCounter
+            )
+        )
+    }
+```
+
+Call `persist()` at the end of `closeSession(_:)`, `rename(_:to:)`, `applyExternalTitle(_:_:)`, and in `selectSession(_:)`.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `./scripts/test-unit.sh 2>&1 | tail -20`
+Expected: PASS, including all earlier tasks.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add Sources/FlightDeck/SessionPersistence.swift Sources/FlightDeck/SessionStore.swift Sources/FlightDeck/FlightDeckApp.swift Tests/FlightDeckTests/SessionPersistenceTests.swift
+git commit -m "feat: persist sessions and resume claude conversations on relaunch"
+```
+
+---
+
+### Task 6: Sidebar inline edit
 
 Double-click a row to rename it. Enter or blur commits, Esc cancels, empty reverts.
 
@@ -803,7 +1202,7 @@ git commit -m "feat: inline-edit session names in the sidebar"
 
 ## Self-Review
 
-**Spec coverage.** §3.1 `ClaudeSession` → Task 1. §3.2 `TranscriptWatcher` → Task 4. §3.3 `SessionStore` rename + seam → Task 2, launch wiring → Task 3. §3.4 sidebar → Task 5. §4 loop suppression → Task 2 (`testApplyExternalTitleIsNoOpWhenUnchanged`). §5 sanitization → Task 1. §6 testing → covered per task.
+**Spec coverage.** §3.1 `ClaudeSession` → Task 1. §3.2 `TranscriptWatcher` → Task 4. §3.3 `SessionStore` rename + seam → Task 2, launch wiring → Task 3. §3.4 sidebar → Task 6. §3.5 persistence + restore → Task 5. §4 loop suppression → Task 2 (`testApplyExternalTitleIsNoOpWhenUnchanged`). §5 sanitization → Task 1. §6 testing → covered per task.
 
 **Known gap, deliberately deferred.** The spec's §3.1 bounded-scan fallback (used when the encoding rule mispredicts the directory) is *not* implemented in Task 4 — the watcher simply stays idle if the file never appears, which is the same graceful degradation as "claude isn't running". Add it only if a real cwd is found where the rule mispredicts; it is dead code until then.
 
