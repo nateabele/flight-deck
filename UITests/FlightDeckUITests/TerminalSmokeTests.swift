@@ -150,8 +150,12 @@ final class TerminalSmokeTests: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])   // close the menu
     }
 
-    /// ⌘N adds a session below the active one. Asserts on row count so an implementation
-    /// that opens a folder picker instead (the pre-feature behaviour) fails here.
+    /// ⌘N adds a session directly below the active one, and selects it. With row count alone
+    /// (the old assertion), "insert below the active row" and "append to the end" are
+    /// indistinguishable — the active row is always the most recently created one, so the two
+    /// coincide until a *different* row is made active first. This test forces that: it
+    /// re-selects the first row before the second ⌘N so the insert lands mid-list, then checks
+    /// both the resulting row order and which row ends up selected.
     func testCommandNAddsASessionBelowTheActiveOne() {
         let app = XCUIApplication()
         app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
@@ -164,11 +168,56 @@ final class TerminalSmokeTests: XCTestCase {
         XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 5))
         XCTAssertEqual(rows.count, 1)
 
+        // First ⌘N: "session 1" (seeded, active) -> "session 1", "session 2" (new, active).
         app.typeKey("n", modifierFlags: .command)
-
         let two = NSPredicate(format: "count == 2")
         expectation(for: two, evaluatedWith: rows)
         waitForExpectations(timeout: 10)
+        // The expectation resolves the instant the count reaches 2; a double-fire arriving on
+        // a *later* runloop tick would slip past that instant undetected. Settle briefly and
+        // re-assert so a late second creation still fails the test.
+        settle()
+        XCTAssertEqual(rows.count, 2)
+
+        // Re-select the first row so the second ⌘N is a genuine mid-list insert — this is
+        // what actually distinguishes "below the active row" from "append to the end". The
+        // row's accessible `session-row-title` text carries its own (double-tap-only) gesture
+        // recognizer, which swallows a plain click before it reaches the List's row-selection
+        // handling; clicking the row's `Cell` (index 1 — index 0 is the "nate" section header)
+        // lands on blank row space instead and reliably selects it.
+        app.cells.element(boundBy: 1).click()
+
+        // Second ⌘N: insert below the now-active first row.
+        app.typeKey("n", modifierFlags: .command)
+        let three = NSPredicate(format: "count == 3")
+        expectation(for: three, evaluatedWith: rows)
+        waitForExpectations(timeout: 10)
+        settle()
+        XCTAssertEqual(rows.count, 3)
+
+        let labels = (0..<3).map { rows.element(boundBy: $0).value as? String }
+        XCTAssertEqual(
+            labels, ["session 1", "session 3", "session 2"],
+            "expected the new session inserted directly below the re-selected first row, got \(labels)"
+        )
+
+        // The newly created session ("session 3", the middle row) must end up selected, not
+        // "session 2" left over from a stale/nil selection binding after the mid-list insert.
+        // `isSelected` is exposed reliably on the row's `Cell` (unlike the nested
+        // `session-row-title` text, which never reports selected) — cell index 2 here, since
+        // the header still occupies index 0.
+        XCTAssertTrue(
+            app.cells.element(boundBy: 2).isSelected,
+            "expected the new \"session 3\" row (not the stale \"session 2\" selection) to be selected"
+        )
+    }
+
+    /// Settles the runloop briefly so a late-arriving duplicate event (e.g. a double-fired
+    /// ⌘N) has a chance to show up before the surrounding assertion re-checks state.
+    private func settle() {
+        let settled = expectation(description: "settle")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { settled.fulfill() }
+        wait(for: [settled], timeout: 2)
     }
 
     /// The button's label follows state: with a seeded session it offers New Session.
