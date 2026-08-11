@@ -60,7 +60,9 @@ final class GhosttyApp {
             userdata: Unmanaged.passUnretained(self).toOpaque(),
             supports_selection_clipboard: false,
             wakeup_cb: { userdata in GhosttyApp.wakeup(userdata) },
-            action_cb: { _, _, _ in false },
+            action_cb: { app, target, action in
+                GhosttyApp.perform(action: action, target: target, app: app)
+            },
             read_clipboard_cb: { _, _, _ in false },
             confirm_read_clipboard_cb: { _, _, _, _ in },
             write_clipboard_cb: { _, _, _, _, _ in },
@@ -94,6 +96,35 @@ final class GhosttyApp {
     }
 
     // MARK: - Runtime callbacks
+
+    /// Dispatches an app-level action from libghostty to its host equivalent.
+    ///
+    /// Most actions are still unhandled — see `docs/FOLLOWUPS.md`. This wires only the ones
+    /// with a real meaning for Flight Deck today; returning `false` tells libghostty the
+    /// action was not handled, which remains the honest answer for the rest.
+    ///
+    /// `quit` matters because a Ghostty keybind can resolve to it without any menu item
+    /// being involved. When a Quit menu item *does* exist, `MenuKeyEquivalents` routes the
+    /// shortcut to the menu first and this path never runs — the two are complementary, not
+    /// redundant.
+    ///
+    /// This is a C callback, so it must not capture context; hence a static.
+    private static func perform(
+        action: ghostty_action_s,
+        target: ghostty_target_s,
+        app: ghostty_app_t?
+    ) -> Bool {
+        switch action.tag {
+        case GHOSTTY_ACTION_QUIT:
+            // Hop to the main queue: libghostty may emit this from inside a tick, and
+            // terminating mid-tick would tear down state the call is still using.
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+            return true
+
+        default:
+            return false
+        }
+    }
 
     /// libghostty asks the host to tick soon; may be called off the main thread.
     private static func wakeup(_ userdata: UnsafeMutableRawPointer?) {

@@ -1234,6 +1234,19 @@ extension Ghostty {
 
             // If this is a binding then we want to perform it.
             if let bindingFlags {
+                // Flight Deck addition (upstream ghostty does this via
+                // AppDelegate.performGhosttyBindingMenuKeyEquivalent). AppKit runs a view's
+                // performKeyEquivalent *before* the main menu, so without this hand-off any
+                // shortcut libghostty claims as a binding is swallowed here and the matching
+                // menu item never fires — ⌘Q included. See MenuKeyEquivalents.
+                if MenuKeyEquivalents.shouldOfferToMenu(
+                    bindingFlags: bindingFlags,
+                    inKeySequence: !keySequence.isEmpty,
+                    inKeyTable: !keyTables.isEmpty
+                ), MenuKeyEquivalents.perform(event) {
+                    return true
+                }
+
                 self.keyDown(with: event)
                 return true
             }
