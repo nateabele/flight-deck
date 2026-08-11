@@ -66,3 +66,13 @@ reader doesn't re-derive them.
   `List(selection:)` binds `selectedSessionID` directly, and persistence now hangs off that
   property's `didSet`. The method is still exercised by `SessionStoreTests`; left in place
   rather than deleted, but it is dead weight if nothing adopts it.
+- **`CLAUDE_CODE_CHILD_SESSION` in the inherited environment turns transcript saving off**,
+  which silently kills inbound rename sync — the watcher tails a file that is never written.
+  Claude Code sets this marker for nested sessions; a `claude` inheriting it prints
+  *"Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker"* in its status
+  line. Launching Flight Deck from Finder / `/Applications` gives a clean LaunchServices
+  environment, so this does not bite in normal use — but launching it from a terminal that
+  is itself inside a Claude Code session does. If inbound sync ever looks dead, check that
+  status line first. `Ghostty.SurfaceConfiguration` exposes `environmentVariables`, so the
+  defensive fix (clear the marker for spawned sessions) is available if this proves to be
+  more than a development-time footgun.
