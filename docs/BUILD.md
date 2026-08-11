@@ -76,6 +76,18 @@ TCC grant, so subsequent `smoke.sh` runs (and CI, if the machine is pre-authoriz
 - **Swift 6 concurrency errors in `GhosttyEmbed/`** — `SWIFT_VERSION` must be `"5.0"` (see
   ARCHITECTURE.md / FOLLOWUPS.md); the vendored Ghostty code isn't Swift-6 strict-concurrency clean.
 
+## Worktrees
+
+A fresh git worktree of this repo cannot build until `vendor/ghostty-artifacts/` is
+populated — it is git-ignored, so a new worktree has no `GhosttyKit.xcframework` and
+`xcodebuild` fails at framework linking before compiling any Swift. Either run
+`scripts/build-libghostty.sh` in the worktree, or create `vendor/ghostty-artifacts/` as a
+real directory and symlink `GhosttyKit.xcframework` into it from the main checkout. Note
+it must be a real directory with the framework symlinked *inside* — a symlink at
+`vendor/ghostty-artifacts` itself is not matched by the trailing-slash `.gitignore`
+pattern and shows up as untracked. When the framework is a cross-checkout symlink,
+`xcodebuild` needs to resolve outside the worktree, so a sandboxed shell will block it.
+
 ## Limitations (build reproducibility)
 
 The libghostty build works on **this host** but is **not reproducible on an arbitrary clean

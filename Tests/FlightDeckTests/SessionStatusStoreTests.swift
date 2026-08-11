@@ -101,4 +101,71 @@ final class SessionStatusStoreTests: XCTestCase {
 
         XCTAssertEqual(store.status(for: session.id)?.subagentCount, 0)
     }
+
+    private final class SpyNotifier: Notifying {
+        var notified: [(UUID, String, String)] = []
+        var withdrawn: [UUID] = []
+        func requestAuthorization() {}
+        func notify(sessionID: UUID, title: String, body: String) {
+            notified.append((sessionID, title, body))
+        }
+        func withdraw(sessionID: UUID) { withdrawn.append(sessionID) }
+    }
+
+    func testNotifiesWhenSessionStartsWaitingAndAppIsBackgrounded() {
+        let store = makeStore()
+        let spy = SpyNotifier()
+        store.notifier = spy
+        store.appIsActive = { false }
+        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+
+        store.applyRegistry([session.id: entry(session.id, .busy)])
+        store.applyRegistry([
+            session.id: entry(session.id, .waiting, waitingFor: "permission prompt"),
+        ])
+
+        XCTAssertEqual(spy.notified.count, 1)
+        XCTAssertEqual(spy.notified.first?.0, session.id)
+        XCTAssertEqual(spy.notified.first?.2, "Waiting for you — permission prompt")
+    }
+
+    func testDoesNotNotifyWhileAppIsFrontmost() {
+        let store = makeStore()
+        let spy = SpyNotifier()
+        store.notifier = spy
+        store.appIsActive = { true }
+        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+
+        store.applyRegistry([session.id: entry(session.id, .waiting)])
+
+        XCTAssertTrue(spy.notified.isEmpty)
+    }
+
+    func testWithdrawsWhenPromptResolves() {
+        let store = makeStore()
+        let spy = SpyNotifier()
+        store.notifier = spy
+        store.appIsActive = { false }
+        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+
+        store.applyRegistry([session.id: entry(session.id, .waiting)])
+        store.applyRegistry([session.id: entry(session.id, .busy)])
+
+        XCTAssertEqual(spy.withdrawn, [session.id])
+    }
+
+    func testActivationNotificationSelectsSession() {
+        let store = makeStore()
+        let first = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let second = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        store.selectSession(first.id)
+
+        NotificationCenter.default.post(
+            name: .flightDeckActivateSession,
+            object: nil,
+            userInfo: ["sessionID": second.id]
+        )
+
+        XCTAssertEqual(store.selectedSessionID, second.id)
+    }
 }

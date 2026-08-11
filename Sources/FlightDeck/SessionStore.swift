@@ -1,4 +1,5 @@
 // Sources/FlightDeck/SessionStore.swift
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -49,9 +50,23 @@ final class SessionStore: ObservableObject {
 
     private let persistence: SessionPersisting?
 
+    /// Test seam. Production sets this from the convenience init.
+    var notifier: Notifying?
+    /// Test seam for frontmost-ness; production reads `NSApplication`.
+    var appIsActive: () -> Bool = { NSApplication.shared.isActive }
+
+    private var activationObserver: NSObjectProtocol?
+
     init(provider: SurfaceProvider?, persistence: SessionPersisting? = nil) {
         self.provider = provider
         self.persistence = persistence
+        observeActivationRequests()
+    }
+
+    deinit {
+        if let activationObserver {
+            NotificationCenter.default.removeObserver(activationObserver)
+        }
     }
 
     /// `resetState` comes from the `-FlightDeckResetState YES` launch argument: `smoke.sh`
@@ -62,6 +77,19 @@ final class SessionStore: ObservableObject {
         self.init(provider: ghostty, persistence: UserDefaultsSessionPersistence())
         if resetState || !restore() { seedInitialSession() }
         startStatusWatching()
+        // `UNUserNotificationCenter.current()` traps when the calling binary is not a
+        // signed bundle. This convenience init is also the one pre-existing
+        // SessionPersistenceTests exercises directly (not through the
+        // `init(provider:persistence:)` test seam), so without this guard every unit
+        // test run crashes the whole process the moment this init runs under `xctest`.
+        // `scripts/test-unit.sh` invokes `xcrun xctest` directly rather than through
+        // `xcodebuild test`, so the usual `XCTestConfigurationFilePath` environment
+        // variable is not set; checking for the loaded XCTest framework instead works
+        // regardless of how the bundle was launched.
+        guard NSClassFromString("XCTestCase") == nil else { return }
+        let notifier = SessionNotifier()
+        notifier.requestAuthorization()
+        self.notifier = notifier
     }
 
     func seedInitialSession(
@@ -347,7 +375,45 @@ final class SessionStore: ObservableObject {
         for id in statuses.keys where next[id] == nil {
             subagentCounts.removeValue(forKey: id)
         }
+        let previous = statuses
         statuses = next
+        deliverNotifications(previous: previous, current: next)
+    }
+
+    /// One notification decision per session, over the union of both snapshots so a
+    /// session that vanished while waiting still gets its banner withdrawn.
+    private func deliverNotifications(
+        previous: [UUID: SessionStatus], current: [UUID: SessionStatus]
+    ) {
+        guard let notifier else { return }
+        let active = appIsActive()
+        for id in Set(previous.keys).union(current.keys) {
+            switch SessionNotificationPolicy.action(
+                old: previous[id], new: current[id], appActive: active
+            ) {
+            case .none:
+                continue
+            case .notify:
+                guard let status = current[id], let title = title(of: id) else { continue }
+                notifier.notify(sessionID: id, title: title, body: status.tooltip)
+            case .withdraw:
+                notifier.withdraw(sessionID: id)
+            }
+        }
+    }
+
+    /// Click-to-activate. The window ordering is the AppDelegate's job; this only moves
+    /// the selection.
+    private func observeActivationRequests() {
+        guard activationObserver == nil else { return }
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: .flightDeckActivateSession, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let raw = note.userInfo?["sessionID"] else { return }
+            let id = (raw as? UUID) ?? (raw as? String).flatMap(UUID.init(uuidString:))
+            guard let id else { return }
+            MainActor.assumeIsolated { self?.selectSession(id) }
+        }
     }
 
     /// Applied from a transcript watcher. Stored even when the registry has not yet
