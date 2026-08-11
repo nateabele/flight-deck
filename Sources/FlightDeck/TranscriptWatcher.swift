@@ -39,20 +39,31 @@ final class TranscriptWatcher {
 
     /// Reads everything appended since the last call and reports the last title found.
     /// Synchronous so tests need no expectations.
+    /// Reads everything appended since the last call and reports the last title found.
+    /// Synchronous so tests need no expectations.
     func drain() {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return }
         defer { try? handle.close() }
 
-        // A shorter file means it was replaced; start over.
+        // A shorter file means it was replaced; start over. This only detects a
+        // *smaller* replacement — a same-or-larger replacement at the same path would
+        // be treated as a continuation. That's acceptable here because the URL is
+        // keyed to one session UUID for the watcher's whole lifetime.
         let size = (try? handle.seekToEnd()) ?? 0
         if size < offset { offset = 0 }
         guard size > offset else { return }
 
         try? handle.seek(toOffset: offset)
         guard let data = try? handle.readToEnd(), !data.isEmpty else { return }
-        offset = size
 
-        let titles = String(decoding: data, as: UTF8.self)
+        // Consume only through the last complete line. A trailing partial line is left
+        // unread so the next drain sees it whole — `claude` appends this file while we
+        // read it, and a drain can land mid-write.
+        guard let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) else { return }
+        let consumed = data.distance(from: data.startIndex, to: lastNewline) + 1
+        offset += UInt64(consumed)
+
+        let titles = String(decoding: data[..<lastNewline], as: UTF8.self)
             .split(separator: "\n", omittingEmptySubsequences: true)
             .compactMap { ClaudeSession.customTitle(inLine: String($0), sessionID: sessionID) }
 
