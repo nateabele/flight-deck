@@ -120,7 +120,7 @@ final class SessionStore: ObservableObject {
             )
         }
 
-        let restoredIDs = Set(repos.flatMap(\.sessions).map(\.id))
+        let restoredIDs = repos.flatMap(\.sessions).map(\.id)
         selectedSessionID = snapshot.selectedSessionID.flatMap {
             restoredIDs.contains($0) ? $0 : nil
         } ?? restoredIDs.first
