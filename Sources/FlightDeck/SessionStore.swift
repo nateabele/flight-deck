@@ -339,6 +339,14 @@ final class SessionStore: ObservableObject {
             }
         }
         guard next != statuses else { return }
+        // A session that HAD a status and no longer does means its `claude` exited.
+        // Drop its sub-agent count too, so a later process reusing the same session
+        // UUID does not inherit a count from the dead one. Counts for sessions that
+        // never had a status are deliberately left alone — that is the
+        // count-arrives-before-registry case.
+        for id in statuses.keys where next[id] == nil {
+            subagentCounts.removeValue(forKey: id)
+        }
         statuses = next
     }
 
