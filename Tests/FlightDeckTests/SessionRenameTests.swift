@@ -28,17 +28,20 @@ final class SessionRenameTests: XCTestCase {
         XCTAssertEqual(store.title(of: id), "my session")
     }
 
-    func testRenameInjectsExactlyOneRenameCommand() {
+    /// The terminator must be CR, not LF. Return sends `\r`; `\n` is Ctrl+J, which Claude's
+    /// input bar inserts as a literal newline — the command shows up unsubmitted.
+    func testRenameInjectsExactlyOneRenameCommandTerminatedByCarriageReturn() {
         let (store, spy, id) = makeStore()
         store.rename(id, to: "my session")
-        XCTAssertEqual(spy.sent, ["/rename my session\n"])
+        XCTAssertEqual(spy.sent, ["/rename my session\r"])
+        XCTAssertFalse(spy.sent[0].contains("\n"), "LF would not submit the command")
     }
 
     func testRenameSanitizesBeforeInjecting() {
         let (store, spy, id) = makeStore()
         store.rename(id, to: "  bad\nname  ")
         XCTAssertEqual(store.title(of: id), "badname")
-        XCTAssertEqual(spy.sent, ["/rename badname\n"])
+        XCTAssertEqual(spy.sent, ["/rename badname\r"])
     }
 
     func testEmptyRenameIsIgnored() {
