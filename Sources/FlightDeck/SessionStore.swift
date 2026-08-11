@@ -8,7 +8,14 @@ import SwiftUI
 @MainActor
 final class SessionStore: ObservableObject {
     @Published private(set) var repos: [Repo] = []
-    @Published var selectedSessionID: UUID?
+    /// `didSet` persists every change, including one made through `SessionSidebar`'s
+    /// `List(selection:)` binding — the only way selection actually changes in
+    /// production, since that binding writes here directly rather than through
+    /// `selectSession(_:)`. `persist()` never re-assigns `selectedSessionID`, so this
+    /// cannot recurse.
+    @Published var selectedSessionID: UUID? {
+        didSet { persist() }
+    }
 
     /// Weak: the process-wide `GhosttyApp` is owned by the AppDelegate for the
     /// whole process; the Store must not co-own its lifetime.
