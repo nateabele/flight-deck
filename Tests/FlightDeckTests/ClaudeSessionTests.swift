@@ -19,6 +19,31 @@ final class ClaudeSessionTests: XCTestCase {
         )
     }
 
+    /// Verified against real `claude`: cwd `…/café-Ω-probe` produced `…-caf----probe`.
+    /// Swift's `isLetter` would have kept `é` and `Ω`; Claude does not.
+    func testEncodesNonASCIILettersAsDashes() {
+        XCTAssertEqual(
+            ClaudeSession.encodedProjectDirName(for: "/x/café-Ω-probe"),
+            "-x-caf----probe"
+        )
+    }
+
+    /// Verified against real `claude`: an astral-plane character becomes TWO dashes,
+    /// proving the replacement is per UTF-16 code unit, not per scalar.
+    func testEncodesAstralCharacterAsTwoDashes() {
+        XCTAssertEqual(
+            ClaudeSession.encodedProjectDirName(for: "/x/emo🎈dir"),
+            "-x-emo--dir"
+        )
+    }
+
+    func testKeepsASCIIAlphanumericsOnly() {
+        XCTAssertEqual(
+            ClaudeSession.encodedProjectDirName(for: "/a1/B2_c3.d"),
+            "-a1-B2-c3-d"
+        )
+    }
+
     func testTranscriptURLJoinsDirAndSessionID() {
         let root = URL(fileURLWithPath: "/root", isDirectory: true)
         let url = ClaudeSession.transcriptURL(
