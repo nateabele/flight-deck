@@ -1194,9 +1194,14 @@ final class FlagDiagnosticsTests: XCTestCase {
         XCTAssertTrue(diagnostics.contains { $0.message.contains("--worktree") })
     }
 
-    func testTmuxWithWorktreeIsClean() {
+    /// `--tmux --worktree` satisfies the pairing rule, so that warning goes quiet — but the
+    /// working-directory consequence still applies, and applies most in exactly this case.
+    func testTmuxWithWorktreeStillWarnsAboutTheWorkingDirectory() {
         let flags = FlagSet(values: ["--tmux": .on, "--worktree": .on])
-        XCTAssertTrue(FlagDiagnostics.validate(flags).isEmpty)
+        let diagnostics = FlagDiagnostics.validate(flags)
+        XCTAssertEqual(diagnostics.count, 1)
+        XCTAssertTrue(diagnostics[0].message.contains("working directory"))
+        XCTAssertFalse(diagnostics.contains { $0.message.contains("requires --worktree") })
     }
 
     func testSkipPermissionsWarns() {
