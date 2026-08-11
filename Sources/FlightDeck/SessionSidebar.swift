@@ -21,6 +21,7 @@ private struct SessionRow: View {
                     .onChange(of: focused) { if !$1 { commit() } }
             } else {
                 Text(session.title)
+                    .accessibilityIdentifier("session-row-title")
                     .onTapGesture(count: 2) {
                         draft = session.title
                         isEditing = true
