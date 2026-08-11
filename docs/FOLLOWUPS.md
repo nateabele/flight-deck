@@ -46,3 +46,36 @@ a shell), which is complete and verified. These are for the phases that follow.
 
 - `scripts/build-libghostty.sh`: add `-f`/`-fS` to the `curl` download (bad HTTP responses are
   already caught by the subsequent `shasum -c`, just less directly).
+
+## Deferred from session name sync (2026-08-11)
+
+Reviewed, real, and deliberately not fixed on that branch. Rulings recorded so the next
+reader doesn't re-derive them.
+
+- **`TranscriptWatcher` polls at 2 Hz forever when `claude` never runs**, with no backoff or
+  cap. Negligible today — it is a `stat` of a nonexistent path — but worth a cap if session
+  counts grow.
+- **Actor-isolation inconsistency across the seams.** `TextInjecting` and `SessionPersisting`
+  are `@MainActor`; `SurfaceProvider` is not. `TranscriptWatcher` also calls `@MainActor
+  drain()` synchronously from a non-isolated `@Sendable` timer handler — dynamically correct
+  (the queue *is* `.main`) but it only compiles because of `SWIFT_VERSION: "5.0"` above. This
+  is Swift-6-migration work, not a defect in the feature.
+- **`testRestoreSelectsFirstSurvivingSessionWhenSelectionIsDropped` is a weak regression
+  guard.** It pins that restore's selection fallback uses an ordered collection rather than a
+  `Set`, but with two survivors a regression to `Set` would still pass roughly half the time
+  (Swift's hash seed is per-process). Adding survivors only moves the odds; if it is ever
+  revisited, assert the full restored ordering instead.
+- **`SessionStore.selectSession(_:)` has no production caller.** The sidebar's
+  `List(selection:)` binds `selectedSessionID` directly, and persistence now hangs off that
+  property's `didSet`. The method is still exercised by `SessionStoreTests`; left in place
+  rather than deleted, but it is dead weight if nothing adopts it.
+- **`CLAUDE_CODE_CHILD_SESSION` in the inherited environment turns transcript saving off**,
+  which silently kills inbound rename sync — the watcher tails a file that is never written.
+  Claude Code sets this marker for nested sessions; a `claude` inheriting it prints
+  *"Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker"* in its status
+  line. Launching Flight Deck from Finder / `/Applications` gives a clean LaunchServices
+  environment, so this does not bite in normal use — but launching it from a terminal that
+  is itself inside a Claude Code session does. If inbound sync ever looks dead, check that
+  status line first. `Ghostty.SurfaceConfiguration` exposes `environmentVariables`, so the
+  defensive fix (clear the marker for spawned sessions) is available if this proves to be
+  more than a development-time footgun.

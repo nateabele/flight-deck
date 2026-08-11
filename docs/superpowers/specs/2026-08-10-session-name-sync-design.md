@@ -20,8 +20,10 @@ inferred from docs. They replace the speculative material in the handoff.
 |---|---|---|
 | Bind a session to its transcript | `claude --session-id <uuid>` accepts a caller-chosen UUID | CONFIRMED (`claude --help`) |
 | Set a name at launch | `claude -n/--name <name>` | CONFIRMED (`claude --help`) |
+| Reattach to a conversation | `claude -r/--resume <session-id>` restores it across processes | CONFIRMED (round-trip test) |
+| Resume of a missing transcript | exits `1`, so a `\|\|` shell fallback fires | CONFIRMED (exit-code test) |
 | Transcript location | `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` | CONFIRMED |
-| cwd encoding | every non-alphanumeric character → `-`, one-for-one, no collapsing (`/private/tmp/x/-Users-nate` → `-private-tmp-x--Users-nate`) | CONFIRMED |
+| cwd encoding | every non-`[0-9A-Za-z]` **UTF-16 code unit** → `-`, one-for-one, no collapsing | CONFIRMED |
 | Rename record shape | a JSONL line `{"type":"custom-title","customTitle":"<name>","sessionId":"<uuid>"}` | CONFIRMED |
 | Rename push notification (hook/env) | none exists — must watch the transcript | CONFIRMED |
 | OSC title carrying the name | not needed; the transcript path is strictly better | dropped from scope |
@@ -50,24 +52,48 @@ No I/O, no state. Two responsibilities:
 
 Kept pure so the encoding rule and the parse are unit-testable without a filesystem.
 
-**Path robustness.** The encoding rule is confirmed for alphanumerics, `/`, `.`, and `-`, but
-not for every possible character (e.g. `_`). So the computed path is a *hypothesis*: if the
-file is absent when the watcher starts, fall back to a single bounded scan of
-`~/.claude/projects/*/<uuid>.jsonl`. The UUID is unique, so the fallback is unambiguous.
+**The encoding rule, exactly.** Replace every UTF-16 code unit that is not an ASCII
+alphanumeric (`0-9`, `A-Z`, `a-z`) with `-`. Runs are not collapsed.
+
+This is narrower than it first appears, and getting it wrong is silent. Swift's
+`Character.isLetter` is Unicode-aware and would keep `é`, `Ω`, and CJK characters —
+Claude does not. Verified by creating real sessions and reading back the directories
+Claude created:
+
+| cwd | directory Claude created |
+|---|---|
+| `…/scratchpad/café-Ω-probe` | `…-scratchpad-caf----probe` |
+| `…/scratchpad/emo🎈dir` | `…-scratchpad-emo--dir` |
+
+The emoji becoming **two** dashes is the decisive case: the replacement is per UTF-16
+code unit, so a surrogate pair yields two dashes. That matches a JavaScript
+`.replace(/[^a-zA-Z0-9]/g, '-')` without the `u` flag.
+
+Getting this wrong doesn't crash — it computes a path that doesn't exist, and inbound
+sync just never fires. That failure is invisible, which is why it is pinned by test
+rather than left to inference.
 
 ### 3.2 `TranscriptWatcher` — inbound (new file)
 
-Owns one session's transcript file. Watches with a `DispatchSource` file-system monitor,
-reading only the bytes appended since the last offset, and emits the **last** `customTitle`
-seen in that batch via a callback on the main actor.
+Owns one session's transcript file. Polls on a 500 ms main-queue timer, reading only the
+bytes appended since the last offset, and emits the **last** `customTitle` seen in that
+batch via a callback on the main actor. Polling rather than a filesystem event source
+keeps it synchronous and testable: `drain()` is callable directly, so tests need no
+expectations.
 
-Because `claude` creates the file slightly after launch, the watcher starts in a
-"waiting" state watching the parent directory, then promotes itself to watching the file once
-it appears.
+Three details here are load-bearing rather than incidental, each pinned by a test:
 
-Failure is non-fatal by design: if the file never appears (e.g. `claude` is not running), the
-watcher stays idle and the name remains a plain local label — exactly the behaviour agreed in
-handoff §5.
+- **It tails from the end, not the beginning.** On the first successful open of an
+  existing file the offset is seeded to the file's current size. Without this a
+  *restored* session replays its whole previous transcript on the first tick: the last
+  `custom-title` from the old run clobbers the just-restored title — so quitting the app
+  could silently undo a rename — and parsing tens of MB of JSONL on the main thread
+  stalls startup, once per restored session.
+- **It consumes only through the last newline.** `claude` appends while we read, so a
+  tick can land mid-write. Leaving the trailing partial line unread lets the next tick
+  see it whole; consuming it would drop that rename permanently.
+- **A missing file is silence, not an error.** It means `claude` isn't running in that
+  pane, and the name stays a plain local label — the behaviour agreed in handoff §5.
 
 ### 3.3 `SessionStore` — the sync spine
 
@@ -99,6 +125,39 @@ Double-click a row → the `Text` becomes a `TextField`. Enter or blur commits; 
 an empty or whitespace-only value reverts to the previous title. The field carries
 `accessibilityIdentifier("session-title-field")` for UITests, alongside the existing
 `close-session` / `new-session` identifiers.
+
+### 3.5 `SessionPersistence` — surviving relaunch
+
+Sessions persist so every tab returns after a restart, each reattached to its own Claude
+conversation. This falls out of the same decision that enables sync: because *we* choose
+the session UUID and persist it, restore is just `--resume <that id>`.
+
+A `SessionSnapshot: Codable` holds the ordered sessions (`id`, `title`,
+`workingDirectory`), the selection, and the session counter — the counter so a newly
+created session cannot reuse a restored session's number. Repos are *derived* from
+`workingDirectory`, so only sessions are stored and the grouping rebuilds on load.
+
+Storage is behind a `SessionPersisting` protocol (same seam style as `SurfaceProvider`
+and `TextInjecting`), with a `UserDefaults` implementation and an in-memory fake for
+tests. It writes to the app's standard defaults domain, which `scripts/smoke.sh:14`
+already wipes via `defaults delete dev.flightdeck.FlightDeck` — so the UITest gate stays
+hermetic with no new plumbing.
+
+Saving happens on every mutation rather than at terminate, so a crash cannot lose the
+list. The list is a handful of small structs; the cost is irrelevant.
+
+Two degradations, both deliberate:
+
+- A session whose `workingDirectory` no longer exists is **dropped** on restore rather
+  than resurrected as a broken terminal.
+- A session whose transcript has been deleted or pruned still returns: the restore
+  command is `claude --resume <id> || claude --session-id <id> --name '<title>'`, so it
+  comes back as a fresh conversation with the right id and name instead of a dead pane
+  showing a resume error. This relies on `--resume` exiting non-zero, which is confirmed
+  in §2.
+
+Closing a session removes it from the snapshot. It does **not** delete the underlying
+Claude transcript — closing a tab is not deleting a conversation.
 
 ## 4. Data flow
 
@@ -145,7 +204,8 @@ Enter, assert the row shows it.
 
 ## 7. Explicitly out of scope
 
-- Persisting names across relaunch — sessions remain in-memory, per the foundation spec.
+- Restoring terminal *scrollback*. `--resume` restores the conversation; the pane starts
+  with a fresh screen.
 - OSC/terminal-title plumbing and the `action_cb` no-op in `docs/FOLLOWUPS.md`.
 - Reading or writing `sessions-index.json`.
 - Non-Claude programs in the terminal; per handoff §5 we assume `claude`, and degrade to a

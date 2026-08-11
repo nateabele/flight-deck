@@ -8,7 +8,9 @@ struct RootView: View {
 
     init(ghostty: GhosttyApp?) {
         // StateObject's autoclosure runs exactly once, so the seed happens once.
-        _store = StateObject(wrappedValue: SessionStore(ghostty: ghostty))
+        // See SessionStore.init(ghostty:resetState:) for why UITests need this.
+        let resetState = UserDefaults.standard.bool(forKey: "FlightDeckResetState")
+        _store = StateObject(wrappedValue: SessionStore(ghostty: ghostty, resetState: resetState))
     }
 
     var body: some View {
