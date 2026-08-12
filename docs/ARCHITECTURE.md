@@ -7,16 +7,18 @@ full design and the reasoning, see the [design spec](superpowers/specs/2026-07-0
 
 ```
 FlightDeckApp (@main SwiftUI App)
-  └─ RootWindow (Scene / WindowGroup)
-       └─ TerminalContainer (NSViewRepresentable)
-            ├─ owns/retains → GhosttyApp            (libghostty bring-up, hand-written)
-            └─ hosts        → Ghostty.SurfaceView   (adapted Ghostty AppKit surface)
-                                 └─ links → GhosttyKit.xcframework (libghostty C API)
+  ├─ SessionStore (source of truth)
+  │   ├─ owns/retains → Ghostty.SurfaceView (per session)
+  │   └─ weak ref    → GhosttyApp.shared (libghostty)
+  └─ RootWindow (Scene / Window)
+       └─ RootView (NavigationSplitView)
+            └─ TerminalPane (NSViewRepresentable)
+                 └─ hosts → Ghostty.SurfaceView (from SessionStore)
 ```
 
 - **`FlightDeckApp.swift`** — `@main`, just declares the scene.
-- **`RootWindow.swift`** — a `WindowGroup` rendering `TerminalContainer` at `NSHomeDirectory()`.
-- **`TerminalContainer.swift`** — the SwiftUI↔AppKit bridge. Its `Coordinator` holds a **strong reference to one `GhosttyApp`** for the view's lifetime (if the app deallocates, its `ghostty_app_t` is freed and the surface dies), builds a `SurfaceConfiguration` with `command = ShellResolver.resolve()` and `workingDirectory`, creates the surface via `GhosttyApp.makeSurfaceView(baseConfig:)`, and kicks an initial `tick()`.
+- **`RootWindow.swift`** — a `Window` (not a `WindowGroup` — that would claim ⌘N) rendering `RootView`.
+- **`TerminalPane.swift`** — the SwiftUI↔AppKit bridge. It hosts whichever surface `SessionStore` has selected: `updateNSView` detaches any surface that isn't the current selection (the Store keeps it retained, so its shell keeps running off-screen) and re-parents the selected one into a `TerminalHostView` rather than recreating it, so tab switching doesn't restart the shell. `TerminalHostView` is an `NSView` subclass that forwards frame changes to `Ghostty.SurfaceView.sizeDidChange(_:)`, which is what makes the terminal grid reflow on resize.
 - **`ShellResolver.swift`** — pure helper: `SHELL` env → `/bin/zsh` fallback. TDD'd (`Tests/FlightDeckTests`).
 
 ## The reuse boundary: `Sources/FlightDeck/GhosttyEmbed/`
@@ -49,9 +51,16 @@ Net: **~97% of `GhosttyEmbed/` is reused Ghostty code**; the Flight-Deck-authore
 
 ## Runtime model
 
-- **Tick loop:** `libghostty` only advances when `ghostty_app_tick` is called. `GhosttyApp`'s `wakeup` callback does `DispatchQueue.main.async { tick() }` (thread-safe), and `TerminalContainer` kicks an initial tick so the first frame renders.
-- **Retention:** one `GhosttyApp` per `TerminalContainer` (per view), held by the Coordinator. **This is the thing to change before multi-window/multi-session** — see the teardown-lifetime item in [FOLLOWUPS.md](FOLLOWUPS.md).
+- **Tick loop:** `libghostty` only advances when `ghostty_app_tick` is called. `GhosttyApp`'s `wakeup` callback does `DispatchQueue.main.async { tick() }` (thread-safe), and `TerminalPane` kicks an initial tick so the first frame renders.
+- **Retention:** one process-wide `GhosttyApp.shared`, held **weakly** by `SessionStore` (the store must not co-own a static that already owns itself for the life of the process). **This is the thing to change before multi-window/multi-session** — see the teardown-lifetime item in [FOLLOWUPS.md](FOLLOWUPS.md).
 - **Shell launch:** the surface's PTY forks `ShellResolver.resolve()` in the working directory (verified: `FlightDeck → /usr/bin/login → -/bin/zsh`).
+- **Surface sizing:** `TerminalPane`'s container is a `TerminalHostView`, an `NSView` subclass
+  that forwards frame changes to `Ghostty.SurfaceView.sizeDidChange(_:)` — the call that
+  reaches `ghostty_surface_set_size`. It exists because that method's upstream caller lives in
+  the `SurfaceScrollView`/SwiftUI wrapper this app dropped during decoupling, so without the
+  hook nothing calls it and the terminal never reflows. `updateNSView` reports the size on
+  every update, not just on attach: re-parenting is how tab switching works, so a surface last
+  shown at a different window size would otherwise carry a stale grid.
 
 ## Preferences
 
@@ -118,6 +127,18 @@ Sidebar rows show what each Claude session is doing. Two sources feed one map:
 
 Full field shapes, the decompiled status derivation, and accepted limitations are in
 `docs/superpowers/specs/2026-08-11-session-status-indicators-design.md`.
+
+## Tab navigation
+
+⌘⇧[ / ⌘⇧] move the selection along `repos.flatMap(\.sessions)` — the sidebar's visual order
+flattened across project sections — wrapping at both ends. `SessionStore.selectNextSession()` /
+`selectPreviousSession()` are the entry points; the wraparound algorithm lives in the private `cycleSelection(forward:)`. `TabNavigationCommands` supplies the Window-menu items.
+
+The menu items are the *mechanism*, not decoration. AppKit gives the Ghostty surface's
+`performKeyEquivalent` first refusal, and libghostty binds both shortcuts by default — but as
+`consumed`-only bindings, which `MenuKeyEquivalents` routes to the main menu first. Before this
+feature the keys were claimed by the surface and the resulting `previous_tab`/`next_tab` action
+went nowhere.
 
 ## Not yet built (design, not code)
 
