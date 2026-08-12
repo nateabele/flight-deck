@@ -18,6 +18,18 @@ struct FlagEditor: View {
 
     @State private var tail: String = ""
     @State private var parseDiagnostics: [Diagnostic] = []
+    /// Non-nil while the confirmation alert for a `requiresConfirmation` flag is up. Set by
+    /// `binding(for:).set` when it intercepts an enabling write instead of applying it.
+    @State private var pendingDangerousFlag: FlagSpec?
+
+    /// Flags that silently widen what every future session may do without asking — gated by
+    /// an extra confirmation in `binding(for:)` on top of `FlagDiagnostics.validate`'s
+    /// persistent inline warning for the same flag. Deliberately does NOT gate the command
+    /// field's text → controls path (`applyTextToControls`): that field is the explicit,
+    /// expert entry point, and it round-trips whatever the controls hold, so intercepting a
+    /// typed `--dangerously-skip-permissions` there would break the invariant that committing
+    /// the field always reflects the model faithfully. Only a control-driven enable prompts.
+    private static let requiresConfirmation: Set<String> = ["--dangerously-skip-permissions"]
 
     private var effective: FlagSet {
         guard let inherited else { return flags }
@@ -100,6 +112,25 @@ struct FlagEditor: View {
         // view's own setters, which already call `syncTextFromControls()` themselves.
         .onChange(of: flags) { _, _ in syncTextFromControls() }
         .onChange(of: inherited) { _, _ in syncTextFromControls() }
+        .alert(
+            "Skip all permission checks?",
+            isPresented: Binding(
+                get: { pendingDangerousFlag != nil },
+                set: { if !$0 { pendingDangerousFlag = nil } }
+            ),
+            presenting: pendingDangerousFlag
+        ) { spec in
+            Button("Cancel", role: .cancel) { pendingDangerousFlag = nil }
+            Button("Enable", role: .destructive) {
+                // Same set/sync/clear sequence as a normal `binding(for:).set` — routed
+                // through `apply(_:for:)` directly rather than back through `binding(for:)`
+                // itself, which would re-enter the gate above and re-present this alert.
+                apply(.on, for: spec)
+                pendingDangerousFlag = nil
+            }
+        } message: { _ in
+            Text("Every new session will bypass all permission checks and act without asking. Recommended only for sandboxes with no internet access.")
+        }
     }
 
     private func specs(in section: FlagSpec.Section) -> [FlagSpec] {
@@ -113,20 +144,37 @@ struct FlagEditor: View {
         Binding(
             get: { flags.values[spec.canonical] },
             set: { newValue in
-                if let newValue {
-                    flags.values[spec.canonical] = newValue
-                } else {
-                    flags.values.removeValue(forKey: spec.canonical)
+                // Gate BEFORE any mutation: turning a `requiresConfirmation` flag on parks
+                // the pending spec and returns without touching `flags`, so the model is
+                // untouched until the alert's own Enable button applies it. Turning the flag
+                // back off (`newValue == nil`) is never gated — only the enabling direction
+                // silently widens what future sessions may do.
+                if newValue != nil, Self.requiresConfirmation.contains(spec.canonical) {
+                    pendingDangerousFlag = spec
+                    return
                 }
-                syncTextFromControls()
-                // Same reasoning as `onRevert`: a control edit genuinely makes any earlier
-                // parse note stale, so this call site owns the clear explicitly rather than
-                // relying on `syncTextFromControls` to do it as a side effect (that side
-                // effect would also fire from `.onChange(of: flags)` and wipe a commit's own
-                // warnings — see `applyTextToControls`).
-                parseDiagnostics = []
+                apply(newValue, for: spec)
             }
         )
+    }
+
+    /// The set/sync/clear sequence `binding(for:).set` performs once past the confirmation
+    /// gate above. Factored out so the alert's Enable button can apply the exact same
+    /// mutation without calling back into `binding(for:)` itself, which would re-enter (and
+    /// re-trigger) the gate.
+    private func apply(_ newValue: FlagValue?, for spec: FlagSpec) {
+        if let newValue {
+            flags.values[spec.canonical] = newValue
+        } else {
+            flags.values.removeValue(forKey: spec.canonical)
+        }
+        syncTextFromControls()
+        // Same reasoning as `onRevert`: a control edit genuinely makes any earlier
+        // parse note stale, so this call site owns the clear explicitly rather than
+        // relying on `syncTextFromControls` to do it as a side effect (that side
+        // effect would also fire from `.onChange(of: flags)` and wipe a commit's own
+        // warnings — see `applyTextToControls`).
+        parseDiagnostics = []
     }
 
     /// controls → text, immediate. Serializes `effective`, not `flags` alone: in the Claude
