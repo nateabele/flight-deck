@@ -11,7 +11,10 @@ final class ConversationRepinTests: XCTestCase {
         return store
     }
 
-    private func row(_ sid: UUID, pid: pid_t = 1, cwd: String = "/w",
+    // `cwd` has no default: every session here is created `in: tmp`, and `applyRegistry`
+    // now moves a tab whenever a row's `cwd` disagrees with it, so a fixture-wide stand-in
+    // like `"/w"` would silently relocate every tab in this file on its first tick.
+    private func row(_ sid: UUID, pid: pid_t = 1, cwd: String,
                      procStart: String = "start-a") -> ClaudeStatusFile.Entry {
         .init(pid: pid, sessionID: sid, activity: .busy, waitingFor: nil,
               startedAt: 1, cwd: cwd, procStart: procStart)
@@ -24,7 +27,7 @@ final class ConversationRepinTests: XCTestCase {
         let session = store.newSession(in: tmp)
         let resumed = UUID()
 
-        // cwd pinned to `tmp` on both rows: this test isolates a repin with no working
+        // Both rows keep `cwd` at `tmp`: this test isolates a repin with no working
         // directory change. `SessionProjectMoveTests` covers the cwd-changes case.
         store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])   // anchor
         store.applyRegistry([1: row(resumed, cwd: tmp.path)])                        // /resume
@@ -39,8 +42,8 @@ final class ConversationRepinTests: XCTestCase {
         let session = store.newSession(in: tmp)
         let resumed = UUID()
 
-        store.applyRegistry([1: row(session.pinnedConversationID)])
-        store.applyRegistry([1: row(resumed)])
+        store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])
+        store.applyRegistry([1: row(resumed, cwd: tmp.path)])
 
         XCTAssertEqual(store.title(of: session.id), "the resumed conversation")
     }
@@ -51,8 +54,8 @@ final class ConversationRepinTests: XCTestCase {
         let session = store.newSession(in: tmp)
         let before = store.title(of: session.id)
 
-        store.applyRegistry([1: row(session.pinnedConversationID)])
-        store.applyRegistry([1: row(UUID())])
+        store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])
+        store.applyRegistry([1: row(UUID(), cwd: tmp.path)])
 
         XCTAssertEqual(store.title(of: session.id), before)
     }
@@ -63,9 +66,9 @@ final class ConversationRepinTests: XCTestCase {
         let store = makeStore()
         let session = store.newSession(in: tmp)
 
-        store.applyRegistry([1: row(session.pinnedConversationID)])
+        store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])
         store.applySubagentCount(session.id, 3)
-        store.applyRegistry([1: row(UUID())])
+        store.applyRegistry([1: row(UUID(), cwd: tmp.path)])
 
         XCTAssertEqual(store.status(for: session.id)?.subagentCount, 0)
     }
@@ -77,8 +80,8 @@ final class ConversationRepinTests: XCTestCase {
         store.notifier = spy
         let session = store.newSession(in: tmp)
 
-        store.applyRegistry([1: row(session.pinnedConversationID)])
-        store.applyRegistry([1: row(UUID())])
+        store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])
+        store.applyRegistry([1: row(UUID(), cwd: tmp.path)])
 
         XCTAssertTrue(spy.withdrawn.contains(session.id))
     }
@@ -90,8 +93,8 @@ final class ConversationRepinTests: XCTestCase {
         let session = store.newSession(in: tmp)
         let resumed = UUID()
 
-        store.applyRegistry([1: row(session.pinnedConversationID)])
-        store.applyRegistry([1: row(resumed)])
+        store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])
+        store.applyRegistry([1: row(resumed, cwd: tmp.path)])
 
         XCTAssertEqual(
             persistence.stored?.sessions.first?.pinnedConversationID, resumed
@@ -106,9 +109,9 @@ final class ConversationRepinTests: XCTestCase {
         store.titleResolver = { _, done in resolverCalls += 1; done(nil) }
         let session = store.newSession(in: tmp)
 
-        store.applyRegistry([1: row(session.pinnedConversationID)])
-        store.applyRegistry([1: row(session.pinnedConversationID)])
-        store.applyRegistry([1: row(session.pinnedConversationID)])
+        store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])
+        store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])
+        store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])
 
         XCTAssertEqual(resolverCalls, 0)
     }
@@ -122,8 +125,8 @@ final class ConversationRepinTests: XCTestCase {
         store.titleResolver = { _, done in pending = done }
         let session = store.newSession(in: tmp)
 
-        store.applyRegistry([1: row(session.pinnedConversationID)])   // anchor
-        store.applyRegistry([1: row(UUID())])                        // /resume, resolver now pending
+        store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])   // anchor
+        store.applyRegistry([1: row(UUID(), cwd: tmp.path)])                        // /resume, resolver now pending
         store.closeSession(session.id)
         pending?("a title that arrives too late")
 
