@@ -91,11 +91,18 @@ final class TabNavigationTests: XCTestCase {
         XCTAssertEqual(store.selectedSessionID, ids[3])
     }
 
-    func testASelectionNamingAMissingSessionIsTreatedAsNoSelection() {
+    func testASelectionNamingAMissingSessionIsTreatedAsNoSelectionGoingForward() {
         let (store, ids) = makeStore()
         store.selectedSessionID = UUID()
         store.selectNextSession()
         XCTAssertEqual(store.selectedSessionID, ids[0])
+    }
+
+    func testASelectionNamingAMissingSessionIsTreatedAsNoSelectionGoingBackward() {
+        let (store, ids) = makeStore()
+        store.selectedSessionID = UUID()
+        store.selectPreviousSession()
+        XCTAssertEqual(store.selectedSessionID, ids[3])
     }
 
     /// `moveSession` deliberately leaves an emptied source project standing, so the first
