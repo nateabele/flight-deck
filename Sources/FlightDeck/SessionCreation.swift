@@ -8,13 +8,16 @@ enum SessionCreateAction: Equatable {
     /// Pick or accept a folder and create a session in it (⌘⇧A, folder drop).
     case addProject
 
-    /// ⌘N reroutes to Add Project when nothing is open.
+    /// ⌘N reroutes to Add Project when the sidebar is bare.
+    ///
+    /// Keyed on *projects*, not sessions: a project with no sessions in it is still
+    /// somewhere to put one, so ⌘N should create there rather than prompting for a folder.
     ///
     /// The menu item stays enabled in both states deliberately: a disabled `NSMenuItem`
     /// does not fire its key equivalent, so disabling New Session when empty would make ⌘N
     /// dead in exactly the state it needs to work.
-    static func forState(hasSessions: Bool) -> SessionCreateAction {
-        hasSessions ? .newSession : .addProject
+    static func forState(hasProjects: Bool) -> SessionCreateAction {
+        hasProjects ? .newSession : .addProject
     }
 
     /// A directory resolves to itself; anything else resolves to its parent, so dropping a

@@ -198,4 +198,57 @@ final class SessionCreationTests: XCTestCase {
         XCTAssertNil(store.acceptDroppedURLs([]))
         XCTAssertTrue(store.repos.isEmpty)
     }
+
+    /// The case the empty-project state creates: the remembered project has to survive its
+    /// last session leaving, or ⌘N lands somewhere arbitrary.
+    @MainActor
+    func testNewSessionTargetsTheLastActiveProjectEvenWhenItIsEmpty() {
+        let store = SessionStore(provider: nil, persistence: nil)
+        store.titleResolver = { _, done in done(nil) }
+        let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
+        store.moveSession(a.id, toProjectAt: URL(fileURLWithPath: "/b", isDirectory: true))
+        // /a is now an empty project, /b holds the session and is last-active.
+        store.selectedSessionID = nil
+
+        let created = store.createFromMenu(chooseFolder: { XCTFail("must not prompt"); return nil })
+
+        XCTAssertEqual(created?.workingDirectory, "/b")
+    }
+
+    @MainActor
+    func testLastActiveProjectFollowsAMovedSelectedSession() {
+        let store = SessionStore(provider: nil, persistence: nil)
+        store.titleResolver = { _, done in done(nil) }
+        let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
+        store.moveSession(a.id, toProjectAt: URL(fileURLWithPath: "/moved", isDirectory: true))
+
+        XCTAssertEqual(store.lastActiveProjectURL?.path, "/moved")
+    }
+
+    @MainActor
+    func testNilSelectionDoesNotForgetTheLastActiveProject() {
+        let store = SessionStore(provider: nil, persistence: nil)
+        _ = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
+
+        store.selectedSessionID = nil
+
+        XCTAssertEqual(store.lastActiveProjectURL?.path, "/a")
+    }
+
+    /// A sidebar holding only an empty project still offers New Session, not Add Project:
+    /// an empty project is somewhere to put a session.
+    @MainActor
+    func testOnlyAnEmptyProjectStillCreatesWithoutPrompting() {
+        let store = SessionStore(provider: nil, persistence: nil)
+        store.titleResolver = { _, done in done(nil) }
+        let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
+        store.moveSession(a.id, toProjectAt: URL(fileURLWithPath: "/b", isDirectory: true))
+        store.closeSession(a.id)
+        // /a survives as an empty project; /b was pruned by closeSession.
+        store.selectedSessionID = nil
+
+        let created = store.createFromMenu(chooseFolder: { XCTFail("must not prompt"); return nil })
+
+        XCTAssertNotNil(created)
+    }
 }
