@@ -24,8 +24,8 @@ Exact recorded versions: [TOOLING.md](TOOLING.md).
 git clone <flight-deck remote or path> flight-deck && cd flight-deck
 git submodule update --init            # checks out vendor/ghostty at pinned v1.3.1
 ./scripts/build-libghostty.sh          # ~10 min first run (builds libghostty from source)
-./scripts/build.sh                     # xcodegen generate + xcodebuild → FlightDeck.app
-open DerivedData/Build/Products/Debug/FlightDeck.app
+./scripts/build.sh                     # xcodegen generate + xcodebuild → "Flight Deck.app"
+open "DerivedData/Build/Products/Debug/Flight Deck.app"
 ```
 
 You should see a "Flight Deck" window with a live shell prompt.
@@ -36,6 +36,7 @@ You should see a "Flight Deck" window with a live shell prompt.
 |---|---|---|
 | `scripts/build-libghostty.sh` | Builds `libghostty` from the pinned submodule → stages `vendor/ghostty-artifacts/GhosttyKit.xcframework` | Downloads Zig 0.15.2 if missing; creates the `xcrun` SDK shim in `vendor/.build-shim/`; builds via the 15.4 SDK; `git clean`s the submodule after staging. Idempotent. Re-run only if the xcframework is missing or you re-pin Ghostty. |
 | `scripts/build.sh` | `export DEVELOPER_DIR` → `xcodegen generate` → `xcodebuild ... build` | Builds the app. Assumes the xcframework already exists (run `build-libghostty.sh` once first). |
+| `scripts/test-unit.sh` | Runs the headless unit test suite (`FlightDeckTests`) | The actually-working path for unit tests — see below. Needs the xcframework staged first, same as `build.sh`. |
 | `scripts/smoke.sh` | Clears saved window state → `build.sh` → `xcodegen generate` → runs the UI smoke test → prints `SMOKE PASS` | See "One-time UI-automation grant" below. |
 
 ## Running tests
@@ -43,10 +44,8 @@ You should see a "Flight Deck" window with a live shell prompt.
 **Unit tests** (fast, no special permission):
 
 ```bash
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  xcodebuild -project FlightDeck.xcodeproj -scheme FlightDeck \
-  -destination 'platform=macOS' test -only-testing:FlightDeckTests
-# → 3/3 ShellResolverTests pass
+./scripts/test-unit.sh
+# → all FlightDeckTests pass (count grows over time; see the script's own output)
 ```
 
 **Smoke test** (launches the app, asserts the window renders):
@@ -75,6 +74,18 @@ TCC grant, so subsequent `smoke.sh` runs (and CI, if the machine is pre-authoriz
   (`./scripts/build-libghostty.sh`) or `OTHER_LDFLAGS: -lstdc++` was removed from `project.yml`.
 - **Swift 6 concurrency errors in `GhosttyEmbed/`** — `SWIFT_VERSION` must be `"5.0"` (see
   ARCHITECTURE.md / FOLLOWUPS.md); the vendored Ghostty code isn't Swift-6 strict-concurrency clean.
+
+## Worktrees
+
+A fresh git worktree of this repo cannot build until `vendor/ghostty-artifacts/` is
+populated — it is git-ignored, so a new worktree has no `GhosttyKit.xcframework` and
+`xcodebuild` fails at framework linking before compiling any Swift. Either run
+`scripts/build-libghostty.sh` in the worktree, or create `vendor/ghostty-artifacts/` as a
+real directory and symlink `GhosttyKit.xcframework` into it from the main checkout. Note
+it must be a real directory with the framework symlinked *inside* — a symlink at
+`vendor/ghostty-artifacts` itself is not matched by the trailing-slash `.gitignore`
+pattern and shows up as untracked. When the framework is a cross-checkout symlink,
+`xcodebuild` needs to resolve outside the worktree, so a sandboxed shell will block it.
 
 ## Limitations (build reproducibility)
 

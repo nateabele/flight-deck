@@ -11,16 +11,29 @@ final class TranscriptWatcher {
     private let sessionID: UUID
     private let url: URL
     private let onTitle: (String) -> Void
+    private let onSubagentCount: (Int) -> Void
+
+    /// Outstanding top-level `Agent` tool_use ids. Cleared at every turn boundary, which
+    /// is what makes a miscount from attaching mid-turn self-correcting rather than
+    /// permanent.
+    private var outstandingAgents: Set<String> = []
 
     private var offset: UInt64 = 0
     /// Whether `offset` has been seeded to the file's size yet. See `drain()`.
     private var hasSeekedToEnd = false
     private var timer: DispatchSourceTimer?
 
-    init(sessionID: UUID, url: URL, onTitle: @escaping (String) -> Void) {
+    /// `onSubagentCount` defaults to a no-op so title-only call sites are unaffected.
+    init(
+        sessionID: UUID,
+        url: URL,
+        onTitle: @escaping (String) -> Void,
+        onSubagentCount: @escaping (Int) -> Void = { _ in }
+    ) {
         self.sessionID = sessionID
         self.url = url
         self.onTitle = onTitle
+        self.onSubagentCount = onSubagentCount
     }
 
     deinit { timer?.cancel() }
@@ -77,10 +90,29 @@ final class TranscriptWatcher {
         let consumed = data.distance(from: data.startIndex, to: lastNewline) + 1
         offset += UInt64(consumed)
 
-        let titles = String(decoding: data[..<lastNewline], as: UTF8.self)
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .compactMap { ClaudeSession.customTitle(inLine: String($0), sessionID: sessionID) }
+        var lastTitle: String?
+        var countChanged = false
 
-        if let last = titles.last { onTitle(last) }
+        for raw in String(decoding: data[..<lastNewline], as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: true) {
+            for event in ClaudeSession.events(inLine: String(raw), sessionID: sessionID) {
+                switch event {
+                case .title(let title):
+                    lastTitle = title
+                case .agentStarted(let id):
+                    if outstandingAgents.insert(id).inserted { countChanged = true }
+                case .agentFinished(let id):
+                    if outstandingAgents.remove(id) != nil { countChanged = true }
+                case .turnEnded:
+                    if !outstandingAgents.isEmpty {
+                        outstandingAgents.removeAll()
+                        countChanged = true
+                    }
+                }
+            }
+        }
+
+        if let lastTitle { onTitle(lastTitle) }
+        if countChanged { onSubagentCount(outstandingAgents.count) }
     }
 }

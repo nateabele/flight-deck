@@ -88,6 +88,37 @@ rejected, so a `claude` release that adds a flag does not make the field lossy.
 - `vendor/.zig-toolchain/` — Zig 0.15.2 (auto-downloaded by the build script).
 - `vendor/.build-shim/` — the `xcrun` SDK shim (recreated by the build script).
 
+## Session status pipeline
+
+Sidebar rows show what each Claude session is doing. Two sources feed one map:
+
+```
+~/.claude/sessions/<pid>.json ──> SessionStatusWatcher ──┐
+  (Claude's own status registry,   (one per app, 500ms    │
+   polled; see the design spec)     poll, keyed by         ├──> SessionStore.statuses
+                                    sessionId)             │      [UUID: SessionStatus]
+<transcript>.jsonl ──────────────> TranscriptWatcher ─────┘             │
+  (outstanding Agent tool_use ids,  (one per session)                   v
+   cleared at each turn boundary)                              SessionStatusIcon
+                                                               SessionNotifier
+```
+
+- **`ClaudeStatusFile`** — pure decode of one registry file. Fails closed: an unknown
+  `status`, a torn read, or a pid/filename mismatch all yield nil, and the watcher keeps
+  its last known value. The registry is undocumented and unversioned, so this is the
+  compatibility boundary.
+- **`SessionStatusWatcher`** — polls rather than watching vnodes because `claude` rewrites
+  the file in place with no create/rename, so a directory watch would never fire.
+- **`SessionStore`** — merges registry activity with transcript-derived sub-agent counts,
+  drops sessions Flight Deck does not own, and runs `SessionNotificationPolicy` on each
+  transition.
+- **`SessionNotifier`** — behind the `Notifying` protocol, because
+  `UNUserNotificationCenter.current()` traps outside a signed bundle and would take the
+  unit-test bundle down.
+
+Full field shapes, the decompiled status derivation, and accepted limitations are in
+`docs/superpowers/specs/2026-08-11-session-status-indicators-design.md`.
+
 ## Not yet built (design, not code)
 
 Harness adapters, the shared code index, the context engine, and the sidebar are **design only** so far — see the [spec](superpowers/specs/2026-07-09-flight-deck-design.md) §1–§9. Nothing in the current codebase implements them.

@@ -1,4 +1,5 @@
 // Sources/FlightDeck/SessionStore.swift
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -8,6 +9,12 @@ import SwiftUI
 @MainActor
 final class SessionStore: ObservableObject {
     @Published private(set) var repos: [Repo] = []
+
+    /// Live activity per session, merged from two sources: the status registry supplies
+    /// `activity`/`waitingFor`, the transcript watchers supply `subagentCount`.
+    /// A session with no entry is absent from the map — that renders no icon, which is
+    /// deliberately distinct from `.idle`.
+    @Published private(set) var statuses: [UUID: SessionStatus] = [:]
     /// `didSet` persists every change, including one made through `SessionSidebar`'s
     /// `List(selection:)` binding — the only way selection actually changes in
     /// production, since that binding writes here directly rather than through
@@ -31,6 +38,14 @@ final class SessionStore: ObservableObject {
     /// Injectable so tests can point at a temp directory.
     var projectsRoot: URL = ClaudeSession.defaultProjectsRoot
 
+    /// Injectable so tests can point at a temp directory.
+    var sessionsRoot: URL = SessionStatusWatcher.defaultRoot
+
+    /// Sub-agent counts kept separately so one arriving before the registry has been
+    /// read is not lost, and so a registry refresh never clobbers it.
+    private var subagentCounts: [UUID: Int] = [:]
+    private var statusWatcher: SessionStatusWatcher?
+
     private var sessionCounter = 0
 
     private let persistence: SessionPersisting?
@@ -38,6 +53,13 @@ final class SessionStore: ObservableObject {
     /// Read at session-creation time only. Preferences configure *new* sessions; a
     /// running `claude` is never reconfigured, because its command line is already spent.
     private let preferences: PreferencesStore?
+
+    /// Test seam. Production sets this from the convenience init.
+    var notifier: Notifying?
+    /// Test seam for frontmost-ness; production reads `NSApplication`.
+    var appIsActive: () -> Bool = { NSApplication.shared.isActive }
+
+    private var activationObserver: NSObjectProtocol?
 
     init(
         provider: SurfaceProvider?,
@@ -47,21 +69,47 @@ final class SessionStore: ObservableObject {
         self.provider = provider
         self.persistence = persistence
         self.preferences = preferences
+        observeActivationRequests()
+    }
+
+    deinit {
+        if let activationObserver {
+            NotificationCenter.default.removeObserver(activationObserver)
+        }
     }
 
     /// `resetState` comes from the `-FlightDeckResetState YES` launch argument: `smoke.sh`
     /// wipes defaults once per run, but the UITest bundle launches the app once per test
     /// case, so a session persisted by an earlier case would otherwise survive into a later
     /// one and make tests order-dependent.
+    /// `notifier` is assigned before `startStatusWatching()` runs, deliberately: the
+    /// watcher's first drain is what can reach `deliverNotifications`, and that must never
+    /// see a nil notifier land on a live `waiting` session at launch. It happens to be
+    /// safe today even when the caller assigns `notifier` after construction (as
+    /// `FlightDeckApp.makeStore()` used to) — `startStatusWatching()`'s first fire is an
+    /// async main-queue hop that lands after this initializer returns — but that safety
+    /// is incidental to the timer's current implementation, not guaranteed by this
+    /// method's contract. Taking `notifier` as a parameter here removes the dependency on
+    /// that timing.
+    ///
+    /// `preferences` is a parameter for a stricter reason: `restore()` below resolves each
+    /// restored session's flags as it rebuilds it, so the store must already be readable by
+    /// the time this initializer runs — assigning it afterwards would launch every restored
+    /// session unconfigured.
     convenience init(
-        ghostty: GhosttyApp?, resetState: Bool = false, preferences: PreferencesStore? = nil
+        ghostty: GhosttyApp?,
+        resetState: Bool = false,
+        preferences: PreferencesStore? = nil,
+        notifier: Notifying? = nil
     ) {
         self.init(
             provider: ghostty,
             persistence: UserDefaultsSessionPersistence(),
             preferences: preferences
         )
+        self.notifier = notifier
         if resetState || !restore() { seedInitialSession() }
+        startStatusWatching()
     }
 
     func seedInitialSession(
@@ -262,6 +310,12 @@ final class SessionStore: ObservableObject {
         surfaces[id] = nil
         watchers[id]?.stop()
         watchers.removeValue(forKey: id)
+        statuses.removeValue(forKey: id)
+        subagentCounts.removeValue(forKey: id)
+        // Closing the row is the most literal case of "a prompt that will never resolve",
+        // and applyRegistry cannot observe the waiting -> gone edge here because both its
+        // before and after snapshots already lack this id.
+        notifier?.withdraw(sessionID: id)
         if repos[repoIndex].sessions.isEmpty {
             repos.remove(at: repoIndex)
         }
@@ -313,6 +367,94 @@ final class SessionStore: ObservableObject {
         persist()
     }
 
+    func status(for id: UUID) -> SessionStatus? { statuses[id] }
+
+    /// Starts registry polling. Called from the production convenience init only, so
+    /// tests using `init(provider:persistence:)` never touch the real registry or spin
+    /// a timer.
+    func startStatusWatching() {
+        guard statusWatcher == nil else { return }
+        let watcher = SessionStatusWatcher(root: sessionsRoot) { [weak self] entries in
+            self?.applyRegistry(entries)
+        }
+        watcher.start()
+        statusWatcher = watcher
+    }
+
+    /// Rebuilds `statuses` from a registry scan. Entries for sessions Flight Deck does
+    /// not own are dropped: the registry lists every `claude` on the machine.
+    func applyRegistry(_ entries: [UUID: ClaudeStatusFile.Entry]) {
+        var next: [UUID: SessionStatus] = [:]
+        for repo in repos {
+            for session in repo.sessions {
+                guard let entry = entries[session.id] else { continue }
+                next[session.id] = SessionStatus(
+                    activity: entry.activity,
+                    waitingFor: entry.waitingFor,
+                    subagentCount: subagentCounts[session.id] ?? 0
+                )
+            }
+        }
+        guard next != statuses else { return }
+        // A session that HAD a status and no longer does means its `claude` exited.
+        // Drop its sub-agent count too, so a later process reusing the same session
+        // UUID does not inherit a count from the dead one. Counts for sessions that
+        // never had a status are deliberately left alone — that is the
+        // count-arrives-before-registry case.
+        for id in statuses.keys where next[id] == nil {
+            subagentCounts.removeValue(forKey: id)
+        }
+        let previous = statuses
+        statuses = next
+        deliverNotifications(previous: previous, current: next)
+    }
+
+    /// One notification decision per session, over the union of both snapshots so a
+    /// session that vanished while waiting still gets its banner withdrawn.
+    private func deliverNotifications(
+        previous: [UUID: SessionStatus], current: [UUID: SessionStatus]
+    ) {
+        guard let notifier else { return }
+        let active = appIsActive()
+        for id in Set(previous.keys).union(current.keys) {
+            switch SessionNotificationPolicy.action(
+                old: previous[id], new: current[id], appActive: active
+            ) {
+            case .none:
+                continue
+            case .notify:
+                guard let status = current[id], let title = title(of: id) else { continue }
+                notifier.notify(sessionID: id, title: title, body: status.tooltip)
+            case .withdraw:
+                notifier.withdraw(sessionID: id)
+            }
+        }
+    }
+
+    /// Click-to-activate. The window ordering is the AppDelegate's job; this only moves
+    /// the selection.
+    private func observeActivationRequests() {
+        guard activationObserver == nil else { return }
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: .flightDeckActivateSession, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let raw = note.userInfo?["sessionID"] else { return }
+            let id = (raw as? UUID) ?? (raw as? String).flatMap(UUID.init(uuidString:))
+            guard let id else { return }
+            MainActor.assumeIsolated { self?.selectSession(id) }
+        }
+    }
+
+    /// Applied from a transcript watcher. Stored even when the registry has not yet
+    /// reported this session, so the next `applyRegistry` picks it up.
+    func applySubagentCount(_ id: UUID, _ count: Int) {
+        guard subagentCounts[id] != count else { return }
+        subagentCounts[id] = count
+        guard var status = statuses[id] else { return }
+        status.subagentCount = count
+        statuses[id] = status
+    }
+
     private func injector(for id: UUID) -> TextInjecting? {
         injectorOverride ?? surfaces[id]
     }
@@ -333,6 +475,8 @@ final class SessionStore: ObservableObject {
             )
         ) { [weak self] title in
             self?.applyExternalTitle(session.id, title)
+        } onSubagentCount: { [weak self] count in
+            self?.applySubagentCount(session.id, count)
         }
         watcher.start()
         watchers[session.id] = watcher

@@ -11,6 +11,13 @@ targets:
   FlightDeck:
     type: application
     platform: macOS
+    # The user-facing product is "Flight Deck" (two words): the bundle on disk is
+    # `Flight Deck.app` and the app menu / About & Quit items read "Flight Deck".
+    # The *target* stays `FlightDeck` so the bundle id (dev.flightdeck.FlightDeck)
+    # and every code identifier are unaffected — and PRODUCT_MODULE_NAME is pinned
+    # below because it would otherwise follow PRODUCT_NAME and become `Flight_Deck`,
+    # breaking `@testable import FlightDeck`.
+    productName: Flight Deck
     sources:
       - Sources/FlightDeck
     dependencies:
@@ -18,6 +25,12 @@ targets:
         embed: false
     settings:
       base:
+        # `productName:` above only renames the product *reference* (and the
+        # test host path xcodegen derives from it); the build system names the
+        # bundle from PRODUCT_NAME, so it has to be set here too or the two
+        # disagree and the unit-test host goes missing.
+        PRODUCT_NAME: Flight Deck
+        PRODUCT_MODULE_NAME: FlightDeck
         CODE_SIGN_ENTITLEMENTS: Sources/FlightDeck/FlightDeck.entitlements
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
         INFOPLIST_KEY_CFBundleDisplayName: Flight Deck

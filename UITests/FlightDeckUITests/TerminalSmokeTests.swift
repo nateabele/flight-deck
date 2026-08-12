@@ -108,12 +108,19 @@ final class TerminalSmokeTests: XCTestCase {
             settle()
             XCTAssertEqual(rows.count, 2)
 
-            // Re-select the first row so the second ⌘N is a genuine mid-list insert. The row's
-            // accessible `session-row-title` text carries its own (double-tap-only) gesture
-            // recognizer, which swallows a plain click before it reaches the List's row
-            // selection; clicking the row's `Cell` (index 1 — index 0 is the section header)
-            // lands on blank row space instead and reliably selects it.
-            app.cells.element(boundBy: 1).click()
+            // Re-select the first row so the second ⌘N is a genuine mid-list insert — this is
+            // what actually distinguishes "below the active row" from "append to the end".
+            //
+            // Deliberately clicks the row's TITLE TEXT, not blank row space. The title carries
+            // the rename recognizer, and while that was an exclusive `onTapGesture(count: 2)`
+            // it swallowed single clicks so the row never selected — the one part of the row
+            // users aim at was the one part that did not work. `SessionRow.handleTitleTap()`
+            // now detects the double click itself, and this click is the regression guard.
+            rows.element(boundBy: 0).click()
+            XCTAssertTrue(
+                app.cells.element(boundBy: 1).isSelected,
+                "clicking a row's title text must select that row"
+            )
 
             app.typeKey("n", modifierFlags: .command)
             expectation(for: NSPredicate(format: "count == 3"), evaluatedWith: rows)
@@ -156,11 +163,36 @@ final class TerminalSmokeTests: XCTestCase {
 
         // Closing a session frees its surface while the app lives — the exact use-after-free
         // path the process-wide GhosttyApp singleton protects against.
+        // The close button is hover-gated in `SessionRow`, so it does not exist until the
+        // pointer is over the row. Asserting that directly, and immediately before the
+        // close group, is what stops that group from silently degrading: a guarded
+        // `if close.exists { close.click() }` against a hover-gated button skips without
+        // failing, and the close assertion below would then prove nothing.
+        //
+        // A single session makes the negative assertion honest, which it is not across
+        // separate launches: with one launch per test, every relaunch puts a new window
+        // under a pointer left parked on a row by the previous test, and `.onHover` is
+        // edge-triggered so it never fires for an already-stationary pointer. That made
+        // "hidden at rest" pass by accident of window-creation timing. Here the pointer's
+        // position is deterministic, because we put it somewhere neutral ourselves.
+        XCTContext.runActivity(named: "the close button is revealed by hover, not shown at rest") { _ in
+            app.buttons["new-session"].hover()
+            XCTAssertFalse(
+                app.buttons["close-session"].exists,
+                "close button should be hidden until the row is hovered"
+            )
+
+            rows.firstMatch.hover()
+            XCTAssertTrue(app.buttons["close-session"].waitForExistence(timeout: 5))
+        }
+
         XCTContext.runActivity(named: "closing a session keeps the app alive") { _ in
+            // Unguarded: the group above has already established the button exists under
+            // hover, so a missing button here is a real failure rather than a skip.
             let close = app.buttons["close-session"].firstMatch
-            if close.waitForExistence(timeout: 5) {
-                close.click()
-            }
+            XCTAssertTrue(close.waitForExistence(timeout: 5))
+            close.click()
+
             XCTAssertEqual(app.state, .runningForeground)
             XCTAssertTrue(window.exists)
         }
