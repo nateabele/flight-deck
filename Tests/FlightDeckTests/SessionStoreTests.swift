@@ -59,6 +59,33 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertEqual(store.selectedSessionID, s2.id)
     }
 
+    /// `moveSession` leaves an emptied source project standing, so an empty section can sit
+    /// at index 0 with every live tab below it. Reselecting through `repos.first` comes back
+    /// nil in that shape and drops the whole app to `RootView`'s "No Session" empty state
+    /// while sessions are still open.
+    func testCloseReselectsPastAnEmptyLeadingProject() {
+        let store = SessionStore(provider: StubProvider())
+        let s1 = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        let s2 = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        let bar = URL(fileURLWithPath: "/work/bar", isDirectory: true)
+        store.moveSession(s1.id, toProjectAt: bar)
+        store.moveSession(s2.id, toProjectAt: bar)
+        store.selectSession(s1.id)
+
+        store.closeSession(s1.id)
+
+        // The hazardous shape, asserted so this cannot pass vacuously.
+        XCTAssertEqual(store.repos.first?.url.path, "/work/foo")
+        XCTAssertTrue(store.repos.first?.sessions.isEmpty == true)
+
+        XCTAssertEqual(store.selectedSessionID, s2.id)
+        // Not just non-nil: it has to name a session that is actually still open.
+        XCTAssertEqual(
+            store.repos.flatMap(\.sessions).map(\.id).contains { $0 == store.selectedSessionID },
+            true
+        )
+    }
+
     func testSeedInitialSessionCreatesOneHomeRepoOnce() {
         let store = SessionStore(provider: StubProvider())
         let home = URL(fileURLWithPath: "/Users/tester", isDirectory: true)

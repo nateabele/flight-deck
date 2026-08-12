@@ -332,7 +332,11 @@ final class SessionStore: ObservableObject {
             repos.remove(at: repoIndex)
         }
         if selectedSessionID == id {
-            selectedSessionID = repos.first?.sessions.first?.id
+            // The first *session*, not the first repo's first session: `moveSession`
+            // deliberately leaves an emptied source project standing, so `repos.first` can
+            // be empty while live tabs sit in a later section. Reading through it would
+            // clear the selection and drop the whole app to the "No Session" empty state.
+            selectedSessionID = repos.flatMap(\.sessions).first?.id
         }
         persist()
     }
