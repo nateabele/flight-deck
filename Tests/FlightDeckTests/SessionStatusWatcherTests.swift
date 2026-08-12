@@ -16,10 +16,13 @@ final class SessionStatusWatcherTests: XCTestCase {
     }
 
     private func write(pid: Int, sid: UUID, status: String,
-                       waitingFor: String? = nil, startedAt: Double = 1000) throws {
+                       waitingFor: String? = nil, startedAt: Double = 1000,
+                       cwd: String = "/tmp",
+                       procStart: String = "Mon Aug 10 15:03:38 2026") throws {
         var obj: [String: Any] = [
             "pid": pid, "sessionId": sid.uuidString.lowercased(),
             "status": status, "startedAt": startedAt,
+            "cwd": cwd, "procStart": procStart,
         ]
         if let waitingFor { obj["waitingFor"] = waitingFor }
         try JSONSerialization.data(withJSONObject: obj)
