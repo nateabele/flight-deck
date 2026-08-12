@@ -218,13 +218,18 @@ final class ClaudeSessionTests: XCTestCase {
     }
 
     /// The Preferences panes show a placeholder prefix rather than calling `lockedPrefix`
-    /// (there is no session yet). Nothing else keeps the two in step, so pin the shape.
-    func testPlaceholderPrefixMatchesTheRealPrefixShape() {
+    /// (there is no session yet). Nothing else keeps the two in step, so pin the *sequence*
+    /// of app-managed flag names, not just a couple of substrings — a substring check would
+    /// stay green if a third flag were added to `lockedPrefix` or the two were reordered,
+    /// leaving the placeholder stale and misleading.
+    func testPlaceholderPrefixMatchesTheRealPrefixShape() throws {
         let real = ClaudeSession.lockedPrefix(sessionID: fixedID, title: "one")
         let placeholder = ClaudeSettingsTab.placeholderPrefix
-        XCTAssertTrue(real.hasPrefix("claude --session-id "))
-        XCTAssertTrue(placeholder.hasPrefix("claude --session-id "))
-        XCTAssertTrue(real.contains(" --name "))
-        XCTAssertTrue(placeholder.contains(" --name "))
+
+        func flagNames(_ command: String) throws -> [String] {
+            try ClaudeFlagQuoting.tokenize(command).map(\.text).filter { $0.hasPrefix("--") }
+        }
+
+        XCTAssertEqual(try flagNames(real), try flagNames(placeholder))
     }
 }
