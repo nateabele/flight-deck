@@ -136,6 +136,58 @@ final class ConversationRepinTests: XCTestCase {
         XCTAssertNil(store.pinnedConversationID(of: session.id))
     }
 
+    /// The watcher has to end up on the *resumed* conversation's transcript, not merely
+    /// exist: tailing the abandoned one is indistinguishable from working until renames
+    /// and sub-agent counts quietly stop arriving.
+    func testRepinPointsTheWatcherAtTheResumedTranscript() {
+        let store = makeStore()
+        let session = store.newSession(in: tmp)
+        let resumed = UUID()
+
+        store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])
+        store.applyRegistry([1: row(resumed, cwd: tmp.path)])
+
+        XCTAssertEqual(
+            store.watchedTranscriptURL(of: session.id),
+            ClaudeSession.transcriptURL(
+                sessionID: resumed,
+                workingDirectory: tmp.path,
+                projectsRoot: store.projectsRoot
+            )
+        )
+    }
+
+    /// Two resumes inside one title read leave two completions outstanding — the read is a
+    /// whole-file load, so this is a real window. If the older one finishes last it must
+    /// not apply a superseded title, and above all must not hand the tab a watcher tailing
+    /// the conversation it has already left.
+    func testAStaleTitleResolutionCannotOvertakeALaterRepin() {
+        let store = makeStore()
+        var pending: [(String?) -> Void] = []
+        store.titleResolver = { _, done in pending.append(done) }
+        let session = store.newSession(in: tmp)
+        let older = UUID()
+        let newer = UUID()
+
+        store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)]) // anchor
+        store.applyRegistry([1: row(older, cwd: tmp.path)])                        // /resume
+        store.applyRegistry([1: row(newer, cwd: tmp.path)])                        // /resume
+        XCTAssertEqual(pending.count, 2)
+
+        pending[1]("the newer conversation")
+        pending[0]("the older conversation")
+
+        XCTAssertEqual(store.title(of: session.id), "the newer conversation")
+        XCTAssertEqual(
+            store.watchedTranscriptURL(of: session.id),
+            ClaudeSession.transcriptURL(
+                sessionID: newer,
+                workingDirectory: tmp.path,
+                projectsRoot: store.projectsRoot
+            )
+        )
+    }
+
     func testTwoTabsResumedOntoOneConversationAreBothFlagged() {
         let store = makeStore()
         let first = store.newSession(in: tmp)

@@ -9,7 +9,10 @@ import Foundation
 @MainActor
 final class TranscriptWatcher {
     private let sessionID: UUID
-    private let url: URL
+    /// Readable so `SessionStore` can expose which transcript a tab is actually tailing
+    /// (`watchedTranscriptURL(of:)`); immutable, so a watcher is replaced rather than
+    /// re-pointed when the tab's conversation or project changes.
+    let url: URL
     private let onTitle: (String) -> Void
     private let onSubagentCount: (Int) -> Void
 
