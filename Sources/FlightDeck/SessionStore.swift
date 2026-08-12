@@ -46,6 +46,11 @@ final class SessionStore: ObservableObject {
     private var subagentCounts: [UUID: Int] = [:]
     private var statusWatcher: SessionStatusWatcher?
 
+    /// Which process each tab is following, keyed by tab id. Established the first time a
+    /// registry row carries the tab's conversation, and thereafter the only thing consulted
+    /// — see `ConversationPin.resolve`.
+    private var anchors: [UUID: ConversationPin.Anchor] = [:]
+
     private var sessionCounter = 0
 
     private let persistence: SessionPersisting?
@@ -301,6 +306,7 @@ final class SessionStore: ObservableObject {
         watchers.removeValue(forKey: id)
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
+        anchors.removeValue(forKey: id)
         // Closing the row is the most literal case of "a prompt that will never resolve",
         // and applyRegistry cannot observe the waiting -> gone edge here because both its
         // before and after snapshots already lack this id.
@@ -370,20 +376,38 @@ final class SessionStore: ObservableObject {
         statusWatcher = watcher
     }
 
-    /// Rebuilds `statuses` from a registry scan. Entries for sessions Flight Deck does
-    /// not own are dropped: the registry lists every `claude` on the machine.
-    func applyRegistry(_ entries: [UUID: ClaudeStatusFile.Entry]) {
-        var next: [UUID: SessionStatus] = [:]
-        for repo in repos {
-            for session in repo.sessions {
-                guard let entry = entries[session.pinnedConversationID] else { continue }
-                next[session.id] = SessionStatus(
-                    activity: entry.activity,
-                    waitingFor: entry.waitingFor,
-                    subagentCount: subagentCounts[session.id] ?? 0
-                )
+    /// Rebuilds `statuses` from a registry scan and keeps each tab's anchor current.
+    /// Entries for processes Flight Deck does not own are dropped: the registry lists
+    /// every `claude` on the machine.
+    func applyRegistry(_ rows: [pid_t: ClaudeStatusFile.Entry]) {
+        // Resolve against a snapshot of the list before touching anything. Later tasks
+        // apply repins and project moves here, and those mutate `repos` — iterating it
+        // while it changes would resolve some tabs against a stale view.
+        let resolutions: [(tab: UUID, resolution: ConversationPin.Resolution)] =
+            repos.flatMap(\.sessions).map { session in
+                (session.id, ConversationPin.resolve(
+                    conversationID: session.pinnedConversationID,
+                    workingDirectory: session.workingDirectory,
+                    anchor: anchors[session.id],
+                    rows: rows
+                ))
             }
+        for (tab, resolution) in resolutions {
+            anchors[tab] = resolution.anchor
         }
+
+        var next: [UUID: SessionStatus] = [:]
+        for session in repos.flatMap(\.sessions) {
+            guard let anchor = anchors[session.id], let entry = rows[anchor.pid] else {
+                continue
+            }
+            next[session.id] = SessionStatus(
+                activity: entry.activity,
+                waitingFor: entry.waitingFor,
+                subagentCount: subagentCounts[session.id] ?? 0
+            )
+        }
+
         guard next != statuses else { return }
         // A session that HAD a status and no longer does means its `claude` exited.
         // Drop its sub-agent count too, so a later process reusing the same session

@@ -32,7 +32,7 @@ final class SessionStatusWatcherTests: XCTestCase {
     /// Every process is alive unless a test says otherwise.
     private func watcher(
         alive: @escaping (pid_t) -> Bool = { _ in true },
-        onChange: @escaping ([UUID: ClaudeStatusFile.Entry]) -> Void
+        onChange: @escaping ([pid_t: ClaudeStatusFile.Entry]) -> Void
     ) -> SessionStatusWatcher {
         SessionStatusWatcher(root: dir, isAlive: alive, onChange: onChange)
     }
@@ -41,25 +41,25 @@ final class SessionStatusWatcherTests: XCTestCase {
         let sid = UUID()
         try write(pid: 100, sid: sid, status: "waiting", waitingFor: "permission prompt")
 
-        var seen: [UUID: ClaudeStatusFile.Entry] = [:]
+        var seen: [pid_t: ClaudeStatusFile.Entry] = [:]
         watcher { seen = $0 }.drain()
 
-        XCTAssertEqual(seen[sid]?.activity, .waiting)
-        XCTAssertEqual(seen[sid]?.waitingFor, "permission prompt")
+        XCTAssertEqual(seen[100]?.activity, .waiting)
+        XCTAssertEqual(seen[100]?.waitingFor, "permission prompt")
     }
 
     func testPicksUpStatusChangeOnSecondDrain() throws {
         let sid = UUID()
         try write(pid: 100, sid: sid, status: "busy")
 
-        var seen: [UUID: ClaudeStatusFile.Entry] = [:]
+        var seen: [pid_t: ClaudeStatusFile.Entry] = [:]
         let w = watcher { seen = $0 }
         w.drain()
-        XCTAssertEqual(seen[sid]?.activity, .busy)
+        XCTAssertEqual(seen[100]?.activity, .busy)
 
         try write(pid: 100, sid: sid, status: "idle")
         w.drain()
-        XCTAssertEqual(seen[sid]?.activity, .idle)
+        XCTAssertEqual(seen[100]?.activity, .idle)
     }
 
     /// `claude` unlinks its file only on a clean exit, so a crash leaks one.
@@ -67,23 +67,10 @@ final class SessionStatusWatcherTests: XCTestCase {
         let sid = UUID()
         try write(pid: 100, sid: sid, status: "busy")
 
-        var seen: [UUID: ClaudeStatusFile.Entry] = [:]
+        var seen: [pid_t: ClaudeStatusFile.Entry] = [:]
         watcher(alive: { _ in false }) { seen = $0 }.drain()
 
         XCTAssertTrue(seen.isEmpty)
-    }
-
-    /// A crash-then-resume leaves two files for one session; the newest wins.
-    func testDuplicateSessionIDResolvesToNewestStartedAt() throws {
-        let sid = UUID()
-        try write(pid: 100, sid: sid, status: "idle", startedAt: 1000)
-        try write(pid: 200, sid: sid, status: "busy", startedAt: 2000)
-
-        var seen: [UUID: ClaudeStatusFile.Entry] = [:]
-        watcher { seen = $0 }.drain()
-
-        XCTAssertEqual(seen[sid]?.activity, .busy)
-        XCTAssertEqual(seen[sid]?.pid, 200)
     }
 
     /// A torn read must not look like "session gone" — the last good status stands.
@@ -91,7 +78,7 @@ final class SessionStatusWatcherTests: XCTestCase {
         let sid = UUID()
         try write(pid: 100, sid: sid, status: "busy")
 
-        var seen: [UUID: ClaudeStatusFile.Entry] = [:]
+        var seen: [pid_t: ClaudeStatusFile.Entry] = [:]
         let w = watcher { seen = $0 }
         w.drain()
 
@@ -100,14 +87,14 @@ final class SessionStatusWatcherTests: XCTestCase {
             .write(to: dir.appendingPathComponent("100.json"))
         w.drain()
 
-        XCTAssertEqual(seen[sid]?.activity, .busy)
+        XCTAssertEqual(seen[100]?.activity, .busy)
     }
 
     func testRemovedFileDropsSession() throws {
         let sid = UUID()
         try write(pid: 100, sid: sid, status: "busy")
 
-        var seen: [UUID: ClaudeStatusFile.Entry] = [:]
+        var seen: [pid_t: ClaudeStatusFile.Entry] = [:]
         let w = watcher { seen = $0 }
         w.drain()
 
@@ -128,8 +115,33 @@ final class SessionStatusWatcherTests: XCTestCase {
 
     func testMissingRootIsNotAnError() {
         let missing = dir.appendingPathComponent("nope", isDirectory: true)
-        var seen: [UUID: ClaudeStatusFile.Entry] = [:]
+        var seen: [pid_t: ClaudeStatusFile.Entry] = [:]
         SessionStatusWatcher(root: missing, isAlive: { _ in true }) { seen = $0 }.drain()
         XCTAssertTrue(seen.isEmpty)
+    }
+
+    func testReportsRowsKeyedByPID() throws {
+        let sid = UUID()
+        try write(pid: 4242, sid: sid, status: "busy")
+
+        var reported: [pid_t: ClaudeStatusFile.Entry] = [:]
+        watcher { reported = $0 }.drain()
+
+        XCTAssertEqual(reported[4242]?.sessionID, sid)
+    }
+
+    /// Two processes on one conversation used to collapse into one row, keeping only the
+    /// newest `startedAt`. Both are real and both must survive.
+    func testTwoProcessesOnOneConversationAreBothReported() throws {
+        let sid = UUID()
+        try write(pid: 100, sid: sid, status: "busy", startedAt: 1)
+        try write(pid: 200, sid: sid, status: "waiting", startedAt: 2)
+
+        var reported: [pid_t: ClaudeStatusFile.Entry] = [:]
+        watcher { reported = $0 }.drain()
+
+        XCTAssertEqual(reported.count, 2)
+        XCTAssertEqual(reported[100]?.activity, .busy)
+        XCTAssertEqual(reported[200]?.activity, .waiting)
     }
 }

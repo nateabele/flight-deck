@@ -25,7 +25,7 @@ final class SessionStatusWatcher {
 
     private let root: URL
     private let isAlive: (pid_t) -> Bool
-    private let onChange: ([UUID: ClaudeStatusFile.Entry]) -> Void
+    private let onChange: ([pid_t: ClaudeStatusFile.Entry]) -> Void
 
     /// Last successfully decoded entry per filename. Survives a torn read so a
     /// half-written file does not read as "session gone".
@@ -36,7 +36,7 @@ final class SessionStatusWatcher {
     init(
         root: URL = SessionStatusWatcher.defaultRoot,
         isAlive: @escaping (pid_t) -> Bool = SessionStatusWatcher.processIsAlive,
-        onChange: @escaping ([UUID: ClaudeStatusFile.Entry]) -> Void
+        onChange: @escaping ([pid_t: ClaudeStatusFile.Entry]) -> Void
     ) {
         self.root = root
         self.isAlive = isAlive
@@ -97,13 +97,12 @@ final class SessionStatusWatcher {
         cache = cache.filter { present.contains($0.key) }
         mtimes = mtimes.filter { present.contains($0.key) }
 
-        var bySession: [UUID: ClaudeStatusFile.Entry] = [:]
-        for entry in live.values {
-            if let existing = bySession[entry.sessionID], existing.startedAt >= entry.startedAt {
-                continue
-            }
-            bySession[entry.sessionID] = entry
-        }
-        onChange(bySession)
+        // Keyed by pid, not by session: a tab follows its *process*, and two live
+        // processes can legitimately hold one conversation once resumes are in play.
+        // Collapsing by session id here would hide one of them and would throw away the
+        // mapping `ConversationPin` anchors on.
+        var byPID: [pid_t: ClaudeStatusFile.Entry] = [:]
+        for entry in live.values { byPID[entry.pid] = entry }
+        onChange(byPID)
     }
 }

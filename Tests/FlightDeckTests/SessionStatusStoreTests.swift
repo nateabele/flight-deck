@@ -8,16 +8,18 @@ final class SessionStatusStoreTests: XCTestCase {
     }
 
     private func entry(_ sid: UUID, _ activity: SessionActivity,
-                       waitingFor: String? = nil) -> ClaudeStatusFile.Entry {
-        .init(pid: 1, sessionID: sid, activity: activity,
-              waitingFor: waitingFor, startedAt: 1)
+                       waitingFor: String? = nil, pid: pid_t = 1,
+                       cwd: String = "/w", procStart: String = "start-a")
+        -> ClaudeStatusFile.Entry {
+        .init(pid: pid, sessionID: sid, activity: activity, waitingFor: waitingFor,
+              startedAt: 1, cwd: cwd, procStart: procStart)
     }
 
     func testRegistryPopulatesStatusForKnownSession() {
         let store = makeStore()
         let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
 
-        store.applyRegistry([session.id: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy)])
 
         XCTAssertEqual(store.status(for: session.id)?.activity, .busy)
     }
@@ -28,7 +30,7 @@ final class SessionStatusStoreTests: XCTestCase {
         let store = makeStore()
         let stranger = UUID()
 
-        store.applyRegistry([stranger: entry(stranger, .busy)])
+        store.applyRegistry([1: entry(stranger, .busy)])
 
         XCTAssertNil(store.status(for: stranger))
         XCTAssertTrue(store.statuses.isEmpty)
@@ -38,9 +40,9 @@ final class SessionStatusStoreTests: XCTestCase {
         let store = makeStore()
         let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
 
-        store.applyRegistry([session.id: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy)])
         store.applySubagentCount(session.id, 3)
-        store.applyRegistry([session.id: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy)])
 
         XCTAssertEqual(store.status(for: session.id)?.subagentCount, 3)
     }
@@ -51,7 +53,7 @@ final class SessionStatusStoreTests: XCTestCase {
         let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
 
         store.applySubagentCount(session.id, 2)
-        store.applyRegistry([session.id: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy)])
 
         XCTAssertEqual(store.status(for: session.id)?.subagentCount, 2)
     }
@@ -60,10 +62,38 @@ final class SessionStatusStoreTests: XCTestCase {
         let store = makeStore()
         let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
 
-        store.applyRegistry([session.id: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy)])
         store.applyRegistry([:])
 
         XCTAssertNil(store.status(for: session.id))
+    }
+
+    /// Two live `claude` processes on one conversation are both real. The old
+    /// dedupe-by-sessionId in the watcher would have hidden one of them.
+    func testTwoProcessesOnOneConversationBothSurviveTheJoin() {
+        let store = makeStore()
+        let first = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let second = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+
+        store.applyRegistry([
+            1: entry(first.pinnedConversationID, .busy, pid: 1),
+            2: entry(second.pinnedConversationID, .waiting, pid: 2, procStart: "start-b"),
+        ])
+
+        XCTAssertEqual(store.status(for: first.id)?.activity, .busy)
+        XCTAssertEqual(store.status(for: second.id)?.activity, .waiting)
+    }
+
+    /// Once anchored, the tab follows its pid. The conversation id in the row is no longer
+    /// consulted for the status join, which is what lets a resume keep the icon alive.
+    func testStatusSurvivesTheConversationChangingUnderTheSamePid() {
+        let store = makeStore()
+        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+
+        store.applyRegistry([1: entry(session.pinnedConversationID, .busy, pid: 1)])
+        store.applyRegistry([1: entry(UUID(), .waiting, pid: 1)])
+
+        XCTAssertEqual(store.status(for: session.id)?.activity, .waiting)
     }
 
     /// Also covers withdrawal: closing a waiting session is the "prompt that will never
@@ -76,7 +106,7 @@ final class SessionStatusStoreTests: XCTestCase {
         let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
 
         store.applyRegistry([
-            session.id: entry(session.id, .waiting, waitingFor: "permission prompt"),
+            1: entry(session.id, .waiting, waitingFor: "permission prompt"),
         ])
         store.applySubagentCount(session.id, 2)
         store.closeSession(session.id)
@@ -95,7 +125,7 @@ final class SessionStatusStoreTests: XCTestCase {
         let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
 
         store.applyRegistry([
-            session.id: entry(session.id, .waiting, waitingFor: "input needed"),
+            1: entry(session.id, .waiting, waitingFor: "input needed"),
         ])
 
         XCTAssertEqual(store.status(for: session.id)?.waitingFor, "input needed")
@@ -107,10 +137,10 @@ final class SessionStatusStoreTests: XCTestCase {
         let store = makeStore()
         let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
 
-        store.applyRegistry([session.id: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy)])
         store.applySubagentCount(session.id, 3)
         store.applyRegistry([:])                                     // claude exited
-        store.applyRegistry([session.id: entry(session.id, .busy)])  // restarted, same UUID
+        store.applyRegistry([1: entry(session.id, .busy)])  // restarted, same UUID
 
         XCTAssertEqual(store.status(for: session.id)?.subagentCount, 0)
     }
@@ -132,9 +162,9 @@ final class SessionStatusStoreTests: XCTestCase {
         store.appIsActive = { false }
         let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
 
-        store.applyRegistry([session.id: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy)])
         store.applyRegistry([
-            session.id: entry(session.id, .waiting, waitingFor: "permission prompt"),
+            1: entry(session.id, .waiting, waitingFor: "permission prompt"),
         ])
 
         XCTAssertEqual(spy.notified.count, 1)
@@ -149,7 +179,7 @@ final class SessionStatusStoreTests: XCTestCase {
         store.appIsActive = { true }
         let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
 
-        store.applyRegistry([session.id: entry(session.id, .waiting)])
+        store.applyRegistry([1: entry(session.id, .waiting)])
 
         XCTAssertTrue(spy.notified.isEmpty)
     }
@@ -161,8 +191,8 @@ final class SessionStatusStoreTests: XCTestCase {
         store.appIsActive = { false }
         let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
 
-        store.applyRegistry([session.id: entry(session.id, .waiting)])
-        store.applyRegistry([session.id: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .waiting)])
+        store.applyRegistry([1: entry(session.id, .busy)])
 
         XCTAssertEqual(spy.withdrawn, [session.id])
     }
