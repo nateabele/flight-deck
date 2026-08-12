@@ -7,7 +7,25 @@ struct SessionSnapshot: Codable, Equatable {
     struct Entry: Codable, Equatable {
         let id: UUID
         var title: String
-        let workingDirectory: String
+        var workingDirectory: String
+        /// Absent in v1 snapshots and in tabs that were never resumed; absent means
+        /// "same as `id`". Optional is load-bearing: synthesized `Codable` decodes an
+        /// optional with `decodeIfPresent`, so every existing snapshot still decodes and
+        /// the defaults key stays `sessions.snapshot.v1`. A non-optional field would throw
+        /// and wipe every tab on the first launch after this change.
+        var pinnedConversationID: UUID?
+
+        init(
+            id: UUID,
+            title: String,
+            workingDirectory: String,
+            pinnedConversationID: UUID? = nil
+        ) {
+            self.id = id
+            self.title = title
+            self.workingDirectory = workingDirectory
+            self.pinnedConversationID = pinnedConversationID
+        }
     }
 
     var sessions: [Entry] = []

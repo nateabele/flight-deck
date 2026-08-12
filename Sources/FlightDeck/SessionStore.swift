@@ -206,7 +206,15 @@ final class SessionStore: ObservableObject {
         }
         provider?.tick()
 
-        startWatching(session, workingDirectory: url.path)
+        startWatching(
+            tabID: session.id,
+            conversationID: session.pinnedConversationID,
+            url: ClaudeSession.transcriptURL(
+                sessionID: session.pinnedConversationID,
+                workingDirectory: url.path,
+                projectsRoot: projectsRoot
+            )
+        )
         return session
     }
 
@@ -234,14 +242,18 @@ final class SessionStore: ObservableObject {
         sessionCounter = snapshot.sessionCounter
         for entry in snapshot.sessions where directoryExists(entry.workingDirectory) {
             let url = URL(fileURLWithPath: entry.workingDirectory, isDirectory: true)
+            let conversationID = entry.pinnedConversationID ?? entry.id
             let session = Session(
-                id: entry.id, title: entry.title, workingDirectory: entry.workingDirectory
+                id: entry.id,
+                title: entry.title,
+                workingDirectory: entry.workingDirectory,
+                pinnedConversationID: conversationID
             )
             insertSession(
                 session,
                 in: url,
                 initialInput: ClaudeSession.resumeCommand(
-                    sessionID: entry.id, title: entry.title
+                    sessionID: conversationID, title: entry.title
                 )
             )
         }
@@ -259,7 +271,12 @@ final class SessionStore: ObservableObject {
         persistence?.save(
             SessionSnapshot(
                 sessions: repos.flatMap(\.sessions).map {
-                    .init(id: $0.id, title: $0.title, workingDirectory: $0.workingDirectory)
+                    .init(
+                        id: $0.id,
+                        title: $0.title,
+                        workingDirectory: $0.workingDirectory,
+                        pinnedConversationID: $0.pinnedConversationID
+                    )
                 },
                 selectedSessionID: selectedSessionID,
                 sessionCounter: sessionCounter
@@ -359,7 +376,7 @@ final class SessionStore: ObservableObject {
         var next: [UUID: SessionStatus] = [:]
         for repo in repos {
             for session in repo.sessions {
-                guard let entry = entries[session.id] else { continue }
+                guard let entry = entries[session.pinnedConversationID] else { continue }
                 next[session.id] = SessionStatus(
                     activity: entry.activity,
                     waitingFor: entry.waitingFor,
@@ -437,21 +454,19 @@ final class SessionStore: ObservableObject {
 
     // MARK: - Helpers
 
-    private func startWatching(_ session: Session, workingDirectory: String) {
+    /// `tabID` keys our own state; `conversationID` is what the transcript is named after
+    /// and what its rename records are stamped with. They differ after a resume.
+    private func startWatching(tabID: UUID, conversationID: UUID, url: URL) {
         let watcher = TranscriptWatcher(
-            sessionID: session.id,
-            url: ClaudeSession.transcriptURL(
-                sessionID: session.id,
-                workingDirectory: workingDirectory,
-                projectsRoot: projectsRoot
-            )
+            sessionID: conversationID,
+            url: url
         ) { [weak self] title in
-            self?.applyExternalTitle(session.id, title)
+            self?.applyExternalTitle(tabID, title)
         } onSubagentCount: { [weak self] count in
-            self?.applySubagentCount(session.id, count)
+            self?.applySubagentCount(tabID, count)
         }
         watcher.start()
-        watchers[session.id] = watcher
+        watchers[tabID] = watcher
     }
 
     private func indexOfRepo(for url: URL) -> Int? {

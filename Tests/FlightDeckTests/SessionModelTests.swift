@@ -14,4 +14,18 @@ final class SessionModelTests: XCTestCase {
         XCTAssertEqual(session.title, "session 1")
         XCTAssertEqual(session.workingDirectory, "/tmp")
     }
+
+    func testPinDefaultsToTheTabsOwnID() {
+        let session = Session(title: "s", workingDirectory: "/w")
+        XCTAssertEqual(session.pinnedConversationID, session.id)
+    }
+
+    func testPinCanDifferFromTheTabID() {
+        let conversation = UUID()
+        let session = Session(
+            title: "s", workingDirectory: "/w", pinnedConversationID: conversation
+        )
+        XCTAssertNotEqual(session.id, conversation)
+        XCTAssertEqual(session.pinnedConversationID, conversation)
+    }
 }
