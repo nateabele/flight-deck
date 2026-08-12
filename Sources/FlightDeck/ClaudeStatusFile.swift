@@ -16,6 +16,35 @@ enum ClaudeStatusFile {
         /// Epoch milliseconds. Breaks ties when two files claim one session (crash,
         /// then resume): the newest wins.
         let startedAt: Double
+        /// The session's current working directory. `claude` rewrites this in place when
+        /// a resume moves the session to another project, so it is the authority on where
+        /// the transcript is being written — not the tab's own stored path.
+        let cwd: String
+        /// Human-readable process start time, e.g. "Mon Aug 10 15:03:38 2026". Paired with
+        /// `pid` it identifies one *process*: macOS recycles pids, so a row with a familiar
+        /// pid and an unfamiliar `procStart` is a different process, not a resume.
+        let procStart: String
+
+        /// `cwd` and `procStart` default to empty purely so existing test call sites that
+        /// predate them keep compiling. Production values always come from `decode`, which
+        /// requires both.
+        init(
+            pid: pid_t,
+            sessionID: UUID,
+            activity: SessionActivity,
+            waitingFor: String?,
+            startedAt: Double,
+            cwd: String = "",
+            procStart: String = ""
+        ) {
+            self.pid = pid
+            self.sessionID = sessionID
+            self.activity = activity
+            self.waitingFor = waitingFor
+            self.startedAt = startedAt
+            self.cwd = cwd
+            self.procStart = procStart
+        }
     }
 
     /// Parses "<pid>.json". Rejects anything that does not round-trip back to the same
@@ -36,7 +65,9 @@ enum ClaudeStatusFile {
               let rawSession = obj["sessionId"] as? String,
               let sessionID = UUID(uuidString: rawSession),
               let rawStatus = obj["status"] as? String,
-              let activity = SessionActivity(rawValue: rawStatus)
+              let activity = SessionActivity(rawValue: rawStatus),
+              let cwd = obj["cwd"] as? String,
+              let procStart = obj["procStart"] as? String
         else { return nil }
 
         return Entry(
@@ -44,7 +75,9 @@ enum ClaudeStatusFile {
             sessionID: sessionID,
             activity: activity,
             waitingFor: obj["waitingFor"] as? String,
-            startedAt: (obj["startedAt"] as? Double) ?? 0
+            startedAt: (obj["startedAt"] as? Double) ?? 0,
+            cwd: cwd,
+            procStart: procStart
         )
     }
 }

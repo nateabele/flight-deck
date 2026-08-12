@@ -16,6 +16,7 @@ final class ClaudeStatusFileTests: XCTestCase {
             "status": status,
             "startedAt": startedAt,
             "cwd": "/tmp",
+            "procStart": "Mon Aug 10 15:03:38 2026",
             "kind": "interactive",
         ]
         if let waitingFor { obj["waitingFor"] = waitingFor }
@@ -75,5 +76,39 @@ final class ClaudeStatusFileTests: XCTestCase {
         XCTAssertNil(ClaudeStatusFile.pid(fromFileName: "notes.json"))
         XCTAssertNil(ClaudeStatusFile.pid(fromFileName: "75951.txt"))
         XCTAssertNil(ClaudeStatusFile.pid(fromFileName: "007.json"))  // non-canonical
+    }
+
+    func testDecodeCapturesCwdAndProcStart() {
+        let sid = UUID()
+        let json = """
+        {"pid":42,"sessionId":"\(sid.uuidString.lowercased())","status":"idle",\
+        "cwd":"/Users/nate/Projects/flight-deck","procStart":"Mon Aug 10 15:03:38 2026",\
+        "startedAt":1786374219307}
+        """
+        let entry = ClaudeStatusFile.decode(Data(json.utf8), expectedPID: 42)
+
+        XCTAssertEqual(entry?.cwd, "/Users/nate/Projects/flight-deck")
+        XCTAssertEqual(entry?.procStart, "Mon Aug 10 15:03:38 2026")
+    }
+
+    /// Fails closed, like every other required field: a row we cannot place in a
+    /// directory is worse than no row, because the transcript path derived from it
+    /// would silently point nowhere.
+    func testDecodeRejectsRowMissingCwd() {
+        let sid = UUID()
+        let json = """
+        {"pid":42,"sessionId":"\(sid.uuidString.lowercased())","status":"idle",\
+        "procStart":"Mon Aug 10 15:03:38 2026"}
+        """
+        XCTAssertNil(ClaudeStatusFile.decode(Data(json.utf8), expectedPID: 42))
+    }
+
+    func testDecodeRejectsRowMissingProcStart() {
+        let sid = UUID()
+        let json = """
+        {"pid":42,"sessionId":"\(sid.uuidString.lowercased())","status":"idle",\
+        "cwd":"/Users/nate"}
+        """
+        XCTAssertNil(ClaudeStatusFile.decode(Data(json.utf8), expectedPID: 42))
     }
 }
