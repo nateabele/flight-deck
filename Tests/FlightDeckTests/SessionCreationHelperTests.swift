@@ -3,13 +3,13 @@ import XCTest
 
 final class SessionCreationHelperTests: XCTestCase {
     func testRoutesToNewSessionWhenSessionsExist() {
-        XCTAssertEqual(SessionCreateAction.forState(hasSessions: true), .newSession)
+        XCTAssertEqual(SessionCreateAction.forState(hasProjects: true), .newSession)
     }
 
     /// With nothing open there is no project to create a session in, so ⌘N must fall
     /// through to Add Project.
     func testRoutesToAddProjectWhenEmpty() {
-        XCTAssertEqual(SessionCreateAction.forState(hasSessions: false), .addProject)
+        XCTAssertEqual(SessionCreateAction.forState(hasProjects: false), .addProject)
     }
 
     func testDirectoryResolvesToItself() throws {

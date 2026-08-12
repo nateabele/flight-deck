@@ -21,7 +21,15 @@ final class SessionStore: ObservableObject {
     /// `selectSession(_:)`. `persist()` never re-assigns `selectedSessionID`, so this
     /// cannot recurse.
     @Published var selectedSessionID: UUID? {
-        didSet { persist() }
+        didSet {
+            if let id = selectedSessionID, let at = locate(id) {
+                lastActiveProjectURL = URL(
+                    fileURLWithPath: repos[at.repo].sessions[at.session].workingDirectory,
+                    isDirectory: true
+                )
+            }
+            persist()
+        }
     }
 
     /// Weak: `GhosttyApp.shared` is a process-wide static that owns itself for the life of
@@ -52,6 +60,11 @@ final class SessionStore: ObservableObject {
     private var anchors: [UUID: ConversationPin.Anchor] = [:]
 
     private var sessionCounter = 0
+
+    /// The project of the most recently activated tab, used as ⌘N's target when there is
+    /// no selection. Deliberately not cleared when the selection goes nil or when the
+    /// project empties — surviving the tab leaving is the entire point.
+    private(set) var lastActiveProjectURL: URL?
 
     private let persistence: SessionPersisting?
 
@@ -142,15 +155,19 @@ final class SessionStore: ObservableObject {
     /// why the menu item can stay enabled in both states.
     @discardableResult
     func createFromMenu(chooseFolder: () -> URL? = { FolderPicker.choose() }) -> Session? {
-        switch SessionCreateAction.forState(hasSessions: !repos.isEmpty) {
+        switch SessionCreateAction.forState(hasProjects: !repos.isEmpty) {
         case .newSession:
             if let created = newSessionBelowActive() {
                 return created
             }
             // `newSessionBelowActive` needs a selection, not just a non-empty `repos` — and
             // selection can be nil with sessions still present (e.g. clicking below the last
-            // row in the sidebar's List clears it). Fall back to the first project rather than
-            // silently doing nothing; only prompt for a folder when there is truly nothing.
+            // row in the sidebar's List clears it). Prefer the project the user was last
+            // working in, *including* when it is now empty; only fall back to an arbitrary
+            // project if we have never had one, and only prompt when nothing is open.
+            if let url = lastActiveProjectURL, indexOfRepo(for: url) != nil {
+                return addProject(at: url)
+            }
             if let first = repos.first {
                 return addProject(at: first.url)
             }
@@ -600,6 +617,7 @@ final class SessionStore: ObservableObject {
         }
         repos[destination].sessions.append(session)
 
+        if selectedSessionID == id { lastActiveProjectURL = target }
         persist()
     }
 
