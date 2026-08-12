@@ -384,6 +384,13 @@ final class SessionStore: ObservableObject {
         persist()
     }
 
+    /// Tabs sharing a conversation with another tab. Computed rather than stored so it can
+    /// never go stale: `repos` is `@Published`, so any change to a pin or to the list
+    /// re-evaluates this on the next view update.
+    var conflictedSessionIDs: Set<UUID> {
+        ConversationPin.conflicted(repos.flatMap(\.sessions))
+    }
+
     func status(for id: UUID) -> SessionStatus? { statuses[id] }
 
     /// Starts registry polling. Called from the production convenience init only, so
