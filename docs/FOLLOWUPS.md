@@ -106,14 +106,50 @@ reader doesn't re-derive them.
   blanked rather than unset because the surface config can only set variables; `claude`
   treats an empty value as absent.
 
-## Deferred from session creation UX (2026-08-11)
+## From session creation UX (2026-08-11)
 
-- **A single click on a sidebar row's *title text* does not reselect that row.** The
-  `Text` in `SessionRow` carries `.onTapGesture(count: 2)` for inline rename, and that
-  recognizer swallows the single click before the enclosing `List(selection:)` sees it.
-  Clicking the blank space around the title in the same row selects normally, so the row
-  is inconsistently hit-tested on the part users aim at most. Found while writing the ⌘N
-  UITest, which had to click the row's `Cell` rather than its title to reselect. Minor —
-  every other selection path works — but worth fixing with a
-  `simultaneousGesture`/`highPriorityGesture` arrangement that lets the single click fall
-  through to selection while the double click still starts a rename.
+- **A single click on a sidebar row's title text did not select the row — FIXED.** The
+  `Text` in `SessionRow` carried `.onTapGesture(count: 2)` for inline rename, and that
+  recognizer swallowed the single click before the enclosing `List(selection:)` saw it, so
+  the one part of the row users aim at was the one part that did not work.
+
+  Two plausible-looking fixes are **not** fixes, both confirmed by test rather than
+  argument: `simultaneousGesture(TapGesture(count: 2))` still does not let the click reach
+  the List, and pairing a count-2 with a count-1 recognizer leaves the count-1 handler never
+  firing at all — an explicit handler assigning `selectedSessionID` did not run. Don't
+  re-attempt either.
+
+  `SessionRow.handleTitleTap()` now uses a single tap recognizer and detects the second
+  click itself against `NSEvent.doubleClickInterval`, which takes SwiftUI's gesture
+  arbitration out of the problem entirely. Guarded by an assertion in
+  `testCommandNAddsASessionBelowTheActiveOne` that clicks the title and requires the row to
+  become selected, plus `testDoubleClickRenamesSession` for the rename path.
+
+## Sidebar row hover no longer covers the full row width
+
+`SessionRow` reveals its close button on hover. That hover is `.onHover` on the row's
+HStack with **no** `.contentShape(Rectangle())`, so it follows the row's actual content:
+the empty gap between the session title and the trailing status icon does not trigger it,
+and sweeping the pointer across a row can flicker rather than hold.
+
+The contentShape was removed deliberately (see `b5d4a07`). With it, the HStack became a
+hit-test participant and competed with the title's `.onTapGesture` for click ownership,
+intermittently swallowing the second click of a double click and breaking rename — 4
+failures in 5 runs of `testDoubleClickRenamesSession`, against 9/9 before this branch met
+master's hand-rolled double-click detection in `66cb7f2`.
+
+Two fixes were measured and rejected, so don't re-try them blind:
+
+- **`NSTrackingArea` via `NSViewRepresentable` in `.background()`** — worse. A real
+  `NSView` takes over the row's hit-test geometry: 6 of 6 runs failed with
+  `Not hittable: StaticText ... session-row-title`.
+- **`.contentShape` + `.onHover` on a transparent SwiftUI layer behind the row** — fixes
+  the click theft (6 of 6 rename runs passed) but breaks hover itself, because the content
+  in front swallows the hover the layer needs to see. Both hover tests failed.
+
+Restoring full-width hover needs a mechanism that does not join SwiftUI's hit-testing and
+does not sit in front of or behind the row's content in a way that intercepts either
+clicks or hover. Worth revisiting if the flicker proves annoying in practice.
+
+Related, still open: `.onHover` does not fire while a trackpad scroll is in flight, so a
+row can hold a stale hover state after scrolling.

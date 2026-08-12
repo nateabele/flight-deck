@@ -2831,7 +2831,7 @@ Expected: build succeeds, every existing suite still passes.
 - [ ] **Step 7: Launch and check the window by hand**
 
 ```bash
-./scripts/build.sh && open DerivedData/Build/Products/Debug/FlightDeck.app
+./scripts/build.sh && open "DerivedData/Build/Products/Debug/Flight Deck.app"
 ```
 
 Press ⌘, and confirm: three tabs appear; toggling **Verbose** appends `--verbose` to the command field; the `claude --session-id ⟨generated⟩ --name ⟨session title⟩` prefix cannot be selected into or deleted.
@@ -2917,7 +2917,7 @@ Note: typing `--dangerously-skip-permissions` into the command field bypasses th
 - [ ] **Step 4: Verify by hand**
 
 ```bash
-./scripts/build.sh && open DerivedData/Build/Products/Debug/FlightDeck.app
+./scripts/build.sh && open "DerivedData/Build/Products/Debug/Flight Deck.app"
 ```
 
 ⌘, → Claude → Permissions & Tools → toggle **Skip all permission checks**. Confirm the alert appears, Cancel leaves it off, Enable turns it on and appends the flag.
