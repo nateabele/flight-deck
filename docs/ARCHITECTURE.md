@@ -7,11 +7,13 @@ full design and the reasoning, see the [design spec](superpowers/specs/2026-07-0
 
 ```
 FlightDeckApp (@main SwiftUI App)
-  └─ RootWindow (Scene / WindowGroup)
-       └─ TerminalPane (NSViewRepresentable)
-            ├─ owns/retains → GhosttyApp            (libghostty bring-up, hand-written)
-            └─ hosts        → Ghostty.SurfaceView   (adapted Ghostty AppKit surface)
-                                 └─ links → GhosttyKit.xcframework (libghostty C API)
+  ├─ SessionStore (source of truth)
+  │   ├─ owns/retains → Ghostty.SurfaceView (per session)
+  │   └─ weak ref    → GhosttyApp.shared (libghostty)
+  └─ RootWindow (Scene / Window)
+       └─ RootView (NavigationSplitView)
+            └─ TerminalPane (NSViewRepresentable)
+                 └─ hosts → Ghostty.SurfaceView (from SessionStore)
 ```
 
 - **`FlightDeckApp.swift`** — `@main`, just declares the scene.
