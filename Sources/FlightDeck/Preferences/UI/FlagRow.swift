@@ -127,12 +127,16 @@ struct FlagRow: View {
                 .accessibilityIdentifier(spec.label)
 
         case .path:
+            // Unlike `.choice`/`.optionalValue`, the primary control here is the text
+            // field — it carries the value — so `spec.label` names it, and the secondary
+            // Choose… button gets the `.button` suffix. Keeps the convention "bare label =
+            // the control holding the value" consistent across every case.
             HStack(spacing: 6) {
                 TextField(inheritedLabel(""), text: stringBinding)
                     .frame(width: 200)
-                    .accessibilityIdentifier("\(spec.label).text")
-                Button("Choose…") { chooseFile() }
                     .accessibilityIdentifier(spec.label)
+                Button("Choose…") { chooseFile() }
+                    .accessibilityIdentifier("\(spec.label).button")
             }
 
         case .multiline:
