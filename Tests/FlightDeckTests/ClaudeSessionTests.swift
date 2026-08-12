@@ -216,4 +216,15 @@ final class ClaudeSessionTests: XCTestCase {
         )
         XCTAssertTrue(command.contains("--add-dir ../shared"))
     }
+
+    /// The Preferences panes show a placeholder prefix rather than calling `lockedPrefix`
+    /// (there is no session yet). Nothing else keeps the two in step, so pin the shape.
+    func testPlaceholderPrefixMatchesTheRealPrefixShape() {
+        let real = ClaudeSession.lockedPrefix(sessionID: fixedID, title: "one")
+        let placeholder = ClaudeSettingsTab.placeholderPrefix
+        XCTAssertTrue(real.hasPrefix("claude --session-id "))
+        XCTAssertTrue(placeholder.hasPrefix("claude --session-id "))
+        XCTAssertTrue(real.contains(" --name "))
+        XCTAssertTrue(placeholder.contains(" --name "))
+    }
 }

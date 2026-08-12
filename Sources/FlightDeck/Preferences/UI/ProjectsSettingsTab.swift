@@ -28,6 +28,12 @@ struct ProjectsSettingsTab: View {
                 .tag(path)
             }
             .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+            .onChange(of: paths) { _, newPaths in
+                // Covers both "Remove Override" and reverting a project's flags to empty
+                // (which also removes it, see `binding(for:)`): either can drop the
+                // selected path from the list out from under the detail pane.
+                if let selected, !newPaths.contains(selected) { self.selected = nil }
+            }
         } detail: {
             if let selected {
                 VStack(alignment: .leading, spacing: 0) {
@@ -62,7 +68,13 @@ struct ProjectsSettingsTab: View {
     private func binding(for path: String) -> Binding<FlagSet> {
         Binding(
             get: { preferences.projectOverride(path) },
-            set: { preferences.setProjectOverride(path, $0) }
+            set: {
+                // An emptied override is a removal, not an empty override: persisting the
+                // empty set would keep the project listed forever with its badge hidden
+                // and its Remove button disabled, leaving no way to delete it.
+                $0.isEmpty ? preferences.removeProjectOverride(path)
+                           : preferences.setProjectOverride(path, $0)
+            }
         )
     }
 }

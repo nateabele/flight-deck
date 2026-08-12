@@ -9,6 +9,19 @@ struct ShellSettingsTab: View {
 
     private var shell: Binding<ShellPreferences> { $preferences.preferences.shell }
 
+    private var trimmedKey: String { newKey.trimmingCharacters(in: .whitespaces) }
+
+    /// Matches shell variable-name rules so `environmentVariables` never receives a
+    /// malformed entry — whitespace or `=` in the name would corrupt the surface's
+    /// environment rather than merely fail to launch.
+    private var keyIsValid: Bool {
+        trimmedKey.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil
+    }
+
+    private var keyCollides: Bool {
+        keyIsValid && shell.wrappedValue.environment[trimmedKey] != nil
+    }
+
     var body: some View {
         Form {
             Section("Shell") {
@@ -61,17 +74,27 @@ struct ShellSettingsTab: View {
                 }
 
                 LabeledContent("Add") {
-                    HStack(spacing: 6) {
-                        TextField("NAME", text: $newKey).frame(width: 120)
-                        TextField("value", text: $newValue).frame(width: 160)
-                        Button("Add") {
-                            let key = newKey.trimmingCharacters(in: .whitespaces)
-                            guard !key.isEmpty else { return }
-                            shell.wrappedValue.environment[key] = newValue
-                            newKey = ""
-                            newValue = ""
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            TextField("NAME", text: $newKey).frame(width: 120)
+                            TextField("value", text: $newValue).frame(width: 160)
+                            Button(keyCollides ? "Replace" : "Add") {
+                                guard keyIsValid else { return }
+                                shell.wrappedValue.environment[trimmedKey] = newValue
+                                newKey = ""
+                                newValue = ""
+                            }
+                            .disabled(!keyIsValid)
                         }
-                        .disabled(newKey.trimmingCharacters(in: .whitespaces).isEmpty)
+                        if !trimmedKey.isEmpty && !keyIsValid {
+                            Text("Must start with a letter or underscore, then letters, digits, or underscores.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if keyCollides {
+                            Text("\"\(trimmedKey)\" already exists — this replaces its value.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
