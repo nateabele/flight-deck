@@ -180,7 +180,7 @@ final class TerminalSmokeTests: XCTestCase {
         XCTContext.runActivity(named: "toggling a control updates the command field") { _ in
             let prefs = preferencesWindow(app)
             prefs.buttons["Claude"].click()
-            let field = prefs.textViews.firstMatch
+            let field = prefs.textViews["command-field"]
             XCTAssertTrue(field.waitForExistence(timeout: 5))
             XCTAssertFalse((field.value as? String ?? "").contains("--verbose"))
 
@@ -199,7 +199,7 @@ final class TerminalSmokeTests: XCTestCase {
         // "it was already on".
         XCTContext.runActivity(named: "typing in the command field updates the controls") { _ in
             let prefs = preferencesWindow(app)
-            let field = prefs.textViews.firstMatch
+            let field = prefs.textViews["command-field"]
             let checkbox = prefs.checkBoxes.matching(identifier: "Agent-to-user messages").firstMatch
             XCTAssertEqual(checkbox.value as? Int, 0)
 
@@ -214,7 +214,7 @@ final class TerminalSmokeTests: XCTestCase {
         // The whole point of the locked prefix: select-all + delete must not destroy it.
         XCTContext.runActivity(named: "the locked prefix survives select-all and delete") { _ in
             let prefs = preferencesWindow(app)
-            let field = prefs.textViews.firstMatch
+            let field = prefs.textViews["command-field"]
             field.click()
             field.typeKey("a", modifierFlags: .command)
             field.typeKey(.delete, modifierFlags: [])
@@ -237,7 +237,7 @@ final class TerminalSmokeTests: XCTestCase {
             sheet.buttons["Cancel"].click()
 
             XCTAssertEqual(checkbox.value as? Int, 0, "Cancel left the bypass enabled")
-            let field = prefs.textViews.firstMatch
+            let field = prefs.textViews["command-field"]
             XCTAssertFalse((field.value as? String ?? "").contains("--dangerously-skip-permissions"))
         }
 

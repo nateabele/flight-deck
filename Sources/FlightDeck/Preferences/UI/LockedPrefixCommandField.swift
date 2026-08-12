@@ -65,6 +65,13 @@ struct LockedPrefixCommandField: NSViewRepresentable {
         textStorage.addLayoutManager(layoutManager)
 
         let textView = CommandFieldTextView(frame: .zero, textContainer: textContainer)
+        // Set directly on the NSTextView rather than via SwiftUI's `.accessibilityIdentifier`
+        // modifier on this NSViewRepresentable: that modifier lands on the NSScrollView
+        // returned by `makeNSView`, not on the NSTextView descendant that XCUITest's
+        // `app.textViews[...]` actually resolves to (the .multiline flag rows above render
+        // TextEditors, which are also NSTextView-backed and would otherwise collide with a
+        // positional `.firstMatch` lookup).
+        textView.setAccessibilityIdentifier("command-field")
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
