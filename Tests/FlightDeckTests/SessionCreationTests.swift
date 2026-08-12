@@ -249,6 +249,7 @@ final class SessionCreationTests: XCTestCase {
 
         let created = store.createFromMenu(chooseFolder: { XCTFail("must not prompt"); return nil })
 
-        XCTAssertNotNil(created)
+        XCTAssertEqual(created?.workingDirectory, "/a")
+        XCTAssertFalse(store.repos.map(\.url.path).contains("/b"))
     }
 }
