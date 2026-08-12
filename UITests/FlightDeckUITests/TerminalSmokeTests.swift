@@ -144,6 +144,48 @@ final class TerminalSmokeTests: XCTestCase {
             )
         }
 
+        // The keystroke, not the menu item, is what this proves. libghostty binds ⌘⇧[ / ⌘⇧]
+        // to previous_tab/next_tab, and the Ghostty surface claims every binding ahead of the
+        // main menu — so with focus in the terminal these keys reach `TabNavigationCommands`
+        // only because `MenuKeyEquivalents` hands consumed-only bindings over first. Clicking
+        // the menu items would exercise none of that, which is why this types instead.
+        //
+        // Inherited state: rows are ["session 1", "session 3", "session 2"] with "session 3"
+        // (row 1) selected. Only the selection moves here.
+        XCTContext.runActivity(named: "⌘⇧] and ⌘⇧[ cycle sessions and wrap around") { _ in
+            XCTAssertEqual(rows.count, 3, "precondition: three sessions from the ⌘N group")
+            XCTAssertTrue(app.cells.element(boundBy: 2).isSelected, "precondition: row 1 selected")
+
+            // Forward one: row 1 -> row 2.
+            app.typeKey("]", modifierFlags: [.command, .shift])
+            settle()
+            XCTAssertTrue(
+                app.cells.element(boundBy: 3).isSelected,
+                "⌘⇧] did not advance the selection — the terminal probably swallowed the key"
+            )
+
+            // Forward again from the last row: wraps to row 0.
+            app.typeKey("]", modifierFlags: [.command, .shift])
+            settle()
+            XCTAssertTrue(
+                app.cells.element(boundBy: 1).isSelected,
+                "⌘⇧] did not wrap from the last session to the first"
+            )
+
+            // Backward from the first row: wraps to the last, row 2.
+            app.typeKey("[", modifierFlags: [.command, .shift])
+            settle()
+            XCTAssertTrue(
+                app.cells.element(boundBy: 3).isSelected,
+                "⌘⇧[ did not wrap from the first session to the last"
+            )
+
+            // The rows themselves must be untouched — a stray "[" or "]" reaching the pty
+            // would not change these, but a misrouted key that hit rename or create would.
+            let labels = (0..<3).map { rows.element(boundBy: $0).value as? String }
+            XCTAssertEqual(labels, ["session 1", "session 3", "session 2"])
+        }
+
         XCTContext.runActivity(named: "double-click renames a session") { _ in
             // Targeted by accessibility identifier rather than outline position: a positional
             // lookup would silently break the moment SwiftUI changes how it flattens sections.
