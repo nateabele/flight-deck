@@ -45,6 +45,12 @@ struct FlagEditor: View {
                                 onRevert: inherited == nil ? nil : {
                                     flags.values.removeValue(forKey: spec.canonical)
                                     syncTextFromControls()
+                                    // A control action makes any earlier parse note stale —
+                                    // unlike `.onChange(of: flags)`, which also lands here
+                                    // indirectly but must NOT clear a commit's own warnings
+                                    // (see `applyTextToControls`), this is a genuine control
+                                    // edit and owns the right to clear them.
+                                    parseDiagnostics = []
                                 }
                             )
                         }
@@ -113,6 +119,12 @@ struct FlagEditor: View {
                     flags.values.removeValue(forKey: spec.canonical)
                 }
                 syncTextFromControls()
+                // Same reasoning as `onRevert`: a control edit genuinely makes any earlier
+                // parse note stale, so this call site owns the clear explicitly rather than
+                // relying on `syncTextFromControls` to do it as a side effect (that side
+                // effect would also fire from `.onChange(of: flags)` and wipe a commit's own
+                // warnings — see `applyTextToControls`).
+                parseDiagnostics = []
             }
         )
     }
@@ -122,15 +134,18 @@ struct FlagEditor: View {
     /// makes the field show the merged command that will actually launch (design spec §6)
     /// rather than just the override's own fragment.
     ///
-    /// Also clears `parseDiagnostics`: every writer that changes the model funnels through
-    /// here, so this is the one place that can reliably tell "the text now reflects the
-    /// current model" — any parse note attached to a *previous* version of the text (e.g. an
-    /// unterminated-quote error from a commit the user never fixed before clicking a control
-    /// instead) is stale the moment that happens, even though nothing re-parsed. Leaving it
-    /// standing would show a red error under text that is, in fact, valid.
+    /// Deliberately free of `parseDiagnostics` side effects. `.onChange(of: flags)` /
+    /// `.onChange(of: inherited)` also call this — and `applyTextToControls` assigns
+    /// `flags` synchronously from the same AppKit callback that also sets `parseDiagnostics`,
+    /// so if this cleared diagnostics as a side effect, the `onChange` triggered by that same
+    /// `flags` write would run afterward and wipe the warnings a successful commit just
+    /// produced (unknown flag, app-managed flag, duplicate, the Important-2 removal notes).
+    /// Each control-driven call site (`binding(for:).set`, `onRevert`) clears
+    /// `parseDiagnostics` explicitly right after calling this, since a control edit *does*
+    /// make an old parse note stale — that's still Important 1's fix, just no longer bundled
+    /// in here where it can't tell a control edit from a commit's own `flags` write apart.
     private func syncTextFromControls() {
         tail = ClaudeFlagSerializer.serialize(effective)
-        parseDiagnostics = []
     }
 
     /// text → controls, on blur or ⌘↩. A parse *error* (unterminated quote) keeps the last
@@ -166,7 +181,15 @@ struct FlagEditor: View {
         // changed and the row was showing as overridden a moment ago. A genuine edit that
         // happens to land back on the global's value (see below) is still a real edit and
         // must still act — this only short-circuits a no-op commit.
-        guard text != ClaudeFlagSerializer.serialize(effective) else { return }
+        guard text != ClaudeFlagSerializer.serialize(effective) else {
+            // Nothing to apply to the model, but the text did parse successfully — adopt
+            // its diagnostics as current. Without this a stale error from an earlier
+            // attempt (fixed since, e.g. by ⌘Z back to the last-good canonical text) would
+            // stand forever: every later blur re-hits this same no-op guard and returns
+            // before ever reaching the assignment below.
+            parseDiagnostics = result.diagnostics
+            return
+        }
 
         guard let inherited else {
             flags = result.flags
