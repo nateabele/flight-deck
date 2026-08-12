@@ -50,7 +50,7 @@ Full details, prerequisites, and troubleshooting: **[BUILD.md](BUILD.md)**.
 
 ## How the code is laid out
 
-The spine is `FlightDeckApp → RootWindow → TerminalContainer → GhosttyApp → Ghostty.SurfaceView`. Flight Deck's own code is small; the terminal surface is adapt-copied from Ghostty and decoupled from its app shell. Component map and key files: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+The spine is `FlightDeckApp → RootWindow → TerminalPane → GhosttyApp → Ghostty.SurfaceView`. Flight Deck's own code is small; the terminal surface is adapt-copied from Ghostty and decoupled from its app shell. Component map and key files: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 ## Key decisions already made (don't relitigate without reason)
 
