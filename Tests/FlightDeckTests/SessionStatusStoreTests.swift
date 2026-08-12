@@ -4,22 +4,33 @@ import XCTest
 @MainActor
 final class SessionStatusStoreTests: XCTestCase {
     private func makeStore() -> SessionStore {
-        SessionStore(provider: nil, persistence: nil)
+        let store = SessionStore(provider: nil, persistence: nil)
+        // Synchronous stand-in for the background transcript read: the rows below can
+        // change conversation under a stable pid, which repins, and the real resolver
+        // would put a `Task.detached` file read behind a status assertion.
+        store.titleResolver = { _, done in done(nil) }
+        return store
     }
 
+    // `cwd` has no default, for the reason `ConversationRepinTests` gave when it dropped
+    // its own: every session here lives in `tmp`, and `applyRegistry` moves a tab whenever
+    // a row's `cwd` disagrees with it, so a fixture-wide stand-in like `"/w"` would run a
+    // silent project move underneath every status assertion in this file.
     private func entry(_ sid: UUID, _ activity: SessionActivity,
                        waitingFor: String? = nil, pid: pid_t = 1,
-                       cwd: String = "/w", procStart: String = "start-a")
+                       cwd: String, procStart: String = "start-a")
         -> ClaudeStatusFile.Entry {
         .init(pid: pid, sessionID: sid, activity: activity, waitingFor: waitingFor,
               startedAt: 1, cwd: cwd, procStart: procStart)
     }
 
+    private var tmp: URL { URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true) }
+
     func testRegistryPopulatesStatusForKnownSession() {
         let store = makeStore()
-        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let session = store.newSession(in: tmp)
 
-        store.applyRegistry([1: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy, cwd: tmp.path)])
 
         XCTAssertEqual(store.status(for: session.id)?.activity, .busy)
     }
@@ -30,7 +41,7 @@ final class SessionStatusStoreTests: XCTestCase {
         let store = makeStore()
         let stranger = UUID()
 
-        store.applyRegistry([1: entry(stranger, .busy)])
+        store.applyRegistry([1: entry(stranger, .busy, cwd: tmp.path)])
 
         XCTAssertNil(store.status(for: stranger))
         XCTAssertTrue(store.statuses.isEmpty)
@@ -38,11 +49,11 @@ final class SessionStatusStoreTests: XCTestCase {
 
     func testSubagentCountSurvivesRegistryRefresh() {
         let store = makeStore()
-        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let session = store.newSession(in: tmp)
 
-        store.applyRegistry([1: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy, cwd: tmp.path)])
         store.applySubagentCount(session.id, 3)
-        store.applyRegistry([1: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy, cwd: tmp.path)])
 
         XCTAssertEqual(store.status(for: session.id)?.subagentCount, 3)
     }
@@ -50,19 +61,19 @@ final class SessionStatusStoreTests: XCTestCase {
     /// A count can arrive before the registry has ever been read.
     func testSubagentCountArrivingBeforeRegistryIsRetained() {
         let store = makeStore()
-        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let session = store.newSession(in: tmp)
 
         store.applySubagentCount(session.id, 2)
-        store.applyRegistry([1: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy, cwd: tmp.path)])
 
         XCTAssertEqual(store.status(for: session.id)?.subagentCount, 2)
     }
 
     func testDisappearingSessionClearsStatus() {
         let store = makeStore()
-        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let session = store.newSession(in: tmp)
 
-        store.applyRegistry([1: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy, cwd: tmp.path)])
         store.applyRegistry([:])
 
         XCTAssertNil(store.status(for: session.id))
@@ -72,12 +83,13 @@ final class SessionStatusStoreTests: XCTestCase {
     /// dedupe-by-sessionId in the watcher would have hidden one of them.
     func testTwoProcessesOnOneConversationBothSurviveTheJoin() {
         let store = makeStore()
-        let first = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
-        let second = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let first = store.newSession(in: tmp)
+        let second = store.newSession(in: tmp)
 
         store.applyRegistry([
-            1: entry(first.pinnedConversationID, .busy, pid: 1),
-            2: entry(second.pinnedConversationID, .waiting, pid: 2, procStart: "start-b"),
+            1: entry(first.pinnedConversationID, .busy, pid: 1, cwd: tmp.path),
+            2: entry(second.pinnedConversationID, .waiting, pid: 2, cwd: tmp.path,
+                     procStart: "start-b"),
         ])
 
         XCTAssertEqual(store.status(for: first.id)?.activity, .busy)
@@ -88,10 +100,12 @@ final class SessionStatusStoreTests: XCTestCase {
     /// consulted for the status join, which is what lets a resume keep the icon alive.
     func testStatusSurvivesTheConversationChangingUnderTheSamePid() {
         let store = makeStore()
-        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let session = store.newSession(in: tmp)
 
-        store.applyRegistry([1: entry(session.pinnedConversationID, .busy, pid: 1)])
-        store.applyRegistry([1: entry(UUID(), .waiting, pid: 1)])
+        store.applyRegistry([
+            1: entry(session.pinnedConversationID, .busy, pid: 1, cwd: tmp.path),
+        ])
+        store.applyRegistry([1: entry(UUID(), .waiting, pid: 1, cwd: tmp.path)])
 
         XCTAssertEqual(store.status(for: session.id)?.activity, .waiting)
     }
@@ -103,10 +117,10 @@ final class SessionStatusStoreTests: XCTestCase {
         let store = makeStore()
         let spy = SpyNotifier()
         store.notifier = spy
-        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let session = store.newSession(in: tmp)
 
         store.applyRegistry([
-            1: entry(session.id, .waiting, waitingFor: "permission prompt"),
+            1: entry(session.id, .waiting, waitingFor: "permission prompt", cwd: tmp.path),
         ])
         store.applySubagentCount(session.id, 2)
         store.closeSession(session.id)
@@ -122,10 +136,10 @@ final class SessionStatusStoreTests: XCTestCase {
 
     func testWaitingReasonIsCarriedThrough() {
         let store = makeStore()
-        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let session = store.newSession(in: tmp)
 
         store.applyRegistry([
-            1: entry(session.id, .waiting, waitingFor: "input needed"),
+            1: entry(session.id, .waiting, waitingFor: "input needed", cwd: tmp.path),
         ])
 
         XCTAssertEqual(store.status(for: session.id)?.waitingFor, "input needed")
@@ -135,12 +149,12 @@ final class SessionStatusStoreTests: XCTestCase {
     /// UUID, it must not inherit the dead one's sub-agent count.
     func testDisappearingSessionAlsoClearsItsSubagentCount() {
         let store = makeStore()
-        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let session = store.newSession(in: tmp)
 
-        store.applyRegistry([1: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy, cwd: tmp.path)])
         store.applySubagentCount(session.id, 3)
         store.applyRegistry([:])                                     // claude exited
-        store.applyRegistry([1: entry(session.id, .busy)])  // restarted, same UUID
+        store.applyRegistry([1: entry(session.id, .busy, cwd: tmp.path)])  // restarted, same UUID
 
         XCTAssertEqual(store.status(for: session.id)?.subagentCount, 0)
     }
@@ -160,11 +174,11 @@ final class SessionStatusStoreTests: XCTestCase {
         let spy = SpyNotifier()
         store.notifier = spy
         store.appIsActive = { false }
-        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let session = store.newSession(in: tmp)
 
-        store.applyRegistry([1: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .busy, cwd: tmp.path)])
         store.applyRegistry([
-            1: entry(session.id, .waiting, waitingFor: "permission prompt"),
+            1: entry(session.id, .waiting, waitingFor: "permission prompt", cwd: tmp.path),
         ])
 
         XCTAssertEqual(spy.notified.count, 1)
@@ -177,9 +191,9 @@ final class SessionStatusStoreTests: XCTestCase {
         let spy = SpyNotifier()
         store.notifier = spy
         store.appIsActive = { true }
-        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let session = store.newSession(in: tmp)
 
-        store.applyRegistry([1: entry(session.id, .waiting)])
+        store.applyRegistry([1: entry(session.id, .waiting, cwd: tmp.path)])
 
         XCTAssertTrue(spy.notified.isEmpty)
     }
@@ -189,18 +203,18 @@ final class SessionStatusStoreTests: XCTestCase {
         let spy = SpyNotifier()
         store.notifier = spy
         store.appIsActive = { false }
-        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let session = store.newSession(in: tmp)
 
-        store.applyRegistry([1: entry(session.id, .waiting)])
-        store.applyRegistry([1: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .waiting, cwd: tmp.path)])
+        store.applyRegistry([1: entry(session.id, .busy, cwd: tmp.path)])
 
         XCTAssertEqual(spy.withdrawn, [session.id])
     }
 
     func testActivationNotificationSelectsSession() {
         let store = makeStore()
-        let first = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
-        let second = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        let first = store.newSession(in: tmp)
+        let second = store.newSession(in: tmp)
         store.selectSession(first.id)
 
         NotificationCenter.default.post(
