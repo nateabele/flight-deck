@@ -68,6 +68,10 @@ final class SessionStore: ObservableObject {
 
     private let persistence: SessionPersisting?
 
+    /// Read at session-creation time only. Preferences configure *new* sessions; a
+    /// running `claude` is never reconfigured, because its command line is already spent.
+    private let preferences: PreferencesStore?
+
     /// Test seam. Production sets this from the convenience init.
     var notifier: Notifying?
     /// Test seam for frontmost-ness; production reads `NSApplication`.
@@ -75,9 +79,14 @@ final class SessionStore: ObservableObject {
 
     private var activationObserver: NSObjectProtocol?
 
-    init(provider: SurfaceProvider?, persistence: SessionPersisting? = nil) {
+    init(
+        provider: SurfaceProvider?,
+        persistence: SessionPersisting? = nil,
+        preferences: PreferencesStore? = nil
+    ) {
         self.provider = provider
         self.persistence = persistence
+        self.preferences = preferences
         observeActivationRequests()
     }
 
@@ -100,8 +109,22 @@ final class SessionStore: ObservableObject {
     /// is incidental to the timer's current implementation, not guaranteed by this
     /// method's contract. Taking `notifier` as a parameter here removes the dependency on
     /// that timing.
-    convenience init(ghostty: GhosttyApp?, resetState: Bool = false, notifier: Notifying? = nil) {
-        self.init(provider: ghostty, persistence: UserDefaultsSessionPersistence())
+    ///
+    /// `preferences` is a parameter for a stricter reason: `restore()` below resolves each
+    /// restored session's flags as it rebuilds it, so the store must already be readable by
+    /// the time this initializer runs — assigning it afterwards would launch every restored
+    /// session unconfigured.
+    convenience init(
+        ghostty: GhosttyApp?,
+        resetState: Bool = false,
+        preferences: PreferencesStore? = nil,
+        notifier: Notifying? = nil
+    ) {
+        self.init(
+            provider: ghostty,
+            persistence: UserDefaultsSessionPersistence(),
+            preferences: preferences
+        )
         self.notifier = notifier
         if resetState || !restore() { seedInitialSession() }
         startStatusWatching()
@@ -124,7 +147,9 @@ final class SessionStore: ObservableObject {
             session,
             in: url,
             initialInput: ClaudeSession.launchCommand(
-                sessionID: session.id, title: session.title
+                sessionID: session.id,
+                title: session.title,
+                flags: preferences?.resolvedFlags(forProject: url.path) ?? FlagSet()
             ),
             at: index
         )
@@ -220,9 +245,10 @@ final class SessionStore: ObservableObject {
         }
 
         var config = Ghostty.SurfaceConfiguration()
-        config.command = ShellResolver.resolve()
+        config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
         config.workingDirectory = url.path
         config.initialInput = initialInput
+        config.environmentVariables = preferences?.sessionEnvironment() ?? [:]
         if let surface = provider?.makeSurface(config) {
             surfaces[session.id] = surface
         }
@@ -275,7 +301,14 @@ final class SessionStore: ObservableObject {
                 session,
                 in: url,
                 initialInput: ClaudeSession.resumeCommand(
-                    sessionID: conversationID, title: entry.title
+                    // The pinned conversation, not the tab's own id — a tab that resumed an
+                    // existing conversation must keep following that one across relaunches.
+                    sessionID: conversationID,
+                    title: entry.title,
+                    // Resolved per entry, from that entry's own working directory, so a
+                    // restored session picks up its project's overrides rather than the
+                    // first repo's.
+                    flags: preferences?.resolvedFlags(forProject: entry.workingDirectory) ?? FlagSet()
                 )
             )
         }

@@ -53,6 +53,34 @@ Net: **~97% of `GhosttyEmbed/` is reused Ghostty code**; the Flight-Deck-authore
 - **Retention:** one `GhosttyApp` per `TerminalContainer` (per view), held by the Coordinator. **This is the thing to change before multi-window/multi-session** — see the teardown-lifetime item in [FOLLOWUPS.md](FOLLOWUPS.md).
 - **Shell launch:** the surface's PTY forks `ShellResolver.resolve()` in the working directory (verified: `FlightDeck → /usr/bin/login → -/bin/zsh`).
 
+## Preferences
+
+`Sources/FlightDeck/Preferences/` holds a pure core and a SwiftUI shell over it.
+
+The core is a declarative `FlagSpec` catalog (`ClaudeFlagCatalog`, a snapshot of
+`claude --help` at 2026-08-11) plus four pure functions: `ClaudeFlagQuoting` (tokenize /
+quote), `ClaudeFlagParser` (text → `FlagSet` + diagnostics), `ClaudeFlagSerializer`
+(`FlagSet` → text), and `FlagSetMerge` (project over global, per flag). The invariant
+`parse(serialize(x)) == x` is what makes the two-way sync between the controls and the
+command field safe; it is pinned in `ClaudeFlagSerializerTests`. Two details of that
+invariant are load-bearing: `ClaudeFlagSerializer.serialize` emits the **passthrough run
+first, then catalog order** — a list flag consumes every following non-flag token, so a
+*trailing* passthrough run would get silently absorbed into it — and `ClaudeFlagQuoting`'s
+tokens carry `wasQuoted`, with the parser refusing to read a quoted token as a flag. That is
+what lets a value like `--verbose` on `--system-prompt` round-trip correctly; quoting alone
+cannot fix it, because the parser never sees the quotes.
+
+`PreferencesStore` (owned by `FlightDeckApp`, constructed **before** `SessionStore` because
+that store restores inline) persists to `UserDefaults` behind `PreferencesPersisting`.
+`SessionStore.insertSession` reads it once per session at creation: preferences configure
+*new* sessions and never reconfigure a running one.
+
+Project overrides are keyed by standardized path in `Preferences.projectFlags`, not held on
+`Repo` — a `Repo` is removed when its last session closes, and an override must outlive that.
+
+Unknown flags are preserved verbatim in `FlagSet.passthrough` and warned about rather than
+rejected, so a `claude` release that adds a flag does not make the field lossy.
+
 ## Vendored layout (git-ignored build inputs/outputs)
 
 - `vendor/ghostty` — submodule, pinned **v1.3.1** (`332b2ae`), pristine (never modified).

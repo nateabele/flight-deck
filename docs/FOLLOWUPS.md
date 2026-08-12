@@ -54,6 +54,10 @@ carried forward on trust.
 
 - `scripts/build-libghostty.sh`: add `-f`/`-fS` to the `curl` download (bad HTTP responses are
   already caught by the subsequent `shasum -c`, just less directly).
+- **The flag catalog is a snapshot of `claude --help` at 2026-08-11.** New `claude` releases
+  add options that will fall through to passthrough with a warning until the catalog is
+  updated. That degradation is by design, but the catalog is worth re-auditing whenever
+  Claude Code ships a notable release.
 
 ## Deferred from session name sync (2026-08-11)
 
@@ -95,6 +99,12 @@ reader doesn't re-derive them.
   status line first. `Ghostty.SurfaceConfiguration` exposes `environmentVariables`, so the
   defensive fix (clear the marker for spawned sessions) is available if this proves to be
   more than a development-time footgun.
+
+  **Update (preferences, 2026-08-11):** now fixed behind a preference. `ShellSettingsTab`
+  exposes *Clear `CLAUDE_CODE_CHILD_SESSION` in new sessions*, defaulted **on**, which blanks
+  an inherited marker via `Ghostty.SurfaceConfiguration.environmentVariables`. The marker is
+  blanked rather than unset because the surface config can only set variables; `claude`
+  treats an empty value as absent.
 
 ## From session creation UX (2026-08-11)
 

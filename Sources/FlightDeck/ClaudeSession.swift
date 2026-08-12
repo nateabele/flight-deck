@@ -80,25 +80,61 @@ enum ClaudeSession {
         return String(trimmed.prefix(maxNameLength))
     }
 
-    /// POSIX single-quoting: wrap in `'…'` and rewrite embedded `'` as `'\''`.
+    /// POSIX single-quoting: wrap in `'…'` and rewrite embedded `'` as `'\''`. Also used by
+    /// `ClaudeFlagSerializer.quotedValue` to force-quote a flag value that would otherwise
+    /// reparse as a flag or trigger zsh's equals-expansion — one implementation shared by
+    /// both call sites rather than two copies of the same escaping logic.
     static func shellQuoted(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    /// The command the shell runs at session start, binding `claude` to our UUID and title.
-    static func launchCommand(sessionID: UUID, title: String) -> String {
+    /// The app-managed portion of the command, always a contiguous prefix. The command
+    /// field renders exactly this as its immutable region, which is what makes the
+    /// locked-token UI a locked *prefix* rather than arbitrary inline tokens.
+    static func lockedPrefix(sessionID: UUID, title: String) -> String {
         let name = sanitizedName(title) ?? "session"
-        return "claude --session-id \(sessionID.uuidString.lowercased()) "
-            + "--name \(shellQuoted(name))\n"
+        return "claude --session-id \(sessionID.uuidString.lowercased()) --name \(shellQuoted(name))"
+    }
+
+    /// Empty list flags are a legitimate stored state — the serializer emits them as a
+    /// bare flag so the editor's round-trip holds — but a bare `--add-dir` on a real
+    /// command line makes `claude` fail to start. Launching drops them; persistence keeps
+    /// them.
+    private static func launchable(_ flags: FlagSet) -> FlagSet {
+        var launchable = flags
+        launchable.values = flags.values.filter { _, value in
+            if case .list(let items) = value { return !items.isEmpty }
+            return true
+        }
+        return launchable
+    }
+
+    /// The command the shell runs at session start, binding `claude` to our UUID and title.
+    /// User flags follow the app-managed ones so the prefix stays contiguous.
+    static func launchCommand(
+        sessionID: UUID, title: String, flags: FlagSet = FlagSet()
+    ) -> String {
+        let tail = ClaudeFlagSerializer.serialize(launchable(flags))
+        return lockedPrefix(sessionID: sessionID, title: title)
+            + (tail.isEmpty ? "" : " \(tail)") + "\n"
     }
 
     /// The command for a session restored from a previous app launch. Reattaches to the
     /// existing conversation, falling back to a fresh session with the same id and name
     /// when the transcript has been deleted or pruned (`--resume` exits 1 in that case).
-    static func resumeCommand(sessionID: UUID, title: String) -> String {
+    ///
+    /// Flags are applied to **both** branches: the fallback is a real session launch, and
+    /// leaving it unconfigured would silently drop every preference the moment a
+    /// transcript is pruned.
+    static func resumeCommand(
+        sessionID: UUID, title: String, flags: FlagSet = FlagSet()
+    ) -> String {
         let id = sessionID.uuidString.lowercased()
         let name = sanitizedName(title) ?? "session"
-        return "claude --resume \(id) || claude --session-id \(id) --name \(shellQuoted(name))\n"
+        let tail = ClaudeFlagSerializer.serialize(launchable(flags))
+        let suffix = tail.isEmpty ? "" : " \(tail)"
+        return "claude --resume \(id)\(suffix) "
+            + "|| claude --session-id \(id) --name \(shellQuoted(name))\(suffix)\n"
     }
 
     /// One state-bearing thing that happened in the transcript.
