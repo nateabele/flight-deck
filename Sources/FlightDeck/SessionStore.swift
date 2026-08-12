@@ -366,6 +366,11 @@ final class SessionStore: ObservableObject {
     /// completion did not resurrect one.
     var watchedSessionIDs: Set<UUID> { Set(watchers.keys) }
 
+    /// Test seam, the other half of `watchedSessionIDs`: *which* transcript a tab is
+    /// tailing. Presence alone cannot catch a watcher left behind on the pre-move or
+    /// pre-repin path, which is the failure both of those paths exist to prevent.
+    func watchedTranscriptURL(of id: UUID) -> URL? { watchers[id]?.url }
+
     func title(of id: UUID) -> String? {
         guard let at = locate(id) else { return nil }
         return repos[at.repo].sessions[at.session].title
@@ -581,13 +586,25 @@ final class SessionStore: ObservableObject {
             projectsRoot: projectsRoot
         )
         titleResolver(url) { [weak self] title in
-            // The tab can close while this read is in flight — `applyExternalTitle`
-            // already no-ops safely via its own `locate` guard, but `startWatching` has
-            // none, so without this guard a closed tab's completion would resurrect a
-            // `TranscriptWatcher` that nothing will ever stop again.
-            guard let self, self.locate(tabID) != nil else { return }
+            // Two things can happen during a read that is a whole-file load: the tab can
+            // close, and the tab can be repinned again (a second resume, or a fork).
+            // `pinnedConversationID(of:)` covers both — it is nil for a closed tab, whose
+            // completion would otherwise resurrect a `TranscriptWatcher` nothing will ever
+            // stop again, and it differs for a re-repinned one, whose completion would
+            // otherwise apply a superseded title and hand the tab a watcher tailing the
+            // conversation it has already left. It is also what makes `startWatching`'s
+            // unconditional `watchers[tabID] =` safe by construction.
+            guard let self, self.pinnedConversationID(of: tabID) == conversationID else {
+                return
+            }
             if let title { self.applyExternalTitle(tabID, title) }
-            self.startWatching(tabID: tabID, conversationID: conversationID, url: url)
+            // Only when nothing has re-watched this tab in the meantime. `repin` cleared
+            // the entry, so a watcher being present means a project move landed during the
+            // read and already pointed one at the tab's *newer* directory; `url` was built
+            // from the pre-move one.
+            if self.watchers[tabID] == nil {
+                self.startWatching(tabID: tabID, conversationID: conversationID, url: url)
+            }
         }
 
         persist()
