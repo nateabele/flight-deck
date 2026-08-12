@@ -121,8 +121,16 @@ struct FlagEditor: View {
     /// tab `inherited` is nil so the two are identical, but in the Projects tab this is what
     /// makes the field show the merged command that will actually launch (design spec §6)
     /// rather than just the override's own fragment.
+    ///
+    /// Also clears `parseDiagnostics`: every writer that changes the model funnels through
+    /// here, so this is the one place that can reliably tell "the text now reflects the
+    /// current model" — any parse note attached to a *previous* version of the text (e.g. an
+    /// unterminated-quote error from a commit the user never fixed before clicking a control
+    /// instead) is stale the moment that happens, even though nothing re-parsed. Leaving it
+    /// standing would show a red error under text that is, in fact, valid.
     private func syncTextFromControls() {
         tail = ClaudeFlagSerializer.serialize(effective)
+        parseDiagnostics = []
     }
 
     /// text → controls, on blur or ⌘↩. A parse *error* (unterminated quote) keeps the last
@@ -141,25 +149,29 @@ struct FlagEditor: View {
     /// new, or genuinely differs from the global, becomes a real override. This is the same
     /// "leave it inherited" outcome `FlagRow`'s own revert button produces, so a user who
     /// edits a value back to match the global one gets the same reverted state either way.
-    ///
-    /// One case this cannot recover: deleting an inherited flag from the merged text
-    /// *without* replacing it is indistinguishable from never having mentioned it, because
-    /// `FlagSet` has no way to represent "override to absent" — only "override to a
-    /// different value." That token reappears (from `inherited`) the next time the tail is
-    /// re-synced. That is not a bug introduced here; it is the same limitation the row
-    /// controls already have (a plain `.toggle` row has no "explicitly off" state to revert
-    /// to either — only unset/inherit, or on). A `.string`/`.path`/`.list` flag *can* be
-    /// overridden to empty (`--model ''`, bare `--add-dir`), and that still round-trips,
-    /// because an explicit empty value is a real, present `FlagValue` distinguishable from
-    /// the key being absent — the token just needs to survive the edit, not vanish.
     private func applyTextToControls(_ text: String) {
         let result = ClaudeFlagParser.parse(text)
-        parseDiagnostics = result.diagnostics
-        guard !result.diagnostics.contains(where: { $0.severity == .error }) else { return }
+        guard !result.diagnostics.contains(where: { $0.severity == .error }) else {
+            parseDiagnostics = result.diagnostics
+            return
+        }
+
+        // The user blurred (or hit ⌘↩) without changing anything — `textDidEndEditing`
+        // fires unconditionally on any resign-first-responder, including clicking a
+        // control, not only on an actual text edit. Without this guard that keystroke-free
+        // commit would still re-diff below and can only lose information: a project
+        // override whose value happens to equal the global's (the user deliberately picked
+        // "opus" in a picker when the global is already "opus") would silently drop back to
+        // inheriting the instant the field loses focus, even though the field's text never
+        // changed and the row was showing as overridden a moment ago. A genuine edit that
+        // happens to land back on the global's value (see below) is still a real edit and
+        // must still act — this only short-circuits a no-op commit.
+        guard text != ClaudeFlagSerializer.serialize(effective) else { return }
 
         guard let inherited else {
             flags = result.flags
             syncTextFromControls()
+            parseDiagnostics = result.diagnostics
             return
         }
 
@@ -168,22 +180,50 @@ struct FlagEditor: View {
             overrides.values[key] = value
         }
         overrides.passthrough = projectPassthrough(from: result.flags.passthrough, inherited: inherited.passthrough)
+
+        // A key present in `inherited` but missing from the parsed result means the user
+        // deleted that flag from the merged text outright rather than editing its value.
+        // `FlagSet` cannot represent "override to absent" — only "override to a different
+        // value" — so `syncTextFromControls()` below will re-serialize the token right back
+        // into the field. Surface that as a warning instead of letting the edit silently
+        // undo itself with no explanation. (A `.string`/`.path`/`.list` flag overridden to
+        // *empty*, e.g. `--model ''` or a bare `--add-dir`, is unaffected: that is a real,
+        // present `FlagValue`, not an absence, and round-trips normally.)
+        let removalWarnings = inherited.values.keys
+            .filter { result.flags.values[$0] == nil }
+            .sorted()
+            .map {
+                Diagnostic.warning(
+                    "\($0) is inherited from the global defaults and can't be removed here — "
+                    + "change it in the Claude tab, or override it to a different value."
+                )
+            }
+
         flags = overrides
         syncTextFromControls()
+        parseDiagnostics = result.diagnostics + removalWarnings
     }
 
     /// Recovers the project's own passthrough tokens from the merged passthrough shown in
-    /// the field. `FlagSetMerge` concatenates `inherited.passthrough + flags.passthrough`,
-    /// and the serializer emits passthrough first, so on an unedited merge the inherited
-    /// tokens are a literal leading prefix of what comes back from the parser — strip it. If
-    /// the user edited that region (reordered it, inserted a token ahead of an inherited
-    /// one, deleted an inherited token), no prefix match survives; treat the whole run as
-    /// the project's own in that case. That can duplicate an inherited token into the
-    /// override, but it never silently drops passthrough text the user just typed.
+    /// the field, as a multiset difference: each token in `merged` that can still be matched
+    /// against an unconsumed copy in `inherited` is attributed to the global and dropped;
+    /// everything left over is the project's own. This handles the common edit shape
+    /// correctly — the serializer emits passthrough *first*, so "type a new unknown flag at
+    /// the start of the field" is the natural way to add one, and a plain prefix-strip would
+    /// see the inserted token break the prefix match and misattribute the whole run,
+    /// duplicating the inherited tokens into the override every time. A multiset diff
+    /// tolerates insertion, deletion, and reordering of individual tokens without ever
+    /// duplicating one.
     private func projectPassthrough(from merged: [String], inherited: [String]) -> [String] {
-        guard merged.count >= inherited.count, Array(merged.prefix(inherited.count)) == inherited else {
-            return merged
+        var remaining = inherited
+        var project: [String] = []
+        for token in merged {
+            if let index = remaining.firstIndex(of: token) {
+                remaining.remove(at: index)
+            } else {
+                project.append(token)
+            }
         }
-        return Array(merged.dropFirst(inherited.count))
+        return project
     }
 }
