@@ -49,8 +49,8 @@ Net: **~97% of `GhosttyEmbed/` is reused Ghostty code**; the Flight-Deck-authore
 
 ## Runtime model
 
-- **Tick loop:** `libghostty` only advances when `ghostty_app_tick` is called. `GhosttyApp`'s `wakeup` callback does `DispatchQueue.main.async { tick() }` (thread-safe), and `TerminalContainer` kicks an initial tick so the first frame renders.
-- **Retention:** one `GhosttyApp` per `TerminalContainer` (per view), held by the Coordinator. **This is the thing to change before multi-window/multi-session** — see the teardown-lifetime item in [FOLLOWUPS.md](FOLLOWUPS.md).
+- **Tick loop:** `libghostty` only advances when `ghostty_app_tick` is called. `GhosttyApp`'s `wakeup` callback does `DispatchQueue.main.async { tick() }` (thread-safe), and `TerminalPane` kicks an initial tick so the first frame renders.
+- **Retention:** one `GhosttyApp` per `TerminalPane` (per view), held by the Coordinator. **This is the thing to change before multi-window/multi-session** — see the teardown-lifetime item in [FOLLOWUPS.md](FOLLOWUPS.md).
 - **Shell launch:** the surface's PTY forks `ShellResolver.resolve()` in the working directory (verified: `FlightDeck → /usr/bin/login → -/bin/zsh`).
 - **Surface sizing:** `TerminalPane`'s container is a `TerminalHostView`, an `NSView` subclass
   that forwards frame changes to `Ghostty.SurfaceView.sizeDidChange(_:)` — the call that
@@ -130,7 +130,7 @@ Full field shapes, the decompiled status derivation, and accepted limitations ar
 
 ⌘⇧[ / ⌘⇧] move the selection along `repos.flatMap(\.sessions)` — the sidebar's visual order
 flattened across project sections — wrapping at both ends. `SessionStore.selectNextSession()` /
-`selectPreviousSession()` hold the logic; `TabNavigationCommands` supplies the Window-menu items.
+`selectPreviousSession()` are the entry points; the wraparound algorithm lives in the private `cycleSelection(forward:)`. `TabNavigationCommands` supplies the Window-menu items.
 
 The menu items are the *mechanism*, not decoration. AppKit gives the Ghostty surface's
 `performKeyEquivalent` first refusal, and libghostty binds both shortcuts by default — but as
