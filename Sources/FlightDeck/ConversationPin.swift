@@ -22,13 +22,23 @@ enum ConversationPin {
         var workingDirectory: String
     }
 
-    /// Anchor once by conversation, then follow the pid forever.
+    /// Match by conversation while unanchored; follow the pid once anchored.
     ///
-    /// The ordering is what makes this sound. A tab can only be anchored while its
-    /// conversation id is one Flight Deck generated and passed as `--session-id`, so at
-    /// that moment at most one row can plausibly be ours. Every later lookup is by pid,
-    /// which is immune to the conversation changing underneath us — and the conversation
-    /// changing underneath us is precisely the event we are trying to detect.
+    /// Match-by-conversation is the one ambiguous operation, and its guarantee is
+    /// **conditional, not universal**. It is unambiguous exactly while the pin is a UUID
+    /// Flight Deck generated and passed as `--session-id` — no other `claude` on the
+    /// machine can be running a conversation whose id we invented — which covers a tab's
+    /// whole life up to its first resume, and is why the first anchoring is sound. Every
+    /// lookup after that is by pid, which is immune to the conversation changing
+    /// underneath us, and that change is precisely the event we are detecting.
+    ///
+    /// The guarantee stops holding after a resume: this branch runs whenever the tab has
+    /// no anchor, including re-anchoring once the anchored `claude` exits, and by then the
+    /// pin may name a conversation the user could equally open in a plain terminal (or one
+    /// rehydrated by `SessionStore.restore()` after a relaunch). Accepted, not overlooked —
+    /// the failure needs a dead tab process plus a deliberate resume of that exact
+    /// conversation elsewhere, and its symptom is a wrong status icon, not lost state. See
+    /// `docs/superpowers/specs/2026-08-11-resumed-conversation-pinning-design.md` §5.
     static func resolve(
         conversationID: UUID,
         workingDirectory: String,

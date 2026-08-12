@@ -188,12 +188,20 @@ When the anchored row's `cwd` changes, the tab moves in the sidebar rather than 
 with a divergent transcript path.
 
 ```swift
-func moveSession(_ id: UUID, toProjectAt url: URL)
+func moveSession(_ id: UUID, toProjectAt url: URL, restartsWatcher: Bool = true)
 ```
 
-- The destination repo is found via the existing `indexOfRepo(for:)`
-  (`standardizedFileURL.path` comparison). **If absent, it is created** — the same
-  `repos.append(Repo(url:))` path `insertSession` already uses.
+- The destination repo is found via the existing `indexOfRepo(for:)`, comparing paths
+  standardized **and symlink-resolved**: `claude` reports `process.cwd()` with symlinks
+  already resolved, while a path from the folder picker or a drop is not, so comparing them
+  raw would move a symlinked project into a duplicate of itself. **If absent, the repo is
+  created** — the same `repos.append(Repo(url:))` path `insertSession` already uses.
+- `restartsWatcher` exists because `workingDirectory` feeds `ClaudeSession.transcriptURL`:
+  a move changes where `claude` writes, so the watcher has to be re-pointed or the tab tails
+  the old directory forever — the same permanent-silence failure §2 describes. `applyRegistry`
+  passes `false` when it has already repinned in the same tick, since `repin` rebuilds the
+  watcher from the resolution's directory itself. Left defaulted to `true` so a future caller
+  that forgets it gets the safe behaviour.
 - The session **appends** to the destination repo's sessions.
 - The source repo is **left in place even when its last session leaves**. A project with no
   sessions is a legitimate sidebar state. This deliberately does *not* mirror
