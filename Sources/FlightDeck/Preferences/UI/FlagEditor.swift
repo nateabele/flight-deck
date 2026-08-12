@@ -129,7 +129,12 @@ struct FlagEditor: View {
                 pendingDangerousFlag = nil
             }
         } message: { _ in
-            Text("Every new session will bypass all permission checks and act without asking. Recommended only for sandboxes with no internet access.")
+            // Deliberately distinct from FlagDiagnostics.validate's persistent inline
+            // warning for this same flag (which stays visible underneath regardless of
+            // this alert's outcome): that warning is a standing description of what the
+            // setting is, so this one-time gate names what it concretely allows and that
+            // the decision isn't final, instead of repeating the caution.
+            Text("Sessions will run file edits, shell commands, and network calls without asking you first. You can turn this back off here at any time.")
         }
     }
 
