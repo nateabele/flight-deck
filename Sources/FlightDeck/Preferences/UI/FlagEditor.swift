@@ -251,11 +251,7 @@ struct FlagEditor: View {
             return
         }
 
-        var overrides = FlagSet()
-        for (key, value) in result.flags.values where inherited.values[key] != value {
-            overrides.values[key] = value
-        }
-        overrides.passthrough = projectPassthrough(from: result.flags.passthrough, inherited: inherited.passthrough)
+        let overrides = FlagSetMerge.unmerge(merged: result.flags, inherited: inherited)
 
         // A key present in `inherited` but missing from the parsed result means the user
         // deleted that flag from the merged text outright rather than editing its value.
@@ -278,28 +274,5 @@ struct FlagEditor: View {
         flags = overrides
         syncTextFromControls()
         parseDiagnostics = result.diagnostics + removalWarnings
-    }
-
-    /// Recovers the project's own passthrough tokens from the merged passthrough shown in
-    /// the field, as a multiset difference: each token in `merged` that can still be matched
-    /// against an unconsumed copy in `inherited` is attributed to the global and dropped;
-    /// everything left over is the project's own. This handles the common edit shape
-    /// correctly — the serializer emits passthrough *first*, so "type a new unknown flag at
-    /// the start of the field" is the natural way to add one, and a plain prefix-strip would
-    /// see the inserted token break the prefix match and misattribute the whole run,
-    /// duplicating the inherited tokens into the override every time. A multiset diff
-    /// tolerates insertion, deletion, and reordering of individual tokens without ever
-    /// duplicating one.
-    private func projectPassthrough(from merged: [String], inherited: [String]) -> [String] {
-        var remaining = inherited
-        var project: [String] = []
-        for token in merged {
-            if let index = remaining.firstIndex(of: token) {
-                remaining.remove(at: index)
-            } else {
-                project.append(token)
-            }
-        }
-        return project
     }
 }
