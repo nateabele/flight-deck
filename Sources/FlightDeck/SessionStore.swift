@@ -450,7 +450,8 @@ final class SessionStore: ObservableObject {
         for (tab, resolution) in resolutions {
             anchors[tab] = resolution.anchor
             guard let session = session(for: tab) else { continue }
-            if resolution.conversationID != session.pinnedConversationID {
+            let repinned = resolution.conversationID != session.pinnedConversationID
+            if repinned {
                 repin(
                     tab,
                     to: resolution.conversationID,
@@ -458,12 +459,19 @@ final class SessionStore: ObservableObject {
                 )
             }
             if !resolution.workingDirectory.isEmpty,
-               resolution.workingDirectory != session.workingDirectory {
+               Self.comparablePath(resolution.workingDirectory)
+                   != Self.comparablePath(session.workingDirectory) {
                 moveSession(
                     tab,
                     toProjectAt: URL(
                         fileURLWithPath: resolution.workingDirectory, isDirectory: true
-                    )
+                    ),
+                    // A repin has already rebuilt the watcher, from the registry row's cwd
+                    // — which is this same destination — and it is the authority on where
+                    // `claude` writes. Restarting again here would start a second watcher
+                    // for one tab, or (in production, where the repin's watcher starts only
+                    // after an async title read) leave the later completion to displace it.
+                    restartsWatcher: !repinned
                 )
             }
         }
@@ -619,12 +627,23 @@ final class SessionStore: ObservableObject {
     ///
     /// The tab id does not change, so `selectedSessionID` needs no fixing up and SwiftUI
     /// animates the same row from one section to the other rather than recreating it.
-    func moveSession(_ id: UUID, toProjectAt url: URL) {
+    ///
+    /// The watcher is restarted, because `Session.workingDirectory` is an input to
+    /// `ClaudeSession.transcriptURL`: a tab that moved without one would keep tailing the
+    /// transcript under its *old* encoded project directory and silently stop receiving
+    /// renames and sub-agent counts — the exact failure a resume already causes for the
+    /// conversation half. `restartsWatcher: false` is for the one caller that rebuilds the
+    /// watcher itself; see `applyRegistry`.
+    func moveSession(_ id: UUID, toProjectAt url: URL, restartsWatcher: Bool = true) {
         guard let at = locate(id) else { return }
         let target = url.standardizedFileURL
-        guard repos[at.repo].url.standardizedFileURL.path != target.path else { return }
+        guard Self.comparablePath(repos[at.repo].url.path)
+                != Self.comparablePath(target.path) else { return }
 
         var session = repos[at.repo].sessions.remove(at: at.session)
+        // Stored as reported, not as compared: the destination comes from the registry
+        // row's `cwd`, and that exact string is what `claude` encodes into the transcript's
+        // project directory name. Normalization is for deciding *whether* to move.
         session.workingDirectory = target.path
 
         // Resolved after the removal so the index cannot be stale. Removing a *session*
@@ -637,6 +656,19 @@ final class SessionStore: ObservableObject {
             destination = repos.count - 1
         }
         repos[destination].sessions.append(session)
+
+        if restartsWatcher {
+            watchers[id]?.stop()
+            startWatching(
+                tabID: id,
+                conversationID: session.pinnedConversationID,
+                url: ClaudeSession.transcriptURL(
+                    sessionID: session.pinnedConversationID,
+                    workingDirectory: session.workingDirectory,
+                    projectsRoot: projectsRoot
+                )
+            )
+        }
 
         if selectedSessionID == id { lastActiveProjectURL = target }
         persist()
@@ -658,8 +690,25 @@ final class SessionStore: ObservableObject {
     }
 
     private func indexOfRepo(for url: URL) -> Int? {
-        let target = url.standardizedFileURL.path
-        return repos.firstIndex { $0.url.standardizedFileURL.path == target }
+        let target = Self.comparablePath(url.path)
+        return repos.firstIndex { Self.comparablePath($0.url.path) == target }
+    }
+
+    /// The form in which two directory paths are compared for "same project".
+    ///
+    /// The two sides come from different places: `claude` reports `process.cwd()`, which
+    /// `getcwd` has already resolved through symlinks, while Flight Deck stores whatever
+    /// the folder picker or a drop handed it — `standardizedFileURL` collapses `.`/`..`
+    /// but never follows a symlink. Comparing those raw makes a project reached through a
+    /// symlink look like a different project, which files a duplicate repo and leaves an
+    /// empty ghost behind on the first registry tick.
+    ///
+    /// `resolvingSymlinksInPath()` is a no-op for a path that does not exist on disk, so
+    /// directories that are only ever named (tests, a project on an unmounted volume)
+    /// still compare exactly as written.
+    private static func comparablePath(_ path: String) -> String {
+        URL(fileURLWithPath: path, isDirectory: true)
+            .standardizedFileURL.resolvingSymlinksInPath().path
     }
 
     private func session(for id: UUID) -> Session? {
