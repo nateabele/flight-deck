@@ -191,18 +191,46 @@ An empty repo renders correctly as-is: `SessionSidebar` is
 `ForEach(repos) { Section(repo.displayName) { ForEach(repo.sessions) … } }`, so a repo with
 no sessions shows its header and nothing under it.
 
-Two consequences of allowing empty repos, both flagged rather than fixed here:
+One consequence is accepted as-is: **an empty project does not survive a relaunch.**
+`SessionSnapshot` stores only sessions and rebuilds `repos` from their `workingDirectory`
+(§10), so a project with nothing in it has nothing to rebuild from. Persisting repos
+independently belongs with the deferred empty-project work, not here.
 
-- **An empty project does not survive a relaunch.** `SessionSnapshot` stores only sessions
-  and rebuilds `repos` from their `workingDirectory` (§10), so a project with nothing in it
-  has nothing to rebuild from. Persisting repos independently is the obvious fix and belongs
-  with the deferred empty-project work, not here.
-- **`repos.isEmpty` stops meaning "no sessions".** `SessionSidebar.isEmpty` drives the
-  bottom button's label and which shortcut it claims, and `createFromMenu` feeds
-  `!repos.isEmpty` to a parameter named `hasSessions`. With a leftover empty project those
-  two diverge: the button offers "New Session" and, absent a selection, falls back to
-  `repos.first` — which may be the empty leftover. Odd, not broken, and pre-existing drift
-  that this change merely makes reachable.
+### 7.1 Session creation follows the last active project
+
+Allowing empty repos breaks an assumption `createFromMenu` currently makes, so the creation
+path is corrected rather than left to drift.
+
+**The naming was already wrong.** `SessionCreateAction.forState(hasSessions:)` is fed
+`!repos.isEmpty`, which is "has projects", not "has sessions". Today those are the same
+thing; with empty projects they are not. The parameter is renamed `hasProjects`, which is
+what the call site always meant and what the behaviour should key on: **while any project
+exists the button offers "New Session" (⌘N)**, and it only offers "Add Project" (⇧⌘A) when
+the sidebar is genuinely bare. An empty project is still somewhere to put a session.
+
+**The fallback chain was arbitrary.** With no selection, `createFromMenu` falls back to
+`repos.first` — which may be an empty leftover the user has nothing to do with. It should
+target the project the user was last working in. `SessionStore` gains:
+
+```swift
+private(set) var lastActiveProjectURL: URL?
+```
+
+- Updated whenever `selectedSessionID` changes to a locatable session, to that session's
+  `workingDirectory`.
+- Updated by `moveSession` (§7) when the session it moves is the selected one, so the
+  remembered project follows a tab into its new home rather than pointing at the one it
+  left.
+- **Not cleared when the selection goes nil** (clicking below the last row), and not cleared
+  when the project empties. That is the whole point: the target survives the tab leaving.
+- Follows `closeSession`'s automatic reassignment, since that reassignment genuinely
+  activates another tab.
+
+`createFromMenu`'s `.newSession` path becomes: new session below the active one; else
+`lastActiveProjectURL` **even when that repo is now empty**; else `repos.first`; else prompt
+for a folder. No new insertion machinery is needed — `addProject(at:)` routes to
+`insertSession`, whose `indexOfRepo(for:)` lookup already appends to an existing repo, and
+an empty repo is found the same as any other.
 
 Selection is unaffected: `selectedSessionID` holds the tab `id`, which does not change, so
 SwiftUI animates the stable row from one section to the other rather than dropping it.
@@ -325,6 +353,13 @@ Store-level, with the existing fakes:
   withdraws the notification, and persists.
 - Move relocates the session, creates the destination repo when absent, and **leaves the
   source repo in place when it empties**.
+- `lastActiveProjectURL` follows selection, follows a move of the selected session, and
+  survives both a nil selection and its project emptying.
+- `createFromMenu` with no selection creates in `lastActiveProjectURL` **even when that repo
+  is empty**, rather than in `repos.first`, and only prompts for a folder when no project
+  exists at all.
+- `SessionCreateAction.forState(hasProjects:)` — existing cases updated for the rename; a
+  sidebar holding only an empty project yields `.newSession`, not `.addProject`.
 - A v1 snapshot without `pinnedConversationID` decodes with the pin defaulting to `id`.
 
 **Not covered by the UITest gate.** Driving a real `/resume` through Claude's interactive
