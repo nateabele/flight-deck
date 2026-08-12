@@ -90,14 +90,29 @@ and a resumed UUID could collide with another tab's `id`. Not a close call.
 The join has to stop being by-conversation, because the conversation is the thing that
 changes.
 
-- **At launch**, the tab's conversation UUID is one Flight Deck generated, so exactly one
-  registry row can match it. Match once and record `(pid, procStart)` as the tab's
-  **anchor**.
-- **Thereafter**, find the tab's row by `pid` and never by conversation again.
+- **While the tab has no anchor**, match a registry row by the tab's current
+  `pinnedConversationID` and record that row's `(pid, procStart)` as the tab's **anchor**.
+- **While the tab has an anchor**, find its row by `pid` and never by conversation again.
 
-The ordering is what makes this sound: **anchoring always happens before any resume can**,
-so the single ambiguous operation — match-by-conversation — only ever runs at a moment when
-the conversation is guaranteed unique to us.
+Match-by-conversation is the one ambiguous operation, and the guarantee that it is
+unambiguous is **conditional, not universal**. It holds exactly when the pinned conversation
+is a UUID Flight Deck generated — which is the case for a tab's whole life up to its first
+resume, and is why the first anchoring is sound: no other `claude` on the machine can be
+running a conversation whose id we invented and passed as `--session-id`.
+
+It stops holding after a resume. Anchoring runs whenever `anchors[tab]` is nil — including
+re-anchoring after the anchored `claude` exits — and by then the pin may be a conversation
+the user could equally open in a plain terminal. The residual case is precise: **the tab's
+`claude` has exited after a resume, the tab has not been re-anchored, and the user resumes
+that same conversation in some other process.** That row then matches the pin, and the tab
+adopts a foreign process's status and pid.
+
+This is accepted, not overlooked. It is strictly better than the pre-branch behaviour, where
+a resume simply broke the join and the tab went permanently statusless; the failure needs a
+dead tab process plus a deliberate resume of that exact conversation elsewhere; and the
+symptom is a wrong status icon, not lost state — the tab's pin, title, and transcript are
+untouched. Narrowing it would mean either refusing to re-anchor after a resume (which
+reintroduces the statusless tab) or matching on something the registry does not expose.
 
 `procStart` is required, not defensive. macOS recycles pids; `claude`'s own concurrency code
 uses proc-start-time for exactly this purpose (`procIdentityOf`, `isSameProcess`). Same pid
