@@ -24,8 +24,10 @@ final class ConversationRepinTests: XCTestCase {
         let session = store.newSession(in: tmp)
         let resumed = UUID()
 
-        store.applyRegistry([1: row(session.pinnedConversationID)])   // anchor
-        store.applyRegistry([1: row(resumed)])                        // /resume
+        // cwd pinned to `tmp` on both rows: this test isolates a repin with no working
+        // directory change. `SessionProjectMoveTests` covers the cwd-changes case.
+        store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])   // anchor
+        store.applyRegistry([1: row(resumed, cwd: tmp.path)])                        // /resume
 
         XCTAssertEqual(store.pinnedConversationID(of: session.id), resumed)
         XCTAssertEqual(store.repos.first?.sessions.first?.id, session.id)
