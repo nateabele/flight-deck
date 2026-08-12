@@ -345,6 +345,44 @@ final class SessionStore: ObservableObject {
         persist()
     }
 
+    /// ⌘⇧] — moves the selection one session down the sidebar's visual order, wrapping to the
+    /// top. ⌘⇧[ is the mirror image.
+    func selectNextSession() { cycleSelection(forward: true) }
+
+    /// ⌘⇧[. See `selectNextSession()`.
+    func selectPreviousSession() { cycleSelection(forward: false) }
+
+    /// The order is `repos.flatMap(\.sessions)` — the sidebar top to bottom, crossing project
+    /// sections. Flattening is not a convenience: `moveSession` deliberately leaves an emptied
+    /// source project standing, so the first repo can hold no sessions while live tabs sit in a
+    /// later section, and anything reading through `repos.first` would walk off the live list.
+    /// `closeSession` documents the same hazard.
+    ///
+    /// No-ops on an empty list, and a lone session wraps to itself. A `selectedSessionID` that
+    /// names no live session is treated as no selection at all, which lands on the first
+    /// session going forward and the last going backward — the same place a nil selection goes.
+    ///
+    /// Assigning `selectedSessionID` is the whole effect: its `didSet` persists the change and
+    /// updates `lastActiveProjectURL`, so ⌘N after a tab switch already targets the newly
+    /// active session's project.
+    private func cycleSelection(forward: Bool) {
+        let ordered = repos.flatMap(\.sessions)
+        guard !ordered.isEmpty else { return }
+
+        guard
+            let current = selectedSessionID,
+            let index = ordered.firstIndex(where: { $0.id == current })
+        else {
+            selectedSessionID = forward ? ordered.first?.id : ordered.last?.id
+            return
+        }
+
+        let destination = forward
+            ? ordered.indexWrapping(after: index)
+            : ordered.indexWrapping(before: index)
+        selectedSessionID = ordered[destination].id
+    }
+
     func closeSession(_ id: UUID) {
         guard let (repoIndex, sessionIndex) = locate(id) else { return }
         repos[repoIndex].sessions.remove(at: sessionIndex)
