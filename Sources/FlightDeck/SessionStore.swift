@@ -416,12 +416,21 @@ final class SessionStore: ObservableObject {
             }
         for (tab, resolution) in resolutions {
             anchors[tab] = resolution.anchor
-            if let session = session(for: tab),
-               resolution.conversationID != session.pinnedConversationID {
+            guard let session = session(for: tab) else { continue }
+            if resolution.conversationID != session.pinnedConversationID {
                 repin(
                     tab,
                     to: resolution.conversationID,
                     transcriptDirectory: resolution.workingDirectory
+                )
+            }
+            if !resolution.workingDirectory.isEmpty,
+               resolution.workingDirectory != session.workingDirectory {
+                moveSession(
+                    tab,
+                    toProjectAt: URL(
+                        fileURLWithPath: resolution.workingDirectory, isDirectory: true
+                    )
                 )
             }
         }
@@ -552,6 +561,37 @@ final class SessionStore: ObservableObject {
             if let title { self.applyExternalTitle(tabID, title) }
             self.startWatching(tabID: tabID, conversationID: conversationID, url: url)
         }
+
+        persist()
+    }
+
+    /// Files a session under a different project, creating that project if it is new.
+    ///
+    /// Unlike `closeSession`, this does **not** prune a source project it empties: a
+    /// project with no sessions is a legitimate sidebar state. (An empty project does not
+    /// currently survive a relaunch, because `SessionSnapshot` stores only sessions and
+    /// rebuilds `repos` from their `workingDirectory` — known, deferred.)
+    ///
+    /// The tab id does not change, so `selectedSessionID` needs no fixing up and SwiftUI
+    /// animates the same row from one section to the other rather than recreating it.
+    func moveSession(_ id: UUID, toProjectAt url: URL) {
+        guard let at = locate(id) else { return }
+        let target = url.standardizedFileURL
+        guard repos[at.repo].url.standardizedFileURL.path != target.path else { return }
+
+        var session = repos[at.repo].sessions.remove(at: at.session)
+        session.workingDirectory = target.path
+
+        // Resolved after the removal so the index cannot be stale. Removing a *session*
+        // never removes a repo, so `at.repo` stays valid either way.
+        let destination: Int
+        if let existing = indexOfRepo(for: target) {
+            destination = existing
+        } else {
+            repos.append(Repo(url: target))
+            destination = repos.count - 1
+        }
+        repos[destination].sessions.append(session)
 
         persist()
     }
