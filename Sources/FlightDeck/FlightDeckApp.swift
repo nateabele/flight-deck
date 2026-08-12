@@ -45,7 +45,10 @@ struct FlightDeckApp: App {
 
     var body: some Scene {
         RootWindow(store: store)
-            .commands { SessionCommands(store: store) }
+            .commands {
+                SessionCommands(store: store)
+                TabNavigationCommands(store: store)
+            }
 
         // A `Settings` scene gives ⌘, and the standard Preferences window for free.
         Settings {
