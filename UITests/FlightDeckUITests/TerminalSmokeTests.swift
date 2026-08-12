@@ -29,6 +29,14 @@ final class TerminalSmokeTests: XCTestCase {
         wait(for: [settled], timeout: 2)
     }
 
+    /// macOS names the Settings window inconsistently across releases ("Preferences" on
+    /// some, SwiftUI's generated "FlightDeck Settings" on others), so it is located
+    /// defensively by content — the window whose descendants include the Claude tab
+    /// button — rather than by a hard-coded title.
+    private func preferencesWindow(_ app: XCUIApplication) -> XCUIElement {
+        app.windows.containing(.button, identifier: "Claude").firstMatch
+    }
+
     func testTheWholeShellInOneSession() {
         let app = XCUIApplication()
         // - `-ApplePersistenceIgnoreState`: XCUITest spawns the app via a raw exec, not
@@ -156,6 +164,85 @@ final class TerminalSmokeTests: XCTestCase {
             XCTAssertEqual(app.state, .runningForeground)
             XCTAssertTrue(window.exists)
         }
+
+        // Preferences (⌘,) opens a separate window whose three tabs are wired to the flag
+        // catalog. The window is located by `preferencesWindow(_:)` rather than by title —
+        // see that helper's doc comment for why.
+        XCTContext.runActivity(named: "⌘, opens Preferences with three tabs") { _ in
+            app.typeKey(",", modifierFlags: .command)
+            let prefs = preferencesWindow(app)
+            XCTAssertTrue(prefs.waitForExistence(timeout: 5), "Preferences window did not open")
+            XCTAssertTrue(prefs.buttons["Claude"].exists)
+            XCTAssertTrue(prefs.buttons["Projects"].exists)
+            XCTAssertTrue(prefs.buttons["Shell & Environment"].exists)
+        }
+
+        XCTContext.runActivity(named: "toggling a control updates the command field") { _ in
+            let prefs = preferencesWindow(app)
+            prefs.buttons["Claude"].click()
+            let field = prefs.textViews.firstMatch
+            XCTAssertTrue(field.waitForExistence(timeout: 5))
+            XCTAssertFalse((field.value as? String ?? "").contains("--verbose"))
+
+            prefs.checkBoxes.matching(identifier: "Verbose").firstMatch.click()
+            expectation(
+                for: NSPredicate(format: "value CONTAINS %@", "--verbose"), evaluatedWith: field
+            )
+            waitForExpectations(timeout: 5)
+        }
+
+        // The other direction of the sync, and the reason ⌘↩ exists: commit without blurring.
+        // Asserts on `--brief` (catalog label "Agent-to-user messages", not "Brief" — the
+        // control's accessibility identifier is `spec.label` verbatim) rather than `--verbose`:
+        // the previous group already turned `--verbose` on and, in this single shared session,
+        // that mutation persists — reusing it here would not distinguish "the sync ran" from
+        // "it was already on".
+        XCTContext.runActivity(named: "typing in the command field updates the controls") { _ in
+            let prefs = preferencesWindow(app)
+            let field = prefs.textViews.firstMatch
+            let checkbox = prefs.checkBoxes.matching(identifier: "Agent-to-user messages").firstMatch
+            XCTAssertEqual(checkbox.value as? Int, 0)
+
+            field.click()
+            field.typeText(" --brief")
+            field.typeKey(.return, modifierFlags: .command)
+
+            expectation(for: NSPredicate(format: "value == 1"), evaluatedWith: checkbox)
+            waitForExpectations(timeout: 5)
+        }
+
+        // The whole point of the locked prefix: select-all + delete must not destroy it.
+        XCTContext.runActivity(named: "the locked prefix survives select-all and delete") { _ in
+            let prefs = preferencesWindow(app)
+            let field = prefs.textViews.firstMatch
+            field.click()
+            field.typeKey("a", modifierFlags: .command)
+            field.typeKey(.delete, modifierFlags: [])
+
+            let value = field.value as? String ?? ""
+            XCTAssertTrue(value.hasPrefix("claude --session-id"), "locked prefix was destroyed: \(value)")
+        }
+
+        // The permission-bypass toggle is gated by a confirmation. Cancel must leave it off —
+        // the gate returns before mutating the model, so the checkbox must not stick on.
+        XCTContext.runActivity(named: "enabling permission bypass asks first, and Cancel leaves it off") { _ in
+            let prefs = preferencesWindow(app)
+            let checkbox = prefs.checkBoxes.matching(identifier: "Skip all permission checks").firstMatch
+            XCTAssertTrue(checkbox.waitForExistence(timeout: 5))
+            XCTAssertEqual(checkbox.value as? Int, 0)
+
+            checkbox.click()
+            let sheet = app.sheets.firstMatch
+            XCTAssertTrue(sheet.waitForExistence(timeout: 5), "no confirmation appeared")
+            sheet.buttons["Cancel"].click()
+
+            XCTAssertEqual(checkbox.value as? Int, 0, "Cancel left the bypass enabled")
+            let field = prefs.textViews.firstMatch
+            XCTAssertFalse((field.value as? String ?? "").contains("--dangerously-skip-permissions"))
+        }
+
+        // Close Preferences so the ⌘Q group below acts on the main window.
+        app.typeKey("w", modifierFlags: .command)
 
         // Strictly last: it terminates the app.
         //
