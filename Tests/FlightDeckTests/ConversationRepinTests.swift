@@ -1,0 +1,126 @@
+import XCTest
+@testable import FlightDeck
+
+@MainActor
+final class ConversationRepinTests: XCTestCase {
+    private func makeStore() -> SessionStore {
+        let store = SessionStore(provider: nil, persistence: nil)
+        // Synchronous stand-in for the background transcript read, so tests need no
+        // expectations — same rationale as `TranscriptWatcher.drain()` being callable.
+        store.titleResolver = { _, done in done(nil) }
+        return store
+    }
+
+    private func row(_ sid: UUID, pid: pid_t = 1, cwd: String = "/w",
+                     procStart: String = "start-a") -> ClaudeStatusFile.Entry {
+        .init(pid: pid, sessionID: sid, activity: .busy, waitingFor: nil,
+              startedAt: 1, cwd: cwd, procStart: procStart)
+    }
+
+    private var tmp: URL { URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true) }
+
+    func testResumeMovesThePinButNotTheTabID() {
+        let store = makeStore()
+        let session = store.newSession(in: tmp)
+        let resumed = UUID()
+
+        store.applyRegistry([1: row(session.pinnedConversationID)])   // anchor
+        store.applyRegistry([1: row(resumed)])                        // /resume
+
+        XCTAssertEqual(store.pinnedConversationID(of: session.id), resumed)
+        XCTAssertEqual(store.repos.first?.sessions.first?.id, session.id)
+    }
+
+    func testResumeAdoptsTheResumedConversationsTitle() {
+        let store = makeStore()
+        store.titleResolver = { _, done in done("the resumed conversation") }
+        let session = store.newSession(in: tmp)
+        let resumed = UUID()
+
+        store.applyRegistry([1: row(session.pinnedConversationID)])
+        store.applyRegistry([1: row(resumed)])
+
+        XCTAssertEqual(store.title(of: session.id), "the resumed conversation")
+    }
+
+    /// An unreadable or nameless transcript leaves the tab called what it was called.
+    func testUnresolvableTitleLeavesTheTitleAlone() {
+        let store = makeStore()
+        let session = store.newSession(in: tmp)
+        let before = store.title(of: session.id)
+
+        store.applyRegistry([1: row(session.pinnedConversationID)])
+        store.applyRegistry([1: row(UUID())])
+
+        XCTAssertEqual(store.title(of: session.id), before)
+    }
+
+    /// The old conversation's outstanding Agent calls will never be answered in the new
+    /// transcript, so a stale count would stick forever.
+    func testResumeZeroesTheSubagentCount() {
+        let store = makeStore()
+        let session = store.newSession(in: tmp)
+
+        store.applyRegistry([1: row(session.pinnedConversationID)])
+        store.applySubagentCount(session.id, 3)
+        store.applyRegistry([1: row(UUID())])
+
+        XCTAssertEqual(store.status(for: session.id)?.subagentCount, 0)
+    }
+
+    /// The banner refers to a prompt in a conversation the tab has left.
+    func testResumeWithdrawsAPendingNotification() {
+        let store = makeStore()
+        let spy = SpyNotifier()
+        store.notifier = spy
+        let session = store.newSession(in: tmp)
+
+        store.applyRegistry([1: row(session.pinnedConversationID)])
+        store.applyRegistry([1: row(UUID())])
+
+        XCTAssertTrue(spy.withdrawn.contains(session.id))
+    }
+
+    func testResumeIsPersisted() {
+        let persistence = FakePersistence()
+        let store = SessionStore(provider: nil, persistence: persistence)
+        store.titleResolver = { _, done in done(nil) }
+        let session = store.newSession(in: tmp)
+        let resumed = UUID()
+
+        store.applyRegistry([1: row(session.pinnedConversationID)])
+        store.applyRegistry([1: row(resumed)])
+
+        XCTAssertEqual(
+            persistence.stored?.sessions.first?.pinnedConversationID, resumed
+        )
+    }
+
+    /// A steady state must not churn: repinning on every tick would restart the watcher
+    /// 120 times a minute.
+    func testUnchangedConversationDoesNotRepin() {
+        let store = makeStore()
+        var resolverCalls = 0
+        store.titleResolver = { _, done in resolverCalls += 1; done(nil) }
+        let session = store.newSession(in: tmp)
+
+        store.applyRegistry([1: row(session.pinnedConversationID)])
+        store.applyRegistry([1: row(session.pinnedConversationID)])
+        store.applyRegistry([1: row(session.pinnedConversationID)])
+
+        XCTAssertEqual(resolverCalls, 0)
+    }
+
+    final class FakePersistence: SessionPersisting {
+        var stored: SessionSnapshot?
+        func load() -> SessionSnapshot? { stored }
+        func save(_ snapshot: SessionSnapshot) { stored = snapshot }
+    }
+
+    final class SpyNotifier: Notifying {
+        var withdrawn: [UUID] = []
+        func requestAuthorization() {}
+        func notify(sessionID: UUID, title: String, body: String) {}
+        func withdraw(sessionID: UUID) { withdrawn.append(sessionID) }
+    }
+}

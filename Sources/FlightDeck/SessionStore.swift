@@ -323,6 +323,23 @@ final class SessionStore: ObservableObject {
     /// Test seam. Production leaves this nil and injection goes to the live surface.
     var injectorOverride: TextInjecting?
 
+    /// Test seam. The default reads the resumed conversation's transcript off the main
+    /// actor and calls back on it; tests substitute a synchronous closure so they need no
+    /// expectations. The read is one-shot per resume and can touch a multi-megabyte file,
+    /// which is why it does not run inline.
+    var titleResolver: @MainActor (URL, @escaping @MainActor (String?) -> Void) -> Void = {
+        url, done in
+        Task.detached(priority: .userInitiated) {
+            let title = ConversationTitle.resolve(transcriptAt: url)
+            await done(title)
+        }
+    }
+
+    func pinnedConversationID(of id: UUID) -> UUID? {
+        guard let at = locate(id) else { return nil }
+        return repos[at.repo].sessions[at.session].pinnedConversationID
+    }
+
     func title(of id: UUID) -> String? {
         guard let at = locate(id) else { return nil }
         return repos[at.repo].sessions[at.session].title
@@ -394,6 +411,14 @@ final class SessionStore: ObservableObject {
             }
         for (tab, resolution) in resolutions {
             anchors[tab] = resolution.anchor
+            if let session = session(for: tab),
+               resolution.conversationID != session.pinnedConversationID {
+                repin(
+                    tab,
+                    to: resolution.conversationID,
+                    transcriptDirectory: resolution.workingDirectory
+                )
+            }
         }
 
         var next: [UUID: SessionStatus] = [:]
@@ -478,6 +503,50 @@ final class SessionStore: ObservableObject {
 
     // MARK: - Helpers
 
+    /// The tab's `claude` switched conversations in place (an in-session `/resume`).
+    ///
+    /// Step order is load-bearing at the end: the title is resolved *before* the new
+    /// watcher starts. `TranscriptWatcher` seeds its offset to the file's current size on
+    /// its first look, so it will not replay history — but if it were started first, an
+    /// old rename record could still land before the resolved title and overwrite it.
+    private func repin(
+        _ tabID: UUID, to conversationID: UUID, transcriptDirectory: String
+    ) {
+        guard let at = locate(tabID) else { return }
+
+        // Refers to a prompt in a conversation this tab has left.
+        notifier?.withdraw(sessionID: tabID)
+
+        repos[at.repo].sessions[at.session].pinnedConversationID = conversationID
+
+        // The old conversation's outstanding Agent ids can never be answered in the new
+        // transcript, so the count would otherwise stick at its last value forever.
+        // Only the backing count is reset, not `statuses`: the sole caller is
+        // `applyRegistry`, which rebuilds `statuses` from these counts immediately after
+        // and diffs the result against the pre-call snapshot to decide notifications.
+        // Editing `statuses` here would corrupt that "before" picture.
+        subagentCounts[tabID] = 0
+
+        watchers[tabID]?.stop()
+        watchers.removeValue(forKey: tabID)
+
+        // Directory comes from the registry row, not the tab: a resumed conversation
+        // carries its own project path, and the row is authoritative about where `claude`
+        // is actually writing.
+        let url = ClaudeSession.transcriptURL(
+            sessionID: conversationID,
+            workingDirectory: transcriptDirectory,
+            projectsRoot: projectsRoot
+        )
+        titleResolver(url) { [weak self] title in
+            guard let self else { return }
+            if let title { self.applyExternalTitle(tabID, title) }
+            self.startWatching(tabID: tabID, conversationID: conversationID, url: url)
+        }
+
+        persist()
+    }
+
     /// `tabID` keys our own state; `conversationID` is what the transcript is named after
     /// and what its rename records are stamped with. They differ after a resume.
     private func startWatching(tabID: UUID, conversationID: UUID, url: URL) {
@@ -496,6 +565,11 @@ final class SessionStore: ObservableObject {
     private func indexOfRepo(for url: URL) -> Int? {
         let target = url.standardizedFileURL.path
         return repos.firstIndex { $0.url.standardizedFileURL.path == target }
+    }
+
+    private func session(for id: UUID) -> Session? {
+        guard let at = locate(id) else { return nil }
+        return repos[at.repo].sessions[at.session]
     }
 
     private func locate(_ id: UUID) -> (repo: Int, session: Int)? {
