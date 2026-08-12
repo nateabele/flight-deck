@@ -5,6 +5,7 @@ import SwiftUI
 private struct SessionRow: View {
     @ObservedObject var store: SessionStore
     let session: Session
+    let isConflicted: Bool
 
     @State private var isEditing = false
     @State private var draft = ""
@@ -33,6 +34,12 @@ private struct SessionRow: View {
                     .onTapGesture(perform: handleTitleTap)
             }
             Spacer()
+            if isConflicted {
+                Image(systemName: "person.2.fill")
+                    .foregroundStyle(.secondary)
+                    .help("Another tab is on this conversation")
+                    .accessibilityIdentifier("session-pin-conflict")
+            }
             SessionStatusIcon(status: store.status(for: session.id))
             // The close button is absent, not merely hidden, until hover: inserting it
             // is what pushes the status icon left. No manual offset needed.
@@ -123,12 +130,17 @@ struct SessionSidebar: View {
     private var isEmpty: Bool { store.repos.isEmpty }
 
     var body: some View {
-        List(selection: $store.selectedSessionID) {
+        let conflicted = store.conflictedSessionIDs
+        return List(selection: $store.selectedSessionID) {
             ForEach(store.repos) { repo in
                 Section(repo.displayName) {
                     ForEach(repo.sessions) { session in
-                        SessionRow(store: store, session: session)
-                            .tag(session.id)
+                        SessionRow(
+                            store: store,
+                            session: session,
+                            isConflicted: conflicted.contains(session.id)
+                        )
+                        .tag(session.id)
                     }
                 }
             }

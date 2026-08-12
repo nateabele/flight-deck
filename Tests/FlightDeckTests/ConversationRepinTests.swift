@@ -136,6 +136,32 @@ final class ConversationRepinTests: XCTestCase {
         XCTAssertNil(store.pinnedConversationID(of: session.id))
     }
 
+    func testTwoTabsResumedOntoOneConversationAreBothFlagged() {
+        let store = makeStore()
+        let first = store.newSession(in: tmp)
+        let second = store.newSession(in: tmp)
+        let shared = UUID()
+
+        store.applyRegistry([
+            1: row(first.pinnedConversationID, pid: 1, cwd: tmp.path),
+            2: row(second.pinnedConversationID, pid: 2, cwd: tmp.path, procStart: "start-b"),
+        ])
+        store.applyRegistry([
+            1: row(shared, pid: 1, cwd: tmp.path),
+            2: row(shared, pid: 2, cwd: tmp.path, procStart: "start-b"),
+        ])
+
+        XCTAssertEqual(store.conflictedSessionIDs, [first.id, second.id])
+    }
+
+    func testDistinctConversationsAreNotFlagged() {
+        let store = makeStore()
+        _ = store.newSession(in: tmp)
+        _ = store.newSession(in: tmp)
+
+        XCTAssertTrue(store.conflictedSessionIDs.isEmpty)
+    }
+
     final class FakePersistence: SessionPersisting {
         var stored: SessionSnapshot?
         func load() -> SessionSnapshot? { stored }
