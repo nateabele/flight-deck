@@ -340,6 +340,11 @@ final class SessionStore: ObservableObject {
         return repos[at.repo].sessions[at.session].pinnedConversationID
     }
 
+    /// Test seam: which tabs currently have a live `TranscriptWatcher`. `watchers` itself
+    /// stays private; this exposes just enough to assert a closed tab's late `repin`
+    /// completion did not resurrect one.
+    var watchedSessionIDs: Set<UUID> { Set(watchers.keys) }
+
     func title(of id: UUID) -> String? {
         guard let at = locate(id) else { return nil }
         return repos[at.repo].sessions[at.session].title
@@ -539,7 +544,11 @@ final class SessionStore: ObservableObject {
             projectsRoot: projectsRoot
         )
         titleResolver(url) { [weak self] title in
-            guard let self else { return }
+            // The tab can close while this read is in flight — `applyExternalTitle`
+            // already no-ops safely via its own `locate` guard, but `startWatching` has
+            // none, so without this guard a closed tab's completion would resurrect a
+            // `TranscriptWatcher` that nothing will ever stop again.
+            guard let self, self.locate(tabID) != nil else { return }
             if let title { self.applyExternalTitle(tabID, title) }
             self.startWatching(tabID: tabID, conversationID: conversationID, url: url)
         }
