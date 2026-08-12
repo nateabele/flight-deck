@@ -111,6 +111,26 @@ final class ConversationRepinTests: XCTestCase {
         XCTAssertEqual(resolverCalls, 0)
     }
 
+    /// If the tab closes while `repin`'s title read is still in flight, the late
+    /// completion must not resurrect a watcher — nothing would ever stop it again, since
+    /// `closeSession` already ran its one-time teardown.
+    func testTabClosedDuringTitleResolutionDoesNotGetAWatcher() {
+        let store = makeStore()
+        var pending: ((String?) -> Void)?
+        store.titleResolver = { _, done in pending = done }
+        let session = store.newSession(in: tmp)
+
+        store.applyRegistry([1: row(session.pinnedConversationID)])   // anchor
+        store.applyRegistry([1: row(UUID())])                        // /resume, resolver now pending
+        store.closeSession(session.id)
+        pending?("a title that arrives too late")
+
+        XCTAssertFalse(store.watchedSessionIDs.contains(session.id))
+        XCTAssertNil(store.status(for: session.id))
+        XCTAssertNil(store.title(of: session.id))
+        XCTAssertNil(store.pinnedConversationID(of: session.id))
+    }
+
     final class FakePersistence: SessionPersisting {
         var stored: SessionSnapshot?
         func load() -> SessionSnapshot? { stored }
