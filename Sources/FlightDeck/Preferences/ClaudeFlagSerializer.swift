@@ -47,10 +47,16 @@ enum ClaudeFlagSerializer {
         return parts.joined(separator: " ")
     }
 
-    /// `quoteIfNeeded` leaves `-` unquoted because it is a safe character, but a value
-    /// that begins with `-` would reparse as a flag. Force quotes for exactly that case.
+    /// `quoteIfNeeded` leaves `-` and `=` unquoted because both are safe *inside* a word,
+    /// but at the start of one they change meaning: a leading `-` reparses as a flag, and
+    /// a leading `=` triggers zsh's equals-expansion, which aborts the whole command line
+    /// when it fails to resolve. Force quotes for exactly those two cases, delegating to
+    /// `ClaudeSession.shellQuoted` for the actual POSIX single-quoting so there is one
+    /// implementation of that logic rather than two byte-identical copies.
     private static func quotedValue(_ raw: String) -> String {
-        guard raw.hasPrefix("-") else { return ClaudeFlagQuoting.quoteIfNeeded(raw) }
-        return "'" + raw.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        guard raw.hasPrefix("-") || raw.hasPrefix("=") else {
+            return ClaudeFlagQuoting.quoteIfNeeded(raw)
+        }
+        return ClaudeSession.shellQuoted(raw)
     }
 }
