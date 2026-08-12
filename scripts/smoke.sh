@@ -3,6 +3,8 @@ set -euo pipefail
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 cd "$(dirname "$0")/.."
 
+. scripts/throttle.sh
+
 # Fresh-launch guard: the UI tests assert the window is present on the primary
 # display. RootWindow pins the initial placement with .defaultPosition(.center),
 # but SwiftUI only applies a default position when there is NO saved window
@@ -35,7 +37,15 @@ xcodegen generate >>"$LOG" 2>&1
 
 echo "[smoke] running FlightDeckUITests… (full output → $LOG)"
 set +e
+# -derivedDataPath matches build.sh and test-unit.sh. Without it this invocation used the
+# shared default DerivedData (~/Library/Developer/Xcode/DerivedData/FlightDeck-*), while
+# build.sh had just built into the local one — so it rebuilt from scratch there and, with a
+# second worktree or Xcode using that same directory, raced their build. The observed
+# failure was `DVTAssertions: Assertion failed: childPID > 0` immediately after xcodebuild
+# logged `Removed stale file .../Debug/FlightDeck.app`: the app it was about to launch had
+# been deleted out from under it by the other build.
 xcodebuild -project FlightDeck.xcodeproj -scheme FlightDeck -destination 'platform=macOS' \
+  -derivedDataPath DerivedData \
   test -only-testing:FlightDeckUITests >>"$LOG" 2>&1
 rc=$?
 set -e

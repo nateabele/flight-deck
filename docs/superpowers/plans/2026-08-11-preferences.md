@@ -1194,9 +1194,14 @@ final class FlagDiagnosticsTests: XCTestCase {
         XCTAssertTrue(diagnostics.contains { $0.message.contains("--worktree") })
     }
 
-    func testTmuxWithWorktreeIsClean() {
+    /// `--tmux --worktree` satisfies the pairing rule, so that warning goes quiet — but the
+    /// working-directory consequence still applies, and applies most in exactly this case.
+    func testTmuxWithWorktreeStillWarnsAboutTheWorkingDirectory() {
         let flags = FlagSet(values: ["--tmux": .on, "--worktree": .on])
-        XCTAssertTrue(FlagDiagnostics.validate(flags).isEmpty)
+        let diagnostics = FlagDiagnostics.validate(flags)
+        XCTAssertEqual(diagnostics.count, 1)
+        XCTAssertTrue(diagnostics[0].message.contains("working directory"))
+        XCTAssertFalse(diagnostics.contains { $0.message.contains("requires --worktree") })
     }
 
     func testSkipPermissionsWarns() {
@@ -1734,14 +1739,25 @@ Append to `Tests/FlightDeckTests/ClaudeSessionTests.swift`, inside the existing 
         XCTAssertEqual(command, "claude --resume \(id) || claude --session-id \(id) --name 'one'\n")
     }
 
-    func testFlagValuesAreQuotedNotStripped() {
+    func testFlagValuesAreQuotedNotStripped() throws {
+        let hostile = "'; rm -rf ~; '"
         let command = ClaudeSession.launchCommand(
             sessionID: fixedID, title: "one",
-            flags: FlagSet(values: ["--system-prompt": .value("'; rm -rf ~; '")])
+            flags: FlagSet(values: ["--system-prompt": .value(hostile)])
         )
-        XCTAssertTrue(command.contains(#"--system-prompt ''\'''\''; rm -rf ~; '\'''\''"#)
-                      || command.contains("rm -rf"))
-        XCTAssertFalse(command.hasSuffix("; \n"), "the value must not escape its quotes")
+        // The real assertion: the value survives as ONE literal argument rather than
+        // decomposing into shell syntax. Tokenizing the command is how we prove that.
+        // `tokenize` returns `[ClaudeFlagQuoting.Token]` (Task 4 added `wasQuoted`), so
+        // compare against `.text`.
+        let texts = try ClaudeFlagQuoting.tokenize(
+            command.trimmingCharacters(in: .newlines)
+        ).map(\.text)
+        guard let index = texts.firstIndex(of: "--system-prompt"), index + 1 < texts.count else {
+            return XCTFail("--system-prompt missing from: \(command)")
+        }
+        XCTAssertEqual(texts[index + 1], hostile)
+        XCTAssertFalse(texts.contains("rm"), "the value must not split into separate tokens")
+        XCTAssertFalse(texts.contains(";"), "the value must not split into separate tokens")
     }
 
     func testLockedPrefixMatchesTheStartOfTheLaunchCommand() {
@@ -2921,8 +2937,15 @@ git commit -m "feat: confirm before enabling permission bypass"
 ### Task 14: UITests and documentation
 
 **Files:**
-- Create: `UITests/FlightDeckUITests/PreferencesUITests.swift`
+- Modify: `UITests/FlightDeckUITests/TerminalSmokeTests.swift`
 - Modify: `docs/ARCHITECTURE.md`, `docs/FOLLOWUPS.md`
+
+> **Do NOT create a new UI test class or a new test method.** The UI suite is deliberately
+> **one app launch total** — every `launch()` seizes the machine's foreground, so the suite
+> is a single session that accumulates assertions in dependency order. Add the preferences
+> checks as new `XCTContext.runActivity` groups inside the existing
+> `testTheWholeShellInOneSession`, positioned **after** the close-session group and
+> **before** the ⌘Q group (⌘Q terminates the app and must stay last).
 
 **Interfaces:**
 - Consumes: the accessibility identifiers from Task 12.
@@ -2934,85 +2957,70 @@ Run: `ls UITests/FlightDeckUITests/ && head -40 UITests/FlightDeckUITests/*.swif
 
 Match how it launches the app — in particular the `-ApplePersistenceIgnoreState YES` argument (without it the window never materialises under XCUITest; see `docs/done/HANDOFF-smoke-gate.md`) and `-FlightDeckResetState YES`.
 
-- [ ] **Step 2: Write the UITest**
+- [ ] **Step 2: Add the preferences groups to the existing single session**
+
+Insert these into `testTheWholeShellInOneSession`, after the "closing a session keeps the app
+alive" group and before the ⌘Q group. They share the already-running `app` — no new launch.
 
 ```swift
-import XCTest
+        XCTContext.runActivity(named: "⌘, opens Preferences with three tabs") { _ in
+            app.typeKey(",", modifierFlags: .command)
+            let prefs = app.windows["Preferences"]
+            XCTAssertTrue(prefs.waitForExistence(timeout: 5), "Preferences window did not open")
+            XCTAssertTrue(prefs.buttons["Claude"].exists)
+            XCTAssertTrue(prefs.buttons["Projects"].exists)
+            XCTAssertTrue(prefs.buttons["Shell & Environment"].exists)
+        }
 
-final class PreferencesUITests: XCTestCase {
-    private func launchedApp() -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-FlightDeckResetState", "YES"]
-        app.launch()
-        return app
-    }
+        XCTContext.runActivity(named: "toggling a control updates the command field") { _ in
+            let prefs = app.windows["Preferences"]
+            prefs.buttons["Claude"].click()
+            let field = prefs.textViews.firstMatch
+            XCTAssertTrue(field.waitForExistence(timeout: 5))
+            XCTAssertFalse((field.value as? String ?? "").contains("--verbose"))
 
-    private func openPreferences(_ app: XCUIApplication) -> XCUIElement {
-        app.typeKey(",", modifierFlags: .command)
-        let window = app.windows["Preferences"]
-        XCTAssertTrue(window.waitForExistence(timeout: 5), "Preferences window did not open")
-        return window
-    }
+            prefs.checkBoxes.matching(identifier: "Verbose").firstMatch.click()
+            expectation(
+                for: NSPredicate(format: "value CONTAINS %@", "--verbose"), evaluatedWith: field
+            )
+            waitForExpectations(timeout: 5)
+        }
 
-    func testPreferencesWindowOpensWithThreeTabs() {
-        let app = launchedApp()
-        let window = openPreferences(app)
-        XCTAssertTrue(window.buttons["Claude"].exists)
-        XCTAssertTrue(window.buttons["Projects"].exists)
-        XCTAssertTrue(window.buttons["Shell & Environment"].exists)
-    }
+        // The other direction of the sync, and the reason ⌘↩ exists: commit without blurring.
+        XCTContext.runActivity(named: "typing in the command field updates the controls") { _ in
+            let prefs = app.windows["Preferences"]
+            let field = prefs.textViews.firstMatch
+            let checkbox = prefs.checkBoxes.matching(identifier: "Brief").firstMatch
+            XCTAssertEqual(checkbox.value as? Int, 0)
 
-    func testTogglingAControlUpdatesTheCommandField() {
-        let app = launchedApp()
-        let window = openPreferences(app)
-        window.buttons["Claude"].click()
+            field.click()
+            field.typeText(" --brief")
+            field.typeKey(.return, modifierFlags: .command)
 
-        let field = window.textViews.firstMatch
-        XCTAssertTrue(field.waitForExistence(timeout: 5))
-        XCTAssertFalse((field.value as? String ?? "").contains("--verbose"))
+            expectation(for: NSPredicate(format: "value == 1"), evaluatedWith: checkbox)
+            waitForExpectations(timeout: 5)
+        }
 
-        window.checkBoxes.matching(identifier: "Verbose").firstMatch.click()
+        // The whole point of the locked prefix: select-all + delete must not destroy it.
+        XCTContext.runActivity(named: "the locked prefix survives select-all and delete") { _ in
+            let prefs = app.windows["Preferences"]
+            let field = prefs.textViews.firstMatch
+            field.click()
+            field.typeKey("a", modifierFlags: .command)
+            field.typeKey(.delete, modifierFlags: [])
 
-        let updated = NSPredicate(format: "value CONTAINS %@", "--verbose")
-        expectation(for: updated, evaluatedWith: field)
-        waitForExpectations(timeout: 5)
-    }
+            let value = field.value as? String ?? ""
+            XCTAssertTrue(value.hasPrefix("claude --session-id"), "locked prefix was destroyed: \(value)")
+        }
 
-    func testTypingInTheCommandFieldUpdatesTheControlsOnBlur() {
-        let app = launchedApp()
-        let window = openPreferences(app)
-        window.buttons["Claude"].click()
-
-        let field = window.textViews.firstMatch
-        XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.click()
-        field.typeText(" --verbose")
-        field.typeKey(.return, modifierFlags: .command)   // commit without leaving the field
-
-        let checkbox = window.checkBoxes.matching(identifier: "Verbose").firstMatch
-        let checked = NSPredicate(format: "value == 1")
-        expectation(for: checked, evaluatedWith: checkbox)
-        waitForExpectations(timeout: 5)
-    }
-
-    func testLockedPrefixCannotBeDeleted() {
-        let app = launchedApp()
-        let window = openPreferences(app)
-        window.buttons["Claude"].click()
-
-        let field = window.textViews.firstMatch
-        XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.click()
-        field.typeKey("a", modifierFlags: .command)   // select all — should clamp past the prefix
-        field.typeKey(.delete, modifierFlags: [])
-
-        let value = field.value as? String ?? ""
-        XCTAssertTrue(value.hasPrefix("claude --session-id"), "locked prefix was destroyed: \(value)")
-    }
-}
+        // Close Preferences so the ⌘Q group below acts on the main window.
+        app.typeKey("w", modifierFlags: .command)
 ```
 
-If `identifier: "Verbose"` does not match, add `.accessibilityIdentifier(spec.label)` to `FlagRow`'s `control` in `FlagRow.swift` and re-run.
+If `identifier: "Verbose"` / `"Brief"` do not match, add `.accessibilityIdentifier(spec.label)`
+to `FlagRow`'s `control` in `FlagRow.swift`. Note `--verbose` is toggled on by the second group
+and left on, which is why the third group asserts on a *different* flag (`--brief`) rather than
+re-using `--verbose` — in a single shared session, earlier groups' mutations persist.
 
 - [ ] **Step 3: Run the UITests**
 

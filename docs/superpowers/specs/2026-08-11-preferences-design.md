@@ -52,12 +52,27 @@ Three pure functions over it, each unit-testable with no window, no store, and n
 | Function | Signature | Notes |
 |---|---|---|
 | **parse** | `String -> (FlagSet, [Diagnostic])` | POSIX-ish tokenizer (single quotes, double quotes, backslash escapes), then catalog lookup. |
-| **serialize** | `FlagSet -> String` | Canonical order by section, then the passthrough tail verbatim. Values quoted via `ClaudeSession.shellQuoted`. |
+| **serialize** | `FlagSet -> String` | The passthrough run first, then catalog order by section. Values quoted via `ClaudeFlagQuoting.quoteIfNeeded`. |
 | **merge** | `(global: FlagSet, project: FlagSet) -> FlagSet` | Per-flag; the project's entry wins per key. |
 
 **The load-bearing invariant is `parse(serialize(x)) == x`** for any `FlagSet`. That single
 property is what makes the two-way sync trustworthy rather than hopeful, and it is the test
 to write first.
+
+Two details of that invariant are load-bearing and were found the hard way, by a review that
+traced the round trip instead of trusting the tests (both original formulations passed the
+tests while being wrong):
+
+- **Quoted-ness must survive tokenization.** `tokenize` returns tokens carrying `wasQuoted`,
+  and the parser refuses to read a quoted token as a flag. Without it, a value of `--verbose`
+  on `--system-prompt` serializes to `--system-prompt --verbose` and reparses as a *different
+  flag being set* — quoting alone cannot fix this, because the parser never sees the quotes.
+  The serializer force-quotes any value beginning with `-` for the same reason.
+- **Passthrough leads, it does not trail.** A list flag consumes every following non-flag
+  token, so a trailing passthrough run gets absorbed into it: `--add-dir a` plus a passthrough
+  of `["orphan"]` came back as `--add-dir: ["a", "orphan"]`. Emitting passthrough first
+  terminates the run at the first catalog flag. This ordering is not cosmetic — do not
+  "tidy" it back.
 
 `merge`'s one asymmetry: `passthrough` is unkeyed, so it cannot merge per-flag. Global's
 tail is concatenated ahead of the project's. Two overlapping passthrough tails therefore
