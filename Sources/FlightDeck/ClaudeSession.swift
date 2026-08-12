@@ -80,7 +80,10 @@ enum ClaudeSession {
         return String(trimmed.prefix(maxNameLength))
     }
 
-    /// POSIX single-quoting: wrap in `'…'` and rewrite embedded `'` as `'\''`.
+    /// POSIX single-quoting: wrap in `'…'` and rewrite embedded `'` as `'\''`. Also used by
+    /// `ClaudeFlagSerializer.quotedValue` to force-quote a flag value that would otherwise
+    /// reparse as a flag or trigger zsh's equals-expansion — one implementation shared by
+    /// both call sites rather than two copies of the same escaping logic.
     static func shellQuoted(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }

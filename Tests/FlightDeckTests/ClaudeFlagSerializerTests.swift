@@ -129,4 +129,17 @@ final class ClaudeFlagSerializerTests: XCTestCase {
         let flags = ClaudeFlagParser.parse("--add-dir --verbose").flags
         XCTAssertEqual(ClaudeFlagParser.parse(ClaudeFlagSerializer.serialize(flags)).flags, flags)
     }
+
+    // MARK: leading `=`
+
+    func testRoundTripOfAValueBeginningWithEquals() {
+        let flags = FlagSet(values: ["--model": .value("=foo")])
+        XCTAssertEqual(ClaudeFlagParser.parse(ClaudeFlagSerializer.serialize(flags)).flags, flags)
+    }
+
+    func testValueBeginningWithEqualsIsQuoted() {
+        // Unquoted, zsh's equals-expansion would abort the launch line.
+        XCTAssertTrue(ClaudeFlagSerializer.serialize(FlagSet(values: ["--model": .value("=foo")]))
+                        .contains("'=foo'"))
+    }
 }
