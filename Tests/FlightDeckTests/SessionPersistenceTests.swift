@@ -22,6 +22,52 @@ final class SessionPersistenceTests: XCTestCase {
 
     private let allDirsExist: (String) -> Bool = { _ in true }
 
+    /// v1 snapshots predate the field. Decoding must not throw, or the first launch after
+    /// this change wipes every tab.
+    func testV1SnapshotWithoutPinDecodes() throws {
+        let id = UUID()
+        let json = """
+        {"sessions":[{"id":"\(id.uuidString)","title":"a","workingDirectory":"/w"}],\
+        "sessionCounter":1}
+        """
+        let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(json.utf8))
+
+        XCTAssertEqual(snapshot.sessions.first?.id, id)
+        XCTAssertNil(snapshot.sessions.first?.pinnedConversationID)
+    }
+
+    func testRestoreDefaultsAnAbsentPinToTheTabID() {
+        let id = UUID()
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(id: id, title: "a", workingDirectory: "/w")],
+            selectedSessionID: id,
+            sessionCounter: 1
+        )
+        let store = SessionStore(provider: nil, persistence: persistence)
+
+        XCTAssertTrue(store.restore(directoryExists: allDirsExist))
+        XCTAssertEqual(store.repos.first?.sessions.first?.pinnedConversationID, id)
+    }
+
+    func testRestoreRoundTripsAPinnedConversation() {
+        let id = UUID()
+        let conversation = UUID()
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(
+                id: id, title: "a", workingDirectory: "/w", pinnedConversationID: conversation
+            )],
+            selectedSessionID: id,
+            sessionCounter: 1
+        )
+        let store = SessionStore(provider: nil, persistence: persistence)
+
+        XCTAssertTrue(store.restore(directoryExists: allDirsExist))
+        XCTAssertEqual(store.repos.first?.sessions.first?.pinnedConversationID, conversation)
+        XCTAssertEqual(persistence.stored?.sessions.first?.pinnedConversationID, conversation)
+    }
+
     func testSnapshotRoundTripsThroughUserDefaults() {
         let suiteName = "test.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
