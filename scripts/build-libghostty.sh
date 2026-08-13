@@ -108,9 +108,17 @@ chmod +x "$SHIM_DIR/xcrun"
 echo "==> Building libghostty (GhosttyKit.xcframework)..."
 (
   cd "$GHOSTTY_DIR"
+  # -Doptimize is REQUIRED. Zig's `standardOptimizeOption` defaults to Debug when
+  # the flag is absent, and Ghostty maps Debug -> `slow_runtime_safety = true`
+  # (src/build/Config.zig). That turns on `PageList.assertIntegrity`, which runs a
+  # full `Page.verifyIntegrity` walk on every cell write. Profiling a Debug build
+  # showed reflow spending 81% of its time (850 of 1052 samples) inside
+  # verifyIntegrity -- and because reflow holds the surface mutex on the io thread,
+  # the main thread blocked for ~1s at a time in mouse handlers, beach-balling the
+  # app. ReleaseFast is what upstream ships.
   DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
     PATH="$SHIM_DIR:$PATH" \
-    "$ZIG_BIN" build -Demit-macos-app=false -Dxcframework-target=native
+    "$ZIG_BIN" build -Doptimize=ReleaseFast -Demit-macos-app=false -Dxcframework-target=native
 )
 
 # --- Step 4: stage the artifact out of the submodule ------------------------
