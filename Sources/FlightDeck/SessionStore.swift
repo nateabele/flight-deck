@@ -96,10 +96,12 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// `resetState` comes from the `-FlightDeckResetState YES` launch argument: `smoke.sh`
-    /// wipes defaults once per run, but the UITest bundle launches the app once per test
-    /// case, so a session persisted by an earlier case would otherwise survive into a later
-    /// one and make tests order-dependent.
+    /// `resetState` comes from the `-FlightDeckResetState YES` launch argument. The UITest
+    /// bundle launches the app once per test case, so a session persisted by an earlier case
+    /// would otherwise survive into a later one and make tests order-dependent. This argument
+    /// is the *only* thing keeping the UI tests hermetic with respect to session state —
+    /// `smoke.sh` deliberately no longer deletes stored state to achieve it, because doing so
+    /// destroyed the user's real sessions on every run.
     /// `notifier` is assigned before `startStatusWatching()` runs, deliberately: the
     /// watcher's first drain is what can reach `deliverNotifications`, and that must never
     /// see a nil notifier land on a live `waiting` session at launch. It happens to be
@@ -114,15 +116,22 @@ final class SessionStore: ObservableObject {
     /// restored session's flags as it rebuilds it, so the store must already be readable by
     /// the time this initializer runs — assigning it afterwards would launch every restored
     /// session unconfigured.
+    ///
+    /// `persistence` is deliberately **not** defaulted: every caller has to say where state
+    /// goes. This initializer seeds *and persists*, and `resetState` only suppresses the
+    /// restore — so a caller that quietly got the real `FileSessionPersistence` would
+    /// overwrite the developer's own `sessions.json` with a test seed. Passing `nil` means
+    /// read nothing and write nothing, which is what a reset/UITest run wants.
     convenience init(
         ghostty: GhosttyApp?,
         resetState: Bool = false,
         preferences: PreferencesStore? = nil,
-        notifier: Notifying? = nil
+        notifier: Notifying? = nil,
+        persistence: SessionPersisting?
     ) {
         self.init(
             provider: ghostty,
-            persistence: UserDefaultsSessionPersistence(),
+            persistence: persistence,
             preferences: preferences
         )
         self.notifier = notifier

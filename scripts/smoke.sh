@@ -10,11 +10,27 @@ cd "$(dirname "$0")/.."
 # but SwiftUI only applies a default position when there is NO saved window
 # frame; a restored frame from a previous run would win and could re-place the
 # window off the primary display (e.g. onto an external monitor at negative X),
-# which fails every UI-test assertion. Wipe all persisted state so the centered
-# default governs. Saved per-window frames live in ~/Library/Saved Application
-# State/, not just Preferences, so wipe all three locations.
-defaults delete dev.flightdeck.FlightDeck 2>/dev/null || true
-rm -f ~/Library/Preferences/dev.flightdeck.FlightDeck.plist 2>/dev/null || true
+# which fails every UI-test assertion.
+#
+# Delete ONLY the window-geometry keys. This script used to `defaults delete` the
+# whole domain, which also destroyed `sessions.snapshot.v1` and `preferences.v1` —
+# i.e. every real session, project and preference the user had, on every smoke run.
+# That was never needed: isolation is the `-FlightDeckResetState YES` launch
+# argument the UI test passes (see TerminalSmokeTests), which makes the app start
+# from a fresh slate without touching what is stored — sessions via SessionStore's
+# `resetState`, preferences via a nil PreferencesPersisting (see FlightDeckApp).
+# Window geometry is the only thing that flag does not cover, because AppKit
+# restores it before any of our code runs. So it is the only thing wiped here.
+#
+# Saved Application State holds no user data (AppKit writes it), so removing that
+# directory wholesale is still fine.
+for key in \
+  "NSWindow Frame main" \
+  "NSWindow Frame com_apple_SwiftUI_Settings_window" \
+  "NSSplitView Subview Frames main, SidebarNavigationSplitView"
+do
+  defaults delete dev.flightdeck.FlightDeck "$key" 2>/dev/null || true
+done
 rm -rf ~/Library/Saved\ Application\ State/dev.flightdeck.FlightDeck.savedState 2>/dev/null || true
 
 # --- Output discipline ---------------------------------------------------

@@ -81,6 +81,14 @@ cannot fix it, because the parser never sees the quotes.
 
 `PreferencesStore` (owned by `FlightDeckApp`, constructed **before** `SessionStore` because
 that store restores inline) persists to `UserDefaults` behind `PreferencesPersisting`.
+
+Sessions do **not** share that store. `SessionStore` persists through `SessionPersisting` to
+`~/Library/Application Support/Flight Deck/sessions.json` (`FileSessionPersistence`, atomic
+write, one-shot migration from the old `sessions.snapshot.v1` defaults key). The split is
+deliberate: `defaults delete <domain>` is a routine debugging gesture that used to take the
+whole session graph with it, `cfprefsd` coalesces writes so a `SIGKILL` could drop the last
+one, and the snapshot grows with sessions × projects. Preferences have none of those
+properties, so they stay where they belong.
 `SessionStore.insertSession` reads it once per session at creation: preferences configure
 *new* sessions and never reconfigure a running one.
 

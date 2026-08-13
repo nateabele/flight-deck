@@ -7,9 +7,10 @@ protocol PreferencesPersisting: AnyObject {
     func save(_ preferences: Preferences)
 }
 
-/// Mirrors `UserDefaultsSessionPersistence` so there is one storage idiom in the codebase.
-/// The same defaults domain (`dev.flightdeck.FlightDeck`) that `scripts/smoke.sh` wipes,
-/// so the UITest gate stays hermetic.
+/// Preferences belong in `UserDefaults` — that is what the defaults system is for, and unlike
+/// the session graph (see `FileSessionPersistence`) they are small, user-tunable, and cheap to
+/// lose. The UITest gate stays hermetic by constructing `PreferencesStore` with a nil
+/// persistence under `-FlightDeckResetState` (see `FlightDeckApp`), not by deleting this key.
 @MainActor
 final class UserDefaultsPreferencesPersistence: PreferencesPersisting {
     private let defaults: UserDefaults
