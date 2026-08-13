@@ -224,31 +224,20 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(store.repos.flatMap(\.sessions).map(\.title), ["one"])
     }
 
-    /// `resetState` is only reachable via the production `init(ghostty:resetState:)` path
-    /// (it needs `UserDefaultsSessionPersistence`'s real-defaults storage, which the
-    /// designated `init(provider:persistence:)` used elsewhere in this file can bypass
-    /// entirely). Save/restore the raw key around the assertion so this doesn't leak
-    /// state into other tests or pollute the real domain permanently.
-    func testResetStateSkipsRestoreEvenWithAStoredSnapshot() {
-        let defaults = UserDefaults.standard
-        let key = "sessions.snapshot.v1"
-        let previous = defaults.data(forKey: key)
-        defer {
-            if let previous {
-                defaults.set(previous, forKey: key)
-            } else {
-                defaults.removeObject(forKey: key)
-            }
-        }
-
-        let stale = SessionSnapshot(
+    /// `resetState` is only reachable via the production `init(ghostty:resetState:)` path,
+    /// so this drives that initializer — but with an injected temp-directory store. Using the
+    /// default would write a seeded snapshot over the developer's real
+    /// `~/Library/Application Support/Flight Deck/sessions.json`.
+    func testResetStateSkipsRestoreEvenWithAStoredSnapshot() throws {
+        let dir = try makeTempDir()
+        let persistence = FileSessionPersistence(directory: dir, legacyDefaults: nil)
+        persistence.save(SessionSnapshot(
             sessions: [.init(id: UUID(), title: "stale", workingDirectory: "/work/foo")],
             selectedSessionID: nil,
             sessionCounter: 1
-        )
-        defaults.set(try! JSONEncoder().encode(stale), forKey: key)
+        ))
 
-        let store = SessionStore(ghostty: nil, resetState: true)
+        let store = SessionStore(ghostty: nil, resetState: true, persistence: persistence)
 
         XCTAssertFalse(store.repos.flatMap(\.sessions).map(\.title).contains("stale"))
     }
@@ -321,4 +310,97 @@ final class SessionPersistenceTests: XCTestCase {
         waitForWatcher()
         XCTAssertEqual(store.title(of: sid), "fresh title")
     }
+
+    // MARK: - FileSessionPersistence
+
+    /// Each test gets its own directory so they never touch the real
+    /// ~/Library/Application Support/Flight Deck, and never each other.
+    private func makeTempDir() throws -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("FlightDeckPersistenceTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir
+    }
+
+    /// A defaults domain scoped to one test, so migration tests cannot read or clobber the
+    /// real `dev.flightdeck.FlightDeck` domain.
+    private func makeScratchDefaults() -> UserDefaults {
+        let name = "dev.flightdeck.FlightDeckTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: name) }
+        return defaults
+    }
+
+    private func makeSnapshot(title: String = "a") -> SessionSnapshot {
+        let id = UUID()
+        return SessionSnapshot(
+            sessions: [.init(id: id, title: title, workingDirectory: "/w")],
+            selectedSessionID: id,
+            sessionCounter: 1
+        )
+    }
+
+    func testFileStoreRoundTripsThroughDisk() throws {
+        let dir = try makeTempDir()
+        let snapshot = makeSnapshot()
+
+        FileSessionPersistence(directory: dir, legacyDefaults: nil).save(snapshot)
+
+        // A *separate* instance, so this reads the file rather than any in-memory state.
+        let reloaded = FileSessionPersistence(directory: dir, legacyDefaults: nil).load()
+        XCTAssertEqual(reloaded, snapshot)
+    }
+
+    func testFileStoreReturnsNilWhenNothingIsStored() throws {
+        let dir = try makeTempDir()
+        XCTAssertNil(FileSessionPersistence(directory: dir, legacyDefaults: nil).load())
+    }
+
+    func testFileStoreCreatesItsDirectory() throws {
+        // The real Application Support subdirectory does not exist on a fresh install.
+        let dir = try makeTempDir().appendingPathComponent("not/created/yet", isDirectory: true)
+        let snapshot = makeSnapshot()
+
+        FileSessionPersistence(directory: dir, legacyDefaults: nil).save(snapshot)
+
+        XCTAssertEqual(FileSessionPersistence(directory: dir, legacyDefaults: nil).load(), snapshot)
+    }
+
+    func testMigratesFromDefaultsOnFirstLoadAndClearsTheOldKey() throws {
+        let dir = try makeTempDir()
+        let defaults = makeScratchDefaults()
+        let snapshot = makeSnapshot(title: "carried over")
+        defaults.set(try JSONEncoder().encode(snapshot), forKey: FileSessionPersistence.legacyKey)
+
+        let migrated = FileSessionPersistence(directory: dir, legacyDefaults: defaults).load()
+
+        XCTAssertEqual(migrated, snapshot, "the upgrade must not drop the user's tabs")
+        XCTAssertNil(
+            defaults.data(forKey: FileSessionPersistence.legacyKey),
+            "the old key must be cleared so there is one source of truth"
+        )
+        // And it is now genuinely on disk, not just returned once.
+        XCTAssertEqual(FileSessionPersistence(directory: dir, legacyDefaults: nil).load(), snapshot)
+    }
+
+    func testFileWinsOverLegacyDefaults() throws {
+        let dir = try makeTempDir()
+        let defaults = makeScratchDefaults()
+        let stale = makeSnapshot(title: "stale defaults copy")
+        defaults.set(try JSONEncoder().encode(stale), forKey: FileSessionPersistence.legacyKey)
+        let current = makeSnapshot(title: "current file copy")
+        FileSessionPersistence(directory: dir, legacyDefaults: nil).save(current)
+
+        let loaded = FileSessionPersistence(directory: dir, legacyDefaults: defaults).load()
+
+        XCTAssertEqual(loaded, current, "a leftover defaults blob must never resurrect old state")
+    }
+
+    func testMigrationIsANoOpWhenNothingWasStored() throws {
+        let dir = try makeTempDir()
+        let defaults = makeScratchDefaults()
+        XCTAssertNil(FileSessionPersistence(directory: dir, legacyDefaults: defaults).load())
+    }
+
 }

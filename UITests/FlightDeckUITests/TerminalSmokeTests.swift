@@ -44,7 +44,9 @@ final class TerminalSmokeTests: XCTestCase {
         //   the initial window never completes and no window is made. Bypassing restoration
         //   matches real-user launch semantics and changes no shipped behavior.
         // - `-FlightDeckResetState`: start from a known seeded slate rather than whatever a
-        //   previous run persisted to UserDefaults.
+        //   previous run persisted. This is now the *only* thing isolating the test from real
+        //   session state — `smoke.sh` no longer deletes it, because doing so destroyed the
+        //   developer's own sessions on every run.
         app.launchArguments += [
             "-ApplePersistenceIgnoreState", "YES",
             "-FlightDeckResetState", "YES",
