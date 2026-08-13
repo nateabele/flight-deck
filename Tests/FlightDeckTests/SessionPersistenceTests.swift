@@ -242,12 +242,16 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertFalse(store.repos.flatMap(\.sessions).map(\.title).contains("stale"))
     }
 
-    /// Pumps the run loop long enough for a `TranscriptWatcher`'s real 500ms polling
-    /// timer to fire at least once.
+    /// Pumps the run loop long enough for the shared `WatchClock` to beat at least once,
+    /// plus room for the read it schedules off the main actor to come back.
+    ///
+    /// Requires the store under test to report itself as frontmost (`appIsActive = { true }`):
+    /// the clock polls every 500 ms in the foreground but backs off to 2 s when the app is
+    /// inactive, and a headless `xctest` run is always inactive. See `WatchClock`.
     private func waitForWatcher() {
         let exp = expectation(description: "watcher tick")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { exp.fulfill() }
-        wait(for: [exp], timeout: 2.0)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { exp.fulfill() }
+        wait(for: [exp], timeout: 3.0)
     }
 
     /// End-to-end regression for the restore bug: reaches the watcher only through the
@@ -295,6 +299,9 @@ final class SessionPersistenceTests: XCTestCase {
 
         let store = SessionStore(provider: CapturingProvider(), persistence: fake)
         store.projectsRoot = projectsRoot
+        // Poll at the foreground cadence: this test asserts on watcher ticks in real time,
+        // and a headless run is never frontmost. See `waitForWatcher`.
+        store.appIsActive = { true }
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
         XCTAssertEqual(store.title(of: sid), "restored title")
 

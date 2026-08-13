@@ -6,6 +6,16 @@ import Foundation
 /// file and only then starts reading. Reads are incremental: only bytes appended since
 /// the last read are parsed. A missing file is not an error — it just means `claude`
 /// isn't running, and the sidebar name stays a local label.
+///
+/// **Threading.** The read and the JSON parse are the expensive half and do not touch
+/// actor state, so `poll()` runs them off the main actor and hops back only to apply the
+/// result. That split matters because transcript lines are large — one assistant record
+/// carries entire tool inputs and results — and the parse used to land on the main thread
+/// at exactly the moment an agent was streaming output. `drain()` keeps the whole thing
+/// synchronous for tests.
+///
+/// **Scheduling.** This type owns no timer. `SessionStore` drives every watcher from a
+/// single `WatchClock`, so N tabs cost one wakeup rather than N — see that type.
 @MainActor
 final class TranscriptWatcher {
     private let sessionID: UUID
@@ -22,43 +32,135 @@ final class TranscriptWatcher {
     private var outstandingAgents: Set<String> = []
 
     private var offset: UInt64 = 0
-    /// Whether `offset` has been seeded to the file's size yet. See `drain()`.
+    /// Whether `offset` has been seeded to the file's size yet. See `Scan.read`.
     private var hasSeekedToEnd = false
-    private var timer: DispatchSourceTimer?
+
+    /// The clock this watcher is registered with, if any. Nil in tests, which call
+    /// `drain()` directly.
+    private weak var clock: WatchClock?
+    private var isPolling = false
 
     /// `onSubagentCount` defaults to a no-op so title-only call sites are unaffected.
     init(
         sessionID: UUID,
         url: URL,
+        clock: WatchClock? = nil,
         onTitle: @escaping (String) -> Void,
         onSubagentCount: @escaping (Int) -> Void = { _ in }
     ) {
         self.sessionID = sessionID
         self.url = url
+        self.clock = clock
         self.onTitle = onTitle
         self.onSubagentCount = onSubagentCount
     }
 
-    deinit { timer?.cancel() }
-
     func start() {
-        guard timer == nil else { return }
-        let t = DispatchSource.makeTimerSource(queue: .main)
-        t.schedule(deadline: .now() + .milliseconds(500), repeating: .milliseconds(500))
-        t.setEventHandler { [weak self] in self?.drain() }
-        timer = t
-        t.resume()
+        clock?.add(self) { [weak self] in self?.poll() }
     }
 
     func stop() {
-        timer?.cancel()
-        timer = nil
+        clock?.remove(self)
+    }
+
+    /// One scheduled pass: reads and parses off the main actor, applies on it.
+    ///
+    /// Re-entrancy is guarded rather than queued. A pass that outlives its tick means the
+    /// file is big enough that the *next* tick has nothing useful to add — it would read
+    /// from a stale offset — so dropping it is both cheaper and more correct than letting
+    /// two passes interleave over one `offset`.
+    private func poll() {
+        guard !isPolling else { return }
+        isPolling = true
+
+        let url = self.url
+        let sessionID = self.sessionID
+        let offset = self.offset
+        let hasSeekedToEnd = self.hasSeekedToEnd
+
+        Task { [weak self] in
+            let scan = await Task.detached(priority: .utility) {
+                Scan.read(
+                    url: url,
+                    offset: offset,
+                    hasSeekedToEnd: hasSeekedToEnd,
+                    sessionID: sessionID
+                )
+            }.value
+
+            guard let self else { return }
+            self.apply(scan)
+            self.isPolling = false
+        }
     }
 
     /// Reads everything appended since the last call and reports the last title found.
     /// Synchronous so tests need no expectations.
     func drain() {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
+        apply(
+            Scan.read(
+                url: url,
+                offset: offset,
+                hasSeekedToEnd: hasSeekedToEnd,
+                sessionID: sessionID
+            )
+        )
+    }
+
+    /// Folds a scan's events into the watcher's state and fires the callbacks.
+    /// Everything here is cheap and main-actor-bound; the expensive half is `Scan.read`.
+    private func apply(_ scan: Scan) {
+        hasSeekedToEnd = scan.hasSeekedToEnd
+        offset = scan.offset
+
+        var lastTitle: String?
+        var countChanged = false
+
+        for event in scan.events {
+            switch event {
+            case .title(let title):
+                lastTitle = title
+            case .agentStarted(let id):
+                if outstandingAgents.insert(id).inserted { countChanged = true }
+            case .agentFinished(let id):
+                if outstandingAgents.remove(id) != nil { countChanged = true }
+            case .turnEnded:
+                if !outstandingAgents.isEmpty {
+                    outstandingAgents.removeAll()
+                    countChanged = true
+                }
+            }
+        }
+
+        if let lastTitle { onTitle(lastTitle) }
+        if countChanged { onSubagentCount(outstandingAgents.count) }
+    }
+}
+
+/// The result of one look at a transcript: how far reading got, and what it found.
+///
+/// Deliberately pure and `Sendable` — no actor state, no callbacks — so the read and the
+/// JSON parse can run off the main actor and only the fold back into watcher state has to
+/// return to it.
+struct Scan: Sendable {
+    var offset: UInt64
+    var hasSeekedToEnd: Bool
+    var events: [ClaudeSession.TranscriptEvent] = []
+
+    /// Reads and parses everything appended after `offset`.
+    ///
+    /// Returns the caller's own position unchanged when there is nothing to do (missing
+    /// file, no new bytes, no complete line), which makes "no change" a cheap no-op rather
+    /// than a special case at the call site.
+    static func read(
+        url: URL,
+        offset: UInt64,
+        hasSeekedToEnd: Bool,
+        sessionID: UUID
+    ) -> Scan {
+        var result = Scan(offset: offset, hasSeekedToEnd: hasSeekedToEnd)
+
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return result }
         defer { try? handle.close() }
 
         let size = (try? handle.seekToEnd()) ?? 0
@@ -66,56 +168,38 @@ final class TranscriptWatcher {
         // On the first time we ever manage to open the file, start tailing from its
         // current end rather than from 0. A restored session points at a transcript
         // that already exists and may be huge (a whole prior conversation); without
-        // this, the first drain would replay every old `custom-title` record — most
+        // this, the first read would replay every old `custom-title` record — most
         // recently clobbering a rename made while `claude` wasn't running — and would
-        // parse the entire file on the main thread. A brand-new session's file doesn't
-        // exist yet at this point, so seeding to its (empty) size here is a no-op and
-        // every subsequent drain still sees only genuinely new bytes.
-        if !hasSeekedToEnd {
-            hasSeekedToEnd = true
-            offset = size
-        } else if size < offset {
+        // parse the entire file. A brand-new session's file doesn't exist yet at this
+        // point, so seeding to its (empty) size here is a no-op and every subsequent
+        // read still sees only genuinely new bytes.
+        if !result.hasSeekedToEnd {
+            result.hasSeekedToEnd = true
+            result.offset = size
+        } else if size < result.offset {
             // A shorter file means it was replaced; start over. This only detects a
             // *smaller* replacement — a same-or-larger replacement at the same path would
             // be treated as a continuation. That's acceptable here because the URL is
             // keyed to one session UUID for the watcher's whole lifetime.
-            offset = 0
+            result.offset = 0
         }
-        guard size > offset else { return }
+        guard size > result.offset else { return result }
 
-        try? handle.seek(toOffset: offset)
-        guard let data = try? handle.readToEnd(), !data.isEmpty else { return }
+        try? handle.seek(toOffset: result.offset)
+        guard let data = try? handle.readToEnd(), !data.isEmpty else { return result }
 
         // Consume only through the last complete line. A trailing partial line is left
-        // unread so the next drain sees it whole — `claude` appends this file while we
-        // read it, and a drain can land mid-write.
-        guard let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) else { return }
+        // unread so the next read sees it whole — `claude` appends this file while we
+        // read it, and a read can land mid-write.
+        guard let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) else { return result }
         let consumed = data.distance(from: data.startIndex, to: lastNewline) + 1
-        offset += UInt64(consumed)
-
-        var lastTitle: String?
-        var countChanged = false
+        result.offset += UInt64(consumed)
 
         for raw in String(decoding: data[..<lastNewline], as: UTF8.self)
             .split(separator: "\n", omittingEmptySubsequences: true) {
-            for event in ClaudeSession.events(inLine: String(raw), sessionID: sessionID) {
-                switch event {
-                case .title(let title):
-                    lastTitle = title
-                case .agentStarted(let id):
-                    if outstandingAgents.insert(id).inserted { countChanged = true }
-                case .agentFinished(let id):
-                    if outstandingAgents.remove(id) != nil { countChanged = true }
-                case .turnEnded:
-                    if !outstandingAgents.isEmpty {
-                        outstandingAgents.removeAll()
-                        countChanged = true
-                    }
-                }
-            }
+            result.events += ClaudeSession.events(inLine: String(raw), sessionID: sessionID)
         }
 
-        if let lastTitle { onTitle(lastTitle) }
-        if countChanged { onSubagentCount(outstandingAgents.count) }
+        return result
     }
 }

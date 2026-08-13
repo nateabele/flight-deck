@@ -43,6 +43,18 @@ final class SessionStore: ObservableObject {
     /// One transcript watcher per session, torn down with the session.
     private var watchers: [UUID: TranscriptWatcher] = [:]
 
+    /// The one timer behind every watcher above, plus `statusWatcher`. Created lazily so a
+    /// store built by a test that never starts watching never schedules anything; see
+    /// `WatchClock` for why the app polls from a single coalesced source.
+    ///
+    /// It reads the store's `appIsActive` seam rather than `NSApplication` directly, so a
+    /// test that needs the foreground (500 ms) cadence gets it from the same switch that
+    /// already governs notification delivery. The closure re-reads the seam on every
+    /// activation change, so assigning `appIsActive` after construction still takes effect.
+    private lazy var clock = WatchClock(appIsActive: { [weak self] in
+        self?.appIsActive() ?? false
+    })
+
     /// Injectable so tests can point at a temp directory.
     var projectsRoot: URL = ClaudeSession.defaultProjectsRoot
 
@@ -353,10 +365,14 @@ final class SessionStore: ObservableObject {
         )
     }
 
+    /// No `persist()` call here: assigning `selectedSessionID` runs its `didSet`, which
+    /// persists. Swift fires `didSet` on every assignment rather than only on a change, so
+    /// this is covered even when re-selecting the already-selected tab. The explicit call
+    /// that used to follow made every tab switch encode the snapshot twice and perform two
+    /// synchronous atomic write-and-rename cycles on the main thread.
     func selectSession(_ id: UUID) {
         guard locate(id) != nil else { return }
         selectedSessionID = id
-        persist()
     }
 
     /// ⌘⇧] — moves the selection one session down the sidebar's visual order, wrapping to the
@@ -516,7 +532,7 @@ final class SessionStore: ObservableObject {
     /// a timer.
     func startStatusWatching() {
         guard statusWatcher == nil else { return }
-        let watcher = SessionStatusWatcher(root: sessionsRoot) { [weak self] entries in
+        let watcher = SessionStatusWatcher(root: sessionsRoot, clock: clock) { [weak self] entries in
             self?.applyRegistry(entries)
         }
         watcher.start()
@@ -794,7 +810,8 @@ final class SessionStore: ObservableObject {
     private func startWatching(tabID: UUID, conversationID: UUID, url: URL) {
         let watcher = TranscriptWatcher(
             sessionID: conversationID,
-            url: url
+            url: url,
+            clock: clock
         ) { [weak self] title in
             self?.applyExternalTitle(tabID, title)
         } onSubagentCount: { [weak self] count in

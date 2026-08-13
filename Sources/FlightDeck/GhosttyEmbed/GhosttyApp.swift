@@ -156,7 +156,11 @@ final class GhosttyApp {
             let hovered: String? = v.len > 0 && v.url != nil
                 ? String(data: Data(bytes: v.url!, count: v.len), encoding: .utf8)
                 : nil
-            return withSurfaceView(target) { $0.hoverUrl = hovered }
+            // Guarded assign: this fires as the pointer crosses link boundaries and
+            // re-sends `nil` for every move over non-link cells. `@Published` publishes on
+            // assignment, not on change, so the unguarded version invalidated observers at
+            // pointer-move rate.
+            return withSurfaceView(target) { if $0.hoverUrl != hovered { $0.hoverUrl = hovered } }
 
         case GHOSTTY_ACTION_MOUSE_SHAPE:
             let shape = action.action.mouse_shape
@@ -175,7 +179,9 @@ final class GhosttyApp {
         case GHOSTTY_ACTION_PWD:
             guard let pwdPtr = action.action.pwd.pwd,
                   let pwd = String(cString: pwdPtr, encoding: .utf8) else { return false }
-            return withSurfaceView(target) { $0.pwd = pwd }
+            // Guarded assign: shells emit OSC 7 on every prompt, so this arrives once per
+            // command with — almost always — the directory it already held.
+            return withSurfaceView(target) { if $0.pwd != pwd { $0.pwd = pwd } }
 
         case GHOSTTY_ACTION_START_SEARCH:
             let startSearch = Ghostty.Action.StartSearch(c: action.action.start_search)

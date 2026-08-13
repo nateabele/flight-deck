@@ -31,33 +31,31 @@ final class SessionStatusWatcher {
     /// half-written file does not read as "session gone".
     private var cache: [String: ClaudeStatusFile.Entry] = [:]
     private var mtimes: [String: Date] = [:]
-    private var timer: DispatchSourceTimer?
+
+    /// The clock this watcher is registered with, if any. Nil in tests, which call
+    /// `drain()` directly.
+    private weak var clock: WatchClock?
 
     init(
         root: URL = SessionStatusWatcher.defaultRoot,
         isAlive: @escaping (pid_t) -> Bool = SessionStatusWatcher.processIsAlive,
+        clock: WatchClock? = nil,
         onChange: @escaping ([pid_t: ClaudeStatusFile.Entry]) -> Void
     ) {
         self.root = root
         self.isAlive = isAlive
+        self.clock = clock
         self.onChange = onChange
     }
 
-    deinit { timer?.cancel() }
-
-    /// 500 ms matches `TranscriptWatcher`; the registry is a handful of small files.
+    /// Registers with the shared clock. This type owns no timer of its own — see
+    /// `WatchClock` for why every poll in the app shares one.
     func start() {
-        guard timer == nil else { return }
-        let t = DispatchSource.makeTimerSource(queue: .main)
-        t.schedule(deadline: .now(), repeating: .milliseconds(500))
-        t.setEventHandler { [weak self] in self?.drain() }
-        timer = t
-        t.resume()
+        clock?.add(self) { [weak self] in self?.drain() }
     }
 
     func stop() {
-        timer?.cancel()
-        timer = nil
+        clock?.remove(self)
     }
 
     /// Rescans the registry and reports the current map. Synchronous so tests need no
@@ -72,7 +70,11 @@ final class SessionStatusWatcher {
                 continue
             }
             let url = root.appendingPathComponent(name)
-            let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+            // `resourceValues` rather than `attributesOfItem`: the latter builds a
+            // dictionary of every attribute the file system can report in order to read
+            // one date, and this runs per file per tick for every `claude` on the machine.
+            let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
 
             // Unchanged since the last look: reuse the decoded entry.
             if let mtime, mtimes[name] == mtime, let cached = cache[name] {

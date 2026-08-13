@@ -119,15 +119,13 @@ extension Ghostty {
         // Whether the pointer should be visible or not
         @Published private(set) var pointerStyle: CursorStyle = .horizontalText
 
-        // Whether the mouse is currently over this surface
-        @Published private(set) var mouseOverSurface: Bool = false
-
-        // The last known mouse location in the surface's local coordinate space,
-        // used by overlays such as the split drag handle reveal region.
-        @Published private(set) var mouseLocationInSurface: CGPoint?
-
-        // Whether the cursor is currently visible (not hidden by typing, etc.)
-        @Published private(set) var cursorVisible: Bool = true
+        // Upstream also published `mouseOverSurface`, `mouseLocationInSurface`, and
+        // `cursorVisible` here. They fed the split drag-handle reveal region and the
+        // focus-follows-mouse overlay, neither of which survived decoupling — this app is a
+        // single-surface skeleton. Nothing read them, but `mouseMoved` wrote
+        // `mouseLocationInSurface` on every event, so each one sent `objectWillChange` on
+        // this 18-property observable at pointer-move rate (120 Hz on ProMotion) to no end.
+        // Restore them alongside whatever actually consumes them, not before.
 
         /// The background color within the color palette of the surface. This is only set if it is
         /// dynamically updated. Otherwise, the background color is the default background color.
@@ -455,8 +453,10 @@ extension Ghostty {
                 // On macOS 13+ we can store our continuous clock...
                 focusInstant = ContinuousClock.now
 
-                // We unset our bell state if we gained focus
-                bell = false
+                // We unset our bell state if we gained focus. Guarded: `@Published` does
+                // not diff, so an unconditional `bell = false` publishes even when the
+                // bell was never rung. See `keyDown`, where that mattered.
+                if bell { bell = false }
 
                 // Remove any notifications for this surface once we gain focus.
                 if !notificationIdentifiers.isEmpty {
@@ -479,77 +479,75 @@ extension Ghostty {
             contentSize = size
         }
 
+        /// The last framebuffer size handed to libghostty, so a repeat report costs nothing.
+        /// `nil` means "next report always lands" — see `viewDidChangeBackingProperties`.
+        private var lastSurfacePixelSize: CGSize?
+
         private func setSurfaceSize(width: UInt32, height: UInt32) {
             guard let surface = self.surface else { return }
+
+            // Re-reporting an unchanged framebuffer size is a no-op for the grid, but it was
+            // not free for us. `TerminalPane.updateNSView` calls this on *every* published
+            // `SessionStore` change — deliberately, so a surface resized while off-screen
+            // reflows on re-parent — and status ticks make that ~2 Hz per live agent. Each
+            // one crossed into libghostty and then published `surfaceSize`, invalidating
+            // every observer of this surface for a size that had not moved.
+            let pixelSize = CGSize(width: CGFloat(width), height: CGFloat(height))
+            guard pixelSize != lastSurfacePixelSize else { return }
+            lastSurfacePixelSize = pixelSize
 
             // Update our core surface
             ghostty_surface_set_size(surface, width, height)
 
             // Update our cached size metrics
             let size = ghostty_surface_size(surface)
-            DispatchQueue.main.async {
-                // DispatchQueue required since this may be called by SwiftUI off
-                // the main thread and Published changes need to be on the main
-                // thread. This caused a crash on macOS <= 14.
+
+            // The hop is required when this arrives off the main thread: SwiftUI can call
+            // it from anywhere and `@Published` changes must be published on main, which
+            // crashed on macOS <= 14. When we are *already* on main — the common case, since
+            // `updateNSView` and the AppKit resize path both are — assign directly rather
+            // than spending a runloop turn to land in the same place.
+            if Thread.isMainThread {
                 self.surfaceSize = size
+            } else {
+                DispatchQueue.main.async { self.surfaceSize = size }
             }
         }
 
+        /// Maps a libghostty mouse shape onto our cursor and publishes it.
+        ///
+        /// libghostty re-emits `GHOSTTY_ACTION_MOUSE_SHAPE` freely — including the same
+        /// shape repeatedly while the pointer moves within one region — so the assignment
+        /// is guarded. `@Published` publishes on assignment rather than on change, and this
+        /// arrives on a pointer-move-rate path.
         func setCursorShape(_ shape: ghostty_action_mouse_shape_e) {
+            let style: CursorStyle
             switch shape {
-            case GHOSTTY_MOUSE_SHAPE_DEFAULT:
-                pointerStyle = .default
-
-            case GHOSTTY_MOUSE_SHAPE_TEXT:
-                pointerStyle = .horizontalText
-
-            case GHOSTTY_MOUSE_SHAPE_GRAB:
-                pointerStyle = .grabIdle
-
-            case GHOSTTY_MOUSE_SHAPE_GRABBING:
-                pointerStyle = .grabActive
-
-            case GHOSTTY_MOUSE_SHAPE_POINTER:
-                pointerStyle = .link
-
-            case GHOSTTY_MOUSE_SHAPE_W_RESIZE:
-                pointerStyle = .resizeLeft
-
-            case GHOSTTY_MOUSE_SHAPE_E_RESIZE:
-                pointerStyle = .resizeRight
-
-            case GHOSTTY_MOUSE_SHAPE_N_RESIZE:
-                pointerStyle = .resizeUp
-
-            case GHOSTTY_MOUSE_SHAPE_S_RESIZE:
-                pointerStyle = .resizeDown
-
-            case GHOSTTY_MOUSE_SHAPE_NS_RESIZE:
-                pointerStyle = .resizeUpDown
-
-            case GHOSTTY_MOUSE_SHAPE_EW_RESIZE:
-                pointerStyle = .resizeLeftRight
-
-            case GHOSTTY_MOUSE_SHAPE_VERTICAL_TEXT:
-                pointerStyle = .verticalText
-
-            case GHOSTTY_MOUSE_SHAPE_CONTEXT_MENU:
-                pointerStyle = .contextMenu
-
-            case GHOSTTY_MOUSE_SHAPE_CROSSHAIR:
-                pointerStyle = .crosshair
-
-            case GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED:
-                pointerStyle = .operationNotAllowed
+            case GHOSTTY_MOUSE_SHAPE_DEFAULT: style = .default
+            case GHOSTTY_MOUSE_SHAPE_TEXT: style = .horizontalText
+            case GHOSTTY_MOUSE_SHAPE_GRAB: style = .grabIdle
+            case GHOSTTY_MOUSE_SHAPE_GRABBING: style = .grabActive
+            case GHOSTTY_MOUSE_SHAPE_POINTER: style = .link
+            case GHOSTTY_MOUSE_SHAPE_W_RESIZE: style = .resizeLeft
+            case GHOSTTY_MOUSE_SHAPE_E_RESIZE: style = .resizeRight
+            case GHOSTTY_MOUSE_SHAPE_N_RESIZE: style = .resizeUp
+            case GHOSTTY_MOUSE_SHAPE_S_RESIZE: style = .resizeDown
+            case GHOSTTY_MOUSE_SHAPE_NS_RESIZE: style = .resizeUpDown
+            case GHOSTTY_MOUSE_SHAPE_EW_RESIZE: style = .resizeLeftRight
+            case GHOSTTY_MOUSE_SHAPE_VERTICAL_TEXT: style = .verticalText
+            case GHOSTTY_MOUSE_SHAPE_CONTEXT_MENU: style = .contextMenu
+            case GHOSTTY_MOUSE_SHAPE_CROSSHAIR: style = .crosshair
+            case GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED: style = .operationNotAllowed
 
             default:
                 // We ignore unknown shapes.
                 return
             }
+
+            if pointerStyle != style { pointerStyle = style }
         }
 
         func setCursorVisibility(_ visible: Bool) {
-            cursorVisible = visible
             // Technically this action could be called anytime we want to
             // change the mouse visibility but at the time of writing this
             // mouse-hide-while-typing is the only use case so this is the
@@ -621,11 +619,15 @@ extension Ghostty {
                 repeats: false
             ) { [weak self] _ in
                 // Set the title if it wasn't manually set.
-                guard self?.titleFromTerminal == nil else {
+                guard let self, self.titleFromTerminal == nil else {
                     self?.titleFromTerminal = title
                     return
                 }
-                self?.title = title
+                // Guarded for the same reason as the other published writes: shells
+                // re-emit OSC 0/2 on every prompt, so the coalescing timer above still
+                // lands one identical title per command. The 75 ms window stops the
+                // flicker; this stops the invalidation.
+                if self.title != title { self.title = title }
             }
         }
 
@@ -757,13 +759,15 @@ extension Ghostty {
         }
 
         @objc private func ghosttyBellDidRing(_ notification: SwiftUI.Notification) {
-            // Bell state goes to true
-            bell = true
+            // Bell state goes to true. Guarded for the same reason as every other
+            // `@Published` write here: repeated bells while already in the bell state
+            // would otherwise re-render observers with nothing to show them.
+            if !bell { bell = true }
         }
 
         @objc private func ghosttyDidChangeReadonly(_ notification: SwiftUI.Notification) {
             guard let value = notification.userInfo?[SwiftUI.Notification.Name.ReadonlyKey] as? Bool else { return }
-            readonly = value
+            if readonly != value { readonly = value }
         }
 
         @objc private func windowDidChangeScreen(notification: SwiftUI.Notification) {
@@ -857,7 +861,13 @@ extension Ghostty {
             let yScale = fbFrame.size.height / self.frame.size.height
             ghostty_surface_set_content_scale(surface, xScale, yScale)
 
-            // When our scale factor changes, so does our fb size so we send that too
+            // When our scale factor changes, so does our fb size so we send that too.
+            //
+            // The size cache is dropped first so this push always reaches libghostty. A
+            // display change can leave the pixel dimensions identical while the scale
+            // differs, and the deduplication in `setSurfaceSize` exists to suppress the
+            // redundant `TerminalPane` path — not to second-guess a display migration.
+            lastSurfacePixelSize = nil
             let scaledSize = self.convertToBacking(contentSize)
             setSurfaceSize(width: UInt32(scaledSize.width), height: UInt32(scaledSize.height))
         }
@@ -939,11 +949,9 @@ extension Ghostty {
         }
 
         override func mouseEntered(with event: NSEvent) {
-            mouseOverSurface = true
             super.mouseEntered(with: event)
 
             let pos = self.convert(event.locationInWindow, from: nil)
-            mouseLocationInSurface = pos
 
             guard let surfaceModel else { return }
 
@@ -960,8 +968,6 @@ extension Ghostty {
         }
 
         override func mouseExited(with event: NSEvent) {
-            mouseOverSurface = false
-            mouseLocationInSurface = nil
             guard let surfaceModel else { return }
 
             // If the mouse is being dragged then we don't have to emit
@@ -982,7 +988,6 @@ extension Ghostty {
 
         override func mouseMoved(with event: NSEvent) {
             let pos = self.convert(event.locationInWindow, from: nil)
-            mouseLocationInSurface = pos
 
             guard let surfaceModel else { return }
 
@@ -1059,8 +1064,14 @@ extension Ghostty {
                 return
             }
 
-            // On any keyDown event we unset our bell state
-            bell = false
+            // On any keyDown event we unset our bell state.
+            //
+            // The guard is load-bearing on the typing path: `@Published` sends
+            // `objectWillChange` on assignment, not on change, so the unconditional
+            // version published on *every keystroke* — almost always writing `false`
+            // over `false` — and re-rendered every SwiftUI view observing this surface
+            // (e.g. `TerminalSearchBar`, live whenever the search bar is open).
+            if bell { bell = false }
 
             // We need to translate the mods (maybe) to handle configs such as option-as-alt
             let translationModsGhostty = Ghostty.eventModifierFlags(
