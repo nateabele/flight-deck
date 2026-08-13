@@ -70,6 +70,7 @@ struct FlightDeckApp: App {
         RootWindow(store: store)
             .commands {
                 SessionCommands(store: store)
+                EditCommands()
                 TabNavigationCommands(store: store)
             }
 

@@ -78,6 +78,7 @@ final class SessionStore: ObservableObject {
     var appIsActive: () -> Bool = { NSApplication.shared.isActive }
 
     private var activationObserver: NSObjectProtocol?
+    private var closeObserver: NSObjectProtocol?
 
     init(
         provider: SurfaceProvider?,
@@ -88,11 +89,15 @@ final class SessionStore: ObservableObject {
         self.persistence = persistence
         self.preferences = preferences
         observeActivationRequests()
+        observeSurfaceClose()
     }
 
     deinit {
         if let activationObserver {
             NotificationCenter.default.removeObserver(activationObserver)
+        }
+        if let closeObserver {
+            NotificationCenter.default.removeObserver(closeObserver)
         }
     }
 
@@ -615,6 +620,29 @@ final class SessionStore: ObservableObject {
             let id = (raw as? UUID) ?? (raw as? String).flatMap(UUID.init(uuidString:))
             guard let id else { return }
             MainActor.assumeIsolated { self?.selectSession(id) }
+        }
+    }
+
+    /// The shell exited (or a `close_surface` binding fired), so retire the tab it belonged to.
+    ///
+    /// libghostty posts this through `GhosttyApp.closeSurface`. Without it the row stayed in
+    /// the sidebar pointing at a dead terminal — the surface would render its final frame
+    /// forever and never accept input again.
+    ///
+    /// The notification's object is the `SurfaceView`, so the session is found by identity
+    /// rather than by an id libghostty does not know about.
+    private func observeSurfaceClose() {
+        guard closeObserver == nil else { return }
+        closeObserver = NotificationCenter.default.addObserver(
+            forName: Ghostty.Notification.ghosttyCloseSurface, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let view = note.object as? Ghostty.SurfaceView else { return }
+            MainActor.assumeIsolated {
+                guard let self,
+                      let id = self.surfaces.first(where: { $0.value === view })?.key
+                else { return }
+                self.closeSession(id)
+            }
         }
     }
 

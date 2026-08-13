@@ -11,9 +11,14 @@ struct RootView: View {
             SessionSidebar(store: store)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
         } detail: {
-            if store.selectedSessionID.flatMap({ store.surface(for: $0) }) != nil {
+            if let surface = store.selectedSessionID.flatMap({ store.surface(for: $0) }) {
                 TerminalPane(store: store)
                     .frame(minWidth: 400, minHeight: 300)
+                    // The find bar floats over the terminal rather than shrinking it: the
+                    // grid would otherwise reflow every time the bar opened or closed.
+                    .overlay(alignment: .topTrailing) {
+                        SearchOverlay(surface: surface)
+                    }
             } else {
                 ContentUnavailableView {
                     Label("No Session", systemImage: "terminal")
