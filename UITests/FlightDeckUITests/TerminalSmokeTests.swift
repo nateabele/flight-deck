@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 
 /// The whole UI gate, in **one** app launch.
@@ -317,8 +318,59 @@ final class TerminalSmokeTests: XCTestCase {
             XCTAssertFalse((field.value as? String ?? "").contains("--dangerously-skip-permissions"))
         }
 
-        // Close Preferences so the ⌘Q group below acts on the main window.
+        // Close Preferences so the groups below act on the main window.
         app.typeKey("w", modifierFlags: .command)
+
+        // libghostty delegates every clipboard operation to the host runtime; those callbacks
+        // used to be empty stubs, so ⌘C looked wired (the menu item existed, the responder
+        // method ran) and still copied nothing. Asserting on the *pasteboard* is what makes
+        // this a real check rather than a test of menu plumbing.
+        XCTContext.runActivity(named: "Copy puts the terminal's selection on the pasteboard") { _ in
+            let sentinel = "flight-deck-clipboard-sentinel-\(UUID().uuidString)"
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(sentinel, forType: .string)
+
+            let edit = app.menuBars.menuBarItems["Edit"]
+            XCTAssertTrue(edit.waitForExistence(timeout: 5))
+
+            edit.click()
+            app.menuItems["Select All"].click()
+            edit.click()
+            app.menuItems["Copy"].click()
+
+            // The shell has drawn at least a prompt by now, so a select-all is non-empty.
+            let copied = NSPasteboard.general.string(forType: .string) ?? ""
+            XCTAssertNotEqual(copied, sentinel, "Copy left the pasteboard untouched")
+            XCTAssertFalse(copied.isEmpty, "Copy wrote an empty string")
+        }
+
+        // These have no SwiftUI defaults — `EditCommands` adds them. A missing item here means
+        // the shortcut is gone too, since the key equivalent lives on the menu item.
+        XCTContext.runActivity(named: "Edit menu exposes the find and paste items") { _ in
+            let edit = app.menuBars.menuBarItems["Edit"]
+            edit.click()
+            for title in ["Paste as Plain Text", "Paste Selection", "Find…", "Find Next",
+                          "Find Previous", "Use Selection for Find"] {
+                XCTAssertTrue(app.menuItems[title].exists, "Edit menu is missing \(title)")
+            }
+            app.typeKey(.escape, modifierFlags: [])
+        }
+
+        // ⌘F is the whole find feature end to end: the key reaches libghostty, which emits
+        // START_SEARCH, which `GhosttyApp` routes to the surface's `searchState`, which is
+        // what makes `TerminalSearchBar` appear. Before this work the action was dropped and
+        // there was no bar to show.
+        XCTContext.runActivity(named: "⌘F opens the find bar and Escape dismisses it") { _ in
+            app.typeKey("f", modifierFlags: .command)
+            let field = app.windows.firstMatch.textFields["Find"]
+            XCTAssertTrue(field.waitForExistence(timeout: 5), "find bar never appeared")
+
+            app.typeKey(.escape, modifierFlags: [])
+            XCTAssertTrue(
+                field.waitForNonExistence(timeout: 5),
+                "find bar stayed up after Escape"
+            )
+        }
 
         // Strictly last: it terminates the app.
         //

@@ -1537,6 +1537,21 @@ extension Ghostty {
             }
         }
 
+        /// Runs a libghostty binding action by name (e.g. `navigate_search:next`).
+        ///
+        /// Flight Deck addition: the `@IBAction` handlers above each open-code this same
+        /// four-line dance. Callers outside this file (the find bar) need it too, so it is
+        /// factored out here rather than duplicated a seventh time.
+        @discardableResult
+        func performBindingAction(_ action: String) -> Bool {
+            guard let surface = self.surface else { return false }
+            let ok = ghostty_surface_binding_action(
+                surface, action, UInt(action.lengthOfBytes(using: .utf8))
+            )
+            if !ok { Ghostty.logger.warning("action failed action=\(action)") }
+            return ok
+        }
+
         @IBAction override func selectAll(_ sender: Any?) {
             guard let surface = self.surface else { return }
             let action = "select_all"

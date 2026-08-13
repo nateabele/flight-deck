@@ -26,12 +26,17 @@ carried forward on trust.
 
 ## Deferred to the harness-adapter / block-model phase
 
-- **`close_surface_cb` is still a no-op, and `action_cb` handles only `quit`.** A shell `exit`
-  leaves a dead surface on screen; title/notification/clipboard/OSC actions are still dropped.
-  Wire the rest when building the block model and the harness adapters (they are the surface's
-  event surface). `action_cb` gained a `quit` case with the menu-key-equivalent fix — see
-  `MenuKeyEquivalents` — because a Ghostty keybind can resolve to `quit` with no menu item
-  involved.
+- **`action_cb` is partial by design, not by omission.** Wired: `quit`, the clipboard callbacks
+  (`read`/`write`/`confirm_read` — libghostty does no pasteboard I/O itself, so these are what
+  make ⌘C/⌘V work at all), `close_surface_cb`, `open_url`, `mouse_over_link`, `mouse_shape`,
+  `mouse_visibility`, `pwd`, and the four search actions.
+
+  Everything else libghostty can emit is deliberately unhandled and is **not** a TODO. Flight
+  Deck is a session manager with one surface per session, so Ghostty's own tab/split/window
+  actions (`new_tab`, `new_split`, `goto_tab`, `goto_split`, `toggle_fullscreen`, …) would
+  duplicate or fight the sidebar, and title/notification actions are already served by
+  `TranscriptWatcher` and `SessionNotifier`. Returning `false` is the honest answer for those.
+  Add one only when a concrete need appears — not to fill in the table.
 
 ## Build reproducibility (known limitation)
 
