@@ -48,8 +48,19 @@ enum ClaudeSession {
     /// Shape: `{"type":"custom-title","customTitle":"…","sessionId":"…"}`.
     static func customTitle(inLine line: String, sessionID: UUID) -> String? {
         guard let data = line.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              obj["type"] as? String == "custom-title",
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return customTitle(inObject: obj, sessionID: sessionID)
+    }
+
+    /// The same rule against an already-decoded record.
+    ///
+    /// `events(inLine:sessionID:)` must decode the line to learn its `type` at all, and
+    /// used to hand the raw string back to the overload above — parsing every
+    /// `custom-title` record twice. Transcript lines are not small (one assistant record
+    /// carries whole tool inputs and results) and this runs per appended line.
+    static func customTitle(inObject obj: [String: Any], sessionID: UUID) -> String? {
+        guard obj["type"] as? String == "custom-title",
               let sid = obj["sessionId"] as? String,
               sid.lowercased() == sessionID.uuidString.lowercased(),
               let title = obj["customTitle"] as? String
@@ -143,7 +154,7 @@ enum ClaudeSession {
     /// the record does not name the tool it answers. `TranscriptWatcher` keeps a set
     /// of outstanding `Agent` ids, so an unrelated id is a harmless no-op there and
     /// this parser stays free of cross-record state.
-    enum TranscriptEvent: Equatable {
+    enum TranscriptEvent: Equatable, Sendable {
         case title(String)
         case agentStarted(String)
         case agentFinished(String)
@@ -165,7 +176,7 @@ enum ClaudeSession {
 
         switch type {
         case "custom-title":
-            return customTitle(inLine: line, sessionID: sessionID).map { [.title($0)] } ?? []
+            return customTitle(inObject: obj, sessionID: sessionID).map { [.title($0)] } ?? []
 
         case "system":
             return obj["subtype"] as? String == "turn_duration" ? [.turnEnded] : []
