@@ -39,14 +39,17 @@ final class SessionRenameTests: XCTestCase {
         XCTAssertEqual(store.title(of: id), "my session")
     }
 
-    /// The command text carries NO line terminator, and Return follows as a separate key
-    /// event. `sendText` is a paste in libghostty; with bracketed-paste mode on (Claude Code
+    /// The command text carries NO line terminator, and the Returns are separate key events.
+    /// `sendText` is a paste in libghostty; with bracketed-paste mode on (Claude Code
     /// enables it) a terminator inside the text arrives between `ESC[200~`/`ESC[201~` and is
     /// inserted as literal content instead of submitting.
-    func testRenameSendsTextThenReturnAsSeparateEvents() {
+    ///
+    /// The *leading* Return is the fix for a half-typed input bar: without it the pasted
+    /// command is appended to whatever the user already had there.
+    func testRenameSendsReturnThenTextThenReturn() {
         let (store, spy, id) = makeStore()
         store.rename(id, to: "my session")
-        XCTAssertEqual(spy.events, [.text("/rename my session"), .ret])
+        XCTAssertEqual(spy.events, [.ret, .text("/rename my session"), .ret])
     }
 
     func testRenameTextCarriesNoLineTerminator() {
@@ -61,7 +64,7 @@ final class SessionRenameTests: XCTestCase {
         let (store, spy, id) = makeStore()
         store.rename(id, to: "  bad\nname  ")
         XCTAssertEqual(store.title(of: id), "badname")
-        XCTAssertEqual(spy.events, [.text("/rename badname"), .ret])
+        XCTAssertEqual(spy.events, [.ret, .text("/rename badname"), .ret])
     }
 
     func testEmptyRenameIsIgnored() {

@@ -464,11 +464,17 @@ final class SessionStore: ObservableObject {
     /// Sidebar → Claude. Updates the title, then types `/rename <name>` into the pty
     /// so the *running* interactive session renames itself and records it.
     ///
-    /// The command text and the Return are sent separately, and that split is load-bearing.
+    /// Return is sent *before* the paste as well as after. Without the leading one, whatever
+    /// the user had half-typed in the input bar is still sitting there and `/rename <name>`
+    /// is appended to it, producing a garbage prompt instead of a slash command. The leading
+    /// Return submits that pending text (it is sent to Claude as a message, not discarded)
+    /// and leaves an empty bar for the command.
+    ///
+    /// The command text and the Returns are sent separately, and that split is load-bearing.
     /// `sendText` is a *paste* in libghostty, and Claude Code enables bracketed-paste mode, so
     /// any line terminator inside the text is delivered between `\u{1b}[200~` and
     /// `\u{1b}[201~` and treated as pasted content — it lands in the input bar as a literal
-    /// newline and never submits. Return has to arrive after the paste closes, as a real key
+    /// newline and never submits. Return has to arrive outside the paste, as a real key
     /// event. See `TextInjecting.sendReturn()`.
     func rename(_ id: UUID, to newTitle: String) {
         guard let at = locate(id),
@@ -477,6 +483,7 @@ final class SessionStore: ObservableObject {
 
         repos[at.repo].sessions[at.session].title = name
         let injector = injector(for: id)
+        injector?.sendReturn()
         injector?.sendText("/rename \(name)")
         injector?.sendReturn()
         persist()
