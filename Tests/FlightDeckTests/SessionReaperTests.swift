@@ -25,6 +25,10 @@ private final class FakeInspector: ProcessInspecting, @unchecked Sendable {
     func isAlive(_ identity: ProcessIdentity) -> Bool {
         living.contains(identity.pid) && identity.procStart == 100
     }
+    /// Unused by `SessionReaper` itself — `reap` takes its pgid as a parameter rather than
+    /// looking it up — so this file's tests never call it. Present only to satisfy the
+    /// protocol.
+    func pgid(of pid: pid_t) -> pid_t? { nil }
 }
 
 private final class SpySignals: SignalSending, @unchecked Sendable {

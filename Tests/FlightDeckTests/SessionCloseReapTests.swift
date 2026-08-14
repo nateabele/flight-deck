@@ -30,6 +30,10 @@ private final class FakeInspector: ProcessInspecting, @unchecked Sendable {
     func isAlive(_ identity: ProcessIdentity) -> Bool {
         living.contains(identity.pid) && identity.procStart == 100
     }
+    /// Unused by this file's tests: `closeSession`'s reap uses the `pgid` already recorded
+    /// on the `SessionProcess`, not a live re-derivation. Present only to satisfy the
+    /// protocol.
+    func pgid(of pid: pid_t) -> pid_t? { nil }
 }
 
 /// Records signals instead of touching a real process. Nothing reachable from a test may

@@ -9,6 +9,10 @@ private final class StubProvider: SurfaceProvider {
 
 private final class FakeInspector: ProcessInspecting, @unchecked Sendable {
     var living: Set<pid_t>
+    /// Overrides what `pgid(of:)` reports for a pid, so a test can stage a live group that
+    /// disagrees with a persisted one. Unset pids fall back to reporting themselves as their
+    /// own group, mirroring the common `setsid` case.
+    var pgids: [pid_t: pid_t] = [:]
     init(living: Set<pid_t>) { self.living = living }
     func children(of ppid: pid_t) -> Set<pid_t> { [] }
     func descendants(of pid: pid_t) -> [ProcessIdentity] { [] }
@@ -16,6 +20,7 @@ private final class FakeInspector: ProcessInspecting, @unchecked Sendable {
     func isAlive(_ identity: ProcessIdentity) -> Bool {
         living.contains(identity.pid) && identity.procStart == 100
     }
+    func pgid(of pid: pid_t) -> pid_t? { pgids[pid] ?? pid }
 }
 
 private final class SpySignals: SignalSending, @unchecked Sendable {
@@ -102,6 +107,26 @@ final class OrphanSweepTests: XCTestCase {
             .sweepOrphans(from: snapshot(owner: owner, processes: [UUID().uuidString: orphan]))
 
         XCTAssertEqual(signals.targets, [600])
+    }
+
+    /// The regression this sweep exists to prevent: `process.pgid` is a number out of JSON
+    /// written by a previous boot, and is never itself the target. Only the group the live
+    /// process table reports right now — from a pid this sweep has just positively
+    /// identified — gets signalled.
+    func testSweepSignalsTheLiveGroupNotThePersistedPgid() async {
+        let owner = ProcessIdentity(pid: 500, procStart: 100)
+        let orphan = SessionProcess(
+            identity: ProcessIdentity(pid: 600, procStart: 100), pgid: 700   // stale on disk
+        )
+        let inspector = FakeInspector(living: [600])
+        inspector.pgids = [600: 650]   // what the live process table actually reports
+        let signals = SpySignals()
+        signals.onSend = { _ in inspector.living.remove(600) }
+
+        await store(inspector: inspector, signals: signals)
+            .sweepOrphans(from: snapshot(owner: owner, processes: [UUID().uuidString: orphan]))
+
+        XCTAssertEqual(signals.targets, [650], "must signal the live group, never the persisted one")
     }
 
     /// The recorded pid was recycled by an unrelated process. Never signal it.

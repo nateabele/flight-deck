@@ -514,13 +514,23 @@ final class SessionStore: ObservableObject {
     /// else's live children, and killing them would be a second Flight Deck instance
     /// sabotaging the first), and each identity's start time must still match (otherwise the
     /// pid has been recycled and now belongs to an unrelated process).
+    ///
+    /// The pgid used to signal is re-derived from the live process table, never taken from
+    /// `process.pgid` — the persisted value came out of JSON written by a previous boot and
+    /// is not evidence about the current process table. A live process whose identity has
+    /// just been confirmed to match is authoritative about its own process group; a number
+    /// on disk is not. Re-deriving only after `isAlive` has passed means this is asking a
+    /// process we have positively identified, not a stranger that happens to share a pid.
     func sweepOrphans(from snapshot: SessionSnapshot) async {
         guard let recorded = snapshot.processes, !recorded.isEmpty else { return }
         if let owner = snapshot.owner, processInspector.isAlive(owner) { return }
 
         var cleaned = 0
         for (_, process) in recorded where processInspector.isAlive(process.identity) {
-            let outcome = await reaper.reap(shell: process.identity, pgid: process.pgid)
+            // A non-positive pgid makes `SessionReaper.deliver` fall back to signalling the
+            // pid directly instead of guessing a group from stale, on-disk data.
+            let livePgid = processInspector.pgid(of: process.identity.pid) ?? -1
+            let outcome = await reaper.reap(shell: process.identity, pgid: livePgid)
             reapReporter?.report(outcome, context: "orphan sweep")
             cleaned += 1
         }
