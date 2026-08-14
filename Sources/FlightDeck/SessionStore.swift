@@ -40,6 +40,9 @@ final class SessionStore: ObservableObject {
     /// sessions re-parents rather than recreates. Dropping an entry frees it.
     private var surfaces: [UUID: Ghostty.SurfaceView] = [:]
 
+    /// Which OS process each tab owns, for teardown. See `SurfaceProcessRegistry`.
+    let processRegistry = SurfaceProcessRegistry()
+
     /// One transcript watcher per session, torn down with the session.
     private var watchers: [UUID: TranscriptWatcher] = [:]
 
@@ -275,7 +278,10 @@ final class SessionStore: ObservableObject {
         config.workingDirectory = url.path
         config.initialInput = initialInput
         config.environmentVariables = preferences?.sessionEnvironment() ?? [:]
-        if let surface = provider?.makeSurface(config) {
+        // Bracketed so the registry can identify the shell libghostty forks inside
+        // `makeSurface`; libghostty exposes no pid of its own.
+        let created = processRegistry.record(for: session.id) { provider?.makeSurface(config) }
+        if let surface = created {
             surfaces[session.id] = surface
         }
         provider?.tick()
@@ -425,6 +431,7 @@ final class SessionStore: ObservableObject {
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
+        processRegistry.forget(id)
         // Closing the row is the most literal case of "a prompt that will never resolve",
         // and applyRegistry cannot observe the waiting -> gone edge here because both its
         // before and after snapshots already lack this id.
