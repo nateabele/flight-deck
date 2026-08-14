@@ -115,6 +115,11 @@ actor SessionReaper {
     /// One target through the whole ladder, stopping the moment it dies.
     private func escalate(on target: ProcessIdentity, pgid: pid_t?) async {
         for rung in Self.ladder {
+            // Before the first `deliver`, not only after each poll: a ladder entered on an
+            // already-cancelled task would otherwise still fire this rung's signal. Same
+            // doctrine as the in-rung check below — cancellation stops the ladder where it
+            // stands, it never escalates.
+            if Task.isCancelled { return }
             guard inspector.isAlive(target) else { return }
             deliver(rung.signal, to: target, pgid: pgid)
 
@@ -138,11 +143,15 @@ actor SessionReaper {
 
     /// Group-first where we can, per-pid where we must.
     ///
-    /// The self-group rail is load-bearing: `killpg` against our own group would kill Flight
-    /// Deck itself. libghostty's child calls `setsid` immediately, so a session's own shell
-    /// never actually shares our group in production; this check is defense in depth against
-    /// a `pgid` argument that happens to equal ours anyway — a mis-derived value, a future
-    /// call site, or (deliberately) a test proving the rail holds
+    /// The self-group rail is load-bearing, and against a real window rather than a
+    /// hypothetical one. `killpg` against our own group would kill Flight Deck itself, and a
+    /// freshly forked child *does* inherit our process group: it is in ours until it runs its
+    /// own `setsid()`, and every `pgid` reaching this method is now derived by a live
+    /// `getpgid` read on the target (`SessionStore.reapSession`, `sweepOrphans`). A read that
+    /// lands inside that window — a surface created and closed in the same breath, a quit
+    /// moments after launch — hands us our own group in good faith. This check is what makes
+    /// that harmless, downgrading the signal to per-pid instead of taking the app down. It
+    /// also covers the deliberate case a test drives
     /// (`ReaperAcceptanceTests.testNeverSignalsTheTestRunnersOwnGroup`). It is *not* guarding
     /// against `Foundation.Process` sharing our group with a spawned child by default — on
     /// Darwin it does not; every `Process`-spawned child lands in a new group of its own (see

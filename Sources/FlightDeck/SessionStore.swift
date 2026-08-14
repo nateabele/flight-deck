@@ -46,6 +46,32 @@ final class SessionStore: ObservableObject {
     /// The process table the orphan sweep reads. Settable so tests can script it.
     var processInspector: ProcessInspecting = ProcessTree()
 
+    /// This run's own identity, stamped into every snapshot as `owner`. Computed once: it
+    /// cannot change for the life of the process, and `persist()` runs on every mutation —
+    /// every tab switch, every rename, every registry tick.
+    ///
+    /// **It must read the real process table, never `processInspector`.** That property is a
+    /// test seam, and `owner` is the interlock the launch sweep gates on: a snapshot whose
+    /// `owner` is reported alive is left entirely alone. Routing this through the seam would
+    /// let a test (or a future refactor tidying "duplicate" inspector use) stamp a fabricated
+    /// owner into a real `sessions.json`, and the next launch would then either decline to
+    /// sweep real orphans or — worse, if the fake identity is one that happens to be dead —
+    /// sweep somebody else's live children. The one value in this file that must come from
+    /// the operating system and nowhere else.
+    private static let selfIdentity: ProcessIdentity? = ProcessTree().identity(of: getpid())
+
+    /// The most recently constructed store.
+    ///
+    /// A fallback for `AppDelegate`, which normally learns about the store through
+    /// `.flightDeckStoreReady`. That notification only reaches the delegate because
+    /// `FlightDeckApp` happens to build the store inside a SwiftUI `@autoclosure`, deferred for
+    /// an entirely unrelated reason (`NSApp` does not exist during `App.init`). Constructing it
+    /// eagerly instead — a plausible "cleanup" — would post the notification before the
+    /// delegate's observer exists, turning `applicationShouldTerminate` into an immediate
+    /// `.terminateNow` that reaps nothing at all, silently, with no test failing. Weak so the
+    /// store's lifetime is still owned by the `@StateObject` that holds it.
+    static weak var current: SessionStore?
+
     /// Off-main-actor process teardown. See `SessionReaper`.
     private let reaper: SessionReaper
     var reapReporter: ReapReporting? = LoggingReapReporter()
@@ -122,9 +148,18 @@ final class SessionStore: ObservableObject {
         self.persistence = persistence
         self.preferences = preferences
         self.reaper = reaper
+        // Shell records land asynchronously, up to half a second after the tab they belong to
+        // (see `SurfaceProcessRegistry`), so the `persist()` that `newSession`/`restore` already
+        // ran is too early to contain them. Without this the snapshot names no shell for any
+        // tab until some unrelated mutation happens to save again — and a crash before that
+        // leaves the next launch's orphan sweep nothing to find.
+        processRegistry.onChange = { [weak self] in self?.persist() }
         observeActivationRequests()
         observeSurfaceClose()
-        // Lets `AppDelegate` find the store it does not own — see `.flightDeckStoreReady`.
+        // Two independent ways for `AppDelegate` to find the store it does not own, because
+        // quit reaping silently does nothing if it finds neither — see `.flightDeckStoreReady`
+        // and `SessionStore.current`.
+        Self.current = self
         NotificationCenter.default.post(name: .flightDeckStoreReady, object: self)
     }
 
@@ -309,8 +344,9 @@ final class SessionStore: ObservableObject {
         config.workingDirectory = url.path
         config.initialInput = initialInput
         config.environmentVariables = preferences?.sessionEnvironment() ?? [:]
-        // Bracketed so the registry can identify the shell libghostty forks inside
-        // `makeSurface`; libghostty exposes no pid of its own.
+        // Wrapped so the registry can identify the shell libghostty forks for this surface;
+        // libghostty exposes no pid of its own. The identification finishes asynchronously,
+        // after `makeSurface` returns — see `SurfaceProcessRegistry`.
         let created = processRegistry.record(for: session.id) { provider?.makeSurface(config) }
         if let surface = created {
             surfaces[session.id] = surface
@@ -398,12 +434,16 @@ final class SessionStore: ObservableObject {
             selectedSessionID: selectedSessionID,
             sessionCounter: sessionCounter
         )
-        snapshot.processes = Dictionary(
+        let processes = Dictionary(
             uniqueKeysWithValues: processRegistry.all.map { ($0.key.uuidString, $0.value) }
         )
+        // `nil` rather than `{}` when there is nothing recorded. Equivalent in effect —
+        // `sweepOrphans` returns early on either — and this file is meant to stay readable by
+        // a human, which an empty object in every snapshot works against.
+        snapshot.processes = processes.isEmpty ? nil : processes
         // Stamped on every save so the next launch can tell "this run is still going" from
         // "this run died and left its children behind".
-        snapshot.owner = ProcessTree().identity(of: getpid())
+        snapshot.owner = Self.selfIdentity
         persistence?.save(snapshot)
     }
 
@@ -527,8 +567,16 @@ final class SessionStore: ObservableObject {
     /// the same signal twice from two separate `deliver` calls. That is fine because POSIX
     /// signals are idempotent, not because it cannot happen.
     ///
+    /// The group to signal is re-derived here, from the live process table, exactly as
+    /// `sweepOrphans` does — it is never carried on the record. Reading a pgid at record time
+    /// races the child's own `setsid()`, and a read that wins that race captures Flight Deck's
+    /// *own* process group and pins it to the session for the rest of its life: the self-group
+    /// rail then downgrades every one of that session's signals to per-pid, silently, forever.
+    /// A live process that has just passed the identity gate is the authority on its own group;
+    /// nothing else is. That is why `SessionProcess` no longer carries a `pgid` at all.
+    ///
     /// `forget` only fires on a confirmed-clean outcome. A budget expiry or an unkillable
-    /// process reports `.survivors` — see this method's `guard`/`if handled` below — and the
+    /// process reports `.survivors` — see this method's `if handled` below — and the
     /// record must stay exactly where it is, because "clean" here is the *only* signal this
     /// method has that the process is actually gone. Forgetting on `.survivors` would erase a
     /// still-live process from the one place (`processRegistry`, and therefore the persisted
@@ -539,7 +587,8 @@ final class SessionStore: ObservableObject {
     func reapSession(_ id: UUID, process: SessionProcess?, context: String) async {
         var handled = true
         if let process {
-            let outcome = await reaper.reap(shell: process.identity, pgid: process.pgid)
+            let livePgid = processInspector.pgid(of: process.identity.pid)
+            let outcome = await reaper.reap(shell: process.identity, pgid: livePgid)
             reapReporter?.report(outcome, context: context)
             handled = (outcome == .clean)
         }
@@ -557,12 +606,13 @@ final class SessionStore: ObservableObject {
     /// sabotaging the first), and each identity's start time must still match (otherwise the
     /// pid has been recycled and now belongs to an unrelated process).
     ///
-    /// The pgid used to signal is re-derived from the live process table, never taken from
-    /// `process.pgid` — the persisted value came out of JSON written by a previous boot and
-    /// is not evidence about the current process table. A live process whose identity has
-    /// just been confirmed to match is authoritative about its own process group; a number
-    /// on disk is not. Re-deriving only after `isAlive` has passed means this is asking a
-    /// process we have positively identified, not a stranger that happens to share a pid.
+    /// The pgid used to signal is re-derived from the live process table. A number carried on
+    /// the record would be evidence about some previous boot's process table, not this one —
+    /// which is why `SessionProcess` carries none at all any more, and why `reapSession`
+    /// re-derives on the live path too. A process whose identity has just been confirmed to
+    /// match is authoritative about its own process group; nothing else is. Re-deriving only
+    /// after `isAlive` has passed means this is asking a process we have positively identified,
+    /// not a stranger that happens to share a pid.
     func sweepOrphans(from snapshot: SessionSnapshot) async {
         guard let recorded = snapshot.processes, !recorded.isEmpty else { return }
         // Fails closed, not open: a snapshot whose provenance cannot be established (no
@@ -576,24 +626,32 @@ final class SessionStore: ObservableObject {
 
         var cleaned = 0
         var survived = false
-        for (idString, process) in recorded where processInspector.isAlive(process.identity) {
-            // `pgid` is the live process's own answer, not the persisted one — see this
-            // method's doc comment above. `reap` takes it as an `Optional` all the way
-            // through so "we could not ask" and "killpg some sentinel group" are never
-            // conflated; `nil` here makes `SessionReaper.deliver` signal the pid directly
-            // instead of guessing.
+        // The map's keys are deliberately dropped. They are *previous-run tab ids*, and
+        // `restore()` has already recreated this run's tabs under those very same UUIDs, each
+        // with a live shell of its own recorded against them. Re-keying a survivor under its
+        // old id would overwrite one of those live records — discarding a live process without
+        // proof of death, and leaving it unreaped on close and on quit.
+        for process in recorded.values where processInspector.isAlive(process.identity) {
+            // `pgid` is the live process's own answer — see this method's doc comment above.
+            // `reap` takes it as an `Optional` all the way through so "we could not ask" and
+            // "killpg some sentinel group" are never conflated; `nil` here makes
+            // `SessionReaper.deliver` signal the pid directly instead of guessing.
             let livePgid = processInspector.pgid(of: process.identity.pid)
             let outcome = await reaper.reap(shell: process.identity, pgid: livePgid)
             reapReporter?.report(outcome, context: "orphan sweep")
             if outcome == .clean {
                 cleaned += 1
-            } else if let tabID = UUID(uuidString: idString) {
+            } else {
                 // A survivor of the *previous* run's sweep must not vanish once this run's
                 // first unrelated `persist()` fires. `processRegistry` starts this run empty
                 // (nothing here forked these children), so unless the survivor is put back
                 // into it, the very next save anywhere in the app would silently drop the
                 // one record that gives the *next* launch's sweep a chance at it.
-                processRegistry.keep(tabID, as: process)
+                //
+                // Under a fresh id: this is an orphan, not a tab. Nothing downstream reads the
+                // key except `reapSession`'s `forget`, and a collision with a live tab's id
+                // would be a live record destroyed. See the loop header above.
+                processRegistry.keep(UUID(), as: process)
                 survived = true
             }
         }

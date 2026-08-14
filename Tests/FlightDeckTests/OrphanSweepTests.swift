@@ -141,7 +141,7 @@ final class OrphanSweepTests: XCTestCase {
     func testDoesNotSweepWhenTheOwnerIsStillAlive() async {
         let owner = ProcessIdentity(pid: 500, procStart: 100)
         let orphan = SessionProcess(
-            identity: ProcessIdentity(pid: 600, procStart: 100), pgid: 600
+            identity: ProcessIdentity(pid: 600, procStart: 100)
         )
         let signals = SpySignals()
 
@@ -159,7 +159,7 @@ final class OrphanSweepTests: XCTestCase {
     /// through instead of returning.
     func testDoesNotSweepWhenTheOwnerIsNil() async {
         let orphan = SessionProcess(
-            identity: ProcessIdentity(pid: 600, procStart: 100), pgid: 600
+            identity: ProcessIdentity(pid: 600, procStart: 100)
         )
         let signals = SpySignals()
 
@@ -172,7 +172,7 @@ final class OrphanSweepTests: XCTestCase {
     func testSweepsALiveOrphanWhenTheOwnerIsGone() async {
         let owner = ProcessIdentity(pid: 500, procStart: 100)   // not in `living`
         let orphan = SessionProcess(
-            identity: ProcessIdentity(pid: 600, procStart: 100), pgid: 600
+            identity: ProcessIdentity(pid: 600, procStart: 100)
         )
         let inspector = FakeInspector(living: [600])
         let signals = SpySignals()
@@ -184,14 +184,14 @@ final class OrphanSweepTests: XCTestCase {
         XCTAssertEqual(signals.targets, [600])
     }
 
-    /// The regression this sweep exists to prevent: `process.pgid` is a number out of JSON
-    /// written by a previous boot, and is never itself the target. Only the group the live
-    /// process table reports right now — from a pid this sweep has just positively
-    /// identified — gets signalled.
-    func testSweepSignalsTheLiveGroupNotThePersistedPgid() async {
+    /// The regression this sweep exists to prevent: nothing on the record is ever the target.
+    /// Only the group the live process table reports right now — for a pid this sweep has just
+    /// positively identified — gets signalled. (`SessionProcess` no longer even carries a
+    /// `pgid`; this test is what stops one being reintroduced and trusted.)
+    func testSweepSignalsTheLiveGroupNotTheRecordedPid() async {
         let owner = ProcessIdentity(pid: 500, procStart: 100)
         let orphan = SessionProcess(
-            identity: ProcessIdentity(pid: 600, procStart: 100), pgid: 700   // stale on disk
+            identity: ProcessIdentity(pid: 600, procStart: 100)
         )
         let inspector = FakeInspector(living: [600])
         inspector.pgids = [600: 650]   // what the live process table actually reports
@@ -201,7 +201,7 @@ final class OrphanSweepTests: XCTestCase {
         await store(inspector: inspector, signals: signals)
             .sweepOrphans(from: snapshot(owner: owner, processes: [UUID().uuidString: orphan]))
 
-        XCTAssertEqual(signals.targets, [650], "must signal the live group, never the persisted one")
+        XCTAssertEqual(signals.targets, [650], "must signal the live group, never the recorded pid")
     }
 
     /// When the live process table cannot establish a group for an otherwise-verified
@@ -210,7 +210,7 @@ final class OrphanSweepTests: XCTestCase {
     func testSweepSignalsThePidDirectlyWhenTheLivePgidIsUnknown() async {
         let owner = ProcessIdentity(pid: 500, procStart: 100)   // not in `living`
         let orphan = SessionProcess(
-            identity: ProcessIdentity(pid: 600, procStart: 100), pgid: 600
+            identity: ProcessIdentity(pid: 600, procStart: 100)
         )
         let inspector = FakeInspector(living: [600])
         inspector.noPgidFor = [600]
@@ -228,7 +228,7 @@ final class OrphanSweepTests: XCTestCase {
     func testDoesNotSweepARecycledPid() async {
         let owner = ProcessIdentity(pid: 500, procStart: 100)
         let stale = SessionProcess(
-            identity: ProcessIdentity(pid: 600, procStart: 42), pgid: 600
+            identity: ProcessIdentity(pid: 600, procStart: 42)
         )
         let signals = SpySignals()
 
@@ -247,7 +247,7 @@ final class OrphanSweepTests: XCTestCase {
         let owner = ProcessIdentity(pid: 500, procStart: 100)   // not in `living`
         let survivorID = UUID()
         let survivor = SessionProcess(
-            identity: ProcessIdentity(pid: 600, procStart: 100), pgid: 600
+            identity: ProcessIdentity(pid: 600, procStart: 100)
         )
         let inspector = FakeInspector(living: [600])   // nothing ever kills it
         let persistence = FakePersistence()
@@ -264,13 +264,45 @@ final class OrphanSweepTests: XCTestCase {
             from: snapshot(owner: owner, processes: [survivorID.uuidString: survivor])
         )
 
+        // *Some* record, not the old key's. The old key is a previous run's tab id, which this
+        // run has already reused for a live tab of its own; asserting on it would have pinned
+        // exactly the collision the sweep must not cause.
         XCTAssertEqual(
-            s.processRegistry.process(for: survivorID), survivor,
+            Array(s.processRegistry.all.values), [survivor],
             "an unkilled orphan must be re-recorded, not just reported and forgotten"
         )
         XCTAssertEqual(
-            persistence.stored?.processes?[survivorID.uuidString], survivor,
+            persistence.stored?.processes.map { Array($0.values) }, [survivor],
             "must reach disk too, or the very next unrelated persist() silently drops it"
+        )
+    }
+
+    /// The collision the fresh key exists to prevent. `restore()` recreates this run's tabs
+    /// under the *same* UUIDs the previous run persisted, and records a brand-new shell against
+    /// each one; the sweep runs afterwards. Re-keying a survivor under its old id would replace
+    /// that live tab's real record with a dead run's orphan — a live process discarded without
+    /// any proof of death, never reaped on close or quit, and gone from the next snapshot too.
+    func testASurvivorDoesNotOverwriteALiveTabRecordedUnderTheSameID() async {
+        let owner = ProcessIdentity(pid: 500, procStart: 100)   // not in `living`
+        let sharedID = UUID()
+        let orphan = SessionProcess(identity: ProcessIdentity(pid: 600, procStart: 100))
+        let liveShell = SessionProcess(identity: ProcessIdentity(pid: 700, procStart: 100))
+        let inspector = FakeInspector(living: [600, 700])   // nothing ever kills either
+        let s = store(inspector: inspector, signals: SpySignals())
+        // What this run's own `insertSession` would have recorded for the restored tab.
+        s.processRegistry.keep(sharedID, as: liveShell)
+
+        await s.sweepOrphans(
+            from: snapshot(owner: owner, processes: [sharedID.uuidString: orphan])
+        )
+
+        XCTAssertEqual(
+            s.processRegistry.process(for: sharedID), liveShell,
+            "the live tab's own shell must still be the record under its id"
+        )
+        XCTAssertTrue(
+            s.processRegistry.all.values.contains(orphan),
+            "and the survivor must still be kept, under a key of its own"
         )
     }
 
@@ -278,7 +310,7 @@ final class OrphanSweepTests: XCTestCase {
         let s = snapshot(
             owner: ProcessIdentity(pid: 1, procStart: 2),
             processes: ["tab": SessionProcess(
-                identity: ProcessIdentity(pid: 3, procStart: 4), pgid: 5
+                identity: ProcessIdentity(pid: 3, procStart: 4)
             )]
         )
 

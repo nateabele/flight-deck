@@ -128,11 +128,12 @@ final class QuitReapTests: XCTestCase {
                 inspector: inspector, signals: signals, sleeper: InstantSleeper()
             )
         )
+        store.processInspector = inspector
         let a = store.newSession(in: URL(fileURLWithPath: "/tmp"))
         let b = store.newSession(in: URL(fileURLWithPath: "/tmp"))
         store.processRegistry.restore([
-            a.id: SessionProcess(identity: .init(pid: 601, procStart: 100), pgid: 601),
-            b.id: SessionProcess(identity: .init(pid: 602, procStart: 100), pgid: 602),
+            a.id: SessionProcess(identity: .init(pid: 601, procStart: 100)),
+            b.id: SessionProcess(identity: .init(pid: 602, procStart: 100)),
         ])
 
         await store.reapAllForQuit(budget: 5)
@@ -151,9 +152,10 @@ final class QuitReapTests: XCTestCase {
                 sleeper: InstantSleeper()
             )
         )
+        store.processInspector = FakeInspector(living: [601])
         let a = store.newSession(in: URL(fileURLWithPath: "/tmp"))
         store.processRegistry.restore([
-            a.id: SessionProcess(identity: .init(pid: 601, procStart: 100), pgid: 601)
+            a.id: SessionProcess(identity: .init(pid: 601, procStart: 100))
         ])
 
         await store.reapAllForQuit(budget: 1)
@@ -182,9 +184,10 @@ final class QuitReapTests: XCTestCase {
                 inspector: inspector, signals: signals, sleeper: InstantSleeper()
             )
         )
+        store.processInspector = inspector
         let a = store.newSession(in: URL(fileURLWithPath: "/tmp"))
         store.processRegistry.restore([
-            a.id: SessionProcess(identity: .init(pid: 601, procStart: 100), pgid: 601)
+            a.id: SessionProcess(identity: .init(pid: 601, procStart: 100))
         ])
 
         store.closeSession(a.id)
@@ -215,8 +218,9 @@ final class QuitReapTests: XCTestCase {
                 inspector: inspector, signals: SpySignals(), sleeper: HangingSleeper()
             )
         )
+        store.processInspector = inspector
         let a = store.newSession(in: URL(fileURLWithPath: "/tmp"))
-        let process = SessionProcess(identity: .init(pid: 601, procStart: 100), pgid: 601)
+        let process = SessionProcess(identity: .init(pid: 601, procStart: 100))
         store.processRegistry.restore([a.id: process])
 
         let start = Date()
@@ -275,11 +279,12 @@ final class QuitReapTests: XCTestCase {
                 sleeper: SlowSecondSignalSleeper(slowTarget: 602) { tracker.lastSignalled }
             )
         )
+        store.processInspector = inspector
         let a = store.newSession(in: URL(fileURLWithPath: "/tmp"))
         let b = store.newSession(in: URL(fileURLWithPath: "/tmp"))
         store.processRegistry.restore([
-            a.id: SessionProcess(identity: .init(pid: 601, procStart: 100), pgid: 601),
-            b.id: SessionProcess(identity: .init(pid: 602, procStart: 100), pgid: 602),
+            a.id: SessionProcess(identity: .init(pid: 601, procStart: 100)),
+            b.id: SessionProcess(identity: .init(pid: 602, procStart: 100)),
         ])
 
         await store.reapAllForQuit(budget: 5)

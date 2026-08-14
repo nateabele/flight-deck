@@ -30,9 +30,9 @@ private final class FakeInspector: ProcessInspecting, @unchecked Sendable {
     func isAlive(_ identity: ProcessIdentity) -> Bool {
         living.contains(identity.pid) && identity.procStart == 100
     }
-    /// Unused by this file's tests: `closeSession`'s reap uses the `pgid` already recorded
-    /// on the `SessionProcess`, not a live re-derivation. Present only to satisfy the
-    /// protocol.
+    /// `reapSession` re-derives the group here rather than trusting anything on the record —
+    /// `SessionProcess` carries no `pgid` at all. Reporting "could not establish a group" is
+    /// the honest answer for a scripted table and sends the ladder down its per-pid path.
     func pgid(of pid: pid_t) -> pid_t? { nil }
 }
 
@@ -74,11 +74,15 @@ final class SessionCloseReapTests: XCTestCase {
         inspector: ProcessInspecting = FakeInspector(),
         signals: SignalSending = SpySignals()
     ) -> SessionStore {
-        SessionStore(
+        let s = SessionStore(
             provider: StubProvider(),
             persistence: nil,
             reaper: SessionReaper(inspector: inspector, signals: signals, sleeper: InstantSleeper())
         )
+        // The same scripted table `reapSession` re-derives the group from, so no test in this
+        // file reaches the real `ProcessTree` for a `getpgid` on a made-up pid.
+        s.processInspector = inspector
+        return s
     }
 
     /// A tab with no recorded process must still close cleanly — this is every tab created
@@ -102,7 +106,7 @@ final class SessionCloseReapTests: XCTestCase {
         let session = s.newSession(in: URL(fileURLWithPath: "/tmp"))
         s.processRegistry.restore([
             session.id: SessionProcess(
-                identity: ProcessIdentity(pid: 31337, procStart: 1), pgid: 31337
+                identity: ProcessIdentity(pid: 31337, procStart: 1)
             )
         ])
 
@@ -128,17 +132,16 @@ final class SessionCloseReapTests: XCTestCase {
         XCTAssertEqual(s.selectedSessionID, second.id)
     }
 
-    /// A close notification for a surface the store no longer knows about must be a no-op,
-    /// not a crash or a second close — this interleaving is new with parked surfaces.
-    func testCloseNotificationForAnUnknownSurfaceIsIgnored() {
+    /// A close notification carrying no surface must be a no-op, not a crash or a stray close.
+    ///
+    /// This covers the `note.object as? Ghostty.SurfaceView` cast failing, and only that. The
+    /// parked-surface interleaving — a late notification that passes the cast and then misses
+    /// the `surfaces` lookup one line later — needs a real `Ghostty.SurfaceView`, which cannot
+    /// be constructed without a live `ghostty_app_t`, so it is not covered here.
+    func testCloseNotificationWithNoSurfaceIsIgnored() {
         let s = store()
         let session = s.newSession(in: URL(fileURLWithPath: "/tmp"))
 
-        // The nil object fails `note.object as? Ghostty.SurfaceView` immediately and
-        // returns. That is not quite the parked-surface case — a parked surface's late
-        // close notification passes that cast and instead misses the `surfaces` lookup one
-        // line later — but it exercises the same "surface not found, stay silent" contract
-        // that `observeSurfaceClose` now needs for parked surfaces too.
         NotificationCenter.default.post(
             name: Ghostty.Notification.ghosttyCloseSurface, object: nil
         )
@@ -162,7 +165,7 @@ final class SessionCloseReapTests: XCTestCase {
         let session = s.newSession(in: URL(fileURLWithPath: "/tmp"))
         s.processRegistry.restore([
             session.id: SessionProcess(
-                identity: ProcessIdentity(pid: 31337, procStart: 100), pgid: 31337
+                identity: ProcessIdentity(pid: 31337, procStart: 100)
             )
         ])
 
