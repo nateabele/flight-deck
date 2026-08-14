@@ -39,6 +39,7 @@ enum SidebarRow: Identifiable, Hashable {
     static func rows(for repos: [Repo]) -> [SidebarRow] {
         repos.flatMap { repo -> [SidebarRow] in
             let header: SidebarRow = .project(repo.id)
+            guard !repo.isCollapsed else { return [header] }
             guard !repo.sessions.isEmpty else { return [header, .empty(repo.id)] }
             return [header] + repo.sessions.map { .session($0.id, project: repo.id) }
         }

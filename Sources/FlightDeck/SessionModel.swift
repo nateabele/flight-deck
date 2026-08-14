@@ -36,11 +36,15 @@ struct Repo: Identifiable, Equatable {
     let url: URL
     var displayName: String
     var sessions: [Session]
+    /// Whether the sidebar hides this project's session rows. Stored on the model rather
+    /// than as view state so it survives a relaunch — see `SessionSnapshot.Project`.
+    var isCollapsed: Bool
 
-    init(id: UUID = UUID(), url: URL, sessions: [Session] = []) {
+    init(id: UUID = UUID(), url: URL, sessions: [Session] = [], isCollapsed: Bool = false) {
         self.id = id
         self.url = url
         self.displayName = url.lastPathComponent
         self.sessions = sessions
+        self.isCollapsed = isCollapsed
     }
 }
