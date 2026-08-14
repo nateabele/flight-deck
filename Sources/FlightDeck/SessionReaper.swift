@@ -146,3 +146,41 @@ actor SessionReaper {
         }
     }
 }
+
+/// Where reap outcomes go.
+///
+/// A protocol rather than a direct call for the reason `Notifying` documents
+/// (`SessionNotifier.swift:12-16`): the real reporter posts a user notification, and
+/// `UNUserNotificationCenter.current()` traps when the calling binary is not a signed
+/// bundle — exactly the case inside the unit-test bundle. Nothing a test can reach may
+/// touch it.
+protocol ReapReporting: AnyObject {
+    func report(_ outcome: ReapOutcome, context: String)
+    /// A launch-time sweep found and killed orphans from a previous run. Separate from
+    /// `report` because this one is worth telling the user about on *success* — it is the
+    /// only evidence they get that a previous run leaked, whereas a clean tab close is
+    /// deliberately silent.
+    func reportSweep(cleaned: Int)
+}
+
+/// The default: the log and nothing else. Task 7 adds the user-facing reporter.
+final class LoggingReapReporter: ReapReporting {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
+        category: "ReapReporter"
+    )
+
+    func report(_ outcome: ReapOutcome, context: String) {
+        switch outcome {
+        case .clean:
+            Self.logger.debug("\(context): process tree terminated")
+        case .survivors(let survivors):
+            let pids = survivors.map { String($0.pid) }.joined(separator: ", ")
+            Self.logger.error("\(context): survived SIGKILL: \(pids)")
+        }
+    }
+
+    func reportSweep(cleaned: Int) {
+        Self.logger.info("orphan sweep cleaned \(cleaned) process tree(s) from a previous run")
+    }
+}
