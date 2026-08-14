@@ -11,6 +11,10 @@ import Foundation
 /// previous boot.
 struct ProcessIdentity: Codable, Equatable, Sendable {
     let pid: pid_t
-    /// Process start time in whole seconds since the epoch, from `PROC_PIDTBSDINFO`.
+    /// Process start time in whole microseconds since the epoch, from `PROC_PIDTBSDINFO`'s
+    /// `pbi_start_tvsec` and `pbi_start_tvusec` combined. Whole-seconds resolution alone lets
+    /// two unrelated processes that start within the same second collide on this field, and
+    /// this value is the sole gate `isAlive` uses before a signal goes out — a collision there
+    /// is a signal sent to the wrong process.
     let procStart: UInt64
 }

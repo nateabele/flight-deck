@@ -59,6 +59,10 @@ struct ProcessTree: ProcessInspecting {
         return found
     }
 
+    /// Microseconds since the epoch. `pbi_start_tvsec` alone is whole seconds, coarse enough
+    /// that two unrelated processes starting within the same second are indistinguishable to
+    /// `isAlive` — the single gate between this feature and a signal sent to the wrong
+    /// process. `pbi_start_tvusec` is read alongside it and folded in for that reason.
     func startTime(of pid: pid_t) -> UInt64? {
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
@@ -67,7 +71,7 @@ struct ProcessTree: ProcessInspecting {
         }
         // A short read means the process died between the call and the copy.
         guard read == size else { return nil }
-        return UInt64(info.pbi_start_tvsec)
+        return info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec
     }
 
     func identity(of pid: pid_t) -> ProcessIdentity? {
