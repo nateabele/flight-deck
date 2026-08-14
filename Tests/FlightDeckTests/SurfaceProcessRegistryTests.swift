@@ -5,6 +5,10 @@ import XCTest
 /// Returns a scripted child set per call, so a test can stage "before" and "after".
 private final class ScriptedInspector: ProcessInspecting, @unchecked Sendable {
     var snapshots: [Set<pid_t>]
+    /// Overrides `pgid(of:)`'s answer for every pid, so a test can prove `record` goes
+    /// through this seam rather than calling `getpgid` itself. `nil` falls back to reporting
+    /// the pid as its own group, matching the common `setsid` case.
+    var pgidOverride: pid_t?
     init(snapshots: [Set<pid_t>]) { self.snapshots = snapshots }
 
     func children(of ppid: pid_t) -> Set<pid_t> {
@@ -13,6 +17,7 @@ private final class ScriptedInspector: ProcessInspecting, @unchecked Sendable {
     func descendants(of pid: pid_t) -> [ProcessIdentity] { [] }
     func startTime(of pid: pid_t) -> UInt64? { 100 }
     func isAlive(_ identity: ProcessIdentity) -> Bool { true }
+    func pgid(of pid: pid_t) -> pid_t? { pgidOverride ?? pid }
 }
 
 @MainActor
@@ -28,6 +33,19 @@ final class SurfaceProcessRegistryTests: XCTestCase {
 
         XCTAssertEqual(made, "surface")
         XCTAssertEqual(registry.process(for: tab)?.identity.pid, 12)
+    }
+
+    /// `record` must read the group through `ProcessInspecting` rather than calling
+    /// `getpgid` itself — otherwise this is untestable, which is exactly what let a stale
+    /// on-disk pgid go unnoticed until the orphan sweep started trusting one.
+    func testRecordsThePgidTheInspectorReports() {
+        let inspector = ScriptedInspector(snapshots: [[10, 11], [10, 11, 12]])
+        inspector.pgidOverride = 999
+        let registry = SurfaceProcessRegistry(inspector: inspector)
+
+        registry.record(for: tab) { () }
+
+        XCTAssertEqual(registry.process(for: tab)?.pgid, 999)
     }
 
     /// No new child (surface creation failed) records nothing rather than guessing.

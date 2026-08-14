@@ -55,12 +55,12 @@ final class SurfaceProcessRegistry {
         }
         guard let start = inspector.startTime(of: pid) else { return result }
 
-        // The shell calls setsid, so its group is its own — but read it rather than assume,
-        // and fall back to the pid if the read fails.
-        let pgid = getpgid(pid)
+        // The shell calls setsid, so its group is its own — but read it through the seam
+        // rather than assume, and fall back to the pid if the read fails. Going through
+        // `inspector` rather than calling `getpgid` directly is what makes this testable.
         processes[tabID] = SessionProcess(
             identity: ProcessIdentity(pid: pid, procStart: start),
-            pgid: pgid > 0 ? pgid : pid
+            pgid: inspector.pgid(of: pid) ?? pid
         )
         return result
     }

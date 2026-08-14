@@ -10,6 +10,11 @@ protocol ProcessInspecting: Sendable {
     func descendants(of pid: pid_t) -> [ProcessIdentity]
     func startTime(of pid: pid_t) -> UInt64?
     func isAlive(_ identity: ProcessIdentity) -> Bool
+    /// The live process group of `pid`, or `nil` if the read failed (the process is gone, or
+    /// `getpgid` returned a non-positive result). A caller about to signal a group should ask
+    /// for this rather than trust a previously recorded value — see `SessionStore.sweepOrphans`
+    /// for why that distinction is load-bearing.
+    func pgid(of pid: pid_t) -> pid_t?
 }
 
 /// The real implementation, over libproc.
@@ -82,5 +87,10 @@ struct ProcessTree: ProcessInspecting {
     /// without it this would happily report a recycled pid as our long-dead shell.
     func isAlive(_ identity: ProcessIdentity) -> Bool {
         startTime(of: identity.pid) == identity.procStart
+    }
+
+    func pgid(of pid: pid_t) -> pid_t? {
+        let result = getpgid(pid)
+        return result > 0 ? result : nil
     }
 }
