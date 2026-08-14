@@ -41,13 +41,20 @@ enum ReapOutcome: Equatable {
 ///
 /// **Why an actor rather than `@MainActor`.** Nothing here may block the UI, and the ladder
 /// deliberately sleeps between rungs.
+///
+/// **The actual bound.** Each ladder (see `ladder` below) is capped at 5 s. `reap` runs one
+/// ladder for the shell's process group, then — if anything escaped that group — one more
+/// *concurrent* batch covering every escapee, rather than one ladder per escapee run back to
+/// back. So the overall bound is roughly two ladders' worth of time (~10 s worst case), not
+/// `5 s × (1 + escapee count)`.
 actor SessionReaper {
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
         category: "SessionReaper"
     )
 
-    /// Signal, and how long to wait for it to work before escalating. Total 5 s.
+    /// Signal, and how long to wait for it to work before escalating. Total 5 s per target —
+    /// see the type doc for why that is not the same as `reap`'s total budget.
     static let ladder: [(signal: Int32, budget: Double)] = [
         (SIGHUP, 2.0), (SIGTERM, 2.0), (SIGKILL, 1.0),
     ]
@@ -80,9 +87,18 @@ actor SessionReaper {
         if inspector.isAlive(shell) { survivors.append(shell) }
 
         // Anything still alive left the process group (setsid), so killpg never reached it.
-        for escapee in tree where inspector.isAlive(escapee) {
-            await escalate(on: escapee, pgid: nil)
-            if inspector.isAlive(escapee) { survivors.append(escapee) }
+        // These run concurrently, not one after another: they are independent of each other,
+        // and the actor gives up its exclusivity at every `await sleeper.sleep` inside
+        // `escalate`, so a `TaskGroup` of escapee ladders overlaps in wall time the same way
+        // real concurrent processes would, instead of paying a fresh 5 s ladder per escapee.
+        let escapees = tree.filter { inspector.isAlive($0) }
+        if !escapees.isEmpty {
+            await withTaskGroup(of: Void.self) { group in
+                for escapee in escapees {
+                    group.addTask { await self.escalate(on: escapee, pgid: nil) }
+                }
+            }
+            survivors.append(contentsOf: escapees.filter { inspector.isAlive($0) })
         }
 
         if !survivors.isEmpty {
@@ -97,10 +113,19 @@ actor SessionReaper {
             guard inspector.isAlive(target) else { return }
             deliver(rung.signal, to: target, pgid: pgid)
 
-            var waited = 0.0
-            while waited < rung.budget {
+            // Poll on an integer count rather than accumulating `Double` seconds, so the
+            // budget cannot drift from float error. Checking `Task.isCancelled` and
+            // *returning* — never escalating — after every poll is load-bearing:
+            // `RealSleeper.sleep` swallows `CancellationError` via `try?` and returns
+            // immediately once the task is cancelled, so without this check a cancelled reap
+            // would spin through every remaining poll in microseconds and fire SIGHUP,
+            // SIGTERM and SIGKILL back to back — turning a graceful shutdown into an instant
+            // kill for a process that would have exited cleanly on the signal already sent.
+            // Being cancelled is not a reason to escalate further, so this stops in place.
+            let polls = Int((rung.budget / Self.pollInterval).rounded())
+            for _ in 0..<polls {
                 await sleeper.sleep(seconds: Self.pollInterval)
-                waited += Self.pollInterval
+                if Task.isCancelled { return }
                 if !inspector.isAlive(target) { return }
             }
         }
