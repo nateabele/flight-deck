@@ -43,4 +43,18 @@ struct SessionStatus: Equatable {
             return "Background command running"
         }
     }
+
+    /// Tooltip and accessibility label for a row that may carry the unread dot.
+    ///
+    /// The unread state is drawn with colour alone (a filled dot in the accent colour rather
+    /// than grey), so this string is what carries the same distinction for VoiceOver and for
+    /// anyone who cannot separate the two hues — the HIG's "don't rely on colour alone" rule
+    /// is satisfied through this channel rather than through a second glyph shape.
+    ///
+    /// Additive rather than a change to `tooltip`: notification bodies use that one and have
+    /// no notion of read state.
+    func tooltip(unread: Bool) -> String {
+        guard unread, activity == .idle else { return tooltip }
+        return "Finished — not yet viewed"
+    }
 }
