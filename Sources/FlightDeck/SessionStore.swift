@@ -43,6 +43,18 @@ final class SessionStore: ObservableObject {
     /// Which OS process each tab owns, for teardown. See `SurfaceProcessRegistry`.
     let processRegistry = SurfaceProcessRegistry()
 
+    /// Off-main-actor process teardown. See `SessionReaper`.
+    private let reaper: SessionReaper
+    var reapReporter: ReapReporting? = LoggingReapReporter()
+
+    /// Surfaces whose tab is gone but whose process is still being killed.
+    ///
+    /// Holding the view here is what orders the teardown correctly: releasing it runs
+    /// `ghostty_surface_free`, which joins libghostty's IO thread and spins in its own
+    /// `killpg` loop *on the main actor*. Reaping first means that loop finds a dead child
+    /// and returns at once instead of blocking the UI.
+    private var parkedSurfaces: [UUID: Ghostty.SurfaceView] = [:]
+
     /// One transcript watcher per session, torn down with the session.
     private var watchers: [UUID: TranscriptWatcher] = [:]
 
@@ -98,11 +110,15 @@ final class SessionStore: ObservableObject {
     init(
         provider: SurfaceProvider?,
         persistence: SessionPersisting? = nil,
-        preferences: PreferencesStore? = nil
+        preferences: PreferencesStore? = nil,
+        reaper: SessionReaper = SessionReaper(
+            inspector: ProcessTree(), signals: PosixSignals(), sleeper: RealSleeper()
+        )
     ) {
         self.provider = provider
         self.persistence = persistence
         self.preferences = preferences
+        self.reaper = reaper
         observeActivationRequests()
         observeSurfaceClose()
     }
@@ -422,16 +438,28 @@ final class SessionStore: ObservableObject {
     func closeSession(_ id: UUID) {
         guard let (repoIndex, sessionIndex) = locate(id) else { return }
         repos[repoIndex].sessions.remove(at: sessionIndex)
-        // Dropping the retained view triggers Ghostty.Surface.deinit, which
-        // defers ghostty_surface_free to a main-actor task. The singleton app
-        // outlives that free, so there is no use-after-free.
-        surfaces[id] = nil
+
+        // Detach and park rather than release. Two reasons this is not just `= nil`:
+        //
+        // 1. `closeSession` never removed the view from its superview, so a *selected*
+        //    tab's surface stayed retained by `TerminalHostView` until SwiftUI's next
+        //    `updateNSView` pass (`TerminalPane.swift:40-42`). Detaching here makes the
+        //    close immediate and independent of that pass.
+        // 2. Releasing the view runs `ghostty_surface_free` on the main actor, which joins
+        //    the IO thread and spins in libghostty's SIGHUP-only `killpg` loop
+        //    (`vendor/ghostty/src/termio/Exec.zig:1152-1185`). We hold the view until our
+        //    own reap has killed the tree, so that loop finds a dead child and returns.
+        if let surface = surfaces.removeValue(forKey: id) {
+            surface.removeFromSuperview()
+            parkedSurfaces[id] = surface
+        }
+        let doomed = processRegistry.forget(id)
+
         watchers[id]?.stop()
         watchers.removeValue(forKey: id)
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
-        processRegistry.forget(id)
         // Closing the row is the most literal case of "a prompt that will never resolve",
         // and applyRegistry cannot observe the waiting -> gone edge here because both its
         // before and after snapshots already lack this id.
@@ -447,6 +475,22 @@ final class SessionStore: ObservableObject {
             selectedSessionID = repos.flatMap(\.sessions).first?.id
         }
         persist()
+
+        Task { [weak self] in
+            await self?.reapSession(id, process: doomed, context: "tab close")
+        }
+    }
+
+    /// Kill a tab's process tree, then release its parked surface. Shared by tab close and
+    /// app quit, which differ only in their budget and in who waits for them.
+    func reapSession(_ id: UUID, process: SessionProcess?, context: String) async {
+        if let process {
+            let outcome = await reaper.reap(shell: process.identity, pgid: process.pgid)
+            reapReporter?.report(outcome, context: context)
+        }
+        // Releasing last: the deferred `ghostty_surface_free` this triggers now has nothing
+        // left to wait for.
+        parkedSurfaces.removeValue(forKey: id)
     }
 
     /// Test seam. Production leaves this nil and injection goes to the live surface.
