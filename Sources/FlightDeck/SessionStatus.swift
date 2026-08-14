@@ -9,6 +9,23 @@ enum SessionActivity: String, Equatable {
     case idle, busy, waiting, shell
 }
 
+extension SessionActivity {
+    /// Priority when several children collapse into one glyph on a project header.
+    /// Higher wins. Idle sits at the bottom and is filtered out before this is consulted,
+    /// but it is ranked anyway so the ordering is total and the tests can state it.
+    ///
+    /// The order is by how much the state wants you: a blocked prompt outranks a
+    /// background command, which outranks work that is simply in progress.
+    var summaryRank: Int {
+        switch self {
+        case .idle: return 0
+        case .busy: return 1
+        case .shell: return 2
+        case .waiting: return 3
+        }
+    }
+}
+
 /// A session's activity plus the detail the sidebar needs to describe it.
 /// Absence of a status is represented by `nil` at the call site, not by a case —
 /// "no `claude` running" renders nothing, which is distinct from `idle`.

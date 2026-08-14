@@ -93,7 +93,8 @@ properties, so they stay where they belong.
 *new* sessions and never reconfigure a running one.
 
 Project overrides are keyed by standardized path in `Preferences.projectFlags`, not held on
-`Repo` — a `Repo` is removed when its last session closes, and an override must outlive that.
+`Repo` — closing a project (`SessionStore.closeProject`) removes its `Repo` outright, and an
+override must outlive that so it is still there if the same path is reopened later.
 
 Unknown flags are preserved verbatim in `FlagSet.passthrough` and warned about rather than
 rejected, so a `claude` release that adds a flag does not make the field lossy.
@@ -104,6 +105,42 @@ rejected, so a `claude` release that adds a flag does not make the field lossy.
 - `vendor/ghostty-artifacts/GhosttyKit.xcframework` — build output of `scripts/build-libghostty.sh`.
 - `vendor/.zig-toolchain/` — Zig 0.15.2 (auto-downloaded by the build script).
 - `vendor/.build-shim/` — the `xcrun` SDK shim (recreated by the build script).
+
+## Sidebar structure
+
+`SessionSidebar` renders one flat `List(selection:) { ForEach(store.sidebarRows) { … } }` rather
+than a `List` of per-project `Section`s. `SidebarRow` (`.project`, `.session`, and `.empty` for
+an expanded project with no sessions) is what gets flattened: `.onMove` is not supported on a
+`ForEach` that yields `Section`s, and flattening is what lets one drag gesture reorder both
+projects and sessions instead of needing a second, hand-rolled `.draggable`/`.dropDestination`
+mechanism just for project drags. `ProjectHeaderRow` draws the chevron, name, and (when
+collapsed) the session count and status glyph in place of the system group header a `Section`
+would have drawn, so nothing about the on-screen result actually needed `Section` to begin with.
+
+`SidebarReorder.apply` holds the whole reorder policy — what a drag of a given row may legally
+move to, and what it does to the projects it passes over — as a pure function over
+`[Repo]`/`[SidebarRow]`/index set, so it is unit-tested without instantiating any SwiftUI.
+`SessionStore.moveSidebarRows(fromOffsets:toOffset:)` is the `.onMove` target and only applies
+the result.
+
+A project's lifetime is explicit, not derived: a `Repo` appears when added
+(`SessionStore.addProject`) or when a session lands in it (`moveSession`), and is removed only
+by `SessionStore.closeProject`, which closes each child session through `closeSession` and then
+drops the `Repo`. `closeSession` no longer prunes an emptied project on its own — an emptied
+project stays in the sidebar until its own close button removes it. That settles a
+disagreement the two methods used to have: `closeSession` used to prune an emptied project while
+`moveSession` always deliberately left one standing; both now agree that an empty project does
+not vanish by itself. The close button itself is not immediate: `ProjectCloseCoordinator` asks
+`ProjectCloseConfirmer` (a real `NSAlert` in production, behind a protocol seam for tests) to
+confirm whenever a project holds more than one session, unless the user has suppressed that
+prompt.
+
+Project order and collapsed state (`Repo.isCollapsed`, toggled by `SessionStore.setCollapsed`)
+survive a relaunch through `SessionSnapshot.projects: [Project]?` — each entry is a path plus
+`isCollapsed`. It is optional for the reason `Entry.pinnedConversationID` is: a non-optional
+field would throw on every `sessions.json` written before this change and wipe every session on
+the first launch after it. `nil` decodes as "no recorded project state", and restore falls back
+to session-encounter order with every project expanded.
 
 ## Session status pipeline
 
@@ -138,8 +175,9 @@ Full field shapes, the decompiled status derivation, and accepted limitations ar
 
 ## Tab navigation
 
-⌘⇧[ / ⌘⇧] move the selection along `repos.flatMap(\.sessions)` — the sidebar's visual order
-flattened across project sections — wrapping at both ends. `SessionStore.selectNextSession()` /
+⌘⇧[ / ⌘⇧] move the selection along `repos.flatMap(\.sessions)` — the sidebar's session order
+crossing every project — wrapping at both ends. This does not skip a collapsed project's
+sessions; they are still selectable, just not currently drawn. `SessionStore.selectNextSession()` /
 `selectPreviousSession()` are the entry points; the wraparound algorithm lives in the private `cycleSelection(forward:)`. `TabNavigationCommands` supplies the Window-menu items.
 
 The menu items are the *mechanism*, not decoration. AppKit gives the Ghostty surface's

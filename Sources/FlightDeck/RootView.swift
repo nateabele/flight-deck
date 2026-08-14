@@ -5,10 +5,13 @@ import SwiftUI
 /// `SessionStore` is owned by `FlightDeckApp` as a `@StateObject`, not by this view.
 struct RootView: View {
     @ObservedObject var store: SessionStore
+    /// Only the sidebar's project-close confirmation reads this; passed rather than
+    /// re-created so it is the same instance the Settings scene edits.
+    var preferences: PreferencesStore?
 
     var body: some View {
         NavigationSplitView {
-            SessionSidebar(store: store)
+            SessionSidebar(store: store, preferences: preferences)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
         } detail: {
             if let surface = store.selectedSessionID.flatMap({ store.surface(for: $0) }) {

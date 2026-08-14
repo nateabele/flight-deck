@@ -5,10 +5,11 @@ import SwiftUI
 /// because `AppDelegate.applicationShouldTerminateAfterLastWindowClosed` returns true.
 struct RootWindow: Scene {
     @ObservedObject var store: SessionStore
+    var preferences: PreferencesStore?
 
     var body: some Scene {
         Window("Flight Deck", id: "main") {
-            RootView(store: store)
+            RootView(store: store, preferences: preferences)
                 .frame(minWidth: 800, minHeight: 500)
         }
         .defaultSize(width: 1000, height: 700)

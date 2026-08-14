@@ -242,14 +242,13 @@ final class SessionCreationTests: XCTestCase {
         let store = SessionStore(provider: nil, persistence: nil)
         store.titleResolver = { _, done in done(nil) }
         let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
-        store.moveSession(a.id, toProjectAt: URL(fileURLWithPath: "/b", isDirectory: true))
         store.closeSession(a.id)
-        // /a survives as an empty project; /b was pruned by closeSession.
+        // /a survives as an empty project — a project's lifetime is explicit now, and
+        // closing its last session no longer prunes it.
         store.selectedSessionID = nil
 
         let created = store.createFromMenu(chooseFolder: { XCTFail("must not prompt"); return nil })
 
         XCTAssertEqual(created?.workingDirectory, "/a")
-        XCTAssertFalse(store.repos.map(\.url.path).contains("/b"))
     }
 }

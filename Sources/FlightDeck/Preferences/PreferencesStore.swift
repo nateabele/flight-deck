@@ -106,4 +106,18 @@ final class PreferencesStore: ObservableObject {
         }
         return environment
     }
+
+    // MARK: Confirmations
+
+    /// Whether closing a project with several sessions asks first. Phrased positively — the
+    /// stored flag is a suppression, but every reader wants the question, and a checkbox
+    /// labelled with a negative is a checkbox people get backwards.
+    var confirmsProjectClose: Bool {
+        get { !(preferences.confirmations?.suppressProjectClose ?? false) }
+        set {
+            var confirmations = preferences.confirmations ?? ConfirmationPreferences()
+            confirmations.suppressProjectClose = !newValue
+            preferences.confirmations = confirmations
+        }
+    }
 }
