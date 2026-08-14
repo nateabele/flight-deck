@@ -47,6 +47,12 @@ private struct InstantSleeper: ReaperSleeping {
     func sleep(seconds: Double) async {}
 }
 
+private final class FakePersistence: SessionPersisting {
+    var stored: SessionSnapshot?
+    func load() -> SessionSnapshot? { stored }
+    func save(_ snapshot: SessionSnapshot) { stored = snapshot }
+}
+
 @MainActor
 final class OrphanSweepTests: XCTestCase {
     private func snapshot(
@@ -230,6 +236,42 @@ final class OrphanSweepTests: XCTestCase {
             .sweepOrphans(from: snapshot(owner: owner, processes: [UUID().uuidString: stale]))
 
         XCTAssertTrue(signals.targets.isEmpty)
+    }
+
+    /// The other half of Critical 1's fix: a survivor the sweep could not kill must not vanish
+    /// the moment anything else in this run calls `persist()`. `processRegistry` starts every
+    /// run empty — nothing here forked these children — so unless the sweep puts the survivor
+    /// back into it, the very next unrelated save (a tab switch, a new session) would silently
+    /// drop the one record the *next* launch's sweep needs to find it by.
+    func testASurvivorIsKeptInTheRegistryAndPersistedForTheNextLaunch() async {
+        let owner = ProcessIdentity(pid: 500, procStart: 100)   // not in `living`
+        let survivorID = UUID()
+        let survivor = SessionProcess(
+            identity: ProcessIdentity(pid: 600, procStart: 100), pgid: 600
+        )
+        let inspector = FakeInspector(living: [600])   // nothing ever kills it
+        let persistence = FakePersistence()
+        let s = SessionStore(
+            provider: StubProvider(),
+            persistence: persistence,
+            reaper: SessionReaper(
+                inspector: inspector, signals: SpySignals(), sleeper: InstantSleeper()
+            )
+        )
+        s.processInspector = inspector
+
+        await s.sweepOrphans(
+            from: snapshot(owner: owner, processes: [survivorID.uuidString: survivor])
+        )
+
+        XCTAssertEqual(
+            s.processRegistry.process(for: survivorID), survivor,
+            "an unkilled orphan must be re-recorded, not just reported and forgotten"
+        )
+        XCTAssertEqual(
+            persistence.stored?.processes?[survivorID.uuidString], survivor,
+            "must reach disk too, or the very next unrelated persist() silently drops it"
+        )
     }
 
     func testSnapshotRoundTripsTheNewFields() throws {
