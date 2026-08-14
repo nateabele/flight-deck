@@ -68,21 +68,64 @@ So Flight Deck discovers the pid itself, and owns the escalation itself. Nothing
 
 ## 4. Discovering the pid
 
-`libproc` gives us our own children. Surface creation is `@MainActor` and therefore serialized,
-so a snapshot taken immediately before and after the `makeSurface` call in `insertSession`
-(`SessionStore.swift:278`) isolates exactly one new child — the shell libghostty just forked:
+`libproc` gives us our own children, so the shell is found by watching that set change across
+the `makeSurface` call in `insertSession`.
 
-```swift
-let before = inspector.children(of: getpid())
-let view   = provider?.makeSurface(config)
-let after  = inspector.children(of: getpid())
-let new    = after.subtracting(before)
-```
+**The fork is asynchronous, and the discovery has to be too.** An earlier version of this
+section claimed libghostty forks the shell *inside* `ghostty_surface_new`, and that main-actor
+serialization therefore makes a `before`/`after` pair around that one call isolate exactly one
+new child. That is false. `Surface.init` only spawns the IO thread
+(`vendor/ghostty/src/Surface.zig:709`); that thread then runs `threadMain_` → `io.threadEnter`
+(`vendor/ghostty/src/termio/Thread.zig:267`) → `Exec.threadEnter` → `subprocess.start`
+(`vendor/ghostty/src/termio/Exec.zig:84-91`), and the fork happens there, on that thread, after
+`makeSurface` has already returned. An `after` snapshot taken microseconds later on the main
+thread therefore usually sees nothing at all — which made the whole feature nondeterministically
+inert in the real app while every test stayed green, because the tests scripted an inspector
+whose "after" snapshot already contained the child.
 
-If `new` holds exactly one pid, that is the session's shell and we record
-`ProcessIdentity(pid:procStart:)` plus its `pgid`. **If it holds zero or more than one, we
-record nothing and log.** No guessing: a tab with no recorded identity simply degrades to
-today's behavior rather than risking a signal at the wrong process.
+So `SurfaceProcessRegistry.record` keeps the `before` snapshot, lets the caller create the
+surface, and then **polls `children(of: getpid())` on a bounded deadline** (0.5 s, in 20 ms
+polls) off the synchronous path, recording the child once it appears. Nothing waits on that
+resolution and it never blocks the main actor; the record simply materializes a few polls later.
+A surface that failed to be created (`makeSurface` returned nil) has no IO thread and will never
+fork, so no resolution is queued for it at all.
+
+**Concurrent creations are resolved by contention, not by order.** Several surfaces can be
+created back to back — ⌘N twice, or `restore()` rebuilding every tab in one synchronous loop —
+and their forks land in whatever order the IO threads are scheduled, which is *not* guaranteed to
+be creation order. Assigning tab A the shell that actually belongs to tab B would make closing A
+kill B's process tree: the one way this design signals the wrong process. So a pid is claimed
+only when exactly one outstanding request could own it (a request's own `before` set rules it out
+of contention for anything already in that set, and a request that has already claimed something
+leaves the contest). A request that gives up **stays** in contention, because its fork may still
+be about to land.
+
+**If nothing appears before the deadline, or the candidate is ambiguous, no tab records it and
+we log.** No guessing: a tab with no recorded identity simply degrades to today's SIGHUP-only
+behavior rather than risking a signal at the wrong process.
+
+Per-tab identification is the only option available, incidentally: the direct child libghostty
+forks is `/usr/bin/login -flp …`, which is **setuid root**. A uid-501 process cannot read its
+`cwd` (`PROC_PIDVNODEPATHINFO`) or its argv/environment (`KERN_PROCARGS2`), so there is no
+attribute to match a child against its surface — contention is all there is. (`getpgid` and
+`PROC_PIDTBSDINFO` remain readable, which is what the identity gate and the group derivation
+need. `kill` on that root child fails with `EPERM`; `killpg` on its group still reaches the
+uid-501 shell inside it, which is the process that actually matters.)
+
+**Unattributable children are still adopted, just not by a tab.** Two of the three teardown
+paths — app quit and the launch sweep — mean "kill every shell this run forked" and never needed
+the mapping. So when a batch of resolutions settles, every new child it produced that no single
+tab could claim is recorded under a **fresh key of its own**: reachable from `reapAllForQuit` and
+from the persisted snapshot, unreachable from `closeSession`, which looks up by tab id. This is
+what keeps a restored window from leaking everything — measured against a real 18-tab restore,
+where every request is outstanding before any fork lands and the contention rule alone attributes
+zero of eighteen. Flight Deck forks no processes other than session shells, which is what makes
+the candidate set exactly right.
+
+**No `pgid` is recorded.** Reading one at discovery time races the child's own `setsid()`, and a
+read that wins captures Flight Deck's own group and pins it to that session for life. Every
+signal path re-derives the group from the live process table immediately before signalling (§7),
+so a process that has just passed the identity gate is always the authority on its own group.
 
 `#import <libproc.h>` goes in `Sources/FlightDeck/BridgingHeader.h`. The app is not sandboxed
 (`FlightDeck.entitlements` carries no `com.apple.security.app-sandbox`), so enumerating and
@@ -183,7 +226,13 @@ new interleaving and §9 pins it with a test.
 
 ## 7. The three entry points
 
-**Tab close** — `closeSession`, per §6, with a ~5 s per-session budget.
+**Tab close** — `closeSession`, per §6. Each ladder is capped at 5 s, and the worst case is two
+of them: one for the shell's process group, then one concurrent batch covering anything that
+escaped that group. So the per-session bound is **~10 s**, not 5 s — see `SessionReaper`'s type
+comment, which documents the same arithmetic.
+
+The group passed to the ladder is derived from a live `getpgid` on the target at that moment,
+never from anything on the record (§4).
 
 **App quit** — `applicationShouldTerminate` returns `.terminateLater`, reaps every live session
 concurrently under one capped **total** budget (~8 s, not 5 s × sessions), then calls
@@ -237,7 +286,10 @@ it. Every outcome is also `os_log`ged unconditionally.
 | **Pid recycling** | A recorded identity whose `procStart` no longer matches must **not** be signalled. This is the test that keeps the launch sweep from killing an innocent process. |
 | Launch sweep gating | Snapshot with a *live* `owner` → sweep is a no-op. Snapshot with a dead owner and a live matching identity → laddered. |
 | Snapshot compatibility | A v1 `sessions.json` with neither new field decodes, restores every tab, and sweeps nothing. |
-| Close interleaving | `ghosttyCloseSurface` posted for a parked, already-removed surface is a no-op (§6). |
+| Close interleaving | `ghosttyCloseSurface` posted with no surface attached is a no-op. Only the failing-cast half is covered: the parked-surface case needs a real `Ghostty.SurfaceView`, which cannot be built without a live `ghostty_app_t` in the headless bundle, so §6's interleaving is argued from the code rather than pinned by a test. |
+| **Pid discovery (async)** | A scripted process table plus a scripted poll clock: a child that appears only *after* `makeSurface` returns is still recorded; one that never appears is not. |
+| **Claim tracking** | Two tabs created before either forks must record nothing *against either tab*; two whose forks land in order must each record their own; a claimed pid is never offered to a second tab; a pid arriving after one request gave up is not handed to its sibling (§4). |
+| **Adoption** | The unattributable children of a batch are still in `all` (so quit and the sweep reach them) and under keys that are no tab's, so no close can. A child that predates every request in the batch is never adopted. |
 | Self-group rail | A target whose pgid equals `getpgid(0)` must produce **zero** `killpg` calls and per-pid signals instead (§5.1). |
 | **Proof of fix (real processes)** | Spawn `/bin/sh -c "trap '' HUP; sleep 300 & sleep 300"`, run the real reaper against it, assert both pids are gone within budget. Real signals, real libproc, no fakes. **This is the test that fails against today's behavior** — SIGHUP alone never kills that tree. |
 
