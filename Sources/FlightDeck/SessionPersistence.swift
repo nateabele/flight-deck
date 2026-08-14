@@ -2,8 +2,9 @@
 import Foundation
 import OSLog
 
-/// What survives a relaunch. Repos are derived from `workingDirectory`, so only
-/// sessions are stored and the grouping rebuilds on restore.
+/// What survives a relaunch. Sessions carry their own `workingDirectory`, so a project's
+/// session list rebuilds from that on restore; `projects` additionally persists each
+/// project's order and collapse state, which the sessions alone cannot express.
 struct SessionSnapshot: Codable, Equatable {
     struct Entry: Codable, Equatable {
         let id: UUID
