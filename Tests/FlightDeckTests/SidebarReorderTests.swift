@@ -87,17 +87,16 @@ final class SidebarReorderTests: XCTestCase {
         XCTAssertEqual(moved?[1].sessions.map(\.id), [onlyChild])
     }
 
-    // TODO(Task 3): uncomment once `Repo.isCollapsed` exists.
-    // func testACollapsedProjectMovesAsASingleRow() {
-    //     var repos = fixture()
-    //     repos[0].isCollapsed = true
-    //
-    //     // Rows are now [P_a, P_b, b0]; row 0 to row 3 appends a after b.
-    //     let moved = move(repos, from: 0, to: 3)
-    //
-    //     XCTAssertEqual(moved?.map(\.url.lastPathComponent), ["b", "a"])
-    //     XCTAssertEqual(moved?.last?.sessions.count, 2, "collapsing hides sessions, never drops them")
-    // }
+    func testACollapsedProjectMovesAsASingleRow() {
+        var repos = fixture()
+        repos[0].isCollapsed = true
+
+        // Rows are now [P_a, P_b, b0]; row 0 to row 3 appends a after b.
+        let moved = move(repos, from: 0, to: 3)
+
+        XCTAssertEqual(moved?.map(\.url.lastPathComponent), ["b", "a"])
+        XCTAssertEqual(moved?.last?.sessions.count, 2, "collapsing hides sessions, never drops them")
+    }
 
     func testAPlaceholderRowCannotBeDragged() {
         let repos = [repo("/w/a", sessions: 0), repo("/w/b", sessions: 1)]

@@ -442,6 +442,44 @@ final class SessionStore: ObservableObject {
         persist()
     }
 
+    // MARK: Projects
+
+    /// The sidebar's rendering order, flattened. Computed rather than stored so it cannot
+    /// drift from `repos`; it is cheap, and `repos` is already `@Published`.
+    var sidebarRows: [SidebarRow] { SidebarRow.rows(for: repos) }
+
+    func setCollapsed(_ isCollapsed: Bool, forProjectAt id: Repo.ID) {
+        guard let index = repos.firstIndex(where: { $0.id == id }),
+              repos[index].isCollapsed != isCollapsed else { return }
+        repos[index].isCollapsed = isCollapsed
+        persist()
+    }
+
+    /// The one status a collapsed project header shows: the most demanding thing any child
+    /// is doing. Idle and unstatused children contribute nothing, so a quiet project shows
+    /// no glyph at all — the same "renders nothing" that an unstatused session row gets.
+    ///
+    /// The subagent count is deliberately dropped. `SessionStatusIcon` draws it beside the
+    /// spinner, and the collapsed header already carries a number (the session count); two
+    /// adjacent numerals read as two counts of the same thing.
+    func collapsedStatus(forProjectAt id: Repo.ID) -> SessionStatus? {
+        guard let repo = repos.first(where: { $0.id == id }) else { return nil }
+        guard var best = repo.sessions
+            .compactMap({ statuses[$0.id] })
+            .filter({ $0.activity != .idle })
+            .max(by: { $0.activity.summaryRank < $1.activity.summaryRank })
+        else { return nil }
+        best.subagentCount = 0
+        return best
+    }
+
+    /// Test seam. Production statuses arrive through `applyRegistry`, which takes registry
+    /// rows keyed by pid; a test that only cares about the sidebar's reading of a status
+    /// should not have to fabricate those.
+    func applyRegistryForTesting(_ next: [UUID: SessionStatus]) {
+        statuses = next
+    }
+
     /// Test seam. Production leaves this nil and injection goes to the live surface.
     var injectorOverride: TextInjecting?
 
