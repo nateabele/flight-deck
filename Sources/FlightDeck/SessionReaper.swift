@@ -2,6 +2,7 @@
 import Darwin
 import Foundation
 import OSLog
+import UserNotifications
 
 /// Signal delivery, behind a protocol so the ladder can be asserted without real processes.
 protocol SignalSending: Sendable {
@@ -186,5 +187,54 @@ final class LoggingReapReporter: ReapReporting {
 
     func reportSweep(cleaned: Int) {
         Self.logger.info("orphan sweep cleaned \(cleaned) process tree(s) from a previous run")
+    }
+}
+
+/// Tells the user when a teardown did not finish. Silent on success by design: closing a tab
+/// stays a one-click, no-dialog gesture, and the only things worth interrupting someone for
+/// are a process that survived SIGKILL and an orphan sweep that found work to do.
+///
+/// Never construct this from a test — see the note on `ReapReporting`.
+final class UserNotificationReapReporter: ReapReporting {
+    private let fallback = LoggingReapReporter()
+
+    /// A tab close and an in-flight quit reap the same session independently (see
+    /// `SessionStore.reapSession`'s doc comment) and each calls `report` on its own — the
+    /// actor serializes those calls but does not deduplicate them. If the identifier below
+    /// included `context`, "tab close" and "app quit" would produce two distinct
+    /// identifiers for the very same survivors and stack two notifications for one session.
+    /// Scoping the identifier to the survivors' pids instead — the same precedent
+    /// `SessionNotifier.notify` sets by keying on the session UUID
+    /// (`SessionNotifier.swift:31-33`) — means a second report about the same processes
+    /// replaces the first rather than adding to it. `context` still appears in the body, so
+    /// the user still learns which teardown it was.
+    func report(_ outcome: ReapOutcome, context: String) {
+        fallback.report(outcome, context: context)
+        guard case .survivors(let survivors) = outcome, !survivors.isEmpty else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Processes still running"
+        let pids = survivors.map { String($0.pid) }.joined(separator: ", ")
+        content.body = survivors.count == 1
+            ? "One process (pid \(pids)) could not be terminated after \(context)."
+            : "\(survivors.count) processes (pids \(pids)) could not be terminated after \(context)."
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(
+                identifier: "reap.\(pids)", content: content, trigger: nil
+            )
+        )
+    }
+
+    func reportSweep(cleaned: Int) {
+        fallback.reportSweep(cleaned: cleaned)
+
+        let content = UNMutableNotificationContent()
+        content.title = "Cleaned up after a previous session"
+        content.body = cleaned == 1
+            ? "One process left running by an earlier launch was terminated."
+            : "\(cleaned) processes left running by an earlier launch were terminated."
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: "reap.sweep", content: content, trigger: nil)
+        )
     }
 }

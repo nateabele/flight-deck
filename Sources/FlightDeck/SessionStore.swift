@@ -168,6 +168,7 @@ final class SessionStore: ObservableObject {
         resetState: Bool = false,
         preferences: PreferencesStore? = nil,
         notifier: Notifying? = nil,
+        reapReporter: ReapReporting? = nil,
         persistence: SessionPersisting?
     ) {
         self.init(
@@ -176,6 +177,8 @@ final class SessionStore: ObservableObject {
             preferences: preferences
         )
         self.notifier = notifier
+        // Before the sweep below, which reports through it.
+        if let reapReporter { self.reapReporter = reapReporter }
         // Captured BEFORE `restore()`, which persists at the end and would otherwise replace
         // the previous run's records with this one's. The sweep itself is async and may land
         // well after that write; it works from this snapshot, not from disk.
