@@ -124,6 +124,8 @@ final class SessionStore: ObservableObject {
         self.reaper = reaper
         observeActivationRequests()
         observeSurfaceClose()
+        // Lets `AppDelegate` find the store it does not own — see `.flightDeckStoreReady`.
+        NotificationCenter.default.post(name: .flightDeckStoreReady, object: self)
     }
 
     deinit {
@@ -545,6 +547,41 @@ final class SessionStore: ObservableObject {
             if outcome == .clean { cleaned += 1 }
         }
         if cleaned > 0 { reapReporter?.reportSweep(cleaned: cleaned) }
+    }
+
+    /// Total wall-clock budget for reaping every session at quit. Not per-session: quitting
+    /// with twelve tabs open must not take twelve times as long.
+    static let quitBudget: Double = 8.0
+
+    /// Reap every live session concurrently, returning when they are all done or the budget
+    /// expires — whichever comes first. Survivors are left for the next launch's sweep.
+    ///
+    /// The deadline races the *aggregate* of every reap, not the fastest one: the fan-out
+    /// lives in a single child task nested inside its own group, so `group.next()` above it
+    /// only resolves once every reap inside has finished (or the sibling deadline task wins
+    /// first). An earlier draft raced the deadline against each reap individually — the first
+    /// session to finish would win the outer `group.next()`, and the `cancelAll()` that
+    /// followed cancelled every reap still in flight, so quitting with several tabs open
+    /// reaped only one of them.
+    func reapAllForQuit(budget: Double = SessionStore.quitBudget) async {
+        let live = processRegistry.all
+        guard !live.isEmpty else { return }
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { [weak self] in
+                await withTaskGroup(of: Void.self) { inner in
+                    for (id, process) in live {
+                        inner.addTask { await self?.reapSession(id, process: process, context: "app quit") }
+                    }
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(budget * 1_000_000_000))
+            }
+            await group.next()
+            group.cancelAll()
+        }
+        processRegistry.restore([:])
     }
 
     /// Test seam. Production leaves this nil and injection goes to the live surface.
