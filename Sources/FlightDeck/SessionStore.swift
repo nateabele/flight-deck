@@ -108,6 +108,16 @@ final class SessionStore: ObservableObject {
     private var closeObserver: NSObjectProtocol?
     private var appActivationObserver: NSObjectProtocol?
 
+    /// Renames typed into the sidebar but not yet typed into `claude`, one per tab.
+    /// See `flushPendingRename` for why an injection waits.
+    private var pendingRenames: [UUID: String] = [:]
+
+    /// Test seam. Production pauses between killing the input line and reading the screen
+    /// back, because Claude Code repaints asynchronously; tests run the continuation inline.
+    var injectionSettle: (@escaping () -> Void) -> Void = { work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
     init(
         provider: SurfaceProvider?,
         persistence: SessionPersisting? = nil,
@@ -607,16 +617,13 @@ final class SessionStore: ObservableObject {
         return repos[at.repo].sessions[at.session].title
     }
 
-    /// Sidebar → Claude. Updates the title, then types `/rename <name>` into the pty
-    /// so the *running* interactive session renames itself and records it.
+    /// Sidebar → Claude. Updates the title immediately, then types `/rename <name>` into
+    /// the pty so the *running* interactive session renames itself and records it.
     ///
-    /// Return is sent *before* the paste as well as after. Without the leading one, whatever
-    /// the user had half-typed in the input bar is still sitting there and `/rename <name>`
-    /// is appended to it, producing a garbage prompt instead of a slash command. The leading
-    /// Return submits that pending text (it is sent to Claude as a message, not discarded)
-    /// and leaves an empty bar for the command.
+    /// The title lands here and now; only the injection can be deferred. A rename is
+    /// therefore never lost, just occasionally late reaching `claude`.
     ///
-    /// The command text and the Returns are sent separately, and that split is load-bearing.
+    /// The command text and the Return are sent separately, and that split is load-bearing.
     /// `sendText` is a *paste* in libghostty, and Claude Code enables bracketed-paste mode, so
     /// any line terminator inside the text is delivered between `\u{1b}[200~` and
     /// `\u{1b}[201~` and treated as pasted content — it lands in the input bar as a literal
@@ -628,11 +635,65 @@ final class SessionStore: ObservableObject {
         else { return }
 
         repos[at.repo].sessions[at.session].title = name
-        let injector = injector(for: id)
-        injector?.sendReturn()
-        injector?.sendText("/rename \(name)")
-        injector?.sendReturn()
         persist()
+        // One pending rename per tab, replaced rather than queued: renaming twice before
+        // the injection lands should type the second name once, not both names in turn.
+        pendingRenames[id] = name
+        flushPendingRename(id)
+    }
+
+    /// Types a pending rename into a session, or leaves it pending if this is a bad moment.
+    ///
+    /// A paste lands wherever the input cursor is, so injecting blindly appends the command
+    /// to whatever the user was half-way through typing and submits the result. The gates:
+    ///
+    /// - **Idle only.** While `busy` the command queues behind the running turn; while
+    ///   `waiting` a Return answers a permission prompt or dialog instead of submitting.
+    ///   `shell` means no `claude` is running at all, where `/rename …` would hit a shell.
+    /// - **One row only.** Ctrl+U kills a single logical line and yank-pop *replaces*
+    ///   rather than appends, so a draft spanning rows cannot be taken apart and put back.
+    ///   Wrapped text renders the same way and behaves the same way under Ctrl+U — a
+    ///   240-character wrapped line survived Ctrl+E + Ctrl+U in testing — so both defer.
+    ///
+    /// The kill happens *before* we know whether there was anything to kill, because that
+    /// is the only way to find out: Claude Code renders its placeholder hint in exactly the
+    /// same shape as a real draft (see `InputBar`), so the screen cannot be trusted to say
+    /// whether the buffer is empty. Killing and then comparing measures the effect instead.
+    /// A kill that changed nothing means the line was empty and there is nothing to restore
+    /// — yanking there would paste the user's *previous* kill into the bar, which is the
+    /// failure this ordering exists to avoid.
+    ///
+    /// The yank comes after the Return, so a wrong guess can only leave text sitting in the
+    /// bar, never submit it.
+    private func flushPendingRename(_ id: UUID) {
+        guard let name = pendingRenames[id],
+              statuses[id]?.activity == .idle,
+              let injector = injector(for: id),
+              let viewport = injector.readViewport(),
+              let bar = InputBar.read(fromViewport: viewport),
+              bar.rows.count == 1
+        else { return }
+
+        let before = bar.content
+        injector.sendKillLine()
+        // Claude Code needs a moment to repaint before the screen reflects the kill.
+        injectionSettle { [weak self] in
+            guard let self, self.pendingRenames[id] == name else { return }
+            let after = injector.readViewport().flatMap(InputBar.read(fromViewport:))?.content
+            injector.sendText("/rename \(name)")
+            injector.sendReturn()
+            // Restore only on a *confirmed* change. If the screen went unreadable we do not
+            // know, and the draft is one Ctrl+Y away in Claude's own ring — better than
+            // pasting text the user never typed into a bar that was empty.
+            if let after, after != before { injector.sendYank() }
+            self.pendingRenames[id] = nil
+        }
+    }
+
+    /// Retries every deferred rename. Driven by the registry scan, which is what turns a
+    /// deferral into a delay rather than a loss.
+    private func flushPendingRenames() {
+        for id in pendingRenames.keys { flushPendingRename(id) }
     }
 
     /// Claude → sidebar. Applied from the transcript watcher; never injects.
@@ -673,6 +734,12 @@ final class SessionStore: ObservableObject {
     /// Entries for processes Flight Deck does not own are dropped: the registry lists
     /// every `claude` on the machine.
     func applyRegistry(_ rows: [pid_t: ClaudeStatusFile.Entry]) {
+        // The scan is also the retry tick for deferred renames. `defer` because this method
+        // returns early when nothing changed, and a rename usually waits on something that
+        // never shows up in `statuses` at all — the user clearing their half-typed draft
+        // moves no status, so gating the retry on a status change would strand it.
+        defer { flushPendingRenames() }
+
         // Resolve against a snapshot of the list before touching anything. Later tasks
         // apply repins and project moves here, and those mutate `repos` — iterating it
         // while it changes would resolve some tabs against a stale view.

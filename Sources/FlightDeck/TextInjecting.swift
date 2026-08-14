@@ -12,6 +12,22 @@ protocol TextInjecting: AnyObject {
 
     /// Press and release Return as a real key event.
     func sendReturn()
+
+    /// Ctrl+E then Ctrl+U: move to the end of the current logical line and kill it into
+    /// Claude Code's own deleted-text ring, from where `sendYank()` can restore it.
+    ///
+    /// Ctrl+E first is load-bearing — Ctrl+U deletes from the cursor to the line *start*,
+    /// so without it a draft's tail survives and the injected command is spliced into the
+    /// middle of it. On an empty line the pair is a no-op and pushes nothing onto the ring.
+    func sendKillLine()
+
+    /// Ctrl+Y: paste back the most recently killed text.
+    func sendYank()
+
+    /// The terminal's visible screen, or nil when it cannot be read. Plain text only —
+    /// libghostty exposes no cell attributes, which is why `InputBar` cannot tell a
+    /// placeholder hint from a real draft.
+    func readViewport() -> String?
 }
 
 extension Ghostty.SurfaceView: TextInjecting {
@@ -34,5 +50,32 @@ extension Ghostty.SurfaceView: TextInjecting {
         guard let surfaceModel else { return }
         surfaceModel.sendKeyEvent(.init(key: .enter, action: .press, text: "\r"))
         surfaceModel.sendKeyEvent(.init(key: .enter, action: .release))
+    }
+
+    func sendKillLine() {
+        sendControl(.e, byte: "\u{05}")
+        sendControl(.u, byte: "\u{15}")
+    }
+
+    func sendYank() {
+        sendControl(.y, byte: "\u{19}")
+    }
+
+    /// Control keys go the same route as Return, and for the same reason — a control byte
+    /// inside a bracketed paste is inserted as content, not acted on.
+    ///
+    /// The encoded byte is passed as `text` rather than left to the key encoder to derive
+    /// from key+modifier: it is what the terminal must actually receive, and stating it
+    /// here keeps the mapping visible next to the key it belongs to.
+    private func sendControl(_ key: Ghostty.Input.Key, byte: String) {
+        guard let surfaceModel else { return }
+        surfaceModel.sendKeyEvent(.init(key: key, action: .press, text: byte, mods: .ctrl))
+        surfaceModel.sendKeyEvent(.init(key: key, action: .release, mods: .ctrl))
+    }
+
+    /// The screen ghostty already keeps for accessibility, reused rather than re-read: it
+    /// is cached for 500 ms, which is well inside the cadence a rename needs.
+    func readViewport() -> String? {
+        cachedVisibleContents.get()
     }
 }
