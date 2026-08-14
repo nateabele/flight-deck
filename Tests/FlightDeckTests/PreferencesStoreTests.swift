@@ -62,8 +62,9 @@ final class PreferencesStoreTests: XCTestCase {
         XCTAssertTrue(store.overriddenProjectPaths.isEmpty)
     }
 
-    /// A `Repo` disappears from `SessionStore` when its last session closes, so the
-    /// override must not be enumerable only from open projects.
+    /// An override outlives the project it belongs to — closing a project removes it from
+    /// `SessionStore` entirely — so the override must be enumerable independently of which
+    /// projects happen to be open.
     func testOverridePathsSurviveIndependentlyOfOpenProjects() {
         let persistence = MemoryPersistence()
         let store = PreferencesStore(persistence: persistence)

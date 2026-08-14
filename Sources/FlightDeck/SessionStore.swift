@@ -839,10 +839,9 @@ final class SessionStore: ObservableObject {
 
     /// Files a session under a different project, creating that project if it is new.
     ///
-    /// Unlike `closeSession`, this does **not** prune a source project it empties: a
-    /// project with no sessions is a legitimate sidebar state. (An empty project does not
-    /// currently survive a relaunch, because `SessionSnapshot` stores only sessions and
-    /// rebuilds `repos` from their `workingDirectory` — known, deferred.)
+    /// This does not prune a source project it empties, matching `closeSession`: a
+    /// project's lifetime is explicit, and an empty project is a legitimate sidebar state
+    /// that now survives a relaunch too, via `SessionSnapshot.projects`.
     ///
     /// The tab id does not change, so `selectedSessionID` needs no fixing up and SwiftUI
     /// animates the same row from one section to the other rather than recreating it.
