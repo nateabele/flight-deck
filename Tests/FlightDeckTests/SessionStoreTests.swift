@@ -40,11 +40,14 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertEqual(b.title, "session 2")
     }
 
-    func testCloseRemovesSessionAndEmptyRepo() {
+    func testCloseRemovesSessionButLeavesTheEmptyRepo() {
         let store = SessionStore(provider: StubProvider())
         let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         store.closeSession(s.id)
-        XCTAssertTrue(store.repos.isEmpty)
+        // A project's lifetime is explicit: closing its last session empties it but does
+        // not remove it. Only `closeProject` does that.
+        XCTAssertEqual(store.repos.count, 1)
+        XCTAssertTrue(store.repos[0].sessions.isEmpty)
         XCTAssertNil(store.selectedSessionID)
     }
 

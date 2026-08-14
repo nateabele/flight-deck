@@ -124,10 +124,14 @@ private struct SessionRow: View {
     }
 }
 
-/// Renders the repo→session tree and issues create/switch/close intents to the
+/// Renders the project→session tree and issues create/switch/close intents to the
 /// Store. Rendering only: it holds no session state of its own.
 struct SessionSidebar: View {
     @ObservedObject var store: SessionStore
+    var preferences: PreferencesStore?
+    /// Injectable so a future test can drive the close flow without a panel; production
+    /// always gets the real alert.
+    var confirmer: ProjectCloseConfirming = NSAlertProjectCloseConfirmer()
 
     /// Drives both the label and which shortcut the button claims.
     private var isEmpty: Bool { store.repos.isEmpty }
@@ -135,9 +139,22 @@ struct SessionSidebar: View {
     var body: some View {
         let conflicted = store.conflictedSessionIDs
         return List(selection: $store.selectedSessionID) {
-            ForEach(store.repos) { repo in
-                Section(repo.displayName) {
-                    ForEach(repo.sessions) { session in
+            // One flat ForEach rather than a Section per project: `.onMove` is not supported
+            // on a ForEach that yields Sections, and this is what lets one gesture reorder
+            // both projects and sessions. See `SidebarRow`.
+            ForEach(store.sidebarRows) { row in
+                switch row {
+                case .project(let projectID):
+                    if let repo = store.repos.first(where: { $0.id == projectID }) {
+                        ProjectHeaderRow(store: store, repo: repo) {
+                            close(projectAt: projectID)
+                        }
+                        .selectionDisabled()
+                    }
+
+                case .session(let sessionID, let projectID):
+                    if let repo = store.repos.first(where: { $0.id == projectID }),
+                       let session = repo.sessions.first(where: { $0.id == sessionID }) {
                         SessionRow(
                             store: store,
                             session: session,
@@ -145,8 +162,15 @@ struct SessionSidebar: View {
                         )
                         .tag(session.id)
                     }
+
+                case .empty:
+                    Text("No sessions")
+                        .font(.subheadline)
+                        .foregroundStyle(.tertiary)
+                        .selectionDisabled()
                 }
             }
+            .onMove { store.moveSidebarRows(fromOffsets: $0, toOffset: $1) }
         }
         .dropDestination(for: URL.self) { urls, _ in
             store.acceptDroppedURLs(urls) != nil
@@ -172,5 +196,12 @@ struct SessionSidebar: View {
                                      : .init("n", modifiers: .command))
             .padding(8)
         }
+    }
+
+    private func close(projectAt id: Repo.ID) {
+        let coordinator = ProjectCloseCoordinator(
+            store: store, preferences: preferences, confirmer: confirmer
+        )
+        Task { await coordinator.requestClose(projectAt: id) }
     }
 }

@@ -39,7 +39,7 @@ final class SessionProjectMoveTests: XCTestCase {
         )
     }
 
-    /// A project with no sessions is a legitimate sidebar state. Unlike `closeSession`,
+    /// A project with no sessions is a legitimate sidebar state. Matching `closeSession`,
     /// moving out does not prune the source.
     func testMoveLeavesAnEmptiedSourceProjectStanding() {
         let store = makeStore()

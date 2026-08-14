@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Per-project overrides. The project list is the union of currently-open projects and
-/// projects with a saved override — a `Repo` vanishes from `SessionStore` when its last
-/// session closes, so open projects alone would lose overrides from view.
+/// projects with a saved override — an override outlives the project it belongs to, since
+/// closing a project removes it from `SessionStore` entirely.
 struct ProjectsSettingsTab: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore
@@ -14,54 +14,74 @@ struct ProjectsSettingsTab: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            List(paths, id: \.self, selection: $selected) { path in
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(URL(fileURLWithPath: path).lastPathComponent)
-                    Text(path)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                }
-                .badge(preferences.projectOverride(path).isEmpty ? nil : Text("override"))
-                .tag(path)
-            }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 220)
-            .onChange(of: paths) { _, newPaths in
-                // Covers both "Remove Override" and reverting a project's flags to empty
-                // (which also removes it, see `binding(for:)`): either can drop the
-                // selected path from the list out from under the detail pane.
-                if let selected, !newPaths.contains(selected) { self.selected = nil }
-            }
-        } detail: {
-            if let selected {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack {
-                        Text(selected).font(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Remove Override") {
-                            preferences.removeProjectOverride(selected)
-                        }
-                        .disabled(preferences.projectOverride(selected).isEmpty)
+        VStack(spacing: 0) {
+            NavigationSplitView {
+                List(paths, id: \.self, selection: $selected) { path in
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(URL(fileURLWithPath: path).lastPathComponent)
+                        Text(path)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.head)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.top, 8)
-
-                    FlagEditor(
-                        flags: binding(for: selected),
-                        inherited: preferences.preferences.globalFlags,
-                        lockedPrefix: ClaudeSettingsTab.placeholderPrefix
-                    )
-                    .id(selected)
+                    .badge(preferences.projectOverride(path).isEmpty ? nil : Text("override"))
+                    .tag(path)
                 }
-            } else {
-                ContentUnavailableView(
-                    "No Project Selected",
-                    systemImage: "folder",
-                    description: Text("Select a project to override its Claude options.")
-                )
+                .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+                .onChange(of: paths) { _, newPaths in
+                    // Covers both "Remove Override" and reverting a project's flags to empty
+                    // (which also removes it, see `binding(for:)`): either can drop the
+                    // selected path from the list out from under the detail pane.
+                    if let selected, !newPaths.contains(selected) { self.selected = nil }
+                }
+            } detail: {
+                if let selected {
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack {
+                            Text(selected).font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Remove Override") {
+                                preferences.removeProjectOverride(selected)
+                            }
+                            .disabled(preferences.projectOverride(selected).isEmpty)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+
+                        FlagEditor(
+                            flags: binding(for: selected),
+                            inherited: preferences.preferences.globalFlags,
+                            lockedPrefix: ClaudeSettingsTab.placeholderPrefix
+                        )
+                        .id(selected)
+                    }
+                } else {
+                    ContentUnavailableView(
+                        "No Project Selected",
+                        systemImage: "folder",
+                        description: Text("Select a project to override its Claude options.")
+                    )
+                }
             }
+
+            Divider()
+            HStack {
+                // HIG requires a suppressed alert to stay recoverable; this is the recovery.
+                // Phrased as the question rather than the suppression — a checkbox whose
+                // label is a negative is one people read backwards.
+                Toggle(
+                    "Confirm before closing a project with multiple sessions",
+                    isOn: Binding(
+                        get: { preferences.confirmsProjectClose },
+                        set: { preferences.confirmsProjectClose = $0 }
+                    )
+                )
+                .accessibilityIdentifier("prefs-confirm-project-close")
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
         }
     }
 

@@ -23,22 +23,40 @@ struct ShellPreferences: Codable, Equatable {
     }
 }
 
+/// Alerts the user has chosen to stop seeing.
+struct ConfirmationPreferences: Codable, Equatable {
+    /// Set by the "Don't ask me again" box on the project-close alert.
+    var suppressProjectClose: Bool
+
+    init(suppressProjectClose: Bool = false) {
+        self.suppressProjectClose = suppressProjectClose
+    }
+}
+
 /// Everything the Preferences window edits.
 struct Preferences: Codable, Equatable {
     var globalFlags: FlagSet
-    /// Keyed by standardized project path. Kept here rather than on `Repo` because a
-    /// `Repo` is removed from `SessionStore` when its last session closes, and an
-    /// override must outlive that.
+    /// Keyed by standardized project path. Kept here rather than on `Repo` because an
+    /// override outlives the project it belongs to — closing a project removes it from
+    /// `SessionStore` entirely.
     var projectFlags: [String: FlagSet]
     var shell: ShellPreferences
+    /// Optional, and it has to stay that way. `UserDefaultsPreferencesPersistence.load()`
+    /// decodes with `try?`, and synthesized `Codable` throws on a missing key rather than
+    /// falling back to a property default — so a non-optional field here would fail to
+    /// decode every existing `preferences.v1` blob and silently reset every flag, override
+    /// and shell setting the user has. `nil` means "never answered", which is not suppressed.
+    var confirmations: ConfirmationPreferences?
 
     init(
         globalFlags: FlagSet = FlagSet(),
         projectFlags: [String: FlagSet] = [:],
-        shell: ShellPreferences = ShellPreferences()
+        shell: ShellPreferences = ShellPreferences(),
+        confirmations: ConfirmationPreferences? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
         self.shell = shell
+        self.confirmations = confirmations
     }
 }
