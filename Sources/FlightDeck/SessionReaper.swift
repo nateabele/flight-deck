@@ -73,7 +73,11 @@ actor SessionReaper {
     }
 
     /// Escalate against the shell's process group, then against anything that escaped it.
-    func reap(shell: ProcessIdentity, pgid: pid_t) async -> ReapOutcome {
+    /// `pgid` is `nil` when the caller could not establish a group to trust (see
+    /// `SessionStore.sweepOrphans`); `escalate`/`deliver` already treat a missing group as
+    /// "signal the pid directly" rather than guessing, so this stays an `Optional` end to
+    /// end instead of being encoded as a sentinel value at the call site.
+    func reap(shell: ProcessIdentity, pgid: pid_t?) async -> ReapOutcome {
         guard inspector.isAlive(shell) else { return .clean }
 
         // Capture the tree FIRST. Once the shell dies its children are reparented to launchd
