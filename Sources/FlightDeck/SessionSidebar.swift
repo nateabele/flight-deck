@@ -40,7 +40,10 @@ private struct SessionRow: View {
                     .help("Another tab is on this conversation")
                     .accessibilityIdentifier("session-pin-conflict")
             }
-            SessionStatusIcon(status: store.status(for: session.id))
+            SessionStatusIcon(
+                status: store.status(for: session.id),
+                unread: store.unreadIdle.contains(session.id)
+            )
             // The close button is absent, not merely hidden, until hover: inserting it
             // is what pushes the status icon left. No manual offset needed.
             if isHovered {
