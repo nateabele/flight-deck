@@ -36,9 +36,9 @@ struct ConfirmationPreferences: Codable, Equatable {
 /// Everything the Preferences window edits.
 struct Preferences: Codable, Equatable {
     var globalFlags: FlagSet
-    /// Keyed by standardized project path. Kept here rather than on `Repo` because a
-    /// `Repo` is removed from `SessionStore` when its last session closes, and an
-    /// override must outlive that.
+    /// Keyed by standardized project path. Kept here rather than on `Repo` because an
+    /// override outlives the project it belongs to — closing a project removes it from
+    /// `SessionStore` entirely.
     var projectFlags: [String: FlagSet]
     var shell: ShellPreferences
     /// Optional, and it has to stay that way. `UserDefaultsPreferencesPersistence.load()`
