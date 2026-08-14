@@ -139,10 +139,15 @@ actor SessionReaper {
     /// Group-first where we can, per-pid where we must.
     ///
     /// The self-group rail is load-bearing: `killpg` against our own group would kill Flight
-    /// Deck itself. libghostty's child calls `setsid` immediately so this never fires in the
-    /// app, but anything spawned without `setsid` — a `Foundation.Process` in the test bundle,
-    /// for instance — shares our group, and upstream ghostty guards the same window from the
-    /// other side (`Exec.zig:1193-1205`).
+    /// Deck itself. libghostty's child calls `setsid` immediately, so a session's own shell
+    /// never actually shares our group in production; this check is defense in depth against
+    /// a `pgid` argument that happens to equal ours anyway — a mis-derived value, a future
+    /// call site, or (deliberately) a test proving the rail holds
+    /// (`ReaperAcceptanceTests.testNeverSignalsTheTestRunnersOwnGroup`). It is *not* guarding
+    /// against `Foundation.Process` sharing our group with a spawned child by default — on
+    /// Darwin it does not; every `Process`-spawned child lands in a new group of its own (see
+    /// that same test's doc comment for how that was confirmed). Upstream ghostty guards the
+    /// same self-group window from the other side (`Exec.zig:1193-1205`).
     private func deliver(_ signal: Int32, to target: ProcessIdentity, pgid: pid_t?) {
         if let pgid, pgid > 0, pgid != signals.ownProcessGroup() {
             _ = signals.send(signal, toGroup: pgid)
@@ -208,6 +213,13 @@ final class UserNotificationReapReporter: ReapReporting {
     /// (`SessionNotifier.swift:31-33`) — means a second report about the same processes
     /// replaces the first rather than adding to it. `context` still appears in the body, so
     /// the user still learns which teardown it was.
+    ///
+    /// This dedup is real but partial: the two racing reaps snapshot the process tree at
+    /// different instants (see `SessionReaper.reap`'s "capture the tree FIRST" comment), so
+    /// if a descendant dies between one report and the other, the survivor lists — and
+    /// therefore the pid strings — differ, and the banners stack again. Closing that
+    /// residual case for good needs a stable identity (a session id) threaded through
+    /// `ReapReporting` itself, which is a protocol change out of scope here.
     func report(_ outcome: ReapOutcome, context: String) {
         fallback.report(outcome, context: context)
         guard case .survivors(let survivors) = outcome, !survivors.isEmpty else { return }
