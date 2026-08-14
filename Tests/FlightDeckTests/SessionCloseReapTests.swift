@@ -92,7 +92,12 @@ final class SessionCloseReapTests: XCTestCase {
         XCTAssertTrue(s.repos.flatMap(\.sessions).isEmpty)
     }
 
-    func testClosingForgetsTheProcessRecord() {
+    /// The record has to survive `closeSession` itself and only disappear once the reap has
+    /// actually run: forgetting it synchronously (the old behavior) opened a window where the
+    /// process was recorded nowhere at all — gone from the live registry and, since
+    /// `closeSession`'s own `persist()` had already fired, absent from the on-disk snapshot
+    /// too. See `reapSession`'s doc comment.
+    func testClosingForgetsTheProcessRecordOnceTheReapDrains() {
         let s = store()
         let session = s.newSession(in: URL(fileURLWithPath: "/tmp"))
         s.processRegistry.restore([
@@ -102,6 +107,11 @@ final class SessionCloseReapTests: XCTestCase {
         ])
 
         s.closeSession(session.id)
+        XCTAssertNotNil(
+            s.processRegistry.process(for: session.id),
+            "still recorded during the reap window, not forgotten synchronously"
+        )
+        drainMainQueue()
 
         XCTAssertNil(s.processRegistry.process(for: session.id))
     }

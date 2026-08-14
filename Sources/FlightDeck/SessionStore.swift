@@ -470,7 +470,10 @@ final class SessionStore: ObservableObject {
             surface.removeFromSuperview()
             parkedSurfaces[id] = surface
         }
-        let doomed = processRegistry.forget(id)
+        // Read, don't remove: the record has to survive until `reapSession` below has
+        // actually confirmed the process is gone. See `reapSession`'s doc comment for why
+        // forgetting it here — before the reap has even started — is the bug.
+        let doomed = processRegistry.process(for: id)
 
         watchers[id]?.stop()
         watchers.removeValue(forKey: id)
@@ -500,11 +503,30 @@ final class SessionStore: ObservableObject {
 
     /// Kill a tab's process tree, then release its parked surface. Shared by tab close and
     /// app quit, which differ only in their budget and in who waits for them.
+    ///
+    /// `processRegistry.forget` and the `persist()` that makes it stick happen here, only
+    /// after the reap has run — never synchronously inside `closeSession`. `closeSession`
+    /// used to forget the record immediately, which opened a window (up to the reap's own
+    /// budget, worst case ~10 s) during which the doomed process existed in *no* record at
+    /// all: gone from `processRegistry.all`, so `reapAllForQuit` would skip it, and already
+    /// absent from the snapshot `closeSession`'s own `persist()` had just written, so the next
+    /// launch's orphan sweep could not find it either. A quit or crash inside that window
+    /// leaked the process permanently and invisibly — forgetting has to happen *after* the
+    /// window closes, not before it opens.
+    ///
+    /// A consequence worth naming rather than hiding: quit and a tab's own close reap can now
+    /// race the same session concurrently (quit sees the record because close hasn't forgotten
+    /// it yet). That is harmless by construction — `SessionReaper.reap`'s `isAlive` gate makes
+    /// a second reap of an already-dead target return `.clean` without signalling anything,
+    /// and a second `forget`/`parkedSurfaces.removeValue` is a plain no-op — so the redundancy
+    /// costs an extra log line, never a duplicate signal to a live process.
     func reapSession(_ id: UUID, process: SessionProcess?, context: String) async {
         if let process {
             let outcome = await reaper.reap(shell: process.identity, pgid: process.pgid)
             reapReporter?.report(outcome, context: context)
         }
+        processRegistry.forget(id)
+        persist()
         // Releasing last: the deferred `ghostty_surface_free` this triggers now has nothing
         // left to wait for.
         parkedSurfaces.removeValue(forKey: id)
@@ -550,8 +572,12 @@ final class SessionStore: ObservableObject {
     }
 
     /// Total wall-clock budget for reaping every session at quit. Not per-session: quitting
-    /// with twelve tabs open must not take twelve times as long.
-    static let quitBudget: Double = 8.0
+    /// with twelve tabs open must not take twelve times as long. `nonisolated` because it is
+    /// a plain `Sendable` constant referenced from `reapAllForQuit`'s default parameter value,
+    /// which Swift evaluates outside this type's actor isolation — without this, the compiler
+    /// warns (and Swift 6 mode errors) that a main-actor-isolated property cannot be read from
+    /// that nonisolated context.
+    nonisolated static let quitBudget: Double = 8.0
 
     /// Reap every live session concurrently, returning when they are all done or the budget
     /// expires — whichever comes first. Survivors are left for the next launch's sweep.
