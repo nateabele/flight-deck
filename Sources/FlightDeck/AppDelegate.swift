@@ -16,7 +16,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The store the delegate does not own — see the type doc comment. Set from
     /// `.flightDeckStoreReady`, the same notification hop `flightDeckActivateSession` uses to
-    /// bridge the same construction-order gap.
+    /// bridge the same construction-order gap. `applicationShouldTerminate` falls back to
+    /// `SessionStore.current` when this is nil, so quit reaping does not depend on that hop
+    /// having landed.
     private weak var store: SessionStore?
 
     /// Registered before launch completes, which is required for the delegate to
@@ -40,6 +42,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// pty's foreground group, which anything ignoring SIGHUP survives. Now every session's
     /// tree is reaped first, under one total budget so quit cannot hang.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // `SessionStore.current` is the second, order-independent way to find the store. The
+        // notification above only arrives because `FlightDeckApp` builds the store lazily, for
+        // a reason that has nothing to do with this file; a future change constructing it
+        // eagerly would post before the observer exists and quietly reduce quit to a no-op.
+        // `assumeIsolated` rather than a hop: AppKit only calls this on the main thread, and
+        // the reply below has to be arranged before returning.
+        let store = MainActor.assumeIsolated { self.store ?? SessionStore.current }
         guard let store else { return .terminateNow }
         Task { @MainActor in
             await store.reapAllForQuit()
