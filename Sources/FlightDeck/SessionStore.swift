@@ -309,11 +309,25 @@ final class SessionStore: ObservableObject {
         directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> Bool {
         guard repos.isEmpty else { return false }
-        guard let snapshot = persistence?.load(), !snapshot.sessions.isEmpty else {
-            return false
-        }
+        guard let snapshot = persistence?.load() else { return false }
+        // Projects outlive their sessions, so a snapshot can legitimately carry projects and
+        // no sessions — the state you get after closing every session but no project. The
+        // old "no sessions means nothing to restore" guard would have discarded it.
+        let recorded = snapshot.projects ?? []
+        guard !snapshot.sessions.isEmpty || !recorded.isEmpty else { return false }
 
         sessionCounter = snapshot.sessionCounter
+
+        // Pass one: seed the projects, in the recorded order, so the sessions below land in
+        // existing repos rather than conjuring them in encounter order.
+        for project in recorded where directoryExists(project.path) {
+            let url = URL(fileURLWithPath: project.path, isDirectory: true)
+            guard indexOfRepo(for: url) == nil else { continue }
+            repos.append(Repo(url: url, isCollapsed: project.isCollapsed))
+        }
+
+        // Pass two: file the sessions. `insertSession` appends a repo for any working
+        // directory pass one did not cover, which is what keeps a v1 snapshot working.
         for entry in snapshot.sessions where directoryExists(entry.workingDirectory) {
             let url = URL(fileURLWithPath: entry.workingDirectory, isDirectory: true)
             let conversationID = entry.pinnedConversationID ?? entry.id
@@ -344,7 +358,12 @@ final class SessionStore: ObservableObject {
             restoredIDs.contains($0) ? $0 : nil
         } ?? restoredIDs.first
         persist()
-        return !restoredIDs.isEmpty
+        // Projects count as "restored something": `SessionStore.init` reads this as
+        // `if resetState || !restore() { seedInitialSession() }`, and seeding a home-directory
+        // session on top of a restored project list would be wrong. (`seedInitialSession`
+        // guards on `repos.isEmpty` too, so this is belt and braces — but the return value is
+        // also read by tests, and it should mean what it says.)
+        return !restoredIDs.isEmpty || !repos.isEmpty
     }
 
     /// Saved on every mutation rather than at terminate, so a crash cannot lose the list.
@@ -359,6 +378,7 @@ final class SessionStore: ObservableObject {
                         pinnedConversationID: $0.pinnedConversationID
                     )
                 },
+                projects: repos.map { .init(path: $0.url.path, isCollapsed: $0.isCollapsed) },
                 selectedSessionID: selectedSessionID,
                 sessionCounter: sessionCounter
             )
@@ -452,6 +472,16 @@ final class SessionStore: ObservableObject {
         guard let index = repos.firstIndex(where: { $0.id == id }),
               repos[index].isCollapsed != isCollapsed else { return }
         repos[index].isCollapsed = isCollapsed
+        persist()
+    }
+
+    /// The sidebar's single `.onMove` target. The policy — what may move where — lives in
+    /// `SidebarReorder`, which is tested without a store; this only applies the result.
+    func moveSidebarRows(fromOffsets source: IndexSet, toOffset destination: Int) {
+        guard let updated = SidebarReorder.apply(
+            to: repos, rows: sidebarRows, from: source, to: destination
+        ) else { return }
+        repos = updated
         persist()
     }
 
