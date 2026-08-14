@@ -9,15 +9,72 @@ private final class StubProvider: SurfaceProvider {
 
 private final class SpyReporter: ReapReporting, @unchecked Sendable {
     var reported: [ReapOutcome] = []
+    var contexts: [String] = []
     var sweeps: [Int] = []
-    func report(_ outcome: ReapOutcome, context: String) { reported.append(outcome) }
+    func report(_ outcome: ReapOutcome, context: String) {
+        reported.append(outcome)
+        contexts.append(context)
+    }
     func reportSweep(cleaned: Int) { sweeps.append(cleaned) }
+}
+
+/// A minimal scripted process table for this file's own reaper injection. Deliberately
+/// simpler than `SessionReaperTests`' `FakeInspector` — this file never exercises the
+/// ladder's escalation machinery, only whether `closeSession` invokes `reap` at all.
+private final class FakeInspector: ProcessInspecting, @unchecked Sendable {
+    var living: Set<pid_t>
+    init(living: Set<pid_t> = []) { self.living = living }
+    func children(of ppid: pid_t) -> Set<pid_t> { [] }
+    func descendants(of pid: pid_t) -> [ProcessIdentity] { [] }
+    func startTime(of pid: pid_t) -> UInt64? { living.contains(pid) ? 100 : nil }
+    func isAlive(_ identity: ProcessIdentity) -> Bool {
+        living.contains(identity.pid) && identity.procStart == 100
+    }
+}
+
+/// Records signals instead of touching a real process. Nothing reachable from a test may
+/// construct `PosixSignals` — see `SurfaceProcessRegistryTests` and `SessionReaperTests` for
+/// the same rule enforced the same way.
+private final class SpySignals: SignalSending, @unchecked Sendable {
+    /// Called after each send so a test can script "this signal kills it", mirroring
+    /// `SessionReaperTests`' `SpySignals`.
+    var onSend: (() -> Void)?
+    func send(_ signal: Int32, toGroup pgid: pid_t) -> Bool { onSend?(); return true }
+    func send(_ signal: Int32, toProcess pid: pid_t) -> Bool { onSend?(); return true }
+    func ownProcessGroup() -> pid_t { 999 }
+}
+
+/// Sleeps not at all, so a ladder that does run finishes instantly instead of taking up to
+/// 5 s per rung.
+private final class InstantSleeper: ReaperSleeping, @unchecked Sendable {
+    func sleep(seconds: Double) async {}
 }
 
 @MainActor
 final class SessionCloseReapTests: XCTestCase {
-    private func store() -> SessionStore {
-        SessionStore(provider: StubProvider(), persistence: nil)
+    /// Let the detached reap `Task` created by `closeSession` run to completion. Same
+    /// technique as `SurfaceLifecycleTests.drainMainQueue()`: pumping the run loop lets the
+    /// main-actor `Task` make progress and return from its `await` into the reaper actor.
+    private func drainMainQueue() {
+        let exp = expectation(description: "drain")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { exp.fulfill() }
+        wait(for: [exp], timeout: 1.0)
+    }
+
+    /// Every test gets a reaper built from fakes. Nothing here may fire the real
+    /// `SessionReaper` default (`ProcessTree()` + `PosixSignals()` + `RealSleeper()`) — that
+    /// reaches real `killpg`/`kill` calls, and `reap`'s `isAlive` guard being the only thing
+    /// standing between a scripted pid like 31337 and a real signal is not a safety margin a
+    /// unit test should depend on.
+    private func store(
+        inspector: ProcessInspecting = FakeInspector(),
+        signals: SignalSending = SpySignals()
+    ) -> SessionStore {
+        SessionStore(
+            provider: StubProvider(),
+            persistence: nil,
+            reaper: SessionReaper(inspector: inspector, signals: signals, sleeper: InstantSleeper())
+        )
     }
 
     /// A tab with no recorded process must still close cleanly — this is every tab created
@@ -63,12 +120,42 @@ final class SessionCloseReapTests: XCTestCase {
         let s = store()
         let session = s.newSession(in: URL(fileURLWithPath: "/tmp"))
 
-        // No object at all: `observeSurfaceClose` casts `note.object` to a `SurfaceView` and
-        // returns on failure, which is the same path a parked surface's late close takes.
+        // The nil object fails `note.object as? Ghostty.SurfaceView` immediately and
+        // returns. That is not quite the parked-surface case — a parked surface's late
+        // close notification passes that cast and instead misses the `surfaces` lookup one
+        // line later — but it exercises the same "surface not found, stay silent" contract
+        // that `observeSurfaceClose` now needs for parked surfaces too.
         NotificationCenter.default.post(
             name: Ghostty.Notification.ghosttyCloseSurface, object: nil
         )
 
         XCTAssertEqual(s.repos.flatMap(\.sessions).map(\.id), [session.id])
+    }
+
+    /// The behavior this task exists to add: closing a tab with a live recorded process
+    /// actually runs the reaper and reports the outcome. Nothing before this test proved
+    /// `reapSession` was ever invoked from `closeSession`.
+    func testClosingATabWithALiveProcessReapsItAndReportsClean() {
+        let inspector = FakeInspector(living: [31337])
+        let signals = SpySignals()
+        // The shell dies on the first signal (SIGHUP) — the overwhelming majority case per
+        // `SessionReaper`'s own doc comment — so the ladder stops immediately instead of
+        // escalating through SIGTERM/SIGKILL.
+        signals.onSend = { [weak inspector] in inspector?.living.remove(31337) }
+        let s = store(inspector: inspector, signals: signals)
+        let reporter = SpyReporter()
+        s.reapReporter = reporter
+        let session = s.newSession(in: URL(fileURLWithPath: "/tmp"))
+        s.processRegistry.restore([
+            session.id: SessionProcess(
+                identity: ProcessIdentity(pid: 31337, procStart: 100), pgid: 31337
+            )
+        ])
+
+        s.closeSession(session.id)
+        drainMainQueue()
+
+        XCTAssertEqual(reporter.reported, [.clean])
+        XCTAssertEqual(reporter.contexts, ["tab close"])
     }
 }
