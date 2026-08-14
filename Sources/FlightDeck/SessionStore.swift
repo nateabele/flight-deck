@@ -43,6 +43,9 @@ final class SessionStore: ObservableObject {
     /// Which OS process each tab owns, for teardown. See `SurfaceProcessRegistry`.
     let processRegistry = SurfaceProcessRegistry()
 
+    /// The process table the orphan sweep reads. Settable so tests can script it.
+    var processInspector: ProcessInspecting = ProcessTree()
+
     /// Off-main-actor process teardown. See `SessionReaper`.
     private let reaper: SessionReaper
     var reapReporter: ReapReporting? = LoggingReapReporter()
@@ -171,8 +174,15 @@ final class SessionStore: ObservableObject {
             preferences: preferences
         )
         self.notifier = notifier
+        // Captured BEFORE `restore()`, which persists at the end and would otherwise replace
+        // the previous run's records with this one's. The sweep itself is async and may land
+        // well after that write; it works from this snapshot, not from disk.
+        let previousRun = persistence?.load()
         if resetState || !restore() { seedInitialSession() }
         startStatusWatching()
+        if let previousRun {
+            Task { [weak self] in await self?.sweepOrphans(from: previousRun) }
+        }
     }
 
     func seedInitialSession(
@@ -371,20 +381,25 @@ final class SessionStore: ObservableObject {
 
     /// Saved on every mutation rather than at terminate, so a crash cannot lose the list.
     private func persist() {
-        persistence?.save(
-            SessionSnapshot(
-                sessions: repos.flatMap(\.sessions).map {
-                    .init(
-                        id: $0.id,
-                        title: $0.title,
-                        workingDirectory: $0.workingDirectory,
-                        pinnedConversationID: $0.pinnedConversationID
-                    )
-                },
-                selectedSessionID: selectedSessionID,
-                sessionCounter: sessionCounter
-            )
+        var snapshot = SessionSnapshot(
+            sessions: repos.flatMap(\.sessions).map {
+                .init(
+                    id: $0.id,
+                    title: $0.title,
+                    workingDirectory: $0.workingDirectory,
+                    pinnedConversationID: $0.pinnedConversationID
+                )
+            },
+            selectedSessionID: selectedSessionID,
+            sessionCounter: sessionCounter
         )
+        snapshot.processes = Dictionary(
+            uniqueKeysWithValues: processRegistry.all.map { ($0.key.uuidString, $0.value) }
+        )
+        // Stamped on every save so the next launch can tell "this run is still going" from
+        // "this run died and left its children behind".
+        snapshot.owner = ProcessTree().identity(of: getpid())
+        persistence?.save(snapshot)
     }
 
     /// No `persist()` call here: assigning `selectedSessionID` runs its `didSet`, which
@@ -491,6 +506,25 @@ final class SessionStore: ObservableObject {
         // Releasing last: the deferred `ghostty_surface_free` this triggers now has nothing
         // left to wait for.
         parkedSurfaces.removeValue(forKey: id)
+    }
+
+    /// Terminate processes recorded by a previous run that outlived it.
+    ///
+    /// Gated twice over: the recording instance must be gone (otherwise these are somebody
+    /// else's live children, and killing them would be a second Flight Deck instance
+    /// sabotaging the first), and each identity's start time must still match (otherwise the
+    /// pid has been recycled and now belongs to an unrelated process).
+    func sweepOrphans(from snapshot: SessionSnapshot) async {
+        guard let recorded = snapshot.processes, !recorded.isEmpty else { return }
+        if let owner = snapshot.owner, processInspector.isAlive(owner) { return }
+
+        var cleaned = 0
+        for (_, process) in recorded where processInspector.isAlive(process.identity) {
+            let outcome = await reaper.reap(shell: process.identity, pgid: process.pgid)
+            reapReporter?.report(outcome, context: "orphan sweep")
+            cleaned += 1
+        }
+        if cleaned > 0 { reapReporter?.reportSweep(cleaned: cleaned) }
     }
 
     /// Test seam. Production leaves this nil and injection goes to the live surface.
