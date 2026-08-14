@@ -67,7 +67,7 @@ struct FlightDeckApp: App {
     }
 
     var body: some Scene {
-        RootWindow(store: store)
+        RootWindow(store: store, preferences: preferences)
             .commands {
                 SessionCommands(store: store)
                 EditCommands()
