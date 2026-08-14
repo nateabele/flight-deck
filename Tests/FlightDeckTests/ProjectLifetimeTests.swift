@@ -56,6 +56,31 @@ final class ProjectLifetimeTests: XCTestCase {
         XCTAssertNil(store.status(for: b.id))
     }
 
+    /// The spec asks for "watchers stopped … notifications withdrawn" on `closeProject`, not
+    /// just `status(for:)` going nil. `watchedSessionIDs` and a `Notifying` spy are the seams
+    /// that let this be asserted directly rather than inferred from the status map alone.
+    func testCloseProjectStopsEveryChildsWatcherAndWithdrawsItsNotifications() {
+        let (store, _) = makeStore()
+        let spy = SpyNotifier()
+        store.notifier = spy
+        let a = store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
+        let b = store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
+        let project = store.repos[0].id
+        XCTAssertTrue(store.watchedSessionIDs.isSuperset(of: [a.id, b.id]))
+
+        store.closeProject(project)
+
+        XCTAssertTrue(store.watchedSessionIDs.isDisjoint(with: [a.id, b.id]))
+        XCTAssertEqual(Set(spy.withdrawn), [a.id, b.id])
+    }
+
+    private final class SpyNotifier: Notifying {
+        var withdrawn: [UUID] = []
+        func requestAuthorization() {}
+        func notify(sessionID: UUID, title: String, body: String) {}
+        func withdraw(sessionID: UUID) { withdrawn.append(sessionID) }
+    }
+
     func testCloseProjectMovesTheSelectionOffItsChildren() {
         let (store, _) = makeStore()
         store.newSession(in: URL(fileURLWithPath: "/w/b", isDirectory: true))

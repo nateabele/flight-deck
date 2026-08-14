@@ -139,12 +139,21 @@ final class ProjectPersistenceTests: XCTestCase {
     func testMoveSidebarRowsIgnoresAnIllegalMove() {
         let persistence = SessionPersistenceTests.FakePersistence()
         let store = SessionStore(provider: nil, persistence: persistence)
-        store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
+        // Project a holds two sessions so a CLAMP (rather than a reject) of the illegal move
+        // below would be distinguishable: clamping row 1 to the nearest legal offset would
+        // still land it inside project a's own block and reorder ["first", "second"] to
+        // ["second", "first"], while a true reject leaves both `repos` and each project's
+        // session order untouched. With only one session in project a, a clamp and a reject
+        // produce an identical `repos` order and this test could not tell them apart.
+        let first = store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
+        let second = store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
         store.newSession(in: URL(fileURLWithPath: "/w/b", isDirectory: true))
 
-        // Row 1 is project a's only session; row 3 is inside project b's block.
-        store.moveSidebarRows(fromOffsets: IndexSet(integer: 1), toOffset: 3)
+        // Rows are [P_a, a0, a1, P_b, b0]; row 1 is one of project a's own sessions, row 4 is
+        // inside project b's block.
+        store.moveSidebarRows(fromOffsets: IndexSet(integer: 1), toOffset: 4)
 
         XCTAssertEqual(store.repos.map(\.url.lastPathComponent), ["a", "b"])
+        XCTAssertEqual(store.repos[0].sessions.map(\.id), [first.id, second.id])
     }
 }

@@ -179,6 +179,16 @@ final class SessionStore: ObservableObject {
             ),
             at: index
         )
+        // A session landing in a collapsed project is otherwise invisible: `SidebarRow.rows`
+        // renders only the header for a collapsed repo, so the new row exists in `repos` but
+        // nothing in the sidebar shows it happened. Un-collapsing here — not in
+        // `insertSession` — is deliberate: `restore()` calls `insertSession` directly rather
+        // than going through `newSession`, precisely so a project's persisted collapsed state
+        // survives relaunch undisturbed. Moving this expansion down into `insertSession` would
+        // spring every restored collapsed project open on the next launch.
+        if let target = indexOfRepo(for: url) {
+            repos[target].isCollapsed = false
+        }
         selectedSessionID = session.id
         persist()
         return session
@@ -297,6 +307,17 @@ final class SessionStore: ObservableObject {
     /// Sessions whose working directory has since disappeared are dropped rather
     /// than resurrected as broken terminals.
     ///
+    /// That drop is harsher for a project than for a session: a session with a missing
+    /// directory is just not rebuilt, but an *empty* project (nothing left in it but its own
+    /// record in `SessionSnapshot.projects`) whose directory is missing is skipped entirely in
+    /// pass one below, and the `persist()` at the end of this method then writes a snapshot
+    /// that no longer mentions it. A project on an unmounted external or network volume is
+    /// therefore not merely hidden until the volume returns — it is permanently forgotten by a
+    /// single launch that happens to occur while the volume is offline. This matches the
+    /// long-standing behavior for sessions and is not being changed here; a future fix would
+    /// need to distinguish "genuinely deleted" from "temporarily unreachable" before pruning an
+    /// empty project.
+    ///
     /// Kept internal rather than `private`: `SessionPersistenceTests` calls it directly
     /// to exercise restore in isolation, and `@testable import` only lifts `internal`
     /// access — a `private` method stays invisible even to `@testable` callers outside
@@ -403,10 +424,10 @@ final class SessionStore: ObservableObject {
     func selectPreviousSession() { cycleSelection(forward: false) }
 
     /// The order is `repos.flatMap(\.sessions)` — the sidebar top to bottom, crossing project
-    /// sections. Flattening is not a convenience: `moveSession` deliberately leaves an emptied
-    /// source project standing, so the first repo can hold no sessions while live tabs sit in a
-    /// later section, and anything reading through `repos.first` would walk off the live list.
-    /// `closeSession` documents the same hazard.
+    /// sections. Flattening is not a convenience: both `closeSession` and `moveSession`
+    /// deliberately leave an emptied project standing rather than pruning it, so the first repo
+    /// can hold no sessions while live tabs sit in a later section, and anything reading through
+    /// `repos.first` would walk off the live list.
     ///
     /// No-ops on an empty list, and a lone session wraps to itself. A `selectedSessionID` that
     /// names no live session is treated as no selection at all, which lands on the first
@@ -455,10 +476,11 @@ final class SessionStore: ObservableObject {
         // long-standing disagreement with `moveSession`, which has always left an emptied
         // source project standing.
         if selectedSessionID == id {
-            // The first *session*, not the first repo's first session: `moveSession`
-            // deliberately leaves an emptied source project standing, so `repos.first` can
-            // be empty while live tabs sit in a later section. Reading through it would
-            // clear the selection and drop the whole app to the "No Session" empty state.
+            // The first *session*, not the first repo's first session: this method just above
+            // may have emptied `repos[repoIndex]` without removing it, and `moveSession` leaves
+            // an emptied source project standing the same way — so `repos.first` can be empty
+            // while live tabs sit in a later section. Reading through it would clear the
+            // selection and drop the whole app to the "No Session" empty state.
             selectedSessionID = repos.flatMap(\.sessions).first?.id
         }
         persist()
@@ -844,7 +866,8 @@ final class SessionStore: ObservableObject {
     /// that now survives a relaunch too, via `SessionSnapshot.projects`.
     ///
     /// The tab id does not change, so `selectedSessionID` needs no fixing up and SwiftUI
-    /// animates the same row from one section to the other rather than recreating it.
+    /// animates the same row moving within the sidebar's one flat `ForEach` rather than
+    /// recreating it — there are no `Section`s in the sidebar to move between.
     ///
     /// The watcher is restarted, because `Session.workingDirectory` is an input to
     /// `ClaudeSession.transcriptURL`: a tab that moved without one would keep tailing the
@@ -874,6 +897,9 @@ final class SessionStore: ObservableObject {
             destination = repos.count - 1
         }
         repos[destination].sessions.append(session)
+        // Same reasoning as `newSession`: a session landing in a collapsed destination must
+        // make that destination visible, or the move is invisible in the sidebar.
+        repos[destination].isCollapsed = false
 
         if restartsWatcher {
             watchers[id]?.stop()
