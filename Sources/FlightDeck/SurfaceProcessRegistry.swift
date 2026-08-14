@@ -70,5 +70,13 @@ final class SurfaceProcessRegistry {
     @discardableResult
     func forget(_ tabID: UUID) -> SessionProcess? { processes.removeValue(forKey: tabID) }
 
+    /// Re-establishes (or refreshes) a single tab's record without disturbing any other.
+    /// Used by `SessionStore.sweepOrphans` to put a survivor it could not kill back where
+    /// `persist()` can see it — the on-disk record is otherwise one-shot, since nothing but
+    /// the sweep itself ever repopulates this registry from a previous run's snapshot, and a
+    /// survivor the sweep failed to kill would vanish the moment anything else in the new run
+    /// persisted.
+    func keep(_ tabID: UUID, as process: SessionProcess) { processes[tabID] = process }
+
     func restore(_ restored: [UUID: SessionProcess]) { processes = restored }
 }

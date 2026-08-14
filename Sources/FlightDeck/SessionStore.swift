@@ -516,16 +516,31 @@ final class SessionStore: ObservableObject {
     ///
     /// A consequence worth naming rather than hiding: quit and a tab's own close reap can now
     /// race the same session concurrently (quit sees the record because close hasn't forgotten
-    /// it yet). That is harmless by construction — `SessionReaper.reap`'s `isAlive` gate makes
-    /// a second reap of an already-dead target return `.clean` without signalling anything,
-    /// and a second `forget`/`parkedSurfaces.removeValue` is a plain no-op — so the redundancy
-    /// costs an extra log line, never a duplicate signal to a live process.
+    /// it yet). That redundancy is benign, not invariant-violating — `SessionReaper.reap`'s
+    /// `isAlive` gate makes a second reap of an already-dead target return `.clean` without
+    /// signalling anything, and a second `forget`/`parkedSurfaces.removeValue` is a plain
+    /// no-op. But the two ladders are genuinely independent: the actor serializes the calls,
+    /// it does not deduplicate targets, so a session still alive when both race *can* receive
+    /// the same signal twice from two separate `deliver` calls. That is fine because POSIX
+    /// signals are idempotent, not because it cannot happen.
+    ///
+    /// `forget` only fires on a confirmed-clean outcome. A budget expiry or an unkillable
+    /// process reports `.survivors` — see this method's `guard`/`if handled` below — and the
+    /// record must stay exactly where it is, because "clean" here is the *only* signal this
+    /// method has that the process is actually gone. Forgetting on `.survivors` would erase a
+    /// still-live process from the one place (`processRegistry`, and therefore the persisted
+    /// snapshot) that gives the next launch's orphan sweep a chance at it — reopening the same
+    /// hole this method's window-closing fix above was written to close. `persist()` always
+    /// runs regardless, because the snapshot must reflect whichever registry state is current
+    /// — including "still recorded, because still alive" — not just the forgetting case.
     func reapSession(_ id: UUID, process: SessionProcess?, context: String) async {
+        var handled = true
         if let process {
             let outcome = await reaper.reap(shell: process.identity, pgid: process.pgid)
             reapReporter?.report(outcome, context: context)
+            handled = (outcome == .clean)
         }
-        processRegistry.forget(id)
+        if handled { processRegistry.forget(id) }
         persist()
         // Releasing last: the deferred `ghostty_surface_free` this triggers now has nothing
         // left to wait for.
@@ -557,7 +572,8 @@ final class SessionStore: ObservableObject {
         if processInspector.isAlive(owner) { return }
 
         var cleaned = 0
-        for (_, process) in recorded where processInspector.isAlive(process.identity) {
+        var survived = false
+        for (idString, process) in recorded where processInspector.isAlive(process.identity) {
             // `pgid` is the live process's own answer, not the persisted one — see this
             // method's doc comment above. `reap` takes it as an `Optional` all the way
             // through so "we could not ask" and "killpg some sentinel group" are never
@@ -566,9 +582,20 @@ final class SessionStore: ObservableObject {
             let livePgid = processInspector.pgid(of: process.identity.pid)
             let outcome = await reaper.reap(shell: process.identity, pgid: livePgid)
             reapReporter?.report(outcome, context: "orphan sweep")
-            if outcome == .clean { cleaned += 1 }
+            if outcome == .clean {
+                cleaned += 1
+            } else if let tabID = UUID(uuidString: idString) {
+                // A survivor of the *previous* run's sweep must not vanish once this run's
+                // first unrelated `persist()` fires. `processRegistry` starts this run empty
+                // (nothing here forked these children), so unless the survivor is put back
+                // into it, the very next save anywhere in the app would silently drop the
+                // one record that gives the *next* launch's sweep a chance at it.
+                processRegistry.keep(tabID, as: process)
+                survived = true
+            }
         }
         if cleaned > 0 { reapReporter?.reportSweep(cleaned: cleaned) }
+        if survived { persist() }
     }
 
     /// Total wall-clock budget for reaping every session at quit. Not per-session: quitting
@@ -580,7 +607,13 @@ final class SessionStore: ObservableObject {
     nonisolated static let quitBudget: Double = 8.0
 
     /// Reap every live session concurrently, returning when they are all done or the budget
-    /// expires — whichever comes first. Survivors are left for the next launch's sweep.
+    /// expires — whichever comes first. Survivors are left for the next launch's sweep: each
+    /// `reapSession` call already forgets its own record on `.clean` and keeps it on
+    /// `.survivors`, so there is nothing left for this method to do about the registry once
+    /// the group above returns. It must not do anything either — a blanket
+    /// `processRegistry.restore([:])` here would erase precisely the records a budget expiry
+    /// (or an unkillable process) needs kept, undoing `reapSession`'s own bookkeeping the
+    /// instant it finishes.
     ///
     /// The deadline races the *aggregate* of every reap, not the fastest one: the fan-out
     /// lives in a single child task nested inside its own group, so `group.next()` above it
@@ -607,7 +640,6 @@ final class SessionStore: ObservableObject {
             await group.next()
             group.cancelAll()
         }
-        processRegistry.restore([:])
     }
 
     /// Test seam. Production leaves this nil and injection goes to the live surface.
