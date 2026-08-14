@@ -62,6 +62,11 @@ struct FlightDeckApp: App {
             resetState: resetState,
             preferences: preferences,
             notifier: notifier,
+            // Passed in rather than assigned after construction for the same two reasons as
+            // `notifier` above: `UNUserNotificationCenter` traps here too, and the
+            // convenience init's launch-time orphan sweep reports through `reapReporter`
+            // before this factory could ever assign it afterwards.
+            reapReporter: UserNotificationReapReporter(),
             persistence: resetState ? nil : FileSessionPersistence()
         )
     }
