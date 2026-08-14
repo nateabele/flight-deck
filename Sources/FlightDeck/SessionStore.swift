@@ -28,9 +28,24 @@ final class SessionStore: ObservableObject {
                     isDirectory: true
                 )
             }
+            // Activating a tab is what marks it read. Deliberately not gated on
+            // `appIsActive()`: selecting a row is an explicit act, so it counts as looking
+            // at it even if the window is not frontmost at that instant.
+            if let id = selectedSessionID { unreadIdle.remove(id) }
             persist()
         }
     }
+
+    /// Sessions that finished while the user was not looking at them, rendered as the unread
+    /// dot in the sidebar. See `SessionReadPolicy`.
+    ///
+    /// Held here rather than on `SessionStatus` for the same reason as `subagentCounts`:
+    /// `applyRegistry` rebuilds every `SessionStatus` wholesale from the registry, so a field
+    /// on that type would be clobbered on the next poll. This is view state about the user,
+    /// not state `claude` reports.
+    ///
+    /// Not persisted — a relaunch is not something you need to be told you missed.
+    @Published private(set) var unreadIdle: Set<UUID> = []
 
     /// Weak: `GhosttyApp.shared` is a process-wide static that owns itself for the life of
     /// the process (see `GhosttyApp.shared`'s doc comment); the store must not co-own it.
@@ -91,6 +106,7 @@ final class SessionStore: ObservableObject {
 
     private var activationObserver: NSObjectProtocol?
     private var closeObserver: NSObjectProtocol?
+    private var appActivationObserver: NSObjectProtocol?
 
     init(
         provider: SurfaceProvider?,
@@ -102,6 +118,7 @@ final class SessionStore: ObservableObject {
         self.preferences = preferences
         observeActivationRequests()
         observeSurfaceClose()
+        observeAppActivation()
     }
 
     deinit {
@@ -110,6 +127,9 @@ final class SessionStore: ObservableObject {
         }
         if let closeObserver {
             NotificationCenter.default.removeObserver(closeObserver)
+        }
+        if let appActivationObserver {
+            NotificationCenter.default.removeObserver(appActivationObserver)
         }
     }
 
@@ -607,7 +627,33 @@ final class SessionStore: ObservableObject {
         }
         let previous = statuses
         statuses = next
+        applyReadState(previous: previous, current: next)
         deliverNotifications(previous: previous, current: next)
+    }
+
+    /// One read/unread decision per session, over the union of both snapshots — the same
+    /// shape as `deliverNotifications`, and driven by the same edge.
+    private func applyReadState(
+        previous: [UUID: SessionStatus], current: [UUID: SessionStatus]
+    ) {
+        let active = appIsActive()
+        for id in Set(previous.keys).union(current.keys) {
+            switch SessionReadPolicy.change(
+                old: previous[id], new: current[id],
+                isViewed: active && selectedSessionID == id
+            ) {
+            case .none:
+                continue
+            case .mark:
+                unreadIdle.insert(id)
+            case .clear:
+                unreadIdle.remove(id)
+            }
+        }
+
+        // A session whose `claude` exited renders no icon at all, so a mark left behind for
+        // it could never be seen or cleared. Drop it rather than leak the entry.
+        unreadIdle.formIntersection(current.keys)
     }
 
     /// One notification decision per session, over the union of both snapshots so a
@@ -643,6 +689,24 @@ final class SessionStore: ObservableObject {
             let id = (raw as? UUID) ?? (raw as? String).flatMap(UUID.init(uuidString:))
             guard let id else { return }
             MainActor.assumeIsolated { self?.selectSession(id) }
+        }
+    }
+
+    /// Returning to the app marks the tab you return *to* as read.
+    ///
+    /// Distinct from `observeActivationRequests`, which handles an explicit click on a
+    /// notification. This covers the ordinary case: a session finished while you were in
+    /// another app, you ⌘-tab back, and the tab you are already looking at should not keep
+    /// telling you there is something new in it.
+    private func observeAppActivation() {
+        guard appActivationObserver == nil else { return }
+        appActivationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let id = self.selectedSessionID else { return }
+                self.unreadIdle.remove(id)
+            }
         }
     }
 
