@@ -523,16 +523,26 @@ final class SessionStore: ObservableObject {
     /// process we have positively identified, not a stranger that happens to share a pid.
     func sweepOrphans(from snapshot: SessionSnapshot) async {
         guard let recorded = snapshot.processes, !recorded.isEmpty else { return }
-        if let owner = snapshot.owner, processInspector.isAlive(owner) { return }
+        // Fails closed, not open: a snapshot whose provenance cannot be established (no
+        // `owner`, e.g. a truncated/hand-edited file, a nil read at write time, or a future
+        // writer that skips `persist()`) is left alone rather than swept. The identity gate
+        // below cannot substitute for this — a live instance's own recorded children pass
+        // `isAlive` by design, so matching identity is exactly what would make them killable
+        // if this fell through.
+        guard let owner = snapshot.owner else { return }
+        if processInspector.isAlive(owner) { return }
 
         var cleaned = 0
         for (_, process) in recorded where processInspector.isAlive(process.identity) {
-            // A non-positive pgid makes `SessionReaper.deliver` fall back to signalling the
-            // pid directly instead of guessing a group from stale, on-disk data.
-            let livePgid = processInspector.pgid(of: process.identity.pid) ?? -1
+            // `pgid` is the live process's own answer, not the persisted one — see this
+            // method's doc comment above. `reap` takes it as an `Optional` all the way
+            // through so "we could not ask" and "killpg some sentinel group" are never
+            // conflated; `nil` here makes `SessionReaper.deliver` signal the pid directly
+            // instead of guessing.
+            let livePgid = processInspector.pgid(of: process.identity.pid)
             let outcome = await reaper.reap(shell: process.identity, pgid: livePgid)
             reapReporter?.report(outcome, context: "orphan sweep")
-            cleaned += 1
+            if outcome == .clean { cleaned += 1 }
         }
         if cleaned > 0 { reapReporter?.reportSweep(cleaned: cleaned) }
     }
