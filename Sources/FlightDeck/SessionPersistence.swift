@@ -29,7 +29,29 @@ struct SessionSnapshot: Codable, Equatable {
         }
     }
 
+    /// A project's sidebar state. Sessions carry their own `workingDirectory`, so this
+    /// exists for the two things the session list cannot express: the order the user put
+    /// the projects in, and whether a project is collapsed.
+    struct Project: Codable, Equatable {
+        /// Stored as reported, matching `Session.workingDirectory`. Normalization decides
+        /// *whether* two paths are the same project (`SessionStore.comparablePath`); it is
+        /// never what gets written down.
+        var path: String
+        var isCollapsed: Bool
+
+        init(path: String, isCollapsed: Bool = false) {
+            self.path = path
+            self.isCollapsed = isCollapsed
+        }
+    }
+
     var sessions: [Entry] = []
+    /// Absent in v1 snapshots. Optional is load-bearing for exactly the reason
+    /// `Entry.pinnedConversationID` is: synthesized `Codable` decodes an optional with
+    /// `decodeIfPresent`, so every existing `sessions.json` still decodes. `nil` means "no
+    /// recorded project state", and `restore` falls back to session-encounter order with
+    /// every project expanded.
+    var projects: [Project]?
     var selectedSessionID: UUID?
     /// Persisted so a new session cannot reuse a restored session's number.
     var sessionCounter: Int = 0
