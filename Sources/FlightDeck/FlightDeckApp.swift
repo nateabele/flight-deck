@@ -29,9 +29,19 @@ struct FlightDeckApp: App {
         _preferences = StateObject(wrappedValue: preferences)
 
         // `wrappedValue` is an @autoclosure: this call is NOT evaluated here. That is
-        // load-bearing — constructing the store touches `GhosttyApp.shared`, which reads
-        // `NSApp.isActive`, and `NSApp` does not exist yet during `App.init`. SwiftUI
-        // evaluates the thunk later, once the app is up.
+        // load-bearing for two unrelated reasons:
+        //
+        // 1. Constructing the store touches `GhosttyApp.shared`, which reads `NSApp.isActive`,
+        //    and `NSApp` does not exist yet during `App.init`. SwiftUI evaluates the thunk
+        //    later, once the app is up.
+        // 2. `SessionStore.init` posts `.flightDeckStoreReady`, which is how `AppDelegate`
+        //    finds the store it reaps every session through at quit. The delegate registers
+        //    its observer in `applicationWillFinishLaunching` — *after* `App.init` — so an
+        //    eagerly constructed store would post to nobody. `AppDelegate` now also falls back
+        //    to `SessionStore.current` so that quit reaping does not silently become a no-op
+        //    if this ever changes, but the ordering is still the primary path.
+        //
+        // Anyone tempted to construct the store here eagerly has to satisfy both.
         _store = StateObject(wrappedValue: Self.makeStore(preferences: preferences))
     }
 
