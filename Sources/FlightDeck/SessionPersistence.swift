@@ -56,6 +56,23 @@ struct SessionSnapshot: Codable, Equatable {
     var selectedSessionID: UUID?
     /// Persisted so a new session cannot reuse a restored session's number.
     var sessionCounter: Int = 0
+
+    /// Each tab's shell, so a run that dies without teardown can be cleaned up on the next
+    /// launch. Keyed by `UUID.uuidString` because a `[UUID: …]` dictionary encodes as a flat
+    /// array in JSON, and this file is meant to stay readable.
+    ///
+    /// Optional for the same load-bearing reason as `Entry.pinnedConversationID` above:
+    /// synthesized `Codable` decodes an optional with `decodeIfPresent`, so every existing
+    /// `sessions.json` still decodes. A non-optional field would throw and wipe every tab on
+    /// the first launch after this change.
+    var processes: [String: SessionProcess]?
+
+    /// The Flight Deck run that wrote this snapshot.
+    ///
+    /// The launch-time sweep only runs when this process is *gone*. Without the check, a
+    /// second concurrent instance would read the first instance's records and kill its live
+    /// children.
+    var owner: ProcessIdentity?
 }
 
 @MainActor
