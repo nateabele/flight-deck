@@ -186,3 +186,47 @@ wrong before. Watch for: clicking the project row's ✕ collapses/expands the pr
 of closing it. If that happens, the remedy is to move `.onTapGesture` off the `HStack` and
 onto the chevron `Image` alone, the way the close button already claims its own `Button`
 rather than relying on the row-level gesture.
+
+Four more from the whole-branch review of this same commit, none exercised in a running app:
+
+1. **`NSAlert` Escape key on the close-project confirmation.** In
+   `Sources/FlightDeck/ProjectCloseConfirmer.swift`, `addButton(withTitle: "Cancel")` gets
+   Escape as its key equivalent automatically — but the very next line,
+   `cancel.keyEquivalent = "\r"`, overwrites it, and an `NSButton` has exactly one key
+   equivalent. Return correctly takes the safe (Cancel) path, but Escape most likely no
+   longer dismisses the alert at all, which is a HIG regression on the one alert the spec
+   singles out for HIG treatment. Watch for: pressing Escape on the close-project alert does
+   nothing.
+2. **Accessibility on `ProjectHeaderRow`.** `.accessibilityElement(children: .combine)` merges
+   every descendant into one element, so the close button's own
+   `accessibilityIdentifier("close-project")` is not queryable at runtime and its
+   `accessibilityLabel("Close Project")` is superseded by the row's combined label. Separately,
+   `.onTapGesture { toggle() }` is not exposed as an accessibility action, so a VoiceOver user
+   has no way to expand/collapse the header by activating it — only the context menu's
+   Expand/Collapse item works. Candidate remedy: `.accessibilityAction { toggle() }` plus
+   `.accessibilityAddTraits(.isButton)` on the header, and pulling the close button out of the
+   combined element (or giving it its own accessibility action) so VoiceOver can reach it.
+3. **`ProjectsSettingsTab` nests a `NavigationSplitView` inside a `VStack`.** Legal SwiftUI, and
+   the split view's own body is unchanged by this branch, but a `NavigationSplitView` expects
+   to own its container's sizing, and that can misbehave when it is not the top-level view.
+   Nobody has opened Preferences → Projects since this change landed. Watch for: the project
+   list/detail split rendering at the wrong size, or the bottom "Confirm before closing…" row
+   squeezing or overlapping the split view.
+4. **`closeProject` writes the snapshot N+1 times.** It routes through `closeSession` once per
+   child (deliberately — see that method's doc comment — to avoid a second copy of the
+   teardown list), and `closeSession`'s `selectedSessionID` `didSet` persists on every call, plus
+   `closeProject` persists once more itself. Closing a ten-session project is eleven
+   synchronous main-thread atomic file writes for one user gesture. Correct but wasteful, and
+   it lands right after `perf: cut main-thread file work and idle timer wakeups`, which was
+   trying to reduce exactly this. Candidate remedy: a private
+   `closeSession(_:persisting:)` that the loop calls with `persisting: false`, or a
+   suppression flag held for the duration of the loop.
+
+**Stale confirmation alert on a double-clicked ✕.** `SessionSidebar.close(projectAt:)` spawns
+a `Task` per call with no de-duplication, so double-clicking a project's close button starts
+two `ProjectCloseCoordinator.requestClose` calls and can show two confirmation sheets for the
+same project. Confirming the second one is a harmless no-op — `closeProject` re-resolves the
+project by `Repo.ID` and does nothing if it is already gone — but the phantom second alert is
+visible to the user. Candidate remedy: a `@State private var closing: Set<Repo.ID>` guard in
+`SessionSidebar`, checked and inserted before starting the `Task` and removed when it
+completes.
