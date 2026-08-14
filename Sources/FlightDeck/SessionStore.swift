@@ -449,9 +449,11 @@ final class SessionStore: ObservableObject {
         // and applyRegistry cannot observe the waiting -> gone edge here because both its
         // before and after snapshots already lack this id.
         notifier?.withdraw(sessionID: id)
-        if repos[repoIndex].sessions.isEmpty {
-            repos.remove(at: repoIndex)
-        }
+        // The project deliberately stays, even emptied. A project's lifetime is explicit:
+        // it appears when added or when a session lands in it, and is removed only by
+        // `closeProject` — the sidebar's project close button. That also settles a
+        // long-standing disagreement with `moveSession`, which has always left an emptied
+        // source project standing.
         if selectedSessionID == id {
             // The first *session*, not the first repo's first session: `moveSession`
             // deliberately leaves an emptied source project standing, so `repos.first` can
@@ -459,6 +461,24 @@ final class SessionStore: ObservableObject {
             // clear the selection and drop the whole app to the "No Session" empty state.
             selectedSessionID = repos.flatMap(\.sessions).first?.id
         }
+        persist()
+    }
+
+    /// Closes every session in a project, then removes the project.
+    ///
+    /// Deliberately routed through `closeSession` per child rather than reimplementing the
+    /// teardown: that method is where surface release, watcher shutdown, status and
+    /// subagent-count removal, anchor removal, and notification withdrawal all live, and a
+    /// second copy of that list would rot.
+    func closeProject(_ id: Repo.ID) {
+        guard let index = repos.firstIndex(where: { $0.id == id }) else { return }
+        // Snapshot the ids first: `closeSession` mutates `repos`, so iterating the live
+        // array would walk off the end.
+        for sessionID in repos[index].sessions.map(\.id) {
+            closeSession(sessionID)
+        }
+        // Re-found rather than reusing `index`: every `closeSession` above rewrote `repos`.
+        repos.removeAll { $0.id == id }
         persist()
     }
 

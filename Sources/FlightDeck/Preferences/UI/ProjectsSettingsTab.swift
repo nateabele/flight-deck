@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Per-project overrides. The project list is the union of currently-open projects and
-/// projects with a saved override — a `Repo` vanishes from `SessionStore` when its last
-/// session closes, so open projects alone would lose overrides from view.
+/// projects with a saved override — an override outlives the project it belongs to, since
+/// closing a project removes it from `SessionStore` entirely.
 struct ProjectsSettingsTab: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore

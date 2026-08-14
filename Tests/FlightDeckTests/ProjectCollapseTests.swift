@@ -34,15 +34,14 @@ final class ProjectCollapseTests: XCTestCase {
         XCTAssertNil(store.collapsedStatus(forProjectAt: project))
     }
 
-    // TODO(Task 5): uncomment once a project survives closing its last session.
-    // func testCollapsedStatusIsNilForAProjectWithNoSessions() {
-    //     let (store, _) = makeStore()
-    //     let session = store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
-    //     let project = store.repos[0].id
-    //     store.closeSession(session.id)
-    //
-    //     XCTAssertNil(store.collapsedStatus(forProjectAt: project))
-    // }
+    func testCollapsedStatusIsNilForAProjectWithNoSessions() {
+        let (store, _) = makeStore()
+        let session = store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
+        let project = store.repos[0].id
+        store.closeSession(session.id)
+
+        XCTAssertNil(store.collapsedStatus(forProjectAt: project))
+    }
 
     func testCollapsedStatusDropsTheSubagentCount() {
         let (store, _) = makeStore()
@@ -78,14 +77,13 @@ final class ProjectCollapseTests: XCTestCase {
         XCTAssertEqual(store.sidebarRows, [.project(project)])
     }
 
-    // TODO(Task 5): uncomment once a project survives closing its last session.
-    // func testACollapsedEmptyProjectHasNoPlaceholder() {
-    //     let (store, _) = makeStore()
-    //     let session = store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
-    //     let project = store.repos[0].id
-    //     store.closeSession(session.id)
-    //     store.setCollapsed(true, forProjectAt: project)
-    //
-    //     XCTAssertEqual(store.sidebarRows, [.project(project)])
-    // }
+    func testACollapsedEmptyProjectHasNoPlaceholder() {
+        let (store, _) = makeStore()
+        let session = store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
+        let project = store.repos[0].id
+        store.closeSession(session.id)
+        store.setCollapsed(true, forProjectAt: project)
+
+        XCTAssertEqual(store.sidebarRows, [.project(project)])
+    }
 }
