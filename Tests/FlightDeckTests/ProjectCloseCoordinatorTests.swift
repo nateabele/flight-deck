@@ -36,11 +36,19 @@ final class ProjectCloseCoordinatorTests: XCTestCase {
         // A v1 preferences blob predates the field. If this throws, `load()` returns nil and
         // every flag, override and shell setting the user has is silently reset.
         //
-        // Built from a real `Preferences()` rather than hand-written JSON, so this test
-        // stays about the missing key rather than guessing `FlagSet`'s encoding.
-        let encoded = try JSONEncoder().encode(Preferences())
+        // Built from a real `Preferences` rather than hand-written JSON, so this test stays
+        // about the missing key rather than guessing `FlagSet`'s encoding. `confirmations`
+        // is given a non-nil value here specifically so the key is genuinely present in the
+        // encoded JSON — a `Preferences()` default would already omit it (synthesized
+        // `Encodable` skips nil optionals), which would make the removal below a no-op and
+        // the test vacuous.
+        let encoded = try JSONEncoder().encode(Preferences(confirmations: ConfirmationPreferences()))
         var object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        XCTAssertNotNil(
+            object["confirmations"],
+            "fixture no longer contains the key, so this test would not exercise removal"
         )
         object.removeValue(forKey: "confirmations")
         let json = try JSONSerialization.data(withJSONObject: object)
