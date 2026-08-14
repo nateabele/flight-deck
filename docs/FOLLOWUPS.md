@@ -158,3 +158,31 @@ clicks or hover. Worth revisiting if the flicker proves annoying in practice.
 
 Related, still open: `.onHover` does not fire while a trackpad scroll is in flight, so a
 row can hold a stale hover state after scrolling.
+
+## From project tabs (2026-08-14) — unverified in a running app
+
+Two behaviours that `SidebarReorder`/`SidebarRow` depend on were exercised only under
+`XCTest`, not by driving the actual sidebar:
+
+1. That `.onMove` gives drag-to-reorder on a macOS `List` without an edit mode (there is no
+   iOS-style "Edit" mode on this platform to put it in).
+2. That `.onMove` coexists with the existing `.dropDestination(for: URL.self)` folder drop on
+   the same `List` — both are attached to the same flattened `ForEach`/`List` in
+   `SessionSidebar`.
+
+If either misbehaves, the fallback is `.draggable`/`.dropDestination` with a typed
+`SidebarRow` payload and a hand-drawn insertion indicator, behind the same
+`SidebarReorder.apply` — so only the gesture plumbing would change, not the reorder policy.
+This fallback is recorded in
+`docs/superpowers/specs/2026-08-14-project-tabs-design.md`.
+
+Also unverified: whether `ProjectHeaderRow`'s close button reliably takes priority over its
+own row's tap gesture. The `HStack` carries `.contentShape(Rectangle())` + `.onHover` +
+`.onTapGesture { toggle() }` for collapse/expand, with the close `Button` as a child of that
+same `HStack`. SwiftUI is expected to give the child `Button` first refusal over the
+ancestor's tap gesture, but that has not been confirmed in a running app — and `SessionRow`'s
+hover fix above is a reminder that this codebase's SwiftUI hit-testing assumptions have been
+wrong before. Watch for: clicking the project row's ✕ collapses/expands the project instead
+of closing it. If that happens, the remedy is to move `.onTapGesture` off the `HStack` and
+onto the chevron `Image` alone, the way the close button already claims its own `Button`
+rather than relying on the row-level gesture.
