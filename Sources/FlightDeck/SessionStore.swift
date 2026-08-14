@@ -55,6 +55,50 @@ final class SessionStore: ObservableObject {
     /// sessions re-parents rather than recreates. Dropping an entry frees it.
     private var surfaces: [UUID: Ghostty.SurfaceView] = [:]
 
+    /// Which OS process each tab owns, for teardown. See `SurfaceProcessRegistry`.
+    let processRegistry = SurfaceProcessRegistry()
+
+    /// The process table the orphan sweep reads. Settable so tests can script it.
+    var processInspector: ProcessInspecting = ProcessTree()
+
+    /// This run's own identity, stamped into every snapshot as `owner`. Computed once: it
+    /// cannot change for the life of the process, and `persist()` runs on every mutation —
+    /// every tab switch, every rename, every registry tick.
+    ///
+    /// **It must read the real process table, never `processInspector`.** That property is a
+    /// test seam, and `owner` is the interlock the launch sweep gates on: a snapshot whose
+    /// `owner` is reported alive is left entirely alone. Routing this through the seam would
+    /// let a test (or a future refactor tidying "duplicate" inspector use) stamp a fabricated
+    /// owner into a real `sessions.json`, and the next launch would then either decline to
+    /// sweep real orphans or — worse, if the fake identity is one that happens to be dead —
+    /// sweep somebody else's live children. The one value in this file that must come from
+    /// the operating system and nowhere else.
+    private static let selfIdentity: ProcessIdentity? = ProcessTree().identity(of: getpid())
+
+    /// The most recently constructed store.
+    ///
+    /// A fallback for `AppDelegate`, which normally learns about the store through
+    /// `.flightDeckStoreReady`. That notification only reaches the delegate because
+    /// `FlightDeckApp` happens to build the store inside a SwiftUI `@autoclosure`, deferred for
+    /// an entirely unrelated reason (`NSApp` does not exist during `App.init`). Constructing it
+    /// eagerly instead — a plausible "cleanup" — would post the notification before the
+    /// delegate's observer exists, turning `applicationShouldTerminate` into an immediate
+    /// `.terminateNow` that reaps nothing at all, silently, with no test failing. Weak so the
+    /// store's lifetime is still owned by the `@StateObject` that holds it.
+    static weak var current: SessionStore?
+
+    /// Off-main-actor process teardown. See `SessionReaper`.
+    private let reaper: SessionReaper
+    var reapReporter: ReapReporting? = LoggingReapReporter()
+
+    /// Surfaces whose tab is gone but whose process is still being killed.
+    ///
+    /// Holding the view here is what orders the teardown correctly: releasing it runs
+    /// `ghostty_surface_free`, which joins libghostty's IO thread and spins in its own
+    /// `killpg` loop *on the main actor*. Reaping first means that loop finds a dead child
+    /// and returns at once instead of blocking the UI.
+    private var parkedSurfaces: [UUID: Ghostty.SurfaceView] = [:]
+
     /// One transcript watcher per session, torn down with the session.
     private var watchers: [UUID: TranscriptWatcher] = [:]
 
@@ -121,14 +165,29 @@ final class SessionStore: ObservableObject {
     init(
         provider: SurfaceProvider?,
         persistence: SessionPersisting? = nil,
-        preferences: PreferencesStore? = nil
+        preferences: PreferencesStore? = nil,
+        reaper: SessionReaper = SessionReaper(
+            inspector: ProcessTree(), signals: PosixSignals(), sleeper: RealSleeper()
+        )
     ) {
         self.provider = provider
         self.persistence = persistence
         self.preferences = preferences
+        self.reaper = reaper
+        // Shell records land asynchronously, up to half a second after the tab they belong to
+        // (see `SurfaceProcessRegistry`), so the `persist()` that `newSession`/`restore` already
+        // ran is too early to contain them. Without this the snapshot names no shell for any
+        // tab until some unrelated mutation happens to save again — and a crash before that
+        // leaves the next launch's orphan sweep nothing to find.
+        processRegistry.onChange = { [weak self] in self?.persist() }
         observeActivationRequests()
         observeSurfaceClose()
         observeAppActivation()
+        // Two independent ways for `AppDelegate` to find the store it does not own, because
+        // quit reaping silently does nothing if it finds neither — see `.flightDeckStoreReady`
+        // and `SessionStore.current`.
+        Self.current = self
+        NotificationCenter.default.post(name: .flightDeckStoreReady, object: self)
     }
 
     deinit {
@@ -174,6 +233,7 @@ final class SessionStore: ObservableObject {
         resetState: Bool = false,
         preferences: PreferencesStore? = nil,
         notifier: Notifying? = nil,
+        reapReporter: ReapReporting? = nil,
         persistence: SessionPersisting?
     ) {
         self.init(
@@ -182,8 +242,17 @@ final class SessionStore: ObservableObject {
             preferences: preferences
         )
         self.notifier = notifier
+        // Before the sweep below, which reports through it.
+        if let reapReporter { self.reapReporter = reapReporter }
+        // Captured BEFORE `restore()`, which persists at the end and would otherwise replace
+        // the previous run's records with this one's. The sweep itself is async and may land
+        // well after that write; it works from this snapshot, not from disk.
+        let previousRun = persistence?.load()
         if resetState || !restore() { seedInitialSession() }
         startStatusWatching()
+        if let previousRun {
+            Task { [weak self] in await self?.sweepOrphans(from: previousRun) }
+        }
     }
 
     func seedInitialSession(
@@ -315,7 +384,11 @@ final class SessionStore: ObservableObject {
         config.workingDirectory = url.path
         config.initialInput = initialInput
         config.environmentVariables = preferences?.sessionEnvironment() ?? [:]
-        if let surface = provider?.makeSurface(config) {
+        // Wrapped so the registry can identify the shell libghostty forks for this surface;
+        // libghostty exposes no pid of its own. The identification finishes asynchronously,
+        // after `makeSurface` returns — see `SurfaceProcessRegistry`.
+        let created = processRegistry.record(for: session.id) { provider?.makeSurface(config) }
+        if let surface = created {
             surfaces[session.id] = surface
         }
         provider?.tick()
@@ -419,21 +492,33 @@ final class SessionStore: ObservableObject {
 
     /// Saved on every mutation rather than at terminate, so a crash cannot lose the list.
     private func persist() {
-        persistence?.save(
-            SessionSnapshot(
-                sessions: repos.flatMap(\.sessions).map {
-                    .init(
-                        id: $0.id,
-                        title: $0.title,
-                        workingDirectory: $0.workingDirectory,
-                        pinnedConversationID: $0.pinnedConversationID
-                    )
-                },
-                projects: repos.map { .init(path: $0.url.path, isCollapsed: $0.isCollapsed) },
-                selectedSessionID: selectedSessionID,
-                sessionCounter: sessionCounter
-            )
+        // `var`, because the process table and owner stamp below are assigned after
+        // construction. `projects` carries the sidebar order and collapse state, which the
+        // session list alone cannot express.
+        var snapshot = SessionSnapshot(
+            sessions: repos.flatMap(\.sessions).map {
+                .init(
+                    id: $0.id,
+                    title: $0.title,
+                    workingDirectory: $0.workingDirectory,
+                    pinnedConversationID: $0.pinnedConversationID
+                )
+            },
+            projects: repos.map { .init(path: $0.url.path, isCollapsed: $0.isCollapsed) },
+            selectedSessionID: selectedSessionID,
+            sessionCounter: sessionCounter
         )
+        let processes = Dictionary(
+            uniqueKeysWithValues: processRegistry.all.map { ($0.key.uuidString, $0.value) }
+        )
+        // `nil` rather than `{}` when there is nothing recorded. Equivalent in effect —
+        // `sweepOrphans` returns early on either — and this file is meant to stay readable by
+        // a human, which an empty object in every snapshot works against.
+        snapshot.processes = processes.isEmpty ? nil : processes
+        // Stamped on every save so the next launch can tell "this run is still going" from
+        // "this run died and left its children behind".
+        snapshot.owner = Self.selfIdentity
+        persistence?.save(snapshot)
     }
 
     /// No `persist()` call here: assigning `selectedSessionID` runs its `didSet`, which
@@ -487,10 +572,26 @@ final class SessionStore: ObservableObject {
     func closeSession(_ id: UUID) {
         guard let (repoIndex, sessionIndex) = locate(id) else { return }
         repos[repoIndex].sessions.remove(at: sessionIndex)
-        // Dropping the retained view triggers Ghostty.Surface.deinit, which
-        // defers ghostty_surface_free to a main-actor task. The singleton app
-        // outlives that free, so there is no use-after-free.
-        surfaces[id] = nil
+
+        // Detach and park rather than release. Two reasons this is not just `= nil`:
+        //
+        // 1. `closeSession` never removed the view from its superview, so a *selected*
+        //    tab's surface stayed retained by `TerminalHostView` until SwiftUI's next
+        //    `updateNSView` pass (`TerminalPane.swift:40-42`). Detaching here makes the
+        //    close immediate and independent of that pass.
+        // 2. Releasing the view runs `ghostty_surface_free` on the main actor, which joins
+        //    the IO thread and spins in libghostty's SIGHUP-only `killpg` loop
+        //    (`vendor/ghostty/src/termio/Exec.zig:1152-1185`). We hold the view until our
+        //    own reap has killed the tree, so that loop finds a dead child and returns.
+        if let surface = surfaces.removeValue(forKey: id) {
+            surface.removeFromSuperview()
+            parkedSurfaces[id] = surface
+        }
+        // Read, don't remove: the record has to survive until `reapSession` below has
+        // actually confirmed the process is gone. See `reapSession`'s doc comment for why
+        // forgetting it here — before the reap has even started — is the bug.
+        let doomed = processRegistry.process(for: id)
+
         watchers[id]?.stop()
         watchers.removeValue(forKey: id)
         statuses.removeValue(forKey: id)
@@ -514,6 +615,169 @@ final class SessionStore: ObservableObject {
             selectedSessionID = repos.flatMap(\.sessions).first?.id
         }
         persist()
+
+        Task { [weak self] in
+            await self?.reapSession(id, process: doomed, context: "tab close")
+        }
+    }
+
+    /// Kill a tab's process tree, then release its parked surface. Shared by tab close and
+    /// app quit, which differ only in their budget and in who waits for them.
+    ///
+    /// `processRegistry.forget` and the `persist()` that makes it stick happen here, only
+    /// after the reap has run — never synchronously inside `closeSession`. `closeSession`
+    /// used to forget the record immediately, which opened a window (up to the reap's own
+    /// budget, worst case ~10 s) during which the doomed process existed in *no* record at
+    /// all: gone from `processRegistry.all`, so `reapAllForQuit` would skip it, and already
+    /// absent from the snapshot `closeSession`'s own `persist()` had just written, so the next
+    /// launch's orphan sweep could not find it either. A quit or crash inside that window
+    /// leaked the process permanently and invisibly — forgetting has to happen *after* the
+    /// window closes, not before it opens.
+    ///
+    /// A consequence worth naming rather than hiding: quit and a tab's own close reap can now
+    /// race the same session concurrently (quit sees the record because close hasn't forgotten
+    /// it yet). That redundancy is benign, not invariant-violating — `SessionReaper.reap`'s
+    /// `isAlive` gate makes a second reap of an already-dead target return `.clean` without
+    /// signalling anything, and a second `forget`/`parkedSurfaces.removeValue` is a plain
+    /// no-op. But the two ladders are genuinely independent: the actor serializes the calls,
+    /// it does not deduplicate targets, so a session still alive when both race *can* receive
+    /// the same signal twice from two separate `deliver` calls. That is fine because POSIX
+    /// signals are idempotent, not because it cannot happen.
+    ///
+    /// The group to signal is re-derived here, from the live process table, exactly as
+    /// `sweepOrphans` does — it is never carried on the record. Reading a pgid at record time
+    /// races the child's own `setsid()`, and a read that wins that race captures Flight Deck's
+    /// *own* process group and pins it to the session for the rest of its life: the self-group
+    /// rail then downgrades every one of that session's signals to per-pid, silently, forever.
+    /// A live process that has just passed the identity gate is the authority on its own group;
+    /// nothing else is. That is why `SessionProcess` no longer carries a `pgid` at all.
+    ///
+    /// `forget` only fires on a confirmed-clean outcome. A budget expiry or an unkillable
+    /// process reports `.survivors` — see this method's `if handled` below — and the
+    /// record must stay exactly where it is, because "clean" here is the *only* signal this
+    /// method has that the process is actually gone. Forgetting on `.survivors` would erase a
+    /// still-live process from the one place (`processRegistry`, and therefore the persisted
+    /// snapshot) that gives the next launch's orphan sweep a chance at it — reopening the same
+    /// hole this method's window-closing fix above was written to close. `persist()` always
+    /// runs regardless, because the snapshot must reflect whichever registry state is current
+    /// — including "still recorded, because still alive" — not just the forgetting case.
+    func reapSession(_ id: UUID, process: SessionProcess?, context: String) async {
+        var handled = true
+        if let process {
+            let livePgid = processInspector.pgid(of: process.identity.pid)
+            let outcome = await reaper.reap(shell: process.identity, pgid: livePgid)
+            reapReporter?.report(outcome, context: context)
+            handled = (outcome == .clean)
+        }
+        if handled { processRegistry.forget(id) }
+        persist()
+        // Releasing last: the deferred `ghostty_surface_free` this triggers now has nothing
+        // left to wait for.
+        parkedSurfaces.removeValue(forKey: id)
+    }
+
+    /// Terminate processes recorded by a previous run that outlived it.
+    ///
+    /// Gated twice over: the recording instance must be gone (otherwise these are somebody
+    /// else's live children, and killing them would be a second Flight Deck instance
+    /// sabotaging the first), and each identity's start time must still match (otherwise the
+    /// pid has been recycled and now belongs to an unrelated process).
+    ///
+    /// The pgid used to signal is re-derived from the live process table. A number carried on
+    /// the record would be evidence about some previous boot's process table, not this one —
+    /// which is why `SessionProcess` carries none at all any more, and why `reapSession`
+    /// re-derives on the live path too. A process whose identity has just been confirmed to
+    /// match is authoritative about its own process group; nothing else is. Re-deriving only
+    /// after `isAlive` has passed means this is asking a process we have positively identified,
+    /// not a stranger that happens to share a pid.
+    func sweepOrphans(from snapshot: SessionSnapshot) async {
+        guard let recorded = snapshot.processes, !recorded.isEmpty else { return }
+        // Fails closed, not open: a snapshot whose provenance cannot be established (no
+        // `owner`, e.g. a truncated/hand-edited file, a nil read at write time, or a future
+        // writer that skips `persist()`) is left alone rather than swept. The identity gate
+        // below cannot substitute for this — a live instance's own recorded children pass
+        // `isAlive` by design, so matching identity is exactly what would make them killable
+        // if this fell through.
+        guard let owner = snapshot.owner else { return }
+        if processInspector.isAlive(owner) { return }
+
+        var cleaned = 0
+        var survived = false
+        // The map's keys are deliberately dropped. They are *previous-run tab ids*, and
+        // `restore()` has already recreated this run's tabs under those very same UUIDs, each
+        // with a live shell of its own recorded against them. Re-keying a survivor under its
+        // old id would overwrite one of those live records — discarding a live process without
+        // proof of death, and leaving it unreaped on close and on quit.
+        for process in recorded.values where processInspector.isAlive(process.identity) {
+            // `pgid` is the live process's own answer — see this method's doc comment above.
+            // `reap` takes it as an `Optional` all the way through so "we could not ask" and
+            // "killpg some sentinel group" are never conflated; `nil` here makes
+            // `SessionReaper.deliver` signal the pid directly instead of guessing.
+            let livePgid = processInspector.pgid(of: process.identity.pid)
+            let outcome = await reaper.reap(shell: process.identity, pgid: livePgid)
+            reapReporter?.report(outcome, context: "orphan sweep")
+            if outcome == .clean {
+                cleaned += 1
+            } else {
+                // A survivor of the *previous* run's sweep must not vanish once this run's
+                // first unrelated `persist()` fires. `processRegistry` starts this run empty
+                // (nothing here forked these children), so unless the survivor is put back
+                // into it, the very next save anywhere in the app would silently drop the
+                // one record that gives the *next* launch's sweep a chance at it.
+                //
+                // Under a fresh id: this is an orphan, not a tab. Nothing downstream reads the
+                // key except `reapSession`'s `forget`, and a collision with a live tab's id
+                // would be a live record destroyed. See the loop header above.
+                processRegistry.keep(UUID(), as: process)
+                survived = true
+            }
+        }
+        if cleaned > 0 { reapReporter?.reportSweep(cleaned: cleaned) }
+        if survived { persist() }
+    }
+
+    /// Total wall-clock budget for reaping every session at quit. Not per-session: quitting
+    /// with twelve tabs open must not take twelve times as long. `nonisolated` because it is
+    /// a plain `Sendable` constant referenced from `reapAllForQuit`'s default parameter value,
+    /// which Swift evaluates outside this type's actor isolation — without this, the compiler
+    /// warns (and Swift 6 mode errors) that a main-actor-isolated property cannot be read from
+    /// that nonisolated context.
+    nonisolated static let quitBudget: Double = 8.0
+
+    /// Reap every live session concurrently, returning when they are all done or the budget
+    /// expires — whichever comes first. Survivors are left for the next launch's sweep: each
+    /// `reapSession` call already forgets its own record on `.clean` and keeps it on
+    /// `.survivors`, so there is nothing left for this method to do about the registry once
+    /// the group above returns. It must not do anything either — a blanket
+    /// `processRegistry.restore([:])` here would erase precisely the records a budget expiry
+    /// (or an unkillable process) needs kept, undoing `reapSession`'s own bookkeeping the
+    /// instant it finishes.
+    ///
+    /// The deadline races the *aggregate* of every reap, not the fastest one: the fan-out
+    /// lives in a single child task nested inside its own group, so `group.next()` above it
+    /// only resolves once every reap inside has finished (or the sibling deadline task wins
+    /// first). An earlier draft raced the deadline against each reap individually — the first
+    /// session to finish would win the outer `group.next()`, and the `cancelAll()` that
+    /// followed cancelled every reap still in flight, so quitting with several tabs open
+    /// reaped only one of them.
+    func reapAllForQuit(budget: Double = SessionStore.quitBudget) async {
+        let live = processRegistry.all
+        guard !live.isEmpty else { return }
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { [weak self] in
+                await withTaskGroup(of: Void.self) { inner in
+                    for (id, process) in live {
+                        inner.addTask { await self?.reapSession(id, process: process, context: "app quit") }
+                    }
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(budget * 1_000_000_000))
+            }
+            await group.next()
+            group.cancelAll()
+        }
     }
 
     /// Closes every session in a project, then removes the project.
