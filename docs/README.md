@@ -7,6 +7,9 @@ Start with **[HANDOFF.md](HANDOFF.md)** — the entry point for picking this pro
 | Doc | What it's for |
 |---|---|
 | **[HANDOFF.md](HANDOFF.md)** | Session handoff: current state, quickstart, decisions, what's next. Read first. |
+| [../AGENTS.md](../AGENTS.md) | Agent entry point: the four rules that trip everyone up, commands, layout, conventions at a glance. |
+| [AGENT-OPERATIONS.md](AGENT-OPERATIONS.md) | Runtime hazards and rituals: the release swap, running inside the app you're editing, process hygiene, state storage, worktrees, test discipline. |
+| [CONVENTIONS.md](CONVENTIONS.md) | Code, comment, commit, test, and workflow conventions. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | The code as built — the spine, the `GhosttyEmbed/` reuse boundary, linkage/build config, runtime model. |
 | [BUILD.md](BUILD.md) | How to build, run, and test (from a fresh clone) + troubleshooting. |
 | [TOOLING.md](TOOLING.md) | Toolchain versions and the Zig/macOS-SDK linker workaround (why the build is unusual). |
@@ -17,6 +20,7 @@ Start with **[HANDOFF.md](HANDOFF.md)** — the entry point for picking this pro
 
 ## Reading order by goal
 
+- **"I'm an agent picking up a task"** → [../AGENTS.md](../AGENTS.md) → AGENT-OPERATIONS → CONVENTIONS.
 - **"Get it running"** → HANDOFF quickstart → BUILD.
 - **"Understand the code"** → ARCHITECTURE → the spec.
 - **"Know what to build next"** → HANDOFF "What to do next" → FOLLOWUPS → spec §9.
