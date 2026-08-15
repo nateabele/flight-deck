@@ -705,7 +705,8 @@ Append to `Tests/FlightDeckTests/SessionPersistenceTests.swift`:
                 .init(id: unread, title: "a", workingDirectory: "/w", unread: true),
                 .init(id: read, title: "b", workingDirectory: "/w"),
             ],
-            selectedSessionID: nil,
+            // Recorded explicitly, and on the READ session — see the correction note below.
+            selectedSessionID: read,
             sessionCounter: 2
         )
         let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
@@ -715,6 +716,15 @@ Append to `Tests/FlightDeckTests/SessionPersistenceTests.swift`:
         XCTAssertTrue(store.unreadIdle.contains(unread))
         XCTAssertFalse(store.unreadIdle.contains(read))
     }
+```
+
+**Corrected during execution:** the fixture above originally read `selectedSessionID: nil`.
+That is defective — with no recorded selection, `restore()`'s fallback (`restoredIDs.first`)
+lands on `unread`, since both fixtures share a working directory and land in one repo in
+encounter order, and the selection's `didSet` clears the very mark this test asserts. The
+shipped test points `selectedSessionID` at `read` instead, which is what is above.
+
+```swift
 
     /// The tab you land on is in front of you, so it comes back read. Seeding happens before
     /// the selection is assigned, whose `didSet` clears the mark — and `observeAppActivation`

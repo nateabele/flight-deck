@@ -247,7 +247,83 @@ final class SessionAutoResumeTests: XCTestCase {
 
         renameSettle?()   // let the rename complete
 
-        XCTAssertEqual(spy.sent, ["/rename renamed"], "the prompt must not follow the rename")
+        XCTAssertEqual(
+            spy.sent, ["/rename renamed"], "a second injection must not be allowed to start"
+        )
         XCTAssertNotNil(store.pendingResumePrompts[id], "deferred, not dropped")
+    }
+
+    /// The other direction from the precedence test above: the prompt starts first and
+    /// leaves its settle outstanding, then a rename lands on the user's keystroke — with no
+    /// interval to race against, unlike the registry tick's poll. The in-flight guard inside
+    /// `inject` must refuse the second call regardless of which caller goes first.
+    func testASecondInjectionIsRefusedWhileTheFirstIsInFlight() {
+        let (store, id, spy) = restoredSession()
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+
+        // Capture the prompt's settle without running it, so its injection stays in flight.
+        var promptSettle: (() -> Void)?
+        store.injectionSettle = { work in promptSettle = work }
+        store.flushPendingResumePromptsForTesting()
+        XCTAssertNotNil(promptSettle, "the prompt must still be mid-flight")
+        XCTAssertEqual(spy.events, [.killLine], "the prompt's Ctrl+U must have gone out")
+
+        // The user renames while that settle is still pending.
+        store.rename(id, to: "renamed")
+
+        XCTAssertEqual(
+            spy.events, [.killLine],
+            "a second injection must not send its own Ctrl+U while the first is in flight"
+        )
+    }
+
+    // MARK: Quitting
+
+    private var tmp: URL { URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true) }
+
+    private func entry(_ sessionID: UUID, _ activity: SessionActivity) -> ClaudeStatusFile.Entry {
+        .init(pid: 1, sessionID: sessionID, activity: activity, waitingFor: nil,
+              startedAt: 1, cwd: tmp.path, procStart: "start-a")
+    }
+
+    /// The clean-quit race: reaping kills every `claude` while the status watcher is still
+    /// running, so a final tick sees an empty registry. Without the terminating guard that
+    /// tick prunes every unread mark and persists `activity: nil` for every tab — wiping
+    /// exactly what the next launch needs.
+    func testAQuitTimeEmptyTickDoesNotWipeRecordedState() async {
+        let persistence = FakePersistence()
+        let store = SessionStore(provider: StubProvider(), persistence: persistence)
+        store.titleResolver = { _, done in done(nil) }
+        // Never viewed, so the busy -> idle transition below marks unread rather than
+        // clearing it — `appIsActive` alone decides that, independent of the selection.
+        store.appIsActive = { false }
+        let session = store.newSession(in: tmp)
+
+        // Busy, then idle while unwatched (marks unread), then busy again — a restored,
+        // unread, busy session, exactly the state auto-resume depends on.
+        store.applyRegistry([1: entry(session.id, .busy)])
+        store.applyRegistry([1: entry(session.id, .idle)])
+        store.applyRegistry([1: entry(session.id, .busy)])
+
+        XCTAssertTrue(store.unreadIdle.contains(session.id), "setup: must be marked unread")
+        XCTAssertEqual(store.status(for: session.id)?.activity, .busy, "setup: must be busy")
+
+        // Begin quitting. No process is registered for this session, so this returns
+        // immediately after setting the terminating flag — no real reap runs.
+        await store.reapAllForQuit()
+
+        // The race: a tick lands after the reap has cleared the registry Flight Deck reads.
+        store.applyRegistry([:])
+
+        XCTAssertTrue(
+            store.unreadIdle.contains(session.id),
+            "a quit-time empty tick must not prune the unread mark"
+        )
+        let persisted = persistence.stored?.sessions.first { $0.id == session.id }
+        XCTAssertEqual(
+            persisted?.activity, SessionActivity.busy.rawValue,
+            "a quit-time empty tick must not overwrite the recorded activity"
+        )
+        XCTAssertEqual(persisted?.unread, true)
     }
 }

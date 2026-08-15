@@ -163,15 +163,22 @@ Sidebar rows show what each Claude session is doing. Two sources feed one map:
   compatibility boundary.
 - **`SessionStatusWatcher`** — polls rather than watching vnodes because `claude` rewrites
   the file in place with no create/rename, so a directory watch would never fire.
-- **`SessionStore`** — merges registry activity with transcript-derived sub-agent counts,
-  drops sessions Flight Deck does not own, and runs `SessionNotificationPolicy` on each
-  transition.
+- **`SessionStore`** — merges registry activity with transcript-derived sub-agent counts and
+  drops sessions Flight Deck does not own. Each tick computes the edges once, as
+  `[StatusTransition]` (`old`/`new` status per tab), and hands that same list to three
+  consumers: `applyReadState` (the sidebar's unread dot), `deliverNotifications`
+  (`SessionNotificationPolicy`), and `cancelSupersededPrompts` (drops a queued "Keep going"
+  the moment a resumed session reports `busy` or `waiting` on its own). `persist()` runs
+  after all three, so the on-disk snapshot's `activity` and `unread` fields reflect the same
+  tick the sidebar just drew.
 - **`SessionNotifier`** — behind the `Notifying` protocol, because
   `UNUserNotificationCenter.current()` traps outside a signed bundle and would take the
   unit-test bundle down.
 
 Full field shapes, the decompiled status derivation, and accepted limitations are in
-`docs/superpowers/specs/2026-08-11-session-status-indicators-design.md`.
+`docs/superpowers/specs/2026-08-11-session-status-indicators-design.md`. The persisted
+`activity`/`unread` fields and the auto-resume prompt built on top of them are in
+`docs/superpowers/plans/2026-08-15-auto-resume.md`.
 
 ## Tab navigation
 

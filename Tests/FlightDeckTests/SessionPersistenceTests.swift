@@ -396,34 +396,55 @@ final class SessionPersistenceTests: XCTestCase {
     /// would clear it a moment later at launch regardless.
     func testTheRestoredSelectionComesBackRead() {
         let selected = UUID()
+        let other = UUID()
         let persistence = FakePersistence()
         persistence.stored = SessionSnapshot(
-            sessions: [.init(id: selected, title: "a", workingDirectory: "/w", unread: true)],
+            sessions: [
+                .init(id: selected, title: "a", workingDirectory: "/w", unread: true),
+                // A second unread session, unselected, so the test can tell "the seeding
+                // line runs at all" apart from "the selection clears its own mark" — with
+                // the seeding line deleted this one would come back unmarked too.
+                .init(id: other, title: "b", workingDirectory: "/w", unread: true),
+            ],
             selectedSessionID: selected,
-            sessionCounter: 1
+            sessionCounter: 2
         )
         let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
 
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
 
         XCTAssertFalse(store.unreadIdle.contains(selected))
+        XCTAssertTrue(store.unreadIdle.contains(other), "an unselected session's mark must restore")
     }
 
     /// A mark for a session whose directory has gone is not restored, because the session
     /// itself is not — there would be no row to draw it on.
     func testAMarkForADroppedSessionIsNotRestored() {
         let gone = UUID()
+        let kept = UUID()
+        let elsewhere = UUID()
         let persistence = FakePersistence()
         persistence.stored = SessionSnapshot(
-            sessions: [.init(id: gone, title: "a", workingDirectory: "/gone", unread: true)],
-            selectedSessionID: nil,
-            sessionCounter: 1
+            sessions: [
+                // Recorded selected and read, and restored, so the fallback in `restore()`
+                // does not land on `kept` and clear its mark via `selectedSessionID`'s
+                // `didSet` — the same trap `testRestoreSeedsUnreadMarks` guards against.
+                .init(id: elsewhere, title: "a", workingDirectory: "/elsewhere"),
+                .init(id: gone, title: "b", workingDirectory: "/gone", unread: true),
+                // A second unread session whose directory does exist, so the test can tell
+                // "the drop actually happened" apart from "nothing was ever seeded" — with
+                // the seeding line deleted this one would come back unmarked too.
+                .init(id: kept, title: "c", workingDirectory: "/kept", unread: true),
+            ],
+            selectedSessionID: elsewhere,
+            sessionCounter: 3
         )
         let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
 
-        store.restore(directoryExists: { _ in false })
+        store.restore(directoryExists: { $0 == "/kept" || $0 == "/elsewhere" })
 
         XCTAssertFalse(store.unreadIdle.contains(gone))
+        XCTAssertTrue(store.unreadIdle.contains(kept), "a restored session's mark must restore")
     }
 
     /// Case (c) — a snapshot that recorded no selection at all. Untested until a Task 6

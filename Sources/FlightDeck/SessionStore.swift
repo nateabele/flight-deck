@@ -140,6 +140,17 @@ final class SessionStore: ObservableObject {
     private var subagentCounts: [UUID: Int] = [:]
     private var statusWatcher: SessionStatusWatcher?
 
+    /// Set the instant `reapAllForQuit` begins, before its first `await`. Nothing stops
+    /// `statusWatcher`'s poll or the `WatchClock` timer while that reap is in flight — there
+    /// is no `applicationWillTerminate` — so a tick can land mid-reap and see every tracked
+    /// `claude` already gone. Every session's transition would then read `old != nil, new ==
+    /// nil`, which `applyReadState` treats as "the process exited" and prunes the unread mark
+    /// for, and the `persist()` at the end of `applyRegistry` would write `activity: nil,
+    /// unread: nil` for every tab — erasing exactly the state the next launch's auto-resume
+    /// needs to read back. `applyRegistry` returns immediately once this is set, so the state
+    /// on disk is whatever the last real tick before quit left there.
+    private var isTerminating = false
+
     /// Which process each tab is following, keyed by tab id. Established the first time a
     /// registry row carries the tab's conversation, and thereafter the only thing consulted
     /// — see `ConversationPin.resolve`.
@@ -179,6 +190,16 @@ final class SessionStore: ObservableObject {
     /// Internal rather than private so the tests can observe the queue without scripting a
     /// whole surface; nothing outside this type writes it.
     private(set) var pendingResumePrompts: [UUID: Date] = [:]
+
+    /// Tabs with a `sendKillLine()` already out and a settle still pending. Guarding here,
+    /// inside `inject` itself, rather than in each caller is load-bearing: `rename()` calls
+    /// `flushPendingRename` straight off the user's keystroke with no interval to race
+    /// against, unlike the registry tick's ~500ms poll against a 120ms settle. Without this a
+    /// rename landing inside a prompt's settle window sends a second Ctrl+U into a viewport
+    /// the first settle is still comparing against, and the prompt's settle then lands into a
+    /// session the rename just made busy — exactly what the idle gate above exists to
+    /// prevent, because it was evaluated before that second send, not after.
+    private var injecting: Set<UUID> = []
 
     /// Test seam, in the style of `appIsActive` and `injectionSettle`. Production reads the
     /// wall clock.
@@ -829,6 +850,8 @@ final class SessionStore: ObservableObject {
     /// followed cancelled every reap still in flight, so quitting with several tabs open
     /// reaped only one of them.
     func reapAllForQuit(budget: Double = SessionStore.quitBudget) async {
+        // Before any `await` — see `isTerminating`'s doc comment for the race this closes.
+        isTerminating = true
         let live = processRegistry.all
         guard !live.isEmpty else { return }
 
@@ -1026,11 +1049,17 @@ final class SessionStore: ObservableObject {
               let bar = InputBar.read(fromViewport: viewport),
               bar.rows.count == 1
         else { return false }
+        // See `injecting`'s doc comment: this is the one place both callers funnel through,
+        // so it is the one place that can refuse a second injection for a tab that already
+        // has one resolving.
+        guard !injecting.contains(id) else { return false }
 
+        injecting.insert(id)
         let before = bar.content
         injector.sendKillLine()
         // Claude Code needs a moment to repaint before the screen reflects the kill.
-        injectionSettle {
+        injectionSettle { [weak self] in
+            defer { self?.injecting.remove(id) }
             guard stillWanted() else { return }
             let after = injector.readViewport().flatMap(InputBar.read(fromViewport:))?.content
             injector.sendText(text)
@@ -1150,6 +1179,10 @@ final class SessionStore: ObservableObject {
     /// Entries for processes Flight Deck does not own are dropped: the registry lists
     /// every `claude` on the machine.
     func applyRegistry(_ rows: [pid_t: ClaudeStatusFile.Entry]) {
+        // Quitting: see `isTerminating`'s doc comment. A tick landing here reads an emptied
+        // registry, not a real one — returning before even the `defer` below runs is
+        // deliberate, so nothing prunes a mark or persists over the state auto-resume wants.
+        guard !isTerminating else { return }
         // The scan is also the retry tick for deferred renames. `defer` because this method
         // returns early when nothing changed, and a rename usually waits on something that
         // never shows up in `statuses` at all — the user clearing their half-typed draft
