@@ -112,4 +112,25 @@ final class SessionAutoResumeTests: XCTestCase {
             start.addingTimeInterval(SessionStore.resumePromptWindow)
         )
     }
+
+    /// Pins "once per restore", not "once per session". A constant `now` stub cannot tell the
+    /// two apart: it returns the same instant however many times it is called, so a regression
+    /// that moved the deadline computation inside the pass-two loop would still pass. This uses
+    /// an advancing clock and asserts every session got the FIRST reading.
+    func testTheDeadlineIsComputedOnceForTheWholeRestore() {
+        let (snap, ids) = snapshot(activities: ["busy", "shell"])
+        let store = makeStore(snap, autoResume: true)
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        var calls = 0
+        store.now = {
+            calls += 1
+            return start.addingTimeInterval(Double(calls - 1) * 60)
+        }
+
+        store.restore(directoryExists: allDirsExist)
+
+        let expected = start.addingTimeInterval(SessionStore.resumePromptWindow)
+        XCTAssertEqual(store.pendingResumePrompts[ids[0]], expected)
+        XCTAssertEqual(store.pendingResumePrompts[ids[1]], expected)
+    }
 }
