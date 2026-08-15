@@ -10,9 +10,33 @@ import SwiftUI
 final class TerminalHostView: NSView {
     var onResize: ((CGSize) -> Void)?
 
+    /// Set by `TerminalPane` on every update. Non-nil means there is a session here to
+    /// close; nil means this view should let `performClose:` continue up to the window.
+    var onCloseSession: (() -> Void)?
+
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         onResize?(newSize)
+    }
+
+    /// ⌘W and File ▸ Close mean "close this session", not "close the window".
+    ///
+    /// Declared rather than overridden: `NSView` does not define `performClose(_:)`, and
+    /// responder-chain dispatch is by selector lookup, not by inheritance. There is
+    /// correspondingly no `super` to call — declining the action is done by failing
+    /// validation below, which makes AppKit keep walking the chain to the window.
+    @objc func performClose(_ sender: Any?) {
+        onCloseSession?()
+    }
+}
+
+/// Without this, AppKit would treat this view as the handler for `performClose:` even when
+/// there is no session behind it, and ⌘W would silently do nothing instead of closing the
+/// window.
+extension TerminalHostView: NSUserInterfaceValidations {
+    func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        guard item.action == #selector(performClose(_:)) else { return true }
+        return onCloseSession != nil
     }
 }
 
@@ -34,6 +58,13 @@ struct TerminalPane: NSViewRepresentable {
 
     func updateNSView(_ container: TerminalHostView, context: Context) {
         let current = store.selectedSessionID.flatMap { store.surface(for: $0) }
+
+        // Refreshed on every update, not just on attach: `updateNSView` is the only place
+        // that learns about a selection change, and a stale capture here would close the
+        // previously-selected session.
+        container.onCloseSession = store.selectedSessionID.map { id in
+            { [weak store] in store?.closeSession(id) }
+        }
 
         // Detach any surface that isn't the current selection. It stays retained
         // by the Store, so its shell keeps running while off-screen.
