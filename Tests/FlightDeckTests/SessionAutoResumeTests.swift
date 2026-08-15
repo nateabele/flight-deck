@@ -205,6 +205,7 @@ final class SessionAutoResumeTests: XCTestCase {
         store.flushPendingResumePromptsForTesting()
 
         XCTAssertTrue(spy.sent.isEmpty)
+        XCTAssertNil(store.pendingResumePrompts[id])
     }
 
     /// The staleness guard: a prompt that never met its gates must not fire an hour later
@@ -232,9 +233,21 @@ final class SessionAutoResumeTests: XCTestCase {
         let (store, id, spy) = restoredSession()
         store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
 
+        // Defer the rename's own settle so `pendingRenames[id]` is still set at the moment
+        // the resume-prompt drain runs. `restoredSession` wires a synchronous settle, so
+        // without this override `rename` would complete and clear its own entry before the
+        // drain below ever executes, leaving the precedence guard nothing to guard against.
+        var renameSettle: (() -> Void)?
+        store.injectionSettle = { work in renameSettle = work }
         store.rename(id, to: "renamed")
+        XCTAssertNotNil(renameSettle, "the rename must still be mid-flight")
 
-        XCTAssertEqual(spy.sent, ["/rename renamed"])
+        store.flushPendingResumePromptsForTesting()
+        XCTAssertTrue(spy.sent.isEmpty, "neither the rename nor the prompt has landed yet")
+
+        renameSettle?()   // let the rename complete
+
+        XCTAssertEqual(spy.sent, ["/rename renamed"], "the prompt must not follow the rename")
         XCTAssertNotNil(store.pendingResumePrompts[id], "deferred, not dropped")
     }
 }

@@ -1072,9 +1072,9 @@ final class SessionStore: ObservableObject {
     /// `claude` needs seconds to boot, and until it registers there is nothing to type into.
     /// A tab that is not ready stays queued and is tried again on the next tick.
     private func flushPendingResumePrompts() {
-        let deadline = now()
-        for (id, expiry) in pendingResumePrompts {
-            guard deadline < expiry else {
+        let currentTime = now()
+        for (id, deadline) in pendingResumePrompts {
+            guard currentTime < deadline else {
                 // Dropped unsent. See `resumePromptWindow`.
                 pendingResumePrompts.removeValue(forKey: id)
                 continue
