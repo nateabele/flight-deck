@@ -16,7 +16,9 @@ Start here if you're picking up Flight Deck fresh. This is the map; the linked d
 >
 > **Session Name Sync** — session names stay in sync with the `claude` running in each
 > terminal, in both directions, and sessions now survive relaunch (each terminal reattaches to
-> its own Claude conversation via `--resume`). Double-click a sidebar row to rename.
+> its own Claude conversation via `--resume`). Rename from the row's context menu — this was
+> double-click until 2026-08-15, when the tap recognizer behind it turned out to block
+> drag-to-reorder; see the project-tabs section of [FOLLOWUPS.md](FOLLOWUPS.md).
 > - **Plan:** [superpowers/plans/2026-08-10-session-name-sync.md](superpowers/plans/2026-08-10-session-name-sync.md) · **Spec:** [superpowers/specs/2026-08-10-session-name-sync-design.md](superpowers/specs/2026-08-10-session-name-sync-design.md)
 >
 > Also fixed: ⌘Q and any other menu shortcut were being swallowed by the terminal
