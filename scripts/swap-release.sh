@@ -123,8 +123,12 @@ else
   for p in $PIDS; do KIDS="$KIDS $(descendants "$p")"; done
   log "descendant processes to reap:${KIDS:- none}"
 
-  # SIGTERM first. Session state is safe either way: SessionStore persists to UserDefaults
-  # on every mutation (selectedSessionID's didSet → persist()), not at quit time.
+  # SIGTERM first, but session state is safe even against the SIGKILL below: SessionStore
+  # persists on every mutation (selectedSessionID's didSet → persist()), not at quit time,
+  # and since 2026-08-12 that write is a synchronous atomic write to
+  # ~/Library/Application Support/Flight Deck/sessions.json — not UserDefaults, whose
+  # coalescing cfprefsd could still be holding the last write when the app is killed.
+  # Preferences DO still live in UserDefaults, so a SIGKILL can drop a just-changed pref.
   for p in $KIDS $PIDS; do kill -TERM "$p" 2>/dev/null; done
 
   for _ in $(seq 1 20); do
