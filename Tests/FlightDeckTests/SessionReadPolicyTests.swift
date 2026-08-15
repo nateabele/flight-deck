@@ -47,13 +47,38 @@ final class SessionReadPolicyTests: XCTestCase {
         )
     }
 
-    /// A session appearing already-idle (first registry read after launch) still counts as
-    /// an edge into idle: there was no previous idle to have seen.
-    func testAppearingIdleFromNothingMarks() {
+    /// The whole sidebar must not light up blue on launch.
+    ///
+    /// `statuses` starts empty, so the first registry read is `nil -> idle` for every session
+    /// at once. Treating that as an edge marked every unselected tab unread the moment the app
+    /// opened, which is precisely the noise the dot exists to cut through: nothing *finished*
+    /// while the user was away, the app simply started.
+    func testAppearingIdleFromNothingDoesNotMark() {
         XCTAssertEqual(
             SessionReadPolicy.change(old: nil, new: status(.idle), isViewed: false),
-            .mark
+            .none
         )
+    }
+
+    /// Same rule covers a `claude` that restarts, or a brand-new session registering for the
+    /// first time: the user created it, they did not miss it finishing.
+    func testSessionAppearingIdleWhileViewedAlsoDoesNotMark() {
+        XCTAssertEqual(
+            SessionReadPolicy.change(old: nil, new: status(.idle), isViewed: true),
+            .none
+        )
+    }
+
+    /// The guard is "we saw it working", not merely "it is idle now" — so a real completion
+    /// still marks even though the launch case above does not.
+    func testRealCompletionStillMarksAfterTheLaunchFix() {
+        for from in [SessionActivity.busy, .waiting, .shell] {
+            XCTAssertEqual(
+                SessionReadPolicy.change(old: status(from), new: status(.idle), isViewed: false),
+                .mark,
+                "\(from) -> idle while away should mark"
+            )
+        }
     }
 
     func testDisappearingIsLeftAlone() {
