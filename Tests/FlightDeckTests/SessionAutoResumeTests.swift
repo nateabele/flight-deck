@@ -133,4 +133,108 @@ final class SessionAutoResumeTests: XCTestCase {
         XCTAssertEqual(store.pendingResumePrompts[ids[0]], expected)
         XCTAssertEqual(store.pendingResumePrompts[ids[1]], expected)
     }
+
+    // MARK: Delivery
+
+    /// Restores one busy session, wires a spy to it, and runs the settle callback inline so
+    /// the test does not have to wait on a real repaint delay.
+    private func restoredSession(
+        autoResume: Bool = true
+    ) -> (store: SessionStore, id: UUID, spy: SpyInjector) {
+        let (snap, ids) = snapshot(activities: ["busy"])
+        let store = makeStore(snap, autoResume: autoResume)
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { work in work() }
+        store.restore(directoryExists: allDirsExist)
+        return (store, ids[0], spy)
+    }
+
+    func testThePromptIsSentOnceTheSessionLandsIdle() {
+        let (store, id, spy) = restoredSession()
+
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+        store.flushPendingResumePromptsForTesting()
+
+        XCTAssertEqual(spy.sent, ["Keep going"])
+        XCTAssertEqual(spy.events.last, .ret, "Return must arrive after the paste closes")
+        XCTAssertNil(store.pendingResumePrompts[id], "one-shot")
+    }
+
+    func testNothingIsSentWhileTheSessionIsStillBooting() {
+        let (store, id, spy) = restoredSession()
+
+        // No status at all yet: `claude` has not registered.
+        store.flushPendingResumePromptsForTesting()
+
+        XCTAssertTrue(spy.sent.isEmpty)
+        XCTAssertNotNil(store.pendingResumePrompts[id], "still pending, not dropped")
+    }
+
+    func testThePromptIsSentOnlyOnce() {
+        let (store, id, spy) = restoredSession()
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+
+        store.flushPendingResumePromptsForTesting()
+        store.flushPendingResumePromptsForTesting()
+
+        XCTAssertEqual(spy.sent, ["Keep going"])
+    }
+
+    /// Something is already working in there, so there is nothing to keep going about.
+    func testReachingBusyBeforeTheFlushCancelsThePrompt() {
+        let (store, id, spy) = restoredSession()
+
+        store.cancelSupersededPromptsForTesting([
+            StatusTransition(id: id, old: nil, new: SessionStatus(activity: .busy))
+        ])
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+        store.flushPendingResumePromptsForTesting()
+
+        XCTAssertTrue(spy.sent.isEmpty)
+        XCTAssertNil(store.pendingResumePrompts[id])
+    }
+
+    func testReachingWaitingBeforeTheFlushCancelsThePrompt() {
+        let (store, id, spy) = restoredSession()
+
+        store.cancelSupersededPromptsForTesting([
+            StatusTransition(id: id, old: nil, new: SessionStatus(activity: .waiting))
+        ])
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+        store.flushPendingResumePromptsForTesting()
+
+        XCTAssertTrue(spy.sent.isEmpty)
+    }
+
+    /// The staleness guard: a prompt that never met its gates must not fire an hour later
+    /// into a session the user has since been working in.
+    func testAPromptPastItsDeadlineIsDroppedUnsent() {
+        let (snap, ids) = snapshot(activities: ["busy"])
+        let store = makeStore(snap, autoResume: true)
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { work in work() }
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        store.now = { start }
+        store.restore(directoryExists: allDirsExist)
+
+        store.now = { start.addingTimeInterval(SessionStore.resumePromptWindow + 1) }
+        store.applyRegistryForTesting([ids[0]: SessionStatus(activity: .idle)])
+        store.flushPendingResumePromptsForTesting()
+
+        XCTAssertTrue(spy.sent.isEmpty)
+        XCTAssertNil(store.pendingResumePrompts[ids[0]])
+    }
+
+    /// Both want the same input box, and a rename is a direct user action.
+    func testAPendingRenameTakesPrecedence() {
+        let (store, id, spy) = restoredSession()
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
+
+        store.rename(id, to: "renamed")
+
+        XCTAssertEqual(spy.sent, ["/rename renamed"])
+        XCTAssertNotNil(store.pendingResumePrompts[id], "deferred, not dropped")
+    }
 }

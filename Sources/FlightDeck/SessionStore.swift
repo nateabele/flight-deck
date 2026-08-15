@@ -914,6 +914,13 @@ final class SessionStore: ObservableObject {
         statuses = next
     }
 
+    /// Test seams. Production drives both from `applyRegistry`; a test that only cares about
+    /// the prompt queue should not have to fabricate registry rows.
+    func flushPendingResumePromptsForTesting() { flushPendingResumePrompts() }
+    func cancelSupersededPromptsForTesting(_ transitions: [StatusTransition]) {
+        cancelSupersededPrompts(transitions)
+    }
+
     /// Test seam. Production marks come from `applyReadState` and from restore; a test that
     /// only cares about how a mark is *pruned* should not have to script an edge to create it.
     func markUnreadForTesting(_ ids: Set<UUID>) {
@@ -1037,6 +1044,7 @@ final class SessionStore: ObservableObject {
         return true
     }
 
+    /// Types a pending rename into a session, or leaves it pending if this is a bad moment.
     private func flushPendingRename(_ id: UUID) {
         guard let name = pendingRenames[id] else { return }
         inject(
@@ -1056,6 +1064,52 @@ final class SessionStore: ObservableObject {
     /// deferral into a delay rather than a loss.
     private func flushPendingRenames() {
         for id in pendingRenames.keys { flushPendingRename(id) }
+    }
+
+    /// Types "Keep going" into every restored session that is finally ready for it.
+    ///
+    /// Driven by the registry scan for the same reason the rename retry is: a resumed
+    /// `claude` needs seconds to boot, and until it registers there is nothing to type into.
+    /// A tab that is not ready stays queued and is tried again on the next tick.
+    private func flushPendingResumePrompts() {
+        let deadline = now()
+        for (id, expiry) in pendingResumePrompts {
+            guard deadline < expiry else {
+                // Dropped unsent. See `resumePromptWindow`.
+                pendingResumePrompts.removeValue(forKey: id)
+                continue
+            }
+            // A rename is a direct user action and wants the same input box. It will clear
+            // itself within a tick or two, and this is queued anyway.
+            guard pendingRenames[id] == nil else { continue }
+            inject(
+                Self.resumePrompt,
+                into: id,
+                // Cancelled during the settle window — the session started working on its
+                // own, or the deadline passed on another path.
+                stillWanted: { [weak self] in self?.pendingResumePrompts[id] != nil },
+                onSent: { [weak self] in self?.pendingResumePrompts.removeValue(forKey: id) }
+            )
+        }
+    }
+
+    /// Drops a queued prompt for any session that has started working on its own.
+    ///
+    /// Covers both the user getting there first and a resumed `claude` picking its own turn
+    /// back up: either way something is already in flight, and "Keep going" would be a second
+    /// instruction on top of it. Conservative on purpose — a session that flickers through
+    /// `busy` while booting loses its prompt, which is a silent no-op rather than a stray
+    /// message typed into someone's work.
+    private func cancelSupersededPrompts(_ transitions: [StatusTransition]) {
+        guard !pendingResumePrompts.isEmpty else { return }
+        for transition in transitions {
+            switch transition.new?.activity {
+            case .busy, .waiting:
+                pendingResumePrompts.removeValue(forKey: transition.id)
+            case .idle, .shell, nil:
+                continue
+            }
+        }
     }
 
     /// Claude → sidebar. Applied from the transcript watcher; never injects.
@@ -1100,7 +1154,13 @@ final class SessionStore: ObservableObject {
         // returns early when nothing changed, and a rename usually waits on something that
         // never shows up in `statuses` at all — the user clearing their half-typed draft
         // moves no status, so gating the retry on a status change would strand it.
-        defer { flushPendingRenames() }
+        defer {
+            flushPendingRenames()
+            // Same reason as the line above: this is the retry tick, and a prompt usually
+            // waits on a `claude` that has not finished booting — which is not a status
+            // change, so gating the retry on one would strand it.
+            flushPendingResumePrompts()
+        }
 
         // Resolve against a snapshot of the list before touching anything. Later tasks
         // apply repins and project moves here, and those mutate `repos` — iterating it
@@ -1171,6 +1231,7 @@ final class SessionStore: ObservableObject {
         }
         applyReadState(transitions)
         deliverNotifications(transitions)
+        cancelSupersededPrompts(transitions)
         // Below the `guard next != statuses` above, so this writes only on a real
         // transition — a handful of small atomic writes a minute, not one per poll.
         // Recording activity here rather than at quit is what covers a SIGKILL (which is
