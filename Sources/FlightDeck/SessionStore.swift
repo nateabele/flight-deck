@@ -57,7 +57,9 @@ final class SessionStore: ObservableObject {
     /// on that type would be clobbered on the next poll. This is view state about the user,
     /// not state `claude` reports.
     ///
-    /// Not persisted — a relaunch is not something you need to be told you missed.
+    /// Persisted, as of the auto-resume work: what finished while you were away is exactly
+    /// what you want to find when you come back, and quitting for the day is the longest
+    /// "away" there is. Written by `persist()`, seeded by `restore()`.
     @Published private(set) var unreadIdle: Set<UUID> = []
 
     /// Weak: `GhosttyApp.shared` is a process-wide static that owns itself for the life of
@@ -488,12 +490,19 @@ final class SessionStore: ObservableObject {
                     flags: preferences?.resolvedFlags(forProject: entry.workingDirectory) ?? FlagSet()
                 )
             )
+            // Seeded here rather than after the loop so it covers exactly the sessions that
+            // were actually rebuilt — a session whose directory has gone has no row to draw a
+            // mark on. Before the `selectedSessionID` assignment below on purpose: its
+            // `didSet` clears the mark for the tab you land on, which is correct.
+            if entry.unread == true { unreadIdle.insert(entry.id) }
         }
 
         let restoredIDs = repos.flatMap(\.sessions).map(\.id)
-        selectedSessionID = snapshot.selectedSessionID.flatMap {
-            restoredIDs.contains($0) ? $0 : nil
-        } ?? restoredIDs.first
+        if let snapshotSelection = snapshot.selectedSessionID {
+            // A selection was recorded: use it if it survived, otherwise pick the first survivor
+            selectedSessionID = restoredIDs.contains(snapshotSelection) ? snapshotSelection : restoredIDs.first
+        }
+        // else: selectedSessionID remains nil if it wasn't recorded
         persist()
         // Projects count as "restored something": `SessionStore.init` reads this as
         // `if resetState || !restore() { seedInitialSession() }`, and seeding a home-directory
