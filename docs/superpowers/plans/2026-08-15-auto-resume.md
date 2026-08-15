@@ -574,14 +574,21 @@ Append to `Tests/FlightDeckTests/SessionStoreTests.swift`:
     /// At launch `statuses` is empty until each resumed `claude` re-registers. The old
     /// blanket intersection wiped every restored mark on that first tick, before it had ever
     /// been drawn — SessionStatusIcon renders nothing for a nil status.
+    ///
+    /// **Two sessions, deliberately.** With only the marked session present, the tick would
+    /// early-return on `next != statuses` (empty to empty), `applyReadState` would never run,
+    /// and the mark would survive under the buggy code too — a test that passes either way.
+    /// `booted` is here to make the tick real; `waiting` is the one under test.
     func testAMarkSurvivesATickInWhichTheSessionHasNoStatusYet() {
         let store = SessionStore(provider: StubProvider())
-        let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
-        store.markUnreadForTesting([s.id])
+        let waiting = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        let booted = store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
+        store.markUnreadForTesting([waiting.id])
 
-        store.applyRegistry([:])
+        // Only `booted` has registered. `waiting`'s `claude` is still starting up.
+        store.applyRegistry([1: row(booted, activity: .busy)])
 
-        XCTAssertTrue(store.unreadIdle.contains(s.id))
+        XCTAssertTrue(store.unreadIdle.contains(waiting.id))
     }
 
     /// The case the intersection was there for: a session that HAD a status and lost it has
@@ -1116,6 +1123,8 @@ git commit -m "feat: queue a resume prompt for sessions that were working at shu
 
 **Files:**
 - Modify: `Sources/FlightDeck/SessionStore.swift` (`applyRegistry`, new `flushPendingResumePrompts` / `cancelSupersededPrompts`)
+- Create: `Tests/FlightDeckTests/SpyInjector.swift` (moved out of `SessionRenameTests`)
+- Modify: `Tests/FlightDeckTests/SessionRenameTests.swift` (drop the now-shared nested fake)
 - Test: `Tests/FlightDeckTests/SessionAutoResumeTests.swift`
 
 **Interfaces:**
@@ -1124,41 +1133,26 @@ git commit -m "feat: queue a resume prompt for sessions that were working at shu
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `Tests/FlightDeckTests/SessionAutoResumeTests.swift`. Reuse the spy from the
-rename tests by copying it in — it models the input bar rather than just recording against
-it, which is what makes the empty-vs-draft cases meaningful:
+**First, share the spy instead of copying it.** `SessionRenameTests` already contains a
+`SpyInjector` that models Claude Code's input box — a kill that lands on a draft clears it, a
+kill that lands on a placeholder hint does not — and that modelling is exactly what makes the
+empty-vs-draft cases here meaningful. Copying it would duplicate a non-trivial fake, so move
+it out instead:
+
+1. Create `Tests/FlightDeckTests/SpyInjector.swift`.
+2. Move the `SpyInjector` class **verbatim** out of `SessionRenameTests` into that file as a
+   top-level `@MainActor final class SpyInjector: TextInjecting`, keeping every member
+   including `typeDraft(_:)`, plus the doc comment explaining why it models the bar rather
+   than only recording against it.
+3. Delete the nested declaration from `SessionRenameTests`. Its references are unqualified
+   (`SpyInjector`), so they resolve to the new top-level type with no further edits.
+4. Run `./scripts/test-unit.sh` and confirm `SessionRenameTests` still passes before writing
+   any new test below. If it does not, the move was not verbatim.
+
+Then append to `Tests/FlightDeckTests/SessionAutoResumeTests.swift`:
 
 ```swift
     // MARK: Delivery
-
-    /// Same spy as SessionRenameTests: it models Claude Code's input box, so a kill that
-    /// lands on a draft clears it and a kill that lands on a placeholder hint does not.
-    final class SpyInjector: TextInjecting {
-        enum Event: Equatable { case text(String), ret, killLine, yank }
-        var events: [Event] = []
-        var sent: [String] {
-            events.compactMap { if case .text(let t) = $0 { return t } else { return nil } }
-        }
-        var buffer = ""
-        var renderedRows: [String] = ["❯"]
-        var viewportIsReadable = true
-
-        func sendText(_ text: String) { events.append(.text(text)) }
-        func sendReturn() { events.append(.ret) }
-        func sendKillLine() {
-            events.append(.killLine)
-            guard !buffer.isEmpty else { return }
-            buffer = ""
-            renderedRows = ["❯"]
-        }
-        func sendYank() { events.append(.yank) }
-        func readViewport() -> String? {
-            guard viewportIsReadable else { return nil }
-            let rule = String(repeating: "─", count: 92)
-            return ([rule] + renderedRows + [rule, "  Opus 5 (1M context)  ⎇ master"])
-                .joined(separator: "\n")
-        }
-    }
 
     /// Restores one busy session, wires a spy to it, and runs the settle callback inline so
     /// the test does not have to wait on a real repaint delay.
