@@ -3,6 +3,19 @@ import AppKit
 import Foundation
 import SwiftUI
 
+/// One session's status edge across a single registry tick.
+///
+/// Three things act on these edges — the unread mark, notifications, and the auto-resume
+/// prompt — and each used to re-walk the before/after maps itself. Computing the edges once
+/// and handing them out means "what changed" has a single definition. A proper state machine
+/// over `SessionActivity` is the next step and is recorded in docs/FOLLOWUPS.md; this is the
+/// seam it would slot into.
+struct StatusTransition: Equatable {
+    let id: UUID
+    let old: SessionStatus?
+    let new: SessionStatus?
+}
+
 /// Single source of truth for repos, sessions, selection, and live surfaces.
 /// The sidebar and terminal pane render this and nothing else; only this type
 /// creates or frees surfaces.
@@ -1074,8 +1087,11 @@ final class SessionStore: ObservableObject {
         }
         let previous = statuses
         statuses = next
-        applyReadState(previous: previous, current: next)
-        deliverNotifications(previous: previous, current: next)
+        let transitions = Set(previous.keys).union(next.keys).map {
+            StatusTransition(id: $0, old: previous[$0], new: next[$0])
+        }
+        applyReadState(transitions)
+        deliverNotifications(transitions)
         // Below the `guard next != statuses` above, so this writes only on a real
         // transition — a handful of small atomic writes a minute, not one per poll.
         // Recording activity here rather than at quit is what covers a SIGKILL (which is
@@ -1084,49 +1100,45 @@ final class SessionStore: ObservableObject {
         persist()
     }
 
-    /// One read/unread decision per session, over the union of both snapshots — the same
-    /// shape as `deliverNotifications`, and driven by the same edge.
-    private func applyReadState(
-        previous: [UUID: SessionStatus], current: [UUID: SessionStatus]
-    ) {
+    /// One read/unread decision per session, over every edge this tick produced.
+    private func applyReadState(_ transitions: [StatusTransition]) {
         let active = appIsActive()
-        for id in Set(previous.keys).union(current.keys) {
+        for transition in transitions {
             switch SessionReadPolicy.change(
-                old: previous[id], new: current[id],
-                isViewed: active && selectedSessionID == id
+                old: transition.old, new: transition.new,
+                isViewed: active && selectedSessionID == transition.id
             ) {
             case .none:
                 continue
             case .mark:
-                unreadIdle.insert(id)
+                unreadIdle.insert(transition.id)
             case .clear:
-                unreadIdle.remove(id)
+                unreadIdle.remove(transition.id)
             }
         }
 
         // A session whose `claude` exited renders no icon at all, so a mark left behind for
         // it could never be seen or cleared. Drop it rather than leak the entry.
-        unreadIdle.formIntersection(current.keys)
+        unreadIdle.formIntersection(statuses.keys)
     }
 
-    /// One notification decision per session, over the union of both snapshots so a
+    /// One notification decision per session, over every edge this tick produced — so a
     /// session that vanished while waiting still gets its banner withdrawn.
-    private func deliverNotifications(
-        previous: [UUID: SessionStatus], current: [UUID: SessionStatus]
-    ) {
+    private func deliverNotifications(_ transitions: [StatusTransition]) {
         guard let notifier else { return }
         let active = appIsActive()
-        for id in Set(previous.keys).union(current.keys) {
+        for transition in transitions {
             switch SessionNotificationPolicy.action(
-                old: previous[id], new: current[id], appActive: active
+                old: transition.old, new: transition.new, appActive: active
             ) {
             case .none:
                 continue
             case .notify:
-                guard let status = current[id], let title = title(of: id) else { continue }
-                notifier.notify(sessionID: id, title: title, body: status.tooltip)
+                guard let status = transition.new, let title = title(of: transition.id)
+                else { continue }
+                notifier.notify(sessionID: transition.id, title: title, body: status.tooltip)
             case .withdraw:
-                notifier.withdraw(sessionID: id)
+                notifier.withdraw(sessionID: transition.id)
             }
         }
     }
