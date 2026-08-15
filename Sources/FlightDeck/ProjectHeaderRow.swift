@@ -17,15 +17,27 @@ struct ProjectHeaderRow: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "chevron.right")
-                .imageScale(.small)
-                .foregroundStyle(.secondary)
-                .rotationEffect(.degrees(repo.isCollapsed ? 0 : 90))
-                // Hidden but still occupying its space on an empty project: there is nothing
-                // to disclose, and collapsing the layout instead would knock every project
-                // name out of alignment as sessions come and go.
-                .opacity(repo.sessions.isEmpty ? 0 : 1)
-                .accessibilityHidden(true)
+            // The chevron is the toggle, and it is a `Button` rather than a tap gesture on
+            // the row. That is load-bearing, not stylistic: a `.onTapGesture` anywhere on a
+            // row consumes the mouse-down that `List`'s `.onMove` needs to begin a drag, so
+            // the row-wide toggle this used to carry made project reordering impossible —
+            // dead across the whole row, because `.contentShape(Rectangle())` below extends
+            // the gesture to the full width. Restricting the toggle to the chevron leaves
+            // the rest of the row grabbable. Finder and the Xcode navigator toggle on the
+            // triangle too, so this is also the more conventional behaviour.
+            Button(action: toggle) {
+                Image(systemName: "chevron.right")
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(repo.isCollapsed ? 0 : 90))
+                    // Hidden but still occupying its space on an empty project: there is
+                    // nothing to disclose, and collapsing the layout instead would knock
+                    // every project name out of alignment as sessions come and go.
+                    .opacity(repo.sessions.isEmpty ? 0 : 1)
+            }
+            .buttonStyle(.plain)
+            .disabled(repo.sessions.isEmpty)
+            .accessibilityHidden(true)
 
             Text(repo.displayName)
                 .font(.subheadline.weight(.semibold))
@@ -56,8 +68,10 @@ struct ProjectHeaderRow: View {
                 .accessibilityIdentifier("close-project")
             }
         }
+        // `.contentShape` stays — it is what makes hover cover the whole row rather than just
+        // the drawn content. It is safe on its own; it was the `.onTapGesture` it used to sit
+        // beside that killed the drag, not the hit-test shape.
         .contentShape(Rectangle())
-        .onTapGesture { toggle() }
         .onHover { isHovered = $0 }
         .animation(.easeOut(duration: 0.12), value: isHovered)
         .animation(.easeOut(duration: 0.12), value: repo.isCollapsed)

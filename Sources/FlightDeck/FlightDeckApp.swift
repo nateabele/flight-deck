@@ -16,6 +16,15 @@ struct FlightDeckApp: App {
         UserDefaults.standard.bool(forKey: "FlightDeckResetState")
     }
 
+    /// `-FlightDeckSeedSecondProject YES`. Used by exactly one UI test, the one that drags a
+    /// project heading to reorder it: that needs two projects in the sidebar, and the only
+    /// production route to a second one is an `NSOpenPanel`, which a UI test cannot drive
+    /// reliably. Gated on `isResettingState` at its call site so it cannot fire in a real
+    /// launch even if the default were somehow set.
+    private static var isSeedingSecondProject: Bool {
+        UserDefaults.standard.bool(forKey: "FlightDeckSeedSecondProject")
+    }
+
     init() {
         // Constructed eagerly, unlike the store: this only reads `UserDefaults`, and both
         // the Settings scene and the store below need the *same* instance.
@@ -67,7 +76,7 @@ struct FlightDeckApp: App {
         // `FileSessionPersistence` overwrites the developer's own `sessions.json` with the
         // test's seed — which is precisely the data loss this whole change set is about.
         // Nil makes a reset run read nothing and write nothing.
-        return SessionStore(
+        let store = SessionStore(
             ghostty: GhosttyApp.shared,
             resetState: resetState,
             preferences: preferences,
@@ -79,6 +88,14 @@ struct FlightDeckApp: App {
             reapReporter: UserNotificationReapReporter(),
             persistence: resetState ? nil : FileSessionPersistence()
         )
+
+        // Test-only second project, so the sidebar has something to reorder. Guarded by
+        // `resetState` as well as its own flag: a reset run reads and writes no persistence,
+        // so this can never reach the developer's real `sessions.json`.
+        if resetState, Self.isSeedingSecondProject {
+            store.newSession(in: FileManager.default.temporaryDirectory)
+        }
+        return store
     }
 
     var body: some Scene {
