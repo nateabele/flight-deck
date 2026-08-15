@@ -12,10 +12,6 @@ private struct SessionRow: View {
     @FocusState private var focused: Bool
     @State private var isHovered = false
 
-    /// When the title was last clicked, for the hand-rolled double-click detection in
-    /// `handleTitleTap()`.
-    @State private var lastTitleTap: Date?
-
     var body: some View {
         HStack(spacing: 4) {
             if isEditing {
@@ -27,11 +23,21 @@ private struct SessionRow: View {
                     .onExitCommand { isEditing = false }   // Esc
                     .onChange(of: focused) { if !$1 { commit() } }
             } else {
+                // Bare, with no tap recognizer of any kind, and that is the whole point.
+                //
+                // Rename used to start from a hand-rolled double-click detector attached here.
+                // It had to go: ANY tap recognizer on this text consumes the mouse-down that
+                // `List`'s `.onMove` needs to begin a drag, so a row could not be dragged by
+                // the one part of it people actually aim at. Measured in the smoke test —
+                // with the recognizer present the drag group fails and the control group
+                // (dragging blank row space) passes; with it removed both pass. Exclusive and
+                // `simultaneousGesture` variants were both tried and both blocked the drag.
+                //
+                // Rename now lives on the row's context menu, which never touches the
+                // mouse-down path. That is also the more native arrangement: Finder reserves
+                // double-click for "open" and renames from the context menu or Return.
                 Text(session.title)
                     .accessibilityIdentifier("session-row-title")
-                    // A single recognizer, with the double click detected by hand. See
-                    // `handleTitleTap()` for why this isn't `onTapGesture(count: 2)`.
-                    .onTapGesture(perform: handleTitleTap)
             }
             Spacer()
             if isConflicted {
@@ -56,11 +62,16 @@ private struct SessionRow: View {
                 .accessibilityIdentifier("close-session")
             }
         }
-        // Hover is tracked on a transparent layer BEHIND the row, not by putting
-        // `.contentShape(Rectangle())` + `.onHover` on the HStack itself. Applied to the
-        // HStack, that pair joins SwiftUI's hit-testing for the row and competes with the
-        // title's own `.onTapGesture`: it intermittently swallowed the second click of a
-        // double click, so `handleTitleTap` never saw one and rename broke. Measured at
+        // HISTORICAL, and kept because it still constrains what may be added here. The
+        // conflict below was between the row's hit-testing and the title's own tap
+        // recognizer; that recognizer is gone now (see the note on the title `Text`), so the
+        // specific breakage described is no longer reachable. What survives is the finding
+        // about `.contentShape` on this HStack, and the two rejected alternatives.
+        //
+        // Hover is tracked without putting `.contentShape(Rectangle())` + `.onHover` on the
+        // HStack itself. Applied to the HStack, that pair joins SwiftUI's hit-testing for the
+        // row and competed with the title's `.onTapGesture`: it intermittently swallowed the
+        // second click of a double click, so the rename detector never saw one. Measured at
         // 4 failures in 5 runs of `testDoubleClickRenamesSession`, against 9/9 before
         // these two changes met.
         //
@@ -82,38 +93,31 @@ private struct SessionRow: View {
         // flight, so a row can hold a stale hover state after scrolling.
         .onHover { isHovered = $0 }
         .animation(.easeOut(duration: 0.12), value: isHovered)
+        // A context menu is safe where a tap gesture is not: it responds to a right-click and
+        // leaves the primary mouse-down — the one `List`'s drag-to-reorder needs — untouched.
+        .contextMenu {
+            Button("Rename") { beginRename() }
+            Button("Close Session") { store.closeSession(session.id) }
+        }
     }
 
-    /// Selects on the first click, starts a rename on a second click that lands within the
-    /// system double-click interval.
+    /// Swaps the title for the edit field. Reached from the row's context menu.
     ///
-    /// This is deliberately *not* `.onTapGesture(count: 2)`, and not a count-2 plus count-1
-    /// pair either. An exclusive count-2 recognizer swallows the single click, so clicking
-    /// the title — the part of the row people actually aim at — never reached the enclosing
-    /// `List(selection:)` and the row would not select. Two things that look like fixes are
-    /// not: `simultaneousGesture` still does not let the click through to the List, and
-    /// pairing a count-2 with a count-1 recognizer leaves the count-1 one never firing at
-    /// all (verified — an explicit handler assigning `selectedSessionID` did not run).
+    /// This replaced a hand-rolled double-click detector on the title text. The history is
+    /// worth keeping, because it rules out the fixes that look obvious: an exclusive
+    /// `onTapGesture(count: 2)` swallows the single click so the row never reaches the
+    /// enclosing `List(selection:)` and will not select; pairing count-2 with count-1 leaves
+    /// the count-1 recognizer never firing at all; and detecting the second click by hand
+    /// worked for rename but blocked `List`'s drag-to-reorder, because ANY tap recognizer
+    /// here consumes the mouse-down the drag needs. Both the exclusive and the
+    /// `simultaneousGesture` forms were measured against the smoke test and both blocked it.
     ///
-    /// Detecting the second click ourselves removes SwiftUI's gesture arbitration from the
-    /// problem entirely: one recognizer, always delivered. `NSEvent.doubleClickInterval`
-    /// honours the user's Trackpad/Mouse setting rather than hard-coding a threshold.
-    ///
-    /// Selecting on the first click of a double click is intended — double-clicking a row
-    /// should both activate it and begin editing it.
-    private func handleTitleTap() {
-        let now = Date()
-        defer { lastTitleTap = now }
-
+    /// Selecting first is deliberate: renaming a row should also make it the active one.
+    private func beginRename() {
         store.selectedSessionID = session.id
-
-        // No need to reset the timestamp after starting a rename: the `Text` is replaced by
-        // the `TextField` while editing, so it cannot receive a third tap.
-        if let last = lastTitleTap, now.timeIntervalSince(last) <= NSEvent.doubleClickInterval {
-            draft = session.title
-            isEditing = true
-            focused = true
-        }
+        draft = session.title
+        isEditing = true
+        focused = true
     }
 
     /// Empty input reverts: `rename` ignores it and we simply leave edit mode.

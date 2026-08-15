@@ -159,33 +159,44 @@ clicks or hover. Worth revisiting if the flicker proves annoying in practice.
 Related, still open: `.onHover` does not fire while a trackpad scroll is in flight, so a
 row can hold a stale hover state after scrolling.
 
-## From project tabs (2026-08-14) — unverified in a running app
+## From project tabs (2026-08-14) — RESOLVED 2026-08-15, kept for the finding
 
-Two behaviours that `SidebarReorder`/`SidebarRow` depend on were exercised only under
-`XCTest`, not by driving the actual sidebar:
+The two `.onMove` questions below are now answered, and the third turned out to be a real bug
+that shipped. Both are covered by UI tests in `TerminalSmokeTests`.
 
-1. That `.onMove` gives drag-to-reorder on a macOS `List` without an edit mode (there is no
-   iOS-style "Edit" mode on this platform to put it in).
-2. That `.onMove` coexists with the existing `.dropDestination(for: URL.self)` folder drop on
-   the same `List` — both are attached to the same flattened `ForEach`/`List` in
-   `SessionSidebar`.
+1. `.onMove` **does** give drag-to-reorder on a macOS `List` with no edit mode. Verified.
+2. It **does** coexist with the existing `.dropDestination(for: URL.self)` folder drop on the
+   same `List`. Verified. The `.draggable`/`.dropDestination` fallback recorded in
+   `docs/superpowers/specs/2026-08-14-project-tabs-design.md` was not needed.
 
-If either misbehaves, the fallback is `.draggable`/`.dropDestination` with a typed
-`SidebarRow` payload and a hand-drawn insertion indicator, behind the same
-`SidebarReorder.apply` — so only the gesture plumbing would change, not the reorder policy.
-This fallback is recorded in
-`docs/superpowers/specs/2026-08-14-project-tabs-design.md`.
+**The finding worth keeping: any tap recognizer on a row blocks that row's list drag.**
 
-Also unverified: whether `ProjectHeaderRow`'s close button reliably takes priority over its
-own row's tap gesture. The `HStack` carries `.contentShape(Rectangle())` + `.onHover` +
-`.onTapGesture { toggle() }` for collapse/expand, with the close `Button` as a child of that
-same `HStack`. SwiftUI is expected to give the child `Button` first refusal over the
-ancestor's tap gesture, but that has not been confirmed in a running app — and `SessionRow`'s
-hover fix above is a reminder that this codebase's SwiftUI hit-testing assumptions have been
-wrong before. Watch for: clicking the project row's ✕ collapses/expands the project instead
-of closing it. If that happens, the remedy is to move `.onTapGesture` off the `HStack` and
-onto the chevron `Image` alone, the way the close button already claims its own `Button`
-rather than relying on the row-level gesture.
+Two bugs shipped from this, both reported by Nate against the merged build:
+
+- Project headings could not be dragged **at all**, because `ProjectHeaderRow`'s `HStack`
+  carried a row-wide `.onTapGesture { toggle() }` for collapse.
+- Session rows could not be dragged **by their title text**, because that `Text` carried the
+  hand-rolled double-click rename detector. The rest of the row dragged fine, which is exactly
+  what made it look like a partial failure rather than one mechanism.
+
+Measured, not inferred: with a recognizer present the drag assertion fails and the control
+assertion (dragging blank row space) passes; with it removed both pass. `.onTapGesture` and
+`.simultaneousGesture(TapGesture())` were both tried and both blocked the drag — simultaneity
+does not help, because the list's reorder is AppKit-level rather than a SwiftUI gesture, so
+there is nothing for SwiftUI to arbitrate against.
+
+Fixes: the project toggle moved onto the chevron as a `Button`; session rename moved to the
+row's context menu. `.contentShape(Rectangle())` was kept on the project header — it is what
+makes hover cover the full row, and on its own it consumes nothing.
+
+**Rule for anything added to a sidebar row: no tap gestures.** Use a `Button` on a small
+control, or a context menu. Both leave the primary mouse-down alone.
+
+Open, and a UX regression worth a decision: **double-click no longer renames a session.** It
+was traded for drag-by-title. Finder's own arrangement is Return-to-rename with double-click
+reserved for open, so Return would be the natural replacement — but it is not implemented, so
+today rename is context-menu only. Candidate remedy: `.onKeyPress(.return)` on the list, or a
+Rename item in the main menu via `SessionCommands` with `.keyboardShortcut(.return, ...)`.
 
 Four more from the whole-branch review of this same commit, none exercised in a running app:
 
@@ -197,15 +208,21 @@ Four more from the whole-branch review of this same commit, none exercised in a 
    longer dismisses the alert at all, which is a HIG regression on the one alert the spec
    singles out for HIG treatment. Watch for: pressing Escape on the close-project alert does
    nothing.
-2. **Accessibility on `ProjectHeaderRow`.** `.accessibilityElement(children: .combine)` merges
-   every descendant into one element, so the close button's own
-   `accessibilityIdentifier("close-project")` is not queryable at runtime and its
-   `accessibilityLabel("Close Project")` is superseded by the row's combined label. Separately,
-   `.onTapGesture { toggle() }` is not exposed as an accessibility action, so a VoiceOver user
-   has no way to expand/collapse the header by activating it — only the context menu's
-   Expand/Collapse item works. Candidate remedy: `.accessibilityAction { toggle() }` plus
-   `.accessibilityAddTraits(.isButton)` on the header, and pulling the close button out of the
-   combined element (or giving it its own accessibility action) so VoiceOver can reach it.
+2. **Accessibility on `ProjectHeaderRow` — now partly MEASURED, and worse than assumed.**
+   `.accessibilityElement(children: .combine)` merges every descendant into one element, so the
+   close button's own `accessibilityIdentifier("close-project")` is not queryable at runtime
+   and its `accessibilityLabel("Close Project")` is superseded by the row's combined label.
+   New evidence (2026-08-15): a UI test querying the header by identifier reads its `label` as
+   the **empty string**, so the carefully composed
+   `"flight-deck, 3 sessions, collapsed, waiting for you"` label is not reaching the
+   accessibility client at all — the `testProjectHeadingsReorderByDragging` test had to assert
+   on session-row order instead, because comparing header labels compared `""` to `""` and
+   passed vacuously. If XCUITest cannot see it, VoiceOver most likely cannot either, which
+   would make the whole collapsed-summary label dead weight. Worth checking with VoiceOver
+   directly before redesigning. The collapse toggle is now a `Button` on the chevron, which
+   VoiceOver can reach; the close button is still inside the combined element. Candidate
+   remedy: drop `children: .combine` in favour of an explicit label on the row plus
+   `.accessibilityHidden(true)` on the decorative parts, so the real controls stay reachable.
 3. **`ProjectsSettingsTab` nests a `NavigationSplitView` inside a `VStack`.** Legal SwiftUI, and
    the split view's own body is unchanged by this branch, but a `NavigationSplitView` expects
    to own its container's sizing, and that can misbehave when it is not the top-level view.

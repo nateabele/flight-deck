@@ -38,6 +38,78 @@ final class TerminalSmokeTests: XCTestCase {
         app.windows.containing(.button, identifier: "Claude").firstMatch
     }
 
+    /// The one behaviour that earns its own launch.
+    ///
+    /// Reordering projects needs TWO projects, and the big test's seeded slate has one. The
+    /// only production route to a second project is an `NSOpenPanel`, which a UI test cannot
+    /// drive reliably — hence `-FlightDeckSeedSecondProject`, a flag `FlightDeckApp` honours
+    /// only under `-FlightDeckResetState`. Adding a second project to the shared slate instead
+    /// would have shifted every row index the big test asserts on, so this pays one extra
+    /// launch to keep that test's arithmetic intact.
+    ///
+    /// This covers a bug that shipped: project headings could not be dragged AT ALL, because a
+    /// row-wide `.onTapGesture` (collapse-on-click) consumed the mouse-down `List`'s `.onMove`
+    /// needs. The toggle moved onto the chevron button, leaving the rest of the header
+    /// grabbable.
+    func testProjectHeadingsReorderByDragging() {
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "-ApplePersistenceIgnoreState", "YES",
+            "-FlightDeckResetState", "YES",
+            "-FlightDeckSeedSecondProject", "YES",
+        ]
+        app.launch()
+        app.activate()
+
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15), "no window appeared")
+
+        // `.accessibilityElement(children: .combine)` on the header means it is not a
+        // StaticText, so match on identifier across any element type rather than guessing.
+        let headers = app.descendants(matching: .any).matching(identifier: "project-header")
+        XCTAssertTrue(
+            headers.element(boundBy: 1).waitForExistence(timeout: 10),
+            "expected two project headings; the seed flag may not have taken effect"
+        )
+        XCTAssertEqual(headers.count, 2, "precondition: exactly two projects")
+
+        // Order is read from the SESSION rows, not the headings. The heading is an
+        // `.accessibilityElement(children: .combine)`, and XCUITest reports its label as ""
+        // (see the FOLLOWUPS note on project-header accessibility), so asserting on heading
+        // labels would compare "" to "" and pass no matter what happened. Each seeded project
+        // owns exactly one session, so the session order IS the project order.
+        let rows = app.staticTexts.matching(identifier: "session-row-title")
+        XCTAssertEqual(rows.count, 2, "precondition: one session per seeded project")
+        let before = (0..<2).map { rows.element(boundBy: $0).value as? String }
+
+        // Drag the first heading past the second. The drop lands below the second project's
+        // own rows, so aim well beneath it rather than exactly on it.
+        // Both ends are coordinates: the press/drag pair is typed, and mixing an element
+        // source with a coordinate destination does not compile. Pressing mid-header also
+        // keeps the press off the chevron button at the leading edge.
+        headers.element(boundBy: 0)
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(
+                forDuration: 0.6,
+                thenDragTo: headers.element(boundBy: 1)
+                    .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1.0))
+                    .withOffset(CGVector(dx: 0, dy: 60))
+            )
+        settle()
+
+        let after = (0..<2).map { rows.element(boundBy: $0).value as? String }
+        XCTAssertNotEqual(
+            after, before,
+            "dragging a project heading did not reorder anything — a gesture on the header is "
+            + "probably swallowing the mouse-down again (got \(after))"
+        )
+        XCTAssertEqual(
+            after.compactMap { $0 }.sorted(), before.compactMap { $0 }.sorted(),
+            "the reorder lost or duplicated a project"
+        )
+
+        app.terminate()
+    }
+
     func testTheWholeShellInOneSession() {
         let app = XCUIApplication()
         // - `-ApplePersistenceIgnoreState`: XCUITest spawns the app via a raw exec, not
@@ -189,12 +261,101 @@ final class TerminalSmokeTests: XCTestCase {
             XCTAssertEqual(labels, ["session 1", "session 3", "session 2"])
         }
 
-        XCTContext.runActivity(named: "double-click renames a session") { _ in
+        // The regression guard for a bug that shipped: pressing on a row's TITLE TEXT could not
+        // start a drag, so reordering silently did nothing for anyone who grabbed a row where
+        // it reads. The cause was the title's own tap recognizer (the hand-rolled double-click
+        // rename) consuming the mouse-down that `List`'s `.onMove` needs; it is declared
+        // `simultaneousGesture` now so both see the event.
+        //
+        // Deliberately presses the title rather than blank row space — blank space always
+        // worked, so a test that grabbed there would have passed against the broken build.
+        //
+        // The assertion is "the order changed", not a specific final order: where a drop lands
+        // depends on drop-target geometry that varies with row height and list insets, and
+        // pinning it would buy flakiness rather than coverage. The bug was that *nothing*
+        // happened, and that is exactly what this distinguishes.
+        // Blank row space to the right of a title: the region that always worked by hand.
+        // Used as the CONTROL below — if a drag from here does not reorder either, the
+        // failure is XCUITest's inability to drive a SwiftUI list reorder, not the app.
+        func blankSpace(inRow index: Int, dy: CGFloat = 0) -> XCUICoordinate {
+            rows.element(boundBy: index)
+                .coordinate(withNormalizedOffset: CGVector(dx: 1.0, dy: 0.5))
+                .withOffset(CGVector(dx: 40, dy: dy))
+        }
+
+        XCTContext.runActivity(named: "control: a session reorders by dragging blank row space") { _ in
+            XCTAssertEqual(rows.count, 3, "precondition: three sessions")
+            let before = (0..<3).map { rows.element(boundBy: $0).value as? String }
+
+            blankSpace(inRow: 0).press(forDuration: 0.6, thenDragTo: blankSpace(inRow: 2, dy: 8))
+            settle()
+
+            let after = (0..<3).map { rows.element(boundBy: $0).value as? String }
+            XCTAssertNotEqual(
+                after, before,
+                "CONTROL FAILED: dragging blank row space did not reorder either, so this test "
+                + "cannot drive a list reorder at all and says nothing about the title-drag bug "
+                + "(got \(after))"
+            )
+        }
+
+        // The regression guard for a bug that shipped: pressing on a row's TITLE TEXT could not
+        // start a drag, so reordering silently did nothing for anyone who grabbed a row where
+        // it reads. The cause was the title's own tap recognizer (the hand-rolled double-click
+        // rename) consuming the mouse-down that `List`'s `.onMove` needs.
+        //
+        // Deliberately presses the title rather than blank space — blank space always worked,
+        // so a test that grabbed there would have passed against the broken build. That is
+        // what the control above is for, and why it is a separate activity.
+        //
+        // The assertion is "the order changed", not a specific final order: where a drop lands
+        // depends on drop-target geometry that varies with row height and list insets, and
+        // pinning it would buy flakiness rather than coverage. The bug was that *nothing*
+        // happened, and that is exactly what this distinguishes.
+        XCTContext.runActivity(named: "a session reorders by dragging its title text") { _ in
+            let before = (0..<3).map { rows.element(boundBy: $0).value as? String }
+
+            rows.element(boundBy: 0).press(
+                forDuration: 0.6, thenDragTo: rows.element(boundBy: 2)
+            )
+            settle()
+
+            let after = (0..<3).map { rows.element(boundBy: $0).value as? String }
+            XCTAssertNotEqual(
+                after, before,
+                "dragging a row by its title text did not reorder anything — the title's tap "
+                + "recognizer is probably swallowing the mouse-down again (got \(after))"
+            )
+            XCTAssertEqual(
+                after.compactMap { $0 }.sorted(), before.compactMap { $0 }.sorted(),
+                "the reorder lost or duplicated a session"
+            )
+        }
+
+        // Dragging leaves first responder in the sidebar. Every group below this point acts on
+        // the terminal — Select All / Copy, and ⌘F, which routes through libghostty — so hand
+        // focus back by clicking the detail pane, the way a user would. Without this the drag
+        // groups silently break the clipboard and find-bar assertions further down.
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        // Deliberately AFTER the drag groups. Renaming makes a row's title the string
+        // "renamed", but more importantly a failure here used to abort the whole test before
+        // the drag groups ran, hiding their result — the reordering evidence is worth more
+        // than the ordering convenience of renaming first.
+        XCTContext.runActivity(named: "the context menu renames a session") { _ in
             // Targeted by accessibility identifier rather than outline position: a positional
             // lookup would silently break the moment SwiftUI changes how it flattens sections.
             let title = rows.firstMatch
             XCTAssertTrue(title.waitForExistence(timeout: 5))
-            title.doubleClick()
+            // Right-click, not double-click. Rename moved off the title's click path so that
+            // a row can be dragged by its title — see the note on the `Text` in SessionSidebar.
+            title.rightClick()
+            let rename = app.menuItems["Rename"]
+            XCTAssertTrue(rename.waitForExistence(timeout: 5), "no Rename item in the row menu")
+            rename.click()
 
             let field = app.textFields["session-title-field"]
             XCTAssertTrue(field.waitForExistence(timeout: 5))
