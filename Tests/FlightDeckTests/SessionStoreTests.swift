@@ -147,6 +147,55 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertEqual(persistence.saveCount, settled)
     }
 
+    // MARK: Unread pruning
+
+    /// At launch `statuses` is empty until each resumed `claude` re-registers. The old
+    /// blanket intersection wiped every restored mark on that first tick, before it had ever
+    /// been drawn — SessionStatusIcon renders nothing for a nil status.
+    ///
+    /// **Two sessions, deliberately.** With only the marked session present, the tick would
+    /// early-return on `next != statuses` (empty to empty), `applyReadState` would never run,
+    /// and the mark would survive under the buggy code too — a test that passes either way.
+    /// `booted` is here to make the tick real; `waiting` is the one under test.
+    func testAMarkSurvivesATickInWhichTheSessionHasNoStatusYet() {
+        let store = SessionStore(provider: StubProvider())
+        let waiting = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        let booted = store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
+        store.markUnreadForTesting([waiting.id])
+
+        // Only `booted` has registered. `waiting`'s `claude` is still starting up.
+        store.applyRegistry([1: row(booted, activity: .busy)])
+
+        XCTAssertTrue(store.unreadIdle.contains(waiting.id))
+    }
+
+    /// The case the intersection was there for: a session that HAD a status and lost it has
+    /// no icon to carry the mark, so the entry must not leak.
+    func testAMarkIsDroppedWhenAnExistingStatusDisappears() {
+        let store = SessionStore(provider: StubProvider())
+        let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        store.selectedSessionID = nil
+        store.appIsActive = { false }
+
+        store.applyRegistry([1: row(s, activity: .busy)])
+        store.applyRegistry([1: row(s, activity: .idle)])
+        XCTAssertTrue(store.unreadIdle.contains(s.id), "precondition: busy -> idle marks")
+
+        store.applyRegistry([:])
+
+        XCTAssertFalse(store.unreadIdle.contains(s.id))
+    }
+
+    func testClosingASessionDropsItsMark() {
+        let store = SessionStore(provider: StubProvider())
+        let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        store.markUnreadForTesting([s.id])
+
+        store.closeSession(s.id)
+
+        XCTAssertFalse(store.unreadIdle.contains(s.id))
+    }
+
     /// A registry row for `session`, in the shape `applyRegistry` resolves against.
     ///
     /// `cwd` must equal the session's own working directory: `applyRegistry` reads a
