@@ -247,3 +247,33 @@ project by `Repo.ID` and does nothing if it is already gone — but the phantom 
 visible to the user. Candidate remedy: a `@State private var closing: Set<Repo.ID>` guard in
 `SessionSidebar`, checked and inserted before starting the `Task` and removed when it
 completes.
+
+## From auto-resume & persisted unread (2026-08-15)
+
+- **Status transitions want a state machine.** `applyRegistry` now computes each tick's
+  edges once as `[StatusTransition]` and hands them to three consumers — `applyReadState`,
+  `deliverNotifications`, and `cancelSupersededPrompts`. That is a seam, not a solution:
+  each consumer still decides for itself what a given edge means, and the decisions are
+  entangled (a `nil -> idle` edge is "launching" to the read policy and "ready" to the
+  prompt queue). The motivating evidence is the bug fixed on that branch: `applyReadState`
+  pruned marks with `unreadIdle.formIntersection(current.keys)`, which is correct for a
+  session whose `claude` exited and wrong for one whose `claude` has not started yet — the
+  two are indistinguishable in that formulation. A small explicit machine over
+  `SessionActivity` (states, permitted edges, and what each edge means to each consumer)
+  would make that class of bug unrepresentable. Not done on that branch because it touches
+  every status consumer at once and the feature did not need it.
+
+- **A prompt can be cancelled by a boot flicker.** `cancelSupersededPrompts` drops a queued
+  "Keep going" the moment a session reports `busy` or `waiting`, so a resumed `claude` that
+  passes briefly through `busy` while loading its transcript loses its prompt. Deliberately
+  conservative: the failure is a silent no-op, where the alternative failure is typing into
+  work the user is already doing. If it proves common in practice, the fix is to ignore
+  transitions until the session has been seen `idle` at least once — not to remove the
+  cancel.
+
+- **Two ticks inside one settle window could double-inject.** `inject` clears the caller's
+  pending entry in `onSent`, which runs after the ~120 ms settle delay, so a second registry
+  tick arriving inside that window would start a second injection for the same tab. This is
+  pre-existing behaviour inherited from `flushPendingRename`, not new to the prompt queue,
+  and the registry poll interval is comfortably longer than the settle. Fix by marking
+  in-flight at the start of `inject` rather than at completion, if it is ever observed.
