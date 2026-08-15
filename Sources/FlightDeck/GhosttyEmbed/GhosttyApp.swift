@@ -56,9 +56,13 @@ final class GhosttyApp {
             Ghostty.logger.critical("ghostty_config_new failed")
             return nil
         }
+        // Flight Deck's own defaults go in FIRST, so the user's config files below can still
+        // override anything here. See GhosttyDefaults.conf for what and why.
+        GhosttyApp.loadBundledDefaults(into: cfg)
         ghostty_config_load_default_files(cfg)
         ghostty_config_load_recursive_files(cfg)
         ghostty_config_finalize(cfg)
+        GhosttyApp.logConfigDiagnostics(cfg)
         self.config = cfg
 
         // The "runtime" config is how libghostty calls back into the host app.
@@ -124,6 +128,39 @@ final class GhosttyApp {
 
     // MARK: - Runtime callbacks
 
+    /// Loads `GhosttyDefaults.conf` from the app bundle into `config`.
+    ///
+    /// libghostty exposes no "parse this string" entry point — only `load_file` — so the
+    /// defaults ship as a real file inside the bundle rather than as a Swift string literal.
+    /// That also makes them inspectable in the installed app.
+    ///
+    /// A missing file is logged and ignored rather than fatal: every default in there is a
+    /// nicety, and refusing to launch over one would be the wrong trade.
+    private static func loadBundledDefaults(into config: ghostty_config_t) {
+        guard let url = Bundle.main.url(forResource: "GhosttyDefaults", withExtension: "conf")
+        else {
+            Ghostty.logger.warning("GhosttyDefaults.conf missing from bundle; skipping defaults")
+            return
+        }
+        url.path.withCString { ghostty_config_load_file(config, $0) }
+    }
+
+    /// Surfaces whatever diagnostics libghostty recorded while parsing the config.
+    ///
+    /// Measured caveat, so nobody mistakes silence for proof: an unparseable `keybind` line
+    /// in a file loaded via `ghostty_config_load_file` does **not** show up here. A bad
+    /// trigger was added to `GhosttyDefaults.conf` deliberately and this reported nothing —
+    /// the binding just silently fails to exist. So this catches some config problems, but
+    /// it is not a validator for the defaults file, and an empty log says little.
+    private static func logConfigDiagnostics(_ config: ghostty_config_t) {
+        let count = ghostty_config_diagnostics_count(config)
+        guard count > 0 else { return }
+        for i in 0..<count {
+            let diagnostic = ghostty_config_get_diagnostic(config, i)
+            guard let message = diagnostic.message else { continue }
+            Ghostty.logger.warning("ghostty config: \(String(cString: message))")
+        }
+    }
     /// Dispatches an app-level action from libghostty to its host equivalent.
     ///
     /// Most actions are still unhandled — see `docs/FOLLOWUPS.md`. This wires only the ones
