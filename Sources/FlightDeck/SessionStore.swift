@@ -171,6 +171,19 @@ final class SessionStore: ObservableObject {
     /// See `flushPendingRename` for why an injection waits.
     private var pendingRenames: [UUID: String] = [:]
 
+    /// Sessions restored from a snapshot that recorded them working, each mapped to the
+    /// instant its prompt stops being worth sending. Drained by `flushPendingResumePrompts`
+    /// on the registry tick, because a resumed `claude` takes seconds to boot and there is
+    /// nothing to type into until it does.
+    ///
+    /// Internal rather than private so the tests can observe the queue without scripting a
+    /// whole surface; nothing outside this type writes it.
+    private(set) var pendingResumePrompts: [UUID: Date] = [:]
+
+    /// Test seam, in the style of `appIsActive` and `injectionSettle`. Production reads the
+    /// wall clock.
+    var now: () -> Date = { Date() }
+
     /// Test seam. Production pauses between killing the input line and reading the screen
     /// back, because Claude Code repaints asynchronously; tests run the continuation inline.
     var injectionSettle: (@escaping () -> Void) -> Void = { work in
@@ -457,6 +470,11 @@ final class SessionStore: ObservableObject {
 
         sessionCounter = snapshot.sessionCounter
 
+        // One deadline for the whole restore, not one per session: they all resume together,
+        // and staggering them by loop position would be noise.
+        let autoResume = preferences?.autoResumesRunningSessions ?? false
+        let promptDeadline = now().addingTimeInterval(Self.resumePromptWindow)
+
         // Pass one: seed the projects, in the recorded order, so the sessions below land in
         // existing repos rather than conjuring them in encounter order.
         for project in recorded where directoryExists(project.path) {
@@ -495,6 +513,12 @@ final class SessionStore: ObservableObject {
             // mark on. Before the `selectedSessionID` assignment below on purpose: its
             // `didSet` clears the mark for the tab you land on, which is correct.
             if entry.unread == true { unreadIdle.insert(entry.id) }
+
+            if autoResume,
+               let activity = entry.activity.flatMap(SessionActivity.init(rawValue:)),
+               Self.resumableActivities.contains(activity) {
+                pendingResumePrompts[entry.id] = promptDeadline
+            }
         }
 
         let restoredIDs = repos.flatMap(\.sessions).map(\.id)
@@ -773,6 +797,20 @@ final class SessionStore: ObservableObject {
     /// warns (and Swift 6 mode errors) that a main-actor-isolated property cannot be read from
     /// that nonisolated context.
     nonisolated static let quitBudget: Double = 8.0
+
+    /// What a resumed session is told. A constant rather than a preference: if the fixed
+    /// string turns out to be wrong in practice, making it configurable is a smaller change
+    /// than un-shipping a setting nobody wanted.
+    static let resumePrompt = "Keep going"
+
+    /// How long after a restore a pending prompt is still worth sending. Without a deadline
+    /// an entry that never met its gates would sit in the queue and fire hours later, into a
+    /// session the user has long since been working in.
+    static let resumePromptWindow: TimeInterval = 120
+
+    /// The activities that mean "this session was working when we went away". `waiting` is
+    /// excluded: what it was blocked on does not survive the restart.
+    static let resumableActivities: Set<SessionActivity> = [.busy, .shell]
 
     /// Reap every live session concurrently, returning when they are all done or the budget
     /// expires — whichever comes first. Survivors are left for the next launch's sweep: each
