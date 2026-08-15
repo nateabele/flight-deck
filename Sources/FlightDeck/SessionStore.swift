@@ -616,6 +616,10 @@ final class SessionStore: ObservableObject {
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
+        // The blanket intersection in `applyReadState` used to cover this implicitly. Now
+        // that it only prunes what it saw disappear, a closed tab has to say so itself —
+        // its id is in neither snapshot, so no tick will ever clean it up.
+        unreadIdle.remove(id)
         // Closing the row is the most literal case of "a prompt that will never resolve",
         // and applyRegistry cannot observe the waiting -> gone edge here because both its
         // before and after snapshots already lack this id.
@@ -863,6 +867,12 @@ final class SessionStore: ObservableObject {
     /// should not have to fabricate those.
     func applyRegistryForTesting(_ next: [UUID: SessionStatus]) {
         statuses = next
+    }
+
+    /// Test seam. Production marks come from `applyReadState` and from restore; a test that
+    /// only cares about how a mark is *pruned* should not have to script an edge to create it.
+    func markUnreadForTesting(_ ids: Set<UUID>) {
+        unreadIdle.formUnion(ids)
     }
 
     /// Test seam. Production leaves this nil and injection goes to the live surface.
@@ -1117,9 +1127,15 @@ final class SessionStore: ObservableObject {
             }
         }
 
-        // A session whose `claude` exited renders no icon at all, so a mark left behind for
-        // it could never be seen or cleared. Drop it rather than leak the entry.
-        unreadIdle.formIntersection(statuses.keys)
+        // Prune only what actually went away this tick. A blanket intersection against the
+        // live statuses looks equivalent and is not: at launch `statuses` is empty until each
+        // resumed `claude` re-registers, so it wiped every mark restore had just seeded — and
+        // it did so before any of them had been drawn, since SessionStatusIcon renders
+        // nothing for a nil status. A mark for a session that has never had a status is
+        // waiting for its process to appear, not stale.
+        for transition in transitions where transition.old != nil && transition.new == nil {
+            unreadIdle.remove(transition.id)
+        }
     }
 
     /// One notification decision per session, over every edge this tick produced — so a
