@@ -15,6 +15,11 @@ struct FlagEditor: View {
     /// Non-nil in the Projects tab: the globals this override inherits from.
     var inherited: FlagSet?
     let lockedPrefix: String
+    /// Rendered as a leading `Section` inside this view's `Form`. The Claude tab uses it for
+    /// settings that belong on that tab but not to the flag model; the Projects tab passes
+    /// nothing. `AnyView` rather than a generic parameter because it is one static section,
+    /// and a generic would ripple through every call site for no benefit.
+    var header: (() -> AnyView)?
 
     @State private var tail: String = ""
     @State private var parseDiagnostics: [Diagnostic] = []
@@ -43,6 +48,7 @@ struct FlagEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Form {
+                if let header { header() }
                 ForEach(FlagSpec.Section.allCases, id: \.self) { section in
                     Section(section.rawValue) {
                         // Keyed by `spec.canonical`, not index/offset: `FlagRow` holds
