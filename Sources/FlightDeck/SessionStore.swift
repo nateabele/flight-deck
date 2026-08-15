@@ -501,7 +501,13 @@ final class SessionStore: ObservableObject {
                     id: $0.id,
                     title: $0.title,
                     workingDirectory: $0.workingDirectory,
-                    pinnedConversationID: $0.pinnedConversationID
+                    pinnedConversationID: $0.pinnedConversationID,
+                    // `nil` rather than a sentinel when no `claude` is registered: restore
+                    // has to distinguish "was not running" from "was running and idle".
+                    activity: statuses[$0.id]?.activity.rawValue,
+                    // `nil` rather than `false` so the common case adds no noise to a file
+                    // that is meant to stay readable.
+                    unread: unreadIdle.contains($0.id) ? true : nil
                 )
             },
             projects: repos.map { .init(path: $0.url.path, isCollapsed: $0.isCollapsed) },
