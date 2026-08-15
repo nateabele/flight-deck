@@ -498,11 +498,9 @@ final class SessionStore: ObservableObject {
         }
 
         let restoredIDs = repos.flatMap(\.sessions).map(\.id)
-        if let snapshotSelection = snapshot.selectedSessionID {
-            // A selection was recorded: use it if it survived, otherwise pick the first survivor
-            selectedSessionID = restoredIDs.contains(snapshotSelection) ? snapshotSelection : restoredIDs.first
-        }
-        // else: selectedSessionID remains nil if it wasn't recorded
+        selectedSessionID = snapshot.selectedSessionID.flatMap {
+            restoredIDs.contains($0) ? $0 : nil
+        } ?? restoredIDs.first
         persist()
         // Projects count as "restored something": `SessionStore.init` reads this as
         // `if resetState || !restore() { seedInitialSession() }`, and seeding a home-directory

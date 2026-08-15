@@ -374,7 +374,13 @@ final class SessionPersistenceTests: XCTestCase {
                 .init(id: unread, title: "a", workingDirectory: "/w", unread: true),
                 .init(id: read, title: "b", workingDirectory: "/w"),
             ],
-            selectedSessionID: nil,
+            // Recorded explicitly, and on the READ session. With no recorded selection,
+            // restore falls back to `restoredIDs.first` — which is `unread`, since both
+            // fixtures share a working directory and land in one repo in encounter order —
+            // and the selection's `didSet` would clear the very mark this test asserts. The
+            // fallback is correct behaviour; the fixture simply must not aim it at the
+            // session under test.
+            selectedSessionID: read,
             sessionCounter: 2
         )
         let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
@@ -418,6 +424,28 @@ final class SessionPersistenceTests: XCTestCase {
         store.restore(directoryExists: { _ in false })
 
         XCTAssertFalse(store.unreadIdle.contains(gone))
+    }
+
+    /// Case (c) — a snapshot that recorded no selection at all. Untested until a Task 6
+    /// regression walked straight through the gap: restore must still come up with a session
+    /// selected, not with tabs in the sidebar and the "No Session" empty state beside them.
+    func testRestoreSelectsTheFirstSessionWhenNoSelectionWasRecorded() {
+        let first = UUID()
+        let second = UUID()
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [
+                .init(id: first, title: "a", workingDirectory: "/w"),
+                .init(id: second, title: "b", workingDirectory: "/w"),
+            ],
+            selectedSessionID: nil,
+            sessionCounter: 2
+        )
+        let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+
+        XCTAssertTrue(store.restore(directoryExists: allDirsExist))
+
+        XCTAssertEqual(store.selectedSessionID, first)
     }
 
     /// The write side of the round trip. Task 2's tests covered `activity`; this covers
