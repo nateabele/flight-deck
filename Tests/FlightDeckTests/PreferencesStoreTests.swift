@@ -129,4 +129,52 @@ final class PreferencesStoreTests: XCTestCase {
         let store = PreferencesStore(persistence: MemoryPersistence())
         XCTAssertNil(store.sessionEnvironment(inherited: [:])["CLAUDE_CODE_CHILD_SESSION"])
     }
+
+    // MARK: Auto-resume
+
+    func testAutoResumeDefaultsOff() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        XCTAssertFalse(store.autoResumesRunningSessions)
+        XCTAssertNil(store.preferences.claude)
+    }
+
+    func testEnablingAutoResumePersists() {
+        let persistence = MemoryPersistence()
+        let store = PreferencesStore(persistence: persistence)
+        store.autoResumesRunningSessions = true
+        XCTAssertEqual(persistence.stored?.claude?.autoResumeRunningSessions, true)
+        XCTAssertTrue(store.autoResumesRunningSessions)
+    }
+
+    func testDisablingAutoResumeRoundTrips() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        store.autoResumesRunningSessions = true
+        store.autoResumesRunningSessions = false
+        XCTAssertFalse(store.autoResumesRunningSessions)
+    }
+
+    /// The load-bearing one. A `preferences.v1` blob written before this field existed must
+    /// still decode — `load()` uses `try?`, so a throw here resets every flag, project
+    /// override and shell setting the user has. Same trap as `Preferences.confirmations`.
+    ///
+    /// Built by encoding a real `Preferences` and deleting the key, rather than by hand, so
+    /// the fixture cannot drift from whatever `FlagSet` actually encodes to.
+    func testPreferencesWithoutTheClaudeKeyStillDecode() throws {
+        let original = Preferences(
+            globalFlags: FlagSet(values: ["--model": .value("opus")]),
+            claude: ClaudePreferences(autoResumeRunningSessions: true)
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try JSONEncoder().encode(original))
+                as? [String: Any]
+        )
+        object.removeValue(forKey: "claude")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(Preferences.self, from: legacy)
+
+        XCTAssertNil(decoded.claude)
+        XCTAssertEqual(decoded.globalFlags.values["--model"], .value("opus"))
+        XCTAssertTrue(decoded.shell.clearChildSessionMarker)
+    }
 }
