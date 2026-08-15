@@ -33,6 +33,18 @@ struct ConfirmationPreferences: Codable, Equatable {
     }
 }
 
+/// Session-lifecycle behaviour, edited on the Claude tab.
+struct ClaudePreferences: Codable, Equatable {
+    /// Sessions that were mid-turn when Flight Deck last went away are prompted to continue
+    /// once they have resumed and settled. Off by default: picking work back up unattended
+    /// is a decision the user has to make deliberately, not one to inherit from an upgrade.
+    var autoResumeRunningSessions: Bool
+
+    init(autoResumeRunningSessions: Bool = false) {
+        self.autoResumeRunningSessions = autoResumeRunningSessions
+    }
+}
+
 /// Everything the Preferences window edits.
 struct Preferences: Codable, Equatable {
     var globalFlags: FlagSet
@@ -47,16 +59,21 @@ struct Preferences: Codable, Equatable {
     /// decode every existing `preferences.v1` blob and silently reset every flag, override
     /// and shell setting the user has. `nil` means "never answered", which is not suppressed.
     var confirmations: ConfirmationPreferences?
+    /// Optional for exactly the reason `confirmations` is — see that property's comment.
+    /// `nil` means "never configured", which reads as every field's default.
+    var claude: ClaudePreferences?
 
     init(
         globalFlags: FlagSet = FlagSet(),
         projectFlags: [String: FlagSet] = [:],
         shell: ShellPreferences = ShellPreferences(),
-        confirmations: ConfirmationPreferences? = nil
+        confirmations: ConfirmationPreferences? = nil,
+        claude: ClaudePreferences? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
         self.shell = shell
         self.confirmations = confirmations
+        self.claude = claude
     }
 }

@@ -120,4 +120,17 @@ final class PreferencesStore: ObservableObject {
             preferences.confirmations = confirmations
         }
     }
+
+    // MARK: Claude
+
+    /// Whether sessions recorded as working at shutdown are prompted to continue on the
+    /// next launch. Reads through the optional so an unconfigured `Preferences` is off.
+    var autoResumesRunningSessions: Bool {
+        get { preferences.claude?.autoResumeRunningSessions ?? false }
+        set {
+            var claude = preferences.claude ?? ClaudePreferences()
+            claude.autoResumeRunningSessions = newValue
+            preferences.claude = claude
+        }
+    }
 }
