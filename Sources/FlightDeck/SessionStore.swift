@@ -1076,6 +1076,12 @@ final class SessionStore: ObservableObject {
         statuses = next
         applyReadState(previous: previous, current: next)
         deliverNotifications(previous: previous, current: next)
+        // Below the `guard next != statuses` above, so this writes only on a real
+        // transition — a handful of small atomic writes a minute, not one per poll.
+        // Recording activity here rather than at quit is what covers a SIGKILL (which is
+        // how scripts/swap-release.sh stops the app) and a panic, and an unplanned exit is
+        // the case auto-resume is most wanted for.
+        persist()
     }
 
     /// One read/unread decision per session, over the union of both snapshots — the same
