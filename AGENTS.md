@@ -1,0 +1,92 @@
+# AGENTS.md
+
+Flight Deck — an orchestration-native macOS terminal (Swift/SwiftUI/AppKit) that reuses Ghostty
+for terminal rendering and runs many coding agents across repos in a `session → project` sidebar.
+
+**New here? Read [docs/HANDOFF.md](docs/HANDOFF.md) first**, then this file.
+
+---
+
+## Read before you act
+
+Four things trip up every agent on this repo. The detail is in
+**[docs/AGENT-OPERATIONS.md](docs/AGENT-OPERATIONS.md)**.
+
+1. **You are probably running inside the app you are editing.** The process tree is
+   `Flight Deck.app → login → fish → claude`. Quitting or killing Flight Deck kills your own
+   session. Detach anything that must outlive the app (`nohup … &`).
+2. **Never launch a bundle from `DerivedData/`.** Flight Deck has no argv parsing — even
+   `--help` boots a *second full app instance*, spawning duplicate `claude --resume` processes
+   that collide in Claude's pid-keyed name registry. Run only `/Applications/Flight Deck.app`.
+3. **Never `defaults delete dev.flightdeck.FlightDeck`.** Preferences live there. Sessions live
+   in `~/Library/Application Support/Flight Deck/sessions.json`. Test isolation is the
+   `-FlightDeckResetState YES` launch argument, not deletion.
+4. **Don't loop `./scripts/smoke.sh`.** It seizes the foreground for ~40s and captures the
+   user's keystrokes as phantom test failures. It's throttled to one run per 180s on purpose.
+
+Also: this checkout is **shared by concurrent sessions**. Never `git stash`, `git checkout .`,
+or revert blind — check `git status` and leave changes that aren't yours alone.
+
+## Commands
+
+```bash
+./scripts/build-libghostty.sh   # once, ~10 min — builds GhosttyKit.xcframework
+./scripts/build.sh              # xcodegen generate + xcodebuild → Debug "Flight Deck.app"
+./scripts/test-unit.sh          # headless unit suite — your normal TDD loop
+./scripts/smoke.sh              # GUI UITest, ends "SMOKE PASS" (see rule 4)
+```
+
+Every `xcodebuild` needs `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` and
+`-derivedDataPath DerivedData` (the scripts handle both). Never `sudo xcode-select`.
+Releases go through `scripts/swap-release.sh`, run detached — see
+[docs/AGENT-OPERATIONS.md §2](docs/AGENT-OPERATIONS.md).
+
+## Layout
+
+| Path | What |
+|---|---|
+| `Sources/FlightDeck/` | The app. `SessionStore` is the single source of truth (`@MainActor`). |
+| `Sources/FlightDeck/GhosttyEmbed/` | **Adapt-copied Ghostty** (MIT, provenance-marked). Vendored-ish — prefer re-pulling upstream to hand-editing. |
+| `Sources/FlightDeck/Preferences/` | Pure flag catalog/parser/serializer/merge + SwiftUI shell. |
+| `Tests/FlightDeckTests/` | Headless unit tests. `UITests/` drives the real app. |
+| `project.yml` | Source of truth for the build; `.xcodeproj` is **generated** and git-ignored. |
+| `vendor/ghostty` | Submodule pinned to v1.3.1. Pristine — never modify. |
+| `docs/` | See below. |
+
+Spine: `FlightDeckApp → RootWindow → RootView → TerminalPane → Ghostty.SurfaceView`.
+
+## Conventions (short version)
+
+Full detail: **[docs/CONVENTIONS.md](docs/CONVENTIONS.md)**.
+
+- **Comments explain *why* and name the failure they prevent** — this is the house style. Audit
+  stale comments repo-wide when behavior changes.
+- Commits: `fix: stop the unread dot marking every session at launch` — lowercase, behavioral,
+  imperative; body covers mechanism, evidence, and rejected alternatives; trailer
+  `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.
+- TDD, and **confirm the test fails against the broken code** before fixing. Never weaken an
+  assertion to go green.
+- Keep logic pure and SwiftUI-free where possible; put seams behind protocols.
+- `SWIFT_VERSION: "5.0"` is deliberate (vendored Ghostty isn't Swift-6 clean). Don't "fix" it.
+- Non-trivial work: spec → plan → subagent-driven build, artifacts in `docs/superpowers/`.
+- Update the affected doc in the same branch as the behavior change.
+
+## Docs
+
+| Doc | For |
+|---|---|
+| [docs/HANDOFF.md](docs/HANDOFF.md) | Current state, quickstart, locked decisions. **Start here.** |
+| [docs/AGENT-OPERATIONS.md](docs/AGENT-OPERATIONS.md) | Release ritual, process/state hazards, worktrees, test discipline. |
+| [docs/CONVENTIONS.md](docs/CONVENTIONS.md) | Code, comment, commit, and workflow conventions. |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | As-built structure, the Ghostty reuse boundary, runtime model. |
+| [docs/BUILD.md](docs/BUILD.md) | Build/run/test from a fresh clone + troubleshooting. |
+| [docs/TOOLING.md](docs/TOOLING.md) | Toolchain versions and the Zig/SDK linker workaround. |
+| [docs/FOLLOWUPS.md](docs/FOLLOWUPS.md) | Known limitations, next fixes, and deliberate non-fixes. |
+| [docs/superpowers/specs/](docs/superpowers/specs) · [plans/](docs/superpowers/plans) | Per-feature design specs and executed plans. |
+
+## Known limitation
+
+The libghostty build is **not reproducible on a clean host/CI**: Ghostty pins Zig 0.15.2, whose
+Mach-O linker mis-parses the macOS 26.x SDK, so the build shims `xcrun` at a locally-present
+`MacOSX15.4.sdk`. It fails fast with a clear error if that SDK is absent.
+[TOOLING.md](docs/TOOLING.md) has the full root cause.
