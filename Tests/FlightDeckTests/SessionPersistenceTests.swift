@@ -363,6 +363,81 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertNil(persistence.stored?.sessions.first(where: { $0.id == a.id })?.activity)
     }
 
+    // MARK: Restoring unread marks
+
+    func testRestoreSeedsUnreadMarks() {
+        let unread = UUID()
+        let read = UUID()
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [
+                .init(id: unread, title: "a", workingDirectory: "/w", unread: true),
+                .init(id: read, title: "b", workingDirectory: "/w"),
+            ],
+            selectedSessionID: nil,
+            sessionCounter: 2
+        )
+        let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+
+        XCTAssertTrue(store.restore(directoryExists: allDirsExist))
+
+        XCTAssertTrue(store.unreadIdle.contains(unread))
+        XCTAssertFalse(store.unreadIdle.contains(read))
+    }
+
+    /// The tab you land on is in front of you, so it comes back read. Seeding happens before
+    /// the selection is assigned, whose `didSet` clears the mark — and `observeAppActivation`
+    /// would clear it a moment later at launch regardless.
+    func testTheRestoredSelectionComesBackRead() {
+        let selected = UUID()
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(id: selected, title: "a", workingDirectory: "/w", unread: true)],
+            selectedSessionID: selected,
+            sessionCounter: 1
+        )
+        let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+
+        XCTAssertTrue(store.restore(directoryExists: allDirsExist))
+
+        XCTAssertFalse(store.unreadIdle.contains(selected))
+    }
+
+    /// A mark for a session whose directory has gone is not restored, because the session
+    /// itself is not — there would be no row to draw it on.
+    func testAMarkForADroppedSessionIsNotRestored() {
+        let gone = UUID()
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(id: gone, title: "a", workingDirectory: "/gone", unread: true)],
+            selectedSessionID: nil,
+            sessionCounter: 1
+        )
+        let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+
+        store.restore(directoryExists: { _ in false })
+
+        XCTAssertFalse(store.unreadIdle.contains(gone))
+    }
+
+    /// The write side of the round trip. Task 2's tests covered `activity`; this covers
+    /// `unread`, which is deliberately written as `true`-or-absent rather than `true`/`false`
+    /// so the JSON stays readable.
+    func testPersistRecordsUnreadAsTrueOrAbsent() {
+        let persistence = FakePersistence()
+        let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        let marked = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        let clean = store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
+
+        store.markUnreadForTesting([marked.id])
+        // `markUnreadForTesting` mutates the set without saving; a selection write persists.
+        store.selectedSessionID = clean.id
+
+        let stored = persistence.stored?.sessions ?? []
+        XCTAssertEqual(stored.first(where: { $0.id == marked.id })?.unread, true)
+        XCTAssertNil(stored.first(where: { $0.id == clean.id })?.unread)
+    }
+
     // MARK: - FileSessionPersistence
 
     /// Each test gets its own directory so they never touch the real
