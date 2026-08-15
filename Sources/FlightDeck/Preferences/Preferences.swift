@@ -34,6 +34,10 @@ struct ConfirmationPreferences: Codable, Equatable {
 }
 
 /// Session-lifecycle behaviour, edited on the Claude tab.
+///
+/// Every field added here must be Optional or carry a custom decoder, for the reason given
+/// on `Preferences.claude`: users already have `"claude": {...}` blobs on disk, and a
+/// non-optional field with no default would fail to decode every one of them.
 struct ClaudePreferences: Codable, Equatable {
     /// Sessions that were mid-turn when Flight Deck last went away are prompted to continue
     /// once they have resumed and settled. Off by default: picking work back up unattended

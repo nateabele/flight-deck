@@ -271,9 +271,21 @@ completes.
   transitions until the session has been seen `idle` at least once — not to remove the
   cancel.
 
-- **Two ticks inside one settle window could double-inject.** `inject` clears the caller's
-  pending entry in `onSent`, which runs after the ~120 ms settle delay, so a second registry
-  tick arriving inside that window would start a second injection for the same tab. This is
-  pre-existing behaviour inherited from `flushPendingRename`, not new to the prompt queue,
-  and the registry poll interval is comfortably longer than the settle. Fix by marking
-  in-flight at the start of `inject` rather than at completion, if it is ever observed.
+- **Two ticks inside one settle window could double-inject — FIXED.** `inject` now marks a
+  tab in-flight (a private `injecting: Set<UUID>`) the moment its `sendKillLine()` goes out
+  and clears it only when the settle work finishes, on every path out of that closure. The
+  original writeup here reasoned about same-caller re-entry only — the registry tick's
+  ~500ms poll against a 120ms settle — and judged it safe. That reasoning did not cover the
+  other caller: `rename()` runs off a direct keystroke with no interval to race against, so
+  a rename landing inside a queued prompt's settle window (or vice versa) could still send a
+  second Ctrl+U into a viewport the first settle was mid-comparison against. The guard now
+  lives inside `inject` itself, so it covers both callers instead of being restated in each.
+
+- **`restore()` blanks the activity it just read.** The `persist()` at the end of `restore()`
+  runs while `statuses` is still empty, so every entry's recorded `activity` is immediately
+  rewritten to nil and only repopulates as each `claude` re-registers. Semantically
+  defensible — activity means "right now" — but it means a second crash inside the boot
+  window loses the auto-resume queue, and the on-disk record is blank for the seconds when
+  it is most interesting. Preserving it needs the store to hold the loaded values until the
+  first real tick; deferred as more machinery than the fix it buys, and the terminating
+  guard already covers the case that actually bit.
