@@ -15,6 +15,14 @@ final class SessionStoreTests: XCTestCase {
         func tick() { tickCount += 1 }
     }
 
+    /// In-memory stand-in for the snapshot store.
+    final class FakePersistence: SessionPersisting {
+        var stored: SessionSnapshot?
+        var saveCount = 0
+        func load() -> SessionSnapshot? { stored }
+        func save(_ snapshot: SessionSnapshot) { stored = snapshot; saveCount += 1 }
+    }
+
     func testNewSessionCreatesRepoAndSelects() {
         let store = SessionStore(provider: StubProvider())
         let session = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
@@ -107,5 +115,54 @@ final class SessionStoreTests: XCTestCase {
         store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
         XCTAssertEqual(stub.madeCount, 2)
         XCTAssertEqual(stub.tickCount, 2)
+    }
+
+    // MARK: Persisting status transitions
+
+    /// Recording activity is what makes auto-resume survive a SIGKILL rather than only a
+    /// clean quit, so the registry tick has to save — it is the only place activity moves.
+    func testRegistryTransitionPersists() {
+        let persistence = FakePersistence()
+        let store = SessionStore(provider: StubProvider(), persistence: persistence)
+        let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        let before = persistence.saveCount
+
+        store.applyRegistry([1: row(s, activity: .busy)])
+
+        XCTAssertGreaterThan(persistence.saveCount, before)
+    }
+
+    /// The counterpart. `applyRegistry` runs on every poll; saving unconditionally would
+    /// rewrite sessions.json a few times a second for the life of the app.
+    func testRegistryPollWithNoChangeDoesNotPersist() {
+        let persistence = FakePersistence()
+        let store = SessionStore(provider: StubProvider(), persistence: persistence)
+        let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        let rows = [pid_t(1): row(s, activity: .busy)]
+
+        store.applyRegistry(rows)
+        let settled = persistence.saveCount
+        store.applyRegistry(rows)
+
+        XCTAssertEqual(persistence.saveCount, settled)
+    }
+
+    /// A registry row for `session`, in the shape `applyRegistry` resolves against.
+    ///
+    /// `cwd` must equal the session's own working directory: `applyRegistry` reads a
+    /// differing cwd as `claude` having moved the session to another project and calls
+    /// `moveSession`, which is not what these tests are exercising.
+    private func row(
+        _ session: Session, pid: pid_t = 1, activity: SessionActivity
+    ) -> ClaudeStatusFile.Entry {
+        .init(
+            pid: pid,
+            sessionID: session.pinnedConversationID,
+            activity: activity,
+            waitingFor: nil,
+            startedAt: 1,
+            cwd: session.workingDirectory,
+            procStart: "start-a"
+        )
     }
 }
