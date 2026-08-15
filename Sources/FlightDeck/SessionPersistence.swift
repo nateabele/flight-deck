@@ -16,17 +16,31 @@ struct SessionSnapshot: Codable, Equatable {
         /// the defaults key stays `sessions.snapshot.v1`. A non-optional field would throw
         /// and wipe every tab on the first launch after this change.
         var pinnedConversationID: UUID?
+        /// The session's activity when this snapshot was written, as
+        /// `SessionActivity.rawValue`. Absent means no `claude` was registered for this tab
+        /// — which is deliberately distinct from `"idle"`, and is what an older snapshot
+        /// reads as.
+        ///
+        /// Optional for the same load-bearing reason as `pinnedConversationID` above.
+        var activity: String?
+        /// Whether this session finished while the user was looking elsewhere. Absent
+        /// reads as false. Optional for the same reason as `activity`.
+        var unread: Bool?
 
         init(
             id: UUID,
             title: String,
             workingDirectory: String,
-            pinnedConversationID: UUID? = nil
+            pinnedConversationID: UUID? = nil,
+            activity: String? = nil,
+            unread: Bool? = nil
         ) {
             self.id = id
             self.title = title
             self.workingDirectory = workingDirectory
             self.pinnedConversationID = pinnedConversationID
+            self.activity = activity
+            self.unread = unread
         }
     }
 

@@ -318,6 +318,51 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(store.title(of: sid), "fresh title")
     }
 
+    // MARK: Recorded activity and unread
+
+    /// Snapshots predating these fields must still decode, or the first launch after this
+    /// change wipes every tab — the same rule `testV1SnapshotWithoutPinDecodes` pins.
+    func testSnapshotWithoutActivityOrUnreadDecodes() throws {
+        let id = UUID()
+        let json = """
+        {"sessions":[{"id":"\(id.uuidString)","title":"a","workingDirectory":"/w"}],\
+        "sessionCounter":1}
+        """
+        let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(json.utf8))
+
+        XCTAssertEqual(snapshot.sessions.first?.id, id)
+        XCTAssertNil(snapshot.sessions.first?.activity)
+        XCTAssertNil(snapshot.sessions.first?.unread)
+    }
+
+    func testPersistRecordsEachSessionsActivity() {
+        let persistence = FakePersistence()
+        let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        let a = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        let b = store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
+
+        store.applyRegistryForTesting([
+            a.id: SessionStatus(activity: .busy),
+            b.id: SessionStatus(activity: .shell),
+        ])
+        // `applyRegistryForTesting` only sets the map; force a save the way any mutation would.
+        store.selectedSessionID = a.id
+
+        let stored = persistence.stored?.sessions ?? []
+        XCTAssertEqual(stored.first(where: { $0.id == a.id })?.activity, "busy")
+        XCTAssertEqual(stored.first(where: { $0.id == b.id })?.activity, "shell")
+    }
+
+    /// A tab with no `claude` registered records no activity. Absent is not the same as
+    /// idle, and restore has to be able to tell them apart.
+    func testPersistRecordsNoActivityForASessionWithNoStatus() {
+        let persistence = FakePersistence()
+        let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        let a = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+
+        XCTAssertNil(persistence.stored?.sessions.first(where: { $0.id == a.id })?.activity)
+    }
+
     // MARK: - FileSessionPersistence
 
     /// Each test gets its own directory so they never touch the real
