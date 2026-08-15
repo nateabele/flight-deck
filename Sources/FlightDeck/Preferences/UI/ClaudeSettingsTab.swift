@@ -8,7 +8,27 @@ struct ClaudeSettingsTab: View {
         FlagEditor(
             flags: $preferences.preferences.globalFlags,
             inherited: nil,
-            lockedPrefix: Self.placeholderPrefix
+            lockedPrefix: Self.placeholderPrefix,
+            header: {
+                AnyView(
+                    Section("Startup") {
+                        Toggle(
+                            "Auto-resume running sessions on restart",
+                            isOn: Binding(
+                                get: { preferences.autoResumesRunningSessions },
+                                set: { preferences.autoResumesRunningSessions = $0 }
+                            )
+                        )
+                        .accessibilityIdentifier("prefs-auto-resume")
+                        // States the busy/shell rule in the user's terms: "running" is not
+                        // self-evident from the label, and the exclusions are the surprising
+                        // half.
+                        Text("Sessions that were working when Flight Deck last quit are asked to continue once they have resumed. Sessions that were idle, or waiting on you, are left alone.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                )
+            }
         )
     }
 
