@@ -942,52 +942,76 @@ final class SessionStore: ObservableObject {
         flushPendingRename(id)
     }
 
-    /// Types a pending rename into a session, or leaves it pending if this is a bad moment.
+    /// Types `text` into a session's input box and submits it, preserving whatever draft was
+    /// there. Returns false when this is a bad moment — nothing was sent, and the caller
+    /// should leave its request pending and try again on a later tick.
     ///
-    /// A paste lands wherever the input cursor is, so injecting blindly appends the command
-    /// to whatever the user was half-way through typing and submits the result. The gates:
+    /// The gates, and why each one:
     ///
-    /// - **Idle only.** While `busy` the command queues behind the running turn; while
-    ///   `waiting` a Return answers a permission prompt or dialog instead of submitting.
-    ///   `shell` means no `claude` is running at all, where `/rename …` would hit a shell.
-    /// - **One row only.** Ctrl+U kills a single logical line and yank-pop *replaces*
-    ///   rather than appends, so a draft spanning rows cannot be taken apart and put back.
-    ///   Wrapped text renders the same way and behaves the same way under Ctrl+U — a
-    ///   240-character wrapped line survived Ctrl+E + Ctrl+U in testing — so both defer.
+    /// - **Idle only.** While `busy` the text queues behind the running turn; while
+    ///   `waiting` a Return answers a permission prompt or dialog instead of submitting;
+    ///   `shell` means no `claude` is running at all, so the text would hit a bare shell.
+    /// - **One row only.** Ctrl+U kills a single logical line and yank-pop *replaces* rather
+    ///   than appends, so a draft spanning rows cannot be taken apart and put back.
     ///
-    /// The kill happens *before* we know whether there was anything to kill, because that
-    /// is the only way to find out: Claude Code renders its placeholder hint in exactly the
-    /// same shape as a real draft (see `InputBar`), so the screen cannot be trusted to say
-    /// whether the buffer is empty. Killing and then comparing measures the effect instead.
-    /// A kill that changed nothing means the line was empty and there is nothing to restore
-    /// — yanking there would paste the user's *previous* kill into the bar, which is the
-    /// failure this ordering exists to avoid.
+    /// The kill happens *before* we know whether there was anything to kill, because that is
+    /// the only way to find out: Claude Code renders its placeholder hint in exactly the same
+    /// shape as a real draft (see `InputBar`), so the screen cannot be trusted to say whether
+    /// the buffer is empty. Killing and then comparing measures the effect instead. A kill
+    /// that changed nothing means the line was empty and there is nothing to restore —
+    /// yanking there would paste the user's *previous* kill into the bar.
     ///
     /// The yank comes after the Return, so a wrong guess can only leave text sitting in the
-    /// bar, never submit it.
-    private func flushPendingRename(_ id: UUID) {
-        guard let name = pendingRenames[id],
-              statuses[id]?.activity == .idle,
+    /// bar, never submit it. `sendText` and `sendReturn` are separate because a paste is not
+    /// typing — see `TextInjecting.sendReturn()`.
+    ///
+    /// `stillWanted` is re-checked after the settle delay, because the request can be
+    /// replaced or cancelled while Claude Code repaints. `onSent` runs once the text has been
+    /// submitted, and is where the caller retires its pending entry.
+    @discardableResult
+    private func inject(
+        _ text: String,
+        into id: UUID,
+        stillWanted: @escaping @MainActor () -> Bool,
+        onSent: @escaping @MainActor () -> Void
+    ) -> Bool {
+        guard statuses[id]?.activity == .idle,
               let injector = injector(for: id),
               let viewport = injector.readViewport(),
               let bar = InputBar.read(fromViewport: viewport),
               bar.rows.count == 1
-        else { return }
+        else { return false }
 
         let before = bar.content
         injector.sendKillLine()
         // Claude Code needs a moment to repaint before the screen reflects the kill.
-        injectionSettle { [weak self] in
-            guard let self, self.pendingRenames[id] == name else { return }
+        injectionSettle {
+            guard stillWanted() else { return }
             let after = injector.readViewport().flatMap(InputBar.read(fromViewport:))?.content
-            injector.sendText("/rename \(name)")
+            injector.sendText(text)
             injector.sendReturn()
             // Restore only on a *confirmed* change. If the screen went unreadable we do not
             // know, and the draft is one Ctrl+Y away in Claude's own ring — better than
             // pasting text the user never typed into a bar that was empty.
             if let after, after != before { injector.sendYank() }
-            self.pendingRenames[id] = nil
+            onSent()
         }
+        return true
+    }
+
+    private func flushPendingRename(_ id: UUID) {
+        guard let name = pendingRenames[id] else { return }
+        inject(
+            "/rename \(name)",
+            into: id,
+            // A second rename during the settle window replaces the first; typing the
+            // superseded name would be wrong, and typing both in turn worse.
+            stillWanted: { [weak self] in
+                guard let self else { return false }
+                return self.pendingRenames[id] == name
+            },
+            onSent: { [weak self] in self?.pendingRenames[id] = nil }
+        )
     }
 
     /// Retries every deferred rename. Driven by the registry scan, which is what turns a
