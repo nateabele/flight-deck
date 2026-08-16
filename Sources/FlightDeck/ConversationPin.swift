@@ -14,11 +14,16 @@ enum ConversationPin {
     }
 
     /// What a tab should look like after reconciling against the registry. Each field is
-    /// independent: a resume can change the conversation, the project, or both.
+    /// independent: a resume can change the conversation, the directory, or both.
     struct Resolution: Equatable {
         /// nil means the anchor was lost — no live process is ours.
         var anchor: Anchor?
         var conversationID: UUID
+        /// The directory `claude` reports it is running in, echoed back unchanged when the
+        /// row omits it. Reported, not interpreted: this resolver says where the process is,
+        /// and `SessionStore.applyRegistry` decides separately what that means for the
+        /// transcript the tab watches and for the project it is filed under — a worktree cwd
+        /// moves the first and deliberately not the second.
         var workingDirectory: String
     }
 

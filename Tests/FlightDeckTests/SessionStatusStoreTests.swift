@@ -13,9 +13,10 @@ final class SessionStatusStoreTests: XCTestCase {
     }
 
     // `cwd` has no default, for the reason `ConversationRepinTests` gave when it dropped
-    // its own: every session here lives in `tmp`, and `applyRegistry` moves a tab whenever
-    // a row's `cwd` disagrees with it, so a fixture-wide stand-in like `"/w"` would run a
-    // silent project move underneath every status assertion in this file.
+    // its own: every session here lives in `tmp`, and `applyRegistry` retargets a tab's
+    // transcript whenever a row's `cwd` disagrees with it, so a fixture-wide stand-in like
+    // `"/w"` would restart a watcher on a made-up path underneath every status assertion in
+    // this file.
     private func entry(_ sid: UUID, _ activity: SessionActivity,
                        waitingFor: String? = nil, pid: pid_t = 1,
                        cwd: String, procStart: String = "start-a")

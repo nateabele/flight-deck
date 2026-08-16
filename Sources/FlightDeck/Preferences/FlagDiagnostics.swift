@@ -22,7 +22,7 @@ enum FlagDiagnostics {
 
         if flags.values["--worktree"] != nil {
             diagnostics.append(.warning(
-                "--worktree moves the session's working directory out of the project root, so its transcript and sidebar grouping follow the worktree."
+                "--worktree moves the session's working directory out of the project root, so its transcript follows the worktree. The tab stays filed under its project in the sidebar."
             ))
         }
 

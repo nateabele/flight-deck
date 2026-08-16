@@ -12,8 +12,10 @@ final class ConversationRepinTests: XCTestCase {
     }
 
     // `cwd` has no default: every session here is created `in: tmp`, and `applyRegistry`
-    // now moves a tab whenever a row's `cwd` disagrees with it, so a fixture-wide stand-in
-    // like `"/w"` would silently relocate every tab in this file on its first tick.
+    // retargets a tab's transcript whenever a row's `cwd` disagrees with it, so a
+    // fixture-wide stand-in like `"/w"` would silently repoint every watcher in this file at
+    // a transcript under `/w` on its first tick — which is the very thing the repin
+    // assertions below read back.
     private func row(_ sid: UUID, pid: pid_t = 1, cwd: String,
                      procStart: String = "start-a") -> ClaudeStatusFile.Entry {
         .init(pid: pid, sessionID: sid, activity: .busy, waitingFor: nil,

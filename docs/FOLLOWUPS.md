@@ -289,3 +289,25 @@ completes.
   it is most interesting. Preserving it needs the store to hold the loaded values until the
   first real tick; deferred as more machinery than the fix it buys, and the terminating
   guard already covers the case that actually bit.
+
+## From worktree/project pinning (2026-08-16)
+
+A reported cwd now answers two questions separately: the transcript always follows it
+(`Session.transcriptDirectory`), while the tab moves in the sidebar only into a project that
+is already open. Design record:
+`superpowers/specs/2026-08-11-resumed-conversation-pinning-design.md` §6.1 and §7.
+
+- **Phantom worktree projects already in the sidebar are not migrated — deliberate.** Sessions
+  that entered a worktree before this change left `…/.claude/worktrees/<name>` projects behind,
+  and nothing folds them back into their parents. A migration would have to guess which real
+  project each one belongs under and relocate live sessions between projects during launch, on
+  a heuristic, to save a one-time click of the project close button. Ruled out rather than
+  overlooked; do not re-derive it.
+- **A plain `cd` into a directory that happens to be another open project still moves the
+  tab.** The sidebar cannot tell "resumed into that project" from "changed directory into it",
+  and an open project is the only available evidence that a path is a project rather than a
+  subdirectory. The move is at least visible in the sidebar, and strictly rarer than the
+  phantom-project failure the conditional rule replaced (no undo, though: dragging a session
+  between projects is still refused by `SidebarReorder`). The alternative — never
+  moving — was considered and rejected: a genuine resume into an open project is worth
+  following.
