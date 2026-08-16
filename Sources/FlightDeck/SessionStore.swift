@@ -181,11 +181,10 @@ final class SessionStore: ObservableObject {
     /// `statusWatcher`'s poll or the `WatchClock` timer while that reap is in flight — there
     /// is no `applicationWillTerminate` — so a tick can land mid-reap and see every tracked
     /// `claude` already gone. Every session's transition would then read `old != nil, new ==
-    /// nil`, which `applyReadState` treats as "the process exited" and prunes the unread mark
-    /// for, and the `persist()` at the end of `applyRegistry` would write `activity: nil,
-    /// unread: nil` for every tab — erasing exactly the state the next launch's auto-resume
-    /// needs to read back. `applyRegistry` returns immediately once this is set, so the state
-    /// on disk is whatever the last real tick before quit left there.
+    /// nil`, and the `persist()` at the end of `applyRegistry` would write `activity: nil`
+    /// for every tab — erasing exactly the state the next launch's auto-resume needs to read
+    /// back. `applyRegistry` returns immediately once this is set, so the state on disk is
+    /// whatever the last real tick before quit left there.
     private var isTerminating = false
 
     /// Which process each tab is following, keyed by tab id. Established the first time a
@@ -757,9 +756,10 @@ final class SessionStore: ObservableObject {
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
-        // The blanket intersection in `applyReadState` used to cover this implicitly. Now
-        // that it only prunes what it saw disappear, a closed tab has to say so itself —
-        // its id is in neither snapshot, so no tick will ever clean it up.
+        // `applyReadState` no longer clears a mark when a session's status disappears — a
+        // mark now outlives its process. But closing a tab removes its id from `repos`
+        // entirely, so no future tick will ever see it again; leaving the mark in
+        // `unreadIdle` here would leak it forever rather than merely have it persist.
         unreadIdle.remove(id)
         // Closing the row is the most literal case of "a prompt that will never resolve",
         // and applyRegistry cannot observe the waiting -> gone edge here because both its
@@ -1270,7 +1270,7 @@ final class SessionStore: ObservableObject {
     func applyRegistry(_ rows: [pid_t: ClaudeStatusFile.Entry]) {
         // Quitting: see `isTerminating`'s doc comment. A tick landing here reads an emptied
         // registry, not a real one — returning before even the `defer` below runs is
-        // deliberate, so nothing prunes a mark or persists over the state auto-resume wants.
+        // deliberate, so nothing clears a mark or persists over the state auto-resume wants.
         guard !isTerminating else { return }
         // The scan is also the retry tick for deferred renames. `defer` because this method
         // returns early when nothing changed, and a rename usually waits on something that
@@ -1403,27 +1403,6 @@ final class SessionStore: ObservableObject {
             case .clear:
                 unreadIdle.remove(transition.id)
             }
-        }
-
-        // Prune only what actually went away this tick. A blanket intersection against the
-        // live statuses looks equivalent and is not: at launch `statuses` is empty until each
-        // resumed `claude` re-registers, so it wiped every mark restore had just seeded,
-        // before any of them had a chance to be viewed. A mark for a session that has never
-        // had a status is waiting for its process to appear, not stale.
-        //
-        // The prune below — dropping a session's unread mark the moment its status goes
-        // back to nil — was originally justified by "SessionStatusIcon renders nothing for
-        // a nil status, so the entry has no icon left to carry the mark and would leak
-        // invisibly." That justification no longer holds: SessionStatusIcon now renders an
-        // unread dot for a nil status too, when `unread` is true (see its `else if unread`
-        // branch). An unread, statusless session IS drawn today. The prune's behavior is
-        // deliberately left UNCHANGED here regardless — whether unread marks should still
-        // be dropped on this transition is a separate, user-facing call, out of scope for
-        // this branch and already raised with the user separately. What is recorded here is
-        // that the rule below is now kept without the reason that originally motivated it,
-        // pending a deliberate decision, not that the rule has been re-justified.
-        for transition in transitions where transition.old != nil && transition.new == nil {
-            unreadIdle.remove(transition.id)
         }
     }
 

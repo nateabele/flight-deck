@@ -147,7 +147,7 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertEqual(persistence.saveCount, settled)
     }
 
-    // MARK: Unread pruning
+    // MARK: Unread marks outlive process state
 
     /// At launch `statuses` is empty until each resumed `claude` re-registers. The old
     /// blanket intersection wiped every restored mark on that first tick, before the user
@@ -169,16 +169,13 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertTrue(store.unreadIdle.contains(waiting.id))
     }
 
-    /// The case the intersection was there for: a session that HAD a status and lost it is
-    /// dropped from `unreadIdle`. That drop was originally justified as "no icon left to
-    /// carry the mark, so the entry must not leak" — that reasoning no longer holds now
-    /// that `SessionStatusIcon` renders an unread dot for a nil status too (its `unread`
-    /// parameter), so a statusless-but-unread session IS drawn. The behavior asserted below
-    /// is deliberately kept unchanged regardless; see the comment on the prune in
-    /// `SessionStore.swift` for the full account. This test documents current behavior, not
-    /// a re-justified rule — whether the prune should still fire here is an open,
-    /// user-facing question outside this branch's scope.
-    func testAMarkIsDroppedWhenAnExistingStatusDisappears() {
+    /// A session that HAD a status and lost it — its `claude` exited while Flight Deck kept
+    /// running — no longer drops the session's mark. An unread mark reflects the user's read
+    /// state, not process state, so it survives the process disappearing; only the status
+    /// glyph does not (`SessionStatusIcon`'s `if let status` branch draws nothing once the
+    /// status is gone, and its `else if unread` branch draws the bare accent dot instead, so
+    /// a statusless-but-unread session is still visibly marked).
+    func testAMarkSurvivesItsStatusDisappearing() {
         let store = SessionStore(provider: StubProvider())
         let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         store.selectedSessionID = nil
@@ -190,7 +187,7 @@ final class SessionStoreTests: XCTestCase {
 
         store.applyRegistry([:])
 
-        XCTAssertFalse(store.unreadIdle.contains(s.id))
+        XCTAssertTrue(store.unreadIdle.contains(s.id))
     }
 
     func testClosingASessionDropsItsMark() {
