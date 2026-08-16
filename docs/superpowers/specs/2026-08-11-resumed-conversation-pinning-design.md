@@ -135,12 +135,12 @@ enum ConversationPin {
     struct Resolution: Equatable {
         var anchor: Anchor?          // nil == lost
         var conversationID: UUID     // possibly repinned
-        var workingDirectory: String // possibly moved
+        var workingDirectory: String // the row's reported cwd; see below
     }
 
     static func resolve(
         conversationID: UUID,
-        workingDirectory: String,
+        workingDirectory: String,     // the tab's transcript directory, as a fallback
         anchor: Anchor?,
         rows: [pid_t: ClaudeStatusFile.Entry]
     ) -> Resolution
@@ -148,8 +148,17 @@ enum ConversationPin {
 ```
 
 The store diffs each `Resolution` against current state and applies the deltas. **`sessionId`
-and `cwd` are independent outcomes** — either can change without the other, so "repin" and
-"move project" are separate effects rather than one coupled resume event.
+and `cwd` are independent outcomes** — either can change without the other, so a repin and
+whatever the cwd implies are separate effects rather than one coupled resume event.
+
+`Resolution.workingDirectory` is a **reported** directory, not a decided project: the
+resolver says where the process is and stops there. What that directory means is the store's
+call, and it makes two of them from the one field — the transcript always follows it (§6.1),
+the tab is refiled only if that directory is a project already open (§7). The parameter of
+the same name is the fallback used when a row reports an empty `cwd`, and the store passes
+the tab's **transcript** directory into it, never its project: falling back to the project
+would move a worktree session's watcher back to the project's transcript on the first row
+that happened to omit its cwd. The shared name is a wart — see FOLLOWUPS.
 
 ### 5.2 Two existing units change
 
@@ -409,11 +418,17 @@ snapshot, where the one field meant both things.
 
 `transcriptDirectory` is written on **every** entry, not only the ones that diverge. Absence
 is reserved for pre-split snapshots, and a file that names each tab's transcript directory
-outright is the one place to see that a session is running in a worktree — the state the
-split exists for.
+outright is the one place to see that a session is running somewhere other than the project
+it is filed under — a worktree usually, but any undirected `cd` gets there — which is the
+state the split exists for.
 
-`workingDirectory` becomes `var` (§7). Repos are still derived from it, so the grouping —
-including a project that only exists because a tab moved into it — rebuilds for free.
+`workingDirectory` becomes `var` (§7). At the time this was written repos were derived from
+it alone, so the grouping — including a project that only exists because a tab moved into it
+— rebuilt for free. Since the project-tabs work `restore` builds in two passes: `snapshot.projects`
+seeds the repos in their recorded order and with their collapsed state, and only then are
+sessions filed, with derivation from `workingDirectory` as the fallback that keeps a snapshot
+predating that field working. A tab that moved still lands in the right project either way;
+what the second pass no longer decides on its own is the *order* projects appear in.
 
 Restore resumes the **pinned** conversation. The existing fallback still applies: if the
 pinned transcript was pruned, `claude --resume <pinned> || claude --session-id <pinned>

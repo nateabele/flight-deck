@@ -311,3 +311,15 @@ is already open. Design record:
   between projects is still refused by `SidebarReorder`). The alternative — never
   moving — was considered and rejected: a genuine resume into an open project is worth
   following.
+- **`ConversationPin.resolve`'s `workingDirectory:` parameter is misnamed — rename deferred,
+  deliberately.** Since the split it is fed, and echoes back, the tab's *transcript*
+  directory; passing its `workingDirectory` would move a worktree session's watcher onto the
+  project's transcript the first time a row omitted its `cwd`. The label survives because it
+  is not local to that one function: `ClaudeSession.transcriptURL(sessionID:workingDirectory:)`
+  carries the same label with the same "directory `claude` is running in" meaning, across two
+  source files and four test files, and `ConversationPin.Resolution` carries it as a field
+  name too. A coherent rename is therefore a multi-site production change (`transcriptDirectory:`
+  everywhere, or nothing), which does not belong in a documentation pass. Until it happens the
+  warning is written where a caller will hit it: a `- Parameter` doc on `resolve` itself and a
+  field comment on `Resolution.workingDirectory`, rather than only at the one call site in
+  `SessionStore.applyRegistry`.
