@@ -410,19 +410,17 @@ final class SessionStore: ObservableObject {
     /// Shared by `newSession` and `restore`. `initialInput` is the only difference:
     /// a fresh session starts `claude`, a restored one resumes it.
     ///
-    /// `url` is the project the tab is filed under; `terminalRoot` is where the shell is
-    /// actually started, and defaults to it. They differ for exactly one caller — `restore`,
-    /// rebuilding a tab that was last in a worktree — because `ClaudeSession.resumeCommand`
-    /// runs `claude --resume <id>` in the terminal's cwd and finds no conversation from the
-    /// wrong directory. The watcher follows `session.transcriptDirectory` rather than either
-    /// of them, since that is the field `claude`'s transcript path is derived from.
+    /// `url` decides only which project the tab is filed under. Both the shell's cwd and the
+    /// watcher come from `session.transcriptDirectory`, and deliberately from the same field:
+    /// `ClaudeSession.resumeCommand` runs `claude --resume <id>` in the shell's cwd and
+    /// `claude` derives the transcript path from that same cwd, so the two disagreeing means
+    /// watching a file the process it just started will never write. They differ from `url`
+    /// for one caller — `restore`, rebuilding a tab that was last inside a worktree — where
+    /// starting the shell at the project would make `--resume` find no conversation and fall
+    /// through to its `|| claude --session-id <id>` branch, losing the history.
     @discardableResult
     private func insertSession(
-        _ session: Session,
-        in url: URL,
-        terminalRoot: URL? = nil,
-        initialInput: String,
-        at index: Int? = nil
+        _ session: Session, in url: URL, initialInput: String, at index: Int? = nil
     ) -> Session {
         let repoIndex: Int
         if let existing = indexOfRepo(for: url) {
@@ -441,7 +439,7 @@ final class SessionStore: ObservableObject {
 
         var config = Ghostty.SurfaceConfiguration()
         config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
-        config.workingDirectory = (terminalRoot ?? url).path
+        config.workingDirectory = session.transcriptDirectory
         config.initialInput = initialInput
         config.environmentVariables = preferences?.sessionEnvironment() ?? [:]
         // Wrapped so the registry can identify the shell libghostty forks for this surface;
@@ -521,7 +519,15 @@ final class SessionStore: ObservableObject {
             let url = URL(fileURLWithPath: entry.workingDirectory, isDirectory: true)
             let conversationID = entry.pinnedConversationID ?? entry.id
             // Absent means the snapshot predates the split, when the one field meant both.
-            let transcriptDirectory = entry.transcriptDirectory ?? entry.workingDirectory
+            let recorded = entry.transcriptDirectory ?? entry.workingDirectory
+            // A worktree deleted between runs takes the tab's transcript directory with it.
+            // The resumed `claude` is started in the project instead (see `insertSession`)
+            // and will write its transcript there, so the tab has to be rebuilt as a
+            // project-directory session outright — leaving the dead path in place would
+            // start the watcher on a transcript nobody writes, persist it back out, and
+            // leave the tab without titles or sub-agent counts until the first registry
+            // tick happened to retarget it.
+            let transcriptDirectory = directoryExists(recorded) ? recorded : entry.workingDirectory
             let session = Session(
                 id: entry.id,
                 title: entry.title,
@@ -532,15 +538,6 @@ final class SessionStore: ObservableObject {
             insertSession(
                 session,
                 in: url,
-                // The terminal restarts where `claude` was, not where the tab is filed:
-                // `resumeCommand` runs `claude --resume <id>` in the shell's cwd, and from
-                // the wrong directory it finds no conversation and falls through to its
-                // `|| claude --session-id <id>` branch — a session that comes back with its
-                // history silently gone. A worktree that has since been removed falls back
-                // to the project directory, which is at least a directory that exists.
-                terminalRoot: directoryExists(transcriptDirectory)
-                    ? URL(fileURLWithPath: transcriptDirectory, isDirectory: true)
-                    : url,
                 initialInput: ClaudeSession.resumeCommand(
                     // The pinned conversation, not the tab's own id — a tab that resumed an
                     // existing conversation must keep following that one across relaunches.
@@ -1006,7 +1003,7 @@ final class SessionStore: ObservableObject {
     var watchedSessionIDs: Set<UUID> { Set(watchers.keys) }
 
     /// Test seam, the other half of `watchedSessionIDs`: *which* transcript a tab is
-    /// tailing. Presence alone cannot catch a watcher left behind on the pre-move or
+    /// tailing. Presence alone cannot catch a watcher left behind on the pre-retarget or
     /// pre-repin path, which is the failure both of those paths exist to prevent.
     func watchedTranscriptURL(of id: UUID) -> URL? { watchers[id]?.url }
 
@@ -1496,10 +1493,11 @@ final class SessionStore: ObservableObject {
                 return
             }
             if let title { self.applyExternalTitle(tabID, title) }
-            // Only when nothing has re-watched this tab in the meantime. `repin` cleared
-            // the entry, so a watcher being present means a project move landed during the
-            // read and already pointed one at the tab's *newer* directory; `url` was built
-            // from the pre-move one.
+            // Only when nothing has re-watched this tab in the meantime. `repin` cleared the
+            // entry, so a watcher being present means a `retarget` landed during the read
+            // and already pointed one at the tab's *newer* directory; `url` was built from
+            // the pre-retarget one. A project move cannot be the cause: `moveSession` stopped
+            // touching watchers when the transcript path stopped depending on the project.
             if self.watchers[tabID] == nil {
                 self.startWatching(tabID: tabID, conversationID: conversationID, url: url)
             }

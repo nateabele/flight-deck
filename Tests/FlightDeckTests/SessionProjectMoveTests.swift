@@ -161,9 +161,14 @@ final class SessionProjectMoveTests: XCTestCase {
     }
 
     /// `ExitWorktree` walks the cwd back out again, which is the ordinary end of a worktree
-    /// session. The tab must come out of it with exactly one watcher, on its own project's
-    /// transcript — a retarget that left the previous watcher running would double every
-    /// title record and sub-agent count the tab sees for the rest of its life.
+    /// session. The tab must come out of it still watched, and watching its own project's
+    /// transcript — the round trip is where a retarget that forgot to update
+    /// `transcriptDirectory` would strand it on the worktree's.
+    ///
+    /// `watchedSessionIDs` is keyed by tab, so it pins "still watched, and only this tab" and
+    /// nothing more: an orphaned `TranscriptWatcher` left running by a retarget that skipped
+    /// its `stop()` is invisible to that seam by construction (see the seam's own doc). The
+    /// URL assertion below is the one with teeth here.
     func testAWorktreeRoundTripLeavesOneWatcherOnTheProjectsTranscript() {
         let store = makeStore()
         let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
@@ -305,5 +310,20 @@ final class SessionProjectMoveTests: XCTestCase {
         XCTAssertEqual(store.repos.count, 1)
         XCTAssertEqual(store.repos.first?.url.path, link.path)
         XCTAssertEqual(store.repos.first?.sessions.map(\.id), [a.id])
+
+        // The other half of the same symlink story, and the guard on the *transcript*
+        // comparison: it is deliberately raw, because `encodedProjectDirName` encodes the cwd
+        // string byte for byte, so the link path and the resolved path name two different
+        // transcript files and only the resolved one is ever written. Making the two
+        // comparisons "consistent" — the obvious tidy-up — silently reinstates a project
+        // opened through a symlink watching a file `claude` never touches.
+        XCTAssertEqual(
+            store.watchedTranscriptURL(of: a.id),
+            ClaudeSession.transcriptURL(
+                sessionID: a.pinnedConversationID,
+                workingDirectory: real.resolvingSymlinksInPath().path,
+                projectsRoot: store.projectsRoot
+            )
+        )
     }
 }
