@@ -83,6 +83,19 @@ final class SessionStore: ObservableObject {
     /// `SessionSnapshot`, so it does not appear in what `persist()` writes or `restore()` reads.
     @Published var renameRequest: UUID?
 
+    /// The session whose rename field is currently open, or nil.
+    ///
+    /// Exists to stop the sidebar's Return-to-rename handler from eating the Return that
+    /// COMMITS a rename. `.onKeyPress(.return)` is attached to the `List`, and the rename
+    /// `TextField` lives inside that `List`, so the handler's `sidebarFocused` gate is still
+    /// true while the field holds focus — SwiftUI focus is a subtree property, not an exclusive
+    /// one. Measured: with only the `sidebarFocused` gate, typing a new name and pressing
+    /// Return left the title unchanged and the smoke test's context-menu rename failed, because
+    /// the list swallowed the key before `onSubmit` ever saw it.
+    ///
+    /// Transient, like `renameRequest`: never persisted, never in the snapshot.
+    @Published var renamingSessionID: UUID?
+
     /// Weak: `GhosttyApp.shared` is a process-wide static that owns itself for the life of
     /// the process (see `GhosttyApp.shared`'s doc comment); the store must not co-own it.
     private weak var provider: SurfaceProvider?
