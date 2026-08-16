@@ -8,9 +8,22 @@ struct Session: Identifiable, Equatable {
     /// the Claude conversation id — see `pinnedConversationID`.
     let id: UUID
     var title: String
-    /// The project the tab is filed under. Mutable because a resume can move a session to
-    /// another project (`SessionStore.moveSession`).
+    /// The project the tab is filed under. Changed only by `SessionStore.moveSession` — an
+    /// explicit move, or a reported cwd that matches a project *already open* in the sidebar.
+    ///
+    /// A cwd change on its own deliberately does NOT move the tab any more: `EnterWorktree`
+    /// changes `claude`'s cwd to `<project>/.claude/worktrees/<name>`, which is a directory
+    /// change *within* a project, and treating it as a resume-into-another-project filed the
+    /// tab under a phantom project named after the worktree. Where `claude` is writing is
+    /// `transcriptDirectory`'s job, not this field's.
     var workingDirectory: String
+    /// Where `claude` is actually writing, and the only input to
+    /// `ClaudeSession.transcriptURL`. Equal to `workingDirectory` at birth and follows every
+    /// reported cwd change, including one into a worktree — `claude` encodes its live
+    /// `process.cwd()` into the project directory name under `~/.claude/projects`, so a tab
+    /// that declined to follow would tail a file nothing writes to and lose title sync and
+    /// sub-agent counts silently.
+    var transcriptDirectory: String
     /// The Claude conversation this tab is currently attached to. Equal to `id` at birth,
     /// because a session Flight Deck starts uses its own tab id as `--session-id`. An
     /// in-session `/resume` repoints it at the resumed conversation.
@@ -20,11 +33,13 @@ struct Session: Identifiable, Equatable {
         id: UUID = UUID(),
         title: String,
         workingDirectory: String,
+        transcriptDirectory: String? = nil,
         pinnedConversationID: UUID? = nil
     ) {
         self.id = id
         self.title = title
         self.workingDirectory = workingDirectory
+        self.transcriptDirectory = transcriptDirectory ?? workingDirectory
         self.pinnedConversationID = pinnedConversationID ?? id
     }
 }

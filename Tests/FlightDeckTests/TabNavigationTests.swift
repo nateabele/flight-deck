@@ -112,8 +112,7 @@ final class TabNavigationTests: XCTestCase {
         let store = SessionStore(provider: StubProvider())
         let moved = store.newSession(in: foo)
         let stayed = store.newSession(in: bar)
-        // `restartsWatcher: false` keeps this test off the filesystem.
-        store.moveSession(moved.id, toProjectAt: bar, restartsWatcher: false)
+        store.moveSession(moved.id, toProjectAt: bar)
         XCTAssertTrue(store.repos[0].sessions.isEmpty, "precondition: source project stands empty")
 
         // Sidebar order is now bar[stayed], bar[moved].

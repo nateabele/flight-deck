@@ -409,9 +409,20 @@ final class SessionStore: ObservableObject {
 
     /// Shared by `newSession` and `restore`. `initialInput` is the only difference:
     /// a fresh session starts `claude`, a restored one resumes it.
+    ///
+    /// `url` is the project the tab is filed under; `terminalRoot` is where the shell is
+    /// actually started, and defaults to it. They differ for exactly one caller — `restore`,
+    /// rebuilding a tab that was last in a worktree — because `ClaudeSession.resumeCommand`
+    /// runs `claude --resume <id>` in the terminal's cwd and finds no conversation from the
+    /// wrong directory. The watcher follows `session.transcriptDirectory` rather than either
+    /// of them, since that is the field `claude`'s transcript path is derived from.
     @discardableResult
     private func insertSession(
-        _ session: Session, in url: URL, initialInput: String, at index: Int? = nil
+        _ session: Session,
+        in url: URL,
+        terminalRoot: URL? = nil,
+        initialInput: String,
+        at index: Int? = nil
     ) -> Session {
         let repoIndex: Int
         if let existing = indexOfRepo(for: url) {
@@ -430,7 +441,7 @@ final class SessionStore: ObservableObject {
 
         var config = Ghostty.SurfaceConfiguration()
         config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
-        config.workingDirectory = url.path
+        config.workingDirectory = (terminalRoot ?? url).path
         config.initialInput = initialInput
         config.environmentVariables = preferences?.sessionEnvironment() ?? [:]
         // Wrapped so the registry can identify the shell libghostty forks for this surface;
@@ -447,7 +458,7 @@ final class SessionStore: ObservableObject {
             conversationID: session.pinnedConversationID,
             url: ClaudeSession.transcriptURL(
                 sessionID: session.pinnedConversationID,
-                workingDirectory: url.path,
+                workingDirectory: session.transcriptDirectory,
                 projectsRoot: projectsRoot
             )
         )
@@ -509,23 +520,37 @@ final class SessionStore: ObservableObject {
         for entry in snapshot.sessions where directoryExists(entry.workingDirectory) {
             let url = URL(fileURLWithPath: entry.workingDirectory, isDirectory: true)
             let conversationID = entry.pinnedConversationID ?? entry.id
+            // Absent means the snapshot predates the split, when the one field meant both.
+            let transcriptDirectory = entry.transcriptDirectory ?? entry.workingDirectory
             let session = Session(
                 id: entry.id,
                 title: entry.title,
                 workingDirectory: entry.workingDirectory,
+                transcriptDirectory: transcriptDirectory,
                 pinnedConversationID: conversationID
             )
             insertSession(
                 session,
                 in: url,
+                // The terminal restarts where `claude` was, not where the tab is filed:
+                // `resumeCommand` runs `claude --resume <id>` in the shell's cwd, and from
+                // the wrong directory it finds no conversation and falls through to its
+                // `|| claude --session-id <id>` branch — a session that comes back with its
+                // history silently gone. A worktree that has since been removed falls back
+                // to the project directory, which is at least a directory that exists.
+                terminalRoot: directoryExists(transcriptDirectory)
+                    ? URL(fileURLWithPath: transcriptDirectory, isDirectory: true)
+                    : url,
                 initialInput: ClaudeSession.resumeCommand(
                     // The pinned conversation, not the tab's own id — a tab that resumed an
                     // existing conversation must keep following that one across relaunches.
                     sessionID: conversationID,
                     title: entry.title,
-                    // Resolved per entry, from that entry's own working directory, so a
-                    // restored session picks up its project's overrides rather than the
-                    // first repo's.
+                    // Resolved per entry, from that entry's own *project* directory rather
+                    // than from wherever `claude` was writing, so a restored session picks
+                    // up its project's overrides rather than the first repo's — and a
+                    // session restored inside a worktree still gets its project's, which
+                    // resolving from the transcript directory would silently lose.
                     flags: preferences?.resolvedFlags(forProject: entry.workingDirectory) ?? FlagSet()
                 )
             )
@@ -566,6 +591,11 @@ final class SessionStore: ObservableObject {
                     id: $0.id,
                     title: $0.title,
                     workingDirectory: $0.workingDirectory,
+                    // Written on every entry, not just the diverging ones: absence is
+                    // reserved for pre-split snapshots, and a file that names each tab's
+                    // transcript directory outright is the one place to see that a session
+                    // is running in a worktree — the state this whole split exists for.
+                    transcriptDirectory: $0.transcriptDirectory,
                     pinnedConversationID: $0.pinnedConversationID,
                     // `nil` rather than a sentinel when no `claude` is registered: restore
                     // has to distinguish "was not running" from "was running and idle".
@@ -1202,37 +1232,53 @@ final class SessionStore: ObservableObject {
             repos.flatMap(\.sessions).map { session in
                 (session.id, ConversationPin.resolve(
                     conversationID: session.pinnedConversationID,
-                    workingDirectory: session.workingDirectory,
+                    // The transcript directory, not the project: this argument is the
+                    // fallback used when the row reports an empty `cwd`, and what comes back
+                    // is fed straight to `ClaudeSession.transcriptURL`. Falling back to the
+                    // project would move a worktree session's watcher back to the project's
+                    // transcript on the first row that happens to omit its cwd.
+                    workingDirectory: session.transcriptDirectory,
                     anchor: anchors[session.id],
                     rows: rows
                 ))
             }
+        // Two independent questions per tab, because a reported cwd now answers both: where
+        // `claude` is writing (the transcript always follows it) and which project the tab
+        // is filed under (it moves only into a project that is already open).
         for (tab, resolution) in resolutions {
             anchors[tab] = resolution.anchor
             guard let session = session(for: tab) else { continue }
-            let repinned = resolution.conversationID != session.pinnedConversationID
-            if repinned {
-                repin(
-                    tab,
-                    to: resolution.conversationID,
-                    transcriptDirectory: resolution.workingDirectory
-                )
+            let cwd = resolution.workingDirectory
+            if resolution.conversationID != session.pinnedConversationID {
+                // `repin` stores this same directory and rebuilds the watcher from it, so
+                // the retarget below would stop and restart an identical watcher. `else`
+                // rather than a second `if` keeps exactly one owner of "who repoints this
+                // tab's watcher" per tick — which is the assumption the deferral in
+                // `repin`'s async title-read completion is written against.
+                repin(tab, to: resolution.conversationID, transcriptDirectory: cwd)
+            } else if !cwd.isEmpty, cwd != session.transcriptDirectory {
+                // Compared raw, deliberately, unlike the project comparison below:
+                // `ClaudeSession.encodedProjectDirName` is a byte-for-byte encoding of this
+                // exact string, so two paths that `comparablePath` calls equal (a symlink
+                // and its target) name two different transcript files. Normalizing here
+                // would leave a project opened through a symlink watching a path `claude`
+                // never writes to.
+                retarget(tab, to: cwd)
             }
-            if !resolution.workingDirectory.isEmpty,
-               Self.comparablePath(resolution.workingDirectory)
-                   != Self.comparablePath(session.workingDirectory) {
-                moveSession(
-                    tab,
-                    toProjectAt: URL(
-                        fileURLWithPath: resolution.workingDirectory, isDirectory: true
-                    ),
-                    // A repin has already rebuilt the watcher, from the registry row's cwd
-                    // — which is this same destination — and it is the authority on where
-                    // `claude` writes. Restarting again here would start a second watcher
-                    // for one tab, or (in production, where the repin's watcher starts only
-                    // after an async title read) leave the later completion to displace it.
-                    restartsWatcher: !repinned
-                )
+            // A cwd that matches no open project never creates one — that is what filed a
+            // tab under a phantom project every time `EnterWorktree` ran. Moving into a
+            // project that is *already* open is still allowed: that is the
+            // resumed-into-another-project case §7 of the pinning design describes.
+            if !cwd.isEmpty,
+               Self.comparablePath(cwd) != Self.comparablePath(session.workingDirectory),
+               let destination = indexOfRepo(
+                   for: URL(fileURLWithPath: cwd, isDirectory: true)
+               ) {
+                // The repo's own recorded path, not the row's cwd: they differ when the
+                // project was opened through a symlink, and filing the tab under the
+                // resolved path would leave `Repo.url` and `Session.workingDirectory`
+                // disagreeing about the project they both name.
+                moveSession(tab, toProjectAt: repos[destination].url)
             }
         }
 
@@ -1412,6 +1458,11 @@ final class SessionStore: ObservableObject {
         notifier?.withdraw(sessionID: tabID)
 
         repos[at.repo].sessions[at.session].pinnedConversationID = conversationID
+        // Stored, not just used below: a resumed conversation carries its own directory, and
+        // the next tick compares the row's cwd against this field to decide whether anything
+        // moved. Leaving it at the pre-resume value would make that comparison fire a
+        // pointless retarget on every subsequent tick.
+        repos[at.repo].sessions[at.session].transcriptDirectory = transcriptDirectory
 
         // The old conversation's outstanding Agent ids can never be answered in the new
         // transcript, so the count would otherwise stick at its last value forever.
@@ -1457,6 +1508,36 @@ final class SessionStore: ObservableObject {
         persist()
     }
 
+    /// The tab's `claude` changed directory without changing conversation — a plain `cd`, or
+    /// the case this exists for: `EnterWorktree` moving it into
+    /// `<project>/.claude/worktrees/<name>`.
+    ///
+    /// Only the transcript follows. The project the tab is filed under deliberately does not
+    /// change, because a worktree is not another project — see `applyRegistry`. The watcher
+    /// must follow, though: `claude` names the transcript's directory after its live cwd, so
+    /// the old watcher is now tailing a file nothing will ever append to, and the tab would
+    /// stop receiving renames and sub-agent counts with nothing to show for it.
+    ///
+    /// Unlike `repin` there is no title read to defer to: the conversation is the same one,
+    /// so its title is already correct and only the path it is written at has moved.
+    private func retarget(_ tabID: UUID, to directory: String) {
+        guard let at = locate(tabID) else { return }
+        repos[at.repo].sessions[at.session].transcriptDirectory = directory
+        let conversationID = repos[at.repo].sessions[at.session].pinnedConversationID
+
+        watchers[tabID]?.stop()
+        startWatching(
+            tabID: tabID,
+            conversationID: conversationID,
+            url: ClaudeSession.transcriptURL(
+                sessionID: conversationID,
+                workingDirectory: directory,
+                projectsRoot: projectsRoot
+            )
+        )
+        persist()
+    }
+
     /// Files a session under a different project, creating that project if it is new.
     ///
     /// This does not prune a source project it empties, matching `closeSession`: a
@@ -1467,22 +1548,21 @@ final class SessionStore: ObservableObject {
     /// animates the same row moving within the sidebar's one flat `ForEach` rather than
     /// recreating it — there are no `Section`s in the sidebar to move between.
     ///
-    /// The watcher is restarted, because `Session.workingDirectory` is an input to
-    /// `ClaudeSession.transcriptURL`: a tab that moved without one would keep tailing the
-    /// transcript under its *old* encoded project directory and silently stop receiving
-    /// renames and sub-agent counts — the exact failure a resume already causes for the
-    /// conversation half. `restartsWatcher: false` is for the one caller that rebuilds the
-    /// watcher itself; see `applyRegistry`.
-    func moveSession(_ id: UUID, toProjectAt url: URL, restartsWatcher: Bool = true) {
+    /// The watcher is deliberately left alone. It used to be restarted here, because
+    /// `workingDirectory` was also the input to `ClaudeSession.transcriptURL` — since the
+    /// split it is not, `transcriptDirectory` is, and that field is untouched by a move. A
+    /// tab moved into another project keeps tailing the transcript `claude` is actually
+    /// writing; only `retarget` and `repin` may repoint a watcher now.
+    func moveSession(_ id: UUID, toProjectAt url: URL) {
         guard let at = locate(id) else { return }
         let target = url.standardizedFileURL
         guard Self.comparablePath(repos[at.repo].url.path)
                 != Self.comparablePath(target.path) else { return }
 
         var session = repos[at.repo].sessions.remove(at: at.session)
-        // Stored as reported, not as compared: the destination comes from the registry
-        // row's `cwd`, and that exact string is what `claude` encodes into the transcript's
-        // project directory name. Normalization is for deciding *whether* to move.
+        // Stored as reported, not as compared: normalization is for deciding *whether* to
+        // move. `transcriptDirectory` is not touched — where `claude` writes has nothing to
+        // do with which project the user files this tab under.
         session.workingDirectory = target.path
 
         // Resolved after the removal so the index cannot be stale. Removing a *session*
@@ -1498,19 +1578,6 @@ final class SessionStore: ObservableObject {
         // Same reasoning as `newSession`: a session landing in a collapsed destination must
         // make that destination visible, or the move is invisible in the sidebar.
         repos[destination].isCollapsed = false
-
-        if restartsWatcher {
-            watchers[id]?.stop()
-            startWatching(
-                tabID: id,
-                conversationID: session.pinnedConversationID,
-                url: ClaudeSession.transcriptURL(
-                    sessionID: session.pinnedConversationID,
-                    workingDirectory: session.workingDirectory,
-                    projectsRoot: projectsRoot
-                )
-            )
-        }
 
         if selectedSessionID == id { lastActiveProjectURL = target }
         persist()

@@ -487,6 +487,107 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertNil(stored.first(where: { $0.id == clean.id })?.unread)
     }
 
+    // MARK: Restoring a session that was in a worktree
+
+    /// Snapshots predating the project/transcript split carry no `transcriptDirectory`, and
+    /// must still decode — the same wipe-every-tab rule `testV1SnapshotWithoutPinDecodes`
+    /// pins.
+    func testSnapshotWithoutTranscriptDirectoryDecodes() throws {
+        let id = UUID()
+        let json = """
+        {"sessions":[{"id":"\(id.uuidString)","title":"a","workingDirectory":"/w"}],\
+        "sessionCounter":1}
+        """
+        let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(json.utf8))
+
+        XCTAssertEqual(snapshot.sessions.first?.id, id)
+        XCTAssertNil(snapshot.sessions.first?.transcriptDirectory)
+    }
+
+    /// A tab that was inside a git worktree comes back filed under its project but pointed at
+    /// the directory `claude` was actually working in — both the watcher and the terminal.
+    /// The terminal is the sharper of the two: `ClaudeSession.resumeCommand` runs
+    /// `claude --resume <id>` in the shell's cwd, and from the project root it finds no
+    /// conversation, falls through to its `|| claude --session-id <id>` branch and comes back
+    /// with the history silently gone.
+    func testRestoreFilesAWorktreeSessionUnderItsProjectAndFollowsTheWorktree() {
+        let id = UUID()
+        let worktree = "/w/.claude/worktrees/x"
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(
+                id: id, title: "a", workingDirectory: "/w", transcriptDirectory: worktree
+            )],
+            selectedSessionID: id,
+            sessionCounter: 1
+        )
+        let provider = CapturingProvider()
+        let store = SessionStore(provider: provider, persistence: persistence)
+
+        XCTAssertTrue(store.restore(directoryExists: allDirsExist))
+
+        XCTAssertEqual(store.repos.map(\.url.path), ["/w"])
+        XCTAssertEqual(store.repos.first?.sessions.map(\.id), [id])
+        XCTAssertEqual(provider.configs.last?.workingDirectory, worktree)
+        XCTAssertEqual(
+            store.watchedTranscriptURL(of: id),
+            ClaudeSession.transcriptURL(
+                sessionID: id, workingDirectory: worktree, projectsRoot: store.projectsRoot
+            )
+        )
+        XCTAssertEqual(persistence.stored?.sessions.first?.transcriptDirectory, worktree)
+    }
+
+    /// The worktree has been deleted since the last run — the usual end of one. Starting the
+    /// shell in a directory that is not there gets a terminal that cannot run anything, so
+    /// the project directory is the fallback. The session is not dropped: its *project* is
+    /// still there, and that is what `restore` gates on.
+    func testRestoreFallsBackToTheProjectWhenTheWorktreeIsGone() {
+        let id = UUID()
+        let worktree = "/w/.claude/worktrees/gone"
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(
+                id: id, title: "a", workingDirectory: "/w", transcriptDirectory: worktree
+            )],
+            selectedSessionID: id,
+            sessionCounter: 1
+        )
+        let provider = CapturingProvider()
+        let store = SessionStore(provider: provider, persistence: persistence)
+
+        XCTAssertTrue(store.restore(directoryExists: { $0 != worktree }))
+
+        XCTAssertEqual(store.repos.first?.sessions.map(\.id), [id])
+        XCTAssertEqual(provider.configs.last?.workingDirectory, "/w")
+    }
+
+    /// A pre-split snapshot has one directory and it means both things, so restoring it must
+    /// behave exactly as it did before the split — terminal and transcript alike at the
+    /// project. Absent is read as "same as `workingDirectory`", never as empty.
+    func testRestoreOfAPreSplitEntryUsesTheProjectForBoth() {
+        let id = UUID()
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(id: id, title: "a", workingDirectory: "/w")],
+            selectedSessionID: id,
+            sessionCounter: 1
+        )
+        let provider = CapturingProvider()
+        let store = SessionStore(provider: provider, persistence: persistence)
+
+        XCTAssertTrue(store.restore(directoryExists: allDirsExist))
+
+        XCTAssertEqual(provider.configs.last?.workingDirectory, "/w")
+        XCTAssertEqual(
+            store.watchedTranscriptURL(of: id),
+            ClaudeSession.transcriptURL(
+                sessionID: id, workingDirectory: "/w", projectsRoot: store.projectsRoot
+            )
+        )
+        XCTAssertEqual(persistence.stored?.sessions.first?.transcriptDirectory, "/w")
+    }
+
     // MARK: - FileSessionPersistence
 
     /// Each test gets its own directory so they never touch the real

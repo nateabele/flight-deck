@@ -10,6 +10,15 @@ struct SessionSnapshot: Codable, Equatable {
         let id: UUID
         var title: String
         var workingDirectory: String
+        /// Where `claude` was writing — `Session.transcriptDirectory`, which diverges from
+        /// `workingDirectory` while the session is in a git worktree. Absent in snapshots
+        /// written before the two were split, and absent means "same as `workingDirectory`".
+        ///
+        /// Optional for the same load-bearing reason as `pinnedConversationID` below:
+        /// synthesized `Codable` decodes an optional with `decodeIfPresent`, so every
+        /// existing `sessions.json` still decodes instead of throwing and wiping every tab on
+        /// the first launch after this change.
+        var transcriptDirectory: String?
         /// Absent in v1 snapshots and in tabs that were never resumed; absent means
         /// "same as `id`". Optional is load-bearing: synthesized `Codable` decodes an
         /// optional with `decodeIfPresent`, so every existing snapshot still decodes and
@@ -31,6 +40,7 @@ struct SessionSnapshot: Codable, Equatable {
             id: UUID,
             title: String,
             workingDirectory: String,
+            transcriptDirectory: String? = nil,
             pinnedConversationID: UUID? = nil,
             activity: String? = nil,
             unread: Bool? = nil
@@ -38,6 +48,7 @@ struct SessionSnapshot: Codable, Equatable {
             self.id = id
             self.title = title
             self.workingDirectory = workingDirectory
+            self.transcriptDirectory = transcriptDirectory
             self.pinnedConversationID = pinnedConversationID
             self.activity = activity
             self.unread = unread
