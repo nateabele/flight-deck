@@ -11,7 +11,8 @@ When the user runs `/resume` inside the `claude` running in a session tab and pi
 different conversation, the tab follows: its title becomes the resumed conversation's, the
 resumed conversation's UUID is pinned to the tab (so a relaunch reattaches to *it*, not to
 the tab's original conversation), and if the resume moved the working directory the tab
-moves to that project in the sidebar.
+follows `claude` to the transcript it is now writing — and to that project in the sidebar,
+but only when that project is already open (§7).
 
 Scope is **in-session `/resume` only** — same process, same pid, new conversation. Flight
 Deck offers no UI for choosing a conversation to resume; that is a separate increment.
@@ -63,7 +64,8 @@ conflation, so it has to be split.
 struct Session: Identifiable, Equatable {
     let id: UUID                     // tab identity — immutable for the tab's life
     var title: String
-    var workingDirectory: String     // was `let`; see §7
+    var workingDirectory: String     // the project the tab is filed under; was `let`, see §7
+    var transcriptDirectory: String  // where `claude` is writing; see §6.1
     var pinnedConversationID: UUID   // attached conversation; starts == id
 }
 ```
@@ -74,6 +76,8 @@ persistence entry.
 
 **Moves to `pinnedConversationID`:** `ClaudeSession.transcriptURL`, `TranscriptWatcher`'s
 `custom-title` sessionId match, `ClaudeSession.resumeCommand`, and the registry join.
+`transcriptURL` takes a directory as well as a conversation, and that argument splits off in
+the same way: it comes from `transcriptDirectory`, never from `workingDirectory` (§6.1).
 
 `ClaudeSession.launchCommand` keeps using `id` — at birth the two are equal, and a new
 session's conversation UUID *is* the tab's UUID.
@@ -129,14 +133,15 @@ enum ConversationPin {
     struct Anchor: Equatable { let pid: pid_t; let procStart: String }
 
     struct Resolution: Equatable {
-        var anchor: Anchor?          // nil == lost
-        var conversationID: UUID     // possibly repinned
-        var workingDirectory: String // possibly moved
+        var anchor: Anchor?              // nil == lost
+        var conversationID: UUID         // possibly repinned
+        var reportedDirectory: String?   // nil == no row named one; see below
+        var transcriptDirectory: String  // reported, else the caller's fallback echoed back
     }
 
     static func resolve(
         conversationID: UUID,
-        workingDirectory: String,
+        transcriptDirectory: String,  // the tab's transcript directory, as a fallback
         anchor: Anchor?,
         rows: [pid_t: ClaudeStatusFile.Entry]
     ) -> Resolution
@@ -144,8 +149,30 @@ enum ConversationPin {
 ```
 
 The store diffs each `Resolution` against current state and applies the deltas. **`sessionId`
-and `cwd` are independent outcomes** — either can change without the other, so "repin" and
-"move project" are separate effects rather than one coupled resume event.
+and `cwd` are independent outcomes** — either can change without the other, so a repin and
+whatever the cwd implies are separate effects rather than one coupled resume event.
+
+The resolver reports where the process is and stops there; what that means is the store's
+call, and it makes two of them — the transcript always follows (§6.1), the tab is refiled
+only if the directory is a project already open (§7).
+
+**Those two decisions cannot read the same field**, which is why the directory is returned
+twice. `resolve` needs a fallback for a tick that names no directory (no row matched, or the
+matched row's `cwd` is empty), and the store passes the tab's **transcript** directory as
+that fallback, never its project: falling back to the project would move a worktree
+session's watcher onto the project's transcript the first time a row omitted its cwd. But
+that makes the returned value ambiguous — an echo of what the tab already held is
+indistinguishable from a report of the same path — and refiling a tab on an echo means
+moving it on no evidence at all. So `transcriptDirectory` carries the echo (always usable,
+never evidence) and `reportedDirectory` is `String?`, nil precisely when nothing was
+reported. An empty `cwd` is folded into that nil: the registry omitting a directory is the
+registry saying nothing, not saying "somewhere new".
+
+The distinction is new with the project/transcript split and did not exist before it. While
+the fallback was the tab's own `workingDirectory`, an echo always compared equal to the
+project and the refile branch was immune by construction; the split made the echo divergent,
+and a tab whose transcript sat in a worktree the user still had open as a project was refiled
+into it on the first tick that reported nothing.
 
 ### 5.2 Two existing units change
 
@@ -182,42 +209,98 @@ lands, would clobber it. Resolve first, tail second.
 authoritative about where `claude` is actually writing. One field read removes an entire
 failure class.
 
-## 7. Moving the tab to the new project
+### 6.1 The transcript directory is a field of its own
 
-When the anchored row's `cwd` changes, the tab moves in the sidebar rather than staying put
-with a divergent transcript path.
+`Session.transcriptDirectory` records where `claude` is writing, and is the only input to
+`ClaudeSession.transcriptURL`'s directory argument. It equals `workingDirectory` at birth
+and follows **every** reported cwd change thereafter, whatever that change means.
+
+It has to be a separate field because the two questions a cwd answers have different
+answers. `claude` derives its project directory under `~/.claude/projects` from its live
+`process.cwd()`, so the transcript's location is a fact about the process and cannot be
+declined: a tab that kept watching its project's transcript while `claude` wrote into a
+worktree's would tail a file nothing appends to, and lose title sync and sub-agent counts
+silently — the same permanent-silence failure §2 describes, arrived at from the other
+direction. Which project the tab is *filed under* is a question about the sidebar, and §7
+answers it differently.
+
+Keeping them in one field is what made the sidebar bug unavoidable: whichever way that
+single field resolved a worktree cwd, one of the two consumers was wrong.
+
+Following it is `retarget(_:to:)` — store the directory, stop the watcher, start one on the
+new transcript. There is no title read to defer to, unlike `repin` (§6): the conversation is
+the same one, so its title is already right and only the path it is written at has moved. A
+tick that repins does not also retarget, because `repin` already stores that directory and
+rebuilds the watcher from it; keeping exactly one owner of "who repoints this tab's watcher"
+per tick is what `repin`'s async title-read completion is written against.
+
+**The transcript comparison is raw string equality, deliberately unlike the project
+comparison in §7, which is symlink-resolved.** `ClaudeSession.encodedProjectDirName` is a
+byte-for-byte encoding of the cwd string, so two paths `comparablePath` calls equal — a
+symlink and its target — name two *different* transcript files. Normalizing here would
+leave a project opened through a symlink watching a path `claude` never writes to. The
+comparisons differ because the things being compared differ: project identity is about
+which directory the user means, transcript identity is about which filename `claude`
+produced.
+
+## 7. Where a reported cwd goes: the transcript always, the sidebar conditionally
+
+A changed `cwd` on the anchored row is not by itself evidence that the tab belongs to
+another project. `EnterWorktree` changes `claude`'s cwd to
+`<project>/.claude/worktrees/<name>` — a directory change *within* a project, and a routine
+one. Treating every cwd change as a project move filed the tab under a phantom project
+named after the worktree, one per worktree entered, and the user was left with a sidebar of
+projects nobody opened. So the two effects are separated: the transcript retargets
+unconditionally (§6.1), and **the tab moves only into a project the sidebar already holds.**
+
+A cwd matching no open project moves nothing and creates nothing. That is deliberately not
+"never move at all": a genuine resume into another project the user already has open is
+still worth following, and the presence of that project in the sidebar is the available
+evidence that the destination is a project rather than a subdirectory. Flight Deck cannot
+tell the two apart from the path, and an already-open project is the one case where it does
+not have to guess.
 
 ```swift
-func moveSession(_ id: UUID, toProjectAt url: URL, restartsWatcher: Bool = true)
+func moveSession(_ id: UUID, toProjectAt url: URL)
 ```
 
 - The destination repo is found via the existing `indexOfRepo(for:)`, comparing paths
   standardized **and symlink-resolved**: `claude` reports `process.cwd()` with symlinks
   already resolved, while a path from the folder picker or a drop is not, so comparing them
-  raw would move a symlinked project into a duplicate of itself. **If absent, the repo is
-  created** — the same `repos.append(Repo(url:))` path `insertSession` already uses.
-- `restartsWatcher` exists because `workingDirectory` feeds `ClaudeSession.transcriptURL`:
-  a move changes where `claude` writes, so the watcher has to be re-pointed or the tab tails
-  the old directory forever — the same permanent-silence failure §2 describes. `applyRegistry`
-  passes `false` when it has already repinned in the same tick, since `repin` rebuilds the
-  watcher from the resolution's directory itself. Left defaulted to `true` so a future caller
-  that forgets it gets the safe behaviour.
+  raw would move a symlinked project into a duplicate of itself. The registry path files the
+  tab under the **repo's own recorded path** rather than the row's cwd, since those differ
+  for a project opened through a symlink and `Repo.url` and `Session.workingDirectory` must
+  not disagree about the project they both name.
+- `moveSession` still creates an absent repo, kept as the safe default for a future explicit-
+  move caller (a drag-to-project, say), where creating one would be the whole point. **No
+  production caller reaches it today**: the registry path is the only caller, and it invokes
+  `moveSession` only once `indexOfRepo(for:)` has already found the destination.
+- The registry path refiles on `Resolution.reportedDirectory` alone, never on the echoed
+  `transcriptDirectory` (§5): a tick that reported no cwd is not evidence that a tab belongs
+  anywhere else.
+- **There is no `restartsWatcher:` parameter.** It existed because `workingDirectory` fed
+  `ClaudeSession.transcriptURL`, so a move changed where the tab believed `claude` was
+  writing and the watcher had to be rebuilt — and because a repin in the same tick had
+  already rebuilt it, the caller had to say which of the two owned that rebuild. With the
+  transcript path on its own field, a move cannot change it, so `moveSession` touches no
+  watchers at all and the coordination it needed disappears rather than being handled.
+  Exactly one path repoints a tab's watcher per tick: a repin, or the retarget.
 - The session **appends** to the destination repo's sessions.
 - The source repo is **left in place even when its last session leaves**. A project with no
-  sessions is a legitimate sidebar state. This deliberately does *not* mirror
-  `closeSession`, which still prunes an emptied repo; unifying the two is a separate
-  question, deferred.
-- `Session.workingDirectory` becomes `var` and is updated. `SessionSnapshot.Entry`'s
-  likewise.
+  sessions is a legitimate sidebar state. This disagreed with `closeSession`, which pruned an
+  emptied repo, until the project-tabs work settled it the other way: a project's lifetime is
+  now explicit everywhere, and only its own close button removes it.
+- `Session.workingDirectory` becomes `var` and is updated. `Session.transcriptDirectory`
+  (§6.1) is not — a move says nothing about where `claude` writes. `SessionSnapshot.Entry`
+  carries both (§10).
 
-An empty repo renders correctly as-is: `SessionSidebar` is
-`ForEach(repos) { Section(repo.displayName) { ForEach(repo.sessions) … } }`, so a repo with
-no sessions shows its header and nothing under it.
+An empty repo renders correctly as-is: the sidebar draws one row per project and one per
+session, so a project with no sessions shows its header and nothing under it.
 
-One consequence is accepted as-is: **an empty project does not survive a relaunch.**
-`SessionSnapshot` stores only sessions and rebuilds `repos` from their `workingDirectory`
-(§10), so a project with nothing in it has nothing to rebuild from. Persisting repos
-independently belongs with the deferred empty-project work, not here.
+One consequence was accepted at the time: **an empty project did not survive a relaunch**,
+because `SessionSnapshot` stored only sessions and rebuilt `repos` from their
+`workingDirectory`. The project-tabs work removed that limitation by persisting projects in
+their own right (`SessionSnapshot.projects`), so an empty project now comes back.
 
 ### 7.1 Session creation follows the last active project
 
@@ -256,15 +339,29 @@ for a folder. No new insertion machinery is needed — `addProject(at:)` routes 
 an empty repo is found the same as any other.
 
 Selection is unaffected: `selectedSessionID` holds the tab `id`, which does not change, so
-SwiftUI animates the stable row from one section to the other rather than dropping it.
+SwiftUI animates the stable row from one project's rows to another's rather than dropping it.
 
-`workingDirectory` now carries a slightly different meaning after a move — it is the
-project the row is filed under, which is also the directory the pane will respawn in on
-relaunch. The *shell's* live cwd is unchanged by a resume; only `claude`'s project path
-moved. Respawning in the new directory is the coherent choice because that is the project
-the user can see the row belongs to, and `claude --resume <pinned>` sets its own project
-path regardless. Nothing else reads `workingDirectory` in a way this breaks:
-`newSessionBelowActive` creating a sibling in the *new* project is correct behaviour.
+### 7.2 What a restored tab is rooted at
+
+`workingDirectory` carries a narrower meaning after a move than it looks like it does — it is
+the project the row is filed under, and nothing more. In particular it is **not** where the
+pane respawns. A restored tab's terminal is rooted at `transcriptDirectory`, falling back to
+the project only when that directory no longer exists (a worktree deleted between runs, which
+is the ordinary end of one); the fallback resets `transcriptDirectory` to match, so the tab is
+rebuilt as a project-directory session outright rather than persisting a dead path back out
+and watching a transcript nobody writes.
+
+Rooting the shell there is what makes the resume work at all. `claude` derives its project
+path from the cwd it is started in, so a shell started at the project while the conversation
+lives in a worktree finds nothing to resume and falls through to the
+`|| claude --session-id <pinned>` half of §10's fallback: a live pane, the right title, and
+none of the history. The shell's cwd and the watcher therefore read the same field, because
+the two disagreeing means watching a file the process just started will never write.
+
+Nothing else reads `workingDirectory` in a way this breaks: `newSessionBelowActive` creating
+a sibling in the *new* project is correct behaviour, and per-project flag overrides are
+resolved from `workingDirectory` on purpose, so a session running inside a worktree still
+gets its project's flags rather than none.
 
 ## 8. Conflict: two tabs on one conversation
 
@@ -327,15 +424,29 @@ last set" and is intended.
 
 ```swift
 var pinnedConversationID: UUID?   // absent in v1; absent means "never resumed"
+var transcriptDirectory: String?  // absent pre-split; absent means "same as workingDirectory"
 ```
 
-**Optional is load-bearing.** Synthesized `Codable` uses `decodeIfPresent` for optional
-properties, so every existing v1 snapshot decodes unchanged and the defaults key stays
+**Optional is load-bearing, for both.** Synthesized `Codable` uses `decodeIfPresent` for
+optional properties, so every existing snapshot decodes unchanged and the defaults key stays
 `sessions.snapshot.v1`. A non-optional field would throw on decode and wipe every tab on
-first launch after the update. On restore, `pinnedConversationID ?? id`.
+first launch after the update. On restore, `pinnedConversationID ?? id` and
+`transcriptDirectory ?? workingDirectory` — the latter is exactly right for a pre-split
+snapshot, where the one field meant both things.
 
-`workingDirectory` becomes `var` (§7). Repos are still derived from it, so the grouping —
-including a project that only exists because a tab moved into it — rebuilds for free.
+`transcriptDirectory` is written on **every** entry, not only the ones that diverge. Absence
+is reserved for pre-split snapshots, and a file that names each tab's transcript directory
+outright is the one place to see that a session is running somewhere other than the project
+it is filed under — a worktree usually, but any undirected `cd` gets there — which is the
+state the split exists for.
+
+`workingDirectory` becomes `var` (§7). At the time this was written repos were derived from
+it alone, so the grouping — including a project that only exists because a tab moved into it
+— rebuilt for free. Since the project-tabs work `restore` builds in two passes: `snapshot.projects`
+seeds the repos in their recorded order and with their collapsed state, and only then are
+sessions filed, with derivation from `workingDirectory` as the fallback that keeps a snapshot
+predating that field working. A tab that moved still lands in the right project either way;
+what the second pass no longer decides on its own is the *order* projects appear in.
 
 Restore resumes the **pinned** conversation. The existing fallback still applies: if the
 pinned transcript was pruned, `claude --resume <pinned> || claude --session-id <pinned>
@@ -354,6 +465,11 @@ showing a dead pane.
   `sessionId` in place, detection stops silently: the tab keeps its old pin and its title
   goes stale. It fails closed, consistent with the posture the status-indicator design
   already took toward this registry.
+- **Phantom projects already in a sidebar are not migrated.** Stopping the rule from
+  creating them (§7) does not retroactively fold the ones it already created back into their
+  parent projects. A migration would have to guess which existing project a
+  `…/.claude/worktrees/<name>` entry belongs under and move live sessions between projects at
+  launch, on a heuristic, to save a one-time close-button click. The user closes them.
 - **No resume UI.** Choosing a conversation from within Flight Deck is out of scope.
 - **No scrollback restoration**, unchanged from the session-name-sync design.
 
@@ -363,7 +479,8 @@ Pure, no filesystem and no terminal:
 
 - `ConversationPin.resolve`: `sessionId` changes under a stable pid → repin; same pid with a
   different `procStart` → anchor lost, not repinned; row absent → anchor lost; `cwd` changes
-  alone → move without repin; both change → both effects.
+  alone → reported without a repin; both change → both reported. The resolver only reports;
+  what a changed `cwd` *means* is §7's decision and is tested at store level.
 - `ConversationTitle.resolve(lines:)`: named conversation (last `agent-name` wins over an
   earlier one), unnamed → first user message, unnamed whose first records are `isMeta` /
   `isCompactSummary` → those skipped, empty file → nil.
@@ -374,8 +491,18 @@ Store-level, with the existing fakes:
 
 - Repin keeps `id`, moves the pin, re-points the watcher, zeroes the sub-agent count,
   withdraws the notification, and persists.
-- Move relocates the session, creates the destination repo when absent, and **leaves the
-  source repo in place when it empties**.
+- Move relocates the session, creates the destination repo when called directly, and
+  **leaves the source repo in place when it empties**.
+- A registry cwd naming an open project moves the tab; a cwd naming nothing open moves it
+  nowhere and **creates no project** — asserted on the repo list, since the failure it guards
+  is a project appearing, not a session going missing. The worktree path
+  (`<project>/.claude/worktrees/<name>`) is the fixture, because that is the shape that
+  actually produced the phantoms.
+- Either way the transcript follows: `watchedTranscriptURL(of:)` is the assertion, because
+  presence of a watcher alone cannot catch one left behind on the pre-retarget path.
+- A tab restored from an entry whose `transcriptDirectory` still exists starts its shell
+  there and watches that transcript; one whose directory is gone starts at the project and
+  persists the project back out, not the dead path.
 - `lastActiveProjectURL` follows selection, follows a move of the selected session, and
   survives both a nil selection and its project emptying.
 - `createFromMenu` with no selection creates in `lastActiveProjectURL` **even when that repo
@@ -383,7 +510,9 @@ Store-level, with the existing fakes:
   exists at all.
 - `SessionCreateAction.forState(hasProjects:)` — existing cases updated for the rename; a
   sidebar holding only an empty project yields `.newSession`, not `.addProject`.
-- A v1 snapshot without `pinnedConversationID` decodes with the pin defaulting to `id`.
+- A v1 snapshot without `pinnedConversationID` decodes with the pin defaulting to `id`, and
+  one without `transcriptDirectory` with the transcript directory defaulting to
+  `workingDirectory`.
 
 **Not covered by the UITest gate.** Driving a real `/resume` through Claude's interactive
 picker is not scriptable, and a fake would assert nothing about the mechanism this design

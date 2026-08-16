@@ -14,12 +14,32 @@ enum ConversationPin {
     }
 
     /// What a tab should look like after reconciling against the registry. Each field is
-    /// independent: a resume can change the conversation, the project, or both.
+    /// independent: a resume can change the conversation, the directory, or both.
+    ///
+    /// The two directory fields are **not** two names for one value, and conflating them is
+    /// a live bug rather than a tidiness question. `transcriptDirectory` is always safe to
+    /// use — it falls back to what the caller passed in — while `reportedDirectory` is the
+    /// only one that constitutes *evidence about where `claude` is*. A caller that treats
+    /// the echoed fallback as evidence acts on a tick where nothing was reported at all.
     struct Resolution: Equatable {
         /// nil means the anchor was lost — no live process is ours.
         var anchor: Anchor?
         var conversationID: UUID
-        var workingDirectory: String
+        /// The directory a registry row actually named, or nil when none did: no row matched
+        /// this tab, or the row it matched carried an empty `cwd`. An empty `cwd` is folded
+        /// in here rather than passed on, because the registry omitting a directory is the
+        /// registry saying nothing, not saying "somewhere new".
+        ///
+        /// Use this, not `transcriptDirectory`, for any decision that must only fire on new
+        /// information — filing the tab under a different project above all. `SessionStore`
+        /// passes the tab's own transcript directory as the fallback below, so on a quiet
+        /// tick `transcriptDirectory` comes back *equal to a value the tab already holds*
+        /// and looks exactly like a report of it.
+        var reportedDirectory: String?
+        /// Where the tab's transcript is: `reportedDirectory` when a row named one, else the
+        /// caller's fallback echoed back unchanged so the watcher simply stays put. Safe on
+        /// any tick, evidence on none.
+        var transcriptDirectory: String
     }
 
     /// Match by conversation while unanchored; follow the pid once anchored.
@@ -39,14 +59,25 @@ enum ConversationPin {
     /// the failure needs a dead tab process plus a deliberate resume of that exact
     /// conversation elsewhere, and its symptom is a wrong status icon, not lost state. See
     /// `docs/superpowers/specs/2026-08-11-resumed-conversation-pinning-design.md` §5.
+    ///
+    /// - Parameter transcriptDirectory: the tab's current transcript directory, echoed back
+    ///   as `Resolution.transcriptDirectory` whenever no row names one. Pass the tab's
+    ///   `transcriptDirectory`, never its `workingDirectory` — what comes back feeds
+    ///   `ClaudeSession.transcriptURL`, so falling back to the project would move a worktree
+    ///   session's watcher onto the project's transcript the first time a row omitted its
+    ///   cwd. Because it is echoed, it is also why `reportedDirectory` exists separately:
+    ///   the echo is indistinguishable from a report of the same path.
     static func resolve(
         conversationID: UUID,
-        workingDirectory: String,
+        transcriptDirectory: String,
         anchor: Anchor?,
         rows: [pid_t: ClaudeStatusFile.Entry]
     ) -> Resolution {
         let unchanged = Resolution(
-            anchor: nil, conversationID: conversationID, workingDirectory: workingDirectory
+            anchor: nil,
+            conversationID: conversationID,
+            reportedDirectory: nil,
+            transcriptDirectory: transcriptDirectory
         )
 
         if let anchor {
@@ -55,11 +86,7 @@ enum ConversationPin {
             guard let row = rows[anchor.pid], row.procStart == anchor.procStart else {
                 return unchanged
             }
-            return Resolution(
-                anchor: anchor,
-                conversationID: row.sessionID,
-                workingDirectory: row.cwd.isEmpty ? workingDirectory : row.cwd
-            )
+            return resolution(anchor: anchor, row: row, fallback: transcriptDirectory)
         }
 
         // Newest process wins, with pid as a tiebreak purely so the choice is
@@ -70,10 +97,25 @@ enum ConversationPin {
             (lhs.startedAt, lhs.pid) < (rhs.startedAt, rhs.pid)
         }) else { return unchanged }
 
-        return Resolution(
+        return resolution(
             anchor: Anchor(pid: row.pid, procStart: row.procStart),
+            row: row,
+            fallback: transcriptDirectory
+        )
+    }
+
+    /// One matched row's contribution, shared by both branches so the empty-`cwd` rule
+    /// cannot drift between them: an omitted directory becomes `nil` evidence *and* leaves
+    /// the transcript where it was, in one place rather than two.
+    private static func resolution(
+        anchor: Anchor, row: ClaudeStatusFile.Entry, fallback: String
+    ) -> Resolution {
+        let reported = row.cwd.isEmpty ? nil : row.cwd
+        return Resolution(
+            anchor: anchor,
             conversationID: row.sessionID,
-            workingDirectory: row.cwd.isEmpty ? workingDirectory : row.cwd
+            reportedDirectory: reported,
+            transcriptDirectory: reported ?? fallback
         )
     }
 
