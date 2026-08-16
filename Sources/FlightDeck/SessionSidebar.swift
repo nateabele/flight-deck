@@ -23,19 +23,25 @@ private struct SessionRow: View {
                     .onExitCommand { isEditing = false }   // Esc
                     .onChange(of: focused) { if !$1 { commit() } }
             } else {
-                // Bare, with no tap recognizer of any kind, and that is the whole point.
+                // The title carries no *SwiftUI* tap recognizer of any kind, and that is
+                // still the point.
                 //
                 // Rename used to start from a hand-rolled double-click detector attached here.
-                // It had to go: ANY tap recognizer on this text consumes the mouse-down that
-                // `List`'s `.onMove` needs to begin a drag, so a row could not be dragged by
-                // the one part of it people actually aim at. Measured in the smoke test —
-                // with the recognizer present the drag group fails and the control group
-                // (dragging blank row space) passes; with it removed both pass. Exclusive and
-                // `simultaneousGesture` variants were both tried and both blocked the drag.
+                // It had to go: ANY SwiftUI tap recognizer on this text consumes the
+                // mouse-down that `List`'s `.onMove` needs to begin a drag, so a row could not
+                // be dragged by the one part of it people actually aim at. Measured in the
+                // smoke test — with the recognizer present the drag group fails and the
+                // control group (dragging blank row space) passes; with it removed both pass.
+                // Exclusive and `simultaneousGesture` variants were both tried and both
+                // blocked the drag.
                 //
-                // Rename now lives on the row's context menu, which never touches the
-                // mouse-down path. That is also the more native arrangement: Finder reserves
-                // double-click for "open" and renames from the context menu or Return.
+                // Double-click-to-rename is back, but it does not go through SwiftUI: see
+                // `.onRowDoubleClick` below, which attaches an AppKit
+                // `NSClickGestureRecognizer` to an ancestor view with
+                // `delaysPrimaryMouseButtonEvents` hard-coded to `false`, so the mouse-down
+                // still reaches the table view immediately and the drag survives. See
+                // `RowDoubleClick.swift` for the SDK-header evidence. Rename is also reachable
+                // from the row's context menu and from Return.
                 Text(session.title)
                     .accessibilityIdentifier("session-row-title")
             }
@@ -63,10 +69,13 @@ private struct SessionRow: View {
             }
         }
         // HISTORICAL, and kept because it still constrains what may be added here. The
-        // conflict below was between the row's hit-testing and the title's own tap
-        // recognizer; that recognizer is gone now (see the note on the title `Text`), so the
-        // specific breakage described is no longer reachable. What survives is the finding
-        // about `.contentShape` on this HStack, and the two rejected alternatives.
+        // conflict below was between the row's hit-testing and the title's own *SwiftUI* tap
+        // recognizer; that recognizer is gone from the title now (see the note on the title
+        // `Text`) — replaced by the AppKit recognizer in `RowDoubleClick.swift`, which is
+        // attached to an ancestor view and deliberately kept out of this HStack's SwiftUI
+        // hit-testing, so the specific breakage described below is not reachable through it.
+        // What survives is the finding about `.contentShape` on this HStack, and the two
+        // rejected alternatives.
         //
         // Hover is tracked without putting `.contentShape(Rectangle())` + `.onHover` on the
         // HStack itself. Applied to the HStack, that pair joins SwiftUI's hit-testing for the
@@ -93,24 +102,41 @@ private struct SessionRow: View {
         // flight, so a row can hold a stale hover state after scrolling.
         .onHover { isHovered = $0 }
         .animation(.easeOut(duration: 0.12), value: isHovered)
+        .onRowDoubleClick { beginRename() }
+        .onChange(of: store.renameRequest) { _, request in
+            guard request == session.id, !isEditing else { return }
+            beginRename()
+            store.renameRequest = nil
+        }
         // A context menu is safe where a tap gesture is not: it responds to a right-click and
         // leaves the primary mouse-down — the one `List`'s drag-to-reorder needs — untouched.
         .contextMenu {
+            Button("Mark as Unread") { store.markUnread(session.id) }
+                .accessibilityIdentifier("session-mark-unread")
+            Divider()
             Button("Rename") { beginRename() }
             Button("Close Session") { store.closeSession(session.id) }
         }
     }
 
-    /// Swaps the title for the edit field. Reached from the row's context menu.
+    /// Swaps the title for the edit field. Reached from the row's context menu, a
+    /// double-click, and Return (via `SessionStore.renameRequest`).
     ///
     /// This replaced a hand-rolled double-click detector on the title text. The history is
     /// worth keeping, because it rules out the fixes that look obvious: an exclusive
     /// `onTapGesture(count: 2)` swallows the single click so the row never reaches the
     /// enclosing `List(selection:)` and will not select; pairing count-2 with count-1 leaves
     /// the count-1 recognizer never firing at all; and detecting the second click by hand
-    /// worked for rename but blocked `List`'s drag-to-reorder, because ANY tap recognizer
-    /// here consumes the mouse-down the drag needs. Both the exclusive and the
+    /// worked for rename but blocked `List`'s drag-to-reorder, because ANY *SwiftUI* tap
+    /// recognizer here consumes the mouse-down the drag needs. Both the exclusive and the
     /// `simultaneousGesture` forms were measured against the smoke test and both blocked it.
+    /// Double-click is back today via `.onRowDoubleClick` above, but that works precisely
+    /// because it is not a SwiftUI recognizer: it is an AppKit
+    /// `NSClickGestureRecognizer` with `delaysPrimaryMouseButtonEvents` hard-coded to
+    /// `false` (see `RowDoubleClick.swift`), so the primary mouse-down still reaches the
+    /// table view immediately. `.onTapGesture(count: 2)` and `.simultaneousGesture` are
+    /// still wrong here for the same reason they always were — do not "simplify" this back
+    /// to either of them.
     ///
     /// Selecting first is deliberate: renaming a row should also make it the active one.
     private func beginRename() {
@@ -136,6 +162,11 @@ struct SessionSidebar: View {
     /// Injectable so a future test can drive the close flow without a panel; production
     /// always gets the real alert.
     var confirmer: ProjectCloseConfirming = NSAlertProjectCloseConfirmer()
+
+    /// Whether the `List` itself (not a row's text field) currently holds keyboard focus.
+    /// Gates `.onKeyPress(.return)` below so Return-to-rename cannot fire while, say, a
+    /// rename `TextField` or some other control owns focus.
+    @FocusState private var sidebarFocused: Bool
 
     /// Drives both the label and which shortcut the button claims.
     private var isEmpty: Bool { store.repos.isEmpty }
@@ -175,6 +206,20 @@ struct SessionSidebar: View {
                 }
             }
             .onMove { store.moveSidebarRows(fromOffsets: $0, toOffset: $1) }
+        }
+        .focused($sidebarFocused)
+        // Return starts a rename on the selected row, but only when the sidebar itself has
+        // focus (not, say, a rename `TextField`, which handles its own Return via
+        // `.onSubmit`) and there is a session to rename and no rename request is already in
+        // flight. Any other case returns `.ignored` so Return still reaches whatever else
+        // wants it.
+        .onKeyPress(.return) {
+            guard sidebarFocused,
+                  let selected = store.selectedSessionID,
+                  store.renameRequest == nil
+            else { return .ignored }
+            store.renameRequest = selected
+            return .handled
         }
         .dropDestination(for: URL.self) { urls, _ in
             store.acceptDroppedURLs(urls) != nil
