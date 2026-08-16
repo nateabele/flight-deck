@@ -82,22 +82,32 @@ final class SessionProjectMoveTests: XCTestCase {
         XCTAssertEqual(store.repos.first?.sessions.map(\.id), [a.id])
     }
 
-    /// The registry drives it: a resume that changes cwd moves the tab.
-    func testRegistryCwdChangeMovesTheTab() {
+    /// The registry still drives a move — but only into a project that is already open,
+    /// which is the resume-into-another-project case §7 of the pinning design describes. A
+    /// destination nothing has opened is the worktree case and moves nothing; see
+    /// `testRegistryCwdChangeIntoAnUnopenedDirectoryDoesNotMoveTheTab`.
+    func testRegistryCwdChangeMovesTheTabIntoAnAlreadyOpenProject() {
         let store = makeStore()
         let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
+        // Opened first: the registry may file a tab under an existing project, never
+        // conjure one.
+        _ = store.newSession(in: URL(fileURLWithPath: "/moved", isDirectory: true))
 
         store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a")])
         store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/moved")])
 
+        XCTAssertEqual(store.repos.count, 2)
         XCTAssertEqual(
-            store.repos.first { $0.url.path == "/moved" }?.sessions.map(\.id), [a.id]
+            store.repos.first { $0.url.path == "/moved" }?.sessions.map(\.id).contains(a.id),
+            true
         )
     }
 
     func testRegistryCanRepinAndMoveInOneTick() {
         let store = makeStore()
         let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
+        // As above: the move half of this tick needs its destination already open.
+        _ = store.newSession(in: URL(fileURLWithPath: "/moved", isDirectory: true))
         let resumed = UUID()
 
         store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a")])
@@ -105,14 +115,84 @@ final class SessionProjectMoveTests: XCTestCase {
 
         XCTAssertEqual(store.pinnedConversationID(of: a.id), resumed)
         XCTAssertEqual(
-            store.repos.first { $0.url.path == "/moved" }?.sessions.map(\.id), [a.id]
+            store.repos.first { $0.url.path == "/moved" }?.sessions.map(\.id).contains(a.id),
+            true
         )
     }
 
-    /// `workingDirectory` is an input to `ClaudeSession.transcriptURL`, so a move that left
-    /// the watcher alone would keep tailing the transcript under the *old* encoded project
-    /// directory — renames and sub-agent counts stop arriving and nothing looks broken.
-    func testMoveRepointsTheWatcherAtTheNewProjectsTranscript() {
+    /// The worktree bug. `EnterWorktree` puts `claude`'s cwd at
+    /// `<project>/.claude/worktrees/<name>` — a directory change *within* a project, not a
+    /// resume into another one. Treating every cwd change as a move called `moveSession`,
+    /// which creates a repo when none matches, so a phantom project named after the worktree
+    /// appeared in the sidebar and took the tab with it. Seen live in
+    /// `~/.claude/sessions/39551.json`.
+    func testRegistryCwdChangeIntoAnUnopenedDirectoryDoesNotMoveTheTab() {
+        let store = makeStore()
+        let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
+
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a")])
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a/.claude/worktrees/w")])
+
+        XCTAssertEqual(store.repos.count, 1, "a cwd matching no open project must create none")
+        XCTAssertEqual(store.repos.first?.url.path, "/a")
+        XCTAssertEqual(store.repos.first?.sessions.map(\.id), [a.id])
+    }
+
+    /// …and the transcript watcher has to follow that cwd all the same. `claude` encodes its
+    /// live `process.cwd()` into the project directory name under `~/.claude/projects`, so
+    /// inside a worktree it genuinely writes somewhere else (verified on disk). Declining the
+    /// move without splitting the transcript directory off would leave the tab tailing a file
+    /// nothing writes to — title sync and sub-agent counts stop, and nothing looks broken.
+    func testRegistryCwdChangeIntoAnUnopenedDirectoryStillFollowsTheTranscript() {
+        let store = makeStore()
+        let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
+
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a")])
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a/.claude/worktrees/w")])
+
+        XCTAssertEqual(
+            store.watchedTranscriptURL(of: a.id),
+            ClaudeSession.transcriptURL(
+                sessionID: a.pinnedConversationID,
+                workingDirectory: "/a/.claude/worktrees/w",
+                projectsRoot: store.projectsRoot
+            )
+        )
+    }
+
+    /// `ExitWorktree` walks the cwd back out again, which is the ordinary end of a worktree
+    /// session. The tab must come out of it with exactly one watcher, on its own project's
+    /// transcript — a retarget that left the previous watcher running would double every
+    /// title record and sub-agent count the tab sees for the rest of its life.
+    func testAWorktreeRoundTripLeavesOneWatcherOnTheProjectsTranscript() {
+        let store = makeStore()
+        let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
+
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a")])
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a/.claude/worktrees/w")])
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a")])
+
+        XCTAssertEqual(store.repos.count, 1, "the round trip must not have conjured a project")
+        XCTAssertEqual(store.watchedSessionIDs, [a.id])
+        XCTAssertEqual(
+            store.watchedTranscriptURL(of: a.id),
+            ClaudeSession.transcriptURL(
+                sessionID: a.pinnedConversationID,
+                workingDirectory: "/a",
+                projectsRoot: store.projectsRoot
+            )
+        )
+    }
+
+    /// The inverse of `testMoveRepointsTheWatcherAtTheNewProjectsTranscript`, which this
+    /// replaces. That test was right while `workingDirectory` was the input to
+    /// `ClaudeSession.transcriptURL`: a move changed where `claude` was assumed to be
+    /// writing, so the watcher had to follow. The field split ended that — the transcript
+    /// path now comes from `transcriptDirectory` alone, and filing a tab under another
+    /// project tells us nothing about `claude`'s cwd. Repointing here would aim the watcher
+    /// at a transcript that need not exist, and would fight `retarget`, which is fed by the
+    /// registry and is the only thing that actually knows.
+    func testAnExplicitMoveLeavesTheWatcherOnTheTranscriptItWasTailing() {
         let store = makeStore()
         let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
 
@@ -122,15 +202,16 @@ final class SessionProjectMoveTests: XCTestCase {
             store.watchedTranscriptURL(of: a.id),
             ClaudeSession.transcriptURL(
                 sessionID: a.pinnedConversationID,
-                workingDirectory: "/moved",
+                workingDirectory: "/a",
                 projectsRoot: store.projectsRoot
             )
         )
     }
 
     /// The cwd-alone path — a `/resume` into the same conversation's new project, or a
-    /// plain `cd` — never goes through `repin`, so the move is the only thing that can
-    /// rebuild the watcher.
+    /// plain `cd` — never goes through `repin`, so `retarget` is the only thing that can
+    /// rebuild the watcher for it. It has to, whether or not the destination is a project
+    /// Flight Deck knows about: `claude` is writing there either way.
     func testRegistryCwdChangeRepointsTheWatcher() {
         let store = makeStore()
         let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
@@ -148,10 +229,12 @@ final class SessionProjectMoveTests: XCTestCase {
         )
     }
 
-    /// Repin and move in one tick: the repin already rebuilds from the registry row's cwd,
-    /// which is this same destination, so the move must not start a second watcher — and
-    /// the one watcher has to be on the new conversation *in* the new project.
-    func testRepinAndMoveInOneTickLeaveOneWatcherOnTheNewTranscript() {
+    /// A resume that also reports a new cwd, in one tick. `repin` stores that directory and
+    /// rebuilds the watcher from it, which is why `retarget` is the `else` of that branch
+    /// rather than a second independent one: running both would start two watchers for one
+    /// tab, and in production the repin's watcher arrives only after an async title read, so
+    /// the second would be the one the late completion is written to defer to.
+    func testARepinCarryingANewCwdLeavesOneWatcherOnTheNewTranscript() {
         let store = makeStore()
         let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
         let resumed = UUID()
@@ -170,10 +253,10 @@ final class SessionProjectMoveTests: XCTestCase {
     }
 
     /// The same pair straddling two ticks, which is what production does: the repin's title
-    /// read is a whole-file load, so the move lands while it is still outstanding. The
-    /// move's watcher is the newer one; the late completion must leave it alone rather than
-    /// replace it with one built from the directory the tab has already left.
-    func testAMoveDuringATitleReadKeepsTheWatcherOnTheNewProject() {
+    /// read is a whole-file load, so the cwd change lands while it is still outstanding. The
+    /// retarget's watcher is the newer one; the late completion must leave it alone rather
+    /// than replace it with one built from the directory the tab has already left.
+    func testARetargetDuringATitleReadKeepsTheNewerWatcher() {
         let store = makeStore()
         var pending: [(String?) -> Void] = []
         store.titleResolver = { _, done in pending.append(done) }
