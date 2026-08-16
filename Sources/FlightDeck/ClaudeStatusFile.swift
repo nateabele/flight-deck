@@ -16,9 +16,11 @@ enum ClaudeStatusFile {
         /// Epoch milliseconds. Breaks ties when two files claim one session (crash,
         /// then resume): the newest wins.
         let startedAt: Double
-        /// The session's current working directory. `claude` rewrites this in place when
-        /// a resume moves the session to another project, so it is the authority on where
-        /// the transcript is being written — not the tab's own stored path.
+        /// The `claude` process's live cwd. Rewritten in place on *any* directory change —
+        /// a resume into another project's conversation, but equally an `EnterWorktree` that
+        /// stays inside one project — so it is the authority on where the transcript is
+        /// being written, and on nothing else. Whether the tab should also be filed
+        /// somewhere new is a separate judgement `SessionStore.applyRegistry` makes.
         let cwd: String
         /// Human-readable process start time, e.g. "Mon Aug 10 15:03:38 2026". Paired with
         /// `pid` it identifies one *process*: macOS recycles pids, so a row with a familiar

@@ -160,7 +160,7 @@ enum ClaudeFlagCatalog {
               help: "Prefix for auto-generated Remote Control session names."),
         .init("--worktree", aliases: ["-w"], kind: .optionalValue,
               section: .integrations, label: "Git worktree",
-              help: "Create a new git worktree for the session, optionally named. Changes the session's working directory away from the project root."),
+              help: "Create a new git worktree for the session, optionally named. claude then runs in the worktree rather than the project root; the tab stays filed under its project."),
         .init("--tmux", kind: .toggle,
               section: .integrations, label: "tmux session",
               help: "Create a tmux session for the worktree. Requires a worktree."),

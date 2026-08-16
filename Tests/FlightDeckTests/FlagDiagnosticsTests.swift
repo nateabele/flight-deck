@@ -27,9 +27,18 @@ final class FlagDiagnosticsTests: XCTestCase {
         XCTAssertTrue(diagnostics.contains { $0.message.contains("permission") })
     }
 
-    func testWorktreeWarnsThatTheWorkingDirectoryMoves() {
+    /// Both halves of the warning are asserted, because only one of them is true and the
+    /// wrong one is easy to reintroduce: the transcript really does follow the worktree
+    /// (`claude` names its project directory after its live cwd), while the sidebar
+    /// deliberately does not (`SessionStore.applyRegistry` moves a tab only into a project
+    /// that is already open). A warning that claimed both would send the user looking for a
+    /// row that never moves.
+    func testWorktreeWarnsTheTranscriptFollowsButTheTabDoesNot() {
         let diagnostics = FlagDiagnostics.validate(FlagSet(values: ["--worktree": .on]))
-        XCTAssertTrue(diagnostics.contains { $0.message.contains("working directory") })
+        let message = diagnostics.first?.message ?? ""
+        XCTAssertTrue(message.contains("working directory"))
+        XCTAssertTrue(message.contains("transcript follows the worktree"))
+        XCTAssertTrue(message.contains("stays filed under its project"))
     }
 
     func testDiagnosticsAreOrderStable() {
