@@ -189,6 +189,112 @@ final class SessionProjectMoveTests: XCTestCase {
         )
     }
 
+    // MARK: A quiet tick is not evidence
+
+    /// Drives a tab into a worktree that is *also* an open project — the state the user's
+    /// sidebar is already in, since this change deliberately does not migrate the phantom
+    /// projects its predecessor created and `restore` re-seeds them from `snapshot.projects`.
+    private func storeWithATabWatchingAnOpenWorktreeProject()
+        -> (SessionStore, Session, String) {
+        let store = makeStore()
+        let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
+        let worktree = "/a/.claude/worktrees/w"
+
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a")])
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: worktree)])
+        // Opened after the retarget, which is the only ordering that leaves the tab filed
+        // under /a while its transcript directory names an open project.
+        _ = store.newSession(in: URL(fileURLWithPath: worktree, isDirectory: true))
+        XCTAssertEqual(
+            store.repos.first?.sessions.map(\.id), [a.id], "precondition: still filed under /a"
+        )
+        return (store, a, worktree)
+    }
+
+    /// A tick with no rows at all — `claude` exited, or this is the first tick after launch
+    /// before it registers — reports no cwd, and must therefore move nothing.
+    ///
+    /// `ConversationPin.resolve` echoes the caller's fallback when nothing matched, and that
+    /// fallback is the tab's *transcript* directory. Before the split the echo was the tab's
+    /// own project, so it always compared equal and the move branch was immune by
+    /// construction; the split made the echo divergent, and reading it as a reported cwd
+    /// refiles the tab into its worktree on no evidence whatsoever.
+    func testATickWithNoRowsDoesNotRefileTheTabIntoItsWorktreeProject() {
+        let (store, a, _) = storeWithATabWatchingAnOpenWorktreeProject()
+
+        store.applyRegistry([:])
+
+        XCTAssertEqual(store.repos.first?.url.path, "/a")
+        XCTAssertEqual(store.repos.first?.sessions.map(\.id), [a.id])
+    }
+
+    /// The same trap through the anchored branch: a live row that simply omits its `cwd`.
+    /// An empty `cwd` is the registry saying nothing, not saying "somewhere new".
+    func testALiveRowWithNoCwdDoesNotRefileTheTabIntoItsWorktreeProject() {
+        let (store, a, _) = storeWithATabWatchingAnOpenWorktreeProject()
+
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: "")])
+
+        XCTAssertEqual(store.repos.first?.url.path, "/a")
+        XCTAssertEqual(store.repos.first?.sessions.map(\.id), [a.id])
+    }
+
+    /// The control: the same quiet tick with the worktree *not* open as a project. Passing
+    /// here and failing above is what tells the two apart — it is the destination being an
+    /// open project, not the tick itself, that used to move the tab.
+    func testAQuietTickMovesNothingWhenTheWorktreeIsNotAProject() {
+        let store = makeStore()
+        let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
+
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a")])
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a/.claude/worktrees/w")])
+        store.applyRegistry([:])
+
+        XCTAssertEqual(store.repos.count, 1)
+        XCTAssertEqual(store.repos.first?.sessions.map(\.id), [a.id])
+    }
+
+    // MARK: A repin carries the directory with it
+
+    /// `repin` has to *store* the directory it watched, not merely watch it. Nothing else
+    /// observes that field directly, so this walks the cwd back out again: the return tick
+    /// can only be recognised as a change — and retarget the watcher home — if the repin
+    /// recorded where it went.
+    func testARepinStoresItsDirectorySoALaterReturnRetargetsBack() {
+        let store = makeStore()
+        let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
+        let resumed = UUID()
+
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a")])
+        store.applyRegistry([1: row(resumed, cwd: "/a/.claude/worktrees/w")])
+        store.applyRegistry([1: row(resumed, cwd: "/a")])
+
+        XCTAssertEqual(
+            store.watchedTranscriptURL(of: a.id),
+            ClaudeSession.transcriptURL(
+                sessionID: resumed, workingDirectory: "/a", projectsRoot: store.projectsRoot
+            )
+        )
+    }
+
+    /// And the stored directory reaches the snapshot, so a relaunch resumes the tab where
+    /// the resumed conversation actually is rather than where it started life.
+    func testARepinsDirectoryIsPersisted() {
+        let persistence = SessionPersistenceTests.FakePersistence()
+        let store = SessionStore(provider: nil, persistence: persistence)
+        store.titleResolver = { _, done in done(nil) }
+        let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
+        let resumed = UUID()
+
+        store.applyRegistry([1: row(a.pinnedConversationID, cwd: "/a")])
+        store.applyRegistry([1: row(resumed, cwd: "/a/.claude/worktrees/w")])
+
+        XCTAssertEqual(
+            persistence.stored?.sessions.first(where: { $0.id == a.id })?.transcriptDirectory,
+            "/a/.claude/worktrees/w"
+        )
+    }
+
     /// The inverse of `testMoveRepointsTheWatcherAtTheNewProjectsTranscript`, which this
     /// replaces. That test was right while `workingDirectory` was the input to
     /// `ClaudeSession.transcriptURL`: a move changed where `claude` was assumed to be
