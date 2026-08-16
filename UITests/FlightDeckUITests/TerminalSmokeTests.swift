@@ -208,6 +208,95 @@ final class TerminalSmokeTests: XCTestCase {
         app.terminate()
     }
 
+    /// ⌘W must close a session even when the sidebar — not the terminal — holds focus.
+    ///
+    /// Earns its own launch for the same reason the drag test does: it needs a slate the big
+    /// test's arithmetic does not have (two sessions, focus parked in the sidebar), and its
+    /// failure mode is the app *quitting*, which would take every group after it with it.
+    ///
+    /// **The hazard.** ⌘W is answered by `TerminalHostView.performClose(_:)`, reached through
+    /// the key window's responder chain. That chain runs first responder → superviews → window.
+    /// `TerminalHostView` is an ancestor of the Ghostty surface but NOT of the sidebar, which
+    /// is a sibling branch of the split view. So with focus in the sidebar the action walks
+    /// straight past the handler to the window — and because
+    /// `applicationShouldTerminateAfterLastWindowClosed` returns true and there is one window,
+    /// closing it quits the app and reaps every session. A user who has learned "⌘W closes the
+    /// tab" would eventually lose all of them from the one place in the UI where clicking a
+    /// session is the natural gesture.
+    ///
+    /// **Why the click is on the already-selected row.** Clicking a *different* row re-parents
+    /// its surface, and `TerminalPane.updateNSView` calls `Ghostty.moveFocus(to:)` on a
+    /// re-parent — handing focus straight back to the terminal and hiding the very hazard under
+    /// test. Clicking the row that is already selected re-parents nothing, so focus stays where
+    /// the click put it. One click, not two: `SidebarInputMonitor` maps a double click to
+    /// inline rename.
+    ///
+    /// **The precondition assertion is load-bearing.** If focus is not actually in the sidebar
+    /// when ⌘W is sent, this test passes while observing nothing — the vacuous-pass shape. It
+    /// fails loudly on that instead, naming what held focus.
+    func testCommandWWithSidebarFocusClosesASessionRatherThanQuitting() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-FlightDeckResetState", "YES"]
+        app.launch()
+        app.activate()
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15), "no window appeared")
+
+        let rows = app.staticTexts.matching(identifier: "session-row-title")
+        XCTAssertTrue(waitFor(timeout: 10) { rows.count == 1 }, "seeded slate should hold one session")
+
+        // Two sessions, so closing one cannot empty the app — otherwise "closed the last tab
+        // and quit" and "quit instead of closing a tab" produce the same observable end state.
+        app.typeKey("n", modifierFlags: .command)
+        XCTAssertTrue(waitFor(timeout: 10) { rows.count == 2 }, "⌘N did not add a second session")
+        settle()
+
+        // ⌘N leaves the new session selected, so this clicks the already-selected row.
+        rows.element(boundBy: 1).click()
+        settle()
+
+        XCTAssertFalse(
+            app.textFields["session-title-field"].exists,
+            "the click started an inline rename; ⌘W would not reach the row handler"
+        )
+
+        // Focus is established BEHAVIOURALLY rather than by reading an attribute: neither
+        // `hasFocus` nor `hasKeyboardFocus` exists on `XCUIElement` in this XCTest, and
+        // guessing at a third spelling is how a precondition ends up silently absent. Up-arrow
+        // moves the selection only when the list holds focus — if the terminal had it instead,
+        // the key goes to the shell as a history recall and the selection does not move.
+        //
+        // Cell indices: 0 is the project header, 1 and 2 the two sessions.
+        XCTAssertTrue(app.cells.element(boundBy: 2).isSelected, "precondition: ⌘N should leave the new session selected")
+        app.typeKey(.upArrow, modifierFlags: [])
+        settle()
+        XCTAssertTrue(
+            app.cells.element(boundBy: 1).isSelected,
+            """
+            precondition failed: Up did not move the sidebar selection, so focus is not in the \
+            sidebar and this test cannot observe the hazard — a pass would mean nothing. Find \
+            another way to park focus in the list rather than deleting this check.
+            """
+        )
+
+        let before = rows.count
+        app.typeKey("w", modifierFlags: .command)
+        settle()
+
+        // Checked before the row count: if the app quit, the count is 0 for a reason that has
+        // nothing to do with closing a tab, and this message is the one worth reading.
+        XCTAssertNotEqual(
+            app.state, .notRunning,
+            "⌘W with the sidebar focused QUIT THE APP instead of closing a session"
+        )
+        XCTAssertTrue(
+            app.windows.firstMatch.exists,
+            "⌘W with the sidebar focused closed the window instead of a session"
+        )
+        XCTAssertEqual(rows.count, before - 1, "⌘W with the sidebar focused closed no session")
+
+        app.terminate()
+    }
+
     func testTheWholeShellInOneSession() {
         let app = XCUIApplication()
         // - `-ApplePersistenceIgnoreState`: XCUITest spawns the app via a raw exec, not
