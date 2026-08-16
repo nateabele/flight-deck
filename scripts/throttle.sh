@@ -4,7 +4,7 @@
 # The UI suite spawns Flight Deck, seizes the foreground, and fires key events
 # into whatever holds focus, so a loop of agents each re-running it makes the
 # machine unusable. This caps UI runs at one per $FLIGHTDECK_TEST_THROTTLE
-# seconds (default 180).
+# seconds (default 120).
 #
 # test-unit.sh is deliberately NOT throttled: it runs headless via `xcrun
 # xctest` and never takes the foreground, so implementers keep a normal
@@ -16,7 +16,7 @@
 # Deliberate one-off override:
 #   FLIGHTDECK_TEST_THROTTLE=0 ./scripts/test-unit.sh
 
-THROTTLE=${FLIGHTDECK_TEST_THROTTLE:-180}
+THROTTLE=${FLIGHTDECK_TEST_THROTTLE:-120}
 STAMP="${TMPDIR:-/tmp}/.flightdeck-test-last-run"
 
 if [ "$THROTTLE" -gt 0 ] && [ -f "$STAMP" ]; then

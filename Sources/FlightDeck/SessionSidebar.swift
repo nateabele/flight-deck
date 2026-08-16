@@ -20,7 +20,10 @@ private struct SessionRow: View {
                     .focused($focused)
                     .accessibilityIdentifier("session-title-field")
                     .onSubmit(commit)
-                    .onExitCommand { isEditing = false }   // Esc
+                    .onExitCommand {                      // Esc
+                        isEditing = false
+                        store.renamingSessionID = nil
+                    }
                     .onChange(of: focused) { if !$1 { commit() } }
             } else {
                 // The title carries no *SwiftUI* tap recognizer of any kind, and that is
@@ -35,13 +38,14 @@ private struct SessionRow: View {
                 // Exclusive and `simultaneousGesture` variants were both tried and both
                 // blocked the drag.
                 //
-                // Double-click-to-rename is back, but it does not go through SwiftUI: see
-                // `.onRowDoubleClick` below, which attaches an AppKit
-                // `NSClickGestureRecognizer` to an ancestor view with
-                // `delaysPrimaryMouseButtonEvents` hard-coded to `false`, so the mouse-down
-                // still reaches the table view immediately and the drag survives. See
-                // `RowDoubleClick.swift` for the SDK-header evidence. Rename is also reachable
-                // from the row's context menu and from Return.
+                // Double-click-to-rename is back, and nothing about it lives in this row.
+                // `SidebarInputMonitor` (see `RowDoubleClick.swift`) watches `.leftMouseDown`
+                // from outside the view hierarchy entirely and maps the click to a row itself.
+                // Putting ANY `NSView` here — even one whose `hitTest(_:)` returns nil — makes
+                // this `Text` unhittable, which was measured at 5 of 5 smoke runs; a gesture
+                // recognizer on the table view never fires, because the synthetic double-click
+                // delivers no mouse-ups. Rename is also reachable from the context menu and
+                // from Return.
                 Text(session.title)
                     .accessibilityIdentifier("session-row-title")
             }
@@ -71,11 +75,12 @@ private struct SessionRow: View {
         // HISTORICAL, and kept because it still constrains what may be added here. The
         // conflict below was between the row's hit-testing and the title's own *SwiftUI* tap
         // recognizer; that recognizer is gone from the title now (see the note on the title
-        // `Text`) — replaced by the AppKit recognizer in `RowDoubleClick.swift`, which is
-        // attached to an ancestor view and deliberately kept out of this HStack's SwiftUI
-        // hit-testing, so the specific breakage described below is not reachable through it.
-        // What survives is the finding about `.contentShape` on this HStack, and the two
-        // rejected alternatives.
+        // `Text`) — double-click is detected by `SidebarInputMonitor`, which adds nothing to
+        // this row at all, so the specific breakage described below is not reachable through
+        // it. What survives is the finding about `.contentShape` on this HStack, and the two
+        // rejected alternatives — one of which, the `NSViewRepresentable`, was re-confirmed
+        // the hard way on this branch: it makes the title unhittable even when its `hitTest`
+        // returns nil.
         //
         // Hover is tracked without putting `.contentShape(Rectangle())` + `.onHover` on the
         // HStack itself. Applied to the HStack, that pair joins SwiftUI's hit-testing for the
@@ -104,15 +109,18 @@ private struct SessionRow: View {
         // flight, so a row can hold a stale hover state after scrolling.
         .onHover { isHovered = $0 }
         .animation(.easeOut(duration: 0.12), value: isHovered)
-        .onRowDoubleClick { beginRename() }
+        // Nothing here detects the double-click. It arrives as a `renameRequest` from the
+        // sidebar-level event monitor below, for the same reason the title carries no tap
+        // recognizer: anything added to a row breaks either the drag or the row's
+        // hit-testing. See `RowDoubleClick.swift`.
         .onChange(of: store.renameRequest) { _, request in
             guard request == session.id else { return }
             // Clear before the `isEditing` check, not after: a request addressed to this
             // row must always be consumed, even when it arrives while the row is already
             // editing and there is nothing left to do. Combining these into one guard (as
             // a "simplification") skips the clear whenever `isEditing` is true, which
-            // leaves `renameRequest` stuck non-nil forever — `.onKeyPress(.return)` guards
-            // on `renameRequest == nil`, so that permanently and silently kills
+            // leaves `renameRequest` stuck non-nil forever — the Return path guards on
+            // `renameRequest == nil`, so that permanently and silently kills
             // Return-to-rename for the rest of the session.
             store.renameRequest = nil
             guard !isEditing else { return }
@@ -140,13 +148,12 @@ private struct SessionRow: View {
     /// worked for rename but blocked `List`'s drag-to-reorder, because ANY *SwiftUI* tap
     /// recognizer here consumes the mouse-down the drag needs. Both the exclusive and the
     /// `simultaneousGesture` forms were measured against the smoke test and both blocked it.
-    /// Double-click is back today via `.onRowDoubleClick` above, but that works precisely
-    /// because it is not a SwiftUI recognizer: it is an AppKit
-    /// `NSClickGestureRecognizer` with `delaysPrimaryMouseButtonEvents` hard-coded to
-    /// `false` (see `RowDoubleClick.swift`), so the primary mouse-down still reaches the
-    /// table view immediately. `.onTapGesture(count: 2)` and `.simultaneousGesture` are
-    /// still wrong here for the same reason they always were — do not "simplify" this back
-    /// to either of them.
+    /// Double-click is back today, but nothing detects it inside this row: `SidebarInputMonitor`
+    /// (`RowDoubleClick.swift`) observes `.leftMouseDown` from outside the view hierarchy and
+    /// maps the click to a row itself, so the row gains neither a gesture nor a subview.
+    /// `.onTapGesture(count: 2)` and `.simultaneousGesture` are still wrong here for the same
+    /// reason they always were, and an `NSViewRepresentable` is worse — do not "simplify" this
+    /// back to any of them.
     ///
     /// Selecting first is deliberate: renaming a row should also make it the active one.
     private func beginRename() {
@@ -154,12 +161,16 @@ private struct SessionRow: View {
         draft = session.title
         isEditing = true
         focused = true
+        // Publish that a field is open so the sidebar's Return handler stands down. See the
+        // note on `renamingSessionID` in the store for the bug this fixes.
+        store.renamingSessionID = session.id
     }
 
     /// Empty input reverts: `rename` ignores it and we simply leave edit mode.
     private func commit() {
         guard isEditing else { return }
         isEditing = false
+        store.renamingSessionID = nil
         store.rename(session.id, to: draft)
     }
 }
@@ -173,10 +184,15 @@ struct SessionSidebar: View {
     /// always gets the real alert.
     var confirmer: ProjectCloseConfirming = NSAlertProjectCloseConfirmer()
 
-    /// Whether the `List` itself (not a row's text field) currently holds keyboard focus.
-    /// Gates `.onKeyPress(.return)` below so Return-to-rename cannot fire while, say, a
-    /// rename `TextField` or some other control owns focus.
-    @FocusState private var sidebarFocused: Bool
+    /// Owns the sidebar's input monitor. `@StateObject` rather than a fresh instance per
+    /// render: the monitor holds `NSEvent` tokens that must be installed once and removed once,
+    /// and a value recreated on every body evaluation would leak monitors.
+    ///
+    /// There is deliberately no `@FocusState` here. Measured: `.focused($flag)` on a `List`
+    /// never reported true — the terminal `SurfaceView` holds first responder and neither a
+    /// click nor Tab moves it — so anything gated on it was dead on arrival. The monitor works
+    /// from the real first responder instead.
+    @StateObject private var input = SidebarInputMonitor()
 
     /// Drives both the label and which shortcut the button claims.
     private var isEmpty: Bool { store.repos.isEmpty }
@@ -217,34 +233,45 @@ struct SessionSidebar: View {
             }
             .onMove { store.moveSidebarRows(fromOffsets: $0, toOffset: $1) }
         }
-        .focused($sidebarFocused)
-        // Return starts a rename on the selected row, but only when the sidebar itself has
-        // focus (not, say, a rename `TextField`, which handles its own Return via
-        // `.onSubmit`), there is a session to rename, no rename request is already in
-        // flight, and that session actually has a rendered `SessionRow` to consume the
-        // request. The last check matters because a selected session need not be visible:
-        // collapsing the project that contains it (`SessionStore.setCollapsed`) does not
-        // clear selection, and `cycleSelection` (⌘⇧[/⌘⇧]) walks every session regardless of
-        // whether its project is collapsed, so selection can land on a session with no row
-        // in `store.sidebarRows`. Without this guard, `renameRequest` would be set and
-        // never consumed — nothing renders to clear it, and since this handler also guards
-        // on `renameRequest == nil`, Return-to-rename would be silently dead for the rest
-        // of the session. (`selectedSessionID`'s `didSet` clears any request left behind by
-        // a later selection change, but that is a second line of defense, not a substitute
-        // for not creating one here.) Any other case returns `.ignored` so Return still
-        // reaches whatever else wants it.
-        .onKeyPress(.return) {
-            guard sidebarFocused,
-                  let selected = store.selectedSessionID,
-                  store.renameRequest == nil,
-                  store.sidebarRows.contains(where: { row in
-                      if case .session(let id, _) = row { return id == selected }
-                      return false
-                  })
-            else { return .ignored }
-            store.renameRequest = selected
-            return .handled
-        }
+        // Double-click-to-rename. The monitor reports a table row index; `sidebarRows` is the
+        // same flat array the `ForEach` above renders, so the index maps straight back to a
+        // row. Bounds-checked because the index comes from AppKit, not from us, and a
+        // non-session row (a project header, or the empty placeholder) is simply ignored.
+        // Double-click renames the row under the pointer; Return renames the selected row
+        // once the sidebar holds focus. Both live in `SidebarInputMonitor` because neither can
+        // be expressed here — see `RowDoubleClick.swift` for the four mechanisms measured and
+        // the three that failed.
+        //
+        // The `renameSelected` guard is why a selected-but-invisible session cannot strand a
+        // request: a selected session need not be rendered, because collapsing its project
+        // (`SessionStore.setCollapsed`) does not clear selection and `cycleSelection` (⌘⇧[/⌘⇧])
+        // walks every session regardless of whether its project is collapsed. Returning false
+        // there also leaves the key unconsumed, so Return still reaches whatever else wants it.
+        .sidebarInputMonitor(
+            input,
+            renameRow: { index in
+                guard index >= 0, index < store.sidebarRows.count else { return }
+                guard case .session(let id, _) = store.sidebarRows[index] else { return }
+                // The same one-shot channel the Return path uses, so all three rename entry
+                // points converge on `SessionRow`'s single consumer.
+                store.renameRequest = id
+            },
+            renameSelected: {
+                guard let selected = store.selectedSessionID,
+                      store.renameRequest == nil,
+                      // A rename field being open is the case first-responder checks cannot
+                      // fully cover; without this the Return that COMMITS a rename would be
+                      // eaten here instead.
+                      store.renamingSessionID == nil,
+                      store.sidebarRows.contains(where: { row in
+                          if case .session(let id, _) = row { return id == selected }
+                          return false
+                      })
+                else { return false }
+                store.renameRequest = selected
+                return true
+            }
+        )
         .dropDestination(for: URL.self) { urls, _ in
             store.acceptDroppedURLs(urls) != nil
         }

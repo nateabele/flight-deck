@@ -30,6 +30,20 @@ final class TerminalSmokeTests: XCTestCase {
         wait(for: [settled], timeout: 2)
     }
 
+    /// Polls `condition` until it holds or the deadline passes.
+    ///
+    /// `waitForExistence` only answers "did this element appear", which is the wrong question
+    /// for state that changes an element's LABEL while it stays on screen the whole time — the
+    /// unread mark being the case in point.
+    private func waitFor(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        return condition()
+    }
+
     /// macOS names the Settings window inconsistently across releases ("Preferences" on
     /// some, SwiftUI's generated "FlightDeck Settings" on others), so it is located
     /// defensively by content — the window whose descendants include the Claude tab
@@ -391,7 +405,21 @@ final class TerminalSmokeTests: XCTestCase {
         XCTContext.runActivity(named: "double-clicking a session title renames it") { _ in
             let otherTitlesBefore = (1..<3).map { rows.element(boundBy: $0).label }
 
-            rows.element(boundBy: 0).doubleClick()
+            // Deliberately a COORDINATE double-click, not `rows.element(boundBy: 0).doubleClick()`.
+            //
+            // Measured: `XCUIElement.doubleClick()` drives an accessibility action and emits no
+            // mouse events at all. Instrumenting the app's own local event monitor during a full
+            // smoke run logged exactly three `.leftMouseUp` events for the entire suite, and both
+            // in the main launch were coordinate-based clicks — every element-level `.click()`
+            // and `.doubleClick()` produced none. Since rename is driven by real mouse input
+            // (see `RowDoubleClick.swift` for why it cannot be a gesture or a subview), an
+            // element-level double click can never exercise it, and a test written that way
+            // fails against a perfectly working build.
+            //
+            // A coordinate double-click posts real events, which is also what a user does.
+            rows.element(boundBy: 0)
+                .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                .doubleClick()
             let field = app.textFields["session-title-field"]
             XCTAssertTrue(field.waitForExistence(timeout: 5),
                           "double-clicking a row title must open the rename field")
@@ -420,12 +448,38 @@ final class TerminalSmokeTests: XCTestCase {
         // List focus, which is what makes Return meaningful here.
         XCTContext.runActivity(named: "Return renames the selected session while the sidebar has focus") { _ in
             let target = rows.element(boundBy: 1)
-            target.click()
+            // A COORDINATE click, for the same measured reason the double-click activity above
+            // uses one: `XCUIElement.click()` drives an accessibility action, which selects the
+            // row but never gives the `List` real keyboard focus — so `$sidebarFocused` stays
+            // false and `.onKeyPress(.return)` correctly declines to fire. A coordinate click
+            // posts a real mouse event and moves focus the way a user's click does.
+            target.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+            // Then click the SAME row again, well after the double-click interval.
+            //
+            // Measured, and it is the crux of this feature: the first click switches session,
+            // which re-parents the terminal surface, and `TerminalPane` calls
+            // `Ghostty.moveFocus(to: surface)` on re-parent — asynchronously, so it lands after
+            // the sidebar claims first responder and hands the keyboard straight back to the
+            // terminal. That auto-focus is right for a terminal app and is deliberately left
+            // alone. It only fires when the surface actually changes, so a second click on the
+            // already-selected row switches nothing and the sidebar keeps focus.
+            //
+            // The two `settle()` calls (~1s) put the second click far outside the double-click
+            // interval; without them this would register as a double-click and open the rename
+            // field for the WRONG reason, passing whether or not Return works.
+            settle()
+            settle()
+            target.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
             XCTAssertTrue(
                 app.cells.element(boundBy: 2).isSelected,
                 "clicking row 1 must select it before Return is asserted against it"
             )
 
+            // No Tab here, deliberately. The terminal consumes Tab like any other key, and the
+            // coordinate click above is what moves first responder to the sidebar table (see
+            // `SidebarInputMonitor`, which claims focus on a single click exactly as
+            // `SurfaceView` does for the terminal). Pressing Tab first would move focus back
+            // off the table and break this.
             app.typeKey(.return, modifierFlags: [])
             let field = app.textFields["session-title-field"]
             XCTAssertTrue(field.waitForExistence(timeout: 5),
@@ -453,7 +507,16 @@ final class TerminalSmokeTests: XCTestCase {
 
             // And the request channel must not have been left stranded by that in-field
             // Return: Return must still work on a different row right afterward.
-            rows.element(boundBy: 0).click()
+            // Same two-click shape as above, and for the same measured reason: the first click
+            // switches session and `TerminalPane` hands focus back to the terminal, so only a
+            // second click on the now-selected row leaves the sidebar focused. The settles keep
+            // that second click outside the double-click interval, so this cannot pass by
+            // accidentally triggering double-click-to-rename instead of Return.
+            let other = rows.element(boundBy: 0)
+            other.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+            settle()
+            settle()
+            other.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
             app.typeKey(.return, modifierFlags: [])
             XCTAssertTrue(
                 field.waitForExistence(timeout: 5),
@@ -503,7 +566,20 @@ final class TerminalSmokeTests: XCTestCase {
             XCTAssertTrue(title.waitForExistence(timeout: 5))
             let markedCell = app.cells.element(boundBy: 3)
             let dot = markedCell.descendants(matching: .any).matching(identifier: "session-status").firstMatch
-            XCTAssertFalse(dot.exists, "precondition: row has no status dot before it is marked unread")
+
+            // Assert on the LABEL, not on the icon's existence.
+            //
+            // Measured: the seeded sessions DO carry a live status here, so the status icon is
+            // already present before anything is marked — an existence check would fail its own
+            // precondition. What "unread" changes is the wording: `SessionStatus.tooltip(unread:)`
+            // returns "Finished — not yet viewed" for an idle+unread session and the plain status
+            // tooltip otherwise, and that label is what the icon publishes.
+            let unreadWording = "not yet viewed"
+            XCTAssertTrue(dot.waitForExistence(timeout: 5), "precondition: the row has a status icon")
+            XCTAssertFalse(
+                dot.label.contains(unreadWording),
+                "precondition: row must not already read as unread before it is marked, got \(dot.label)"
+            )
 
             title.rightClick()
             // `app.menus.firstMatch` can resolve to a menu-bar menu rather than this popup —
@@ -523,11 +599,9 @@ final class TerminalSmokeTests: XCTestCase {
             // title-based lookup (as used for "Rename" above) is.
             firstItem.click()
 
-            XCTAssertTrue(dot.waitForExistence(timeout: 5),
-                          "marking a session unread did not show its status dot")
             XCTAssertTrue(
-                dot.label.contains("Unread"),
-                "the unread status dot's accessibility label should carry the unread wording, got \(dot.label)"
+                waitFor(timeout: 5) { dot.exists && dot.label.contains(unreadWording) },
+                "marking a session unread did not change its status icon to the unread wording, got \(dot.label)"
             )
 
             // Selecting a DIFFERENT row, then the marked row again, must clear the mark.
@@ -536,8 +610,9 @@ final class TerminalSmokeTests: XCTestCase {
             title.click()
 
             XCTAssertTrue(
-                dot.waitForNonExistence(timeout: 5),
-                "re-selecting a marked row should clear its unread mark, but the status dot is still showing"
+                waitFor(timeout: 5) { dot.exists && !dot.label.contains(unreadWording) },
+                "re-selecting a marked row must clear its unread mark, but the icon still reads "
+                + "as unread (\(dot.label))"
             )
         }
 

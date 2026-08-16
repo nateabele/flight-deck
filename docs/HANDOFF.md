@@ -16,10 +16,12 @@ Start here if you're picking up Flight Deck fresh. This is the map; the linked d
 >
 > **Session Name Sync** — session names stay in sync with the `claude` running in each
 > terminal, in both directions, and sessions now survive relaunch (each terminal reattaches to
-> its own Claude conversation via `--resume`). Rename is reachable three ways: double-click
-> (via an AppKit recognizer that leaves drag-to-reorder's mouse-down alone — the original
-> SwiftUI tap gesture blocked it and was pulled on 2026-08-15), Return on the selected row,
-> and the row's context menu; see the project-tabs section of [FOLLOWUPS.md](FOLLOWUPS.md).
+> its own Claude conversation via `--resume`). Rename is reachable three ways: double-click,
+> Return on the selected row (once the sidebar has focus — click the row you are already on),
+> and the row's context menu. Double-click and Return both come from a passive event monitor
+> that adds nothing to the row, because the original SwiftUI tap gesture blocked
+> drag-to-reorder and an `NSViewRepresentable` made the row title unhittable; see the
+> project-tabs section of [FOLLOWUPS.md](FOLLOWUPS.md).
 > - **Plan:** [superpowers/plans/2026-08-10-session-name-sync.md](superpowers/plans/2026-08-10-session-name-sync.md) · **Spec:** [superpowers/specs/2026-08-10-session-name-sync-design.md](superpowers/specs/2026-08-10-session-name-sync-design.md)
 >
 > Also fixed: ⌘Q and any other menu shortcut were being swallowed by the terminal

@@ -189,18 +189,28 @@ Fixes: the project toggle moved onto the chevron as a `Button`; session rename m
 row's context menu. `.contentShape(Rectangle())` was kept on the project header — it is what
 makes hover cover the full row, and on its own it consumes nothing.
 
-**Rule for anything added to a sidebar row: no *SwiftUI* tap gestures.** Use a `Button` on a
-small control, a context menu, or the third safe mechanism added later on this branch: an
-AppKit `NSClickGestureRecognizer` with `delaysPrimaryMouseButtonEvents` hard-coded to `false`,
-attached to an ancestor view rather than to the row's own SwiftUI hit-testing (see
-`Sources/FlightDeck/RowDoubleClick.swift`). All three leave the primary mouse-down alone.
+**Rule for anything added to a sidebar row: add nothing to the row.** No *SwiftUI* tap gestures
+(they eat the mouse-down the drag needs) and **no `NSViewRepresentable` either** — measured on
+this branch at 5 of 5 smoke failures with `Not hittable: StaticText … session-row-title`, even
+with `hitTest(_:)` returning nil. `hitTest` keeps a view out of AppKit's hit-test path but not
+out of the accessibility geometry XCUITest measures, which is the same cause as the older
+tracking-area finding. Safe: a `Button` on a small control, a context menu, or an out-of-band
+event monitor (`Sources/FlightDeck/RowDoubleClick.swift`).
 
-Closed: **double-click renames a session again.** It returned via the AppKit recognizer above,
-which sidesteps the SwiftUI-tap-gesture-vs-drag conflict entirely. Return-to-rename is also
-implemented (`SessionSidebar`'s `.onKeyPress(.return)`, wired through
-`SessionStore.renameRequest`), matching Finder's arrangement of Return-to-rename with
-double-click reserved for open. Rename is reachable three ways today: double-click, Return, and
-the row's context menu.
+Two further mechanisms were tried on this branch and also failed, both worth not repeating:
+an `NSClickGestureRecognizer` on the table view attaches correctly but never recognizes,
+because XCUITest's synthetic double-click emits two mouse-*downs* (the second already carrying
+`clickCount == 2`) and **no ups at all**; and `.onKeyPress(.return)` on the `List` never fires,
+because the terminal `SurfaceView` holds first responder and neither a click nor Tab moves it —
+a `@FocusState` on the `List` never reported true.
+
+Closed: **double-click renames a session again**, and **Return-to-rename is implemented.** Both
+live in `SidebarInputMonitor`: a passive `.leftMouseDown` monitor renames on `clickCount == 2`,
+and Return renames the selected row when the sidebar's table is first responder. The sidebar
+takes first responder when you click the row you are *already* on — not on every click, because
+switching session re-parents the terminal surface and `TerminalPane` asynchronously calls
+`Ghostty.moveFocus(to:)`, which would take focus straight back. Rename is reachable three ways:
+double-click, Return, and the row's context menu.
 
 Four more from the whole-branch review of this same commit, none exercised in a running app:
 
