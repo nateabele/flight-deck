@@ -196,6 +196,38 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertFalse(store.unreadIdle.contains(s.id))
     }
 
+    // MARK: Mark as Unread
+
+    /// The context menu's entry point, not the `markUnreadForTesting` seam: pins that the
+    /// production `markUnread(_:)` itself lands in `unreadIdle`.
+    func testMarkUnreadInsertsIntoUnreadIdle() {
+        let store = SessionStore(provider: StubProvider())
+        let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        XCTAssertFalse(store.unreadIdle.contains(s.id), "precondition: not yet marked")
+
+        store.markUnread(s.id)
+
+        XCTAssertTrue(store.unreadIdle.contains(s.id))
+    }
+
+    /// The condition the whole "Mark as Unread" feature was approved on: reactivating an
+    /// inactive tab clears its mark. This is `selectedSessionID`'s `didSet`
+    /// (`SessionStore.swift:47`), pinned here as well as in the UI smoke test — a unit test
+    /// is what tells you *why* it broke if it ever does again.
+    func testSelectingASessionClearsItsMark() {
+        let store = SessionStore(provider: StubProvider())
+        let a = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        // Created after `a`, so `b` — not `a` — holds the selection below, the way looking
+        // at a different tab before coming back to the marked one would.
+        _ = store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
+        store.markUnread(a.id)
+        XCTAssertTrue(store.unreadIdle.contains(a.id), "precondition: marked while unselected")
+
+        store.selectSession(a.id)
+
+        XCTAssertFalse(store.unreadIdle.contains(a.id))
+    }
+
     /// A registry row for `session`, in the shape `applyRegistry` resolves against.
     ///
     /// `cwd` must equal the session's own working directory: `applyRegistry` reads a
