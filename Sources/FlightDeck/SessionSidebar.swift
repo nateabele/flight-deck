@@ -14,6 +14,24 @@ private struct SessionRow: View {
 
     var body: some View {
         HStack(spacing: 4) {
+            // Leading, unlike the project header's, which stays trailing.
+            //
+            // The fixed minimum width is what makes that work. `SessionStatusIcon` draws
+            // *nothing* for a session with no `claude` running, which on the trailing edge was
+            // invisible — the row simply ended — but on the leading edge would slide that
+            // row's title left and leave the sidebar's left edge ragged as sessions start and
+            // stop. Reserving the column keeps every title on the same x.
+            //
+            // `minWidth`, not `width`: a busy session with sub-agents draws its count beside
+            // the glyph, and a hard width would overlap it onto the title. That row's title
+            // shifts right by the width of the numeral, which is the one case where alignment
+            // gives — deliberately, since clipping the count would be worse.
+            SessionStatusIcon(
+                status: store.status(for: session.id),
+                unread: store.unreadIdle.contains(session.id)
+            )
+            .frame(minWidth: 16, alignment: .leading)
+
             if isEditing {
                 TextField("", text: $draft)
                     .textFieldStyle(.plain)
@@ -56,12 +74,12 @@ private struct SessionRow: View {
                     .help("Another tab is on this conversation")
                     .accessibilityIdentifier("session-pin-conflict")
             }
-            SessionStatusIcon(
-                status: store.status(for: session.id),
-                unread: store.unreadIdle.contains(session.id)
-            )
-            // The close button is absent, not merely hidden, until hover: inserting it
-            // is what pushes the status icon left. No manual offset needed.
+            // Absent rather than hidden until hover, as it always was — but the reason has
+            // changed with the status icon's move. It used to be that inserting the button is
+            // what pushed the status icon left, so no manual offset was needed. The icon is on
+            // the leading edge now and nothing trails it but the conflict marker, so this is
+            // simply a destructive control kept out of the way until pointed at — the same
+            // rule `ProjectHeaderRow`'s close button follows.
             if isHovered {
                 Button {
                     store.closeSession(session.id)
