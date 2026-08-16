@@ -58,7 +58,7 @@ final class NonDelayingDoubleClickRecognizer: NSClickGestureRecognizer {
 /// A previous attempt put a real `NSView` in `.background()` and it took over the row's
 /// hit-test geometry, making the title unhittable — 6 of 6 UI test runs failed with
 /// `"Not hittable: StaticText … session-row-title"` (quoted in full at
-/// `SessionSidebar.swift:84-90`). Two rules keep this view from repeating that:
+/// `SessionSidebar.swift:96-98`). Two rules keep this view from repeating that:
 ///
 /// 1. `hitTest(_:)` always returns `nil`, so this view never participates in
 ///    hit-testing and cannot steal anything, no matter what SwiftUI does with its frame.
@@ -84,6 +84,24 @@ private final class DoubleClickCatcherView: NSView {
             return
         }
         attachIfNeeded()
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        // `viewDidMoveToWindow()` only fires on a window transition, but AppKit can
+        // re-parent this catcher into a different `NSTableRowView` without one —
+        // plausibly what `List`'s row reuse/reorder does. Left unhandled, the recognizer
+        // would stay attached to the OLD row view while `updateNSView` rebinds `action`
+        // to the NEW row, so a double-click on the old row would rename the wrong
+        // session. Re-resolve the ancestor on every superview change and re-attach only
+        // when it actually differs; if there is no recognizer yet, or the resolved
+        // ancestor is unchanged, this is a no-op and `attachIfNeeded()`'s idempotence
+        // guarantees are untouched.
+        guard recognizer != nil,
+              let ancestor = findAncestor(),
+              ancestor !== attachedAncestor
+        else { return }
+        attach(to: ancestor)
     }
 
     private func attachIfNeeded() {

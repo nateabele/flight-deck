@@ -81,7 +81,9 @@ private struct SessionRow: View {
         // HStack itself. Applied to the HStack, that pair joins SwiftUI's hit-testing for the
         // row and competed with the title's `.onTapGesture`: it intermittently swallowed the
         // second click of a double click, so the rename detector never saw one. Measured at
-        // 4 failures in 5 runs of `testDoubleClickRenamesSession`, against 9/9 before
+        // 4 failures in 5 runs of `testDoubleClickRenamesSession` (a test from the
+        // hand-rolled-detector era; it no longer exists — double-click is now covered by
+        // the AppKit-recognizer tests in `TerminalSmokeTests.swift`), against 9/9 before
         // these two changes met.
         //
         // `.onHover` alone is safe; it was `.contentShape(Rectangle())` that made the
@@ -218,13 +220,27 @@ struct SessionSidebar: View {
         .focused($sidebarFocused)
         // Return starts a rename on the selected row, but only when the sidebar itself has
         // focus (not, say, a rename `TextField`, which handles its own Return via
-        // `.onSubmit`) and there is a session to rename and no rename request is already in
-        // flight. Any other case returns `.ignored` so Return still reaches whatever else
-        // wants it.
+        // `.onSubmit`), there is a session to rename, no rename request is already in
+        // flight, and that session actually has a rendered `SessionRow` to consume the
+        // request. The last check matters because a selected session need not be visible:
+        // collapsing the project that contains it (`SessionStore.setCollapsed`) does not
+        // clear selection, and `cycleSelection` (⌘⇧[/⌘⇧]) walks every session regardless of
+        // whether its project is collapsed, so selection can land on a session with no row
+        // in `store.sidebarRows`. Without this guard, `renameRequest` would be set and
+        // never consumed — nothing renders to clear it, and since this handler also guards
+        // on `renameRequest == nil`, Return-to-rename would be silently dead for the rest
+        // of the session. (`selectedSessionID`'s `didSet` clears any request left behind by
+        // a later selection change, but that is a second line of defense, not a substitute
+        // for not creating one here.) Any other case returns `.ignored` so Return still
+        // reaches whatever else wants it.
         .onKeyPress(.return) {
             guard sidebarFocused,
                   let selected = store.selectedSessionID,
-                  store.renameRequest == nil
+                  store.renameRequest == nil,
+                  store.sidebarRows.contains(where: { row in
+                      if case .session(let id, _) = row { return id == selected }
+                      return false
+                  })
             else { return .ignored }
             store.renameRequest = selected
             return .handled

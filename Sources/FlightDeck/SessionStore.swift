@@ -45,6 +45,17 @@ final class SessionStore: ObservableObject {
             // `appIsActive()`: selecting a row is an explicit act, so it counts as looking
             // at it even if the window is not frontmost at that instant.
             if let id = selectedSessionID { unreadIdle.remove(id) }
+            // Safety net against a stranded `renameRequest`: `SessionSidebar`'s Return
+            // handler only sets it for a session with a rendered row, but the selection
+            // it was issued for can still move out from under it afterward — collapsing
+            // the project that owns the selected session, `cycleSelection` (⌘⇧[/⌘⇧])
+            // landing on a session inside a collapsed project, or simply the user
+            // clicking a different row before the request is consumed. Any selection
+            // change, including one that reassigns the same id, clears the request, so
+            // it can never outlive the selection state it was issued for. Swift fires
+            // `didSet` on every assignment, not only on a change, which is exactly the
+            // guarantee this leans on.
+            renameRequest = nil
             persist()
         }
     }
@@ -624,11 +635,16 @@ final class SessionStore: ObservableObject {
     ///
     /// Deliberately does not special-case the *currently selected* session: `selectedSessionID`
     /// already removes an id from `unreadIdle` in its `didSet`, but only when that property is
-    /// next assigned. Marking the active tab unread inserts it right back, and the dot stays up
-    /// — even though the user is looking at that tab right now — until they navigate away and
-    /// return, which reassigns `selectedSessionID` and clears it. That is intentional and
-    /// matches Mail, where marking the open message unread sticks until you leave and re-open
-    /// it; do not "fix" it by adding a guard here.
+    /// next assigned. Marking the active tab unread inserts it right back, and the dot
+    /// typically stays up — even though the user is looking at that tab right now — until
+    /// they navigate away and return, which reassigns `selectedSessionID` and clears it. That
+    /// is not the *only* way it clears, though: `applyReadState` can also clear it sooner, if
+    /// this session's status edges from working back to idle while it is still selected and
+    /// the app is active — `SessionReadPolicy.change` returns `.clear` rather than `.mark` for
+    /// exactly that edge when `isViewed` is true, because a running `claude` reporting it
+    /// finished counts as the user having seen it too. Either way, marking here without a
+    /// guard is intentional and matches Mail, where marking the open message unread sticks
+    /// until something counts as having read it again; do not "fix" it by adding a guard here.
     ///
     /// Persists immediately, same as `rename(_:to:)`: unread marks are meant to survive a
     /// relaunch (see `unreadIdle`'s doc comment), so there is no "mark now, save later" here.
@@ -1320,10 +1336,21 @@ final class SessionStore: ObservableObject {
 
         // Prune only what actually went away this tick. A blanket intersection against the
         // live statuses looks equivalent and is not: at launch `statuses` is empty until each
-        // resumed `claude` re-registers, so it wiped every mark restore had just seeded — and
-        // it did so before any of them had been drawn, since SessionStatusIcon renders
-        // nothing for a nil status. A mark for a session that has never had a status is
-        // waiting for its process to appear, not stale.
+        // resumed `claude` re-registers, so it wiped every mark restore had just seeded,
+        // before any of them had a chance to be viewed. A mark for a session that has never
+        // had a status is waiting for its process to appear, not stale.
+        //
+        // The prune below — dropping a session's unread mark the moment its status goes
+        // back to nil — was originally justified by "SessionStatusIcon renders nothing for
+        // a nil status, so the entry has no icon left to carry the mark and would leak
+        // invisibly." That justification no longer holds: SessionStatusIcon now renders an
+        // unread dot for a nil status too, when `unread` is true (see its `else if unread`
+        // branch). An unread, statusless session IS drawn today. The prune's behavior is
+        // deliberately left UNCHANGED here regardless — whether unread marks should still
+        // be dropped on this transition is a separate, user-facing call, out of scope for
+        // this branch and already raised with the user separately. What is recorded here is
+        // that the rule below is now kept without the reason that originally motivated it,
+        // pending a deliberate decision, not that the rule has been re-justified.
         for transition in transitions where transition.old != nil && transition.new == nil {
             unreadIdle.remove(transition.id)
         }
