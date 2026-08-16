@@ -311,15 +311,23 @@ is already open. Design record:
   between projects is still refused by `SidebarReorder`). The alternative — never
   moving — was considered and rejected: a genuine resume into an open project is worth
   following.
-- **`ConversationPin.resolve`'s `workingDirectory:` parameter is misnamed — rename deferred,
-  deliberately.** Since the split it is fed, and echoes back, the tab's *transcript*
-  directory; passing its `workingDirectory` would move a worktree session's watcher onto the
-  project's transcript the first time a row omitted its `cwd`. The label survives because it
-  is not local to that one function: `ClaudeSession.transcriptURL(sessionID:workingDirectory:)`
-  carries the same label with the same "directory `claude` is running in" meaning, across two
-  source files and four test files, and `ConversationPin.Resolution` carries it as a field
-  name too. A coherent rename is therefore a multi-site production change (`transcriptDirectory:`
-  everywhere, or nothing), which does not belong in a documentation pass. Until it happens the
-  warning is written where a caller will hit it: a `- Parameter` doc on `resolve` itself and a
-  field comment on `Resolution.workingDirectory`, rather than only at the one call site in
-  `SessionStore.applyRegistry`.
+- **`ConversationPin.resolve`'s `workingDirectory:` parameter was misnamed — FIXED, and the
+  name was hiding a bug rather than just reading badly.** It was deferred once as a cosmetic
+  multi-site rename. It was not cosmetic: since the split that parameter is fed, and echoes
+  back, the tab's *transcript* directory, and `Resolution` returned the echo and a genuine
+  report under one name. `applyRegistry` refiled a tab on that field, so a tick that named no
+  directory at all — no rows, or a live row with an empty `cwd` — looked like a report of the
+  tab's transcript directory, and a tab whose transcript sat in a worktree the user still had
+  open as a project was silently refiled into it. Before the split the echo was the tab's own
+  project and always compared equal, so the branch was immune by construction.
+
+  `Resolution` now carries both: `transcriptDirectory` (reported, else the echo — always
+  usable, never evidence) and `reportedDirectory: String?` (nil when nothing was reported, an
+  empty `cwd` included). The parameter is `transcriptDirectory:`, and the refile branch reads
+  `reportedDirectory` only. A call-site gate was rejected: it would have left the trap intact
+  for the next caller, and `moveSession` re-trips it the moment a drag-to-project UI exists,
+  since a move leaves `transcriptDirectory` alone and the next quiet tick would echo it back.
+
+  `ClaudeSession.transcriptURL(sessionID:workingDirectory:)` deliberately keeps its label —
+  it is a pure path encoder whose argument really is "the directory `claude` is running in",
+  it has no fallback and so no echo, and renaming it is a separate, genuinely cosmetic pass.

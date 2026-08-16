@@ -133,14 +133,15 @@ enum ConversationPin {
     struct Anchor: Equatable { let pid: pid_t; let procStart: String }
 
     struct Resolution: Equatable {
-        var anchor: Anchor?          // nil == lost
-        var conversationID: UUID     // possibly repinned
-        var workingDirectory: String // the row's reported cwd; see below
+        var anchor: Anchor?              // nil == lost
+        var conversationID: UUID         // possibly repinned
+        var reportedDirectory: String?   // nil == no row named one; see below
+        var transcriptDirectory: String  // reported, else the caller's fallback echoed back
     }
 
     static func resolve(
         conversationID: UUID,
-        workingDirectory: String,     // the tab's transcript directory, as a fallback
+        transcriptDirectory: String,  // the tab's transcript directory, as a fallback
         anchor: Anchor?,
         rows: [pid_t: ClaudeStatusFile.Entry]
     ) -> Resolution
@@ -151,14 +152,27 @@ The store diffs each `Resolution` against current state and applies the deltas. 
 and `cwd` are independent outcomes** — either can change without the other, so a repin and
 whatever the cwd implies are separate effects rather than one coupled resume event.
 
-`Resolution.workingDirectory` is a **reported** directory, not a decided project: the
-resolver says where the process is and stops there. What that directory means is the store's
-call, and it makes two of them from the one field — the transcript always follows it (§6.1),
-the tab is refiled only if that directory is a project already open (§7). The parameter of
-the same name is the fallback used when a row reports an empty `cwd`, and the store passes
-the tab's **transcript** directory into it, never its project: falling back to the project
-would move a worktree session's watcher back to the project's transcript on the first row
-that happened to omit its cwd. The shared name is a wart — see FOLLOWUPS.
+The resolver reports where the process is and stops there; what that means is the store's
+call, and it makes two of them — the transcript always follows (§6.1), the tab is refiled
+only if the directory is a project already open (§7).
+
+**Those two decisions cannot read the same field**, which is why the directory is returned
+twice. `resolve` needs a fallback for a tick that names no directory (no row matched, or the
+matched row's `cwd` is empty), and the store passes the tab's **transcript** directory as
+that fallback, never its project: falling back to the project would move a worktree
+session's watcher onto the project's transcript the first time a row omitted its cwd. But
+that makes the returned value ambiguous — an echo of what the tab already held is
+indistinguishable from a report of the same path — and refiling a tab on an echo means
+moving it on no evidence at all. So `transcriptDirectory` carries the echo (always usable,
+never evidence) and `reportedDirectory` is `String?`, nil precisely when nothing was
+reported. An empty `cwd` is folded into that nil: the registry omitting a directory is the
+registry saying nothing, not saying "somewhere new".
+
+The distinction is new with the project/transcript split and did not exist before it. While
+the fallback was the tab's own `workingDirectory`, an echo always compared equal to the
+project and the refile branch was immune by construction; the split made the echo divergent,
+and a tab whose transcript sat in a worktree the user still had open as a project was refiled
+into it on the first tick that reported nothing.
 
 ### 5.2 Two existing units change
 
@@ -257,9 +271,13 @@ func moveSession(_ id: UUID, toProjectAt url: URL)
   tab under the **repo's own recorded path** rather than the row's cwd, since those differ
   for a project opened through a symlink and `Repo.url` and `Session.workingDirectory` must
   not disagree about the project they both name.
-- `moveSession` still creates an absent repo, because its other callers are explicit user
-  actions where creating one is the whole point. The registry path never reaches that branch:
-  it only calls `moveSession` once `indexOfRepo(for:)` has already found the destination.
+- `moveSession` still creates an absent repo, kept as the safe default for a future explicit-
+  move caller (a drag-to-project, say), where creating one would be the whole point. **No
+  production caller reaches it today**: the registry path is the only caller, and it invokes
+  `moveSession` only once `indexOfRepo(for:)` has already found the destination.
+- The registry path refiles on `Resolution.reportedDirectory` alone, never on the echoed
+  `transcriptDirectory` (§5): a tick that reported no cwd is not evidence that a tab belongs
+  anywhere else.
 - **There is no `restartsWatcher:` parameter.** It existed because `workingDirectory` fed
   `ClaudeSession.transcriptURL`, so a move changed where the tab believed `claude` was
   writing and the watcher had to be rebuilt — and because a repin in the same tick had

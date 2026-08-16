@@ -14,7 +14,7 @@ final class ConversationPinTests: XCTestCase {
         let conversation = UUID()
         let resolution = ConversationPin.resolve(
             conversationID: conversation,
-            workingDirectory: "/w",
+            transcriptDirectory: "/w",
             anchor: nil,
             rows: [7: row(pid: 7, session: conversation)]
         )
@@ -26,7 +26,7 @@ final class ConversationPinTests: XCTestCase {
     func testWithoutAMatchingRowThereIsNoAnchor() {
         let resolution = ConversationPin.resolve(
             conversationID: UUID(),
-            workingDirectory: "/w",
+            transcriptDirectory: "/w",
             anchor: nil,
             rows: [7: row(pid: 7, session: UUID())]
         )
@@ -40,7 +40,7 @@ final class ConversationPinTests: XCTestCase {
         let new = UUID()
         let resolution = ConversationPin.resolve(
             conversationID: old,
-            workingDirectory: "/w",
+            transcriptDirectory: "/w",
             anchor: .init(pid: 7, procStart: "start-a"),
             rows: [7: row(pid: 7, session: new)]
         )
@@ -55,7 +55,7 @@ final class ConversationPinTests: XCTestCase {
         let old = UUID()
         let resolution = ConversationPin.resolve(
             conversationID: old,
-            workingDirectory: "/w",
+            transcriptDirectory: "/w",
             anchor: .init(pid: 7, procStart: "start-a"),
             rows: [7: row(pid: 7, session: UUID(), procStart: "start-b")]
         )
@@ -68,40 +68,96 @@ final class ConversationPinTests: XCTestCase {
         let old = UUID()
         let resolution = ConversationPin.resolve(
             conversationID: old,
-            workingDirectory: "/w",
+            transcriptDirectory: "/w",
             anchor: .init(pid: 7, procStart: "start-a"),
             rows: [:]
         )
 
         XCTAssertNil(resolution.anchor)
         XCTAssertEqual(resolution.conversationID, old)
-        XCTAssertEqual(resolution.workingDirectory, "/w")
+        XCTAssertEqual(resolution.transcriptDirectory, "/w")
+        XCTAssertNil(
+            resolution.reportedDirectory,
+            "a tick with no rows reports no directory — the transcript value is our own echo"
+        )
     }
 
     func testCwdChangeIsReportedIndependentlyOfTheConversation() {
         let conversation = UUID()
         let resolution = ConversationPin.resolve(
             conversationID: conversation,
-            workingDirectory: "/old",
+            transcriptDirectory: "/old",
             anchor: .init(pid: 7, procStart: "start-a"),
             rows: [7: row(pid: 7, session: conversation, cwd: "/new")]
         )
 
         XCTAssertEqual(resolution.conversationID, conversation)
-        XCTAssertEqual(resolution.workingDirectory, "/new")
+        XCTAssertEqual(resolution.transcriptDirectory, "/new")
+        XCTAssertEqual(resolution.reportedDirectory, "/new")
+    }
+
+    // MARK: Reported vs echoed
+
+    /// The distinction the two directory fields exist for. `transcriptDirectory` is always
+    /// usable, so it is also always *present*, which makes an echo indistinguishable from a
+    /// report of the same path — and `SessionStore` files a tab under a different project on
+    /// exactly this value. Anything that acts on new information must read
+    /// `reportedDirectory`, so "nothing was reported" has to survive the call.
+    func testAnAnchoredRowWithNoCwdReportsNothingAndLeavesTheTranscriptWhereItWas() {
+        let conversation = UUID()
+        let resolution = ConversationPin.resolve(
+            conversationID: conversation,
+            transcriptDirectory: "/a/.claude/worktrees/w",
+            anchor: .init(pid: 7, procStart: "start-a"),
+            rows: [7: row(pid: 7, session: conversation, cwd: "")]
+        )
+
+        XCTAssertNil(resolution.reportedDirectory)
+        XCTAssertEqual(resolution.transcriptDirectory, "/a/.claude/worktrees/w")
+        XCTAssertEqual(resolution.anchor, .init(pid: 7, procStart: "start-a"), "still ours")
+    }
+
+    /// The same rule on the unanchored branch, which is a separate code path: first
+    /// anchoring, and re-anchoring after the anchored `claude` exits.
+    func testAFirstAnchoringWithNoCwdReportsNothing() {
+        let conversation = UUID()
+        let resolution = ConversationPin.resolve(
+            conversationID: conversation,
+            transcriptDirectory: "/w",
+            anchor: nil,
+            rows: [7: row(pid: 7, session: conversation, cwd: "")]
+        )
+
+        XCTAssertEqual(resolution.anchor, .init(pid: 7, procStart: "start-a"))
+        XCTAssertNil(resolution.reportedDirectory)
+        XCTAssertEqual(resolution.transcriptDirectory, "/w")
+    }
+
+    /// A recycled pid is somebody else's process, so its `cwd` is not a report about us
+    /// either — the anchor and the directory have to be dropped together.
+    func testARecycledPidReportsNoDirectory() {
+        let resolution = ConversationPin.resolve(
+            conversationID: UUID(),
+            transcriptDirectory: "/w",
+            anchor: .init(pid: 7, procStart: "start-a"),
+            rows: [7: row(pid: 7, session: UUID(), cwd: "/elsewhere", procStart: "start-b")]
+        )
+
+        XCTAssertNil(resolution.reportedDirectory)
+        XCTAssertEqual(resolution.transcriptDirectory, "/w")
     }
 
     func testRepinAndMoveCanHappenTogether() {
         let new = UUID()
         let resolution = ConversationPin.resolve(
             conversationID: UUID(),
-            workingDirectory: "/old",
+            transcriptDirectory: "/old",
             anchor: .init(pid: 7, procStart: "start-a"),
             rows: [7: row(pid: 7, session: new, cwd: "/new")]
         )
 
         XCTAssertEqual(resolution.conversationID, new)
-        XCTAssertEqual(resolution.workingDirectory, "/new")
+        XCTAssertEqual(resolution.transcriptDirectory, "/new")
     }
 
     /// Two processes can legitimately hold one conversation. Anchoring must be
@@ -116,7 +172,7 @@ final class ConversationPinTests: XCTestCase {
 
         for _ in 0..<20 {
             let resolution = ConversationPin.resolve(
-                conversationID: conversation, workingDirectory: "/w", anchor: nil, rows: rows
+                conversationID: conversation, transcriptDirectory: "/w", anchor: nil, rows: rows
             )
             XCTAssertEqual(resolution.anchor, .init(pid: 9, procStart: "new"))
         }
