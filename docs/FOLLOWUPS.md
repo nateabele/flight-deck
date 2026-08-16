@@ -124,11 +124,13 @@ reader doesn't re-derive them.
   firing at all — an explicit handler assigning `selectedSessionID` did not run. Don't
   re-attempt either.
 
-  `SessionRow.handleTitleTap()` now uses a single tap recognizer and detects the second
-  click itself against `NSEvent.doubleClickInterval`, which takes SwiftUI's gesture
-  arbitration out of the problem entirely. Guarded by an assertion in
-  `testCommandNAddsASessionBelowTheActiveOne` that clicks the title and requires the row to
-  become selected, plus `testDoubleClickRenamesSession` for the rename path.
+  **Superseded twice since.** `SessionRow.handleTitleTap()` — a single tap recognizer that
+  detected the second click itself — was removed in `b18b86a` because ANY tap recognizer on
+  the row blocks drag-to-reorder, and `testDoubleClickRenamesSession` went with it. The
+  AppKit recognizer that briefly replaced it was also removed, measured. Double-click is now
+  detected entirely outside the row by `Sources/FlightDeck/SidebarInputMonitor.swift`; see the
+  project-tabs section below for the four mechanisms tried and the three that failed. The
+  title-click-selects-the-row assertion survives, inside the consolidated smoke test.
 
 ## Sidebar row hover no longer covers the full row width
 
@@ -195,7 +197,7 @@ this branch at 5 of 5 smoke failures with `Not hittable: StaticText … session-
 with `hitTest(_:)` returning nil. `hitTest` keeps a view out of AppKit's hit-test path but not
 out of the accessibility geometry XCUITest measures, which is the same cause as the older
 tracking-area finding. Safe: a `Button` on a small control, a context menu, or an out-of-band
-event monitor (`Sources/FlightDeck/RowDoubleClick.swift`).
+event monitor (`Sources/FlightDeck/SidebarInputMonitor.swift`).
 
 Two further mechanisms were tried on this branch and also failed, both worth not repeating:
 an `NSClickGestureRecognizer` on the table view attaches correctly but never recognizes,

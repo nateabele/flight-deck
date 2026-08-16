@@ -318,10 +318,10 @@ final class TerminalSmokeTests: XCTestCase {
         // start a drag, so reordering silently did nothing for anyone who grabbed a row where
         // it reads. The cause was the title's own tap recognizer (the hand-rolled double-click
         // rename) consuming the mouse-down that `List`'s `.onMove` needs. The title carries no
-        // SwiftUI tap recognizer of any kind today — double-click-to-rename goes through an
-        // AppKit `NSClickGestureRecognizer` in `RowDoubleClick.swift` with
-        // `delaysPrimaryMouseButtonEvents` hard-coded to `false`, so the mouse-down still
-        // reaches the table view immediately and both the drag and the rename see the event.
+        // SwiftUI tap recognizer of any kind today, and no subview either — double-click is
+        // detected by a passive `.leftMouseDown` monitor outside the view hierarchy
+        // (`SidebarInputMonitor.swift`), which returns every event unchanged, so the drag still
+        // sees the mouse-down it needs.
         //
         // Deliberately presses the title rather than blank space — blank space always worked,
         // so a test that grabbed there would have passed against the broken build. That is
@@ -336,7 +336,7 @@ final class TerminalSmokeTests: XCTestCase {
         // reorders by dragging its title text") and "double-clicking a session title renames
         // it" (below, after the context-menu rename group) each pin one half of the conflict
         // commit `b18b86a` traded away and this branch put back. Satisfy only the drag test
-        // and someone removes the AppKit recognizer — rename dies again, which is literally
+        // and someone removes the monitor — rename dies again, which is literally
         // what `b18b86a` did. Satisfy only the rename test and someone reaches for
         // `.onTapGesture(count: 2)` on the title — drag dies again. Losing that knowledge is
         // exactly what happened last time; writing it down here is the point.
@@ -398,8 +398,8 @@ final class TerminalSmokeTests: XCTestCase {
         // MATCHED PAIR, do not separate or delete independently: see the note on "a session
         // reorders by dragging its title text" above, which this activity completes. Rename
         // was traded away in `b18b86a` to fix drag-to-reorder because the two looked
-        // incompatible; they are not, once the recognizer lives in AppKit instead of SwiftUI
-        // (`RowDoubleClick.swift`). This activity is the half of that pair that proves rename
+        // incompatible; they are not, once detection moves out of the row entirely
+        // (`SidebarInputMonitor.swift`). This activity is the half of that pair that proves rename
         // survives; the drag activity above proves reordering does. Deleting either one alone
         // reopens the trade this branch closed.
         XCTContext.runActivity(named: "double-clicking a session title renames it") { _ in
@@ -412,7 +412,7 @@ final class TerminalSmokeTests: XCTestCase {
             // smoke run logged exactly three `.leftMouseUp` events for the entire suite, and both
             // in the main launch were coordinate-based clicks — every element-level `.click()`
             // and `.doubleClick()` produced none. Since rename is driven by real mouse input
-            // (see `RowDoubleClick.swift` for why it cannot be a gesture or a subview), an
+            // (see `SidebarInputMonitor.swift` for why it cannot be a gesture or a subview), an
             // element-level double click can never exercise it, and a test written that way
             // fails against a perfectly working build.
             //
@@ -423,10 +423,10 @@ final class TerminalSmokeTests: XCTestCase {
             let field = app.textFields["session-title-field"]
             XCTAssertTrue(field.waitForExistence(timeout: 5),
                           "double-clicking a row title must open the rename field")
-            // Proves the shared-ancestor hazard (Important 2 in the final review) is actually
-            // caught here rather than merely surfacing as an ambiguous-element error: if the
-            // AppKit recognizer had stayed attached to a stale row view after a re-parent,
-            // more than one row could believe it owns the open rename field.
+            // A double-click must open exactly ONE field. This and the unchanged-titles check
+            // below are what distinguish "renamed the row I clicked" from "renamed some other
+            // row": a mechanism that resolved the wrong row would still open exactly one field,
+            // so the count alone is not enough and the pair is deliberate.
             XCTAssertEqual(
                 app.textFields.matching(identifier: "session-title-field").count, 1,
                 "exactly one rename field should be open after a single double-click"
@@ -442,17 +442,15 @@ final class TerminalSmokeTests: XCTestCase {
             )
         }
 
-        // Return-to-rename is reachable only while the sidebar `List` itself holds focus
-        // (`SessionSidebar`'s `.onKeyPress(.return)`, gated on `$sidebarFocused`), not while a
-        // rename field or the terminal owns it. Clicking a row both selects it and gives the
-        // List focus, which is what makes Return meaningful here.
+        // Return-to-rename is reachable only while the sidebar's table is first responder, not
+        // while the terminal or a rename field owns it (`SidebarInputMonitor.handleKeyDown`).
+        // Reaching that state takes two clicks, for the measured reason spelled out below.
         XCTContext.runActivity(named: "Return renames the selected session while the sidebar has focus") { _ in
             let target = rows.element(boundBy: 1)
             // A COORDINATE click, for the same measured reason the double-click activity above
-            // uses one: `XCUIElement.click()` drives an accessibility action, which selects the
-            // row but never gives the `List` real keyboard focus — so `$sidebarFocused` stays
-            // false and `.onKeyPress(.return)` correctly declines to fire. A coordinate click
-            // posts a real mouse event and moves focus the way a user's click does.
+            // uses one: `XCUIElement.click()` drives an accessibility action and emits no mouse
+            // event at all, so the monitor never sees it and focus never moves. A coordinate
+            // click posts a real mouse event, the way a user's click does.
             target.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
             // Then click the SAME row again, well after the double-click interval.
             //
@@ -470,6 +468,16 @@ final class TerminalSmokeTests: XCTestCase {
             settle()
             settle()
             target.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+            // The two clicks above must NOT have registered as a double-click, or this activity
+            // would be measuring double-click-to-rename a second time instead of Return. The
+            // settles put them ~1s apart against a 0.5s default interval, but that interval is a
+            // user preference and can be raised, so assert the intent rather than trusting it.
+            XCTAssertFalse(
+                app.textFields["session-title-field"].exists,
+                "the two focusing clicks registered as a double-click; this activity would then "
+                + "prove nothing about Return. Raise the settle count or lower the system "
+                + "double-click interval."
+            )
             XCTAssertTrue(
                 app.cells.element(boundBy: 2).isSelected,
                 "clicking row 1 must select it before Return is asserted against it"
