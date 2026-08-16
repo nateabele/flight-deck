@@ -238,8 +238,9 @@ final class SessionStoreTests: XCTestCase {
     /// A registry row for `session`, in the shape `applyRegistry` resolves against.
     ///
     /// `cwd` must equal the session's own working directory: `applyRegistry` reads a
-    /// differing cwd as `claude` having moved the session to another project and calls
-    /// `moveSession`, which is not what these tests are exercising.
+    /// differing cwd as `claude` having changed directory and retargets the tab's transcript
+    /// watcher onto it, which is not what these tests are exercising and would put them on
+    /// the filesystem.
     private func row(
         _ session: Session, pid: pid_t = 1, activity: SessionActivity
     ) -> ClaudeStatusFile.Entry {

@@ -21,7 +21,10 @@ final class TranscriptWatcher {
     private let sessionID: UUID
     /// Readable so `SessionStore` can expose which transcript a tab is actually tailing
     /// (`watchedTranscriptURL(of:)`); immutable, so a watcher is replaced rather than
-    /// re-pointed when the tab's conversation or project changes.
+    /// re-pointed when the tab's conversation or transcript directory changes. Those are
+    /// the only two things that move a transcript: the project a tab is filed under does
+    /// not feed this path at all, and `SessionStore.moveSession` deliberately leaves
+    /// watchers alone.
     let url: URL
     private let onTitle: (String) -> Void
     private let onSubagentCount: (Int) -> Void
