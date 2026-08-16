@@ -150,8 +150,8 @@ final class SessionStoreTests: XCTestCase {
     // MARK: Unread pruning
 
     /// At launch `statuses` is empty until each resumed `claude` re-registers. The old
-    /// blanket intersection wiped every restored mark on that first tick, before it had ever
-    /// been drawn — SessionStatusIcon renders nothing for a nil status.
+    /// blanket intersection wiped every restored mark on that first tick, before the user
+    /// ever had a chance to view it.
     ///
     /// **Two sessions, deliberately.** With only the marked session present, the tick would
     /// early-return on `next != statuses` (empty to empty), `applyReadState` would never run,
@@ -169,8 +169,15 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertTrue(store.unreadIdle.contains(waiting.id))
     }
 
-    /// The case the intersection was there for: a session that HAD a status and lost it has
-    /// no icon to carry the mark, so the entry must not leak.
+    /// The case the intersection was there for: a session that HAD a status and lost it is
+    /// dropped from `unreadIdle`. That drop was originally justified as "no icon left to
+    /// carry the mark, so the entry must not leak" — that reasoning no longer holds now
+    /// that `SessionStatusIcon` renders an unread dot for a nil status too (its `unread`
+    /// parameter), so a statusless-but-unread session IS drawn. The behavior asserted below
+    /// is deliberately kept unchanged regardless; see the comment on the prune in
+    /// `SessionStore.swift` for the full account. This test documents current behavior, not
+    /// a re-justified rule — whether the prune should still fire here is an open,
+    /// user-facing question outside this branch's scope.
     func testAMarkIsDroppedWhenAnExistingStatusDisappears() {
         let store = SessionStore(provider: StubProvider())
         let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))

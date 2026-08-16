@@ -266,11 +266,7 @@ final class TerminalSmokeTests: XCTestCase {
         // The regression guard for a bug that shipped: pressing on a row's TITLE TEXT could not
         // start a drag, so reordering silently did nothing for anyone who grabbed a row where
         // it reads. The cause was the title's own tap recognizer (the hand-rolled double-click
-        // rename) consuming the mouse-down that `List`'s `.onMove` needs. The title carries no
-        // SwiftUI tap recognizer of any kind today — double-click-to-rename goes through an
-        // AppKit `NSClickGestureRecognizer` in `RowDoubleClick.swift` with
-        // `delaysPrimaryMouseButtonEvents` hard-coded to `false`, so the mouse-down still
-        // reaches the table view immediately and both the drag and the rename see the event.
+        // rename) consuming the mouse-down that `List`'s `.onMove` needs.
         //
         // Deliberately presses the title rather than blank row space — blank space always
         // worked, so a test that grabbed there would have passed against the broken build.
@@ -307,7 +303,11 @@ final class TerminalSmokeTests: XCTestCase {
         // The regression guard for a bug that shipped: pressing on a row's TITLE TEXT could not
         // start a drag, so reordering silently did nothing for anyone who grabbed a row where
         // it reads. The cause was the title's own tap recognizer (the hand-rolled double-click
-        // rename) consuming the mouse-down that `List`'s `.onMove` needs.
+        // rename) consuming the mouse-down that `List`'s `.onMove` needs. The title carries no
+        // SwiftUI tap recognizer of any kind today — double-click-to-rename goes through an
+        // AppKit `NSClickGestureRecognizer` in `RowDoubleClick.swift` with
+        // `delaysPrimaryMouseButtonEvents` hard-coded to `false`, so the mouse-down still
+        // reaches the table view immediately and both the drag and the rename see the event.
         //
         // Deliberately presses the title rather than blank space — blank space always worked,
         // so a test that grabbed there would have passed against the broken build. That is
@@ -389,13 +389,29 @@ final class TerminalSmokeTests: XCTestCase {
         // survives; the drag activity above proves reordering does. Deleting either one alone
         // reopens the trade this branch closed.
         XCTContext.runActivity(named: "double-clicking a session title renames it") { _ in
+            let otherTitlesBefore = (1..<3).map { rows.element(boundBy: $0).label }
+
             rows.element(boundBy: 0).doubleClick()
             let field = app.textFields["session-title-field"]
             XCTAssertTrue(field.waitForExistence(timeout: 5),
                           "double-clicking a row title must open the rename field")
+            // Proves the shared-ancestor hazard (Important 2 in the final review) is actually
+            // caught here rather than merely surfacing as an ambiguous-element error: if the
+            // AppKit recognizer had stayed attached to a stale row view after a re-parent,
+            // more than one row could believe it owns the open rename field.
+            XCTAssertEqual(
+                app.textFields.matching(identifier: "session-title-field").count, 1,
+                "exactly one rename field should be open after a single double-click"
+            )
             field.typeKey("a", modifierFlags: .command)
             field.typeText("dbl renamed\n")
             XCTAssertTrue(app.staticTexts["dbl renamed"].waitForExistence(timeout: 5))
+
+            let otherTitlesAfter = (1..<3).map { rows.element(boundBy: $0).label }
+            XCTAssertEqual(
+                otherTitlesAfter, otherTitlesBefore,
+                "double-clicking row 0 must not change any other row's title"
+            )
         }
 
         // Return-to-rename is reachable only while the sidebar `List` itself holds focus
@@ -414,11 +430,42 @@ final class TerminalSmokeTests: XCTestCase {
             let field = app.textFields["session-title-field"]
             XCTAssertTrue(field.waitForExistence(timeout: 5),
                           "Return did not open the rename field while the sidebar had focus")
+
+            // MEASURED, not assumed: the plan required that Return not be hijacked while the
+            // rename field ITSELF is open, and the negative activity below only measures
+            // TERMINAL focus — it says nothing about RENAME-FIELD focus. Focus has moved from
+            // the sidebar `List` to this `TextField` by now, so a second Return here should be
+            // the field's own `.onSubmit` committing it, not a second rename opening on top of
+            // it and not `store.renameRequest` being left set with nothing left to consume it
+            // — which would silently kill Return-to-rename for every row after this one.
             field.typeKey("a", modifierFlags: .command)
             // "return renamed" was never on screen before this point, so the assertion below
             // cannot pass vacuously.
-            field.typeText("return renamed\n")
+            field.typeText("return renamed")
+            app.typeKey(.return, modifierFlags: [])
+
             XCTAssertTrue(app.staticTexts["return renamed"].waitForExistence(timeout: 5))
+            XCTAssertEqual(
+                app.textFields.matching(identifier: "session-title-field").count, 0,
+                "Return while the rename field was open should commit it, not leave it open "
+                + "or open a second one"
+            )
+
+            // And the request channel must not have been left stranded by that in-field
+            // Return: Return must still work on a different row right afterward.
+            rows.element(boundBy: 0).click()
+            app.typeKey(.return, modifierFlags: [])
+            XCTAssertTrue(
+                field.waitForExistence(timeout: 5),
+                "Return should still open the rename field on another row — renameRequest "
+                + "must not have been left stranded by the in-field Return above"
+            )
+            app.typeKey(.escape, modifierFlags: [])
+            settle()
+            XCTAssertFalse(
+                field.exists,
+                "Escape should close the rename field opened for this stranding check"
+            )
         }
 
         // The negative half of the pair above: Return must not reach for a rename when the
@@ -443,9 +490,12 @@ final class TerminalSmokeTests: XCTestCase {
 
         // The human approved "Mark as Unread" conditional on one thing: re-activating an
         // inactive tab clears the mark. That condition, not just the mark itself, is what this
-        // activity asserts. Row 2 has not been touched by any earlier group, so its status dot
-        // does not exist yet — the precondition that keeps "the dot appears" from passing
-        // vacuously.
+        // activity asserts. The precondition that keeps "the dot appears" from passing
+        // vacuously is not that row 2 is untouched — it was selected during the ⌘⇧]/⌘⇧[
+        // cycling group and moved by both drag groups above. It has no status dot yet because
+        // no `claude` actually runs under test, so nothing has ever set a `SessionStatus` for
+        // it, and `SessionStatusIcon` draws nothing for a session that is neither statused nor
+        // marked unread.
         XCTContext.runActivity(
             named: "Mark as Unread is first in the context menu, marks the row, and clears on reselect"
         ) { _ in
@@ -456,14 +506,22 @@ final class TerminalSmokeTests: XCTestCase {
             XCTAssertFalse(dot.exists, "precondition: row has no status dot before it is marked unread")
 
             title.rightClick()
-            let menu = app.menus.firstMatch
+            // `app.menus.firstMatch` can resolve to a menu-bar menu rather than this popup —
+            // scope to the menu that actually holds this row's items by requiring a menu item
+            // this row's context menu is known to carry ("Rename"; see the group above).
+            let menu = app.menus.containing(.menuItem, identifier: "Rename").firstMatch
             XCTAssertTrue(menu.waitForExistence(timeout: 5), "no context menu appeared")
             let firstItem = menu.menuItems.element(boundBy: 0)
             XCTAssertEqual(
                 firstItem.title, "Mark as Unread",
                 "Mark as Unread must be the FIRST item in the row's context menu, got \(firstItem.title)"
             )
-            app.menuItems["session-mark-unread"].click()
+            // Click the already-resolved element rather than re-querying by
+            // `.accessibilityIdentifier`: SwiftUI's `.accessibilityIdentifier` on a
+            // `contextMenu` Button commonly does not reach the backing `NSMenuItem`, so
+            // `app.menuItems["session-mark-unread"]` is not the proven idiom in this file —
+            // title-based lookup (as used for "Rename" above) is.
+            firstItem.click()
 
             XCTAssertTrue(dot.waitForExistence(timeout: 5),
                           "marking a session unread did not show its status dot")

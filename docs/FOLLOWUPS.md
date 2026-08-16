@@ -189,14 +189,18 @@ Fixes: the project toggle moved onto the chevron as a `Button`; session rename m
 row's context menu. `.contentShape(Rectangle())` was kept on the project header — it is what
 makes hover cover the full row, and on its own it consumes nothing.
 
-**Rule for anything added to a sidebar row: no tap gestures.** Use a `Button` on a small
-control, or a context menu. Both leave the primary mouse-down alone.
+**Rule for anything added to a sidebar row: no *SwiftUI* tap gestures.** Use a `Button` on a
+small control, a context menu, or the third safe mechanism added later on this branch: an
+AppKit `NSClickGestureRecognizer` with `delaysPrimaryMouseButtonEvents` hard-coded to `false`,
+attached to an ancestor view rather than to the row's own SwiftUI hit-testing (see
+`Sources/FlightDeck/RowDoubleClick.swift`). All three leave the primary mouse-down alone.
 
-Open, and a UX regression worth a decision: **double-click no longer renames a session.** It
-was traded for drag-by-title. Finder's own arrangement is Return-to-rename with double-click
-reserved for open, so Return would be the natural replacement — but it is not implemented, so
-today rename is context-menu only. Candidate remedy: `.onKeyPress(.return)` on the list, or a
-Rename item in the main menu via `SessionCommands` with `.keyboardShortcut(.return, ...)`.
+Closed: **double-click renames a session again.** It returned via the AppKit recognizer above,
+which sidesteps the SwiftUI-tap-gesture-vs-drag conflict entirely. Return-to-rename is also
+implemented (`SessionSidebar`'s `.onKeyPress(.return)`, wired through
+`SessionStore.renameRequest`), matching Finder's arrangement of Return-to-rename with
+double-click reserved for open. Rename is reachable three ways today: double-click, Return, and
+the row's context menu.
 
 Four more from the whole-branch review of this same commit, none exercised in a running app:
 
