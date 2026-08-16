@@ -86,12 +86,15 @@ final class SessionStore: ObservableObject {
     /// The session whose rename field is currently open, or nil.
     ///
     /// Exists to stop the sidebar's Return-to-rename handler from eating the Return that
-    /// COMMITS a rename. `.onKeyPress(.return)` is attached to the `List`, and the rename
-    /// `TextField` lives inside that `List`, so the handler's `sidebarFocused` gate is still
-    /// true while the field holds focus — SwiftUI focus is a subtree property, not an exclusive
-    /// one. Measured: with only the `sidebarFocused` gate, typing a new name and pressing
-    /// Return left the title unchanged and the smoke test's context-menu rename failed, because
-    /// the list swallowed the key before `onSubmit` ever saw it.
+    /// COMMITS a rename. Measured: without it, typing a new name and pressing Return left the
+    /// title unchanged, because the sidebar's Return handler claimed the key before the field's
+    /// `onSubmit` ever saw it, and the smoke test's context-menu rename failed.
+    ///
+    /// The first-responder check in `SidebarInputMonitor` covers most of this on its own (an
+    /// open field editor is not an `NSTableView`), but this flag is what makes the intent
+    /// explicit and survives a focus state that has not settled yet. `SessionRow` clears it on
+    /// commit, on Esc, on focus loss, and on teardown — all four matter, because a stranded
+    /// value disables Return-to-rename for the rest of the process.
     ///
     /// Transient, like `renameRequest`: never persisted, never in the snapshot.
     @Published var renamingSessionID: UUID?

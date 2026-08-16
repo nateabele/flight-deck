@@ -39,7 +39,7 @@ private struct SessionRow: View {
                 // blocked the drag.
                 //
                 // Double-click-to-rename is back, and nothing about it lives in this row.
-                // `SidebarInputMonitor` (see `RowDoubleClick.swift`) watches `.leftMouseDown`
+                // `SidebarInputMonitor` (see `SidebarInputMonitor.swift`) watches `.leftMouseDown`
                 // from outside the view hierarchy entirely and maps the click to a row itself.
                 // Putting ANY `NSView` here — even one whose `hitTest(_:)` returns nil — makes
                 // this `Text` unhittable, which was measured at 5 of 5 smoke runs; a gesture
@@ -112,7 +112,7 @@ private struct SessionRow: View {
         // Nothing here detects the double-click. It arrives as a `renameRequest` from the
         // sidebar-level event monitor below, for the same reason the title carries no tap
         // recognizer: anything added to a row breaks either the drag or the row's
-        // hit-testing. See `RowDoubleClick.swift`.
+        // hit-testing. See `SidebarInputMonitor.swift`.
         .onChange(of: store.renameRequest) { _, request in
             guard request == session.id else { return }
             // Clear before the `isEditing` check, not after: a request addressed to this
@@ -126,6 +126,14 @@ private struct SessionRow: View {
             guard !isEditing else { return }
             beginRename()
         }
+        // Teardown safety net. `renamingSessionID` is otherwise only ever cleared from inside
+        // this row (commit, Esc, focus loss), so a row destroyed MID-EDIT would strand it — and
+        // the Return path refuses to fire while it is set, which would silently kill
+        // Return-to-rename for the rest of the process. Reachable: ⌘W closes the session from a
+        // menu key equivalent without any focus change, and `observeSurfaceClose` closes a
+        // session asynchronously when its shell exits. Whether SwiftUI delivers `focused ->
+        // false` during teardown is not something worth betting the feature on.
+        .onDisappear { if isEditing { store.renamingSessionID = nil } }
         // A context menu is safe where a tap gesture is not: it responds to a right-click and
         // leaves the primary mouse-down — the one `List`'s drag-to-reorder needs — untouched.
         .contextMenu {
@@ -149,7 +157,7 @@ private struct SessionRow: View {
     /// recognizer here consumes the mouse-down the drag needs. Both the exclusive and the
     /// `simultaneousGesture` forms were measured against the smoke test and both blocked it.
     /// Double-click is back today, but nothing detects it inside this row: `SidebarInputMonitor`
-    /// (`RowDoubleClick.swift`) observes `.leftMouseDown` from outside the view hierarchy and
+    /// (`SidebarInputMonitor.swift`) observes `.leftMouseDown` from outside the view hierarchy and
     /// maps the click to a row itself, so the row gains neither a gesture nor a subview.
     /// `.onTapGesture(count: 2)` and `.simultaneousGesture` are still wrong here for the same
     /// reason they always were, and an `NSViewRepresentable` is worse — do not "simplify" this
@@ -192,7 +200,7 @@ struct SessionSidebar: View {
     /// never reported true — the terminal `SurfaceView` holds first responder and neither a
     /// click nor Tab moves it — so anything gated on it was dead on arrival. The monitor works
     /// from the real first responder instead.
-    @StateObject private var input = SidebarInputMonitor()
+    @State private var input = SidebarInputMonitor()
 
     /// Drives both the label and which shortcut the button claims.
     private var isEmpty: Bool { store.repos.isEmpty }
@@ -239,7 +247,7 @@ struct SessionSidebar: View {
         // non-session row (a project header, or the empty placeholder) is simply ignored.
         // Double-click renames the row under the pointer; Return renames the selected row
         // once the sidebar holds focus. Both live in `SidebarInputMonitor` because neither can
-        // be expressed here — see `RowDoubleClick.swift` for the four mechanisms measured and
+        // be expressed here — see `SidebarInputMonitor.swift` for the four mechanisms measured and
         // the three that failed.
         //
         // The `renameSelected` guard is why a selected-but-invisible session cannot strand a

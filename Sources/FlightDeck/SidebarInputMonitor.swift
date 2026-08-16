@@ -1,10 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Sidebar keyboard/mouse affordances that SwiftUI cannot express here: double-click-to-rename,
+/// Sidebar mouse/keyboard affordances that SwiftUI cannot express here: double-click-to-rename,
 /// click-to-focus, and Return-to-rename.
 ///
-/// # Why none of this is a SwiftUI gesture or a subview. Read before "simplifying".
+/// # Four mechanisms were measured. Three are dead. Read this before "simplifying".
 ///
 /// **1. A SwiftUI tap recognizer on the row breaks drag-to-reorder.**
 /// `NSClickGestureRecognizer` overrides `NSGestureRecognizer`'s pass-through default and
@@ -22,9 +22,8 @@ import SwiftUI
 /// assertion — `Not hittable: StaticText, …, identifier: 'session-row-title'`. Isolated in two
 /// steps: disabling the modifier made it pass, and keeping the view while never attaching a
 /// recognizer still failed. It is the **presence of an `NSView` in the row**, not the
-/// recognizer. `hitTest -> nil` keeps the view out of AppKit's hit-test path but not out of the
-/// accessibility geometry XCUITest measures — which is also why the older tracking-area
-/// representable made the title unhittable 6 times out of 6.
+/// recognizer. `hitTest -> nil` keeps a view out of AppKit's hit-test path but not out of the
+/// accessibility geometry XCUITest measures — the same cause as the older tracking-area finding.
 ///
 /// **3. A gesture recognizer on the table view never fires.** It attaches correctly
 /// (instrumentation confirmed one live on SwiftUI's `SwiftUIOutlineListView` with the right row
@@ -36,9 +35,9 @@ import SwiftUI
 ///
 /// **4. `.onKeyPress(.return)` on the `List` never fires**, because the sidebar never holds
 /// keyboard focus. Measured by logging the first responder on every Return: it is
-/// `_SystemTextFieldFieldEditor` while a rename field is open, and `SurfaceView` — the terminal —
+/// `_SystemTextFieldFieldEditor` while a rename field is open and `SurfaceView` — the terminal —
 /// every other time, including immediately after a row is clicked. Tab does not help; the
-/// terminal consumes it like any other key. A `@FocusState` on the `List` never reported true.
+/// terminal consumes it. A `@FocusState` on the `List` never reported true.
 ///
 /// # What this does instead
 ///
@@ -46,21 +45,36 @@ import SwiftUI
 ///
 /// - **mouse-down, `clickCount == 2`** → rename that row. `clickCount == 2` is what AppKit
 ///   synthesizes here and what a real double-click produces, so it works for users and the suite.
-/// - **mouse-down, `clickCount == 1`, inside the sidebar table** → make the table the first
-///   responder, so the sidebar can hold keyboard focus at all. This mirrors exactly what
-///   `SurfaceView.localEventLeftMouseDown` already does for the terminal (it claims first
-///   responder when a click hit-tests to itself), so the two panes now behave symmetrically —
-///   click a pane, focus that pane, which is also how Finder and Xcode behave.
-/// - **Return with the sidebar table as first responder** → rename the selected row, and consume
-///   the event. Gated on the first responder, so Return still reaches the terminal whenever the
-///   terminal has focus, and still commits a rename whenever the field editor has focus.
+/// - **mouse-down, `clickCount == 1`, on the already-selected row** → make the table first
+///   responder, so the sidebar can hold keyboard focus at all. This mirrors what
+///   `SurfaceView.localEventLeftMouseDown` already does for the terminal. It is restricted to the
+///   selected row because clicking a *different* row switches session, which re-parents the
+///   surface and makes `TerminalPane` asynchronously call `Ghostty.moveFocus(to:)` — claiming
+///   focus there achieves nothing but a flicker, and measurably broke the Copy and ⌘F groups.
+/// - **Return with the sidebar table as first responder** → rename the selected row, consuming
+///   the key. Gated on the first responder, so Return still reaches the terminal and still
+///   commits an open rename field.
 ///
-/// Mouse events are always returned unchanged, so nothing about row hit-testing or list dragging
-/// can change. A drag begins with a `clickCount == 1` down, so dragging never renames.
+/// Mouse events are always returned unchanged, so row hit-testing and list dragging cannot
+/// change. A drag begins with a `clickCount == 1` down, so dragging never renames.
+///
+/// # Scoping: this monitor is app-wide, so it must prove which table it is looking at
+///
+/// `NSEvent.addLocalMonitorForEvents` sees every event in the process, and this app has more
+/// than one `NSTableView`: Settings ▸ Projects is a second SwiftUI `List`, and `NSOpenPanel`
+/// (used by "Add Project", and in-process because the app is unsandboxed) is table-backed too.
+/// Without a scope check, double-clicking a folder in the open panel would map a row index onto
+/// `sidebarRows` and rename an unrelated session, and Return in Settings would be swallowed.
+/// So every path requires the event's window to be the window that hosted the sidebar when the
+/// monitor started — Settings and the open panel are separate windows and are excluded outright.
 @MainActor
-final class SidebarInputMonitor: ObservableObject {
+final class SidebarInputMonitor {
     private var mouseToken: Any?
     private var keyToken: Any?
+
+    /// The window that owned the sidebar when the monitor started. Weak: the monitor must not
+    /// keep a window alive, and a closed window should simply stop matching.
+    private weak var host: NSWindow?
 
     /// Rename the session at this table row index.
     var renameRow: ((Int) -> Void)?
@@ -68,10 +82,12 @@ final class SidebarInputMonitor: ObservableObject {
     /// knows whether to consume the key.
     var renameSelected: (() -> Bool)?
 
-    /// `kVK_Return`. Hard-coded rather than imported from Carbon for one constant.
+    /// `kVK_Return`. Hard-coded rather than importing Carbon for one constant.
     private static let returnKeyCode: UInt16 = 36
 
     func start() {
+        captureHostWindow()
+
         if mouseToken == nil {
             mouseToken = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
                 self?.handleMouseDown(event)
@@ -91,17 +107,38 @@ final class SidebarInputMonitor: ObservableObject {
         if let keyToken { NSEvent.removeMonitor(keyToken) }
         mouseToken = nil
         keyToken = nil
+        host = nil
     }
 
     deinit {
-        // `NSEvent.removeMonitor` is not main-actor-isolated, so a deallocation off the main
-        // actor still drops the tokens rather than leaking monitors.
-        if let mouseToken { NSEvent.removeMonitor(mouseToken) }
-        if let keyToken { NSEvent.removeMonitor(keyToken) }
+        // Hop to the main actor rather than removing inline: `removeMonitor` is an AppKit call
+        // and belongs on the main thread. A `@StateObject` is released on main in practice, but
+        // "in practice" is not a reason to make the unsafe call the documented one.
+        let (mouse, key) = (mouseToken, keyToken)
+        if mouse != nil || key != nil {
+            DispatchQueue.main.async {
+                if let mouse { NSEvent.removeMonitor(mouse) }
+                if let key { NSEvent.removeMonitor(key) }
+            }
+        }
+    }
+
+    /// SwiftUI's `onAppear` can run before the view is in a window, so this retries briefly.
+    private func captureHostWindow(attempt: Int = 0) {
+        guard host == nil else { return }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            host = window
+            return
+        }
+        guard attempt < 40 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.captureHostWindow(attempt: attempt + 1)
+        }
     }
 
     private func handleMouseDown(_ event: NSEvent) {
-        guard let window = event.window, let content = window.contentView else { return }
+        // Scope check first: Settings ▸ Projects and `NSOpenPanel` are table-backed too.
+        guard let window = event.window, window === host, let content = window.contentView else { return }
 
         // `NSView.hitTest(_:)` takes a point in the RECEIVER'S SUPERVIEW coordinates; for a
         // window's `contentView` that is already `locationInWindow`, so no conversion.
@@ -113,20 +150,15 @@ final class SidebarInputMonitor: ObservableObject {
             return
         }
 
-        // Single click on the ALREADY-SELECTED row: take keyboard focus, so Return means
-        // something here.
-        //
-        // Deliberately not on every click. Clicking a *different* row switches session, which
-        // re-parents the terminal surface, and `TerminalPane` responds by calling
-        // `Ghostty.moveFocus(to: surface)` — asynchronously, so it lands after any claim made
-        // here and hands the keyboard back to the terminal anyway. Claiming focus on those
-        // clicks therefore achieves nothing except a brief focus flicker, and measurably broke
-        // the terminal-focused groups later in the smoke test (Copy and ⌘F both failed).
-        //
-        // Restricting it to the selected row means focus only moves when the click cannot be a
-        // session switch, so the terminal keeps focus exactly when a user expects to keep
-        // typing, and the sidebar can still be focused deliberately by clicking the row you are
-        // already on.
+        // Never steal focus from an open text editor. A rename field's row IS the selected row
+        // (`beginRename` selects it), so without this a click inside the field would satisfy the
+        // guard below, pull first responder to the table, and the resulting focus loss would
+        // commit the rename — making it impossible to click, drag-select, or double-click a word
+        // inside the field you are editing. `NSTextView` (the field editor) is an `NSText`.
+        guard !(window.firstResponder is NSText) else { return }
+
+        // Single click on the already-selected row: take keyboard focus, so Return means
+        // something here. See the doc comment for why this is not done on every click.
         guard table.selectedRow == rowIndex else { return }
         if window.firstResponder !== table { window.makeFirstResponder(table) }
     }
@@ -136,14 +168,16 @@ final class SidebarInputMonitor: ObservableObject {
         guard event.keyCode == Self.returnKeyCode else { return false }
         // Any modifier means this is some other command, not a plain Return.
         guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty else { return false }
-        // Only when the sidebar's own table holds focus. This is what keeps Return working
-        // normally in the terminal and inside the rename field editor.
-        guard NSApp.keyWindow?.firstResponder is NSTableView else { return false }
+        // Same scope check as the mouse path: only this sidebar's window.
+        guard let window = NSApp.keyWindow, window === host else { return false }
+        // Only when a table holds focus. This is what keeps Return working normally in the
+        // terminal and inside the rename field editor.
+        guard window.firstResponder is NSTableView else { return false }
         return renameSelected?() ?? false
     }
 
-    /// Resolves a hit view to the sidebar's table and the row index under it. Read-only: nothing
-    /// is attached, replaced, or reconfigured.
+    /// Resolves a hit view to its table and the row index under it. Read-only: nothing is
+    /// attached, replaced, or reconfigured.
     private static func sidebarRow(under view: NSView) -> (NSTableView, Int)? {
         var candidate: NSView? = view
         while let current = candidate, !(current is NSTableRowView) { candidate = current.superview }
