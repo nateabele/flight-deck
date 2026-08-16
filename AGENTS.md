@@ -21,8 +21,17 @@ Four things trip up every agent on this repo. The detail is in
 3. **Never `defaults delete dev.flightdeck.FlightDeck`.** Preferences live there. Sessions live
    in `~/Library/Application Support/Flight Deck/sessions.json`. Test isolation is the
    `-FlightDeckResetState YES` launch argument, not deletion.
-4. **Don't loop `./scripts/smoke.sh`.** It seizes the foreground for ~40s and captures the
-   user's keystrokes as phantom test failures. It's throttled to one run per 180s on purpose.
+4. **Don't loop `./scripts/smoke.sh`.** It seizes the foreground for ~70s and captures the
+   user's keystrokes as phantom test failures. It's throttled to one run per 120s on purpose.
+   **To chase a flaky assertion, isolate it — never re-run the suite.** `UITests` is one giant
+   test function of `runActivity` groups, so `-only-testing:` cannot target a behavior, and the
+   statistics are against you: at a 20% failure rate, five clean whole-suite runs still pass by
+   luck 33% of the time, so "5/5 green" is not evidence of a fix. Add a skipped-by-default hunt
+   case that loops the suspect sequence inside ONE launch —
+   `testPermissionBypassConfirmationUnderChurn` is the worked example: 20 samples in ~107s, 1.2%
+   luck, versus ~23 min for the same power via the suite. Gate it on a **`TEST_RUNNER_`-prefixed**
+   variable; `xcodebuild` forwards nothing else into the UI-test runner, and a bare one silently
+   *skips* the case rather than failing.
 
 Also: this checkout is **shared by concurrent sessions**. Never `git stash`, `git checkout .`,
 or revert blind — check `git status` and leave changes that aren't yours alone.
@@ -34,6 +43,10 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 ./scripts/build.sh              # xcodegen generate + xcodebuild → Debug "Flight Deck.app"
 ./scripts/test-unit.sh          # headless unit suite — your normal TDD loop
 ./scripts/smoke.sh              # GUI UITest, ends "SMOKE PASS" (see rule 4)
+
+# Flake hunting — loops one suspect sequence 20x in a single launch (rule 4).
+# The TEST_RUNNER_ prefix is mandatory; without it the case is silently SKIPPED.
+TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.sh
 ```
 
 Every `xcodebuild` needs `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` and

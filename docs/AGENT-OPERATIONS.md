@@ -93,10 +93,22 @@ Log: `~/Library/Logs/flight-deck-swap.log`. Rollback is printed at the end of ev
 - `test-unit.sh` runs the app-hosted bundle in-process via `xcrun xctest` (symlinking the host
   dylib) because `xcodebuild test` would try to *launch* the app and dies with
   `DVTAssertions: Assertion failed: childPID > 0` outside a GUI login session.
-- **Do not loop `smoke.sh`.** It seizes the foreground for ~40s and fires key events into
+- **Do not loop `smoke.sh`.** It seizes the foreground for ~70s and fires key events into
   whatever holds focus, so the user's typing lands in the test and shows up as phantom
-  failures. `scripts/throttle.sh` caps it at one run per 180s
+  failures. `scripts/throttle.sh` caps it at one run per 120s
   (`FLIGHTDECK_TEST_THROTTLE=0` for a deliberate one-off).
+- **To chase a flaky assertion, isolate it — do not re-run the suite.** `TerminalSmokeTests` is
+  deliberately one test function of `runActivity` groups, so `-only-testing:` cannot target a
+  single behaviour. Re-running the whole thing is also weak evidence: at a 20% failure rate,
+  five clean runs still pass by luck 33% of the time. Instead add a hunt case that loops the
+  suspect sequence inside ONE launch and is `XCTSkipUnless`-gated so normal runs pay nothing —
+  `testPermissionBypassConfirmationUnderChurn` is the worked example, at 20 samples in ~107s
+  (1.2% luck) against ~23 min for the same power via the suite.
+- **Gate hunt cases on a `TEST_RUNNER_`-prefixed variable.** `xcodebuild` does not forward
+  arbitrary shell environment into the UI-test runner process; it forwards only `TEST_RUNNER_*`,
+  stripping the prefix. A bare `FOO=1` leaves the case **silently skipped**, which reads as a
+  pass in the compact summary — check `scripts/.smoke.log` for `skipped` if a hunt reports
+  nothing.
 - The first UITest run needs a one-time TCC grant ("XCTest is trying to Enable UI Automation").
 - **Output discipline:** `smoke.sh` sends all `xcodebuild` output to `scripts/.smoke.log` and
   prints a compact summary, because dumping it floods an agent's context window. Keep it that
