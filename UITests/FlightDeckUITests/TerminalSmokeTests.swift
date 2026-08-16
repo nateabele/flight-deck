@@ -124,6 +124,90 @@ final class TerminalSmokeTests: XCTestCase {
         app.terminate()
     }
 
+    /// Flake hunt for the permission-bypass confirmation. **Skipped unless
+    /// `FLIGHTDECK_FLAKE_HUNT` is set**, so it costs normal runs nothing:
+    ///
+    ///     TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.sh
+    ///
+    /// The `TEST_RUNNER_` prefix is required and is not decoration: `xcodebuild` does not pass
+    /// arbitrary shell variables into the UI-test runner process, and only forwards ones with
+    /// that prefix, stripping it on the way in. Setting a bare `FLIGHTDECK_FLAKE_HUNT` silently
+    /// skips this test — measured, having done exactly that first.
+    ///
+    /// Exists because the suite is deliberately ONE test function of `runActivity` groups, so
+    /// `-only-testing:` cannot target a single behaviour — and chasing a ~20%-rate flake by
+    /// re-running the whole 70-second suite is the wrong tool by two orders of magnitude. This
+    /// reproduces the suspect sequence — the command field's ⌘A+delete churn, then the checkbox
+    /// click — `iterations` times inside ONE launch, so 20 samples cost ~40s instead of ~23min.
+    ///
+    /// Statistics worth stating: at a 20% failure rate, 5 clean samples still pass by luck 33%
+    /// of the time, so a 5-run batch was never evidence of a fix. 20 samples drops that to 1.2%.
+    ///
+    /// The same pattern is the right answer for any future flake here: add a hunt case, loop the
+    /// suspect sequence in one launch, and delete it or leave it skipped once the cause is known.
+    func testPermissionBypassConfirmationUnderChurn() throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["FLIGHTDECK_FLAKE_HUNT"] != nil,
+            "flake hunt — set FLIGHTDECK_FLAKE_HUNT=1 to run"
+        )
+
+        let app = XCUIApplication()
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-FlightDeckResetState", "YES"]
+        app.launch()
+        app.activate()
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15), "no window appeared")
+
+        app.typeKey(",", modifierFlags: .command)
+        let prefs = preferencesWindow(app)
+        XCTAssertTrue(prefs.waitForExistence(timeout: 10), "Preferences never opened")
+
+        let iterations = 20
+        var failures: [String] = []
+
+        for i in 1...iterations {
+            // Reproduce the churn the real suite's preceding activity causes: ⌘A + delete in the
+            // command field mutates `flags`, which trips `.onChange(of: flags)` -> re-render.
+            let field = prefs.textViews["command-field"]
+            guard field.waitForExistence(timeout: 5) else {
+                failures.append("iteration \(i): command field missing")
+                continue
+            }
+            field.click()
+            field.typeKey("a", modifierFlags: .command)
+            field.typeKey(.delete, modifierFlags: [])
+
+            let checkbox = prefs.checkBoxes.matching(identifier: "Skip all permission checks").firstMatch
+            guard checkbox.waitForExistence(timeout: 5) else {
+                failures.append("iteration \(i): checkbox missing")
+                continue
+            }
+            guard checkbox.value as? Int == 0 else {
+                failures.append("iteration \(i): checkbox was already ON before the click")
+                continue
+            }
+
+            checkbox.click()
+            let sheet = prefs.sheets.firstMatch
+            if sheet.waitForExistence(timeout: 5) {
+                sheet.buttons["Cancel"].click()
+                if checkbox.value as? Int != 0 {
+                    failures.append("iteration \(i): Cancel left the bypass ENABLED")
+                }
+            } else if checkbox.value as? Int != 0 {
+                // The outcome that would matter: the gate did not fire and the flag went on.
+                failures.append("iteration \(i): SECURITY — no confirmation AND bypass toggled on")
+            } else {
+                failures.append("iteration \(i): no confirmation appeared (checkbox stayed off)")
+            }
+        }
+
+        XCTAssertTrue(
+            failures.isEmpty,
+            "\(failures.count)/\(iterations) iterations failed:\n" + failures.joined(separator: "\n")
+        )
+        app.terminate()
+    }
+
     func testTheWholeShellInOneSession() {
         let app = XCUIApplication()
         // - `-ApplePersistenceIgnoreState`: XCUITest spawns the app via a raw exec, not
@@ -559,6 +643,35 @@ final class TerminalSmokeTests: XCTestCase {
             )
         }
 
+        // ⌘R is a menu key equivalent, not a raw keystroke handled by `SidebarInputMonitor`:
+        // `MenuKeyEquivalents.swift` offers this binding to the main menu before any view sees
+        // it. So unlike Return above, it does NOT require the sidebar table to hold first
+        // responder — no two-click focus dance is needed here, just select the row (a plain
+        // `.click()`, as the Mark-as-Unread activity below also uses for selection) and press
+        // ⌘R. The row menu's own "Rename" item and the double-click and Return paths above all
+        // route through the same `store.renameRequest` channel; this activity is the fourth
+        // path into it.
+        XCTContext.runActivity(named: "Cmd-R opens the rename field for the selected session and commits it") { _ in
+            let target = rows.element(boundBy: 2)
+            target.click()
+            XCTAssertTrue(
+                app.cells.element(boundBy: 3).isSelected,
+                "clicking row 2 must select it before Cmd-R is asserted against it"
+            )
+
+            app.typeKey("r", modifierFlags: .command)
+            let field = app.textFields["session-title-field"]
+            XCTAssertTrue(field.waitForExistence(timeout: 5),
+                          "Cmd-R did not open the rename field for the selected session")
+
+            field.typeKey("a", modifierFlags: .command)
+            // "cmdR renamed" was never on screen before this point, so the assertion below
+            // cannot pass vacuously.
+            field.typeText("cmdR renamed\n")
+
+            XCTAssertTrue(app.staticTexts["cmdR renamed"].waitForExistence(timeout: 5))
+        }
+
         // The human approved "Mark as Unread" conditional on one thing: re-activating an
         // inactive tab clears the mark. That condition, not just the mark itself, is what this
         // activity asserts. The precondition that keeps "the dot appears" from passing
@@ -721,14 +834,35 @@ final class TerminalSmokeTests: XCTestCase {
         // The permission-bypass toggle is gated by a confirmation. Cancel must leave it off —
         // the gate returns before mutating the model, so the checkbox must not stick on.
         XCTContext.runActivity(named: "enabling permission bypass asks first, and Cancel leaves it off") { _ in
+            // The activity immediately above does ⌘A + delete in the command field, which
+            // drives `applyTextToControls` -> mutates `flags` -> trips
+            // `.onChange(of: flags) { syncTextFromControls() }` (FlagEditor.swift:119). If this
+            // activity's checkbox click lands inside that churn, the click either no-ops or sets
+            // `pendingDangerousFlag` only for the re-render to immediately clear it — both look
+            // identical from here as "no confirmation appeared". Settling first drains that
+            // churn before the click, so a real failure of the confirmation gate is not
+            // masked by a timing collision with the previous activity.
+            settle()
+
             let prefs = preferencesWindow(app)
             let checkbox = prefs.checkBoxes.matching(identifier: "Skip all permission checks").firstMatch
             XCTAssertTrue(checkbox.waitForExistence(timeout: 5))
             XCTAssertEqual(checkbox.value as? Int, 0)
 
             checkbox.click()
-            let sheet = app.sheets.firstMatch
-            XCTAssertTrue(sheet.waitForExistence(timeout: 5), "no confirmation appeared")
+            // Scoped to the Preferences window's own sheets, not `app.sheets.firstMatch` — the
+            // latter can resolve to an unrelated window's sheet and report a false positive.
+            let sheet = prefs.sheets.firstMatch
+            if !sheet.waitForExistence(timeout: 5) {
+                // This gate guards `--dangerously-skip-permissions`, so a missed click and a
+                // genuinely broken confirmation must not read as the same failure.
+                XCTAssertEqual(
+                    checkbox.value as? Int, 0,
+                    "SECURITY: no confirmation appeared AND the bypass toggled on — the gate did not fire"
+                )
+                XCTFail("no confirmation appeared, but the checkbox stayed off — missed click, not a broken gate")
+                return
+            }
             sheet.buttons["Cancel"].click()
 
             XCTAssertEqual(checkbox.value as? Int, 0, "Cancel left the bypass enabled")
