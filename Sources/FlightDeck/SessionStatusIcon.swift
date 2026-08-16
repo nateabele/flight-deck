@@ -7,7 +7,13 @@ import SwiftUI
 /// to read. `busy` uses a real indeterminate `ProgressView` because that is the macOS
 /// idiom for work of unknown duration.
 ///
-/// A nil status renders nothing — "no `claude` running here", distinct from `.idle`.
+/// `status` nil and `unread` false renders nothing — "no `claude` running here", distinct
+/// from `.idle`. That is a statement about *process* state: nothing is running, so there is
+/// nothing to show. `unread` is a separate, user-asserted *read* state — "Mark as Unread" is
+/// reachable from the context menu regardless of whether `claude` is running — and it must
+/// stay visible even when there is no process to report on, or the menu item would look
+/// broken. So a nil status with `unread == true` still draws the dot; "nil renders nothing"
+/// only ever protected the process-state case.
 ///
 /// `unread` marks a session that finished while the user was looking elsewhere. It is the one
 /// distinction here drawn in colour alone — a filled dot in the accent colour rather than in
@@ -33,6 +39,21 @@ struct SessionStatusIcon: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(status.tooltip(unread: unread))
             .accessibilityIdentifier("session-status")
+        } else if unread {
+            // No `SessionStatus` to ask for a tooltip — `tooltip(unread:)` is an instance
+            // method and needs an `activity` to branch on, and there is none here: no `claude`
+            // is running, so there is no process state to describe, only the user's own mark.
+            // `tooltip(unread:)`'s idle+unread string ("Finished — not yet viewed") would be
+            // wrong here — nothing necessarily *finished*, there may never have been a process
+            // — so this is a short literal instead of reshaping that API for a case it was
+            // never meant to express.
+            let label = "Unread"
+            symbol("circle.fill")
+                .foregroundStyle(Color.accentColor)
+                .help(label)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(label)
+                .accessibilityIdentifier("session-status")
         }
     }
 

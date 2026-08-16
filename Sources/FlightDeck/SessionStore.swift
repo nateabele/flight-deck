@@ -62,6 +62,16 @@ final class SessionStore: ObservableObject {
     /// "away" there is. Written by `persist()`, seeded by `restore()`.
     @Published private(set) var unreadIdle: Set<UUID> = []
 
+    /// One-shot request channel for the keyboard rename path: the sidebar's `List` sets this
+    /// on Return (it has the selection but no way to reach a specific row's private `@State`),
+    /// the matching `SessionRow` observes it via `.onChange`, starts editing, and clears it
+    /// back to `nil`. Double-click and the context menu skip this entirely — they already hold
+    /// the row and call `beginRename()` directly.
+    ///
+    /// Transient signal, not durable state: never persisted, and deliberately absent from
+    /// `SessionSnapshot`, so it does not appear in what `persist()` writes or `restore()` reads.
+    @Published var renameRequest: UUID?
+
     /// Weak: `GhosttyApp.shared` is a process-wide static that owns itself for the life of
     /// the process (see `GhosttyApp.shared`'s doc comment); the store must not co-own it.
     private weak var provider: SurfaceProvider?
@@ -608,6 +618,24 @@ final class SessionStore: ObservableObject {
 
     /// ⌘⇧[. See `selectNextSession()`.
     func selectPreviousSession() { cycleSelection(forward: false) }
+
+    /// Context-menu "Mark as Unread". `unreadIdle` is `private(set)`, so this is the sidebar's
+    /// only way in.
+    ///
+    /// Deliberately does not special-case the *currently selected* session: `selectedSessionID`
+    /// already removes an id from `unreadIdle` in its `didSet`, but only when that property is
+    /// next assigned. Marking the active tab unread inserts it right back, and the dot stays up
+    /// — even though the user is looking at that tab right now — until they navigate away and
+    /// return, which reassigns `selectedSessionID` and clears it. That is intentional and
+    /// matches Mail, where marking the open message unread sticks until you leave and re-open
+    /// it; do not "fix" it by adding a guard here.
+    ///
+    /// Persists immediately, same as `rename(_:to:)`: unread marks are meant to survive a
+    /// relaunch (see `unreadIdle`'s doc comment), so there is no "mark now, save later" here.
+    func markUnread(_ id: UUID) {
+        unreadIdle.insert(id)
+        persist()
+    }
 
     /// The order is `repos.flatMap(\.sessions)` — the sidebar top to bottom, crossing project
     /// sections. Flattening is not a convenience: both `closeSession` and `moveSession`
