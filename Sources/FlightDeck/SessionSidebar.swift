@@ -104,9 +104,17 @@ private struct SessionRow: View {
         .animation(.easeOut(duration: 0.12), value: isHovered)
         .onRowDoubleClick { beginRename() }
         .onChange(of: store.renameRequest) { _, request in
-            guard request == session.id, !isEditing else { return }
-            beginRename()
+            guard request == session.id else { return }
+            // Clear before the `isEditing` check, not after: a request addressed to this
+            // row must always be consumed, even when it arrives while the row is already
+            // editing and there is nothing left to do. Combining these into one guard (as
+            // a "simplification") skips the clear whenever `isEditing` is true, which
+            // leaves `renameRequest` stuck non-nil forever — `.onKeyPress(.return)` guards
+            // on `renameRequest == nil`, so that permanently and silently kills
+            // Return-to-rename for the rest of the session.
             store.renameRequest = nil
+            guard !isEditing else { return }
+            beginRename()
         }
         // A context menu is safe where a tap gesture is not: it responds to a right-click and
         // leaves the primary mouse-down — the one `List`'s drag-to-reorder needs — untouched.
