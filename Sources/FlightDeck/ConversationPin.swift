@@ -44,6 +44,14 @@ enum ConversationPin {
     /// the failure needs a dead tab process plus a deliberate resume of that exact
     /// conversation elsewhere, and its symptom is a wrong status icon, not lost state. See
     /// `docs/superpowers/specs/2026-08-11-resumed-conversation-pinning-design.md` §5.
+    ///
+    /// - Parameter workingDirectory: the caller's fallback for a row that reports an empty
+    ///   `cwd`, echoed straight back in that case. Pass the tab's **`transcriptDirectory`**,
+    ///   never its `workingDirectory` — what comes back feeds `ClaudeSession.transcriptURL`,
+    ///   so falling back to the project would move a worktree session's watcher onto the
+    ///   project's transcript the first time a row omitted its cwd. The name is inherited
+    ///   from before the two fields split and is misleading here; renaming it is deferred in
+    ///   `docs/FOLLOWUPS.md`.
     static func resolve(
         conversationID: UUID,
         workingDirectory: String,

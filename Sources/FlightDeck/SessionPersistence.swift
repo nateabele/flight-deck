@@ -11,8 +11,11 @@ struct SessionSnapshot: Codable, Equatable {
         var title: String
         var workingDirectory: String
         /// Where `claude` was writing — `Session.transcriptDirectory`, which diverges from
-        /// `workingDirectory` while the session is in a git worktree. Absent in snapshots
-        /// written before the two were split, and absent means "same as `workingDirectory`".
+        /// `workingDirectory` whenever `claude` has changed directory to somewhere the tab
+        /// did not follow: a git worktree is the common case, but a plain `cd`, or a resume
+        /// into a conversation whose project is not open, diverges them just as well.
+        /// Absent in snapshots written before the two were split, and absent means "same as
+        /// `workingDirectory`".
         ///
         /// Optional for the same load-bearing reason as `pinnedConversationID` below:
         /// synthesized `Codable` decodes an optional with `decodeIfPresent`, so every
