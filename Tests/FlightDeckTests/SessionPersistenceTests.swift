@@ -487,6 +487,31 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertNil(stored.first(where: { $0.id == clean.id })?.unread)
     }
 
+    /// The production entry point, not the `markUnreadForTesting` seam above: `markUnread`
+    /// persists immediately (see its doc comment), and the write must survive a genuine
+    /// restore into a fresh store — the way `testRestoreSeedsUnreadMarks` drives a mark that
+    /// arrived some other way.
+    func testMarkUnreadPersistsAndSurvivesRestore() {
+        let persistence = FakePersistence()
+        let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        let marked = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        // Created after `marked`, so it — not `marked` — holds the selection below, keeping
+        // `marked`'s mark from being cleared by `selectedSessionID`'s own `didSet`.
+        let other = store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
+
+        store.markUnread(marked.id)
+
+        XCTAssertEqual(
+            persistence.stored?.sessions.first(where: { $0.id == marked.id })?.unread, true,
+            "markUnread must persist immediately"
+        )
+
+        let restored = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        XCTAssertTrue(restored.restore(directoryExists: allDirsExist))
+        XCTAssertTrue(restored.unreadIdle.contains(marked.id))
+        XCTAssertFalse(restored.unreadIdle.contains(other.id))
+    }
+
     // MARK: - FileSessionPersistence
 
     /// Each test gets its own directory so they never touch the real
