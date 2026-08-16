@@ -542,6 +542,11 @@ final class SessionPersistenceTests: XCTestCase {
     /// shell in a directory that is not there gets a terminal that cannot run anything, so
     /// the project directory is the fallback. The session is not dropped: its *project* is
     /// still there, and that is what `restore` gates on.
+    ///
+    /// The watcher has to fall back with it. `claude` is now started in the project and
+    /// writes its transcript there, so a tab left watching the dead worktree's transcript
+    /// would show no titles and no sub-agent counts until some later registry tick happened
+    /// to retarget it — and would persist the dead path back out in the meantime.
     func testRestoreFallsBackToTheProjectWhenTheWorktreeIsGone() {
         let id = UUID()
         let worktree = "/w/.claude/worktrees/gone"
@@ -560,6 +565,13 @@ final class SessionPersistenceTests: XCTestCase {
 
         XCTAssertEqual(store.repos.first?.sessions.map(\.id), [id])
         XCTAssertEqual(provider.configs.last?.workingDirectory, "/w")
+        XCTAssertEqual(
+            store.watchedTranscriptURL(of: id),
+            ClaudeSession.transcriptURL(
+                sessionID: id, workingDirectory: "/w", projectsRoot: store.projectsRoot
+            )
+        )
+        XCTAssertEqual(persistence.stored?.sessions.first?.transcriptDirectory, "/w")
     }
 
     /// A pre-split snapshot has one directory and it means both things, so restoring it must
