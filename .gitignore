@@ -10,4 +10,5 @@ vendor/.zig-toolchain
 vendor/.build-shim
 *.profraw
 scripts/.smoke.log
+scripts/.release-build.log
 .superpowers/
