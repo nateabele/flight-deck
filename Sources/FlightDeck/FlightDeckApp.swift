@@ -25,6 +25,19 @@ struct FlightDeckApp: App {
         UserDefaults.standard.bool(forKey: "FlightDeckSeedSecondProject")
     }
 
+    /// `-FlightDeckFixture <dir>`. Used by exactly one UI test, the one that produces the
+    /// README screenshot: it needs several projects and a session in every status at once, and
+    /// statuses come from live `claude` processes, so there is no production route to it.
+    ///
+    /// Read only when `isResettingState` is also set — see `makeStore`, which is the only
+    /// caller — so a stray default cannot pose a real user's deck. `SessionFixture` writes
+    /// nothing; the flag's whole safety story is in that type's doc comment.
+    private static var fixture: SessionFixture? {
+        guard let path = UserDefaults.standard.string(forKey: "FlightDeckFixture"),
+              !path.isEmpty else { return nil }
+        return SessionFixture(root: URL(fileURLWithPath: path, isDirectory: true))
+    }
+
     init() {
         // Constructed eagerly, unlike the store: this only reads `UserDefaults`, and both
         // the Settings scene and the store below need the *same* instance.
@@ -35,6 +48,17 @@ struct FlightDeckApp: App {
         let preferences = PreferencesStore(
             persistence: Self.isResettingState ? nil : UserDefaultsPreferencesPersistence()
         )
+        // Point fixture sessions at the fixture's own executable instead of the login shell.
+        //
+        // This is the difference between a screenshot run and a screenshot run that trashes
+        // the machine's state. A session launches `resolvedShell()`, and the login shell's
+        // profile is what starts `claude` — so without this override every seeded session
+        // spawns a real agent, each writing a status file into `~/.claude/sessions` and
+        // colliding in the pid-keyed name registry. Safe to assign: under reset the store
+        // has a nil persistence, so this never reaches `preferences.v1`.
+        if Self.isResettingState, let fixture = Self.fixture {
+            preferences.preferences.shell.shellOverride = fixture.shellURL.path
+        }
         _preferences = StateObject(wrappedValue: preferences)
 
         // `wrappedValue` is an @autoclosure: this call is NOT evaluated here. That is
@@ -76,9 +100,20 @@ struct FlightDeckApp: App {
         // `FileSessionPersistence` overwrites the developer's own `sessions.json` with the
         // test's seed — which is precisely the data loss this whole change set is about.
         // Nil makes a reset run read nothing and write nothing.
+        // A posed deck for the screenshot run. Gated on `resetState` like the seed flag below,
+        // so it cannot fire in a real launch even if the default were somehow set.
+        //
+        // It deliberately passes `resetState: false` to the store while the *app* is still in
+        // reset: `resetState` suppresses `restore()`, and restoring is the entire point here.
+        // Safety does not come from that flag in this path, it comes from the persistence —
+        // `FixtureSessionPersistence` reads the fixture and discards every write, so the
+        // developer's `sessions.json` is neither read nor written. Preferences are still
+        // hermetic, because `isResettingState` gave that store a nil persistence above.
+        let fixture = resetState ? Self.fixture : nil
+
         let store = SessionStore(
             ghostty: GhosttyApp.shared,
-            resetState: resetState,
+            resetState: resetState && fixture == nil,
             preferences: preferences,
             notifier: notifier,
             // Passed in rather than assigned after construction for the same two reasons as
@@ -86,7 +121,13 @@ struct FlightDeckApp: App {
             // convenience init's launch-time orphan sweep reports through `reapReporter`
             // before this factory could ever assign it afterwards.
             reapReporter: UserNotificationReapReporter(),
-            persistence: resetState ? nil : FileSessionPersistence()
+            persistence: fixture?.persistence() ?? (resetState ? nil : FileSessionPersistence()),
+            // Point the watcher at the fixture's status files instead of `~/.claude/sessions`,
+            // and believe them: they name pids that were never spawned, so the real liveness
+            // check would drop every row.
+            statusRoot: fixture?.statusRoot,
+            transcriptsRoot: fixture?.projectsRoot,
+            statusIsAlive: fixture == nil ? nil : { _ in true }
         )
 
         // Test-only second project, so the sidebar has something to reorder. Guarded by
