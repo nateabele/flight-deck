@@ -172,6 +172,12 @@ final class SessionStore: ObservableObject {
     /// Injectable so tests can point at a temp directory.
     var sessionsRoot: URL = SessionStatusWatcher.defaultRoot
 
+    /// Liveness predicate for registry entries. Nil means the real one — a status file is
+    /// believed only while its process is running. `SessionFixture` overrides it, because a
+    /// posed deck's status files name pids that were never spawned; without this the watcher
+    /// discards every row and the sidebar reports nothing.
+    var statusIsAlive: ((pid_t) -> Bool)?
+
     /// Sub-agent counts kept separately so one arriving before the registry has been
     /// read is not lost, and so a registry refresh never clobbers it.
     private var subagentCounts: [UUID: Int] = [:]
@@ -319,7 +325,10 @@ final class SessionStore: ObservableObject {
         preferences: PreferencesStore? = nil,
         notifier: Notifying? = nil,
         reapReporter: ReapReporting? = nil,
-        persistence: SessionPersisting?
+        persistence: SessionPersisting?,
+        statusRoot: URL? = nil,
+        transcriptsRoot: URL? = nil,
+        statusIsAlive: ((pid_t) -> Bool)? = nil
     ) {
         self.init(
             provider: ghostty,
@@ -327,6 +336,13 @@ final class SessionStore: ObservableObject {
             preferences: preferences
         )
         self.notifier = notifier
+        // Both assigned before `startStatusWatching()` below, which reads them when it builds
+        // the watcher — setting either afterwards would leave the watcher pointed at the real
+        // registry for the life of the run. Nil for every caller except a fixture launch.
+        if let statusRoot { sessionsRoot = statusRoot }
+        // Before `restore()`, which attaches a transcript watcher per restored session.
+        if let transcriptsRoot { projectsRoot = transcriptsRoot }
+        self.statusIsAlive = statusIsAlive
         // Before the sweep below, which reports through it.
         if let reapReporter { self.reapReporter = reapReporter }
         // Captured BEFORE `restore()`, which persists at the end and would otherwise replace
@@ -1257,7 +1273,11 @@ final class SessionStore: ObservableObject {
     /// a timer.
     func startStatusWatching() {
         guard statusWatcher == nil else { return }
-        let watcher = SessionStatusWatcher(root: sessionsRoot, clock: clock) { [weak self] entries in
+        let watcher = SessionStatusWatcher(
+            root: sessionsRoot,
+            isAlive: statusIsAlive ?? SessionStatusWatcher.processIsAlive,
+            clock: clock
+        ) { [weak self] entries in
             self?.applyRegistry(entries)
         }
         watcher.start()
