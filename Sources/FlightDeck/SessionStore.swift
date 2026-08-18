@@ -1525,8 +1525,9 @@ final class SessionStore: ObservableObject {
     /// The tab's `claude` switched conversations in place (an in-session `/resume`).
     ///
     /// Step order is load-bearing at the end: the title is resolved *before* the new
-    /// watcher starts. `TranscriptWatcher` seeds its offset to the file's current size on
-    /// its first look, so it will not replay history — but if it were started first, an
+    /// watcher starts. A resumed conversation's transcript exists by the time we point a
+    /// watcher at it, and `TranscriptWatcher` starts tailing an already-existing file from
+    /// its current end, so it will not replay history — but if it were started first, an
     /// old rename record could still land before the resolved title and overwrite it.
     private func repin(
         _ tabID: UUID, to conversationID: UUID, transcriptDirectory: String

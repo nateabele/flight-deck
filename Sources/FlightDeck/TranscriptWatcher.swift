@@ -35,8 +35,8 @@ final class TranscriptWatcher {
     private var outstandingAgents: Set<String> = []
 
     private var offset: UInt64 = 0
-    /// Whether `offset` has been seeded to the file's size yet. See `Scan.read`.
-    private var hasSeekedToEnd = false
+    /// Whether the position to start reading from has been decided yet. See `Scan.read`.
+    private var hasChosenStart = false
 
     /// The clock this watcher is registered with, if any. Nil in tests, which call
     /// `drain()` directly.
@@ -79,14 +79,14 @@ final class TranscriptWatcher {
         let url = self.url
         let sessionID = self.sessionID
         let offset = self.offset
-        let hasSeekedToEnd = self.hasSeekedToEnd
+        let hasChosenStart = self.hasChosenStart
 
         Task { [weak self] in
             let scan = await Task.detached(priority: .utility) {
                 Scan.read(
                     url: url,
                     offset: offset,
-                    hasSeekedToEnd: hasSeekedToEnd,
+                    hasChosenStart: hasChosenStart,
                     sessionID: sessionID
                 )
             }.value
@@ -104,7 +104,7 @@ final class TranscriptWatcher {
             Scan.read(
                 url: url,
                 offset: offset,
-                hasSeekedToEnd: hasSeekedToEnd,
+                hasChosenStart: hasChosenStart,
                 sessionID: sessionID
             )
         )
@@ -113,7 +113,7 @@ final class TranscriptWatcher {
     /// Folds a scan's events into the watcher's state and fires the callbacks.
     /// Everything here is cheap and main-actor-bound; the expensive half is `Scan.read`.
     private func apply(_ scan: Scan) {
-        hasSeekedToEnd = scan.hasSeekedToEnd
+        hasChosenStart = scan.hasChosenStart
         offset = scan.offset
 
         var lastTitle: String?
@@ -147,37 +147,49 @@ final class TranscriptWatcher {
 /// return to it.
 struct Scan: Sendable {
     var offset: UInt64
-    var hasSeekedToEnd: Bool
+    var hasChosenStart: Bool
     var events: [ClaudeSession.TranscriptEvent] = []
 
     /// Reads and parses everything appended after `offset`.
     ///
-    /// Returns the caller's own position unchanged when there is nothing to do (missing
-    /// file, no new bytes, no complete line), which makes "no change" a cheap no-op rather
-    /// than a special case at the call site.
+    /// Returns the caller's own position unchanged when there is nothing to do (no new
+    /// bytes, no complete line), which makes "no change" a cheap no-op rather than a
+    /// special case at the call site.
     static func read(
         url: URL,
         offset: UInt64,
-        hasSeekedToEnd: Bool,
+        hasChosenStart: Bool,
         sessionID: UUID
     ) -> Scan {
-        var result = Scan(offset: offset, hasSeekedToEnd: hasSeekedToEnd)
+        var result = Scan(offset: offset, hasChosenStart: hasChosenStart)
 
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return result }
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            // Nothing on disk, but that settles where reading will start: a transcript that
+            // does not exist while we are *already* watching has no history to skip, so
+            // whatever `claude` creates here later is ours from byte 0.
+            //
+            // Deciding it here rather than on the first successful open is what makes the
+            // first `/rename` of a session arrive. `claude` buffers its startup records and
+            // does not create the transcript until it first has something to persist —
+            // for a session renamed before its first turn, that is the rename itself. The
+            // file therefore does not appear empty and then grow: it springs into existence
+            // with the `custom-title` record already inside, and the branch below would
+            // seek straight past it. Every later rename appended to a file we are by then
+            // tracking, which is why only the first one went missing.
+            result.hasChosenStart = true
+            return result
+        }
         defer { try? handle.close() }
 
         let size = (try? handle.seekToEnd()) ?? 0
 
-        // On the first time we ever manage to open the file, start tailing from its
-        // current end rather than from 0. A restored session points at a transcript
-        // that already exists and may be huge (a whole prior conversation); without
-        // this, the first read would replay every old `custom-title` record — most
-        // recently clobbering a rename made while `claude` wasn't running — and would
-        // parse the entire file. A brand-new session's file doesn't exist yet at this
-        // point, so seeding to its (empty) size here is a no-op and every subsequent
-        // read still sees only genuinely new bytes.
-        if !result.hasSeekedToEnd {
-            result.hasSeekedToEnd = true
+        // The file already existed on our first look, so it predates the watcher: start
+        // tailing from its current end rather than from 0. A restored session points at a
+        // transcript that may be huge (a whole prior conversation); without this, the first
+        // read would replay every old `custom-title` record — most recently clobbering a
+        // rename made while `claude` wasn't running — and would parse the entire file.
+        if !result.hasChosenStart {
+            result.hasChosenStart = true
             result.offset = size
         } else if size < result.offset {
             // A shorter file means it was replaced; start over. This only detects a
