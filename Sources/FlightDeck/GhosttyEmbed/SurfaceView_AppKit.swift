@@ -479,7 +479,10 @@ extension Ghostty {
             // session's shell is forked from `SessionStore.init`, long before SwiftUI builds the
             // scene body. Falling back to the main screen's scale keeps that report honest, and
             // matches what `SurfaceConfiguration.withCValue` already hands `ghostty_surface_new`
-            // as `scale_factor`. Once the view is in a window, `convertToBacking` is authoritative
+            // as `scale_factor`. That match is about the expression, not a guaranteed value:
+            // `NSScreen.main` is whichever screen currently holds the key window, not a fixed
+            // primary display, so on a mixed-DPI setup the two can still disagree by the time
+            // this fires. Once the view is in a window, `convertToBacking` is authoritative
             // again — it accounts for which screen the window is actually on.
             let scaledSize: CGSize
             if window != nil {
@@ -867,6 +870,19 @@ extension Ghostty {
                 layer?.contentsScale = window.backingScaleFactor
                 CATransaction.commit()
             }
+
+            // Flight Deck: with no window, `convertToBacking` below is the identity
+            // conversion, so the fall-through would compute xScale/yScale as 1.0 and push
+            // a point-sized framebuffer under a claimed 1x content scale — the same "grid
+            // and cell metrics disagree" failure `sizeDidChange` guards against above,
+            // just reached from the backing-properties path instead of the size path.
+            // This isn't a brief startup transient: `TerminalPane` calls
+            // `removeFromSuperview()` on every non-selected surface, so a backgrounded
+            // session can sit window-less indefinitely while the store's settled resize
+            // fan-out keeps sizing it. Bailing out here is safe — there's nothing
+            // authoritative to react to without a window — and AppKit calls this method
+            // again once the view is reparented, where the real values are available.
+            guard window != nil else { return }
 
             guard let surface = self.surface else { return }
 
