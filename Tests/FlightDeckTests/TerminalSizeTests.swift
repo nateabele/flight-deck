@@ -84,4 +84,111 @@ final class TerminalSizeTests: XCTestCase {
 
         XCTAssertEqual(store.terminalSize, CGSize(width: 900, height: 500))
     }
+
+    /// A store with three live sessions in one project, the first selected.
+    private func makeStoreWithThreeSessions(
+        _ persistence: FakePersistence
+    ) -> (SessionStore, [UUID]) {
+        let ids = [UUID(), UUID(), UUID()]
+        persistence.stored = SessionSnapshot(
+            sessions: ids.map { .init(id: $0, title: "s", workingDirectory: "/w") },
+            selectedSessionID: ids[0],
+            sessionCounter: 3
+        )
+        let store = makeStore(persistence)
+        store.restore(directoryExists: allDirsExist)
+        return (store, ids)
+    }
+
+    func testResizeReachesTheSelectedTabImmediatelyAndTheRestOnSettle() {
+        let persistence = FakePersistence()
+        let (store, ids) = makeStoreWithThreeSessions(persistence)
+
+        var pending: (() -> Void)?
+        store.resizeSettle = { pending = $0 }
+
+        var reports: [(UUID, CGSize)] = []
+        store.sizeReporterOverride = { reports.append(($0, $1)) }
+
+        store.terminalSizeDidChange(CGSize(width: 900, height: 700))
+
+        // Only the selected tab, until the drag settles.
+        XCTAssertEqual(reports.map(\.0), [ids[0]])
+
+        pending?()
+
+        XCTAssertEqual(Set(reports.map(\.0)), Set(ids))
+        XCTAssertTrue(reports.allSatisfy { $0.1 == CGSize(width: 900, height: 700) })
+    }
+
+    /// Every frame of a window drag calls this. Only the last size may be broadcast, or a
+    /// drag costs one grid-and-scrollback reflow per surface per frame.
+    func testOnlyTheFinalSizeOfADragIsBroadcast() {
+        let persistence = FakePersistence()
+        let (store, ids) = makeStoreWithThreeSessions(persistence)
+
+        var pending: [() -> Void] = []
+        store.resizeSettle = { pending.append($0) }
+        store.terminalSizeDidChange(CGSize(width: 900, height: 700))
+        store.terminalSizeDidChange(CGSize(width: 950, height: 700))
+
+        var reports: [(UUID, CGSize)] = []
+        store.sizeReporterOverride = { reports.append(($0, $1)) }
+        for work in pending { work() }
+
+        XCTAssertEqual(Set(reports.map(\.0)), Set(ids), "the superseded settle must be dropped")
+        XCTAssertTrue(reports.allSatisfy { $0.1 == CGSize(width: 950, height: 700) })
+        XCTAssertEqual(reports.count, ids.count, "exactly one report per surface")
+    }
+
+    /// "Launch, resize, quit" contains no session mutation, so the size would otherwise be
+    /// lost exactly when the user had just chosen it.
+    func testASettledResizePersists() {
+        let persistence = FakePersistence()
+        let (store, _) = makeStoreWithThreeSessions(persistence)
+
+        var pending: (() -> Void)?
+        store.resizeSettle = { pending = $0 }
+        store.terminalSizeDidChange(CGSize(width: 900, height: 700))
+        pending?()
+
+        XCTAssertEqual(
+            persistence.stored?.terminalSize, .init(width: 900, height: 700))
+    }
+
+    /// A repeat of the current size is the `updateNSView` path, which runs on every published
+    /// store change — roughly 2 Hz per live agent.
+    func testARepeatedSizeIsIgnored() {
+        let persistence = FakePersistence()
+        let (store, _) = makeStoreWithThreeSessions(persistence)
+
+        // Installed before the first resize, so this case never schedules a real 150ms
+        // dispatch that would outlive it and fire into another test's store.
+        var pending: [() -> Void] = []
+        store.resizeSettle = { pending.append($0) }
+        store.terminalSizeDidChange(CGSize(width: 900, height: 700))
+        XCTAssertEqual(pending.count, 1, "the first resize is accepted")
+
+        var reports: [(UUID, CGSize)] = []
+        store.sizeReporterOverride = { reports.append(($0, $1)) }
+        store.terminalSizeDidChange(CGSize(width: 900, height: 700))
+
+        XCTAssertTrue(reports.isEmpty)
+        XCTAssertEqual(pending.count, 1, "no second settle scheduled")
+    }
+
+    /// Activation must NOT go through the dedupe: the whole point is that this surface's grid
+    /// may be stale while the store's size has not moved.
+    func testActivatingATabReportsTheCurrentSizeEvenWhenItHasNotChanged() {
+        let persistence = FakePersistence()
+        let (store, ids) = makeStoreWithThreeSessions(persistence)
+
+        var reports: [(UUID, CGSize)] = []
+        store.sizeReporterOverride = { reports.append(($0, $1)) }
+
+        store.activateTerminalSize(for: ids[2])
+
+        XCTAssertEqual(reports.map(\.0), [ids[2]])
+        XCTAssertEqual(reports.first?.1, store.terminalSize)
+    }
 }
