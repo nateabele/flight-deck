@@ -67,7 +67,12 @@ other, and would introduce state that can diverge without meaning anything.
 private(set) var terminalSize: CGSize
 ```
 
-Seeded in `restore()` from `snapshot.terminalSize`; otherwise `Self.defaultTerminalSize`,
+Seeded in `restore()` from `snapshot.terminalSize` **immediately after
+`persistence?.load()`, above the `!snapshot.sessions.isEmpty || !recorded.isEmpty` guard**.
+That guard returns early when the user quit with every session closed, and
+`SessionStore.init` then calls `seedInitialSession()` — which goes through `insertSession`
+and so needs the size. Seeding below the guard would hand that session the default instead
+of the size the window was actually left at. Otherwise `Self.defaultTerminalSize`,
 derived from the geometry `RootWindow` actually declares — `.defaultSize(width: 1000,
 height: 700)` less the 240pt sidebar ideal and the title bar. That constant is documented as
 an estimate that applies only to a first-ever launch, when there is no snapshot to read.
@@ -105,6 +110,7 @@ func terminalSizeDidChange(_ size: CGSize) {
     resizeSettle { [weak self] in
         guard let self, self.resizeGeneration == generation else { return }
         for id in self.surfaces.keys { self.report(self.terminalSize, to: id) }
+        self.persist()
     }
 }
 ```
@@ -135,13 +141,15 @@ unchanged when a test substitutes an inline `resizeSettle`.
 
 ### 3.4 Persistence
 
-`terminalSizeDidChange` does **not** call `persist()`. It fires on every frame of a live
-drag, and the value is only ever *read* at launch, so promptness buys nothing. `persist()`
-already runs on every mutation and on `processRegistry.onChange`
-(`SessionStore.swift:273`), so the current `terminalSize` rides along with the next natural
-write. Implementation must confirm the `applicationShouldTerminate` path
-(`AppDelegate.swift:44`) persists once, and add it if it does not — otherwise a launch,
-resize, quit sequence with no other mutation loses the size.
+`terminalSizeDidChange` does **not** persist — it fires on every frame of a live drag. The
+**settled** callback does, once, after the broadcast.
+
+Relying on the next natural `persist()` instead would be wrong: `persist()` runs on every
+mutation (`SessionStore.swift:634`), but "launch, resize the window, quit" contains no
+mutation, so the new size would be lost exactly when the user had just chosen it. One write
+per resize gesture is cheap and matches the file's stated philosophy — "saved on every
+mutation rather than at terminate, so a crash cannot lose the list". No `AppDelegate`
+change is needed.
 
 ## 4. Activation refresh — `TerminalPane`
 
