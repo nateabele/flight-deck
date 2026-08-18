@@ -3,10 +3,13 @@ import SwiftUI
 /// The container the selected surface is parented into.
 ///
 /// It exists as a subclass for one reason: libghostty has to be *told* the new pixel size or
-/// the terminal grid never reflows. `Ghostty.SurfaceView.sizeDidChange(_:)` is the call that
-/// does that, and upstream drives it from a `SurfaceScrollView` inside the SwiftUI wrapper
-/// this app dropped during decoupling — so without this hook nothing calls it at all, and the
-/// Metal layer stretches over a grid that keeps its launch-time rows and columns.
+/// the terminal grid never reflows, and plain `NSView` has no notification for a frame change
+/// of its own — upstream drives that from a `SurfaceScrollView` inside the SwiftUI wrapper this
+/// app dropped during decoupling. Overriding `setFrameSize` is how this view learns of a resize
+/// at all; `onResize` hands the new size to `SessionStore.terminalSizeDidChange(_:)`, which now
+/// owns delivering it to `Ghostty.SurfaceView.sizeDidChange(_:)`. Without this hook, nothing
+/// would notice the resize, and the Metal layer would stretch over a grid that keeps its
+/// launch-time rows and columns.
 final class TerminalHostView: NSView {
     var onResize: ((CGSize) -> Void)?
 
@@ -49,9 +52,8 @@ struct TerminalPane: NSViewRepresentable {
     func makeNSView(context: Context) -> TerminalHostView {
         let container = TerminalHostView()
         container.autoresizingMask = [.width, .height]
-        container.onResize = { [weak container] size in
-            guard let surface = container?.subviews.first as? Ghostty.SurfaceView else { return }
-            Self.report(size, to: surface)
+        container.onResize = { [weak store] size in
+            store?.terminalSizeDidChange(size)
         }
         return container
     }
@@ -82,17 +84,12 @@ struct TerminalPane: NSViewRepresentable {
 
         // Unconditionally, not just on attach. Re-parenting is how tab switching works, so a
         // surface that was created off-screen or last shown at a different window size still
-        // carries that old grid — resizing the window while another tab is selected is enough
-        // to produce one.
-        Self.report(container.bounds.size, to: surface)
+        // carries that old grid — a resize while another tab was selected is enough to produce
+        // one. This goes through `activateTerminalSize` rather than `terminalSizeDidChange`
+        // because the store's size has not changed; only this surface's copy of it is stale.
+        if let id = store.selectedSessionID {
+            store.activateTerminalSize(for: id)
+        }
         store.tick()
-    }
-
-    /// A zero-sized container is a normal transient state (added early, or to a hierarchy
-    /// that is not on screen yet); upstream Ghostty guards the same call the same way in
-    /// `SurfaceScrollView.synchronizeCoreSurface`.
-    private static func report(_ size: CGSize, to surface: Ghostty.SurfaceView) {
-        guard size.width > 0, size.height > 0 else { return }
-        surface.sizeDidChange(size)
     }
 }
