@@ -16,21 +16,31 @@ private struct SessionRow: View {
         HStack(spacing: 4) {
             // Leading, unlike the project header's, which stays trailing.
             //
-            // The fixed minimum width is what makes that work. `SessionStatusIcon` draws
-            // *nothing* for a session with no `claude` running, which on the trailing edge was
-            // invisible — the row simply ended — but on the leading edge would slide that
-            // row's title left and leave the sidebar's left edge ragged as sessions start and
-            // stop. Reserving the column keeps every title on the same x.
+            // A reserved column is what makes that work. `SessionStatusIcon` draws *nothing*
+            // for a session with no `claude` running, which on the trailing edge was
+            // invisible — the row simply ended — but on the leading edge slides that row's
+            // title left and leaves the sidebar's left edge ragged as sessions start and stop.
             //
-            // `minWidth`, not `width`: a busy session with sub-agents draws its count beside
-            // the glyph, and a hard width would overlap it onto the title. That row's title
-            // shifts right by the width of the numeral, which is the one case where alignment
-            // gives — deliberately, since clipping the count would be worse.
-            SessionStatusIcon(
-                status: store.status(for: session.id),
-                unread: store.unreadIdle.contains(session.id)
-            )
-            .frame(minWidth: 16, alignment: .leading)
+            // The reservation is a `Color.clear` sibling, NOT `.frame(minWidth:)` on the icon,
+            // which was measured not to work: an icon whose body is an unfulfilled `if`
+            // resolves to no view at all, and a stack drops an empty subview along with its
+            // spacing, so the wrapping frame never gets a chance to floor anything. That cost
+            // a launching session's title 20pt (16 column + 4 spacing) until its first status
+            // arrived. `Color.clear` is a real subview at every status, so the slot and its
+            // spacing always exist. `SessionStatusIconLayoutTests` measures both facts.
+            //
+            // A ZStack rather than a fixed width: a busy session with sub-agents draws its
+            // count beside the glyph, and a hard width would overlap it onto the title. The
+            // stack takes the wider of the two, so that row's title shifts right by the width
+            // of the numeral — the one case where alignment gives, deliberately, since
+            // clipping the count would be worse.
+            ZStack(alignment: .leading) {
+                Color.clear.frame(width: 16, height: 0)
+                SessionStatusIcon(
+                    status: store.status(for: session.id),
+                    unread: store.unreadIdle.contains(session.id)
+                )
+            }
 
             if isEditing {
                 TextField("", text: $draft)

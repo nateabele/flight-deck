@@ -19,12 +19,14 @@ final class TranscriptWatcherTests: XCTestCase {
         #"{"type":"custom-title","customTitle":"\#(title)","sessionId":"\#(sid.uuidString.lowercased())"}"# + "\n"
     }
 
-    /// All these tests prime the watcher with one `drain()` call while the file is still
-    /// empty (or missing) before writing the content under test. That mirrors production:
-    /// `start()` runs long before `claude` writes anything, so the watcher's first
-    /// *successful* look at the file normally finds it empty. See
-    /// `testSkipsContentThatExistedBeforeFirstDrain` for the case this priming is standing
-    /// in for — a restored session, where the file is already large on the first look.
+    /// Most of these tests prime the watcher with one `drain()` call while the file is
+    /// still empty (or missing) before writing the content under test, so that what they
+    /// assert about is unambiguously *appended* bytes. The two cases that decide where a
+    /// watcher starts reading at all are pinned separately:
+    /// `testSkipsContentThatExistedBeforeFirstDrain` (a restored session, whose file is
+    /// already large on the first look, must not be replayed) and
+    /// `testReportsATitleInAFileThatDidNotExistAtStart` (a fresh session, whose file is
+    /// created by `claude` with content already in it, must not be skipped).
 
     func testReportsTitleAppendedAfterStart() throws {
         let sid = UUID()
@@ -87,6 +89,35 @@ final class TranscriptWatcherTests: XCTestCase {
         try (line("late", sid)).data(using: .utf8)!.write(to: url)
         watcher.drain()
         XCTAssertEqual(seen, ["late"])
+    }
+
+    /// The counterpart to `testSkipsContentThatExistedBeforeFirstDrain`, and the case
+    /// production actually hits on every new session.
+    ///
+    /// `claude` buffers its startup records and does not create the transcript until it
+    /// first has something to persist — for a session renamed before its first turn, that
+    /// is the `/rename` itself. So the file does not appear empty and then grow, as
+    /// `testHandlesFileCreatedAfterStart` has it: it springs into existence with the rename
+    /// record already inside. Seeking past that on the first successful look swallowed the
+    /// record, which is why the *first* `/rename` of a session never reached the sidebar
+    /// while every later one did.
+    ///
+    /// Note the deliberately missing prime between creation and content: the file is made
+    /// and filled in one step, exactly as `claude` does it, so the watcher never gets a
+    /// look at it empty.
+    func testReportsATitleInAFileThatDidNotExistAtStart() throws {
+        let sid = UUID()
+        let url = dir.appendingPathComponent("born-with-content.jsonl")
+
+        var seen: [String] = []
+        let watcher = TranscriptWatcher(sessionID: sid, url: url) { seen.append($0) }
+        watcher.start()
+        watcher.drain()   // first look: `claude` is still booting, nothing on disk yet
+        XCTAssertTrue(seen.isEmpty, "a missing file reports nothing")
+
+        try (line("first", sid)).data(using: .utf8)!.write(to: url)
+        watcher.drain()
+        XCTAssertEqual(seen, ["first"], "a file created after we started watching is ours from byte 0")
     }
 
     /// A drain that lands mid-write must not consume the partial line: the next drain
