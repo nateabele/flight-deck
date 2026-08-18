@@ -74,6 +74,22 @@ struct SessionSnapshot: Codable, Equatable {
         }
     }
 
+    /// The terminal pane's content size when this snapshot was written.
+    ///
+    /// Points, not pixels: scale is a property of whichever display the app is on now, so a
+    /// snapshot written on a Retina display and reopened on a 1x one must not double the
+    /// column count. `CGSize` is deliberately not used — this file is a JSON schema, and
+    /// `CGSize`'s `Codable` conformance encodes as an unlabelled array.
+    struct TerminalSize: Codable, Equatable {
+        var width: Double
+        var height: Double
+
+        init(width: Double, height: Double) {
+            self.width = width
+            self.height = height
+        }
+    }
+
     var sessions: [Entry] = []
     /// Absent in v1 snapshots. Optional is load-bearing for exactly the reason
     /// `Entry.pinnedConversationID` is: synthesized `Codable` decodes an optional with
@@ -101,6 +117,16 @@ struct SessionSnapshot: Codable, Equatable {
     /// second concurrent instance would read the first instance's records and kill its live
     /// children.
     var owner: ProcessIdentity?
+
+    /// The size the terminal pane was last laid out at, so a relaunch can size each surface
+    /// before its shell can print anything. Without it every restored session spawns into
+    /// libghostty's placeholder 800x600 *pixel* grid — about 50 columns on a 2x display —
+    /// and hard-wraps its scrollback there permanently.
+    ///
+    /// Optional for the same load-bearing reason as `processes` above: synthesized `Codable`
+    /// decodes an optional with `decodeIfPresent`, so every existing `sessions.json` still
+    /// decodes instead of throwing and wiping every tab.
+    var terminalSize: TerminalSize?
 }
 
 @MainActor
