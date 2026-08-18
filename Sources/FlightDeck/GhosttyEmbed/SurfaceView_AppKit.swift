@@ -473,7 +473,22 @@ extension Ghostty {
             // here that we use "size" and NOT the view frame. If we're in the middle of
             // an animation (i.e. a fullscreen animation), the frame will not yet be updated.
             // The size represents our final size we're going for.
-            let scaledSize = self.convertToBacking(size)
+            //
+            // Flight Deck: `convertToBacking` returns the size *unchanged* for a view with no
+            // window, and this app sizes surfaces before they are ever parented — a restored
+            // session's shell is forked from `SessionStore.init`, long before SwiftUI builds the
+            // scene body. Falling back to the main screen's scale keeps that report honest, and
+            // matches what `SurfaceConfiguration.withCValue` already hands `ghostty_surface_new`
+            // as `scale_factor`. Once the view is in a window, `convertToBacking` is authoritative
+            // again — it accounts for which screen the window is actually on.
+            let scaledSize: CGSize
+            if window != nil {
+                scaledSize = convertToBacking(size)
+            } else {
+                let scale = NSScreen.main?.backingScaleFactor ?? 1
+                scaledSize = CGSize(width: size.width * scale, height: size.height * scale)
+            }
+
             setSurfaceSize(width: UInt32(scaledSize.width), height: UInt32(scaledSize.height))
             // Store this size so we can reuse it when backing properties change
             contentSize = size
