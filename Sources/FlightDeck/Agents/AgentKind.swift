@@ -28,8 +28,11 @@ struct AgentBinding: Equatable, Sendable {
 /// One state-bearing thing an agent reported. The single vocabulary `SessionStore` speaks;
 /// it never learns whether this arrived by tailing a file or by JSON-RPC notification.
 ///
-/// Widened from `ClaudeSession.TranscriptEvent`: `.activity` and `.subagentCount` are new,
-/// because codex pushes both where claude makes them be inferred.
+/// Not a superset of `ClaudeSession.TranscriptEvent` — it sits at a different level of
+/// abstraction. `TranscriptEvent`'s `agentStarted`/`agentFinished` are per-agent records;
+/// `AgentRuntime` folds those into a running count before they ever reach here, so
+/// `.subagentCount` carries the count, never an id. `.activity` has no `TranscriptEvent`
+/// counterpart at all — it comes from claude's status registry, not the transcript.
 enum AgentEvent: Equatable, Sendable {
     case title(String)
     case activity(SessionActivity)
