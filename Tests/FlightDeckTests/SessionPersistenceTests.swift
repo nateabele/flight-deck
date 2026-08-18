@@ -717,4 +717,28 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertNil(FileSessionPersistence(directory: dir, legacyDefaults: defaults).load())
     }
 
+    /// Snapshots predating the field must still decode, or the first launch after this
+    /// change wipes every tab.
+    func testSnapshotWithoutTerminalSizeDecodes() throws {
+        let id = UUID()
+        let json = """
+        {"sessions":[{"id":"\(id.uuidString)","title":"a","workingDirectory":"/w"}],\
+        "sessionCounter":1}
+        """
+        let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(json.utf8))
+
+        XCTAssertEqual(snapshot.sessions.first?.id, id)
+        XCTAssertNil(snapshot.terminalSize)
+    }
+
+    func testTerminalSizeRoundTrips() throws {
+        var snapshot = SessionSnapshot(sessions: [], sessionCounter: 0)
+        snapshot.terminalSize = .init(width: 742.5, height: 618)
+
+        let data = try JSONEncoder().encode(snapshot)
+        let decoded = try JSONDecoder().decode(SessionSnapshot.self, from: data)
+
+        XCTAssertEqual(decoded.terminalSize, .init(width: 742.5, height: 618))
+    }
+
 }
