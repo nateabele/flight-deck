@@ -289,6 +289,59 @@ final class SessionStore: ObservableObject {
         surfaces[id]?.sizeDidChange(size)
     }
 
+    /// Test seam. Production waits for a drag to settle before touching background surfaces;
+    /// tests capture the continuation and run it when they choose. Mirrors `injectionSettle`.
+    var resizeSettle: (@escaping () -> Void) -> Void = { work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    /// Bumped on every accepted resize so a superseded settle can identify itself and bow out.
+    /// A counter rather than a cancellable `DispatchWorkItem` because it keeps working
+    /// unchanged when a test substitutes a `resizeSettle` that runs inline.
+    private var resizeGeneration = 0
+
+    /// The terminal pane was laid out at a new size.
+    ///
+    /// The selected surface is told straight away — it is the one being watched, and its
+    /// reflow is the one the user is waiting to see. Every other live surface is told once,
+    /// after the drag settles. Telling them all per frame would cost one
+    /// `ghostty_surface_set_size` — a grid *and* scrollback reflow — per surface per frame,
+    /// and `setSurfaceSize`'s deduplication cannot help, because no two frames of a drag carry
+    /// the same size.
+    func terminalSizeDidChange(_ size: CGSize) {
+        guard size.width > 0, size.height > 0, size != terminalSize else { return }
+        terminalSize = size
+        if let selectedSessionID { report(size, to: selectedSessionID) }
+
+        resizeGeneration &+= 1
+        let generation = resizeGeneration
+        resizeSettle { [weak self] in
+            guard let self, self.resizeGeneration == generation else { return }
+            // Every live session, not "every surface except the selected one": selection can
+            // change between the resize and the settle, and `setSurfaceSize` already discards
+            // a repeat of an unchanged pixel size, so the redundant call costs nothing.
+            //
+            // Walks `repos`, not `surfaces.keys`: a session whose surface has not been created
+            // yet (or was never given one, as in tests) still belongs on the size, and
+            // `report(_:to:)` is a safe no-op for it either way.
+            for id in self.repos.flatMap(\.sessions).map(\.id) {
+                self.report(self.terminalSize, to: id)
+            }
+            // Persisted here rather than left to the next mutation, because "launch, resize the
+            // window, quit" contains no mutation — and once per drag gesture is cheap.
+            self.persist()
+        }
+    }
+
+    /// A tab was selected, so its surface may be carrying a grid from whenever it was last on
+    /// screen — or, for a tab restored and never opened, from its creation.
+    ///
+    /// Deliberately not routed through `terminalSizeDidChange`: that method dedupes against
+    /// the stored size, and here the stored size is exactly what has *not* changed.
+    func activateTerminalSize(for id: UUID) {
+        report(terminalSize, to: id)
+    }
+
     init(
         provider: SurfaceProvider?,
         persistence: SessionPersisting? = nil,
