@@ -253,6 +253,42 @@ final class SessionStore: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
     }
 
+    /// The terminal pane's content size in points — the single source of truth for how big
+    /// every surface's grid should be.
+    ///
+    /// It exists because there is nowhere else to ask. `restore()` runs inside
+    /// `SessionStore.init`, which is a `@StateObject` initializer, so every session's shell is
+    /// forked before SwiftUI has built the scene body: at spawn time there is no window to
+    /// measure. Seeded from the snapshot, updated by `TerminalHostView`, and handed to each
+    /// surface the moment it is created.
+    private(set) var terminalSize: CGSize = SessionStore.defaultTerminalSize
+
+    /// What to use on a first-ever launch, when no snapshot has a size to offer.
+    ///
+    /// Derived from the geometry `RootWindow` declares — `.defaultSize(width: 1000, height:
+    /// 700)` less the sidebar's 240pt ideal and the title bar. An estimate, and deliberately
+    /// so: it is only ever wrong for one launch, after which a real layout has been recorded.
+    static let defaultTerminalSize = CGSize(width: 760, height: 672)
+
+    /// Test seam. Production leaves this nil and sizing goes to the live surface — the same
+    /// arrangement as `injectorOverride`, and for the same reason: `SurfaceProvider` stubs
+    /// return nil surfaces, so there would otherwise be nothing to assert against.
+    var sizeReporterOverride: ((UUID, CGSize) -> Void)?
+
+    /// The one place a size reaches a surface.
+    ///
+    /// A zero-sized report is a normal transient state (a container added early, or to a
+    /// hierarchy that is not on screen yet); upstream Ghostty guards the same call the same
+    /// way in `SurfaceScrollView.synchronizeCoreSurface`.
+    private func report(_ size: CGSize, to id: UUID) {
+        guard size.width > 0, size.height > 0 else { return }
+        if let sizeReporterOverride {
+            sizeReporterOverride(id, size)
+            return
+        }
+        surfaces[id]?.sizeDidChange(size)
+    }
+
     init(
         provider: SurfaceProvider?,
         persistence: SessionPersisting? = nil,
@@ -502,6 +538,12 @@ final class SessionStore: ObservableObject {
         if let surface = created {
             surfaces[session.id] = surface
         }
+        // Before `tick()`, and before anything can be typed at the shell: `ghostty_surface_new`
+        // has already forked the child, and until this lands it is talking to libghostty's
+        // placeholder 800x600 *pixel* grid — about 50 columns on a 2x display. Anything the
+        // child prints in that window is hard-wrapped there for good, because reflow can only
+        // rejoin rows the terminal soft-wrapped, not rows the program broke itself.
+        report(terminalSize, to: session.id)
         provider?.tick()
 
         startWatching(
@@ -545,6 +587,15 @@ final class SessionStore: ObservableObject {
     ) -> Bool {
         guard repos.isEmpty else { return false }
         guard let snapshot = persistence?.load() else { return false }
+
+        // Above the emptiness guard on purpose. That guard returns early when the last run ended
+        // with every session closed, and `SessionStore.init` answers a false return by calling
+        // `seedInitialSession()` — which creates a surface that needs this size just as much as a
+        // restored one does.
+        if let size = snapshot.terminalSize {
+            terminalSize = CGSize(width: size.width, height: size.height)
+        }
+
         // Projects outlive their sessions, so a snapshot can legitimately carry projects and
         // no sessions — the state you get after closing every session but no project. The
         // old "no sessions means nothing to restore" guard would have discarded it.
@@ -658,7 +709,11 @@ final class SessionStore: ObservableObject {
             },
             projects: repos.map { .init(path: $0.url.path, isCollapsed: $0.isCollapsed) },
             selectedSessionID: selectedSessionID,
-            sessionCounter: sessionCounter
+            sessionCounter: sessionCounter,
+            // Written on every save rather than only when it changes: it is one small object, and
+            // the alternative is tracking dirtiness for a value whose whole job is to be present at
+            // the next launch.
+            terminalSize: .init(width: terminalSize.width, height: terminalSize.height)
         )
         let processes = Dictionary(
             uniqueKeysWithValues: processRegistry.all.map { ($0.key.uuidString, $0.value) }
