@@ -43,7 +43,9 @@ final class PreferencesStore: ObservableObject {
 
     init(persistence: PreferencesPersisting?) {
         self.persistence = persistence
-        self.preferences = persistence?.load() ?? Preferences()
+        var loaded = persistence?.load() ?? Preferences()
+        loaded.migrateAgentsIfNeeded()
+        self.preferences = loaded
     }
 
     convenience init() {
