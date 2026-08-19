@@ -3,9 +3,15 @@ import XCTest
 
 final class CodexEventMapperTests: XCTestCase {
     private func fixture(_ key: String) throws -> [String: Any] {
-        let url = try XCTUnwrap(Bundle(for: Self.self)
-            .url(forResource: "notifications", withExtension: "json", subdirectory: "Fixtures/Codex")
-            ?? Bundle(for: Self.self).url(forResource: "notifications", withExtension: "json"))
+        // No fallback to a subdirectory-less lookup: that would silently resolve a
+        // differently-scoped `notifications.json` if one ever existed elsewhere in the
+        // bundle (later tasks are expected to add `Fixtures/<Adapter>/` siblings). Fail
+        // loudly instead of matching ambiguously.
+        let url = try XCTUnwrap(
+            Bundle(for: Self.self)
+                .url(forResource: "notifications", withExtension: "json", subdirectory: "Fixtures/Codex"),
+            "Fixtures/Codex/notifications.json not found in the test bundle"
+        )
         let root = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
         )
@@ -46,6 +52,41 @@ final class CodexEventMapperTests: XCTestCase {
         XCTAssertEqual(
             CodexEventMapper.events(method: "item/completed", params: try fixture("oneFinished"), state: &state),
             [.subagentCount(1)]
+        )
+    }
+
+    func testSubagentCountTreatsUnfamiliarStateAsNotLive() throws {
+        var state = CodexThreadState()
+
+        // "quiescing" is not in `liveStates` — an unfamiliar value must read as finished so
+        // it can never pin the spinner on. Only "sub-a" (running) should count.
+        XCTAssertEqual(
+            CodexEventMapper.events(
+                method: "item/started", params: try fixture("spawnWithUnfamiliarState"), state: &state
+            ),
+            [.subagentCount(1)]
+        )
+    }
+
+    func testThreadStatusChangedMapsKnownStatusToActivity() throws {
+        var state = CodexThreadState()
+        XCTAssertEqual(
+            CodexEventMapper.events(
+                method: "thread/status/changed", params: try fixture("statusRunning"), state: &state
+            ),
+            [.activity(.busy)]
+        )
+    }
+
+    func testThreadStatusChangedIgnoresUnrecognizedStatus() throws {
+        var state = CodexThreadState()
+        // An unrecognized status must not overwrite a known activity with a guess — it
+        // produces nothing, explicitly not `.idle` or `.busy`.
+        XCTAssertEqual(
+            CodexEventMapper.events(
+                method: "thread/status/changed", params: try fixture("statusUnrecognized"), state: &state
+            ),
+            []
         )
     }
 
