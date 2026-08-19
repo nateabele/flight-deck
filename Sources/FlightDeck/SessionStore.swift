@@ -1181,6 +1181,7 @@ final class SessionStore: ObservableObject {
                 transcriptDirectory: transcriptDirectory,
                 pinnedConversationID: conversationID,
                 agent: entry.agent ?? .claude,
+                accountID: entry.accountID,
                 transcriptPath: entry.transcriptPath
             )
             let adapter = adapter(for: session.agent)
@@ -1368,6 +1369,7 @@ final class SessionStore: ObservableObject {
                     // that is meant to stay readable.
                     unread: unreadIdle.contains($0.id) ? true : nil,
                     agent: $0.agent,
+                    accountID: $0.accountID,
                     transcriptPath: $0.transcriptPath
                 )
             },

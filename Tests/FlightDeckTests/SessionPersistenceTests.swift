@@ -741,4 +741,24 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(decoded.terminalSize, .init(width: 742.5, height: 618))
     }
 
+    /// The migration that needs no migration: an absent key is nil is the built-in home.
+    func testASnapshotWithoutAnAccountDecodesAsNil() throws {
+        let json = Data(#"{"sessions":[{"id":"00000000-0000-0000-0000-000000000001","title":"s","workingDirectory":"/p"}],"sessionCounter":1}"#.utf8)
+        let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: json)
+        XCTAssertNil(snapshot.sessions[0].accountID)
+    }
+
+    func testAnAccountSurvivesTheRoundTrip() throws {
+        let id = UUID()
+        let entry = SessionSnapshot.Entry(
+            id: UUID(), title: "s", workingDirectory: "/p", accountID: id
+        )
+        var snapshot = SessionSnapshot()
+        snapshot.sessions = [entry]
+        let decoded = try JSONDecoder().decode(
+            SessionSnapshot.self, from: try JSONEncoder().encode(snapshot)
+        )
+        XCTAssertEqual(decoded.sessions[0].accountID, id)
+    }
+
 }

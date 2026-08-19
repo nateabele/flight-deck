@@ -40,6 +40,13 @@ struct SessionSnapshot: Codable, Equatable {
         var unread: Bool?
         /// Absent in every snapshot written before agent adapters; `nil` means claude.
         var agent: AgentID?
+        /// Absent in every snapshot written before accounts; `nil` means the agent's built-in
+        /// home, exactly as on `Session.accountID` — see that field's doc comment. Optional
+        /// for the same load-bearing reason as `pinnedConversationID` above: synthesized
+        /// `Codable` decodes an optional with `decodeIfPresent`, so every existing
+        /// `sessions.json` still decodes instead of throwing and wiping every tab on the
+        /// first launch after this change.
+        var accountID: UUID?
         /// An absolute transcript path reported by the agent, mirroring `Session.transcriptPath`.
         var transcriptPath: String?
 
@@ -52,6 +59,7 @@ struct SessionSnapshot: Codable, Equatable {
             activity: String? = nil,
             unread: Bool? = nil,
             agent: AgentID? = nil,
+            accountID: UUID? = nil,
             transcriptPath: String? = nil
         ) {
             self.id = id
@@ -62,6 +70,7 @@ struct SessionSnapshot: Codable, Equatable {
             self.activity = activity
             self.unread = unread
             self.agent = agent
+            self.accountID = accountID
             self.transcriptPath = transcriptPath
         }
     }
