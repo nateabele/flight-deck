@@ -78,6 +78,15 @@ struct Preferences: Codable, Equatable {
     /// An *empty* array is a different thing entirely: it means the user deleted every tool,
     /// and it must stay empty.
     var storedTools: [ToolDefinition]?
+    /// Ordered. Relative order *within one agent's* entries is that agent's default ordering:
+    /// the topmost is what a project with no explicit choice resolves to.
+    ///
+    /// Optional in storage for the same reason `storedAgents` is — see that property. `nil`
+    /// means "never migrated", which `migrateAccountsIfNeeded` fills in.
+    var storedAccounts: [AgentAccount]?
+    /// Keyed by standardized project path, replacing `projectFlags`. Optional for the same
+    /// reason; `migrateProjectSettingsIfNeeded` folds the old field in.
+    var storedProjectSettings: [String: ProjectSettings]?
 
     init(
         globalFlags: FlagSet = FlagSet(),
@@ -86,7 +95,9 @@ struct Preferences: Codable, Equatable {
         confirmations: ConfirmationPreferences? = nil,
         claude: ClaudePreferences? = nil,
         storedAgents: [AgentSettings]? = nil,
-        storedTools: [ToolDefinition]? = nil
+        storedTools: [ToolDefinition]? = nil,
+        storedAccounts: [AgentAccount]? = nil,
+        storedProjectSettings: [String: ProjectSettings]? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
@@ -95,6 +106,8 @@ struct Preferences: Codable, Equatable {
         self.claude = claude
         self.storedAgents = storedAgents
         self.storedTools = storedTools
+        self.storedAccounts = storedAccounts
+        self.storedProjectSettings = storedProjectSettings
     }
 
     /// Falls back to claude-then-codex so a `Preferences` that has never been migrated
@@ -166,5 +179,89 @@ struct Preferences: Codable, Equatable {
     mutating func migrateToolsIfNeeded(terminalCommand: String) {
         guard storedTools == nil else { return }
         storedTools = Self.defaultTools(terminalCommand: terminalCommand)
+    }
+
+    var accounts: [AgentAccount] {
+        get { storedAccounts ?? [] }
+        set { storedAccounts = newValue }
+    }
+
+    func accounts(for agent: AgentID) -> [AgentAccount] {
+        accounts.filter { $0.agent == agent }
+    }
+
+    var projectSettings: [String: ProjectSettings] {
+        get { storedProjectSettings ?? [:] }
+        set { storedProjectSettings = newValue }
+    }
+
+    /// Reorders one agent's accounts without disturbing any other agent's.
+    ///
+    /// `accounts` is one flat array, so offsets from a per-agent list cannot be applied to it
+    /// directly. This maps them back: pull out this agent's entries, reorder them, then write
+    /// them into the positions the flat array already reserved for that agent.
+    mutating func moveAccounts(forAgent agent: AgentID, fromOffsets source: IndexSet, toOffset destination: Int) {
+        var mine = accounts(for: agent)
+        mine.move(fromOffsets: source, toOffset: destination)
+        var reordered = mine.makeIterator()
+        accounts = accounts.map { $0.agent == agent ? (reordered.next() ?? $0) : $0 }
+    }
+
+    /// Seeds the built-in account per agent, then discovers siblings ONCE.
+    ///
+    /// Deliberately not a re-scan on later launches: a re-scan resurrects accounts the user
+    /// removed. The Accounts pane offers "Scan for Accounts…" for additions made afterwards.
+    mutating func migrateAccountsIfNeeded(
+        // Overridable so tests can migrate against a temp directory instead of the real
+        // `$HOME` — this scans for sibling account directories, which must never touch the
+        // developer's actual `~/.claude` / `~/.codex`.
+        homeRoot: URL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+    ) {
+        guard storedAccounts == nil else { return }
+        var seeded: [AgentAccount] = []
+        for agent in AgentID.allCases {
+            let builtIn = homeRoot.appendingPathComponent(agent.builtInHome.lastPathComponent, isDirectory: true)
+            seeded.append(AgentAccount(
+                agent: agent,
+                displayName: AccountDirectory.identity(atHome: builtIn, agent: agent)?.email ?? "Default",
+                home: builtIn,
+                cachedIdentity: AccountDirectory.identity(atHome: builtIn, agent: agent)
+            ))
+            for home in AccountDirectory.discover(in: homeRoot, agent: agent) {
+                let identity = AccountDirectory.identity(atHome: home, agent: agent)
+                seeded.append(AgentAccount(
+                    agent: agent,
+                    displayName: identity?.email ?? home.lastPathComponent,
+                    home: home,
+                    cachedIdentity: identity
+                ))
+            }
+        }
+        storedAccounts = seeded
+    }
+
+    /// Folds today's per-project claude flags into the per-agent record. Every existing project
+    /// lands in the unspecified state — no default agent, no account — with its flags intact.
+    mutating func migrateProjectSettingsIfNeeded() {
+        guard storedProjectSettings == nil else { return }
+        storedProjectSettings = projectFlags.mapValues {
+            ProjectSettings(options: [.claude: .claude($0)])
+        }
+    }
+
+    /// Makes `agents[claude].options` the single source for global claude flags.
+    ///
+    /// `globalFlags` and the claude agent row have held the same value in parallel since the
+    /// Agents tab shipped, with only the former being read. Two homes for one setting is
+    /// tolerable while nothing else writes either; it is not once per-(project, agent) options
+    /// exist. `globalFlags` stays as a decode-only legacy field.
+    mutating func migrateGlobalFlagsIfNeeded() {
+        guard let index = agents.firstIndex(where: { $0.id == .claude }),
+              case .claude(let existing) = agents[index].options, existing.isEmpty,
+              !globalFlags.isEmpty
+        else { return }
+        var list = agents
+        list[index].options = .claude(globalFlags)
+        agents = list
     }
 }
