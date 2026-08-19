@@ -41,6 +41,12 @@ struct ClaudeAdapter: AgentAdapter {
         )
     }
 
+    func location(for session: Session) -> AgentLocation {
+        // Claude encodes its live cwd into the transcript path and follows the agent into a
+        // worktree, so the transcript directory is where it is working.
+        AgentLocation(workingDirectory: session.transcriptDirectory, binding: binding(for: session))
+    }
+
     func launchCommand(_ binding: AgentBinding, _ session: Session, _ options: AgentOptions) -> String {
         ClaudeSession.launchCommand(
             sessionID: binding.conversationID, title: session.title, flags: flags(options)

@@ -32,9 +32,10 @@ protocol AgentAdapter {
 
     /// Where this session's agent is working right now, paired with its binding.
     ///
-    /// The one accessor the tools subsystem is allowed to use: `Session.transcriptDirectory`
-    /// reads as claude-specific and is not, so a caller reading it directly would be
-    /// hardcoding a coincidence rather than asking the agent.
+    /// Both shipped agents use `transcriptDirectory` as their working directory, but that is a
+    /// coincidence of two implementations, not a derivable rule — so every adapter states its
+    /// own answer and the compiler catches one that forgets. The tools subsystem reads through
+    /// this accessor alone, not `Session.transcriptDirectory` directly.
     func location(for session: Session) -> AgentLocation
 
     func launchCommand(_ binding: AgentBinding, _ session: Session, _ options: AgentOptions) -> String
@@ -62,14 +63,5 @@ extension AgentAdapter {
     /// able to report a failure.
     func rebind(for session: Session, options: AgentOptions) async throws -> AgentBinding {
         binding(for: session)
-    }
-
-    /// Both shipped agents agree that `transcriptDirectory` is where they are working —
-    /// `CodexAdapter.prepare` passes it as codex's own thread cwd, and its `launchCommand`
-    /// requires the pty to be spawned there. Stating that once here, rather than in every
-    /// adapter, is the same trade `rebind`'s default makes: an agent opts *in* to a different
-    /// answer instead of every adapter restating the common one.
-    func location(for session: Session) -> AgentLocation {
-        AgentLocation(workingDirectory: session.transcriptDirectory, binding: binding(for: session))
     }
 }

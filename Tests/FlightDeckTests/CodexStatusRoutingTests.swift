@@ -26,6 +26,10 @@ final class CodexStatusRoutingTests: XCTestCase {
             AgentBinding(conversationID: session.pinnedConversationID, transcriptURL: nil)
         }
 
+        func location(for session: Session) -> AgentLocation {
+            AgentLocation(workingDirectory: session.transcriptDirectory, binding: binding(for: session))
+        }
+
         func launchCommand(_ b: AgentBinding, _: Session, _: AgentOptions) -> String {
             "codex resume \(b.conversationID.uuidString.lowercased())\n"
         }

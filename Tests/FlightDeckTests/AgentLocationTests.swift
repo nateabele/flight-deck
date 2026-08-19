@@ -1,9 +1,9 @@
 import XCTest
 @testable import FlightDeck
 
-/// The seam that keeps claude's path derivation out of the tools subsystem. These tests pin
-/// that a location is the ADAPTER's answer — not a field read — which is what makes a third
-/// agent able to disagree.
+/// The seam that keeps an agent's path derivation out of the tools subsystem. Each adapter
+/// states its own location, and the requirement is overridable — so a third agent can decline
+/// to use transcriptDirectory and the compiler catches one that forgets to implement it.
 @MainActor
 final class AgentLocationTests: XCTestCase {
     private func session(cwd: String, live: String) -> Session {
@@ -49,5 +49,24 @@ final class AgentLocationTests: XCTestCase {
         func launchCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
         func resumeCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
         func rename(_: AgentBinding, to: String) async throws {}
+    }
+
+    func testCodexReportsTheAgentsLiveDirectoryAndItsOwnBinding() {
+        // Codex also uses transcriptDirectory as its working directory: prepare passes it as
+        // the thread's own cwd, and launchCommand requires the pty to spawn there.
+        let transport = MinimalCodexTransport()
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: transport))
+        let s = session(cwd: "/w/a", live: "/w/a/.claude/worktrees/tools")
+        let location = adapter.location(for: s)
+
+        XCTAssertEqual(location.workingDirectory, "/w/a/.claude/worktrees/tools")
+        XCTAssertEqual(location.binding, adapter.binding(for: s),
+                       "location must carry the adapter's own binding")
+    }
+
+    /// Minimal transport that doesn't respond to anything — location(for:) doesn't make RPC calls.
+    private class MinimalCodexTransport: CodexTransport {
+        var onLine: ((String) -> Void)?
+        func send(_: String) {}
     }
 }

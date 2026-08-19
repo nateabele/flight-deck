@@ -54,6 +54,12 @@ struct CodexAdapter: AgentAdapter {
         )
     }
 
+    func location(for session: Session) -> AgentLocation {
+        // `prepare` passes transcriptDirectory as codex's own thread cwd via
+        // `asThreadStartParams(cwd:)`, and `launchCommand` requires the pty to be spawned there.
+        AgentLocation(workingDirectory: session.transcriptDirectory, binding: binding(for: session))
+    }
+
     /// Launch and resume are the same command: the thread already exists by the time any
     /// terminal opens, so there is no "first run" to distinguish.
     ///
