@@ -6,8 +6,9 @@ import XCTest
 /// The store used to answer `options(for: .codex, project:)` with a hardcoded
 /// `CodexThreadOptions()`, so every control in that pane was inert — a user who chose the
 /// `read-only` sandbox silently got codex's default instead, which is a safety expectation
-/// the UI was breaking. Claude never had this problem because `ClaudeOptionsPane` binds
-/// `globalFlags`, which is what `resolvedFlags` reads.
+/// the UI was breaking. Claude never had this problem because `ClaudeOptionsPane` binds the
+/// claude row in `preferences.agents`, which is exactly what `resolvedOptions(for:project:)`
+/// reads.
 @MainActor
 final class CodexOptionsRoutingTests: XCTestCase {
     private final class MemoryPreferences: PreferencesPersisting {

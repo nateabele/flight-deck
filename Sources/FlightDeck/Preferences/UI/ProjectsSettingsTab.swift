@@ -10,7 +10,7 @@ struct ProjectsSettingsTab: View {
 
     private var paths: [String] {
         let open = sessions.repos.map(\.url.standardizedFileURL.path)
-        return Array(Set(open).union(preferences.overriddenProjectPaths)).sorted()
+        return Array(Set(open).union(preferences.configuredProjectPaths)).sorted()
     }
 
     var body: some View {
@@ -25,7 +25,7 @@ struct ProjectsSettingsTab: View {
                             .lineLimit(1)
                             .truncationMode(.head)
                     }
-                    .badge(preferences.projectOverride(path).isEmpty ? nil : Text("override"))
+                    .badge(claudeFlags(for: path).isEmpty ? nil : Text("override"))
                     .tag(path)
                 }
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220)
@@ -42,9 +42,9 @@ struct ProjectsSettingsTab: View {
                             Text(selected).font(.caption).foregroundStyle(.secondary)
                             Spacer()
                             Button("Remove Override") {
-                                preferences.removeProjectOverride(selected)
+                                removeOverride(selected)
                             }
-                            .disabled(preferences.projectOverride(selected).isEmpty)
+                            .disabled(claudeFlags(for: selected).isEmpty)
                         }
                         .padding(.horizontal, 12)
                         .padding(.top, 8)
@@ -85,15 +85,36 @@ struct ProjectsSettingsTab: View {
         }
     }
 
+    /// Reads the claude override straight out of `ProjectSettings.options`, so this pane and
+    /// `PreferencesStore.resolvedOptions(for:project:)` can never disagree about what a project
+    /// carries.
+    private func claudeFlags(for path: String) -> FlagSet {
+        guard case .claude(let flags)? = preferences.projectSettings(path).options[.claude] else {
+            return FlagSet()
+        }
+        return flags
+    }
+
+    private func removeOverride(_ path: String) {
+        var settings = preferences.projectSettings(path)
+        settings.options[.claude] = nil
+        preferences.setProjectSettings(path, settings)
+    }
+
     private func binding(for path: String) -> Binding<FlagSet> {
         Binding(
-            get: { preferences.projectOverride(path) },
+            get: { claudeFlags(for: path) },
             set: {
                 // An emptied override is a removal, not an empty override: persisting the
                 // empty set would keep the project listed forever with its badge hidden
                 // and its Remove button disabled, leaving no way to delete it.
-                $0.isEmpty ? preferences.removeProjectOverride(path)
-                           : preferences.setProjectOverride(path, $0)
+                if $0.isEmpty {
+                    removeOverride(path)
+                } else {
+                    var settings = preferences.projectSettings(path)
+                    settings.options[.claude] = .claude($0)
+                    preferences.setProjectSettings(path, settings)
+                }
             }
         )
     }

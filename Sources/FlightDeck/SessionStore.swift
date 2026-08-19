@@ -199,15 +199,16 @@ final class SessionStore: ObservableObject {
     ///
     /// `project` is a path, not a session: preferences are resolved from the project a tab is
     /// *filed under*, which is not where `claude` is necessarily writing. See `restore`.
+    ///
+    /// One resolution path for both agents: `PreferencesStore.resolvedOptions(for:project:)`
+    /// merges the project's per-agent override over the global row, claude and codex alike.
+    /// This used to hand codex a hardcoded `CodexThreadOptions()`, which made every control in
+    /// the Codex pane inert — a user who chose the `read-only` sandbox silently got codex's
+    /// default.
     private func options(for agent: AgentID, project: String) -> AgentOptions {
         switch agent {
-        case .claude: .claude(preferences?.resolvedFlags(forProject: project) ?? FlagSet())
-        // This used to be a hardcoded `CodexThreadOptions()`, which made every control in
-        // the Codex pane inert — a user who chose the `read-only` sandbox silently got
-        // codex's default. `project` is unused for codex on purpose: codex has no
-        // per-project override storage (claude's `projectFlags` has no counterpart), so
-        // there is one global row and it is looked up by id, never by position.
-        case .codex: .codex(preferences?.resolvedCodexOptions() ?? CodexThreadOptions())
+        case .claude: return preferences?.resolvedOptions(for: agent, project: project) ?? .claude(FlagSet())
+        case .codex:  return preferences?.resolvedOptions(for: agent, project: project) ?? .codex(CodexThreadOptions())
         }
     }
 
