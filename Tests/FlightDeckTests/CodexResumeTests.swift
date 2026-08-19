@@ -105,74 +105,200 @@ final class CodexResumeTests: XCTestCase {
         CodexRuntime(rpc: CodexRPC(transport: SilentTransport()))
     }
 
-    /// The hazard in one line: a `thread/read` issued by the first notification answering
-    /// after a second notification has already moved the tab on.
-    func testALateReconcileResultIsDroppedWhenANotificationLandedFirst() {
-        let runtime = makeRuntime()
-        var events: [AgentEvent] = []
-        runtime.attach(AgentBinding(conversationID: existing, transcriptURL: nil)) { events.append($0) }
+    /// Holds each reconcile open until the test lets it home, and stamps what it read with
+    /// the order it was issued in — which is what makes "the *first* read landed after the
+    /// second one was issued" expressible at all.
+    /// `@MainActor` explicitly: a nested type does not inherit its enclosing type's
+    /// isolation, and a gate that hops actors would race the very ordering it is measuring.
+    @MainActor
+    private final class ReadGate {
+        private var gates: [CheckedContinuation<Void, Never>] = []
 
-        let id = existing.uuidString.lowercased()
-        runtime.handle(method: "turn/started", params: ["threadId": id])
-        runtime.handle(method: "thread/name/updated", params: ["threadId": id, "threadName": "newer"])
-        runtime.applyReconciled(title: "stale", activity: .idle, for: existing)
+        /// Derived from `gates` rather than counted separately, which is load-bearing: a
+        /// counter bumped *before* `withCheckedContinuation` lets `waitForReads` return in the
+        /// window before the continuation is parked, and `release` then finds nothing.
+        var issued: Int { gates.count }
 
-        XCTAssertEqual(events, [.activity(.busy), .title("newer")],
-                       "a read that predates the rename must not flick the title back")
+        func hold() async {
+            await withCheckedContinuation { gates.append($0) }
+        }
+
+        /// Fails rather than traps when the read was never issued: a guard that abandons a
+        /// reconcile is a test failure, not a reason to take the whole suite down.
+        func release(_ index: Int) {
+            guard index < gates.count else { return XCTFail("read \(index + 1) was never issued") }
+            gates[index].resume()
+        }
+
+        /// Spins the main actor until `count` reads are parked. Bounded so a regression fails
+        /// the assertion below rather than hanging the suite.
+        func waitForReads(_ count: Int) async {
+            var spins = 0
+            while issued < count, spins < 10_000 {
+                await Task.yield()
+                spins += 1
+            }
+        }
     }
 
-    func testAReconcileResultAppliesWhenNothingMovedUnderIt() {
-        let runtime = makeRuntime()
+    /// The production wire itself: `reconcileByReading` must issue a real `thread/read` and
+    /// deliver what it answers. Every other test here injects its own closure, so without
+    /// this one the requirement-4 deliverable — the closure `CodexStack.init` installs —
+    /// would have no coverage at all.
+    func testTheProductionWireReadsTheThreadAndAppliesWhatItSays() async {
+        let t = ScriptedTransport()
+        let rpc = CodexRPC(transport: t)
+        let runtime = CodexRuntime(rpc: rpc)
+        runtime.reconcileByReading(with: CodexAdapter(rpc: rpc))
         var events: [AgentEvent] = []
         runtime.attach(AgentBinding(conversationID: existing, transcriptURL: nil)) { events.append($0) }
 
-        let id = existing.uuidString.lowercased()
-        runtime.handle(method: "turn/started", params: ["threadId": id])
-        runtime.applyReconciled(title: "restored", activity: .idle, for: existing)
+        runtime.handle(method: "turn/started", params: ["threadId": existing.uuidString.lowercased()])
+        for _ in 0..<50 where events.count < 3 { await Task.yield() }
 
+        XCTAssertEqual(t.methods, ["thread/read"])
         XCTAssertEqual(events, [.activity(.busy), .title("restored"), .activity(.idle)])
     }
 
-    /// The same guard driven the way production drives it: through the injected `reconcile`,
-    /// which is `async` while `handle` is not. The gate holds the read open across a
-    /// notification, which is exactly the interleaving that cannot be produced by calling
-    /// `applyReconciled` directly.
+    /// The guard driven the way production drives it: through the injected `reconcile`, which
+    /// is `async` while `handle` is not. The gate holds the read open across a notification,
+    /// which is the interleaving that genuinely makes a read stale.
     func testAScheduledReconcileCannotOverwriteANotificationThatBeatItHome() async {
         let runtime = makeRuntime()
         var events: [AgentEvent] = []
         runtime.attach(AgentBinding(conversationID: existing, transcriptURL: nil)) { events.append($0) }
-
-        var release: (() -> Void)?
+        let gate = ReadGate()
         runtime.reconcile = { [weak runtime] id in
-            await withCheckedContinuation { continuation in release = { continuation.resume() } }
+            await gate.hold()
             runtime?.applyReconciled(title: "stale", activity: .busy, for: id)
         }
 
         let id = existing.uuidString.lowercased()
         runtime.handle(method: "turn/started", params: ["threadId": id])
-        while release == nil { await Task.yield() }
+        await gate.waitForReads(1)
         runtime.handle(method: "turn/completed", params: ["threadId": id])
-        release?()
+        gate.release(0)
         await Task.yield()
 
         XCTAssertEqual(events, [.activity(.busy), .activity(.idle), .turnEnded],
                        "the turn ended while the read was in flight; the read must not revive it")
     }
 
+    /// `CodexProcessTransport` delivers every line of one pipe chunk in a single synchronous
+    /// loop, so first contact is routinely a *burst* — and the whole burst lands before the
+    /// scheduled `Task` has issued anything. None of it can make a read stale: the read has
+    /// not been sent yet, and codex answers it with everything those notifications reported.
+    /// Invalidating on them drops the reconcile deterministically for the ordinary shape of a
+    /// turn, which is exactly the case it exists to serve.
+    func testAFirstContactBurstDoesNotDropTheReconcileItScheduled() async {
+        let runtime = makeRuntime()
+        var events: [AgentEvent] = []
+        runtime.attach(AgentBinding(conversationID: existing, transcriptURL: nil)) { events.append($0) }
+        let gate = ReadGate()
+        runtime.reconcile = { [weak runtime] id in
+            await gate.hold()
+            runtime?.applyReconciled(title: "read", activity: nil, for: id)
+        }
+
+        let id = existing.uuidString.lowercased()
+        // One chunk, delivered synchronously: a turn beginning, an item that maps to nothing,
+        // and a rename. The `Task` cannot have run yet.
+        runtime.handle(method: "turn/started", params: ["threadId": id])
+        runtime.handle(method: "item/started", params: ["threadId": id, "item": ["type": "assistantMessage"]])
+        runtime.handle(method: "thread/name/updated", params: ["threadId": id, "threadName": "burst"])
+        await gate.waitForReads(1)
+        gate.release(0)
+        await Task.yield()
+
+        XCTAssertEqual(events, [.activity(.busy), .title("burst"), .title("read")],
+                       "nothing that arrived before the read was issued can have made it stale")
+    }
+
+    /// A notification that maps to no events changed nothing, so it cannot invalidate a read
+    /// in flight either.
+    func testANotificationThatChangesNothingDoesNotInvalidateAReadInFlight() async {
+        let runtime = makeRuntime()
+        var events: [AgentEvent] = []
+        runtime.attach(AgentBinding(conversationID: existing, transcriptURL: nil)) { events.append($0) }
+        let gate = ReadGate()
+        runtime.reconcile = { [weak runtime] id in
+            await gate.hold()
+            runtime?.applyReconciled(title: "read", activity: nil, for: id)
+        }
+
+        let id = existing.uuidString.lowercased()
+        runtime.handle(method: "turn/started", params: ["threadId": id])
+        await gate.waitForReads(1)
+        // An unrecognised status maps to `[]` — see `CodexEventMapper.activity(forThreadStatus:)`.
+        runtime.handle(method: "thread/status/changed",
+                       params: ["threadId": id, "status": ["type": "somethingNew"]])
+        gate.release(0)
+        await Task.yield()
+
+        XCTAssertEqual(events, [.activity(.busy), .title("read")])
+    }
+
+    /// A read that was overtaken is retried on the next notification rather than abandoned
+    /// for the life of the attachment.
+    func testAnOvertakenReconcileIsRetriedRatherThanAbandoned() async {
+        let runtime = makeRuntime()
+        var events: [AgentEvent] = []
+        runtime.attach(AgentBinding(conversationID: existing, transcriptURL: nil)) { events.append($0) }
+        let gate = ReadGate()
+        runtime.reconcile = { [weak runtime] id in
+            let attempt = gate.issued + 1
+            await gate.hold()
+            runtime?.applyReconciled(title: "read\(attempt)", activity: nil, for: id)
+        }
+
+        let id = existing.uuidString.lowercased()
+        runtime.handle(method: "turn/started", params: ["threadId": id])
+        await gate.waitForReads(1)
+        runtime.handle(method: "thread/name/updated", params: ["threadId": id, "threadName": "live"])
+        gate.release(0)                     // dropped: overtaken by the rename
+        await Task.yield()
+        runtime.handle(method: "turn/completed", params: ["threadId": id])
+        await gate.waitForReads(2)
+        gate.release(1)
+        await Task.yield()
+
+        XCTAssertFalse(events.contains(.title("read1")), "the overtaken read must not land")
+        XCTAssertEqual(events.last, .title("read2"), "but the tab must still get reconciled")
+    }
+
     /// A reconcile answering for an attachment that has since been replaced is stale by
-    /// construction: the new attachment reconciles on its own first contact.
-    func testAReconcileForAReattachedThreadIsDropped() {
+    /// construction, however far the replacement's own counter has got. Latent today — no
+    /// codex path detaches and re-attaches one conversation id — but this is the exact
+    /// failure class the guard exists to remove, so it is closed by identity rather than by
+    /// counting.
+    func testAReconcileForAReattachedThreadIsDropped() async {
         let runtime = makeRuntime()
         let binding = AgentBinding(conversationID: existing, transcriptURL: nil)
+        let gate = ReadGate()
+        runtime.reconcile = { [weak runtime] id in
+            let attempt = gate.issued + 1
+            await gate.hold()
+            runtime?.applyReconciled(title: "read\(attempt)", activity: nil, for: id)
+        }
+        let id = existing.uuidString.lowercased()
+
         runtime.attach(binding) { _ in }
-        runtime.handle(method: "turn/started", params: ["threadId": existing.uuidString.lowercased()])
+        runtime.handle(method: "turn/started", params: ["threadId": id])
+        await gate.waitForReads(1)
 
         var events: [AgentEvent] = []
         runtime.detach(binding)
         runtime.attach(binding) { events.append($0) }
-        runtime.applyReconciled(title: "stale", activity: .idle, for: existing)
+        runtime.handle(method: "turn/started", params: ["threadId": id])
+        await gate.waitForReads(2)
 
-        XCTAssertTrue(events.isEmpty)
+        gate.release(0)                     // the replaced attachment's read comes home
+        await Task.yield()
+        gate.release(1)
+        await Task.yield()
+
+        XCTAssertEqual(events, [.activity(.busy), .title("read2")],
+                       "a counter that restarts at attach must not let read1 match read2's slot")
     }
 
     // MARK: - Restore

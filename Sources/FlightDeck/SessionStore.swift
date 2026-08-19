@@ -231,24 +231,12 @@ final class SessionStore: ObservableObject {
             // the failure mode `CodexRPC` documents as the worst it can have. Weak so the
             // transport's callback does not retain the client that already owns it.
             transport.onTerminate = { [weak rpc] in rpc?.transportClosed() }
-            // Reconcile-on-first-contact, finally pointed at `thread/read`.
-            //
-            // This closure reads and nothing else. The ordering hazard it would otherwise
-            // have — `reconcile` is `async` while `CodexRuntime.handle` is not, so an answer
-            // can arrive after later notifications have already advanced the tab — is solved
-            // by handing the result back to `applyReconciled` rather than applying it here:
-            // that is where the per-thread version counter lives, and it drops a read a
-            // notification overtook. Nothing in here may write tab state directly.
-            //
-            // The adapter is captured by value (a struct over the same `rpc`); the runtime
-            // weakly, because it is what owns this closure.
-            let reader = adapter
-            runtime.reconcile = { [weak runtime] id in
-                guard let state = try? await reader.read(
-                    AgentBinding(conversationID: id, transcriptURL: nil)
-                ) else { return }
-                runtime?.applyReconciled(title: state.title, activity: state.activity, for: id)
-            }
+            // Reconcile-on-first-contact, finally pointed at `thread/read`. The ordering
+            // hazard that goes with it — `reconcile` is `async` while `CodexRuntime.handle`
+            // is not, so an answer can arrive after later notifications have already advanced
+            // the tab — is solved inside the runtime, which is also why this is one call
+            // rather than a closure written here: see `CodexRuntime.reconcileByReading`.
+            runtime.reconcileByReading(with: adapter)
         }
     }
 
@@ -1197,6 +1185,18 @@ final class SessionStore: ObservableObject {
             // and re-pinning it would file state against a row that no longer exists.
             guard let session = session(for: tabID) else { continue }
             let options = options(for: .codex, project: session.workingDirectory)
+
+            // A failed probe or handshake tore the stack down — `startCodex` calls
+            // `stopCodex` so the next attempt re-probes rather than replaying the failure —
+            // and that orphaned the attachment `insertSession` made: it names a `CodexRuntime`
+            // belonging to a stack the store has already forgotten, so `runtime(for:)` now
+            // answers from a *new* one and this tab's events would arrive at an object nobody
+            // is listening to. Re-attaching is the same fix requirement 3 exists for, on the
+            // path where codex is missing or broken and the tab most needs to behave sanely.
+            if prepared == nil {
+                stopWatching(tabID)
+                startWatching(tabID: tabID)
+            }
 
             var binding = adapter.binding(for: session)
             if prepared != nil,
