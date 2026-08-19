@@ -9,6 +9,9 @@ struct RootView: View {
     /// re-created so it is the same instance the Settings scene edits.
     var preferences: PreferencesStore?
 
+    @StateObject private var overlayModel = ToolOverlayModel()
+    @StateObject private var overlayMonitor = ToolOverlayInputMonitorBox()
+
     var body: some View {
         NavigationSplitView {
             SessionSidebar(store: store, preferences: preferences)
@@ -17,10 +20,21 @@ struct RootView: View {
             if let surface = store.selectedSessionID.flatMap({ store.surface(for: $0) }) {
                 TerminalPane(store: store)
                     .frame(minWidth: 400, minHeight: 300)
-                    // The find bar floats over the terminal rather than shrinking it: the
-                    // grid would otherwise reflow every time the bar opened or closed.
+                    // Both float rather than shrinking the terminal: the grid would otherwise
+                    // reflow every time either one appeared. Stacked so the find bar and the
+                    // tool cluster never contend for the same corner.
                     .overlay(alignment: .topTrailing) {
-                        SearchOverlay(surface: surface)
+                        VStack(alignment: .trailing, spacing: 0) {
+                            SearchOverlay(surface: surface)
+                            if let preferences {
+                                ToolOverlay(
+                                    store: store,
+                                    preferences: preferences,
+                                    model: overlayModel,
+                                    monitor: overlayMonitor.monitor
+                                )
+                            }
+                        }
                     }
             } else {
                 ContentUnavailableView {

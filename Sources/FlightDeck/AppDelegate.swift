@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import UserNotifications
 
 /// App-level delegate: notification handling and the last-window-closed policy.
@@ -21,6 +22,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// having landed.
     private weak var store: SessionStore?
 
+    /// Owned here rather than by a SwiftUI scene: it inserts an AppKit menu into
+    /// `NSApp.mainMenu`, which is app-level state with no SwiftUI owner. `lazy` rather than an
+    /// eager default: `ToolsMenuController.init` is main-actor-isolated, and `AppDelegate`'s
+    /// own (synthesized) init is not, so construction has to be deferred to first access from
+    /// `installToolsMenu`, which is on the main actor.
+    @MainActor
+    private lazy var toolsMenu = ToolsMenuController()
+
+    /// Watches `PreferencesStore.tools` so the menu stays in sync with edits made in the
+    /// Settings window. Torn down implicitly on dealloc, same as any other `AnyCancellable`.
+    private var toolsObserver: AnyCancellable?
+
     /// Registered before launch completes, which is required for the delegate to
     /// receive a click that launched or foregrounded the app. The store-ready observer is
     /// registered here rather than in `applicationDidFinishLaunching` for the same reason: a
@@ -30,12 +43,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             forName: .flightDeckStoreReady, object: nil, queue: .main
         ) { [weak self] note in
-            MainActor.assumeIsolated { self?.store = note.object as? SessionStore }
+            MainActor.assumeIsolated {
+                self?.store = note.object as? SessionStore
+                // The store can arrive after `applicationDidFinishLaunching` already tried
+                // and bailed out for lack of one, so installation is retried from here too.
+                self?.installToolsMenu()
+            }
         }
+    }
+
+    /// SwiftUI builds `NSApp.mainMenu` asynchronously, so it may not exist yet when the
+    /// store-ready notification lands above — this is the second, order-independent attempt.
+    /// `installToolsMenu` is idempotent, so trying twice just means one of the two calls does
+    /// the real work.
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        installToolsMenu()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    /// Wires the Tools menu to the live store and its preferences. Safe to call more than
+    /// once — see the two call sites above — because `install(in:)` removes any previous copy
+    /// before inserting, and every closure assigned here is idempotent to reassign.
+    @MainActor
+    private func installToolsMenu() {
+        // Same fallback as `applicationShouldTerminate`: the store-ready notification is not
+        // guaranteed to have landed yet, so `SessionStore.current` covers the gap.
+        let store = MainActor.assumeIsolated { self.store ?? SessionStore.current }
+        guard let store else { return }
+        guard let preferences = store.preferences else { return }
+
+        toolsMenu.isEnabled = { [weak store] in store?.selectedSessionID != nil }
+        toolsMenu.run = { [weak store] tool in
+            guard let store else { return }
+            ToolRunner.run(tool, store: store, launcher: ShellToolLauncher())
+        }
+        toolsMenu.openPreferences = {
+            // macOS renamed this selector at some point; a menu item that silently does
+            // nothing is worse than trying both spellings.
+            if !NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
+                _ = NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+            }
+        }
+        toolsMenu.tools = preferences.tools
+
+        toolsObserver = preferences.objectWillChange.sink { [weak self, weak preferences] _ in
+            // `objectWillChange` fires BEFORE the mutation lands, so the read has to happen on
+            // the next main-queue turn — and only reassign when the value actually changed, or
+            // every unrelated preference edit would rebuild the menu.
+            DispatchQueue.main.async { [weak self, weak preferences] in
+                guard let self, let preferences else { return }
+                if self.toolsMenu.tools != preferences.tools {
+                    self.toolsMenu.tools = preferences.tools
+                }
+            }
+        }
+
+        if let mainMenu = NSApp.mainMenu { toolsMenu.install(in: mainMenu) }
     }
 
     /// Quitting used to kill nothing: the app just exited and left the kernel to SIGHUP each
