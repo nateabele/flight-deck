@@ -2980,7 +2980,7 @@ That is the point of the split. The alternative, a server that reaches into the 
 - Consumes: `FleetTLS` (Task 6), `ClientFrame`/`ServerFrame` (Task 5).
 - Produces:
   - `public final class FleetSocketServer` — `init(queue:)`, `start(keys:port:) throws -> NWEndpoint.Port`, `stop()`, `broadcast(_: ServerFrame)`, `var onHello: ((UUID, Int) -> [ServerFrame])?`, `var onCommand: ((UUID, Int, FleetCommand) -> ServerFrame)?`, `var onAttachedCountChanged: ((Int) -> Void)?`, `var authDeadline: TimeInterval`.
-  - `public final class FleetClient` — `init(key:queue:)`, `connect(to: NWEndpoint, lastSeq: Int)`, `disconnect()`, `send(_: FleetCommand) -> Int`, `var onFrame: ((ServerFrame) -> Void)?`, `var onReady: (() -> Void)?`, `var onDisconnect: ((Error?) -> Void)?`.
+  - `public final class FleetClient` — `init(key:queue:)`, `connect(to: NWEndpoint, lastSeq: Int)`, `disconnect()`, `send(_: FleetCommand) -> Int`, `var onFrame: ((ServerFrame) -> Void)?`, `var onReady: (() -> Void)?`, `var onDisconnect: ((Error?) -> Void)?` — **guaranteed to fire at most once per connection, and never for a `disconnect()` the caller asked for.**
 - Task 12 wires the server's closures to the store.
 
 - [ ] **Step 1: Write the failing test**
@@ -3126,6 +3126,53 @@ final class FleetSocketLoopbackTests: XCTestCase {
         // A refusal can also present as silence; either way `onHello` must not have run,
         // which is what the XCTFail above asserts.
         _ = XCTWaiter().wait(for: [refused], timeout: 8)
+    }
+
+    /// One dropped socket must produce exactly one `onDisconnect`. Three code paths reach
+    /// that closure and a single failure trips at least two of them, so without the guard the
+    /// reconnect policy built on it schedules a retry per firing.
+    func testDisconnectIsReportedAtMostOncePerConnection() throws {
+        let key = FleetDeviceKey.mint()
+        let port = try startServer(key: key, hello: { _, _ in
+            [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)]
+        })
+        let client = connect(key: key, port: port)
+        let attached = expectation(description: "attached")
+        server?.onAttachedCountChanged = { if $0 == 1 { attached.fulfill() } }
+        wait(for: [attached], timeout: 10)
+
+        var endings = 0
+        client.onDisconnect = { _ in endings += 1 }
+        // Drop the socket from the far end, which is what a Mac going away looks like.
+        server?.stop()
+
+        let settled = expectation(description: "settled")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { settled.fulfill() }
+        wait(for: [settled], timeout: 10)
+        XCTAssertEqual(endings, 1, "onDisconnect fired \(endings) times for one drop")
+    }
+
+    /// A teardown we asked for is not a disconnection to react to. If `disconnect()` reported
+    /// through `onDisconnect`, a client that raced several endpoints and cancelled the losers
+    /// would immediately try to reconnect to each of them.
+    func testAskingToDisconnectDoesNotReportADisconnection() throws {
+        let key = FleetDeviceKey.mint()
+        let port = try startServer(key: key, hello: { _, _ in
+            [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)]
+        })
+        let client = connect(key: key, port: port)
+        let attached = expectation(description: "attached")
+        server?.onAttachedCountChanged = { if $0 == 1 { attached.fulfill() } }
+        wait(for: [attached], timeout: 10)
+
+        var endings = 0
+        client.onDisconnect = { _ in endings += 1 }
+        client.disconnect()
+
+        let settled = expectation(description: "settled")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { settled.fulfill() }
+        wait(for: [settled], timeout: 10)
+        XCTAssertEqual(endings, 0, "a self-initiated teardown must not read as a drop")
     }
 
     /// A peer that completes a handshake and then says nothing must not hold a slot open
@@ -3374,6 +3421,22 @@ public final class FleetClient {
     private var connection: NWConnection?
     private var nextCID = 1
 
+    /// Guards `onDisconnect` so it fires at most once per connection, and never for a
+    /// teardown we asked for ourselves.
+    ///
+    /// Three independent paths reach it — `stateUpdateHandler`'s `.failed`, its `.cancelled`,
+    /// and the receive loop's `onEnd` — and one dropped socket trips at least two of them,
+    /// because `receiveMessage` errors at the same moment the state goes `.failed`.
+    /// Network.framework adds a third: calling `cancel()` on a connection that has already
+    /// reached a terminal state still delivers a further asynchronous `.cancelled`, which was
+    /// measured while building the TLS handshake tests (it double-fulfilled an
+    /// `XCTestExpectation` and aborted the test host).
+    ///
+    /// The consumer of `onDisconnect` schedules a reconnect, so an unguarded closure turns a
+    /// single drop into a retry storm — and a deliberate `disconnect()` into a reconnect of
+    /// the thing we just chose to stop talking to.
+    private var hasEnded = false
+
     public init(key: FleetDeviceKey, queue: DispatchQueue = .main) {
         self.key = key
         self.queue = queue
@@ -3381,6 +3444,9 @@ public final class FleetClient {
 
     public func connect(to endpoint: NWEndpoint, lastSeq: Int) {
         disconnect()
+        // Cleared after `disconnect()`, which sets it: the flag is per-connection, and this
+        // is a new one.
+        hasEnded = false
         let parameters = FleetSocket.webSocketParameters(
             FleetTLS.clientParameters(key: key)
         )
@@ -3395,9 +3461,9 @@ public final class FleetClient {
                 FleetSocket.send(ClientFrame.hello(lastSeq: lastSeq), over: connection)
                 self.onReady?()
             case .failed(let error):
-                self.onDisconnect?(error)
+                self.end(error)
             case .cancelled:
-                self.onDisconnect?(nil)
+                self.end(nil)
             default:
                 break
             }
@@ -3405,12 +3471,24 @@ public final class FleetClient {
         FleetSocket.receive(ServerFrame.self, from: connection) { [weak self] frame in
             self?.onFrame?(frame)
         } onEnd: { [weak self] error in
-            self?.onDisconnect?(error)
+            self?.end(error)
         }
         connection.start(queue: queue)
     }
 
+    /// Reports the connection ending, exactly once. See `hasEnded`.
+    private func end(_ error: Error?) {
+        guard !hasEnded else { return }
+        hasEnded = true
+        onDisconnect?(error)
+    }
+
+    /// Stops talking to this peer. Deliberately does NOT report through `onDisconnect`:
+    /// `hasEnded` is set first, so the `.cancelled` this provokes is swallowed. That keeps
+    /// `onDisconnect` meaning one thing — "the peer went away without being asked" — which
+    /// is the only reading a reconnect policy can act on.
     public func disconnect() {
+        hasEnded = true
         connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
