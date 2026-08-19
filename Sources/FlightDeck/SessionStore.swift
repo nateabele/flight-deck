@@ -225,23 +225,17 @@ final class SessionStore: ObservableObject {
         let adapter: CodexAdapter
         let runtime: CodexRuntime
 
-        init() {
+        init(clock: WatchClock?, indexURL: URL) {
             transport = CodexProcessTransport()
             rpc = CodexRPC(transport: transport)
             adapter = CodexAdapter(rpc: rpc)
-            runtime = CodexRuntime(rpc: rpc)
+            runtime = CodexRuntime(clock: clock, indexURL: indexURL)
             // The hook `CodexProcessTransport` exposes exists for exactly this. Without it a
             // mid-session app-server crash leaves every in-flight request suspended forever —
             // a tab waiting on a dead process is indistinguishable from a hung agent, which is
             // the failure mode `CodexRPC` documents as the worst it can have. Weak so the
             // transport's callback does not retain the client that already owns it.
             transport.onTerminate = { [weak rpc] in rpc?.transportClosed() }
-            // Reconcile-on-first-contact, finally pointed at `thread/read`. The ordering
-            // hazard that goes with it — `reconcile` is `async` while `CodexRuntime.handle`
-            // is not, so an answer can arrive after later notifications have already advanced
-            // the tab — is solved inside the runtime, which is also why this is one call
-            // rather than a closure written here: see `CodexRuntime.reconcileByReading`.
-            runtime.reconcileByReading(with: adapter)
         }
     }
 
@@ -285,7 +279,7 @@ final class SessionStore: ObservableObject {
     /// Builds the stack on first ask and memoizes it. Starts no process; see `startCodex`.
     private func makeCodexStackIfNeeded() -> CodexStack {
         if let codexStack { return codexStack }
-        let stack = CodexStack()
+        let stack = CodexStack(clock: clock, indexURL: codexIndexURL)
         // Composed on top of the stack's own hook rather than replacing it: failing every
         // in-flight request is the stack's job, forgetting the stack is the store's, and both
         // have to happen for the same event.
@@ -414,6 +408,10 @@ final class SessionStore: ObservableObject {
 
     /// Injectable so tests can point at a temp directory.
     var sessionsRoot: URL = SessionStatusWatcher.defaultRoot
+
+    /// Codex's rename index. A seam for the same reason `sessionsRoot` is one: the default is
+    /// a real file in the user's home, and a test that read it would be reading live state.
+    var codexIndexURL: URL = CodexNameWatcher.defaultIndexURL
 
     /// Liveness predicate for registry entries. Nil means the real one — a status file is
     /// believed only while its process is running. `SessionFixture` overrides it, because a

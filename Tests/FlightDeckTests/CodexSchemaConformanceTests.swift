@@ -21,6 +21,13 @@ import XCTest
 /// hermetic by design — nothing in this file spawns `codex` unless
 /// `FLIGHT_DECK_CODEX_SCHEMA_REGEN=1` is set.
 final class CodexSchemaConformanceTests: XCTestCase {
+    // Four cases were deleted when codex observation moved to the rollout file: they asserted
+    // that the notification vocabulary the mapper handled was real, and the mapper no longer
+    // handles notifications. Nothing generated can assert their replacement — the rollout and
+    // session-index formats have no schema — so that coverage now lives in captured fixtures
+    // (`rollout.captured.jsonl`) and in `CodexIntegrationTests`. That is weaker, deliberately
+    // and knowingly: see the spec's §6.
+
     // MARK: - Loading
 
     private static func loadFixtureSchema() throws -> [String: Any] {
@@ -99,36 +106,12 @@ final class CodexSchemaConformanceTests: XCTestCase {
         "thread/read",        // CodexAdapter.read
     ]
 
-    /// Every notification `CodexEventMapper.events` switches on.
-    private static let handledNotifications = [
-        "thread/name/updated",
-        "turn/started",
-        "turn/completed",
-        "thread/status/changed",
-        "item/started",
-        "item/completed",
-    ]
-
     func testEveryMethodTheAdapterSendsExists() throws {
         let requests = try enumValues(under: "ClientRequest")
         for method in Self.sentMethods {
             XCTAssertTrue(requests.contains(method),
                           "`\(method)` is not a ClientRequest method in codex's own schema")
         }
-    }
-
-    func testEveryNotificationTheMapperHandlesExists() throws {
-        let notifications = try enumValues(under: "ServerNotification")
-        for method in Self.handledNotifications {
-            XCTAssertTrue(notifications.contains(method),
-                          "`\(method)` is not a ServerNotification in codex's own schema")
-        }
-    }
-
-    /// The one that used to be in the mapper and never could have fired.
-    func testTurnAbortedIsNotAThingAndTheMapperNoLongerPretendsItIs() throws {
-        XCTAssertFalse(try enumValues(under: "ServerNotification").contains("turn/aborted"))
-        XCTAssertFalse(Self.handledNotifications.contains("turn/aborted"))
     }
 
     // MARK: - Thread status
@@ -167,30 +150,6 @@ final class CodexSchemaConformanceTests: XCTestCase {
     func testTheStatusNotificationCarriesTheUnionThisCodeReadsFromIt() throws {
         XCTAssertEqual(try propertyNames(of: "ThreadStatusChangedNotification"), ["threadId", "status"])
         XCTAssertEqual(try propertyNames(of: "ThreadNameUpdatedNotification"), ["threadId", "threadName"])
-    }
-
-    // MARK: - Sub-agents
-
-    /// `CollabAgentState` is an OBJECT. Decoding `agentsStates` as `[String: String]` is what
-    /// stopped `.subagentCount` ever being emitted.
-    func testCollabAgentStateIsAnObjectWithAStatus() throws {
-        XCTAssertTrue(try propertyNames(of: "CollabAgentState").contains("status"),
-                      "agentsStates values are objects; a bare status string was never the shape")
-    }
-
-    func testEveryLiveStateIsARealCollabAgentStatus() throws {
-        let statuses = try enumValues(under: "CollabAgentStatus")
-        XCTAssertEqual(
-            statuses,
-            ["pendingInit", "running", "interrupted", "completed", "errored", "shutdown", "notFound"],
-            "the CollabAgentStatus union moved — re-decide which of them are live"
-        )
-        // The real constant, not a copy of it. A copy is how `inProgress`, `started` and
-        // `interacted` — none of which codex has ever sent — survived review.
-        for state in CodexEventMapper.liveStates {
-            XCTAssertTrue(statuses.contains(state),
-                          "`\(state)` is not a CollabAgentStatus; it can never count as live")
-        }
     }
 
     // MARK: - thread/start options
@@ -281,13 +240,9 @@ final class CodexSchemaConformanceTests: XCTestCase {
         // Every assertion above reads `definitions`, so this is the entire re-check.
         definitions = try XCTUnwrap(fresh["definitions"] as? [String: Any])
         try testEveryMethodTheAdapterSendsExists()
-        try testEveryNotificationTheMapperHandlesExists()
-        try testTurnAbortedIsNotAThingAndTheMapperNoLongerPretendsItIs()
         try testEveryThreadStatusVariantIsAccountedFor()
         try testEveryThreadActiveFlagMeansWaiting()
         try testTheStatusNotificationCarriesTheUnionThisCodeReadsFromIt()
-        try testCollabAgentStateIsAnObjectWithAStatus()
-        try testEveryLiveStateIsARealCollabAgentStatus()
         try testTheOptionsPanesPickersOfferOnlyValuesCodexAccepts()
         try testAsThreadStartParamsOnlyUsesRealThreadStartFields()
         try testWritableRootsIsCodexsOwnConfigKey()

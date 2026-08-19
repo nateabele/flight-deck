@@ -222,6 +222,13 @@ final class CodexIntegrationTests: XCTestCase {
         let store = SessionStore(provider: nil, persistence: persistence)
         let injector = SpyInjector()
         store.injectorOverride = injector
+        // Set before anything builds the codex stack, or the runtime captures the real
+        // `~/.codex/session_index.jsonl` instead and this test reads the user's live state.
+        let indexDir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: indexDir) }
+        let index = indexDir.appendingPathComponent("session_index.jsonl")
+        FileManager.default.createFile(atPath: index.path, contents: Data())
+        store.codexIndexURL = index
 
         XCTAssertTrue(store.restore(directoryExists: { _ in true }))
         XCTAssertTrue(store.hasCodexStackForTesting,
@@ -243,22 +250,27 @@ final class CodexIntegrationTests: XCTestCase {
         // fallback line — reached before the heal ever runs — and the pin/injector checks
         // only prove `startCodex()` failed and the tab degraded to its pin, not that anything
         // got re-attached. What the heal is actually responsible for is which *runtime
-        // instance* holds this tab's attachment: `CodexRuntime.handle` looks a notification's
-        // `threadId` up in a private, per-instance `attachments` dict, so a notification only
-        // reaches this tab if `.attach()` was called on the exact runtime object
-        // `store.runtime(for: .codex)` returns now. `stopWatching`/`startWatching` in the heal
-        // is what makes that call; without it, this tab's attachment is still the one
-        // `insertSession`'s original `startWatching` made, against a runtime `startCodex()`'s
-        // failure already tore down — an orphaned object nothing routes notifications to
-        // anymore. Deleting the heal block and re-running this test confirms exactly that:
-        // this assertion goes red while every assertion above it stays green.
+        // instance* holds this tab's attachment: a `CodexRuntime` registers each attached tab
+        // with its own private, per-instance name watcher, so a rename only reaches this tab
+        // if `.attach()` was called on the exact runtime object `store.runtime(for: .codex)`
+        // returns now. `stopWatching`/`startWatching` in the heal is what makes that call;
+        // without it, this tab's attachment is still the one `insertSession`'s original
+        // `startWatching` made, against a runtime `startCodex()`'s failure already tore down
+        // — an orphaned object whose watchers nothing reads. Deleting the heal block and
+        // re-running this test confirms exactly that: this assertion goes red while every
+        // assertion above it stays green.
         let currentRuntime = try XCTUnwrap(store.runtime(for: .codex) as? CodexRuntime,
-            "codex's runtime is always a CodexRuntime; `handle` below is how a real " +
-            "notification reaches it, which is not part of the shared AgentRuntime protocol")
-        currentRuntime.handle(
-            method: "thread/name/updated",
-            params: ["threadId": existing.uuidString, "threadName": "post-heal-rename"]
-        )
+            "codex's runtime is always a CodexRuntime; draining its watchers below is how a "
+            + "real rename reaches it, which is not part of the shared AgentRuntime protocol")
+        // Prime, then append: the name watcher starts at end of file, so a line already
+        // present when it attached is history rather than news.
+        currentRuntime.drainForTesting()
+        let line = #"{"id":"\#(existing.uuidString.lowercased())","thread_name":"post-heal-rename"}"# + "\n"
+        let handle = try FileHandle(forWritingTo: index)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(line.utf8))
+        try handle.close()
+        currentRuntime.drainForTesting()
         let renamedTab = store.repos.flatMap(\.sessions).first { $0.id == tabID }
         XCTAssertEqual(renamedTab?.title, "post-heal-rename",
             "a notification delivered on the current runtime must still reach this tab — true " +
