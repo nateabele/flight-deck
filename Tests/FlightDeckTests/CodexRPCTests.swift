@@ -64,17 +64,29 @@ final class CodexRPCTests: XCTestCase {
         }
     }
 
-    func testNotificationsAreDeliveredSeparatelyFromResponses() {
+    /// Codex sends notifications regardless of whether anyone here is listening, and nothing
+    /// is — there is no `onNotification` hook any more. A notification line must still be
+    /// read off the wire and silently dropped rather than disturb the responses around it:
+    /// not treated as malformed, not consuming a `pending` entry, not dropping the reply
+    /// that follows it.
+    func testANotificationBetweenTwoResponsesDisturbsNeitherRequest() async throws {
         let t = StubTransport()
+        t.onSend = { line in
+            if line.contains(#""id":1"#) {
+                t.reply(#"{"method":"thread/name/updated","params":{"threadId":"abc","threadName":"x"}}"#)
+                t.reply(#"{"id":1,"result":{"which":"first"}}"#)
+            } else {
+                t.reply(#"{"id":2,"result":{"which":"second"}}"#)
+            }
+        }
         let rpc = CodexRPC(transport: t)
 
-        var seen: [(String, [String: Any])] = []
-        rpc.onNotification = { seen.append(($0, $1)) }
-        t.reply(#"{"method":"thread/name/updated","params":{"threadId":"abc","threadName":"x"}}"#)
+        let first = try await rpc.request("thread/start", ["cwd": "/w/a"])
+        let second = try await rpc.request("thread/start", ["cwd": "/w/b"])
 
-        XCTAssertEqual(seen.count, 1)
-        XCTAssertEqual(seen.first?.0, "thread/name/updated")
-        XCTAssertEqual(seen.first?.1["threadName"] as? String, "x")
+        XCTAssertEqual(first["which"] as? String, "first")
+        XCTAssertEqual(second["which"] as? String, "second")
+        XCTAssertEqual(rpc.pendingCount, 0, "the notification must not have left a phantom entry")
     }
 
     /// A non-JSON banner arriving before the real reply must be swallowed, not corrupt the
