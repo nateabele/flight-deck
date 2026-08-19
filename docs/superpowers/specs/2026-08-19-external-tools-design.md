@@ -42,14 +42,32 @@ mechanism outright.
    `<project>/.claude/worktrees/<name>`. `${cwd}` and `${project}` map onto these two facts
    (§4) rather than collapsing them.
 
-5. **Optional fields in `Preferences` are load-bearing, not stylistic.**
+5. **Agent-session facts are already normalized, and tools must use that boundary.**
+   `AgentBinding { conversationID, transcriptURL? }` is the adapter vocabulary for exactly the
+   two facts a tool wants, and the adapters differ underneath in ways no caller should see:
+   `ClaudeAdapter.binding` *derives* the transcript path from the cwd via
+   `ClaudeSession.transcriptURL`, while `CodexAdapter.binding` reads a path codex *reported*
+   into `Session.transcriptPath`. `ClaudeAdapter`'s own doc comment states the rule this
+   feature has to respect — `encodedProjectDirName` is kept off the protocol deliberately so
+   that claude's path derivation does not "leak a claude implementation detail into every
+   future agent." A `ToolContext` built by reading `Session.transcriptPath` and calling
+   `ClaudeSession.transcriptURL` would be that leak, one layer further out.
+
+   The cwd is the same story wearing a misleading name. `transcriptDirectory` reads as
+   claude-specific, but `CodexAdapter.prepare` passes it as codex's *thread* cwd
+   (`asThreadStartParams(cwd:)`), and `launchCommand`'s comment requires the pty to be spawned
+   there. It is already the shared "where this agent is working" fact — it just has no
+   normalized accessor. §3.1 adds one rather than letting the tools subsystem hardcode today's
+   coincidence.
+
+6. **Optional fields in `Preferences` are load-bearing, not stylistic.**
    `UserDefaultsPreferencesPersistence.load()` decodes with `try?`, and synthesized `Codable`
    throws on a missing key rather than falling back to a property default. A non-optional
    `tools` field would fail to decode every existing `preferences.v1` blob and silently reset
    every flag, override and shell setting the user has. `storedTools` is Optional for exactly
    the reason `confirmations`, `claude` and `storedAgents` are (§3).
 
-6. **Flight Deck's own environment is not the user's shell environment.** Launched from Finder,
+7. **Flight Deck's own environment is not the user's shell environment.** Launched from Finder,
    the app process has no `$EDITOR` and a `PATH` without `/opt/homebrew/bin`. `$EDITOR ${cwd}`
    can only work if the command runs through the login shell (§5).
 
@@ -128,6 +146,57 @@ sees `open -b com.googlecode.iterm2 ${cwd}` in the pane and can change it; nothi
 magically at launch time. The probe runs once, at materialisation, which is the second reason
 the migration is one-shot.
 
+### 3.1 Normalizing agent-session facts
+
+Everything a tool knows about the *agent* comes through `AgentAdapter`. Nothing in the tools
+subsystem may read `Session.transcriptPath`, `Session.transcriptDirectory` or
+`Session.pinnedConversationID`, and nothing there may call `ClaudeSession` (finding 5).
+
+`AgentBinding` already normalizes conversation identity and transcript location. The gap is the
+working directory, which has no accessor. One type and one method close it, both alongside
+`AgentBinding` in `Agents/AgentKind.swift` and `Agents/AgentAdapter.swift`:
+
+```swift
+/// Where an agent is working right now, and what it is bound to. The adapter's answer to
+/// "describe this live session" — callers never learn which agent produced it.
+struct AgentLocation: Equatable, Sendable {
+    let workingDirectory: String
+    let binding: AgentBinding
+}
+
+// on AgentAdapter
+func location(for session: Session) -> AgentLocation
+```
+
+with a protocol-extension default:
+
+```swift
+extension AgentAdapter {
+    func location(for session: Session) -> AgentLocation {
+        AgentLocation(workingDirectory: session.transcriptDirectory, binding: binding(for: session))
+    }
+}
+```
+
+The default is deliberate, and shaped exactly like `rebind`'s: today both adapters genuinely
+agree that `transcriptDirectory` is the agent's cwd — `CodexAdapter.prepare` passes it as codex's
+thread cwd — so the shared rule is stated **once, in the adapter layer**, and an agent whose cwd
+works differently overrides it. That is the whole difference from reading the field at the call
+site: the override point exists, and it is where a future agent's author would look.
+
+`SessionStore` owns adapter resolution (`adapter(for:)`), so it is also where a context is
+assembled — tools code never touches an adapter:
+
+```swift
+// SessionStore
+func toolContext() -> ToolContext?   // nil when nothing is selected
+```
+
+It combines `adapter(for: session.agent).location(for: session)` with the facts that are Flight
+Deck's own and not any agent's: the `Repo` the tab is filed under, the tab's title, and its
+`AgentID`. `ToolContext` is a plain value type with no adapter or SwiftUI knowledge, which is
+what keeps `ToolTemplate` a pure function.
+
 ## 4. Template expansion
 
 `ToolTemplate.expand(_:in:)` is pure — no Foundation process API, no SwiftUI — so the quoting
@@ -135,17 +204,25 @@ rules are assertable without a window.
 
 | Variable | Source | Example |
 |---|---|---|
-| `${cwd}` | `Session.transcriptDirectory` — where the agent actually is, worktree included | `~/Projects/fd/.claude/worktrees/tools` |
+| `${cwd}` | `AgentLocation.workingDirectory` — where the agent actually is, worktree included | `~/Projects/fd/.claude/worktrees/tools` |
+| `${transcript}` | `AgentLocation.binding.transcriptURL` | |
+| `${conversationID}` | `AgentLocation.binding.conversationID` | |
 | `${project}` | `Repo.url.path` — the filed project root | `~/Projects/fd` |
 | `${root}` | alias for `${project}` | |
 | `${projectName}` | `Repo.displayName` | `flight-deck` |
 | `${session}` | `Session.title` | `tools` |
-| `${sessionID}` | `Session.id.uuidString` | |
-| `${agent}` | `Session.agent` raw value | `claude` |
-| `${transcript}` | `Session.transcriptPath` when set (codex reports one), else `ClaudeSession.transcriptURL(sessionID: pinnedConversationID, workingDirectory: transcriptDirectory)` | |
+| `${agent}` | `AgentID` raw value | `claude` |
 | `${home}` | `NSHomeDirectory()` | |
 
-Two rules matter:
+The first three come from the adapter (§3.1); the rest are Flight Deck's own facts.
+
+There is deliberately **no `${sessionID}`**. It was the ambiguity finding 5 is about: a tab has
+both a `Session.id` and a conversation id, they diverge the moment an in-session `/resume`
+repoints the tab, and a variable named for both is a variable that is wrong half the time.
+`${conversationID}` names the one a tool could act on. Flight Deck's internal tab UUID is not
+exposed at all until something needs it.
+
+Three rules matter:
 
 **Substituted values are shell-quoted** — wrapped in single quotes with embedded `'` escaped as
 `'\''`. `$EDITOR ${cwd}` over `~/My Projects/foo` must not word-split. This is the single most
@@ -157,8 +234,15 @@ is a documented property, not an oversight: it is what makes `$EDITOR` work at a
 `${HOME}`, `$USER` and command substitution behave exactly as they would if typed. The cost is
 that `${cwd}` shadows a shell variable of that name, which the pane's variable reference states.
 
-When no session is selected there is no context, and every tool is disabled rather than expanded
-against blanks (§6, §7).
+**A known name with no value expands to `''`, not to nothing.** `AgentBinding.transcriptURL` is
+Optional — its doc comment notes an agent that reports no transcript "is still usable" — so
+`${transcript}` can legitimately have no value. Expanding it to the empty string would let the
+command silently absorb the *next* argument into that position; expanding it to an empty quoted
+string keeps argument count intact and fails visibly instead. This is the one case where a known
+and an unknown name must behave differently, which is why they are separate rules.
+
+When no session is selected there is no context at all — `SessionStore.toolContext()` returns
+nil — and every tool is disabled rather than expanded against blanks (§6, §7).
 
 ## 5. Launching
 
@@ -297,7 +381,9 @@ Headless unit tests only (§2).
 
 | Unit | Assertions |
 |---|---|
-| `ToolTemplate` | every variable; paths with spaces and embedded single quotes survive quoting; unknown `${…}` left literal; `$EDITOR` untouched |
+| `ToolTemplate` | every variable; paths with spaces and embedded single quotes survive quoting; unknown `${…}` left literal; a nil `transcriptURL` expands to `''`; `$EDITOR` untouched |
+| `AgentAdapter.location` | the extension default reports `transcriptDirectory` and the adapter's own binding; an adapter that overrides it is honoured (asserted through a stub, which is the point of the seam) |
+| `SessionStore.toolContext` | nil with no selection; built from the *adapter's* location, proven by overriding the adapter via `overrideAdapter` and seeing the context change; project facts come from the `Repo`, not the agent |
 | `ToolOverlayVisibility` | move → visible; +5s → hidden; keystroke → hidden immediately; move after keystroke → visible again; hover pins past the timeout |
 | `ToolShortcut` | round trip to `NSMenuItem` key equivalent + modifier mask; `⌘⇧O` display string |
 | `Preferences` | a `preferences.v1` blob with no `storedTools` decodes and materialises defaults; `[]` persists as `[]` across a save/load; full round trip |
@@ -315,11 +401,16 @@ Headless unit tests only (§2).
 `ToolOverlayInputMonitor.swift`; and under `Preferences/UI/`, `ToolsSettingsTab.swift`,
 `SymbolPicker.swift`, `ShortcutRecorder.swift`.
 
-**Modified:** `Preferences/Preferences.swift` (the `storedTools` field, defaults, migration),
-`Preferences/PreferencesStore.swift` (call the migration; expose `tools` and a resolved
-`ToolContext`), `Preferences/UI/PreferencesView.swift` (the fourth tab), `RootView.swift` (the
-stacked overlay), `AppDelegate.swift` (install `ToolsMenuController`), `project.yml` only if the
-new directory needs declaring.
+**Modified:** `Agents/AgentKind.swift` (`AgentLocation`), `Agents/AgentAdapter.swift`
+(`location(for:)` plus its extension default), `SessionStore.swift` (`toolContext()`),
+`Preferences/Preferences.swift` (the `storedTools` field, defaults, migration),
+`Preferences/PreferencesStore.swift` (call the migration; expose `tools`),
+`Preferences/UI/PreferencesView.swift` (the fourth tab), `RootView.swift` (the stacked overlay),
+`AppDelegate.swift` (install `ToolsMenuController`), `project.yml` only if the new directory
+needs declaring.
+
+Note that `ToolContext` assembly lives on `SessionStore`, not `PreferencesStore`: the store owns
+both adapter resolution and the `Repo` a session is filed under, and neither is a preference.
 
 **Docs:** `docs/ARCHITECTURE.md` gains the tools spine; `README.md` gains a bullet.
 
@@ -333,6 +424,12 @@ new directory needs declaring.
   so a future re-pull that drops `.mouseMoved` would silently break fade-in. The overlay
   visibility tests cover the state machine, not the event source, so this would surface as a
   behaviour report rather than a red test.
+- **`location(for:)`'s default is an inherited answer.** A future agent whose working directory
+  is not `transcriptDirectory` gets the wrong `${cwd}` silently if its author does not override
+  the default — the same failure mode `rebind`'s default already carries, and accepted for the
+  same reason: opting *in* to a per-agent answer is safer than forcing every adapter to restate
+  the common one. The mitigation is that the override point is named and documented on the
+  protocol, so it is visible to anyone writing a third adapter.
 - **Menu insertion index.** SwiftUI owns `NSApp.mainMenu` and builds it asynchronously;
   `ToolsMenuController` must tolerate installing before the menu is fully populated and place
   itself by title lookup rather than a fixed index.
