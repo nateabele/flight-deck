@@ -1474,6 +1474,18 @@ final class SessionStore: ObservableObject {
         persist()
     }
 
+    /// The counterpart to `markUnread`, and the store method the phone's `markRead` command
+    /// lands on.
+    ///
+    /// Added here rather than special-cased in the replicator on purpose: anything the phone
+    /// can do, the Mac's own UI should be able to do, and a command with no store method
+    /// behind it is a feature that exists on one device only. Writes through `setUnread`, so
+    /// `unreadIdle` keeps its single writer.
+    func markRead(_ id: UUID) {
+        setUnread(id, false)
+        persist()
+    }
+
     /// The order is `repos.flatMap(\.sessions)` — the sidebar top to bottom, crossing project
     /// sections. Flattening is not a convenience: both `closeSession` and `moveSession`
     /// deliberately leave an emptied project standing rather than pruning it, so the first repo
@@ -2113,6 +2125,8 @@ final class SessionStore: ObservableObject {
     }
 
     func status(for id: UUID) -> SessionStatus? { statuses[id] }
+
+    func sessionExists(_ id: UUID) -> Bool { locate(id) != nil }
 
     /// Starts registry polling. Called from the production convenience init only, so
     /// tests using `init(provider:persistence:)` never touch the real registry or spin
