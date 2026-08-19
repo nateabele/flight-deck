@@ -1,5 +1,6 @@
 // Sources/FlightDeck/SessionStore.swift
 import AppKit
+import FleetKit
 import Foundation
 import SwiftUI
 
@@ -457,6 +458,28 @@ final class SessionStore: ObservableObject {
     /// Test seam. Production sets this from the convenience init.
     var notifier: Notifying?
 
+    /// Where fleet changes are reported for replication to paired devices. Optional and nil
+    /// by default, exactly like `notifier`: nearly every test builds a store with no client
+    /// attached and must not be made to care.
+    ///
+    /// **If you add a mutation to `repos`, `statuses` or `unreadIdle`, it must `emit` its
+    /// event.** Forgetting leaves every connected phone silently wrong until it reconnects —
+    /// nothing crashes and no existing test fails. `FleetReplicator`'s DEBUG drift check is
+    /// what turns that omission into a failure; see
+    /// docs/superpowers/specs/2026-08-18-fleet-state-encapsulation-design.md for the
+    /// structural fix that will eventually make it unwriteable.
+    var replicator: (any FleetRecording)?
+
+    private func emit(_ events: FleetEvent...) {
+        guard let replicator, !events.isEmpty else { return }
+        replicator.record(events)
+    }
+
+    /// The wire form of a session as it stands right now.
+    private func wire(_ session: Session) -> WireSession {
+        FleetProjection.project(session, status: statuses[session.id], unread: unreadIdle)
+    }
+
     /// How a refused session creation reaches the user. Defaulted rather than injected
     /// because every caller wants the same alert, and overridable so no test ever puts a
     /// panel on screen. See `AgentLaunchFailureReporting`.
@@ -828,8 +851,9 @@ final class SessionStore: ObservableObject {
         // than going through `newSession`, precisely so a project's persisted collapsed state
         // survives relaunch undisturbed. Moving this expansion down into `insertSession` would
         // spring every restored collapsed project open on the next launch.
-        if let target = indexOfRepo(for: url) {
+        if let target = indexOfRepo(for: url), repos[target].isCollapsed {
             repos[target].isCollapsed = false
+            emit(.projectCollapsed(id: repos[target].id, isCollapsed: false))
         }
         selectedSessionID = session.id
         persist()
@@ -1053,14 +1077,24 @@ final class SessionStore: ObservableObject {
         } else {
             repos.append(Repo(url: url))
             repoIndex = repos.count - 1
+            // Emitted here, before the session goes in, so a client never receives a
+            // `sessionAdded` naming a project it has not been told about.
+            emit(.projectAdded(
+                FleetProjection.project(repos[repoIndex], statuses: statuses, unread: unreadIdle),
+                at: repoIndex
+            ))
         }
         // `index` is a position within this repo's sessions; out-of-range falls back to
         // appending so a stale index can never trap.
+        let insertedAt: Int
         if let index, index >= 0, index <= repos[repoIndex].sessions.count {
             repos[repoIndex].sessions.insert(session, at: index)
+            insertedAt = index
         } else {
             repos[repoIndex].sessions.append(session)
+            insertedAt = repos[repoIndex].sessions.count - 1
         }
+        emit(.sessionAdded(wire(session), project: repos[repoIndex].id, at: insertedAt))
 
         var config = Ghostty.SurfaceConfiguration()
         config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
@@ -1241,6 +1275,10 @@ final class SessionStore: ObservableObject {
         // session on top of a restored project list would be wrong. (`seedInitialSession`
         // guards on `repos.isEmpty` too, so this is belt and braces — but the return value is
         // also read by tests, and it should mean what it says.)
+        // The fleet was replaced, not changed. There is no event sequence that describes
+        // that, and emitting one per restored row would be a lie about what happened — so
+        // the replicator re-reads and anyone behind is sent back for a snapshot.
+        replicator?.reset()
         return !restoredIDs.isEmpty || !repos.isEmpty
     }
 
@@ -1453,6 +1491,7 @@ final class SessionStore: ObservableObject {
     func closeSession(_ id: UUID) {
         guard let (repoIndex, sessionIndex) = locate(id) else { return }
         repos[repoIndex].sessions.remove(at: sessionIndex)
+        emit(.sessionRemoved(id: id))
 
         // Detach and park rather than release. Two reasons this is not just `= nil`:
         //
@@ -1706,6 +1745,7 @@ final class SessionStore: ObservableObject {
         }
         // Re-found rather than reusing `index`: every `closeSession` above rewrote `repos`.
         repos.removeAll { $0.id == id }
+        emit(.projectRemoved(id: id))
         persist()
     }
 
@@ -1719,6 +1759,7 @@ final class SessionStore: ObservableObject {
         guard let index = repos.firstIndex(where: { $0.id == id }),
               repos[index].isCollapsed != isCollapsed else { return }
         repos[index].isCollapsed = isCollapsed
+        emit(.projectCollapsed(id: id, isCollapsed: isCollapsed))
         persist()
     }
 
@@ -1728,8 +1769,27 @@ final class SessionStore: ObservableObject {
         guard let updated = SidebarReorder.apply(
             to: repos, rows: sidebarRows, from: source, to: destination
         ) else { return }
+        let before = repos
         repos = updated
+        emitReorder(from: before, to: updated)
         persist()
+    }
+
+    /// A reorder is the one mutation whose input is already a whole rebuilt array — the
+    /// policy lives in `SidebarReorder` and hands back `[Repo]`, not a move. Comparing the
+    /// two is therefore describing what the caller did, not the store-wide diffing the
+    /// design rejected: the comparison is bounded by one gesture.
+    private func emitReorder(from before: [Repo], to after: [Repo]) {
+        if before.map(\.id) != after.map(\.id) {
+            emit(.projectsReordered(order: after.map(\.id)))
+        }
+        for repo in after {
+            guard
+                let old = before.first(where: { $0.id == repo.id }),
+                old.sessions.map(\.id) != repo.sessions.map(\.id)
+            else { continue }
+            emit(.sessionsReordered(project: repo.id, order: repo.sessions.map(\.id)))
+        }
     }
 
     /// The one status a collapsed project header shows: the most demanding thing any child
@@ -2421,25 +2481,41 @@ final class SessionStore: ObservableObject {
         guard Self.comparablePath(repos[at.repo].url.path)
                 != Self.comparablePath(target.path) else { return }
 
-        var session = repos[at.repo].sessions.remove(at: at.session)
-        // Stored as reported, not as compared: normalization is for deciding *whether* to
-        // move. `transcriptDirectory` is not touched — where `claude` writes has nothing to
-        // do with which project the user files this tab under.
-        session.workingDirectory = target.path
-
-        // Resolved after the removal so the index cannot be stale. Removing a *session*
-        // never removes a repo, so `at.repo` stays valid either way.
+        // Resolved before the removal below, and its `projectAdded` emitted immediately —
+        // not because the index would go stale otherwise (removing a *session* never removes
+        // a repo, so `at.repo` stays valid either way), but because the removal and the
+        // append are one logical move with no event of their own until `sessionMoved` below.
+        // Letting `projectAdded` land between them would emit it against a store that has
+        // already lost the session from its source project, one event ahead of where the
+        // folded mirror is — exactly the momentary mismatch the drift check exists to catch.
         let destination: Int
         if let existing = indexOfRepo(for: target) {
             destination = existing
         } else {
             repos.append(Repo(url: target))
             destination = repos.count - 1
+            emit(.projectAdded(
+                FleetProjection.project(repos[destination], statuses: statuses, unread: unreadIdle),
+                at: destination
+            ))
         }
+
+        var session = repos[at.repo].sessions.remove(at: at.session)
+        // Stored as reported, not as compared: normalization is for deciding *whether* to
+        // move. `transcriptDirectory` is not touched — where `claude` writes has nothing to
+        // do with which project the user files this tab under.
+        session.workingDirectory = target.path
         repos[destination].sessions.append(session)
+        emit(.sessionMoved(
+            id: id, project: repos[destination].id,
+            at: repos[destination].sessions.count - 1
+        ))
         // Same reasoning as `newSession`: a session landing in a collapsed destination must
         // make that destination visible, or the move is invisible in the sidebar.
-        repos[destination].isCollapsed = false
+        if repos[destination].isCollapsed {
+            repos[destination].isCollapsed = false
+            emit(.projectCollapsed(id: repos[destination].id, isCollapsed: false))
+        }
 
         if selectedSessionID == id { lastActiveProjectURL = target }
         persist()
