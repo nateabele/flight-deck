@@ -926,6 +926,46 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// The per-agent ⌘N action Task 12's per-slot menu items and the sidebar button both
+    /// call. Mirrors `createFromMenu()`'s routing (the active session's project, else the
+    /// last active project, else the first, else a chosen folder) but goes through the async
+    /// `createSession(agent:in:)` rather than the synchronous claude-only `newSession`,
+    /// because that is the only path able to start codex. Kept separate from the plain
+    /// `createFromMenu()` above rather than folding an `agent` parameter into it, so every
+    /// existing claude-only call site — and the regression suite pinning it — is untouched.
+    @discardableResult
+    func createFromMenu(
+        agent: AgentID, chooseFolder: () -> URL? = { FolderPicker.choose() }
+    ) async -> Session? {
+        switch SessionCreateAction.forState(hasProjects: !repos.isEmpty) {
+        case .newSession:
+            if let activeID = selectedSessionID, let at = locate(activeID) {
+                let active = repos[at.repo].sessions[at.session]
+                return await create(agent, in: active.workingDirectory, at: at.session + 1)
+            }
+            if let url = lastActiveProjectURL, indexOfRepo(for: url) != nil {
+                return await create(agent, in: url.path)
+            }
+            if let first = repos.first {
+                return await create(agent, in: first.url.path)
+            }
+            guard let url = chooseFolder() else { return nil }
+            return await create(agent, in: url.path)
+        case .addProject:
+            guard let url = chooseFolder() else { return nil }
+            return await create(agent, in: url.path)
+        }
+    }
+
+    /// `createSession`'s `Result` collapsed to the `Session?` shape the menu/button want —
+    /// a failure already reported itself through `launchFailureReporter` inside
+    /// `createSession`, so there is nothing left for the caller to do with it but stop.
+    private func create(_ agent: AgentID, in path: String, at index: Int? = nil) async -> Session? {
+        guard case .success(let id) = await createSession(agent: agent, in: path, at: index)
+        else { return nil }
+        return session(for: id)
+    }
+
     /// ⌘⇧A. Always prompts, regardless of what is open.
     @discardableResult
     func addProjectFromMenu(chooseFolder: () -> URL? = { FolderPicker.choose() }) -> Session? {

@@ -233,6 +233,19 @@ struct SessionSidebar: View {
     /// Drives both the label and which shortcut the button claims.
     private var isEmpty: Bool { store.repos.isEmpty }
 
+    /// Tracks held modifiers so the button below can relabel itself live while ⌘⇧ is being
+    /// pressed on the way to ⌘⇧N — see `NewSessionAffordance.resolve`.
+    @StateObject private var modifiers = ModifierWatcher()
+
+    /// The slot the New Session button currently claims. `nil` preferences (some previews and
+    /// tests construct the sidebar without one) falls back to the same claude-then-codex
+    /// default `Preferences.agents` uses.
+    private var affordance: NewSessionAffordance.Slot? {
+        NewSessionAffordance.resolve(
+            modifiers.flags, in: preferences?.preferences.agents ?? Preferences.defaultAgents
+        )
+    }
+
     var body: some View {
         let conflicted = store.conflictedSessionIDs
         return List(selection: $store.selectedSessionID) {
@@ -313,15 +326,20 @@ struct SessionSidebar: View {
         }
         .safeAreaInset(edge: .bottom) {
             Button {
-                store.createFromMenu()
+                let agent = affordance?.agent ?? Preferences.defaultAgents[0].id
+                Task { await store.createFromMenu(agent: agent) }
             } label: {
                 HStack {
-                    Label(isEmpty ? "Add Project" : "New Session", systemImage: "plus")
+                    // The agent name is dynamic — "New Claude Session" by default, changing
+                    // live to "New Codex Session" the instant ⇧ is held on the way to ⌘⇧N.
+                    // See `NewSessionAffordance.resolve`.
+                    Label(isEmpty ? "Add Project" : (affordance?.label ?? "New Session"),
+                          systemImage: "plus")
                     Spacer()
                     // Apple's HIG puts shortcuts on menu items, not buttons. Shown here
                     // deliberately so the binding is discoverable without opening the menu;
-                    // the File menu carries the same two shortcuts.
-                    Text(isEmpty ? "⇧⌘A" : "⌘N")
+                    // the File menu carries the same shortcuts, one item per agent slot.
+                    Text(isEmpty ? "⇧⌘A" : (affordance?.shortcutDisplay ?? "⌘N"))
                         .foregroundStyle(.secondary)
                         .accessibilityHidden(true)
                 }
@@ -329,8 +347,12 @@ struct SessionSidebar: View {
             }
             .accessibilityIdentifier("new-session")
             .keyboardShortcut(isEmpty ? .init("a", modifiers: [.command, .shift])
-                                     : .init("n", modifiers: .command))
+                                     : .init("n", modifiers: NewSessionAffordance.eventModifiers(
+                                         affordance?.modifiers ?? [.command]
+                                     )))
             .padding(8)
+            .onAppear { modifiers.start() }
+            .onDisappear { modifiers.stop() }
         }
     }
 
