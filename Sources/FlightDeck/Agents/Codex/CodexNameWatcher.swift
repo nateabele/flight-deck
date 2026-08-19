@@ -15,11 +15,17 @@ final class CodexNameWatcher {
     /// Codex's index, honouring `CODEX_HOME` exactly as codex does. Getting this wrong fails
     /// silently — a watcher on the wrong path simply never reports anything.
     nonisolated static var defaultIndexURL: URL {
-        let home = ProcessInfo.processInfo.environment["CODEX_HOME"]
+        indexURL(codexHome: ProcessInfo.processInfo.environment["CODEX_HOME"],
+                 home: FileManager.default.homeDirectoryForCurrentUser)
+    }
+
+    /// Pure decision behind `defaultIndexURL`, split out so both branches are testable
+    /// without depending on whether `CODEX_HOME` happens to be set in the test process.
+    nonisolated static func indexURL(codexHome: String?, home: URL) -> URL {
+        let base = codexHome
             .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true) }
-            ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".codex", isDirectory: true)
-        return home.appendingPathComponent("session_index.jsonl")
+            ?? home.appendingPathComponent(".codex", isDirectory: true)
+        return base.appendingPathComponent("session_index.jsonl")
     }
 
     let url: URL
