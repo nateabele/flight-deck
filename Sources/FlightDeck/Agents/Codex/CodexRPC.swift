@@ -28,6 +28,11 @@ final class CodexRPC {
 
     var onNotification: ((String, [String: Any]) -> Void)?
 
+    /// Test-only observability: how many requests are still awaiting a reply. Exists so a
+    /// cancellation test can assert `request`'s `onCancel` actually removed its entry from
+    /// `pending`, not merely that the caller unblocked.
+    var pendingCount: Int { pending.count }
+
     init(transport: CodexTransport) {
         self.transport = transport
         transport.onLine = { [weak self] line in self?.receive(line) }
@@ -46,8 +51,18 @@ final class CodexRPC {
     }
 
     /// Sends a request and suspends until the matching `id` comes back as a result or an
-    /// error. `transportClosed()` and deinit are the only other ways this resumes — nothing
-    /// here can hang a caller forever on a dead app-server.
+    /// error. `transportClosed()` and deinit are the only other ways this resumes on its
+    /// own — but the caller's enclosing `Task` can also be cancelled out from under it, and
+    /// `withCheckedThrowingContinuation` alone does not notice that: a cancelled `Task`
+    /// awaiting this would stay suspended until an actual resume, and because a suspended
+    /// call retains `self`, that leaks the whole `CodexRPC` too. `withTaskCancellationHandler`
+    /// fixes both — its `onCancel` closure is not actor-isolated (cancellation can be
+    /// requested from any thread), so it only ever hops back via `Task { @MainActor in }`
+    /// rather than touching `pending` directly. That hop is safe without an explicit lock:
+    /// `pending[id] = continuation` below runs synchronously with no intervening `await`, and
+    /// `MainActor` is a serial executor, so the hopped cleanup task — merely enqueued, not run
+    /// inline — can only actually execute after that registration completes (or after this
+    /// whole synchronous prefix runs, if cancellation raced ahead of it), never before it.
     func request(_ method: String, _ params: [String: Any]) async throws -> [String: Any] {
         nextID += 1
         let id = nextID
@@ -57,10 +72,22 @@ final class CodexRPC {
               let line = String(data: data, encoding: .utf8)
         else { throw CodexRPCError.malformed(method) }
 
-        return try await withCheckedThrowingContinuation { continuation in
-            pending[id] = continuation
-            transport.send(line + "\n")
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pending[id] = continuation
+                transport.send(line + "\n")
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.failPending(id, with: CancellationError())
+            }
         }
+    }
+
+    /// Resumes and removes one pending request. Shared by `request`'s cancellation path;
+    /// `transportClosed()` keeps its own loop since it must fail every entry at once.
+    private func failPending(_ id: Int, with error: Error) {
+        pending.removeValue(forKey: id)?.resume(throwing: error)
     }
 
     /// Fire-and-forget notification: no `id`, no reply expected.
