@@ -279,8 +279,8 @@ final class CodexIntegrationTests: XCTestCase {
         currentRuntime.drainForTesting()
         let renamedTab = store.repos.flatMap(\.sessions).first { $0.id == tabID }
         XCTAssertEqual(renamedTab?.title, "post-heal-rename",
-            "a notification delivered on the current runtime must still reach this tab — true " +
-            "only if the heal re-attached it there")
+            "a rename line delivered on the current runtime's name watcher must still reach " +
+            "this tab — true only if the heal re-attached it there")
     }
 
     // MARK: - 4. The rollout vocabulary

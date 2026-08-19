@@ -145,7 +145,8 @@ final class AgentRoutingTests: XCTestCase {
         XCTAssertEqual(store.title(of: id), "renamed", "the sidebar is authoritative and immediate")
         XCTAssertEqual(t.names.last, "renamed",
                        "renaming a codex tab must send thread/name/set — the thread name is what "
-                       + "thread/read returns, so a divergence flicks the title back on reconcile")
+                       + "session_index.jsonl and thread/read both report, so a divergence "
+                       + "flicks the title back on the next tail or restore")
         XCTAssertTrue(spy.events.isEmpty,
                       "a codex tab must never queue `/rename` for the pty: nothing retires the "
                       + "entry, and a match would paste it into the user's live codex session")
