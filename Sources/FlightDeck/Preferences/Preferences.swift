@@ -66,18 +66,47 @@ struct Preferences: Codable, Equatable {
     /// Optional for exactly the reason `confirmations` is — see that property's comment.
     /// `nil` means "never configured", which reads as every field's default.
     var claude: ClaudePreferences?
+    /// Ordered; position binds the New Session shortcuts (see `NewSessionAffordance`).
+    /// Optional in storage, for the same reason `confirmations` is: a snapshot written before
+    /// agent adapters decodes cleanly, and `migrateAgentsIfNeeded()` fills it in from today's
+    /// single-agent settings rather than failing the whole decode.
+    var storedAgents: [AgentSettings]?
 
     init(
         globalFlags: FlagSet = FlagSet(),
         projectFlags: [String: FlagSet] = [:],
         shell: ShellPreferences = ShellPreferences(),
         confirmations: ConfirmationPreferences? = nil,
-        claude: ClaudePreferences? = nil
+        claude: ClaudePreferences? = nil,
+        storedAgents: [AgentSettings]? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
         self.shell = shell
         self.confirmations = confirmations
         self.claude = claude
+        self.storedAgents = storedAgents
+    }
+
+    /// Falls back to claude-then-codex so a `Preferences` that has never been migrated
+    /// behaves exactly as it always has, with claude on ⌘N.
+    var agents: [AgentSettings] {
+        get { storedAgents ?? Self.defaultAgents }
+        set { storedAgents = newValue }
+    }
+
+    static let defaultAgents: [AgentSettings] = [
+        AgentSettings(id: .claude, options: .claude(FlagSet())),
+        AgentSettings(id: .codex, options: .codex(CodexThreadOptions())),
+    ]
+
+    /// Folds today's single-agent settings (`globalFlags`) into the list. Idempotent — safe
+    /// to call on every load — so it never overwrites a list the user has already reordered.
+    mutating func migrateAgentsIfNeeded() {
+        guard storedAgents == nil else { return }
+        storedAgents = [
+            AgentSettings(id: .claude, options: .claude(globalFlags)),
+            AgentSettings(id: .codex, options: .codex(CodexThreadOptions())),
+        ]
     }
 }
