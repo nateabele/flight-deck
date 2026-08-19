@@ -98,15 +98,31 @@ final class CodexNameWatcherTests: XCTestCase {
     }
 
     /// Codex honours `CODEX_HOME`; a watcher that ignored it would tail a file codex is not
-    /// writing and report nothing, forever, with no error.
+    /// writing and report nothing, forever, with no error. `defaultIndexURL` only supplies
+    /// the ambient environment to `indexURL(codexHome:home:)`, which is what actually
+    /// decides — tested directly below so both branches run regardless of whether
+    /// `CODEX_HOME` happens to be set in this test process.
     func testTheDefaultPathFollowsCodexHome() {
         let url = CodexNameWatcher.defaultIndexURL
         XCTAssertEqual(url.lastPathComponent, "session_index.jsonl")
-        if let home = ProcessInfo.processInfo.environment["CODEX_HOME"] {
-            XCTAssertEqual(url.deletingLastPathComponent().standardizedFileURL.path,
-                           URL(fileURLWithPath: home).standardizedFileURL.path)
-        } else {
-            XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, ".codex")
-        }
+    }
+
+    func testIndexURLUsesCodexHomeWhenSet() {
+        let url = CodexNameWatcher.indexURL(codexHome: "/custom/codex-home",
+                                            home: URL(fileURLWithPath: "/Users/someone"))
+        XCTAssertEqual(url.path, "/custom/codex-home/session_index.jsonl")
+    }
+
+    func testIndexURLExpandsATildeInCodexHome() {
+        let url = CodexNameWatcher.indexURL(codexHome: "~/elsewhere",
+                                            home: URL(fileURLWithPath: "/Users/someone"))
+        XCTAssertFalse(url.path.hasPrefix("~"), "a literal tilde would fail to tail anything")
+        XCTAssertTrue(url.path.hasSuffix("/elsewhere/session_index.jsonl"))
+    }
+
+    func testIndexURLFallsBackToDotCodexUnderHomeWhenUnset() {
+        let url = CodexNameWatcher.indexURL(codexHome: nil,
+                                            home: URL(fileURLWithPath: "/Users/someone"))
+        XCTAssertEqual(url.path, "/Users/someone/.codex/session_index.jsonl")
     }
 }
