@@ -256,13 +256,38 @@ final class SessionStore: ObservableObject {
     private var codexHandshake: Task<Void, Error>?
 
     /// Test seam. Proves the app-server's lifetime — lazy on first codex use, gone with the
-    /// last codex tab — without spawning a process to observe it.
+    /// last codex tab or with its process — without spawning a process to observe it.
     var hasCodexStackForTesting: Bool { codexStack != nil }
+
+    /// Test seam. Drives the exact path a crashed `codex app-server` takes, which can
+    /// otherwise only be produced by killing a real process the committed suite may not spawn.
+    func simulateCodexTerminationForTesting() {
+        codexStack?.transport.simulateProcessTerminationForTesting()
+    }
 
     /// Builds the stack on first ask and memoizes it. Starts no process; see `startCodex`.
     private func makeCodexStackIfNeeded() -> CodexStack {
         if let codexStack { return codexStack }
         let stack = CodexStack()
+        // Composed on top of the stack's own hook rather than replacing it: failing every
+        // in-flight request is the stack's job, forgetting the stack is the store's, and both
+        // have to happen for the same event.
+        //
+        // Forgetting is what keeps a crash from wedging codex for the rest of the run.
+        // `transportClosed()` resumes what is pending at that moment and latches nothing, so
+        // a `codexStack`/`codexHandshake` left standing means the next creation returns the
+        // already-succeeded handshake without re-probing, writes `thread/start` into a dead
+        // pipe (`send` swallows the failure), and suspends on a continuation nothing will ever
+        // resume — the same hang one session later, with no alert and no failed `Result`.
+        let failInFlightRequests = stack.transport.onTerminate
+        stack.transport.onTerminate = { [weak self, weak stack] in
+            failInFlightRequests?()
+            // Identity-checked: a late termination from a *replaced* stack must not tear down
+            // the live one that succeeded it.
+            guard let self, let stack, self.codexStack === stack else { return }
+            self.codexStack = nil
+            self.codexHandshake = nil
+        }
         codexStack = stack
         return stack
     }
@@ -282,7 +307,10 @@ final class SessionStore: ObservableObject {
 
     /// Tears the stack down whatever the reason. `stop()` funnels into the transport's
     /// termination hook, so every request still in flight fails rather than hanging its
-    /// caller — the same guarantee a crash gets.
+    /// caller — the same guarantee a crash gets, and by the same route: that hook is also
+    /// what nils the two fields below. They are cleared again here rather than left to it,
+    /// because `stop()` on a transport whose process never ran is a no-op the hook may have
+    /// already consumed.
     private func stopCodex() {
         codexStack?.transport.stop()
         codexStack = nil
@@ -795,11 +823,17 @@ final class SessionStore: ObservableObject {
         do {
             try await task.value
         } catch {
-            // A failed launch must not poison the store: dropping both means the next
-            // attempt — after the user installs or upgrades codex — probes again instead of
-            // replaying this failure for the rest of the run.
-            codexHandshake = nil
-            codexStack = nil
+            // A failed launch must not poison the store: tearing the stack down means the
+            // next attempt — after the user installs or upgrades codex — probes again instead
+            // of replaying this failure for the rest of the run.
+            //
+            // `stopCodex()` rather than nilling the two fields, because the failure can come
+            // from `verifyHandshake` — by which point a process is already running. Relying on
+            // `CodexProcessTransport.deinit` to reap it would be correctness by retention
+            // reasoning two files away, and would break the moment anything took a second
+            // strong reference to the transport. `ClaudeRuntime.attach` refuses to lean on
+            // exactly that; so does this.
+            stopCodex()
             throw error
         }
     }
@@ -2239,6 +2273,13 @@ final class SessionStore: ObservableObject {
     /// which already carries it — so this is codex's route in practice. It is not gated on
     /// the agent even so: an agent that reports activity is reporting activity, and a gate
     /// would only mean a second rule to keep in step with the one in `applyRegistry`.
+    ///
+    /// What keeps claude out is that `ClaudeRuntime.ingest` has no production caller, and it
+    /// must stay that way: wiring it to the registry tick would route claude's activity in
+    /// here on a *different* row-selection rule — an `.activity` event names a conversation,
+    /// not an anchored pid — skipping `ConversationPin.resolve`'s pid-recycling validation and
+    /// its newest-wins tiebreak, and blanking `waitingFor` on every tick. Claude's status has
+    /// one writer, `applyRegistry`, and this is not it.
     private func applyActivity(_ activity: SessionActivity, to tabID: UUID) {
         guard session(for: tabID) != nil else { return }
         var next = statuses
