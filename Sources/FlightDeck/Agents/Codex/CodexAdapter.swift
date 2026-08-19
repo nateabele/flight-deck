@@ -76,9 +76,10 @@ struct CodexAdapter: AgentAdapter {
 
     /// Authoritative title and status for an already-bound thread.
     ///
-    /// Used by reconcile-on-first-contact: a session whose codex sat behind the
-    /// directory-trust or hooks-review prompt emits nothing until the user clears it, so its
-    /// title is stale by exactly one read rather than by a stream of missed notifications.
+    /// Used by `rebind` on every restore, and directly by `resumeRestoredCodex`'s follow-up
+    /// title read: a session whose codex sat behind the directory-trust or hooks-review
+    /// prompt emits nothing until the user clears it, so its title is stale by exactly one
+    /// read rather than by a stream of missed notifications.
     ///
     /// Bounded by `readTimeout` rather than left to `CodexRPC.request`, which has no deadline
     /// at all. An app-server that answered `initialize` and then went quiet would otherwise
@@ -93,9 +94,9 @@ struct CodexAdapter: AgentAdapter {
             group.addTask { @MainActor in
                 let result = try await rpc.request("thread/read", ["threadId": threadID])
                 let thread = result["thread"] as? [String: Any] ?? [:]
-                // Same table the notification path uses — `CodexThreadStatus` exists because
-                // these two drifted, and the copy that lived here reported a *working*
-                // thread as idle on every reconcile.
+                // The same table `CodexThreadStatus` centralizes everywhere else — it exists
+                // because two copies of this mapping once drifted, and the copy that used to
+                // live here reported a *working* thread as idle on every reconcile.
                 return (
                     thread["name"] as? String,
                     CodexThreadStatus.activity(from: thread["status"] as? [String: Any])

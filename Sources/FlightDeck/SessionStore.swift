@@ -1293,6 +1293,19 @@ final class SessionStore: ObservableObject {
             }
             // Re-read: the re-pin above rewrote the row, and the command names the session.
             guard let repinned = self.session(for: tabID) else { continue }
+
+            // Both watchers start at end-of-file (§2.5, §4), so a rename made while Flight
+            // Deck was closed is invisible to them. This read is the only thing that can
+            // still recover it. Only when an app-server was actually prepared — on the
+            // degraded path there is nothing to ask — and title only: `thread/read` reports
+            // `notLoaded` for a thread a TUI drives, so its activity is meaningless here, and
+            // applying it would flick the tab's status off nothing. Non-fatal: a restore that
+            // cannot reach the app-server must still produce a usable tab.
+            if prepared != nil, let codexAdapter = adapter as? CodexAdapter,
+               let read = try? await codexAdapter.read(binding), let title = read.title {
+                apply(.title(title), to: tabID)
+            }
+
             sendToShell(adapter.resumeCommand(binding, repinned, options), into: tabID)
         }
     }
@@ -1812,8 +1825,9 @@ final class SessionStore: ObservableObject {
     ///
     /// **This used to be claude-only, and every tab took claude's route.** Renaming a codex
     /// tab therefore never sent `thread/name/set`, so the sidebar title and codex's thread
-    /// name diverged permanently — and since the thread name is what `thread/read` returns,
-    /// the next reconcile or restore flicked the sidebar back to the old one. Worse, it
+    /// name diverged permanently — and since the thread name is what `session_index.jsonl`
+    /// and `thread/read` both report, the next tail or restore flicked the sidebar back to
+    /// the old one. Worse, it
     /// queued `/rename <name>` for a pty nothing would ever retire it from: `flushPendingRename`
     /// retried it on every registry tick for the life of the process, and `InputBar.read`
     /// keys on a line starting with `❯` — a common shell prompt glyph — so a match would have
