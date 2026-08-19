@@ -202,7 +202,12 @@ final class SessionStore: ObservableObject {
     private func options(for agent: AgentID, project: String) -> AgentOptions {
         switch agent {
         case .claude: .claude(preferences?.resolvedFlags(forProject: project) ?? FlagSet())
-        case .codex: .codex(CodexThreadOptions())
+        // This used to be a hardcoded `CodexThreadOptions()`, which made every control in
+        // the Codex pane inert — a user who chose the `read-only` sandbox silently got
+        // codex's default. `project` is unused for codex on purpose: codex has no
+        // per-project override storage (claude's `projectFlags` has no counterpart), so
+        // there is one global row and it is looked up by id, never by position.
+        case .codex: .codex(preferences?.resolvedCodexOptions() ?? CodexThreadOptions())
         }
     }
 
