@@ -48,10 +48,13 @@ final class FleetEventApplicationTests: XCTestCase {
     func testActivityCarriesItsWholeTripleTogether() {
         let after = base().applying([
             .activityChanged(id: sessionID, activity: "waiting",
-                             waitingFor: "permission prompt", subagentCount: 0)
+                             waitingFor: "permission prompt", subagentCount: 4)
         ])
         XCTAssertEqual(after.projects[0].sessions[0].activity, "waiting")
         XCTAssertEqual(after.projects[0].sessions[0].waitingFor, "permission prompt")
+        // Non-default deliberately: `WireSession.subagentCount` defaults to 0, so asserting
+        // 0 here would pass just as happily against an `apply` that never wrote the field.
+        XCTAssertEqual(after.projects[0].sessions[0].subagentCount, 4)
     }
 
     /// Statuslessness is a real state and has to be reachable by an event, or a tab whose
@@ -79,6 +82,20 @@ final class FleetEventApplicationTests: XCTestCase {
         let after = snapshot.applying([.sessionMoved(id: sessionID, project: other, at: 0)])
         XCTAssertTrue(after.projects[0].sessions.isEmpty)
         XCTAssertEqual(after.projects[1].sessions.map(\.id), [sessionID])
+    }
+
+    /// The case where remove-then-insert can invert the index: the session is taken out of
+    /// the same array it is about to go back into, so a clamp computed before the removal
+    /// would be off by one. Cross-project moves cannot catch this.
+    func testAMoveWithinTheSameProjectReordersRatherThanCorrupting() {
+        let second = UUID()
+        var snapshot = base()
+        snapshot.projects[0].sessions.append(session(second, "two"))
+        let after = snapshot.applying([
+            .sessionMoved(id: sessionID, project: projectID, at: 1)
+        ])
+        XCTAssertEqual(after.projects[0].sessions.map(\.id), [second, sessionID])
+        XCTAssertEqual(after.projects[0].sessions.count, 2, "a move must not drop or duplicate")
     }
 
     // MARK: Projects
