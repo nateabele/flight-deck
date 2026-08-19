@@ -28,7 +28,7 @@ final class CodexRolloutMapperTests: XCTestCase {
     }
 
     func testAnAbortedTurnEndsTheTurnJustLikeACompletedOne() throws {
-        let line = try XCTUnwrap(CodexRolloutFixtureTests.lines("turn-aborted").first)
+        let line = try XCTUnwrap(CodexRolloutFixtureTests.lines("turn-aborted.captured").first)
         XCTAssertEqual(CodexEventMapper.events(inRolloutLine: line),
                        [.activity(.idle), .turnEnded])
     }
