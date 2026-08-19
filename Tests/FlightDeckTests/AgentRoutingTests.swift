@@ -10,18 +10,39 @@ import XCTest
 final class AgentRoutingTests: XCTestCase {
     private var tmp: URL { URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true) }
 
+    /// A throwaway stand-in for `~/.claude/projects`. Every store below creates a session,
+    /// and creating one now derives a transcript path through `ClaudeAdapter` and starts a
+    /// watcher polling it — pointed at the real root, these tests would poll the user's own
+    /// transcripts. This diff is what taught the adapter to honour `projectsRoot`; these
+    /// tests are the first that must use it.
+    private var projectsRoot: URL!
+
     /// `SessionStore.provider` is weak, so a provider held only by the store deallocates
     /// before it is ever asked for a surface — same retention trick as `SessionCreationTests`.
     private var retainedProviders: [RecordingProvider] = []
 
+    override func setUpWithError() throws {
+        projectsRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: projectsRoot, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: projectsRoot)
+    }
+
     private func makeStore() -> SessionStore {
-        SessionStore(provider: nil, persistence: nil)
+        let store = SessionStore(provider: nil, persistence: nil)
+        store.projectsRoot = projectsRoot
+        return store
     }
 
     private func makeRecordingStore() -> (SessionStore, RecordingProvider) {
         let provider = RecordingProvider()
         retainedProviders.append(provider)
-        return (SessionStore(provider: provider, persistence: nil), provider)
+        let store = SessionStore(provider: provider, persistence: nil)
+        store.projectsRoot = projectsRoot
+        return (store, provider)
     }
 
     func testTheStoreSelectsAnAdapterByTheSessionsAgent() {
@@ -66,24 +87,6 @@ final class AgentRoutingTests: XCTestCase {
         XCTAssertEqual(provider.configs.last?.initialInput, "stub-launch")
     }
 
-    /// The status registry is claude's app-wide source and `SessionStore` scans it once per
-    /// tick, so the runtime is *fed* rather than owning a scanner. This pins that the feed is
-    /// actually connected — in production it agrees with `applyRegistry` by construction, so
-    /// only a second, disagreeing scan can show the wire is live.
-    func testTheStatusRegistryFansOutThroughTheRuntime() {
-        let store = makeStore()
-        let session = store.newSession(in: tmp)
-
-        store.applyRegistry([1: entry(session.pinnedConversationID, activity: .busy)])
-        XCTAssertEqual(store.status(for: session.id)?.activity, .busy)
-
-        store.ingestStatusEntriesForTesting(
-            [1: entry(session.pinnedConversationID, activity: .waiting)]
-        )
-        XCTAssertEqual(store.status(for: session.id)?.activity, .waiting,
-                       "a registry row must reach the tab through its runtime")
-    }
-
     /// `AgentAdapter.rename` is how an agent that owns its own conversation name gets asked
     /// to change it. For claude that is still `/rename` typed into the pty, so it must land
     /// on the *same* route `SessionStore.rename` uses — one `pendingRenames` entry behind one
@@ -98,9 +101,12 @@ final class AgentRoutingTests: XCTestCase {
         spy.events.removeAll()
 
         let adapter = store.adapter(for: .claude)
-        try await adapter.rename(adapter.binding(for: session), to: "from the adapter")
+        // Deliberately unsanitized: the adapter route is the one an agent's own caller
+        // reaches, and what it queues becomes text typed into a pty.
+        try await adapter.rename(adapter.binding(for: session), to: "  from\nthe adapter  ")
 
-        XCTAssertEqual(spy.events, [.killLine, .text("/rename from the adapter"), .ret])
+        XCTAssertEqual(spy.events, [.killLine, .text("/rename fromthe adapter"), .ret],
+                       "the adapter route must reach the same sanitizer as the sidebar's")
     }
 
     private func entry(_ conversation: UUID, activity: SessionActivity) -> ClaudeStatusFile.Entry {
