@@ -206,12 +206,101 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Codex's half of the two dictionaries above, held together rather than as four fields
+    /// because the four are inseparable: the adapter and the runtime are only usable through
+    /// the one `CodexRPC` that speaks to the one app-server process they share.
+    ///
+    /// A class so the transport's termination hook can be wired to the client it belongs to
+    /// while both are being constructed. `@MainActor` explicitly: a nested type does not
+    /// inherit its enclosing type's isolation, and every piece it holds is main-actor bound.
+    @MainActor
+    private final class CodexStack {
+        let transport: CodexProcessTransport
+        let rpc: CodexRPC
+        let adapter: CodexAdapter
+        let runtime: CodexRuntime
+
+        init() {
+            transport = CodexProcessTransport()
+            rpc = CodexRPC(transport: transport)
+            adapter = CodexAdapter(rpc: rpc)
+            runtime = CodexRuntime(rpc: rpc)
+            // The hook `CodexProcessTransport` exposes exists for exactly this. Without it a
+            // mid-session app-server crash leaves every in-flight request suspended forever —
+            // a tab waiting on a dead process is indistinguishable from a hung agent, which is
+            // the failure mode `CodexRPC` documents as the worst it can have. Weak so the
+            // transport's callback does not retain the client that already owns it.
+            transport.onTerminate = { [weak rpc] in rpc?.transportClosed() }
+            // `runtime.reconcile` is deliberately left at its no-op default. Wiring it to
+            // `thread/read` needs the ordering hazard solved first: `reconcile` is `async`
+            // while `CodexRuntime.handle` is synchronous, so a reconcile scheduled by one
+            // notification can land *after* later notifications have already advanced the
+            // tab, overwriting fresh state with stale. Task 15 owns that ordering along with
+            // the `thread/read` call itself.
+        }
+    }
+
+    /// Codex's stack, built on first use and dropped with the last codex tab.
+    ///
+    /// Nil until something actually needs codex: a user who never opens a codex tab must
+    /// never have `codex app-server` spawned behind their back, so neither this nor the
+    /// process it eventually holds is created at launch. Building it spawns nothing either —
+    /// `startCodex()` is the only thing that runs a process, and only `createSession` calls it.
+    private var codexStack: CodexStack?
+
+    /// Serialises spawn + handshake so N tabs created at once produce one app-server.
+    ///
+    /// A `Task` rather than a `Bool` because the handshake is `async`: a second creation
+    /// racing the first has to *wait* for the same `initialize` to be answered, not proceed
+    /// against a process that has not spoken yet.
+    private var codexHandshake: Task<Void, Error>?
+
+    /// Test seam. Proves the app-server's lifetime — lazy on first codex use, gone with the
+    /// last codex tab — without spawning a process to observe it.
+    var hasCodexStackForTesting: Bool { codexStack != nil }
+
+    /// Builds the stack on first ask and memoizes it. Starts no process; see `startCodex`.
+    private func makeCodexStackIfNeeded() -> CodexStack {
+        if let codexStack { return codexStack }
+        let stack = CodexStack()
+        codexStack = stack
+        return stack
+    }
+
+    /// Stops the app-server once the last codex tab is gone.
+    ///
+    /// Safe to do, and not merely tidy: `thread/start` + `thread/name/set` committed every
+    /// thread to codex's own storage, which is exactly what makes `codex resume <id>` work
+    /// across processes — so nothing is lost, and the next codex session spawns a fresh
+    /// server. Keeping it alive instead would leave a process running for the rest of the
+    /// run on the strength of a tab the user closed.
+    private func stopCodexIfUnused() {
+        guard codexStack != nil else { return }
+        guard !repos.flatMap(\.sessions).contains(where: { $0.agent == .codex }) else { return }
+        stopCodex()
+    }
+
+    /// Tears the stack down whatever the reason. `stop()` funnels into the transport's
+    /// termination hook, so every request still in flight fails rather than hanging its
+    /// caller — the same guarantee a crash gets.
+    private func stopCodex() {
+        codexStack?.transport.stop()
+        codexStack = nil
+        codexHandshake = nil
+    }
+
     /// Falls back to claude's registered adapter, wiring and all. A bare `ClaudeAdapter()`
     /// would carry neither this store's `projectsRoot` nor its rename route, so a tab on an
     /// agent nobody registered would derive transcript paths under the real
     /// `~/.claude/projects` even inside a test.
+    ///
+    /// Codex is answered from `codexStack` rather than from `adapters`, so that an override
+    /// installed through `overrideAdapter` keeps winning and the stack stays droppable in one
+    /// place. `adapters` therefore holds only claude's entry and whatever a caller injected.
     func adapter(for agent: AgentID) -> any AgentAdapter {
-        adapters[agent] ?? adapters[.claude] ?? ClaudeAdapter()
+        if let existing = adapters[agent] { return existing }
+        if agent == .codex { return makeCodexStackIfNeeded().adapter }
+        return adapters[.claude] ?? ClaudeAdapter()
     }
 
     /// Memoized on a miss, never freshly built per call.
@@ -223,8 +312,13 @@ final class SessionStore: ObservableObject {
     /// a *data* possibility, not just a future-code one. Degrading to claude's runtime keeps a
     /// mislabelled tab working; trapping would turn a hand-edited `sessions.json` into a
     /// launch crash.
+    ///
+    /// Codex gets its own real runtime, not that degraded fallback: a `ClaudeRuntime` here
+    /// would sit on a codex tab tailing a transcript nothing writes, and the notifications the
+    /// app-server does send would reach nobody.
     func runtime(for agent: AgentID) -> any AgentRuntime {
         if let existing = runtimes[agent] { return existing }
+        if agent == .codex { return makeCodexStackIfNeeded().runtime }
         let runtime = ClaudeRuntime(clock: clock)
         runtimes[agent] = runtime
         return runtime
@@ -299,6 +393,12 @@ final class SessionStore: ObservableObject {
 
     /// Test seam. Production sets this from the convenience init.
     var notifier: Notifying?
+
+    /// How a refused session creation reaches the user. Defaulted rather than injected
+    /// because every caller wants the same alert, and overridable so no test ever puts a
+    /// panel on screen. See `AgentLaunchFailureReporting`.
+    var launchFailureReporter: AgentLaunchFailureReporting = NSAlertAgentLaunchFailureReporter()
+
     /// Test seam for frontmost-ness; production reads `NSApplication`.
     var appIsActive: () -> Bool = { NSApplication.shared.isActive }
 
@@ -554,20 +654,94 @@ final class SessionStore: ObservableObject {
         newSession(in: homeURL)
     }
 
+    /// Claude's creation path, synchronous and infallible.
+    ///
+    /// Stays that way deliberately: `seedInitialSession` runs inline inside
+    /// `SessionStore.init`, so an `await` here would mean the first tab appearing after the
+    /// initializer returns. It reaches `binding(for:)` legally because claude *mints* its own
+    /// conversation id — the session already holds the identity, and there is nothing to
+    /// negotiate. An agent whose identity comes back from a server cannot be created here at
+    /// all: this takes no agent, `Session` defaults to `.claude`, and codex goes through
+    /// `createSession(agent:in:)`.
     @discardableResult
     func newSession(in url: URL, at index: Int? = nil) -> Session {
-        sessionCounter += 1
-        let session = Session(
-            title: "session \(sessionCounter)", workingDirectory: url.path
-        )
+        let session = Session(title: nextSessionTitle(), workingDirectory: url.path)
         let adapter = adapter(for: session.agent)
         let options = options(for: session.agent, project: url.path)
-        insertSession(
+        return addSession(
             session,
             in: url,
             initialInput: adapter.launchCommand(adapter.binding(for: session), session, options),
             at: index
         )
+    }
+
+    /// Creates a tab for any agent, negotiating conversation identity first for the agents
+    /// that need it, and refusing to create one at all when that negotiation fails.
+    ///
+    /// `async` and fallible for exactly one agent. Codex assigns thread ids itself and does
+    /// not persist a thread until it has also been named, so identity here is a round trip
+    /// that can fail — and a tab bound to a thread that was never committed looks fine until
+    /// its terminal reports `No saved session found with ID …`. Claude cannot fail and must
+    /// not be made to await: it keeps `newSession`'s synchronous path untouched.
+    ///
+    /// Both reports the failure and returns it: the alert is what the user sees (a failed
+    /// creation leaves no tab on which to notice anything), and the `Result` is what a caller
+    /// that wants to react — a test, a menu action selecting the new tab — reads.
+    @discardableResult
+    func createSession(
+        agent: AgentID, in directory: String, at index: Int? = nil
+    ) async -> Result<UUID, AgentLaunchError> {
+        let url = URL(fileURLWithPath: directory, isDirectory: true)
+        guard agent != .claude else { return .success(newSession(in: url, at: index).id) }
+
+        // Named before `prepare`, not after: `thread/name/set` is what commits the thread,
+        // and it sends this title. A failed creation therefore burns a number — "session 4"
+        // following "session 2" is a far smaller cost than a tab whose codex thread is
+        // called something else.
+        let draft = Session(
+            title: nextSessionTitle(), workingDirectory: directory, agent: agent
+        )
+        let options = options(for: agent, project: directory)
+        let binding: AgentBinding
+        do {
+            binding = try await preparedAdapter(for: agent).prepare(for: draft, options: options)
+        } catch {
+            let failure = launchError(from: error)
+            launchFailureReporter.report(failure)
+            return .failure(failure)
+        }
+
+        // Rebuilt rather than mutated so the tab is pinned to what codex actually named,
+        // including the rollout path it reported. `id` is carried over so the title minted
+        // above still belongs to this tab.
+        let session = Session(
+            id: draft.id,
+            title: draft.title,
+            workingDirectory: directory,
+            pinnedConversationID: binding.conversationID,
+            agent: agent,
+            transcriptPath: binding.transcriptURL?.path
+        )
+        let adapter = adapter(for: agent)
+        addSession(
+            session,
+            in: url,
+            initialInput: adapter.launchCommand(binding, session, options),
+            at: index
+        )
+        return .success(session.id)
+    }
+
+    /// The tail every creation shares: file the tab, reveal it, select it, save.
+    ///
+    /// Split from `insertSession` rather than folded into it because `restore` calls that one
+    /// directly — for the reason the un-collapse below spells out.
+    @discardableResult
+    private func addSession(
+        _ session: Session, in url: URL, initialInput: String, at index: Int? = nil
+    ) -> Session {
+        insertSession(session, in: url, initialInput: initialInput, at: index)
         // A session landing in a collapsed project is otherwise invisible: `SidebarRow.rows`
         // renders only the header for a collapsed repo, so the new row exists in `repos` but
         // nothing in the sidebar shows it happened. Un-collapsing here — not in
@@ -581,6 +755,64 @@ final class SessionStore: ObservableObject {
         selectedSessionID = session.id
         persist()
         return session
+    }
+
+    /// The next default tab name. One counter for every agent: the number is the tab's
+    /// position in this run's history, not the agent's.
+    private func nextSessionTitle() -> String {
+        sessionCounter += 1
+        return "session \(sessionCounter)"
+    }
+
+    /// The adapter to create a session with, with whatever has to be running behind it
+    /// running.
+    ///
+    /// A caller that installed its own adapter through `overrideAdapter` owns the transport
+    /// behind it, so nothing is spawned for it — which is also what keeps the committed test
+    /// suite from ever running `codex`.
+    private func preparedAdapter(for agent: AgentID) async throws -> any AgentAdapter {
+        if let registered = adapters[agent] { return registered }
+        guard agent == .codex else { return adapter(for: agent) }
+        try await startCodex()
+        return makeCodexStackIfNeeded().adapter
+    }
+
+    /// Probes the installed `codex`, spawns its app-server and completes the handshake —
+    /// once, however many tabs ask at the same time.
+    ///
+    /// The version probe runs off the main actor because it spawns `codex --version` and
+    /// waits for it, which is a visible hitch where the UI lives. Everything after it is
+    /// main-actor work by construction: the transport and the client both are.
+    private func startCodex() async throws {
+        if let codexHandshake { return try await codexHandshake.value }
+        let stack = makeCodexStackIfNeeded()
+        let task = Task { @MainActor in
+            try await Task.detached { try CodexVersionProbe.check() }.value
+            try stack.transport.start()
+            try await CodexProcessTransport.verifyHandshake(stack.rpc)
+        }
+        codexHandshake = task
+        do {
+            try await task.value
+        } catch {
+            // A failed launch must not poison the store: dropping both means the next
+            // attempt — after the user installs or upgrades codex — probes again instead of
+            // replaying this failure for the rest of the run.
+            codexHandshake = nil
+            codexStack = nil
+            throw error
+        }
+    }
+
+    /// Names the cause for the alert. `localizedDescription` on a plain Swift error is the
+    /// useless "The operation couldn't be completed. (FlightDeck.CodexRPCError error 2.)",
+    /// and an alert that does not say what went wrong is barely better than no alert.
+    private func launchError(from error: Error) -> AgentLaunchError {
+        if let launch = error as? AgentLaunchError { return launch }
+        if let localized = (error as? LocalizedError)?.errorDescription {
+            return .prepareFailed(localized)
+        }
+        return .prepareFailed(String(describing: error))
     }
 
     /// ⌘N. Creates a session in the ACTIVE session's project, directly below it, and
@@ -984,6 +1216,8 @@ final class SessionStore: ObservableObject {
         let doomed = processRegistry.process(for: id)
 
         stopWatching(id)
+        // After `stopWatching`, which still needs the runtime this may drop.
+        stopCodexIfUnused()
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
@@ -1172,6 +1406,12 @@ final class SessionStore: ObservableObject {
     func reapAllForQuit(budget: Double = SessionStore.quitBudget) async {
         // Before any `await` — see `isTerminating`'s doc comment for the race this closes.
         isTerminating = true
+        // The app-server is our child too, and unlike a tab's shell nothing else will ever
+        // come looking for it: it has no entry in `processRegistry`, so a quit that skipped
+        // this would leave `codex app-server` running with nobody left to talk to it. Above
+        // the `live.isEmpty` return below, deliberately — quitting with no tabs still has to
+        // stop it.
+        stopCodex()
         let live = processRegistry.all
         guard !live.isEmpty else { return }
 
@@ -1605,6 +1845,16 @@ final class SessionStore: ObservableObject {
 
         var next: [UUID: SessionStatus] = [:]
         for session in repos.flatMap(\.sessions) {
+            // A tab on an agent that has no claude status registry behind it keeps whatever
+            // its runtime last reported. This scan can neither confirm nor refute a codex
+            // thread — it lists `claude` processes — so rebuilding blindly would erase a
+            // codex tab's status on every tick and hand the diff below a fabricated
+            // `busy → gone` edge, marking it unread and withdrawing its banner on no
+            // evidence at all.
+            guard session.agent == .claude else {
+                next[session.id] = statuses[session.id]
+                continue
+            }
             guard let anchor = anchors[session.id], let entry = rows[anchor.pid] else {
                 continue
             }
@@ -1615,6 +1865,19 @@ final class SessionStore: ObservableObject {
             )
         }
 
+        commitStatuses(next)
+    }
+
+    /// The single writer of `statuses`, and the one place a status change turns into its
+    /// consequences.
+    ///
+    /// Every caller hands over a whole rebuilt map rather than a single edit, because every
+    /// consequence below is read off the *diff*: an unread mark, a notification, a superseded
+    /// resume prompt and the save are all decided per transition. A caller that wrote
+    /// `statuses` directly instead would skip all of it — and worse, its value would become
+    /// the `previous` snapshot the next tick diffs against, so a later tick could fabricate
+    /// or swallow an edge that never happened.
+    private func commitStatuses(_ next: [UUID: SessionStatus]) {
         guard next != statuses else { return }
         // A session that HAD a status and no longer does means its `claude` exited.
         // Drop its sub-agent count too, so a later process reusing the same session
@@ -1949,33 +2212,47 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// An agent reported what it is doing. Not routed yet, deliberately.
+    /// An agent reported what it is doing.
     ///
-    /// `applyRegistry` owns `statuses` outright, and not merely as a matter of style: it
-    /// picks each tab's row through `ConversationPin.resolve`, which validates `procStart`
-    /// against pid recycling and applies a newest-wins tiebreak precisely because two
-    /// processes really can hold one conversation once resumes are in play. It then diffs
-    /// the whole map — `previous` against `next` — and every unread mark, notification,
-    /// superseded resume prompt and `persist()` on that tick is read off that one diff.
+    /// Routed through `commitStatuses` rather than written into `statuses`, which is the
+    /// whole point of this method existing: that is where the diff lives, and every unread
+    /// mark, notification, superseded resume prompt and save is decided from it. Writing the
+    /// map directly would skip all of them *and* corrupt the snapshot the next registry tick
+    /// diffs against.
     ///
-    /// Writing `statuses` from here would bypass all of it, and would do so on a *different*
-    /// row-selection rule: an `.activity` event names a conversation, not an anchored pid.
-    /// The corrupted value then becomes the `previous` snapshot the next tick diffs against,
-    /// so a later tick can fabricate or swallow a `busy → idle` edge. Claude has no need of
-    /// this route at all — its registry tick already carries activity — so it stays a stub
-    /// rather than a second writer.
-    ///
-    /// Task 10 owns routing codex's activity event *through* `applyRegistry`'s transition
-    /// machinery rather than around it.
-    private func applyActivity(_ activity: SessionActivity, to tabID: UUID) {}
+    /// Claude never arrives here in production — its activity comes off the registry tick,
+    /// which already carries it — so this is codex's route in practice. It is not gated on
+    /// the agent even so: an agent that reports activity is reporting activity, and a gate
+    /// would only mean a second rule to keep in step with the one in `applyRegistry`.
+    private func applyActivity(_ activity: SessionActivity, to tabID: UUID) {
+        guard session(for: tabID) != nil else { return }
+        var next = statuses
+        next[tabID] = SessionStatus(
+            activity: activity,
+            // Not carried over from the previous status: `waitingFor` describes *this*
+            // report's block, and keeping a stale reason on a tab that has moved on would
+            // put the wrong sentence in the sidebar and in the notification body.
+            waitingFor: nil,
+            subagentCount: subagentCounts[tabID] ?? 0
+        )
+        commitStatuses(next)
+    }
 
     /// An agent finished a turn.
     ///
     /// Nothing for claude to do: its turn boundary reaches the store as a status transition
     /// to `.idle` on the next registry tick, and `applyRegistry` is what turns that into
-    /// unread marks and notifications. Codex has no registry to tick and reports the
-    /// boundary outright — this is the seam that will carry it.
-    private func applyTurnEnded(to tabID: UUID) {}
+    /// unread marks and notifications. Codex has no registry to tick and reports the boundary
+    /// outright — and the unread mark is exactly what keys off it, so without this a codex
+    /// session silently never marks unread.
+    ///
+    /// Idempotent with the `.activity(.idle)` that `turn/completed` maps to just ahead of it:
+    /// landing idle on an already-idle tab produces no change, so `commitStatuses` returns
+    /// without touching anything. That is why this is expressed as "the turn left it idle"
+    /// rather than as its own kind of edge.
+    private func applyTurnEnded(to tabID: UUID) {
+        applyActivity(.idle, to: tabID)
+    }
 
     private func indexOfRepo(for url: URL) -> Int? {
         let target = Self.comparablePath(url.path)
