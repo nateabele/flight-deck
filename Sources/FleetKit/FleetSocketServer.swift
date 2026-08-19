@@ -25,6 +25,14 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// Only clients that have said `hello`. A handshake alone does not make an attachment,
     /// which is what keeps `onAttachedCountChanged` meaningful as "phones watching".
     private var attached: [UUID: NWConnection] = [:]
+    /// Every accepted connection that has not yet said `hello`, so `stop()` has something to
+    /// cancel for it. Without this, a connection accepted mid-handshake — key rotation
+    /// restarts the listener on every arm, expiry, and revocation, so this is routine, not
+    /// theoretical — has no reference left holding it once the server is gone: its own
+    /// `authDeadline` closure captures `self` and `connection` weakly, so a deallocated
+    /// server's deadline firing does nothing, and the receive loop's strong capture of
+    /// `connection` keeps the socket alive with nothing left able to cancel it.
+    private var pending: [UUID: NWConnection] = [:]
 
     public init(queue: DispatchQueue = .main) {
         self.queue = queue
@@ -32,8 +40,12 @@ public final class FleetSocketServer: @unchecked Sendable {
 
     /// `port: nil` asks the OS for one, which is what the tests use. Returns the port
     /// actually bound, for advertising.
+    ///
+    /// `async` rather than a busy-wait: this is started from the main actor in the app, where
+    /// blocking the calling thread for up to five seconds waiting for a bind is a visible UI
+    /// stall, not a background hiccup.
     @discardableResult
-    public func start(keys: [FleetDeviceKey], port: NWEndpoint.Port?) throws -> NWEndpoint.Port {
+    public func start(keys: [FleetDeviceKey], port: NWEndpoint.Port?) async throws -> NWEndpoint.Port {
         stop()
         let parameters = FleetSocket.webSocketParameters(
             FleetTLS.listenerParameters(keys: keys)
@@ -41,30 +53,42 @@ public final class FleetSocketServer: @unchecked Sendable {
         let listener = try port.map { try NWListener(using: parameters, on: $0) }
             ?? NWListener(using: parameters)
         listener.newConnectionHandler = { [weak self] in self?.accept($0) }
-        listener.start(queue: queue)
         self.listener = listener
 
-        // `listener.port` goes non-nil the moment the listener has a socket, which is
-        // *before* the OS has actually assigned the ephemeral port: in between it reports
-        // the `.any` (0) placeholder, and connecting to that port fails immediately with
-        // `EADDRNOTAVAIL` rather than any error that looks like "not ready yet". The real
-        // port — and the guarantee that something is actually listening — only lands once
-        // the listener's state reaches `.ready`, so both conditions have to hold before a
-        // caller can be handed a port worth advertising.
-        // `nonisolated(unsafe)`: written only from `listener.stateUpdateHandler` and read
-        // only from the busy-wait below, both on `queue` (the `.main` default), so this is
-        // single-threaded in practice — the same confinement argument as the class's
-        // `@unchecked Sendable`, just for a local rather than a stored property.
-        nonisolated(unsafe) var isReady = false
-        listener.stateUpdateHandler = { state in
-            if case .ready = state { isReady = true }
-        }
-        let deadline = Date().addingTimeInterval(5)
-        while (!isReady || listener.port == nil || listener.port == .any), Date() < deadline {
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
-        }
-        guard isReady, let bound = listener.port, bound != .any else {
-            throw FleetSocketError.didNotBind
+        // Awaiting the state handler rather than pumping a run loop: `listener.port` goes
+        // non-nil the moment the listener has a socket, which is *before* the OS has
+        // actually assigned the ephemeral port — in between it reports the `.any` (0)
+        // placeholder, and connecting to that port fails immediately with `EADDRNOTAVAIL`.
+        // The real port, and the guarantee that something is actually listening, only land
+        // once the listener's state reaches `.ready`.
+        //
+        // A continuation must be resumed exactly once or the program traps, and
+        // `stateUpdateHandler` fires repeatedly (`.setup`, `.waiting`, `.ready`, and
+        // potentially `.failed`/`.cancelled` later) — hence the `resumed` guard.
+        let bound: NWEndpoint.Port = try await withCheckedThrowingContinuation { continuation in
+            // `nonisolated(unsafe)`: written and read only from `stateUpdateHandler`, which
+            // Network.framework always invokes serially on `queue` — the same single-queue
+            // confinement argument as the class's `@unchecked Sendable` — but the compiler
+            // cannot see that a `@Sendable` closure calls back onto one queue, hence the flag.
+            nonisolated(unsafe) var resumed = false
+            listener.stateUpdateHandler = { state in
+                guard !resumed else { return }
+                switch state {
+                case .ready:
+                    guard let port = listener.port else { return }
+                    resumed = true
+                    continuation.resume(returning: port)
+                case .failed(let error):
+                    resumed = true
+                    continuation.resume(throwing: error)
+                case .cancelled:
+                    resumed = true
+                    continuation.resume(throwing: FleetSocketError.didNotBind)
+                default:
+                    break
+                }
+            }
+            listener.start(queue: queue)
         }
         return bound
     }
@@ -72,6 +96,8 @@ public final class FleetSocketServer: @unchecked Sendable {
     public func stop() {
         for connection in attached.values { connection.cancel() }
         attached.removeAll()
+        for connection in pending.values { connection.cancel() }
+        pending.removeAll()
         listener?.cancel()
         listener = nil
     }
@@ -84,6 +110,7 @@ public final class FleetSocketServer: @unchecked Sendable {
 
     private func accept(_ connection: NWConnection) {
         let id = UUID()
+        pending[id] = connection
         connection.start(queue: queue)
 
         // Drop a peer that completed a handshake and then said nothing. Without this a
@@ -99,6 +126,7 @@ public final class FleetSocketServer: @unchecked Sendable {
             switch frame {
             case .hello(let lastSeq):
                 if self.attached[id] == nil {
+                    self.pending.removeValue(forKey: id)
                     self.attached[id] = connection
                     self.onAttachedCountChanged?(self.attached.count)
                 }
@@ -115,6 +143,7 @@ public final class FleetSocketServer: @unchecked Sendable {
         } onEnd: { [weak self] _ in
             guard let self else { return }
             connection.cancel()
+            self.pending.removeValue(forKey: id)
             guard self.attached.removeValue(forKey: id) != nil else { return }
             self.onAttachedCountChanged?(self.attached.count)
         }
