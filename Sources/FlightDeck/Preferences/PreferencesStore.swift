@@ -63,6 +63,19 @@ final class PreferencesStore: ObservableObject {
         )
     }
 
+    /// The `thread/start` options a new codex tab launches with.
+    ///
+    /// Codex's counterpart to `resolvedFlags(forProject:)`, minus the project layer: there
+    /// is no per-project codex storage, so this is the one global row. Looked up by id
+    /// rather than by position, because the list's order is the New Session shortcut
+    /// binding and the user can reorder it — the same lookup `CodexOptionsForm` writes
+    /// through, so the pane and the launch path cannot disagree about which row is codex's.
+    func resolvedCodexOptions() -> CodexThreadOptions {
+        guard case .codex(let options)? = preferences.agents.first(where: { $0.id == .codex })?.options
+        else { return CodexThreadOptions() }
+        return options
+    }
+
     func projectOverride(_ path: String) -> FlagSet {
         preferences.projectFlags[Self.key(path)] ?? FlagSet()
     }
