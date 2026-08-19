@@ -831,17 +831,18 @@ final class FleetReplayFoldTests: XCTestCase {
         assertFoldPreservesOutcome(events)
     }
 
-    /// A session that both appeared and vanished inside the gap never existed as far as the
-    /// client is concerned. Emitting its removal would be harmless but emitting its *add*
-    /// would not, and keeping the pair is pure noise.
-    func testASessionAddedAndRemovedInTheGapDisappearsEntirely() {
+    /// A session that appeared and vanished inside the gap collapses to its removal alone.
+    /// The removal survives rather than the pair vanishing: the fold cannot know whether the
+    /// client already held this id, and a removal it did not need is inert, while a removal
+    /// it did need and never got is a phantom session.
+    func testASessionAddedAndRemovedInTheGapCollapsesToItsRemoval() {
         let ghost = UUID()
         let events: [FleetEvent] = [
             .sessionAdded(session(ghost, "ghost"), project: projectID, at: 0),
             .activityChanged(id: ghost, activity: "busy", waitingFor: nil, subagentCount: 0),
             .sessionRemoved(id: ghost)
         ]
-        XCTAssertTrue(FleetReplay.fold(events).isEmpty)
+        XCTAssertEqual(FleetReplay.fold(events), [.sessionRemoved(id: ghost)])
         assertFoldPreservesOutcome(events)
     }
 
@@ -912,69 +913,85 @@ public enum FleetReplay {
         return collapseLastWriteWins(survivors, in: events)
     }
 
-    /// A removal is the one event about a doomed subject that still matters — and only if
-    /// the client had the subject before the window opened. A subject that was both created
-    /// and destroyed in the gap never reached the client at all.
+    /// A removal is the only event about a doomed subject that still matters. Everything
+    /// earlier is superseded by it, and everything later cannot exist.
+    ///
+    /// The removal is kept unconditionally, even when this window also contains the subject's
+    /// creation. An earlier draft dropped it in that case, reasoning that a client which never
+    /// saw the subject need not hear it left — but the fold sees only events, never the
+    /// snapshot, so it cannot distinguish a genesis add from a redundant add on something the
+    /// client already holds, and guessing wrong left the client holding a deleted session.
+    /// Applying a removal for an unknown id is a silent no-op by contract, so keeping it costs
+    /// one inert frame and makes the property hold unconditionally.
     private static func survives(_ event: FleetEvent, _ doomed: Doomed) -> Bool {
         if let id = event.sessionID, doomed.sessions.contains(id) {
             guard case .sessionRemoved = event else { return false }
-            return !doomed.sessionsBornInWindow.contains(id)
+            return true
         }
         if let id = event.projectID, doomed.projects.contains(id) {
             guard case .projectRemoved = event else { return false }
-            return !doomed.projectsBornInWindow.contains(id)
+            return true
         }
         return true
     }
 
     // MARK: Removals
 
+    /// Subjects that are gone by the end of the window. There is deliberately no
+    /// "born in this window" companion — see `survives(_:_:)`.
     private struct Doomed {
         var sessions: Set<UUID> = []
         var projects: Set<UUID> = []
-        var sessionsBornInWindow: Set<UUID> = []
-        var projectsBornInWindow: Set<UUID> = []
     }
 
+    /// One forward pass recording, per subject, where it was last added and last removed.
+    ///
+    /// A subject is doomed only when its last removal comes *after* its last addition. That
+    /// ordering test is what lets a remove-then-re-add under the same id survive intact:
+    /// dropping both events would leave the client holding the subject's pre-window contents,
+    /// which is stale data rather than a missing frame — the worse of the two failures.
+    ///
+    /// The symmetry between sessions and projects is load-bearing. An earlier draft of this
+    /// plan defended sessions only, and a project removed and re-added inside one window
+    /// resurrected every session it used to hold.
     private static func subjectsRemovedInWindow(_ events: [FleetEvent]) -> Doomed {
-        var doomed = Doomed()
-        for event in events {
+        var lastSessionAdd: [UUID: Int] = [:], lastSessionRemove: [UUID: Int] = [:]
+        var lastProjectAdd: [UUID: Int] = [:], lastProjectRemove: [UUID: Int] = [:]
+        for (index, event) in events.enumerated() {
             switch event {
-            case .sessionRemoved(let id): doomed.sessions.insert(id)
-            case .projectRemoved(let id): doomed.projects.insert(id)
-            case .sessionAdded(let s, _, _): doomed.sessionsBornInWindow.insert(s.id)
-            case .projectAdded(let p, _): doomed.projectsBornInWindow.insert(p.id)
+            case .sessionAdded(let session, _, _): lastSessionAdd[session.id] = index
+            case .sessionRemoved(let id): lastSessionRemove[id] = index
+            case .projectAdded(let project, _): lastProjectAdd[project.id] = index
+            case .projectRemoved(let id): lastProjectRemove[id] = index
             default: continue
             }
         }
-        // A session removed and then re-added under the same id is not doomed — its final
-        // state is "present". `repos` never reuses a tab id, so this is defensive rather
-        // than expected, but the alternative is silently dropping a live session.
-        for event in events.reversed() {
-            if case .sessionAdded(let s, _, _) = event, doomed.sessions.contains(s.id) {
-                if lastIndexOfRemoval(of: s.id, in: events) < lastIndexOfAdd(of: s.id, in: events) {
-                    doomed.sessions.remove(s.id)
-                }
-            }
+
+        var doomed = Doomed()
+        for (id, removedAt) in lastSessionRemove where (lastSessionAdd[id] ?? -1) < removedAt {
+            doomed.sessions.insert(id)
+        }
+        for (id, removedAt) in lastProjectRemove where (lastProjectAdd[id] ?? -1) < removedAt {
+            doomed.projects.insert(id)
         }
         return doomed
-    }
-
-    private static func lastIndexOfRemoval(of id: UUID, in events: [FleetEvent]) -> Int {
-        events.lastIndex { if case .sessionRemoved(let r) = $0 { return r == id }; return false } ?? -1
-    }
-
-    private static func lastIndexOfAdd(of id: UUID, in events: [FleetEvent]) -> Int {
-        events.lastIndex { if case .sessionAdded(let s, _, _) = $0 { return s.id == id }; return false } ?? -1
     }
 
     // MARK: Last-write-wins collapsing
 
     /// The kinds where only the final value can matter, keyed by what they are final *for*.
     /// Anything not listed here is positional and is left exactly where it is.
+    ///
+    /// Reorders and moves are deliberately absent, and that is a correctness requirement
+    /// rather than caution. `reorder` leaves any id its order does not mention "in place", so
+    /// a reorder's result depends on the list it runs against — it is a state-dependent
+    /// transform, not a field. Collapsing two reorders that straddle an insertion silently
+    /// changes the surviving order: with [A,B], `reorder→[B,A]`, `add C at 1`, `reorder
+    /// pinning only A` yields [A,B,C] raw and [A,C,B] folded. There is nothing to gain by
+    /// collapsing them either — reorders are human drag gestures, while the volume this fold
+    /// exists to absorb is machine-generated status flaps.
     private enum FoldKey: Hashable {
-        case activity(UUID), rename(UUID), unread(UUID)
-        case collapsed(UUID), sessionsOrder(UUID), projectsOrder
+        case activity(UUID), rename(UUID), unread(UUID), collapsed(UUID)
     }
 
     private static func key(_ event: FleetEvent) -> FoldKey? {
@@ -983,8 +1000,6 @@ public enum FleetReplay {
         case .renamed(let id, _, _): return .rename(id)
         case .unreadChanged(let id, _): return .unread(id)
         case .projectCollapsed(let id, _): return .collapsed(id)
-        case .sessionsReordered(let id, _): return .sessionsOrder(id)
-        case .projectsReordered: return .projectsOrder
         default: return nil
         }
     }
