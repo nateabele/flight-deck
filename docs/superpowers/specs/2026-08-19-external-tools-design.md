@@ -393,7 +393,7 @@ Headless unit tests only (§2).
 | Unit | Assertions |
 |---|---|
 | `ToolTemplate` | every variable; paths with spaces and embedded single quotes survive quoting; unknown `${…}` left literal; a nil `transcriptURL` expands to `''`; `$EDITOR` untouched |
-| `AgentAdapter.location` | the extension default reports `transcriptDirectory` and the adapter's own binding; an adapter that overrides it is honoured (asserted through a stub, which is the point of the seam) |
+| `AgentAdapter.location` | each shipped adapter reports the agent's live directory and its own binding; two adapters given the same session can disagree, which is what makes the per-adapter answer real rather than a shared constant |
 | `SessionStore.toolContext` | nil with no selection; built from the *adapter's* location, proven by overriding the adapter via `overrideAdapter` and seeing the context change; project facts come from the `Repo`, not the agent |
 | `ToolOverlayVisibility` | move → visible; +5s → hidden; keystroke → hidden immediately; move after keystroke → visible again; hover pins past the timeout |
 | `ToolShortcut` | round trip to `NSMenuItem` key equivalent + modifier mask; `⌘⇧O` display string |
@@ -413,7 +413,7 @@ Headless unit tests only (§2).
 `SymbolPicker.swift`, `ShortcutRecorder.swift`.
 
 **Modified:** `Agents/AgentKind.swift` (`AgentLocation`), `Agents/AgentAdapter.swift`
-(`location(for:)` plus its extension default), `SessionStore.swift` (`toolContext()`),
+(`location(for:)` as a required member, no default), `SessionStore.swift` (`toolContext()`),
 `Preferences/Preferences.swift` (the `storedTools` field, defaults, migration),
 `Preferences/PreferencesStore.swift` (call the migration; expose `tools`),
 `Preferences/UI/PreferencesView.swift` (the fourth tab), `RootView.swift` (the stacked overlay),
