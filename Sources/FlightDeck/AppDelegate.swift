@@ -76,9 +76,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let preferences = store.preferences else { return }
 
         toolsMenu.isEnabled = { [weak store] in store?.selectedSessionID != nil }
+        // `.configured` — not a bare `ShellToolLauncher()` — so a Shell & Environment override
+        // reaches menu-launched tools the same way it reaches session creation.
         toolsMenu.run = { [weak store] tool in
             guard let store else { return }
-            ToolRunner.run(tool, store: store, launcher: ShellToolLauncher())
+            ToolRunner.run(tool, store: store, launcher: ShellToolLauncher.configured(preferences))
         }
         toolsMenu.openPreferences = {
             // macOS renamed this selector at some point; a menu item that silently does

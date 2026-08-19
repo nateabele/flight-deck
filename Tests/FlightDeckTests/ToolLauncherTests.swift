@@ -12,6 +12,14 @@ final class ToolLauncherTests: XCTestCase {
         }
     }
 
+    /// Same in-memory stand-in `ToolPreferencesTests` and `PreferencesStoreTests` use, so this
+    /// test never touches the real defaults domain.
+    private final class MemoryPersistence: PreferencesPersisting {
+        var stored: Preferences?
+        func load() -> Preferences? { stored }
+        func save(_ preferences: Preferences) { stored = preferences }
+    }
+
     private func makeLauncher(_ reporter: RecordingReporter) -> ShellToolLauncher {
         var launcher = ShellToolLauncher()
         launcher.shell = { "/bin/sh" }
@@ -109,5 +117,51 @@ final class ToolLauncherTests: XCTestCase {
             reporter.reports.first?.message.contains("tmp") ?? false,
             "currentDirectoryURL is what makes relative paths in a template resolve"
         )
+    }
+
+    // MARK: .configured(_:)
+
+    func testConfiguredHonoursTheShellOverride() {
+        // The bug this closes: `ShellToolLauncher()` bare-constructed at both production call
+        // sites ignored the Shell & Environment pane entirely. `.configured` is what makes
+        // `resolvedShell()` — not `ShellResolver.resolve()`'s environment-only fallback — the
+        // thing a tool launch actually asks.
+        let preferences = PreferencesStore(persistence: MemoryPersistence())
+        preferences.preferences.shell.shellOverride = "/opt/homebrew/bin/fish"
+
+        let launcher = ShellToolLauncher.configured(preferences)
+
+        XCTAssertEqual(launcher.shell(), "/opt/homebrew/bin/fish")
+    }
+
+    func testConfiguredMergesThePanesEnvironmentOverProcessEnvironmentWithThePaneWinning() {
+        let preferences = PreferencesStore(persistence: MemoryPersistence())
+        // PATH is near-certain to already be in ProcessInfo's environment, so overriding it is
+        // what proves the pane wins a collision rather than merge() keeping the first value.
+        preferences.preferences.shell.environment = [
+            "PATH": "/pane/only/bin", "FLIGHT_DECK_TOOL_TEST": "from-pane",
+        ]
+
+        let launcher = ShellToolLauncher.configured(preferences)
+        let environment = launcher.environment()
+
+        XCTAssertEqual(environment["PATH"], "/pane/only/bin")
+        XCTAssertEqual(environment["FLIGHT_DECK_TOOL_TEST"], "from-pane")
+        // The process environment must still be the base — an override list is deltas on top
+        // of it, not a full replacement, same contract `sessionEnvironment` documents.
+        XCTAssertEqual(environment["HOME"], ProcessInfo.processInfo.environment["HOME"])
+    }
+
+    func testConfiguredReadsPreferencesLiveNotAtConstruction() {
+        // Captured weakly and re-read on each call, so an edit made in the pane after this
+        // launcher was built (e.g. while it sits on `ToolOverlay` across the view's lifetime)
+        // still applies to the next launch instead of being frozen at construction.
+        let preferences = PreferencesStore(persistence: MemoryPersistence())
+        let launcher = ShellToolLauncher.configured(preferences)
+        XCTAssertNotEqual(launcher.shell(), "/bin/dash", "no override yet — this would be a false pass")
+
+        preferences.preferences.shell.shellOverride = "/bin/dash"
+
+        XCTAssertEqual(launcher.shell(), "/bin/dash")
     }
 }

@@ -60,8 +60,12 @@ private final class StderrTail {
 /// in a template (pipes, `&&`, quoting) works as written.
 @MainActor
 struct ShellToolLauncher: ToolLaunching {
-    /// Honours the Shell & Environment pane's override, like session creation does.
+    /// Overridden by `configured(_:)` to read `PreferencesStore.resolvedShell()`. The bare
+    /// default here only fires for a launcher nobody wired to preferences (tests), so it falls
+    /// back to `$SHELL` directly rather than silently dropping the user's override.
     var shell: () -> String = { ShellResolver.resolve() }
+    /// Overridden by `configured(_:)` to merge in `ShellPreferences.environment`. The bare
+    /// default is the plain process environment, same caveat as `shell` above.
     var environment: () -> [String: String] = { ProcessInfo.processInfo.environment }
     var reporter: ToolLaunchFailureReporting = NSAlertToolLaunchFailureReporter()
     /// How long a child has to fail before it is assumed to have started fine. Long enough for
@@ -131,5 +135,39 @@ struct ShellToolLauncher: ToolLaunching {
             let message = tail.lastLine ?? "exited with status \(process.terminationStatus)"
             reporter.report(tool: name, message: message)
         }
+    }
+}
+
+extension ShellToolLauncher {
+    /// The one launcher every production call site should use, so the Shell & Environment
+    /// pane's override actually reaches tool launches — the bug this exists to close was two
+    /// call sites each constructing a bare `ShellToolLauncher()` and wiring neither `shell` nor
+    /// `environment` to preferences at all.
+    ///
+    /// `preferences` is captured weakly and read inside the closures rather than snapshotted
+    /// here, so an edit made in the pane after this launcher is built still applies to the next
+    /// launch instead of being frozen at construction time.
+    ///
+    /// Deliberately not `PreferencesStore.sessionEnvironment(inherited:)`: that also blanks
+    /// `CLAUDE_CODE_CHILD_SESSION`, which exists to keep a nested Claude session's transcript
+    /// writing (and the sidebar's rename sync that depends on it) alive — a session-creation
+    /// concern with nothing to say about launching an editor or a terminal. The pane's raw
+    /// `shell.environment` is merged in directly instead.
+    @MainActor
+    static func configured(_ preferences: PreferencesStore) -> ShellToolLauncher {
+        var launcher = ShellToolLauncher()
+        launcher.shell = { [weak preferences] in
+            preferences?.resolvedShell() ?? ShellResolver.resolve()
+        }
+        launcher.environment = { [weak preferences] in
+            var environment = ProcessInfo.processInfo.environment
+            // The pane's values win on collision — a user who sets a variable there means to
+            // override whatever Flight Deck inherited from Finder or the login shell.
+            if let overrides = preferences?.preferences.shell.environment {
+                environment.merge(overrides) { _, override in override }
+            }
+            return environment
+        }
+        return launcher
     }
 }

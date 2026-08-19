@@ -101,7 +101,7 @@ struct ToolsSettingsTab: View {
                         .frame(width: 260, alignment: .leading)
                 }
                 LabeledContent("Shortcut") {
-                    ShortcutRecorder(shortcut: binding(index, \.shortcut), toolName: tools[index].name)
+                    ShortcutRecorder(shortcut: binding(index, \.shortcut), toolID: tools[index].id)
                 }
                 Toggle("Show in terminal overlay", isOn: binding(index, \.showsInOverlay))
             }

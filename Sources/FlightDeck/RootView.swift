@@ -31,7 +31,8 @@ struct RootView: View {
                                     store: store,
                                     preferences: preferences,
                                     model: overlayModel,
-                                    monitor: overlayMonitor.monitor
+                                    monitor: overlayMonitor.monitor,
+                                    launcher: ShellToolLauncher.configured(preferences)
                                 )
                             }
                         }

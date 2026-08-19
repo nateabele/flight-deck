@@ -8,9 +8,11 @@ import SwiftUI
 /// of `performKeyEquivalent`, so nothing else sees the key first.
 struct ShortcutRecorder: View {
     @Binding var shortcut: ToolShortcut?
-    /// The name of the tool being edited, so conflict detection can skip that tool's own menu
-    /// item rather than the whole Tools submenu — see `findConflict`.
-    let toolName: String
+    /// The id of the tool being edited, so conflict detection can skip that tool's own menu
+    /// item rather than the whole Tools submenu — see `findConflict`. Compared by id, not by
+    /// name: nothing enforces unique tool names, so two tools sharing a name (or a tool named
+    /// after a real menu item) would otherwise hide each other's — or that item's — conflict.
+    let toolID: ToolDefinition.ID
 
     @State private var isRecording = false
     @State private var monitor: Any?
@@ -53,21 +55,26 @@ struct ShortcutRecorder: View {
     /// never reaches the tool, with nothing on screen to explain why.
     private var conflict: String? {
         guard let shortcut, let mainMenu = NSApp.mainMenu else { return nil }
-        guard let existing = Self.findConflict(shortcut, excluding: toolName, in: mainMenu) else { return nil }
+        guard let existing = Self.findConflict(shortcut, excluding: toolID, in: mainMenu) else { return nil }
         return "\(shortcut.displayString) is already \(existing)"
     }
 
     /// Excludes only the menu item for the tool being edited, not the whole Tools submenu.
     /// Skipping the whole submenu would hide the most likely conflict a user actually creates
     /// — giving two tools the same chord — since only one of them could ever fire.
-    private static func findConflict(_ shortcut: ToolShortcut, excluding toolName: String, in menu: NSMenu) -> String? {
+    private static func findConflict(
+        _ shortcut: ToolShortcut, excluding toolID: ToolDefinition.ID, in menu: NSMenu
+    ) -> String? {
         for item in menu.items {
             if let submenu = item.submenu,
-               let found = findConflict(shortcut, excluding: toolName, in: submenu) {
+               let found = findConflict(shortcut, excluding: toolID, in: submenu) {
                 return found
             }
             guard item.submenu == nil else { continue }
-            if item.title == toolName { continue }
+            // Tool menu items carry their `ToolDefinition` as `representedObject` (see
+            // `ToolsMenuController`); comparing that id, not `item.title`, is what keeps two
+            // same-named tools from silently hiding each other's conflicts.
+            if (item.representedObject as? ToolDefinition)?.id == toolID { continue }
             if item.keyEquivalent == shortcut.key,
                item.keyEquivalentModifierMask == shortcut.modifierFlags {
                 return item.title
