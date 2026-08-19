@@ -376,3 +376,53 @@ is already open. Design record:
   and `#if DEBUG`, that folding the emitted events over the previous projection equals a fresh
   projection of the store. That assertion is the only thing standing between a new mutation
   site and a stale phone; do not remove it before the encapsulation replaces it.
+
+## Codex rollout observation (2026-08-19) — landed, with these residues
+
+Codex observation now reads the files codex writes: a per-thread rollout `.jsonl` for turn
+boundaries and the app-wide `session_index.jsonl` for renames. Spec:
+[superpowers/specs/2026-08-19-codex-rollout-observation-design.md](superpowers/specs/2026-08-19-codex-rollout-observation-design.md).
+Everything below was found by that branch's reviews, triaged, and deliberately not fixed.
+
+### Blocking, and NOT caused by that branch
+
+- **`codex resume` fails against a live app-server on codex-cli 0.148.0.** Codex holds a
+  writer lock on a thread, and the interactive TUI refuses with `thread/resume failed:
+  thread <id> already has an active writer (code -32600)`. Flight Deck keeps ONE long-lived
+  app-server (a thread belongs to the process that created it) and then spawns `codex resume
+  <id>`, which is exactly the refused shape — so codex tabs appear unable to launch on 0.148.
+  Reproduced directly in that production shape; the adapter was built against 0.142.4/0.147.0,
+  and `~/.codex` now has a `thread-writer-locks` directory, so this looks like newer codex
+  behaviour rather than a regression here.
+
+  `thread/unsubscribe` is NOT the release: it answers `{"status":"unsubscribed"}` and the lock
+  stays held. The only release observed is the app-server process exiting. Untried candidates:
+  `thread/archive`, or not holding a long-lived app-server at all — which is now a live option
+  precisely because observation no longer depends on the app-server. Written up at the point of
+  the workaround in `Tests/FlightDeckTests/CodexIntegrationTests.swift`.
+
+### Worth doing
+
+- **`CodexRuntime`'s two `watcher.stop()` calls are unasserted** (`CodexRuntime.swift:44,53`).
+  `drainForTesting` only iterates live attachments, so a regression dropping either still passes
+  the detach test. The replacement-stop at :44 carries a four-line comment calling it
+  load-bearing and has no coverage at all.
+- **`testTheDefaultPathFollowsCodexHome` cannot prove the `CODEX_HOME` branch.** It reads the
+  ambient environment, so on a normal machine only the `~/.codex` fallback is exercised — while
+  the spec's §7 risk 4 names this as the thing tests assert. Split a pure
+  `indexURL(codexHome:home:)` and test both branches.
+- **Unit tests tail the user's real `~/.codex/session_index.jsonl`.** `SessionStore.codexIndexURL`
+  exists as a seam but defaults to the real path, and only `CodexIntegrationTests` overrides it.
+  Read-only and assertions are unaffected (random UUIDs), but the spec says tests never touch it.
+- **`CodexRPC.onNotification` has no production consumer.** The hook survives as generic
+  transport plumbing, wired to nothing and exercised only by `CodexRPCTests`.
+- **`TailReader`'s shrink branch lost a sentence** in the extraction: that only a *smaller*
+  replacement is detectable, and a same-size-or-larger one reads as a continuation.
+
+### Not worth doing
+
+- The captured rollout fixture bakes a temp probe path (and so a username) into the repo.
+  Editing it would violate the fixture's own verbatim rule, and git authorship already
+  discloses the same thing.
+- `CodexProcessTransport.stop()` sends SIGTERM without awaiting exit. Theoretical, unobserved,
+  and integration-test-only; a wait would need a timeout policy for no measured gain.
