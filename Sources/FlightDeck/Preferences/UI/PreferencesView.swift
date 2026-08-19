@@ -17,6 +17,10 @@ struct PreferencesView: View {
             ShellSettingsTab(preferences: preferences)
                 .tabItem { Label("Shell & Environment", systemImage: "terminal") }
                 .accessibilityIdentifier("prefs-shell")
+
+            ToolsSettingsTab(preferences: preferences, sessions: sessions)
+                .tabItem { Label("Tools", systemImage: "wrench.and.screwdriver") }
+                .accessibilityIdentifier("prefs-tools")
         }
         .frame(width: 720, height: 560)
     }
