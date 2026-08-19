@@ -42,7 +42,11 @@ final class CodexAdapterTests: XCTestCase {
 
         // Order is load-bearing: thread/start alone does NOT persist the thread, so naming
         // it is what commits it. Reversing these leaves a thread codex cannot resume.
-        XCTAssertEqual(t.methods, ["thread/start", "thread/name/set"])
+        // The archive/unarchive pair that follows releases the writer lock `thread/start`
+        // takes out — see the comment at that call site in `CodexAdapter.prepare` — and
+        // must come after naming (archiving an unnamed thread has no rollout to archive)
+        // and in that internal order (unarchiving before archiving is meaningless).
+        XCTAssertEqual(t.methods, ["thread/start", "thread/name/set", "thread/archive", "thread/unarchive"])
         XCTAssertEqual(binding.conversationID.uuidString.lowercased(), t.threadID)
         XCTAssertEqual(binding.transcriptURL?.path, "/r/\(t.threadID).jsonl")
     }

@@ -30,6 +30,11 @@ import XCTest
 ///    codex wrote on one day, and no schema exists for that format, so nothing else in the
 ///    suite would notice a rename.
 ///    `testARealResumedTurnAppendsTheTurnRecordsToTheRolloutThreadStartNamed` below.
+/// 5. **The writer-lock release** — `CodexAdapter.prepare`'s `thread/archive`/
+///    `thread/unarchive` pair, issued right after naming, must actually free the thread for
+///    a SECOND app-server connection to resume — the exact refusal codex-cli 0.148.0 raises
+///    against the TUI, reproduced headlessly via `thread/resume` rather than a pty.
+///    `testPrepareReleasesTheWriterLockSoASecondConnectionCanResumeTheThread` below.
 ///
 /// Every thread a test here creates is deleted by that same test, by the id codex handed
 /// back — never by name or recency, which could catch the user's real history. Every
@@ -388,6 +393,69 @@ final class CodexIntegrationTests: XCTestCase {
                        "a turn run by a process our app-server does not own must still append "
                        + "task_started then task_complete to the rollout it named; if this "
                        + "fails, every codex tab has silently stopped moving")
+    }
+
+    // MARK: - 5. The writer-lock release
+
+    /// The fix for the launch-blocking defect: on codex-cli 0.148.0, the app-server that
+    /// creates a thread holds a writer lock on it, and `codex resume <id>` — what
+    /// `CodexAdapter.launchCommand` spawns in a pty — refuses with `thread/resume failed:
+    /// thread <id> already has an active writer (code -32600)` while that lock is held.
+    /// `testARealResumedTurnAppendsTheTurnRecordsToTheRolloutThreadStartNamed` above works
+    /// around exactly this by stopping the app-server outright, which production never does.
+    ///
+    /// This test proves the actual fix instead: `CodexAdapter.prepare` now issues
+    /// `thread/archive` then `thread/unarchive` right after naming, and that round trip must
+    /// release the lock while the FIRST app-server stays alive — reproduced headlessly with
+    /// a second `thread/resume` from a SECOND app-server connection, which is exactly the
+    /// refusal the TUI hits, without needing a pty or provoking a modal.
+    func testPrepareReleasesTheWriterLockSoASecondConnectionCanResumeTheThread() async throws {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let cwd = home.appendingPathComponent("work", isDirectory: true)
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        // Trusted in THIS home only. Without it `codex resume` refuses the directory with a
+        // prompt that has no headless answer.
+        try """
+        [projects."\(cwd.path)"]
+        trust_level = "trusted"
+        """.write(to: home.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+
+        let auth = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/auth.json")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: auth.path),
+                          "needs a logged-in codex: ~/.codex/auth.json")
+        try FileManager.default.copyItem(at: auth, to: home.appendingPathComponent("auth.json"))
+
+        // The FIRST app-server: the one whose `CodexAdapter.prepare` creates, names, and
+        // must un-stick the thread. Left running for the whole test — proving the release
+        // works without it exiting is the entire point.
+        let creator = CodexProcessTransport(environment: ["CODEX_HOME": home.path])
+        try creator.start()
+        defer { creator.stop() }
+        let creatorRPC = CodexRPC(transport: creator)
+        try await CodexProcessTransport.verifyHandshake(creatorRPC)
+
+        let adapter = CodexAdapter(rpc: creatorRPC)
+        let session = Session(title: "writer-lock probe", workingDirectory: cwd.path)
+        let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+        let id = binding.conversationID.uuidString.lowercased()
+
+        // The SECOND app-server: a fresh connection that never created this thread, standing
+        // in for the `codex resume <id>` TUI production spawns in its own pty. If the writer
+        // lock were still held, this fails with the exact error quoted above.
+        let resumer = CodexProcessTransport(environment: ["CODEX_HOME": home.path])
+        try resumer.start()
+        defer { resumer.stop() }
+        let resumerRPC = CodexRPC(transport: resumer)
+        try await CodexProcessTransport.verifyHandshake(resumerRPC)
+
+        _ = try await resumerRPC.request("thread/resume", ["threadId": id])
+        // No assertion beyond "did not throw": a successful `thread/resume` IS the proof.
+        // Before this fix, `creator`'s own `thread/start` writer lock made this call fail
+        // every time, with `creator` still alive exactly as it is here.
     }
 
     // MARK: - Test doubles
