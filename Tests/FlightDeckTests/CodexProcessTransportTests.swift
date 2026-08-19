@@ -152,6 +152,29 @@ final class CodexProcessTransportTests: XCTestCase {
         // No throw is the assertion; nothing further to observe.
     }
 
+    /// Regression pin for a real incident: `verifyHandshake` used to send `initialize` with
+    /// `[:]`, which `CodexRPC.request` then wrote onto the wire with no `"params"` key at
+    /// all. Real codex's `InitializeParams` requires `clientInfo` and rejected that outright
+    /// — `CodexIntegrationTests` caught it, no hermetic test did, because a `StubTransport`
+    /// never validates what it's handed. This asserts the actual bytes sent, not just that
+    /// the call succeeds, so a future regression back to empty params fails here again.
+    func testVerifyHandshakeSendsNonEmptyClientInfoParams() async throws {
+        let t = StubTransport()
+        var sent: [String: Any] = [:]
+        t.onSend = { line in
+            sent = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any] ?? [:]
+            t.reply(#"{"id":1,"result":{"userAgent":"flight-deck"}}"#)
+        }
+        let rpc = CodexRPC(transport: t)
+
+        try await CodexProcessTransport.verifyHandshake(rpc, timeoutSeconds: 5)
+
+        let params = try XCTUnwrap(sent["params"] as? [String: Any], "params must not be omitted")
+        let clientInfo = try XCTUnwrap(params["clientInfo"] as? [String: Any])
+        XCTAssertFalse((clientInfo["name"] as? String ?? "").isEmpty, "clientInfo.name must not be empty")
+        XCTAssertNotNil(clientInfo["version"] as? String, "clientInfo.version must be present")
+    }
+
     /// A wedged app-server (spawned, alive, never answering) must not hang session creation
     /// forever. The bounded wait is what `CodexRPCError.timeout` exists for.
     func testVerifyHandshakeThrowsTimeoutWhenInitializeNeverReplies() async throws {

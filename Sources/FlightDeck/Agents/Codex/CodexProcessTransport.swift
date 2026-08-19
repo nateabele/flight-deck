@@ -250,9 +250,20 @@ extension CodexProcessTransport {
     /// is what `CodexRPCError.timeout` exists for; it only works because `request` is
     /// cancellation-aware, so losing this race actually retires the in-flight call instead of
     /// abandoning it.
+    ///
+    /// `clientInfo` MUST be present. This used to be `rpc.request("initialize", [:])`, which
+    /// reads as "no params to send" but is not what real codex sees: `CodexRPC.request` omits
+    /// the whole `"params"` key when its argument is empty (see `CodexRPC.swift`), so the
+    /// wire message carried no `params` at all. `codex app-server`'s `InitializeParams`
+    /// requires `clientInfo`, and rejected that outright — `-32600 missing field 'params'` —
+    /// on every real handshake, against both codex-cli 0.142.4 and 0.147.0. Caught only by
+    /// `CodexIntegrationTests`, because every hermetic test talks to a stub transport that
+    /// never validates params. See this task's report for the incident.
     static func verifyHandshake(_ rpc: CodexRPC, timeoutSeconds: Double = 5) async throws {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+        let clientInfo: [String: Any] = ["clientInfo": ["name": "flight-deck", "version": version]]
         try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask { _ = try await rpc.request("initialize", [:]) }
+            group.addTask { _ = try await rpc.request("initialize", clientInfo) }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
                 throw CodexRPCError.timeout

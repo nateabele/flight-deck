@@ -18,9 +18,9 @@ import XCTest
 ///    private `terminate()` directly. Nothing proves the real `readabilityHandler`/
 ///    `terminationHandler` wiring `start()` installs is still connected to it.
 ///    `testKillingARealAppServerFiresTheTerminationHookAndFailsInFlightRequests` below.
-/// 3. **The restore-handshake-failure heal** — `resumeRestoredCodex` re-attaches a restored
-///    tab's watcher when `startCodex()`'s real handshake fails. See that test's own doc
-///    comment for what "real" turned out to mean here.
+/// 3. **The restore/startCodex-failure heal** — `resumeRestoredCodex` re-attaches a restored
+///    tab's watcher when `startCodex()` fails for real. See that test's own doc comment for
+///    how this test forces a real failure without a real, buggy codex to lean on.
 ///
 /// Every thread a test here creates is deleted by that same test, by the id codex handed
 /// back — never by name or recency, which could catch the user's real history. Every
@@ -51,9 +51,10 @@ final class CodexIntegrationTests: XCTestCase {
         let cwd = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: cwd) }
 
-        _ = try await rpc.request(
-            "initialize", ["clientInfo": ["name": "flight-deck-test", "version": "0"]]
-        )
+        // The real production handshake, not a hand-rolled `initialize` call — this is what
+        // proves `CodexProcessTransport.verifyHandshake` itself, not just the shape of a
+        // correct request, actually succeeds against a real `codex app-server`.
+        try await CodexProcessTransport.verifyHandshake(rpc)
 
         let started = try await rpc.request("thread/start", ["cwd": cwd.path])
         let id = try XCTUnwrap((started["thread"] as? [String: Any])?["id"] as? String)
@@ -104,9 +105,7 @@ final class CodexIntegrationTests: XCTestCase {
         let before = tree.children(of: getpid())
         try transport.start()
 
-        _ = try await rpc.request(
-            "initialize", ["clientInfo": ["name": "flight-deck-test", "version": "0"]]
-        )
+        try await CodexProcessTransport.verifyHandshake(rpc)
 
         let spawned = tree.children(of: getpid()).subtracting(before)
         guard spawned.count == 1, let pid = spawned.first else {
@@ -146,31 +145,45 @@ final class CodexIntegrationTests: XCTestCase {
         }
     }
 
-    // MARK: - 3. The restore-handshake-failure heal
+    // MARK: - 3. The restore/startCodex-failure heal
 
     /// `SessionStore.startCodex()` is private, and every other store in this suite reaches
     /// codex through `overrideAdapter`, which answers `preparedAdapter` before `startCodex()`
-    /// is ever called. So nothing else has ever driven a real handshake failure through
+    /// is ever called. So nothing else has ever driven a real `startCodex()` failure through
     /// `resumeRestoredCodex`'s re-attach heal (`stopWatching`/`startWatching`, taken exactly
     /// when `preparedAdapter` throws).
     ///
-    /// This test drives it for real — without contriving a failure, because none is needed:
-    /// `CodexProcessTransport.verifyHandshake` sends `initialize` with `rpc.request(
-    /// "initialize", [:])`, and `CodexRPC.request` omits the `"params"` key entirely whenever
-    /// the dictionary handed to it is empty. Both installed codex builds (codex-cli 0.142.4
-    /// and 0.147.0) reject that outright — `{"error":{"code":-32600,"message":"Invalid
-    /// request: missing field `params`"}}`, verified directly against both binaries — so
-    /// `startCodex()`'s handshake fails **every time**, against a real `codex`, with no
-    /// fixture or fault injection involved. See this task's report for why that is a serious
-    /// finding on its own, well beyond what this test needs from it.
-    ///
-    /// If `verifyHandshake` is ever fixed to send real params, this specific failure goes
-    /// away and this test will need a different way to force one — see the report.
-    func testARestoredCodexTabReattachesAfterARealHandshakeFailure() async throws {
+    /// This used to force that failure for free: `CodexProcessTransport.verifyHandshake` sent
+    /// `initialize` with `rpc.request("initialize", [:])`, which real codex rejected outright
+    /// (`-32600 missing field 'params'`), so `startCodex()` failed every time against a real
+    /// `codex` with no fault injection needed. That was a genuine bug — see this task's
+    /// report — and it is now fixed, which means this test needs a real failure of its own to
+    /// exercise the heal. It gets one the same way: through the real `CodexVersionProbe.check`
+    /// code path, spawning a real (if substitute) process via `/usr/bin/env` — not by stubbing
+    /// anything inside `SessionStore` or `CodexProcessTransport`. A fake `codex` on `PATH`
+    /// that exits non-zero on `--version` makes `startCodex()` throw
+    /// `AgentLaunchError.notInstalled` for exactly the reason a user with a broken PATH would
+    /// see it: nothing about the heal's own logic is contrived, only which real codepath trips
+    /// it.
+    func testARestoredCodexTabReattachesAfterAStartCodexFailure() async throws {
         let tabID = UUID()
         let existing = UUID()
         let cwd = try makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: cwd) }
+
+        // A fake `codex` that fails `--version`, ahead of the real one on `PATH` for the
+        // duration of this test only. `/usr/bin/env codex …` — what both `CodexVersionProbe`
+        // and `CodexProcessTransport` shell out through — resolves against `PATH` exactly like
+        // a shell would, so this reaches the real spawn-and-parse code without touching
+        // `SessionStore` or the transport at all.
+        let fakeCodexDir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: fakeCodexDir) }
+        let fakeCodex = fakeCodexDir.appendingPathComponent("codex")
+        try "#!/bin/sh\nexit 1\n".write(to: fakeCodex, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCodex.path)
+        let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        setenv("PATH", "\(fakeCodexDir.path):\(originalPath)", 1)
+        defer { setenv("PATH", originalPath, 1) }
 
         let persistence = FakePersistence()
         persistence.stored = SessionSnapshot(
@@ -201,10 +214,10 @@ final class CodexIntegrationTests: XCTestCase {
         XCTAssertEqual(store.codexServerRequestsForTesting, 1,
             "resumeRestoredCodex must have asked preparedAdapter for a real, started app-server")
         XCTAssertTrue(store.hasCodexStackForTesting,
-            "the heal must rebuild a stack for the tab's runtime to watch, even though the " +
-            "real handshake failed and startCodex() tore the first one down")
+            "the heal must rebuild a stack for the tab's runtime to watch, even though " +
+            "startCodex() failed for real and tore the first one down")
         XCTAssertEqual(store.pinnedConversationID(of: tabID), existing,
-            "a broken handshake must fall back to the pinned thread rather than inventing a new one")
+            "a failed startCodex() must fall back to the pinned thread rather than inventing a new one")
         XCTAssertEqual(injector.sent, ["codex resume \(existing.uuidString.lowercased())"])
     }
 
