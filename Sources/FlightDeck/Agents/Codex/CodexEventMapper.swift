@@ -44,6 +44,10 @@ enum CodexEventMapper {
                   item["type"] as? String == "collabAgentToolCall",
                   let states = item["agentsStates"] as? [String: String]
             else { return [] }
+            // The live count below is derived straight from this payload's own `states`, so
+            // nothing here reads `state.subagents` back. It is still recorded — forward-looking
+            // state for the runtime Task 9 wires up, which will want per-agent detail (which
+            // thread id is in which state) beyond the single number this mapper emits today.
             state.subagents = states
             let live = states.values.filter { liveStates.contains($0) }.count
             return [.subagentCount(live)]

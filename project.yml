@@ -43,7 +43,18 @@ targets:
   FlightDeckTests:
     type: bundle.unit-test
     platform: macOS
-    sources: [Tests/FlightDeckTests]
+    sources:
+      # `Fixtures` is carved out into its own folder-reference entry below so its
+      # subdirectory structure (e.g. `Fixtures/Codex/notifications.json`) survives into the
+      # test bundle's Resources. Left in the plain group above, xcodegen's default "Copy
+      # Bundle Resources" phase flattens every file to the Resources root, which would
+      # collide fixtures from different adapters that happen to share a filename.
+      - path: Tests/FlightDeckTests
+        excludes:
+          - "Fixtures/**"
+      - path: Tests/FlightDeckTests/Fixtures
+        type: folder
+        buildPhase: resources
     dependencies:
       - target: FlightDeck
     settings:
