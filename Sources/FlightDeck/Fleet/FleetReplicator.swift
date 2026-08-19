@@ -45,6 +45,14 @@ final class FleetReplicator: FleetRecording {
 
     private(set) var seq = 0
 
+    #if DEBUG
+    /// Every event recorded so far, for tests that assert the emission itself rather than
+    /// its effect. Unbounded, unlike `ring` — a test wants the whole history of the mutation
+    /// it just performed, and a test's fleet does not run for hours. DEBUG-only: nothing in
+    /// the app has any business reading the log back.
+    private(set) var recorded: [FleetEvent] = []
+    #endif
+
     /// Delivered to every attached client. Set by `FleetService` (Task 12).
     var onEvents: (([SequencedEvent]) -> Void)?
 
@@ -67,6 +75,9 @@ final class FleetReplicator: FleetRecording {
         for event in events {
             seq += 1
             mirror.apply(event)
+            #if DEBUG
+            recorded.append(event)
+            #endif
             batch.append(SequencedEvent(seq: seq, event: event))
         }
         ring.append(contentsOf: batch)
