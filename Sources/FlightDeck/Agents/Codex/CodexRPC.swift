@@ -33,9 +33,21 @@ final class CodexRPC {
         transport.onLine = { [weak self] line in self?.receive(line) }
     }
 
+    /// Every request still pending when this object is torn down must fail rather than hang
+    /// its caller forever. `transportClosed()` covers the paths that remember to call it;
+    /// this covers the one that doesn't — the last strong reference simply going away (a tab
+    /// closing mid-flight, a spawn failure with no explicit teardown call). Direct access to
+    /// `pending` here is legal: `deinit` has unique, non-concurrent access to `self` during
+    /// teardown, so no actor hop is needed despite the class being `@MainActor`.
+    deinit {
+        for continuation in pending.values {
+            continuation.resume(throwing: CodexRPCError.transportClosed)
+        }
+    }
+
     /// Sends a request and suspends until the matching `id` comes back as a result or an
-    /// error. `transportClosed()` is the only other way this resumes — nothing here can hang
-    /// a caller forever on a dead app-server.
+    /// error. `transportClosed()` and deinit are the only other ways this resumes — nothing
+    /// here can hang a caller forever on a dead app-server.
     func request(_ method: String, _ params: [String: Any]) async throws -> [String: Any] {
         nextID += 1
         let id = nextID
