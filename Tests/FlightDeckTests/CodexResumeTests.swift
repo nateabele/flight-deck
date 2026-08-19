@@ -61,8 +61,9 @@ final class CodexResumeTests: XCTestCase {
 
         let state = try await adapter.read(AgentBinding(conversationID: existing, transcriptURL: nil))
 
-        // This is what reconcile-on-first-contact applies for a tab that launched behind
-        // the hooks prompt and therefore reported nothing until the user cleared it.
+        // This is what `rebind` reads on every restore, and what `resumeRestoredCodex`
+        // applies as a tab's title for a rename made while Flight Deck was closed — the
+        // one gap tailing `session_index.jsonl` can't cover, since it starts at end-of-file.
         XCTAssertEqual(state.title, "restored")
         XCTAssertEqual(state.activity, .idle)
     }
@@ -288,10 +289,29 @@ final class CodexResumeTests: XCTestCase {
                        "nothing may be typed at a codex tab before its thread is known to exist")
         await store.codexRestoreTask?.value
 
-        XCTAssertEqual(t.methods, ["thread/read"])
+        // Two reads, not one: `rebind` settles identity, and `resumeRestoredCodex`'s own
+        // follow-up read recovers a title changed while Flight Deck was closed — see
+        // `testARestoredCodexTabRecoversATitleChangedWhileItWasClosed` below.
+        XCTAssertEqual(t.methods, ["thread/read", "thread/read"])
         XCTAssertEqual(injector.sent, ["codex resume \(existing.uuidString.lowercased())"])
         XCTAssertEqual(injector.returns, 1, "a paste alone submits nothing")
         XCTAssertEqual(store.pinnedConversationID(of: tabID), existing)
+    }
+
+    /// Requirement (item 1 of the final fix wave): a rename made while Flight Deck was
+    /// closed is invisible to both watchers — they start at end-of-file — so nothing but
+    /// this follow-up read can recover it. Without applying it, this test fails: the tab
+    /// keeps the stale title `"a"` from the snapshot forever.
+    func testARestoredCodexTabRecoversATitleChangedWhileItWasClosed() async {
+        let t = ScriptedTransport()
+        let (store, _, _, tabID) = makeRestoredStore(agent: .codex, transport: t)
+
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        await store.codexRestoreTask?.value
+
+        XCTAssertEqual(store.title(of: tabID), "restored",
+                       "the title `thread/read` reports must reach the tab on restore, the "
+                       + "same way a live rename would")
     }
 
     func testARestoredCodexTabWhoseThreadIsGoneIsRepinnedToAFreshOne() async {
