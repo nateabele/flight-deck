@@ -1757,26 +1757,51 @@ final class SessionStore: ObservableObject {
         return repos[at.repo].sessions[at.session].title
     }
 
-    /// Sidebar → Claude. Updates the title immediately, then types `/rename <name>` into
-    /// the pty so the *running* interactive session renames itself and records it.
+    /// Sidebar → the agent. Updates the title immediately, then tells the agent, by whatever
+    /// route that agent renames its own conversation.
     ///
-    /// The title lands here and now; only the injection can be deferred. A rename is
-    /// therefore never lost, just occasionally late reaching `claude`.
+    /// The title lands here and now; only the telling can be deferred or fail. A rename is
+    /// therefore never lost from the sidebar, just occasionally late reaching the agent.
     ///
-    /// The command text and the Return are sent separately, and that split is load-bearing.
-    /// `sendText` is a *paste* in libghostty, and Claude Code enables bracketed-paste mode, so
-    /// any line terminator inside the text is delivered between `\u{1b}[200~` and
-    /// `\u{1b}[201~` and treated as pasted content — it lands in the input bar as a literal
-    /// newline and never submits. Return has to arrive outside the paste, as a real key
-    /// event. See `TextInjecting.sendReturn()`.
+    /// **This used to be claude-only, and every tab took claude's route.** Renaming a codex
+    /// tab therefore never sent `thread/name/set`, so the sidebar title and codex's thread
+    /// name diverged permanently — and since the thread name is what `thread/read` returns,
+    /// the next reconcile or restore flicked the sidebar back to the old one. Worse, it
+    /// queued `/rename <name>` for a pty nothing would ever retire it from: `flushPendingRename`
+    /// retried it on every registry tick for the life of the process, and `InputBar.read`
+    /// keys on a line starting with `❯` — a common shell prompt glyph — so a match would have
+    /// sent Ctrl-U and pasted `/rename foo` into the user's live codex session.
+    ///
+    /// Claude's leg stays synchronous and inline, deliberately. `AgentAdapter.rename` is
+    /// `async`, and dispatching claude through it would push `injectPendingRename` into a
+    /// later turn of the run loop — which is exactly the guarantee the injection contract is
+    /// built on (`inject` decides *now* whether the bar is busy, and defers only if it is).
+    /// Codex has no such constraint: its rename is a request, and nothing waits on it.
     func rename(_ id: UUID, to newTitle: String) {
         guard let at = locate(id),
+              // Sanitized for both agents, not just claude's: it is what the sidebar shows,
+              // and the whole point below is that codex's thread name matches the sidebar.
               let name = ClaudeSession.sanitizedName(newTitle)
         else { return }
 
         repos[at.repo].sessions[at.session].title = name
         persist()
-        injectPendingRename(id, name)
+
+        let session = repos[at.repo].sessions[at.session]
+        switch session.agent {
+        case .claude:
+            // Byte-identical to what every tab did before this dispatch existed. Not routed
+            // through `ClaudeAdapter.rename` only because that route is `async`; it lands on
+            // this same method, and `AgentRoutingTests` covers that it does.
+            injectPendingRename(id, name)
+        case .codex:
+            let adapter = adapter(for: session.agent)
+            let binding = adapter.binding(for: session)
+            // Fire and forget: the sidebar already has the name, and a thread that refuses
+            // the rename (or an app-server that is gone) must not block the user's edit or
+            // pop an alert over a cosmetic failure.
+            Task { try? await adapter.rename(binding, to: name) }
+        }
     }
 
     /// Queues a rename for `claude` and tries it at once. The one route into `pendingRenames`
