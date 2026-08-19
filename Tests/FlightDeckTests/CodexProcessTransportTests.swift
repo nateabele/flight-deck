@@ -168,4 +168,77 @@ final class CodexProcessTransportTests: XCTestCase {
         // `initialize` call in flight, and its `onCancel` removes it from `pending`.
         XCTAssertEqual(rpc.pendingCount, 0, "the losing initialize request must be cleaned up, not leaked")
     }
+
+    // MARK: - Termination convergence
+    //
+    // `terminate()` itself is private — real EOF and a real `terminationHandler` firing can
+    // only be produced by an actual OS process, which the committed suite must not spawn.
+    // `simulateEOFForTesting`/`simulateProcessTerminationForTesting` are thin, named seams
+    // onto the exact same private bottleneck those two real closures call in `start()`, so
+    // these tests pin the convergence/de-duplication logic itself — not a re-implementation
+    // of it. What they do NOT cover is whether the real `readabilityHandler`/
+    // `terminationHandler` closures actually get wired to call it; that's Task 14's
+    // real-process job.
+
+    func testExplicitStopFiresOnTerminateExactlyOnce() {
+        let transport = CodexProcessTransport()
+        var fireCount = 0
+        transport.onTerminate = { fireCount += 1 }
+
+        transport.stop()
+        transport.stop()   // idempotent — closing tabs and app quit can both reach this
+
+        XCTAssertEqual(fireCount, 1)
+    }
+
+    func testSimulatedEOFFiresOnTerminateExactlyOnce() {
+        let transport = CodexProcessTransport()
+        var fireCount = 0
+        transport.onTerminate = { fireCount += 1 }
+
+        transport.simulateEOFForTesting()
+        transport.simulateEOFForTesting()
+
+        XCTAssertEqual(fireCount, 1)
+    }
+
+    func testSimulatedProcessTerminationHandlerFiresOnTerminateExactlyOnce() {
+        let transport = CodexProcessTransport()
+        var fireCount = 0
+        transport.onTerminate = { fireCount += 1 }
+
+        transport.simulateProcessTerminationForTesting()
+        transport.simulateProcessTerminationForTesting()
+
+        XCTAssertEqual(fireCount, 1)
+    }
+
+    /// The convergence the review asked for: however many of the three ways this can fire
+    /// actually fire — in any order — the owner is told exactly once, never zero and never
+    /// more than one.
+    func testStopEOFAndTerminationHandlerAllConvergeOnASingleFire() {
+        let transport = CodexProcessTransport()
+        var fireCount = 0
+        transport.onTerminate = { fireCount += 1 }
+
+        transport.stop()
+        transport.simulateEOFForTesting()
+        transport.simulateProcessTerminationForTesting()
+
+        XCTAssertEqual(fireCount, 1, "however many ways this fires, the owner must be told exactly once")
+    }
+
+    /// `deinit` is a resource-cleanup backstop (don't orphan the OS process), not a
+    /// notification channel — by the time it runs there is no owner left to notify. Dropping
+    /// the last reference without ever calling `stop()` must not crash and must not fire
+    /// `onTerminate`.
+    func testDeinitDoesNotFireOnTerminate() {
+        var fireCount = 0
+        var transport: CodexProcessTransport? = CodexProcessTransport()
+        transport?.onTerminate = { fireCount += 1 }
+
+        transport = nil
+
+        XCTAssertEqual(fireCount, 0, "deinit is a backstop for the process, not a callback to a gone owner")
+    }
 }
