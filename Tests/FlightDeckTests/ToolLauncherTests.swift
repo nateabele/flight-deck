@@ -76,6 +76,26 @@ final class ToolLauncherTests: XCTestCase {
         XCTAssertEqual(reporter.reports.first?.tool, "Editor")
     }
 
+    func testAFailureAfterFillingTheStderrPipeIsStillReported() {
+        // A Pipe's kernel buffer is 64 KiB. Without continuous draining, a child that writes
+        // more than that blocks inside `write()` — and a process blocked in a syscall still
+        // reports `isRunning == true`, so a verbose failure would look identical to success.
+        let reporter = RecordingReporter()
+        let expectation = expectation(description: "reported")
+        reporter.onReport = { expectation.fulfill() }
+
+        makeLauncher(reporter).launch(
+            command: "{ yes | head -c 200000; } >&2; exit 3", in: "/tmp", named: "Editor"
+        )
+
+        wait(for: [expectation], timeout: 5)
+        XCTAssertEqual(reporter.reports.first?.tool, "Editor")
+        XCTAssertFalse(
+            reporter.reports.first?.message.isEmpty ?? true,
+            "a verbose failure must still surface some stderr, not be swallowed as success"
+        )
+    }
+
     func testTheCommandRunsInTheGivenDirectory() {
         let reporter = RecordingReporter()
         let expectation = expectation(description: "reported")
