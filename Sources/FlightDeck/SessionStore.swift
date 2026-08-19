@@ -836,7 +836,12 @@ final class SessionStore: ObservableObject {
         if let codexHandshake { return try await codexHandshake.value }
         let stack = makeCodexStackIfNeeded()
         let task = Task { @MainActor in
-            try await Task.detached { try CodexVersionProbe.check() }.value
+            // Bounded, and that matters more here than anywhere else in this method: this
+            // task is memoized in `codexHandshake`, so an unbounded probe would hang not
+            // just this creation but every codex creation for the rest of the run, all of
+            // them awaiting the same wedged task. `verifyHandshake` below was already
+            // bounded; the step in front of it was not. See `checkOffMainActor`.
+            try await CodexVersionProbe.checkOffMainActor()
             try stack.transport.start()
             try await CodexProcessTransport.verifyHandshake(stack.rpc)
         }
