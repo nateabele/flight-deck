@@ -69,6 +69,39 @@ final class CodexLaunchFailureTests: XCTestCase {
         func tick() {}
     }
 
+    /// Blocks in `prepare` until it is released, so a test can act while a codex creation is
+    /// genuinely mid-negotiation.
+    private final class GatedAdapter: AgentAdapter {
+        static let id: AgentID = .codex
+        private var resume: CheckedContinuation<Void, Never>?
+        private var entered: CheckedContinuation<Void, Never>?
+        private var hasEntered = false
+
+        /// Suspends until `prepare` is actually inside the gate.
+        func waitUntilPreparing() async {
+            guard !hasEntered else { return }
+            await withCheckedContinuation { entered = $0 }
+        }
+
+        func release() { resume?.resume(); resume = nil }
+
+        func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
+            hasEntered = true
+            entered?.resume()
+            entered = nil
+            await withCheckedContinuation { resume = $0 }
+            return AgentBinding(conversationID: UUID(), transcriptURL: nil)
+        }
+
+        func binding(for session: Session) -> AgentBinding {
+            AgentBinding(conversationID: session.pinnedConversationID, transcriptURL: nil)
+        }
+
+        func launchCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
+        func resumeCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
+        func rename(_: AgentBinding, to: String) async throws {}
+    }
+
     private var projectsRoot: URL!
     private var retained: [RecordingProvider] = []
 
@@ -101,6 +134,56 @@ final class CodexLaunchFailureTests: XCTestCase {
     }
 
     private var reporter = SpyReporter()
+
+    // MARK: - Stopping the app-server without racing a creation
+
+    /// Closing the last codex tab must not kill the app-server a *concurrent* creation is
+    /// still negotiating against.
+    ///
+    /// `stopCodexIfUnused` counts codex tabs in `repos`, and a creation's tab is not in
+    /// `repos` until `addSession` runs — so a close landing mid-`prepare` used to stop the
+    /// app-server between `thread/start` and `thread/name/set`, which EVAPORATES the thread,
+    /// because naming is what commits it. The tab would then exist bound to a thread
+    /// `codex resume` cannot find.
+    func testClosingTheLastTabDoesNotKillAnAppServerACreationIsStillUsing() async {
+        let (store, _) = makeStore()
+        // Builds the stack without spawning anything — only `startCodex()` runs a process,
+        // and the override below is what keeps `createSession` away from it. Building it
+        // first is what makes `stopCodexIfUnused` observable at all.
+        _ = store.adapter(for: .codex)
+        XCTAssertTrue(store.hasCodexStackForTesting)
+        let gate = GatedAdapter()
+        store.overrideAdapter(gate, for: .codex)
+        let claudeTab = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+
+        let creation = Task { await store.createSession(agent: .codex, in: NSTemporaryDirectory()) }
+        await gate.waitUntilPreparing()
+
+        store.closeSession(claudeTab.id)
+
+        XCTAssertTrue(store.hasCodexStackForTesting,
+                      "a creation mid-negotiation still needs the app-server it is talking to")
+
+        gate.release()
+        _ = await creation.value
+    }
+
+    /// The other half: once that creation is done, the deferred teardown must actually run.
+    /// Skipping it would leave `codex app-server` alive with no codex tab for the rest of
+    /// the session, which is the leak `stopCodexIfUnused` exists to prevent.
+    func testTheDeferredTeardownRunsOnceTheCreationFinishes() async {
+        let (store, _) = makeStore()
+        _ = store.adapter(for: .codex)
+        let transport = DeadTransport()
+        let rpc = CodexRPC(transport: transport)
+        transport.rpc = rpc            // this creation will fail, leaving no codex tab
+        store.overrideAdapter(CodexAdapter(rpc: rpc), for: .codex)
+
+        _ = await store.createSession(agent: .codex, in: NSTemporaryDirectory())
+
+        XCTAssertFalse(store.hasCodexStackForTesting,
+                       "a failed creation must not leave the app-server running with no codex tab")
+    }
 
     func testAHardPrepareFailureCreatesNoTab() async {
         let (store, _) = makeStore()
