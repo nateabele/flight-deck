@@ -6,7 +6,7 @@ import XCTest
 /// `setUpWithError` — so `./scripts/test-unit.sh` stays hermetic and never spawns a process;
 /// opt in with `FLIGHT_DECK_CODEX_INTEGRATION=1`.
 ///
-/// It exists because the codex adapter leans on three undocumented behaviours of an
+/// It exists because the codex adapter leans on four undocumented behaviours of an
 /// experimental, fast-moving binary, none of which the other 708 tests can see because they
 /// all talk to a scripted `CodexTransport`:
 ///
@@ -24,6 +24,12 @@ import XCTest
 ///    `/bin/sh` stub that only `exit 1`s, needing no installed or logged-in codex at all —
 ///    rather than depending on any particular real binary misbehaving. See that test's own
 ///    doc comment for what the heal is actually responsible for and how this test isolates it.
+/// 4. **The rollout vocabulary** — `task_started`/`task_complete` are still what a turn looks
+///    like in the rollout file `thread/start` named, and a separate process still appends to
+///    it after the creating app-server has exited. `rollout.captured.jsonl` records what
+///    codex wrote on one day, and no schema exists for that format, so nothing else in the
+///    suite would notice a rename.
+///    `testARealResumedTurnAppendsTheTurnRecordsToTheRolloutThreadStartNamed` below.
 ///
 /// Every thread a test here creates is deleted by that same test, by the id codex handed
 /// back — never by name or recency, which could catch the user's real history. Every
@@ -284,12 +290,21 @@ final class CodexIntegrationTests: XCTestCase {
     /// It pins two things at once, and both are load-bearing:
     ///
     /// 1. **A separate process appends to the rollout `thread/start` named.** This is the
-    ///    fact the entire observation design rests on — our app-server does not run the turn,
-    ///    and it does not have to.
+    ///    fact the entire observation design rests on — our app-server does not have to be
+    ///    the one that runs the turn.
     /// 2. **`task_started` and `task_complete` are still what a turn looks like.**
     ///    `rollout.captured.jsonl` records what codex wrote on one day, and no schema exists
     ///    for that format, so nothing else in the suite would notice a rename. The failure
     ///    mode without this test is silent: codex tabs simply stop moving.
+    ///
+    /// What this test does **not** prove: that a *live* app-server's rollout is externally
+    /// appended to. The transport is stopped (see the `transport.stop()` call below) before
+    /// `codex exec resume` runs, because codex-cli 0.148.0 refuses to resume a thread while
+    /// the app-server that created it still holds a writer lock on it. So what this test
+    /// actually pins is "a rollout survives its creator, and a separate process can still
+    /// append to it" — not "a separate process can append to a rollout while the original
+    /// app-server is still attached." See the comment at `transport.stop()` below for the
+    /// writer-lock details, including a note on why this may also affect production.
     ///
     /// Everything happens under an isolated `CODEX_HOME` in a temp directory, so no thread
     /// cleanup is needed — the whole home is deleted — and the user's real codex history is
@@ -327,11 +342,28 @@ final class CodexIntegrationTests: XCTestCase {
         // Naming commits the thread. An unnamed one cannot be resumed at all — see
         // `testThreadStartAloneDoesNotPersistButNamingCommits` above.
         _ = try await rpc.request("thread/name/set", ["threadId": id, "name": "rollout vocabulary"])
-        // Our own app-server holds an exclusive writer lock on the thread it just created —
-        // `codex exec resume` below refuses to attach while that lock is held ("thread ...
-        // already has an active writer"). Stopping the transport here, rather than only in
-        // the `defer` below, is what lets a SEPARATE process pick the thread back up at all;
-        // `stop()` is idempotent, so the deferred call after it is still safe.
+        // Our own app-server holds an exclusive writer lock on the thread it just created.
+        // codex-cli 0.148.0 refuses `thread/resume` — and the interactive `codex resume <id>`
+        // TUI, which is what `CodexAdapter.launchCommand` spawns in production — while that
+        // lock is held, failing with:
+        //
+        //     Error: thread/resume: thread/resume failed: thread <id> already has an active
+        //     writer (code -32600)
+        //
+        // `thread/unsubscribe` was tried as a release mechanism and does NOT work: it answers
+        // `{"status":"unsubscribed"}` but the lock stays held regardless. The only release
+        // observed is the app-server process actually exiting — which is why this test stops
+        // the transport here, rather than only in the `defer` below: it is what lets a
+        // SEPARATE `codex exec resume` process pick the thread back up at all. `stop()` is
+        // idempotent, so the deferred call after it is still safe.
+        //
+        // PRODUCTION NOTE (unresolved; not covered by this test): Flight Deck's real launch
+        // path never stops the app-server between `thread/start`/`thread/name/set` and
+        // spawning the interactive `codex resume <id>` TUI in a pty, so on codex-cli 0.148.0
+        // that resume is very likely hitting this same "active writer" error in production.
+        // This test cannot exercise the live-app-server case (see the class-level doc comment
+        // above) and deliberately does not attempt to fix production behaviour here; it is
+        // being tracked and surfaced separately.
         transport.stop()
 
         var seen: [AgentEvent] = []
