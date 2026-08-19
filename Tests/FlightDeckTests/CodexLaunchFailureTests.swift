@@ -97,6 +97,10 @@ final class CodexLaunchFailureTests: XCTestCase {
             AgentBinding(conversationID: session.pinnedConversationID, transcriptURL: nil)
         }
 
+        func location(for session: Session) -> AgentLocation {
+            AgentLocation(workingDirectory: session.transcriptDirectory, binding: binding(for: session))
+        }
+
         func launchCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
         func resumeCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
         func rename(_: AgentBinding, to: String) async throws {}
