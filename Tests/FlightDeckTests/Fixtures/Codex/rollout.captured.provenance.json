@@ -1,0 +1,29 @@
+{
+  "files": [
+    "rollout.captured.jsonl",
+    "turn-aborted.captured.jsonl",
+    "session-index.captured.jsonl"
+  ],
+  "isVerbatimCapturedOutput": true,
+  "codexVersion": "codex-cli 0.148.0",
+  "capturedOn": "2026-08-19",
+  "capturedBy": [
+    "A thread created over `codex app-server` under an isolated CODEX_HOME, then driven by a",
+    "real `codex resume` TUI and by `codex exec resume --skip-git-repo-check`. The index file",
+    "is that home's session_index.jsonl after three renames: one at creation, one from a",
+    "second app-server connection, one typed as `/rename` into the TUI.",
+    "turn-aborted.captured.jsonl is a single line lifted from local codex history — no probe",
+    "produced an interrupted turn, and the record carries no prose."
+  ],
+  "editingRule": [
+    "Lines may be DROPPED, never EDITED. rollout.captured.jsonl is the source rollout filtered",
+    "to `session_meta` and `event_msg` records; every surviving line is byte-for-byte what",
+    "codex wrote.",
+    "",
+    "Unlike codex-app-server-v2.generated.json, this is not generated from a schema, because",
+    "no schema for these formats exists — `codex app-server generate-json-schema` covers the",
+    "protocol only. That makes these files the weakest ground truth in the suite: they record",
+    "what codex DID on one day, not what it DECLARES. `CodexIntegrationTests` is what notices",
+    "when that stops being true; run it with FLIGHT_DECK_CODEX_INTEGRATION=1."
+  ]
+}
