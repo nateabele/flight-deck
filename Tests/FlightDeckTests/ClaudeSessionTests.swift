@@ -224,7 +224,7 @@ final class ClaudeSessionTests: XCTestCase {
     /// leaving the placeholder stale and misleading.
     func testPlaceholderPrefixMatchesTheRealPrefixShape() throws {
         let real = ClaudeSession.lockedPrefix(sessionID: fixedID, title: "one")
-        let placeholder = ClaudeSettingsTab.placeholderPrefix
+        let placeholder = ClaudeOptionsPane.placeholderPrefix
 
         func flagNames(_ command: String) throws -> [String] {
             try ClaudeFlagQuoting.tokenize(command).map(\.text).filter { $0.hasPrefix("--") }

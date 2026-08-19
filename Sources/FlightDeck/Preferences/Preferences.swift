@@ -109,4 +109,13 @@ struct Preferences: Codable, Equatable {
             AgentSettings(id: .codex, options: .codex(CodexThreadOptions())),
         ]
     }
+
+    /// Reorders the agent list, which rebinds the New Session shortcuts
+    /// (`NewSessionAffordance`) — dragging a row in the Agents tab is the only way a user
+    /// changes what ⌘N launches.
+    mutating func moveAgents(fromOffsets source: IndexSet, toOffset destination: Int) {
+        var list = agents
+        list.move(fromOffsets: source, toOffset: destination)
+        agents = list
+    }
 }

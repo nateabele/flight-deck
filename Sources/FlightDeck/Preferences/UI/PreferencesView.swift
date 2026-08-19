@@ -6,9 +6,9 @@ struct PreferencesView: View {
 
     var body: some View {
         TabView {
-            ClaudeSettingsTab(preferences: preferences)
-                .tabItem { Label("Claude", systemImage: "sparkles") }
-                .accessibilityIdentifier("prefs-claude")
+            AgentsSettingsTab(preferences: preferences)
+                .tabItem { Label("Agents", systemImage: "person.2") }
+                .accessibilityIdentifier("prefs-agents")
 
             ProjectsSettingsTab(preferences: preferences, sessions: sessions)
                 .tabItem { Label("Projects", systemImage: "folder") }
