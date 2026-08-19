@@ -87,10 +87,12 @@ struct CodexAdapter: AgentAdapter {
             group.addTask { @MainActor in
                 let result = try await rpc.request("thread/read", ["threadId": threadID])
                 let thread = result["thread"] as? [String: Any] ?? [:]
-                let status = (thread["status"] as? [String: Any])?["type"] as? String
+                // Same table the notification path uses — `CodexThreadStatus` exists because
+                // these two drifted, and the copy that lived here reported a *working*
+                // thread as idle on every reconcile.
                 return (
                     thread["name"] as? String,
-                    status.map { $0 == "running" || $0 == "busy" ? .busy : .idle }
+                    CodexThreadStatus.activity(from: thread["status"] as? [String: Any])
                 )
             }
             group.addTask {

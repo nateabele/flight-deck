@@ -4,13 +4,19 @@ import XCTest
 final class CodexEventMapperTests: XCTestCase {
     private func fixture(_ key: String) throws -> [String: Any] {
         // No fallback to a subdirectory-less lookup: that would silently resolve a
-        // differently-scoped `notifications.json` if one ever existed elsewhere in the
-        // bundle (later tasks are expected to add `Fixtures/<Adapter>/` siblings). Fail
-        // loudly instead of matching ambiguously.
+        // differently-scoped fixture if one ever existed elsewhere in the bundle (later
+        // tasks are expected to add `Fixtures/<Adapter>/` siblings). Fail loudly instead of
+        // matching ambiguously.
+        //
+        // `notifications.schema-derived` and not `notifications`: the file is built from
+        // codex's generated schema, and the name says so because the version it replaced
+        // claimed to be captured from a live codex and was not. See its `_provenance`.
         let url = try XCTUnwrap(
-            Bundle(for: Self.self)
-                .url(forResource: "notifications", withExtension: "json", subdirectory: "Fixtures/Codex"),
-            "Fixtures/Codex/notifications.json not found in the test bundle"
+            Bundle(for: Self.self).url(
+                forResource: "notifications.schema-derived", withExtension: "json",
+                subdirectory: "Fixtures/Codex"
+            ),
+            "Fixtures/Codex/notifications.schema-derived.json not found in the test bundle"
         )
         let root = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
@@ -42,10 +48,16 @@ final class CodexEventMapperTests: XCTestCase {
     func testSubagentCountIsRecomputedFromAgentsStates() throws {
         var state = CodexThreadState()
 
+        // Two live agents: one `running`, one `pendingInit`. `pendingInit` is an agent that
+        // has been spawned but has not started — it was missing from `liveStates` entirely,
+        // so a freshly spawned agent read as already finished.
         XCTAssertEqual(
             CodexEventMapper.events(method: "item/started", params: try fixture("spawnTwo"), state: &state),
             [.subagentCount(2)]
         )
+        // `agentsStates` is recorded flattened to id -> status, dropping `CollabAgentState`'s
+        // optional `message`.
+        XCTAssertEqual(state.subagents, ["sub-a": "running", "sub-b": "pendingInit"])
         // Recomputed from the payload's own map, not decremented. `agentsStates` carries the
         // full current state every time, so the count cannot drift and needs no turn-boundary
         // clearing — which is exactly the fragile part of claude's `outstandingAgents`.
@@ -68,14 +80,54 @@ final class CodexEventMapperTests: XCTestCase {
         )
     }
 
-    func testThreadStatusChangedMapsKnownStatusToActivity() throws {
+    /// Every terminal `CollabAgentStatus` counts as finished.
+    ///
+    /// The list is exhaustive over the non-live half of `CollabAgentStatus` — `interrupted`,
+    /// `completed`, `errored`, `shutdown`, `notFound` — so adding a live state without
+    /// thinking about this one breaks here.
+    func testEveryTerminalCollabAgentStatusReadsAsFinished() throws {
         var state = CodexThreadState()
         XCTAssertEqual(
             CodexEventMapper.events(
-                method: "thread/status/changed", params: try fixture("statusRunning"), state: &state
+                method: "item/completed", params: try fixture("everyTerminalState"), state: &state
             ),
-            [.activity(.busy)]
+            [.subagentCount(0)]
         )
+    }
+
+    func testANonCollabItemIsNotMistakenForASubagentUpdate() {
+        var state = CodexThreadState()
+        let params: [String: Any] = [
+            "threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b", "turnId": "t1",
+            "startedAtMs": 1, "item": ["type": "agentMessage", "id": "m1", "text": "hi"],
+        ]
+        XCTAssertTrue(CodexEventMapper.events(method: "item/started", params: params, state: &state).isEmpty)
+    }
+
+    /// The whole `ThreadStatus` union, through the notification path.
+    ///
+    /// The pre-fix table mapped `running`/`busy` — neither of which is in the protocol —
+    /// and had no case for `active` at all, so the one status that means "this thread is
+    /// working" produced no event. See `CodexThreadStatus`.
+    func testThreadStatusChangedMapsEveryRealStatus() throws {
+        var state = CodexThreadState()
+        let cases: [(String, [AgentEvent])] = [
+            ("statusIdle", [.activity(.idle)]),
+            ("statusActive", [.activity(.busy)]),
+            ("statusActiveWaitingOnApproval", [.activity(.waiting)]),
+            ("statusSystemError", [.activity(.idle)]),
+            // `notLoaded` is an absence of information — every restored tab sees it — so it
+            // must not overwrite what is already known.
+            ("statusNotLoaded", []),
+        ]
+        for (key, expected) in cases {
+            XCTAssertEqual(
+                CodexEventMapper.events(
+                    method: "thread/status/changed", params: try fixture(key), state: &state
+                ),
+                expected, "fixture \(key)"
+            )
+        }
     }
 
     func testThreadStatusChangedIgnoresUnrecognizedStatus() throws {

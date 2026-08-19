@@ -243,8 +243,17 @@ and New Session, so the pattern exists.
   construction and event mapping, no processes.
 - A `FakeAgentRuntime`, mirroring `SpyInjector`, lets `SessionStore` tests cover both
   agents without spawning anything.
-- The codex JSON-RPC client is tested against **recorded fixtures** of real notification
-  payloads captured during the spike — not a live `codex`.
+- The codex JSON-RPC client is tested against **schema-derived fixtures**
+  (`Tests/FlightDeckTests/Fixtures/Codex/notifications.schema-derived.json`) — not a live
+  `codex`. *Corrected 2026-08-19:* this bullet used to say the fixtures were "recorded …
+  real notification payloads captured during the spike". They were not, and because the
+  mapper was written from the same wrong assumptions, fixture and code agreed with each
+  other while both disagreed with the protocol (`agentsStates` typed as `[String: String]`
+  instead of `CollabAgentState` objects; thread statuses `running`/`busy`, neither of which
+  exists in `ThreadStatus`). Fixtures are now built field-by-field from
+  `codex app-server generate-json-schema`, and a checked-in copy of that schema backs
+  `CodexSchemaConformanceTests`, which asserts every method name and enum value the adapter
+  layer depends on still exists.
 - One opt-in integration test against a real `app-server`, skipped by default like the
   existing skipped test.
 - The claude suite must stay green at every step of the refactor; it is the only thing

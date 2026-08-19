@@ -13,11 +13,23 @@ struct CodexThreadState: Equatable {
 /// Pure and static so every mapping is testable from a recorded payload with no process,
 /// no socket and no timing — the same reason `ClaudeSession.events(inLine:sessionID:)` is pure.
 enum CodexEventMapper {
-    /// States that mean a sub-agent is still occupying a slot. Anything else — completed,
-    /// failed, cancelled — is finished. Listing the *live* states rather than the dead ones
-    /// means an unfamiliar state reads as finished, so an unknown value cannot pin the
-    /// spinner on forever.
-    private static let liveStates: Set<String> = ["running", "inProgress", "started", "interacted"]
+    /// `CollabAgentStatus` values that mean a sub-agent is still occupying a slot.
+    ///
+    /// The full union, from `CollabAgentStatus` in the schema emitted by
+    /// `codex app-server generate-json-schema` at codex-cli 0.147.0:
+    ///
+    ///     pendingInit | running | interrupted | completed | errored | shutdown | notFound
+    ///
+    /// Of the four values this list used to hold — `running`, `inProgress`, `started`,
+    /// `interacted` — only `running` was ever real, and `pendingInit` (an agent that has
+    /// been spawned but has not started yet) was missing, so a just-spawned agent read as
+    /// already finished.
+    ///
+    /// Still an enumeration of the LIVE states rather than the dead ones, and that polarity
+    /// is the load-bearing part: a status codex adds in some future release reads as
+    /// finished, which under-reports a count for one release, rather than pinning a spinner
+    /// on forever with no way for the user to clear it.
+    private static let liveStates: Set<String> = ["pendingInit", "running"]
 
     static func events(
         method: String, params: [String: Any], state: inout CodexThreadState
@@ -34,34 +46,36 @@ enum CodexEventMapper {
             return [.activity(.idle), .turnEnded]
 
         case "thread/status/changed":
-            guard let raw = (params["status"] as? [String: Any])?["type"] as? String,
-                  let activity = activity(forThreadStatus: raw)
+            // Whole status object, not just its `type`: `active` carries `activeFlags`, and
+            // those are what tell `.waiting` from `.busy`. See `CodexThreadStatus`.
+            guard let activity = CodexThreadStatus.activity(from: params["status"] as? [String: Any])
             else { return [] }
             return [.activity(activity)]
 
         case "item/started", "item/completed":
+            // `agentsStates` is a map of thread id to `CollabAgentState`, which is an OBJECT
+            // — `{status: CollabAgentStatus, message?: String}` — not a bare status string.
+            // Decoding it as `[String: String]` failed against every real payload, so this
+            // guard returned early and `.subagentCount` was never emitted at all. Established
+            // from `CollabAgentState` in codex's generated schema at codex-cli 0.147.0.
             guard let item = params["item"] as? [String: Any],
                   item["type"] as? String == "collabAgentToolCall",
-                  let states = item["agentsStates"] as? [String: String]
+                  let states = item["agentsStates"] as? [String: [String: Any]]
             else { return [] }
-            // The live count below is derived straight from this payload's own `states`, so
+            // Flattened to id -> status. `message` is deliberately dropped: nothing renders
+            // it today, and carrying it would put a free-text field into `Equatable` state
+            // that changes on every progress update.
+            let statuses = states.compactMapValues { $0["status"] as? String }
+            // The live count below is derived straight from this payload's own `statuses`, so
             // nothing here reads `state.subagents` back. It is still recorded — forward-looking
             // state for the runtime Task 9 wires up, which will want per-agent detail (which
             // thread id is in which state) beyond the single number this mapper emits today.
-            state.subagents = states
-            let live = states.values.filter { liveStates.contains($0) }.count
+            state.subagents = statuses
+            let live = statuses.values.filter { liveStates.contains($0) }.count
             return [.subagentCount(live)]
 
         default:
             return []
-        }
-    }
-
-    private static func activity(forThreadStatus raw: String) -> SessionActivity? {
-        switch raw {
-        case "running", "busy": .busy
-        case "idle", "notLoaded": .idle
-        default: nil   // an unknown status must not overwrite a known one
         }
     }
 }

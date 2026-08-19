@@ -15,6 +15,10 @@ final class CodexResumeTests: XCTestCase {
         var onLine: ((String) -> Void)?
         private(set) var methods: [String] = []
         var threadMissing = false
+        /// The `ThreadStatus` object `thread/read` answers with, as raw JSON. Configurable
+        /// because `read` maps the whole union through `CodexThreadStatus`, and `idle` — the
+        /// default the rest of this file relies on — is only one of its four cases.
+        var readStatus = #"{"type":"idle"}"#
 
         func send(_ line: String) {
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
@@ -24,7 +28,7 @@ final class CodexResumeTests: XCTestCase {
             case "thread/read" where threadMissing:
                 onLine?(#"{"id":\#(id),"error":{"code":-32602,"message":"no such thread"}}"#)
             case "thread/read":
-                onLine?(#"{"id":\#(id),"result":{"thread":{"id":"01a01269-baa6-7493-8d15-8fa21bcb602b","name":"restored","status":{"type":"idle"},"path":"/r/x.jsonl","cwd":"/w/a"}}}"#)
+                onLine?(#"{"id":\#(id),"result":{"thread":{"id":"01a01269-baa6-7493-8d15-8fa21bcb602b","name":"restored","status":\#(readStatus),"path":"/r/x.jsonl","cwd":"/w/a"}}}"#)
             case "thread/start":
                 onLine?(#"{"id":\#(id),"result":{"thread":{"id":"01a01705-bd49-7b70-a0a1-4514d4bda5dd","cwd":"/w/a","path":"/r/y.jsonl"}}}"#)
             default:
@@ -56,6 +60,34 @@ final class CodexResumeTests: XCTestCase {
         // the hooks prompt and therefore reported nothing until the user cleared it.
         XCTAssertEqual(state.title, "restored")
         XCTAssertEqual(state.activity, .idle)
+    }
+
+    /// `read` is the second consumer of the status table, and it used to carry its own copy
+    /// that answered "anything not `running`/`busy`" with `.idle` — so a thread codex
+    /// reported as `active` came back from every reconcile as idle, actively wrong rather
+    /// than merely uninformative.
+    func testReadMapsTheWholeThreadStatusUnion() async throws {
+        let cases: [(String, SessionActivity?)] = [
+            (#"{"type":"idle"}"#, .idle),
+            (#"{"type":"active","activeFlags":[]}"#, .busy),
+            (#"{"type":"active","activeFlags":["waitingOnUserInput"]}"#, .waiting),
+            (#"{"type":"systemError"}"#, .idle),
+            // Confirmed against a live app-server: `thread/read` on a thread that exists on
+            // disk but is not open in this process succeeds with `notLoaded`.
+            (#"{"type":"notLoaded"}"#, nil),
+        ]
+        for (status, expected) in cases {
+            let t = ScriptedTransport()
+            t.readStatus = status
+            let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+
+            let state = try await adapter.read(
+                AgentBinding(conversationID: existing, transcriptURL: nil)
+            )
+
+            XCTAssertEqual(state.activity, expected, "status \(status)")
+            XCTAssertEqual(state.title, "restored", "the title must survive every status")
+        }
     }
 
     func testRebindReusesAThreadThatStillExists() async throws {
