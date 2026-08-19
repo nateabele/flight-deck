@@ -185,4 +185,57 @@ final class CodexRPCTests: XCTestCase {
         let value = try await result
         XCTAssertEqual(value["ok"] as? Bool, true)
     }
+
+    /// `withCheckedThrowingContinuation` alone does not notice `Task` cancellation: a caller
+    /// whose enclosing `Task` is cancelled while this is suspended would otherwise stay
+    /// suspended forever, leaking `CodexRPC` along with it (it's the in-flight call, not the
+    /// caller, that keeps `self` alive — see the test above). `request`'s
+    /// `withTaskCancellationHandler` must resume with a cancellation error AND remove the
+    /// entry from `pending`, not just unblock the caller.
+    func testCancellingTheEnclosingTaskResumesWithCancellationErrorAndClearsPending() async throws {
+        let t = StubTransport()   // never replies — nothing here may synthesise a reply
+        let rpc = CodexRPC(transport: t)
+
+        let task = Task { try await rpc.request("thread/start", ["cwd": "/w"]) }
+        try await Task.sleep(nanoseconds: 50_000_000)   // let it actually register in `pending`
+        XCTAssertEqual(rpc.pendingCount, 1, "the request must be in flight before we cancel it")
+
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("a cancelled request must not resolve")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("expected CancellationError, got \(error)")
+        }
+
+        XCTAssertEqual(rpc.pendingCount, 0, "cancellation must remove the entry, not just resume it")
+    }
+
+    /// Two requests in flight, only one of them cancelled: the survivor must still resolve
+    /// normally off its own reply. Cancellation cleanup must be per-`id`, not "clear everything
+    /// pending" — that would be indistinguishable from `transportClosed()`.
+    func testCancellingOneRequestLeavesAnotherInFlightRequestUnaffected() async throws {
+        let t = StubTransport()
+        let rpc = CodexRPC(transport: t)
+
+        let toCancel = Task { try await rpc.request("thread/start", ["cwd": "/a"]) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        async let survivor: [String: Any] = rpc.request("thread/start", ["cwd": "/b"])
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(rpc.pendingCount, 2)
+
+        toCancel.cancel()
+        do {
+            _ = try await toCancel.value
+            XCTFail("the cancelled request must not resolve")
+        } catch is CancellationError {}
+
+        XCTAssertEqual(rpc.pendingCount, 1, "only the cancelled request's entry should be gone")
+
+        t.reply(#"{"id":2,"result":{"cwd":"/b"}}"#)
+        let value = try await survivor
+        XCTAssertEqual(value["cwd"] as? String, "/b")
+    }
 }
