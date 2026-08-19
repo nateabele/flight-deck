@@ -35,8 +35,16 @@ final class FleetTLSHandshakeTests: XCTestCase {
 
     /// Returns the connection's terminal state: `.ready` on a successful handshake, or
     /// `.failed`/`.cancelled` when the peer refused us.
+    ///
+    /// A refused handshake presents as *silence*, not as `.failed` — Apple's PSK path drops a
+    /// mismatched identity rather than sending an alert, which is a reasonable way to avoid an
+    /// identity oracle. So these tests conclude "refused" from a timeout, and that is only
+    /// evidence because the two positive tests in this file exercise the identical listener
+    /// and `attempt` path and reach `.ready` in single-digit milliseconds. They are the
+    /// control. If you ever weaken or delete them, these refusal tests stop proving anything
+    /// and quietly keep passing.
     private func attempt(
-        key: FleetDeviceKey, port: NWEndpoint.Port, timeout: TimeInterval = 8
+        key: FleetDeviceKey, port: NWEndpoint.Port, timeout: TimeInterval = 2
     ) -> NWConnection.State {
         let connection = NWConnection(
             host: "127.0.0.1", port: port, using: FleetTLS.clientParameters(key: key)
