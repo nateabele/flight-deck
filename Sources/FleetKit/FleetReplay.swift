@@ -25,17 +25,24 @@ public enum FleetReplay {
         return collapseLastWriteWins(survivors, in: events)
     }
 
-    /// A removal is the one event about a doomed subject that still matters — and only if
-    /// the client had the subject before the window opened. A subject that was both created
-    /// and destroyed in the gap never reached the client at all.
+    /// A removal is the only event about a doomed subject that still matters. Everything
+    /// earlier is superseded by it, and everything later cannot exist.
+    ///
+    /// The removal is kept unconditionally, even when this window also contains the subject's
+    /// creation. An earlier version dropped it in that case, reasoning that a client which
+    /// never saw the subject need not hear it left — but the fold sees only events, never the
+    /// snapshot, so it cannot distinguish a genesis add from a redundant add on something the
+    /// client already holds, and guessing wrong left the client holding a deleted session.
+    /// Applying a removal for an unknown id is a silent no-op by contract, so keeping it costs
+    /// one inert frame and makes the property hold unconditionally.
     private static func survives(_ event: FleetEvent, _ doomed: Doomed) -> Bool {
         if let id = event.sessionID, doomed.sessions.contains(id) {
             guard case .sessionRemoved = event else { return false }
-            return !doomed.sessionsBornInWindow.contains(id)
+            return true
         }
         if let id = event.projectID, doomed.projects.contains(id) {
             guard case .projectRemoved = event else { return false }
-            return !doomed.projectsBornInWindow.contains(id)
+            return true
         }
         return true
     }
@@ -45,8 +52,6 @@ public enum FleetReplay {
     private struct Doomed {
         var sessions: Set<UUID> = []
         var projects: Set<UUID> = []
-        var sessionsBornInWindow: Set<UUID> = []
-        var projectsBornInWindow: Set<UUID> = []
     }
 
     /// One forward pass recording, per subject, where it was last added and last removed.
@@ -75,13 +80,9 @@ public enum FleetReplay {
         var doomed = Doomed()
         for (id, removedAt) in lastSessionRemove where (lastSessionAdd[id] ?? -1) < removedAt {
             doomed.sessions.insert(id)
-            // Added *and* removed inside the window: the client never held it, so even the
-            // removal is noise.
-            if lastSessionAdd[id] != nil { doomed.sessionsBornInWindow.insert(id) }
         }
         for (id, removedAt) in lastProjectRemove where (lastProjectAdd[id] ?? -1) < removedAt {
             doomed.projects.insert(id)
-            if lastProjectAdd[id] != nil { doomed.projectsBornInWindow.insert(id) }
         }
         return doomed
     }
