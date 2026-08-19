@@ -1,0 +1,125 @@
+{
+  "_provenance": [
+    "SCHEMA-DERIVED, NOT CAPTURED. The file this replaces was called `notifications.json`",
+    "and the design doc described it as 'recorded fixtures of real notification payloads",
+    "captured during the spike'. It was not. Its `agentsStates` values were strings where",
+    "the protocol has objects, and its thread statuses were `running` / `someFutureState`,",
+    "neither of which exists in `ThreadStatus` at all. Because the mapper was written from",
+    "the same wrong assumption, fixture and code agreed with each other and both disagreed",
+    "with codex — which is precisely the failure mode a hermetic fixture cannot catch.",
+    "",
+    "Every payload below is now built field-by-field from the definitions emitted by",
+    "`codex app-server generate-json-schema` at codex-cli 0.147.0: ItemStartedNotification,",
+    "ItemCompletedNotification, CollabAgentToolCallThreadItem, CollabAgentState,",
+    "CollabAgentStatus, ThreadStatusChangedNotification, ThreadStatus, ThreadActiveFlag,",
+    "ThreadNameUpdatedNotification, TurnStartedNotification, TurnCompletedNotification.",
+    "`CodexSchemaConformanceTests` asserts that vocabulary against a checked-in copy of that",
+    "schema, so this file cannot drift back out of the protocol unnoticed.",
+    "",
+    "The one thing here that IS observed rather than derived is the thread id, which comes",
+    "from a real rollout, and the `notLoaded` status, confirmed by probing a live app-server:",
+    "`thread/read` on an existing-but-unopened thread succeeds and reports `notLoaded`."
+  ],
+
+  "nameUpdated": {"threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b", "threadName": "flight-deck spike"},
+
+  "turnStarted": {
+    "threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+    "turn": {"id": "t1"}
+  },
+  "turnCompleted": {
+    "threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+    "turn": {"id": "t1"}
+  },
+
+  "spawnTwo": {
+    "threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+    "turnId": "t1",
+    "startedAtMs": 1787015279623,
+    "item": {
+      "type": "collabAgentToolCall",
+      "id": "c1",
+      "tool": "spawnAgent",
+      "status": "inProgress",
+      "senderThreadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+      "receiverThreadIds": ["sub-a", "sub-b"],
+      "agentsStates": {"sub-a": {"status": "running"}, "sub-b": {"status": "pendingInit"}}
+    }
+  },
+  "oneFinished": {
+    "threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+    "turnId": "t1",
+    "completedAtMs": 1787015280000,
+    "item": {
+      "type": "collabAgentToolCall",
+      "id": "c1",
+      "tool": "closeAgent",
+      "status": "completed",
+      "senderThreadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+      "receiverThreadIds": ["sub-a"],
+      "agentsStates": {
+        "sub-a": {"status": "completed", "message": "done"},
+        "sub-b": {"status": "running"}
+      }
+    }
+  },
+  "spawnWithUnfamiliarState": {
+    "threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+    "turnId": "t1",
+    "startedAtMs": 1787015281000,
+    "item": {
+      "type": "collabAgentToolCall",
+      "id": "c2",
+      "tool": "spawnAgent",
+      "status": "inProgress",
+      "senderThreadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+      "receiverThreadIds": ["sub-a", "sub-c"],
+      "agentsStates": {"sub-a": {"status": "running"}, "sub-c": {"status": "quiescing"}}
+    }
+  },
+  "everyTerminalState": {
+    "threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+    "turnId": "t1",
+    "completedAtMs": 1787015282000,
+    "item": {
+      "type": "collabAgentToolCall",
+      "id": "c3",
+      "tool": "wait",
+      "status": "completed",
+      "senderThreadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+      "receiverThreadIds": ["sub-a", "sub-b", "sub-c", "sub-d"],
+      "agentsStates": {
+        "sub-a": {"status": "interrupted"},
+        "sub-b": {"status": "completed"},
+        "sub-c": {"status": "errored", "message": "boom"},
+        "sub-d": {"status": "shutdown"},
+        "sub-e": {"status": "notFound"}
+      }
+    }
+  },
+
+  "statusIdle": {
+    "threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+    "status": {"type": "idle"}
+  },
+  "statusActive": {
+    "threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+    "status": {"type": "active", "activeFlags": []}
+  },
+  "statusActiveWaitingOnApproval": {
+    "threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+    "status": {"type": "active", "activeFlags": ["waitingOnApproval"]}
+  },
+  "statusNotLoaded": {
+    "threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+    "status": {"type": "notLoaded"}
+  },
+  "statusSystemError": {
+    "threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+    "status": {"type": "systemError"}
+  },
+  "statusUnrecognized": {
+    "threadId": "01a01269-baa6-7493-8d15-8fa21bcb602b",
+    "status": {"type": "someFutureState"}
+  }
+}
