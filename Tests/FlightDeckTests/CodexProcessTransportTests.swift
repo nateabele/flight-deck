@@ -52,6 +52,48 @@ final class CodexProcessTransportTests: XCTestCase {
         )
     }
 
+    // MARK: - CodexVersionProbe: the deadline
+
+    /// The fifth hang. `startCodex` memoizes the task that awaits this probe, so a
+    /// `codex --version` that never exits used to hang the first codex tab AND every
+    /// subsequent codex creation for the rest of the run — no alert, no timeout, no
+    /// recovery. `verifyHandshake`, the very next step, was already bounded.
+    func testAProbeThatNeverAnswersFailsRatherThanHanging() async {
+        let started = Date()
+        do {
+            try await CodexVersionProbe.checkOffMainActor(timeoutSeconds: 0.2) { _ in
+                // Blocks its thread the way a wedged child process does. It is detached, so
+                // the deadline has to come from outside it — which is the whole point.
+                Thread.sleep(forTimeInterval: 1.5)
+                return "codex-cli 99.0.0"
+            }
+            XCTFail("an unbounded probe is the hang this deadline exists to prevent")
+        } catch {
+            XCTAssertEqual(error as? AgentLaunchError,
+                           .prepareFailed("`codex --version` did not answer within 0.2s."))
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0,
+                          "the caller must unblock on the deadline, not on the wedged probe")
+    }
+
+    func testAProbeThatAnswersInTimeStillSucceeds() async throws {
+        try await CodexVersionProbe.checkOffMainActor(timeoutSeconds: 5) { _ in "codex-cli 0.147.0" }
+    }
+
+    /// The deadline must not swallow the specific diagnosis. A binary that answers promptly
+    /// with a version too old still reports `.versionTooOld`, not a timeout.
+    func testARealFailureBeatsTheDeadlineToTheCaller() async {
+        do {
+            try await CodexVersionProbe.checkOffMainActor(timeoutSeconds: 5) { _ in "codex-cli 0.1.0" }
+            XCTFail("an old codex must still be rejected")
+        } catch {
+            XCTAssertEqual(
+                error as? AgentLaunchError,
+                .versionTooOld(found: "0.1.0", minimum: CodexVersionProbe.minimumVersion)
+            )
+        }
+    }
+
     // MARK: - CodexVersionProbe: parsing
 
     func testParsesTheVersionTokenFromCodexsVersionBanner() {

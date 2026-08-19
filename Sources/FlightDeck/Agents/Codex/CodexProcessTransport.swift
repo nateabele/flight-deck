@@ -51,6 +51,75 @@ enum CodexVersionProbe {
     /// against the binary, not derived from a changelog.
     static let minimumVersion = "0.142.4"
 
+    /// How long any single step of the probe may take before it is treated as a failure.
+    ///
+    /// Matches `CodexProcessTransport.verifyHandshake`'s default, and for the same reason:
+    /// the user is waiting on a tab that does not exist yet, and five seconds is already
+    /// past the point where nothing-happening reads as broken.
+    static let timeoutSeconds: Double = 5
+
+    /// `check()` moved off the caller's actor and given a deadline.
+    ///
+    /// The deadline is the point. `check()` spawns a process and blocks on it, and the store
+    /// memoizes the task that awaits it — so before this existed, one `codex --version` that
+    /// never exited hung the first codex tab forever AND every subsequent codex creation for
+    /// the rest of the run, with no alert, no timeout and no recovery. `verifyHandshake`, the
+    /// step immediately after, was already bounded; this one was not.
+    ///
+    /// Belt and braces with `defaultRun`'s own watchdog on purpose. That one kills the
+    /// process, which is what stops a thread being leaked; this one guarantees the *caller*
+    /// unblocks even when `run` is an injected seam that ignores deadlines entirely.
+    static func checkOffMainActor(
+        executable: String = "codex",
+        timeoutSeconds: Double = timeoutSeconds + 1,
+        run: @escaping @Sendable (String) throws -> String = defaultRun
+    ) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            let race = FirstToFinish(continuation)
+            // Detached and deliberately NOT awaited structurally. `check` blocks a thread on
+            // a child process and cannot be cancelled, so a `withThrowingTaskGroup` would
+            // still wait for it after the deadline fired — the deadline would be reported
+            // and the caller would unblock five seconds later anyway, which is the hang this
+            // is supposed to remove. Racing on a continuation is what actually returns.
+            // Nothing is leaked permanently: `defaultRun`'s own watchdog kills the process,
+            // which is what releases this thread.
+            Task.detached {
+                do {
+                    try check(executable: executable, run: run)
+                    race.finish(nil)
+                } catch {
+                    race.finish(error)
+                }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds) {
+                race.finish(AgentLaunchError.prepareFailed(
+                    "`\(executable) --version` did not answer within \(timeoutSeconds)s."
+                ))
+            }
+        }
+    }
+
+    /// Resumes a continuation exactly once, whichever of the two racers gets there first.
+    /// A second resume is a crash in Swift concurrency, not a no-op, so the guard is not
+    /// tidiness — and the two racers genuinely can finish at the same moment.
+    private final class FirstToFinish: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Void, Error>?
+
+        init(_ continuation: CheckedContinuation<Void, Error>) {
+            self.continuation = continuation
+        }
+
+        func finish(_ error: Error?) {
+            lock.lock()
+            let pending = continuation
+            continuation = nil
+            lock.unlock()
+            guard let pending else { return }
+            if let error { pending.resume(throwing: error) } else { pending.resume() }
+        }
+    }
+
     /// Runs `codex --version`, parses it, and throws the launch error that names what's
     /// wrong. `executable` also names the binary in that error; `run` is injected so tests
     /// can supply canned output instead of spawning a real process.
@@ -112,8 +181,22 @@ enum CodexVersionProbe {
         // copies this and points it at something chattier.
         process.standardError = FileHandle.nullDevice
         try process.run()
-        process.waitUntilExit()
+
+        // A `codex --version` that never exits must not block this thread for the life of
+        // the app. SIGTERM closes its end of the pipe, which is what lets the read below
+        // return; the caller then sees empty output and reports `.notInstalled`, which is
+        // the honest answer for a binary that cannot answer its own version.
+        let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds, execute: watchdog)
+
+        // Read BEFORE waiting, not after. `waitUntilExit()` first is the classic
+        // Foundation.Process deadlock: a child that fills the pipe buffer blocks writing
+        // while the parent blocks waiting for it to exit, and neither moves.
+        // `readDataToEndOfFile` returns at EOF, which the child signals by exiting, so this
+        // ordering both drains and waits.
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        watchdog.cancel()
         return String(data: data, encoding: .utf8) ?? ""
     }
 }
