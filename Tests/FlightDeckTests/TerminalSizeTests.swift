@@ -177,6 +177,66 @@ final class TerminalSizeTests: XCTestCase {
         XCTAssertEqual(pending.count, 1, "no second settle scheduled")
     }
 
+    /// A degenerate size must not become the stored size. If one did, it would be broadcast to
+    /// every surface — where `report(_:to:)`'s own guard would swallow it, leaving every grid
+    /// frozen — and then written to `sessions.json` by the settle, poisoning every later launch.
+    ///
+    /// NaN is in the table on purpose. The guard is written as `width > 0`, an assertion about
+    /// the value; NaN compares false against that and is rejected. Rewritten as a rejection test
+    /// (`width <= 0`) it would compare false too, and NaN would sail through.
+    func testADegenerateSizeIsIgnored() {
+        let cases: [(String, CGSize)] = [
+            ("zero", CGSize(width: 0, height: 0)),
+            ("zero width", CGSize(width: 0, height: 700)),
+            ("zero height", CGSize(width: 900, height: 0)),
+            ("negative", CGSize(width: -900, height: -700)),
+            ("NaN", CGSize(width: CGFloat.nan, height: CGFloat.nan)),
+        ]
+
+        for (label, size) in cases {
+            let persistence = FakePersistence()
+            let (store, _) = makeStoreWithThreeSessions(persistence)
+            let before = store.terminalSize
+
+            var pending: [() -> Void] = []
+            store.resizeSettle = { pending.append($0) }
+            var reports: [(UUID, CGSize)] = []
+            store.sizeReporterOverride = { reports.append(($0, $1)) }
+
+            store.terminalSizeDidChange(size)
+
+            XCTAssertEqual(store.terminalSize, before, "\(label): the stored size must not move")
+            XCTAssertTrue(reports.isEmpty, "\(label): nothing may be reported")
+            XCTAssertTrue(pending.isEmpty, "\(label): no settle may be armed")
+        }
+    }
+
+    /// `sessions.json` is meant to stay human-readable, so it gets hand-edited. An implausible
+    /// value there has to be rejected at the seed: nothing downstream re-validates it, and every
+    /// `report(_:to:)` would then no-op on its own guard, leaving every surface — this launch and
+    /// every launch after — at libghostty's 800x600 placeholder.
+    func testAnImplausiblePersistedSizeFallsBackToTheDefault() {
+        for width in [0.0, -742.0, Double.nan, .infinity, 1e12] {
+            let id = UUID()
+            let persistence = FakePersistence()
+            persistence.stored = SessionSnapshot(
+                sessions: [.init(id: id, title: "a", workingDirectory: "/w")],
+                selectedSessionID: id,
+                sessionCounter: 1
+            )
+            persistence.stored?.terminalSize = .init(width: width, height: 618)
+
+            let store = makeStore(persistence)
+            var reports: [(UUID, CGSize)] = []
+            store.sizeReporterOverride = { reports.append(($0, $1)) }
+
+            store.restore(directoryExists: allDirsExist)
+
+            XCTAssertEqual(store.terminalSize, SessionStore.defaultTerminalSize, "width \(width)")
+            XCTAssertEqual(reports.first?.1, SessionStore.defaultTerminalSize, "width \(width)")
+        }
+    }
+
     /// Activation must NOT go through the dedupe: the whole point is that this surface's grid
     /// may be stale while the store's size has not moved.
     func testActivatingATabReportsTheCurrentSizeEvenWhenItHasNotChanged() {

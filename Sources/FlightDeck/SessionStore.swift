@@ -356,6 +356,22 @@ final class SessionStore: ObservableObject {
     /// so: it is only ever wrong for one launch, after which a real layout has been recorded.
     static let defaultTerminalSize = CGSize(width: 760, height: 672)
 
+    /// What a persisted dimension has to fall inside for `restore()` to believe it, rather than
+    /// falling back to `defaultTerminalSize`.
+    ///
+    /// `sessions.json` is deliberately kept human-readable, which is another way of saying
+    /// humans edit it. A zero, negative, or NaN value there would be permanent and silent: every
+    /// `report(_:to:)` would fail its own positive-size guard, so every surface in every future
+    /// launch would sit at libghostty's 800x600 placeholder — the exact bug this feature exists
+    /// to fix — and nothing downstream re-validates the seed. The upper bound is not decoration
+    /// either: `sizeDidChange` ends at `UInt32(scaledSize.width)`, which *traps* rather than
+    /// saturates once the scaled value passes `UInt32.max`.
+    ///
+    /// Membership is tested rather than the failures being tested for, and that is load-bearing:
+    /// NaN compares false against every operator, so `contains` rejects it, while the negated
+    /// form (`width <= 0 || width > max`) would wave it straight through.
+    private static let plausibleTerminalDimension: ClosedRange<Double> = 1...100_000
+
     /// Test seam. Production leaves this nil and sizing goes to the live surface — the same
     /// arrangement as `injectorOverride`, and for the same reason: `SurfaceProvider` stubs
     /// return nil surfaces, so there would otherwise be nothing to assert against.
@@ -680,6 +696,14 @@ final class SessionStore: ObservableObject {
         // placeholder 800x600 *pixel* grid — about 50 columns on a 2x display. Anything the
         // child prints in that window is hard-wrapped there for good, because reflow can only
         // rejoin rows the terminal soft-wrapped, not rows the program broke itself.
+        //
+        // That reasoning covers the case where a surface was actually created. The call is left
+        // outside the `if let surface` above anyway: when `makeSurface` returns nil — no provider
+        // at all, or a creation that failed — there is no forked child to protect, and `report`
+        // finds no surface for this id and does nothing. Keeping it unconditional costs a
+        // dictionary lookup and keeps `report(_:to:)` the single place a size leaves this class,
+        // which is also what lets `sizeReporterOverride` observe creation-time sizing in tests,
+        // where every surface is nil.
         report(terminalSize, to: session.id)
         provider?.tick()
 
@@ -721,7 +745,9 @@ final class SessionStore: ObservableObject {
         // with every session closed, and `SessionStore.init` answers a false return by calling
         // `seedInitialSession()` — which creates a surface that needs this size just as much as a
         // restored one does.
-        if let size = snapshot.terminalSize {
+        if let size = snapshot.terminalSize,
+           Self.plausibleTerminalDimension.contains(size.width),
+           Self.plausibleTerminalDimension.contains(size.height) {
             terminalSize = CGSize(width: size.width, height: size.height)
         }
 

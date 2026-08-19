@@ -82,6 +82,21 @@ struct TerminalPane: NSViewRepresentable {
             Ghostty.moveFocus(to: surface)
         }
 
+        // A deliberate second route to the same fact, ahead of the activation report below.
+        // `terminalSizeDidChange` is otherwise reached only from `TerminalHostView.setFrameSize`,
+        // a single AppKit notification with no acknowledgement: miss it once — a frame change
+        // that arrives while this view is off-window, an ordering the layout system is free to
+        // produce — and the store's idea of the pane's size is wrong until the *next* resize,
+        // with nothing to correct it in between. Reconciling against `container.bounds` here
+        // restores the self-healing property the pre-store code had, when `updateNSView` reported
+        // the container's actual geometry on every pass.
+        //
+        // Cheap enough to do at this frequency: `updateNSView` runs on every published store
+        // change (~2 Hz per live agent), and `terminalSizeDidChange` dedupes against the stored
+        // size, so the steady state is one `CGSize` comparison. Its zero-size guard covers the
+        // early-layout passes where `bounds` has not been assigned yet.
+        store.terminalSizeDidChange(container.bounds.size)
+
         // Unconditionally, not just on attach. Re-parenting is how tab switching works, so a
         // surface that was created off-screen or last shown at a different window size still
         // carries that old grid — a resize while another tab was selected is enough to produce
