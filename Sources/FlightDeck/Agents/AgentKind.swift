@@ -25,6 +25,17 @@ struct AgentBinding: Equatable, Sendable {
     let transcriptURL: URL?
 }
 
+/// Where an agent is working right now, and what it is bound to.
+///
+/// The adapter's answer to "describe this live session", so a caller never learns which agent
+/// produced it. `AgentBinding` alone was not enough: it settles *identity*, which is fixed at
+/// prepare time, while the working directory moves for the life of the tab — an agent that
+/// enters a worktree changes where a tool should point without changing what it is bound to.
+struct AgentLocation: Equatable, Sendable {
+    let workingDirectory: String
+    let binding: AgentBinding
+}
+
 /// One state-bearing thing an agent reported. The single vocabulary `SessionStore` speaks;
 /// it never learns whether this arrived by tailing a file or by JSON-RPC notification.
 ///
