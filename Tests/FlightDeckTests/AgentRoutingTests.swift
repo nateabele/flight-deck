@@ -84,6 +84,25 @@ final class AgentRoutingTests: XCTestCase {
                        "a registry row must reach the tab through its runtime")
     }
 
+    /// `AgentAdapter.rename` is how an agent that owns its own conversation name gets asked
+    /// to change it. For claude that is still `/rename` typed into the pty, so it must land
+    /// on the *same* route `SessionStore.rename` uses — one `pendingRenames` entry behind one
+    /// `injecting` guard, not a second injector wired in beside it.
+    func testTheAdaptersRenameTypesThroughTheStoresOwnInjectionRoute() async throws {
+        let store = makeStore()
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { $0() }
+        let session = store.newSession(in: tmp)
+        store.applyRegistry([1: entry(session.pinnedConversationID, activity: .idle)])
+        spy.events.removeAll()
+
+        let adapter = store.adapter(for: .claude)
+        try await adapter.rename(adapter.binding(for: session), to: "from the adapter")
+
+        XCTAssertEqual(spy.events, [.killLine, .text("/rename from the adapter"), .ret])
+    }
+
     private func entry(_ conversation: UUID, activity: SessionActivity) -> ClaudeStatusFile.Entry {
         .init(pid: 1, sessionID: conversation, activity: activity, waitingFor: nil,
               startedAt: 1, cwd: tmp.path)
