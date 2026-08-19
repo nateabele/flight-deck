@@ -75,7 +75,11 @@ public final class FleetSocketServer: @unchecked Sendable {
                 guard !resumed else { return }
                 switch state {
                 case .ready:
-                    guard let port = listener.port else { return }
+                    // `.any` (0) is the placeholder `listener.port` can report in the moment
+                    // before the OS assigns the real ephemeral port; without this guard a
+                    // `.ready` caught in that window would resume success with an unusable
+                    // port instead of waiting for a real one.
+                    guard let port = listener.port, port != .any else { return }
                     resumed = true
                     continuation.resume(returning: port)
                 case .failed(let error):
@@ -89,6 +93,18 @@ public final class FleetSocketServer: @unchecked Sendable {
                 }
             }
             listener.start(queue: queue)
+
+            // Bounded on purpose. `.waiting` is Network.framework's "this may resolve itself"
+            // state — a port not yet released by the listener we just stopped is the ordinary
+            // way in, since a key rotation rebinds the same port. Without this, `start()`
+            // never returns and the listener silently never comes up; the busy-wait this
+            // replaced had a five-second bound and dropping it was a regression.
+            queue.asyncAfter(deadline: .now() + 5) {
+                guard !resumed else { return }
+                resumed = true
+                listener.cancel()
+                continuation.resume(throwing: FleetSocketError.didNotBind)
+            }
         }
         return bound
     }
