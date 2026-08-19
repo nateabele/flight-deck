@@ -139,6 +139,10 @@ final class CodexStatusRoutingTests: XCTestCase {
     }
 
     /// A blocked codex thread has to raise the same banner a blocked claude does.
+    ///
+    /// Note: no codex source produces `.waiting` any more. Codex writes nothing when it
+    /// starts waiting on approval, so a codex tab reads busy through a prompt. This test
+    /// covers the store's policy for the event, which claude still produces.
     func testWaitingNotifiesThroughTheSamePolicy() async throws {
         let store = makeStore()
         let spy = SpyNotifier()
