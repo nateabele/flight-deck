@@ -25,6 +25,47 @@ struct FlightDeckApp: App {
         UserDefaults.standard.bool(forKey: "FlightDeckSeedSecondProject")
     }
 
+    /// `-FlightDeckStateDir <path>`. Puts `sessions.json` somewhere other than
+    /// `~/Library/Application Support/Flight Deck`, so a second instance can be run against a
+    /// *copy* of a real deck without touching the original.
+    ///
+    /// This exists because there was no other way to do it. Redirecting `HOME` does not work:
+    /// `FileSessionPersistence.defaultDirectory()` goes through
+    /// `FileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)`, which
+    /// resolves the real home via `getpwuid` and ignores the environment entirely. A debug run
+    /// launched that way silently restores the developer's live sessions and starts a second
+    /// `claude --resume` for every one of them — the duplicate-instance collision
+    /// `scripts/swap-release.sh` warns about, reached by accident rather than by executing the
+    /// bundle.
+    ///
+    /// Unlike `FlightDeckResetState` this is *not* gated on anything: pointing the app at a
+    /// different directory is a legitimate thing to want in a real launch, and unlike the
+    /// fixture flags it cannot pose as someone else's data — it only decides where this
+    /// instance's own state lives.
+    ///
+    /// Internal rather than private so `StateDirectoryOverrideTests` can exercise the parsing
+    /// without launching an app; the `defaults` parameter is what lets those tests use a suite
+    /// of their own instead of the real domain.
+    static func stateDirectory(_ defaults: UserDefaults = .standard) -> URL? {
+        guard let path = defaults.string(forKey: "FlightDeckStateDir"), !path.isEmpty else {
+            return nil
+        }
+        return URL(
+            fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
+    }
+
+    /// The session store for this launch, honouring `-FlightDeckStateDir`.
+    ///
+    /// `legacyDefaults: nil` under an override is load-bearing, not tidiness.
+    /// `FileSessionPersistence.migrateFromDefaults` *removes* the legacy key once it has
+    /// written the file, so an overridden store allowed to migrate would consume the real
+    /// user's `sessions.snapshot.v1` blob as a side effect of running a debug instance —
+    /// isolation that mutates the very thing it is isolating from.
+    private static func fileSessionPersistence() -> FileSessionPersistence {
+        guard let directory = stateDirectory() else { return FileSessionPersistence() }
+        return FileSessionPersistence(directory: directory, legacyDefaults: nil)
+    }
+
     /// `-FlightDeckFixture <dir>`. Used by exactly one UI test, the one that produces the
     /// README screenshot: it needs several projects and a session in every status at once, and
     /// statuses come from live `claude` processes, so there is no production route to it.
@@ -121,7 +162,7 @@ struct FlightDeckApp: App {
             // convenience init's launch-time orphan sweep reports through `reapReporter`
             // before this factory could ever assign it afterwards.
             reapReporter: UserNotificationReapReporter(),
-            persistence: fixture?.persistence() ?? (resetState ? nil : FileSessionPersistence()),
+            persistence: fixture?.persistence() ?? (resetState ? nil : Self.fileSessionPersistence()),
             // Point the watcher at the fixture's status files instead of `~/.claude/sessions`,
             // and believe them: they name pids that were never spawned, so the real liveness
             // check would drop every row.
