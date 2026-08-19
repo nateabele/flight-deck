@@ -2979,7 +2979,7 @@ That is the point of the split. The alternative, a server that reaches into the 
 **Interfaces:**
 - Consumes: `FleetTLS` (Task 6), `ClientFrame`/`ServerFrame` (Task 5).
 - Produces:
-  - `public final class FleetSocketServer` — `init(queue:)`, `start(keys:port:) throws -> NWEndpoint.Port`, `stop()`, `broadcast(_: ServerFrame)`, `var onHello: ((UUID, Int) -> [ServerFrame])?`, `var onCommand: ((UUID, Int, FleetCommand) -> ServerFrame)?`, `var onAttachedCountChanged: ((Int) -> Void)?`, `var authDeadline: TimeInterval`.
+  - `public final class FleetSocketServer` — `init(queue:)`, `start(keys:port:) async throws -> NWEndpoint.Port`, `stop()`, `broadcast(_: ServerFrame)`, `var onHello: ((UUID, Int) -> [ServerFrame])?`, `var onCommand: ((UUID, Int, FleetCommand) -> ServerFrame)?`, `var onAttachedCountChanged: ((Int) -> Void)?`, `var authDeadline: TimeInterval`.
   - `public final class FleetClient` — `init(key:queue:)`, `connect(to: NWEndpoint, lastSeq: Int)`, `disconnect()`, `send(_: FleetCommand) -> Int`, `var onFrame: ((ServerFrame) -> Void)?`, `var onReady: (() -> Void)?`, `var onDisconnect: ((Error?) -> Void)?` — **guaranteed to fire at most once per connection, and never for a `disconnect()` the caller asked for.**
 - Task 12 wires the server's closures to the store.
 
@@ -3542,7 +3542,7 @@ The spec's rule about commands is followed literally here: *where a command has 
 
 **Interfaces:**
 - Consumes: `FleetSocketServer` (Task 11), `FleetReplicator` (Task 8), `FleetProjection` (Task 7), `SessionStore`.
-- Produces: `@MainActor final class FleetService: ObservableObject` — `init(store:keys:)`, `start(port:) throws -> NWEndpoint.Port`, `stop()`, `@Published private(set) var attachedDeviceCount: Int`; and `SessionStore.markRead(_ id: UUID)`. Plan 2's pairing UI reads `attachedDeviceCount` and supplies `keys`.
+- Produces: `@MainActor final class FleetService: ObservableObject` — `init(store:keys:)`, `start(port:) async throws -> NWEndpoint.Port`, `stop()`, `@Published private(set) var attachedDeviceCount: Int`; and `SessionStore.markRead(_ id: UUID)`. Plan 2's pairing UI reads `attachedDeviceCount` and supplies `keys`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3568,16 +3568,16 @@ final class FleetServiceTests: XCTestCase {
         service = nil
     }
 
-    private func standUp() throws -> (SessionStore, FleetDeviceKey, NWEndpoint.Port) {
+    private func standUp() async throws -> (SessionStore, FleetDeviceKey, NWEndpoint.Port) {
         let store = SessionStore(provider: nil, persistence: nil)
         let key = FleetDeviceKey.mint()
         let service = FleetService(store: store, keys: { [key] })
         self.service = service
-        return (store, key, try service.start(port: nil))
+        return (store, key, try await service.start(port: nil))
     }
 
-    func testAConnectingClientIsHandedTheLiveFleet() throws {
-        let (store, key, port) = try standUp()
+    func testAConnectingClientIsHandedTheLiveFleet() async throws {
+        let (store, key, port) = try await standUp()
         let session = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
 
         let arrived = expectation(description: "snapshot")
@@ -3597,8 +3597,8 @@ final class FleetServiceTests: XCTestCase {
         XCTAssertEqual(snapshot?.projects.first?.sessions.map(\.id), [session.id])
     }
 
-    func testAMutationAfterAttachingReachesTheClient() throws {
-        let (store, key, port) = try standUp()
+    func testAMutationAfterAttachingReachesTheClient() async throws {
+        let (store, key, port) = try await standUp()
         let session = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
 
         let renamed = expectation(description: "rename reached the client")
@@ -3625,8 +3625,8 @@ final class FleetServiceTests: XCTestCase {
         wait(for: [renamed], timeout: 10)
     }
 
-    func testMarkingReadFromAClientClearsTheMarkOnTheMac() throws {
-        let (store, key, port) = try standUp()
+    func testMarkingReadFromAClientClearsTheMarkOnTheMac() async throws {
+        let (store, key, port) = try await standUp()
         let a = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
         let b = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
         store.selectSession(b.id)
@@ -3648,8 +3648,8 @@ final class FleetServiceTests: XCTestCase {
         XCTAssertFalse(store.unreadIdle.contains(a.id))
     }
 
-    func testACommandNamingASessionThatIsGoneIsRefusedNotIgnored() throws {
-        let (_, key, port) = try standUp()
+    func testACommandNamingASessionThatIsGoneIsRefusedNotIgnored() async throws {
+        let (_, key, port) = try await standUp()
         let refused = expectation(description: "err")
         let client = FleetClient(key: key)
         self.client = client
@@ -3754,9 +3754,12 @@ final class FleetService: ObservableObject {
     /// `port: nil` asks the OS for one. Plan 2's Bonjour advertisement publishes whatever
     /// comes back — no port is hard-coded anywhere, because a fixed port is a collision
     /// waiting for a second Mac app.
+    /// `async` because the listener half is: it awaits the OS reporting the bound port rather
+    /// than polling for it. The previous shape blocked its caller for up to five seconds, and
+    /// this type is main-actor — a visible stall in a terminal app.
     @discardableResult
-    func start(port: NWEndpoint.Port? = nil) throws -> NWEndpoint.Port {
-        let bound = try server.start(keys: keys(), port: port)
+    func start(port: NWEndpoint.Port? = nil) async throws -> NWEndpoint.Port {
+        let bound = try await server.start(keys: keys(), port: port)
         Self.logger.info("fleet listener bound to port \(bound.rawValue, privacy: .public)")
         return bound
     }
@@ -3769,8 +3772,8 @@ final class FleetService: ObservableObject {
     /// Restart the listener so a change to the paired-device list takes effect. Revoking a
     /// device is deleting its key, and a listener started with the old set would keep
     /// honouring it until the app quit.
-    func reloadKeys(port: NWEndpoint.Port? = nil) throws {
-        try start(port: port)
+    func reloadKeys(port: NWEndpoint.Port? = nil) async throws {
+        try await start(port: port)
     }
 
     private func apply(_ command: FleetCommand, cid: Int) -> ServerFrame {
@@ -3844,7 +3847,7 @@ Add a dated section, in the existing style, covering exactly three things:
 
 1. **The drift assertion is temporary and must not be removed** until the `FleetState` encapsulation lands. Cross-reference the section already added on 2026-08-18 rather than repeating it.
 2. **"Mark as Read" exists as a store method and a phone command, but has no Mac menu item.** The spec's rule is that anything the phone can do the Mac should too; `SessionCommands`' context menu offers only "Mark as Unread". Small, and deliberately not in this plan's scope.
-3. **The listener restarts to pick up a key change** (`FleetService.reloadKeys`), which drops attached clients for the length of a reconnect. Acceptable because revocation is rare and a client reconnects on its own, but worth knowing before someone calls it on a timer.
+3. **The listener restarts to pick up a key change** (`FleetService.reloadKeys`), which drops attached clients for the length of a reconnect. Acceptable because revocation is rare and a client reconnects on its own, but worth knowing before someone calls it on a timer. `FleetSocketServer.stop()` drains both attached *and* pending connections, so a rotation that catches a device mid-handshake no longer orphans its socket — that was a real leak, found in review, and the `pending` set exists for exactly this call path.
 
 - [ ] **Step 4: Verify nothing regressed and commit**
 
