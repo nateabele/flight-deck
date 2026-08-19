@@ -133,6 +133,10 @@ final class CodexLaunchFailureTests: XCTestCase {
         retained.append(provider)
         let store = SessionStore(provider: provider, persistence: nil)
         store.projectsRoot = projectsRoot
+        // Never the user's real `~/.codex/session_index.jsonl`: every test below creates a
+        // codex tab, and only the adapter is overridden — `runtime(for: .codex)` still builds
+        // a real `CodexStack`, whose `CodexNameWatcher` would otherwise tail the user's home.
+        store.codexIndexURL = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = reporter
         return (store, provider)
     }
