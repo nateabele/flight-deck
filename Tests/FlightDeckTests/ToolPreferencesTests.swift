@@ -44,13 +44,19 @@ final class ToolPreferencesTests: XCTestCase {
     }
 
     func testMigrationMaterialisesEditorAndTerminal() {
+        // If migrateToolsIfNeeded were a no-op, storedTools would remain nil and the getter's
+        // fallback would synthesise a list using fallbackTerminalCommand. A distinctive terminal
+        // command makes that failure visible: the returned tools would have com.apple.Terminal
+        // instead of com.example.probe, and storedTools would be nil.
         var prefs = Preferences()
-        prefs.migrateToolsIfNeeded(terminalCommand: "open -b com.apple.Terminal ${cwd}")
+        prefs.migrateToolsIfNeeded(terminalCommand: "open -b com.example.probe ${cwd}")
         XCTAssertEqual(prefs.tools.map(\.name), ["Editor", "Terminal"])
         XCTAssertEqual(prefs.tools[0].command, "$EDITOR ${cwd}")
         XCTAssertEqual(prefs.tools[0].shortcut, ToolShortcut(key: "o", modifiers: [.command]))
-        XCTAssertEqual(prefs.tools[1].command, "open -b com.apple.Terminal ${cwd}")
+        XCTAssertEqual(prefs.tools[1].command, "open -b com.example.probe ${cwd}")
         XCTAssertEqual(prefs.tools[1].shortcut, ToolShortcut(key: "t", modifiers: [.command]))
+        // Materialisation means storedTools was assigned; the getter's fallback would leave it nil.
+        XCTAssertNotNil(prefs.storedTools)
     }
 
     func testMigrationIsIdempotentAndNeverOverwritesTheUsersList() {
@@ -75,6 +81,10 @@ final class ToolPreferencesTests: XCTestCase {
     func testAFreshStoreMaterialisesTheDefaults() {
         let store = PreferencesStore(persistence: MemoryPersistence())
         XCTAssertEqual(store.tools.map(\.name), ["Editor", "Terminal"])
+        // Materialisation means storedTools was assigned during init. If migrateToolsIfNeeded
+        // were a no-op, storedTools would be nil and store.tools would synthesise the list from
+        // the getter's fallback, making the name check still pass and masking the failure.
+        XCTAssertNotNil(store.preferences.storedTools)
     }
 
     func testToolsRoundTripThroughStorage() {
