@@ -804,15 +804,30 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// Names the cause for the alert. `localizedDescription` on a plain Swift error is the
-    /// useless "The operation couldn't be completed. (FlightDeck.CodexRPCError error 2.)",
-    /// and an alert that does not say what went wrong is barely better than no alert.
+    /// Names the cause for the alert, in words rather than in case names.
+    ///
+    /// Neither default is usable as it stands: `localizedDescription` on a plain Swift error
+    /// is "The operation couldn't be completed. (FlightDeck.CodexRPCError error 2.)", and
+    /// `String(describing:)` is `transportClosed` — an alert that shows either has told the
+    /// user nothing. The one exception is a remote error, whose message comes from codex and
+    /// is the most specific thing anyone knows about the failure ("cwd is not trusted").
     private func launchError(from error: Error) -> AgentLaunchError {
-        if let launch = error as? AgentLaunchError { return launch }
-        if let localized = (error as? LocalizedError)?.errorDescription {
-            return .prepareFailed(localized)
+        switch error {
+        case let launch as AgentLaunchError:
+            return launch
+        case CodexRPCError.transportClosed:
+            return .prepareFailed("the Codex app-server stopped before it answered.")
+        case CodexRPCError.timeout:
+            return .prepareFailed("the Codex app-server did not answer in time.")
+        case CodexRPCError.remote(_, let message):
+            return .prepareFailed(message)
+        case CodexRPCError.malformed(let what):
+            return .prepareFailed("Codex sent something unusable (\(what)).")
+        default:
+            return .prepareFailed(
+                (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+            )
         }
-        return .prepareFailed(String(describing: error))
     }
 
     /// ⌘N. Creates a session in the ACTIVE session's project, directly below it, and
