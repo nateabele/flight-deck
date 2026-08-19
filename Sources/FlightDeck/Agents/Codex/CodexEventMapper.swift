@@ -85,4 +85,37 @@ enum CodexEventMapper {
             return []
         }
     }
+
+    /// Translates one line of a codex rollout `.jsonl` into the app's vocabulary.
+    ///
+    /// This is the production path. Codex's app-server notifications are scoped to the
+    /// connection that made the change, and turns run in a separate `codex resume` process,
+    /// so nothing about what the user does ever reaches our connection. The rollout is
+    /// written by whichever process drives the turn, which is exactly the property the
+    /// notification route lacks.
+    ///
+    /// Only `event_msg` records carry turn boundaries. `response_item`, `turn_context`,
+    /// `world_state` and `session_meta` are conversation content and bookkeeping.
+    static func events(inRolloutLine line: String) -> [AgentEvent] {
+        guard let raw = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
+              let record = raw as? [String: Any],
+              record["type"] as? String == "event_msg",
+              let payload = record["payload"] as? [String: Any],
+              let kind = payload["type"] as? String
+        else { return [] }
+
+        switch kind {
+        case "task_started":
+            return [.activity(.busy)]
+
+        // `.turnEnded` is what `SessionReadPolicy` marks unread from, so it must accompany
+        // idle. An aborted turn is still a turn that ended: the user interrupted it, and a
+        // tab left spinning because nothing said "over" is the worse failure.
+        case "task_complete", "turn_aborted":
+            return [.activity(.idle), .turnEnded]
+
+        default:
+            return []
+        }
+    }
 }
