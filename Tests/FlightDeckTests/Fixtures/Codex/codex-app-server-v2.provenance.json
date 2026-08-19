@@ -1,0 +1,20 @@
+{
+  "file": "codex-app-server-v2.generated.json",
+  "isVerbatimGeneratedOutput": true,
+  "codexVersion": "codex-cli 0.147.0",
+  "generatedOn": "2026-08-19",
+  "generatedBy": "codex app-server generate-json-schema --out <tmp>",
+  "generatedFile": "codex_app_server_protocol.v2.schemas.json",
+  "note": [
+    "Checked in VERBATIM and never hand-edited. It is the ground truth",
+    "`CodexSchemaConformanceTests` asserts against, so editing it to make a test pass would",
+    "recreate exactly the failure it exists to catch: three wire-format bugs shipped because",
+    "the fixture and the code were written from the same wrong assumption and agreed with",
+    "each other.",
+    "",
+    "To refresh: run the command above against a newer codex, replace this file wholesale,",
+    "update `codexVersion` and `generatedOn`, and let the conformance test tell you what",
+    "moved. `FLIGHT_DECK_CODEX_SCHEMA_REGEN=1` runs that comparison against the installed",
+    "binary without replacing anything."
+  ]
+}
