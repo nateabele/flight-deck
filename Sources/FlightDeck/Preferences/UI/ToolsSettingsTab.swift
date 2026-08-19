@@ -101,12 +101,17 @@ struct ToolsSettingsTab: View {
                         .frame(width: 260, alignment: .leading)
                 }
                 LabeledContent("Shortcut") {
-                    ShortcutRecorder(shortcut: binding(index, \.shortcut))
+                    ShortcutRecorder(shortcut: binding(index, \.shortcut), toolName: tools[index].name)
                 }
                 Toggle("Show in terminal overlay", isOn: binding(index, \.showsInOverlay))
             }
             .formStyle(.grouped)
             .frame(maxWidth: .infinity)
+            // Forces a remount, not just an update, when the selected tool changes. That resets
+            // the recorder's @State (so an armed monitor tears down via onDisappear) and drops
+            // the closures captured by every `binding(index, _)` below, which otherwise keep
+            // referring to the tool the user navigated away from.
+            .id(tools[index].id)
         } else {
             ContentUnavailableView("No Tool Selected", systemImage: "wrench.and.screwdriver")
                 .frame(maxWidth: .infinity)
@@ -149,7 +154,13 @@ struct ToolsSettingsTab: View {
     ) -> Binding<V> {
         Binding(
             get: { preferences.tools[index][keyPath: keyPath] },
-            set: { preferences.tools[index][keyPath: keyPath] = $0 }
+            set: { newValue in
+                // The `.id()` remount above is the primary defence against a stale index, but
+                // it depends on SwiftUI's identity semantics; this is the cheap backstop against
+                // an out-of-range write crashing the whole preferences window.
+                guard preferences.tools.indices.contains(index) else { return }
+                preferences.tools[index][keyPath: keyPath] = newValue
+            }
         )
     }
 }
