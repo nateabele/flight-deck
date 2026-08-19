@@ -70,12 +70,13 @@ therefore a different connection**. So the app-server that created the thread ne
 `turn/*`, `item/*`, `thread/status/changed` or `thread/name/updated` for anything the user does.
 
 **Consequence:** the notification path — `CodexEventMapper`'s notification decoding,
-`CodexRuntime.handle`, `CodexRPC.onNotification`, and the reconcile machinery that ordered a
-read against that stream — is deleted, not merely dead. Title, status and unread for codex
-now come from tailing the rollout `thread/start` returns and the app-wide
-`session_index.jsonl`, exactly as §3 describes. `CodexThreadStatus` survives unchanged — it
-was never on the notification path, only on `thread/read`, which `rebind` and restore still
-use.
+`CodexRuntime.handle`, and the reconcile machinery that ordered a read against that stream —
+is deleted, not merely dead. `CodexRPC.onNotification` itself is not deleted — it is generic
+transport plumbing — but nothing in production sets it any more, so it has no consumer.
+Title, status and unread for codex now come from tailing the rollout `thread/start` returns
+and the app-wide `session_index.jsonl`, exactly as §3 describes. `CodexThreadStatus` survives
+unchanged — it was never on the notification path, only on `thread/read`, which `rebind` and
+restore still use.
 
 This was found by the final whole-branch review asking a question nobody had tested, then
 settled by experiment. It cost nothing to check and would have cost a rewrite to discover
@@ -112,12 +113,14 @@ routes each line by `id` to whichever tab holds that conversation and drops ids 
 `thread/start` returns.** `TailReader`'s existing rule sends an existing file to the end,
 which is correct here — the header is not a turn — but do not "fix" it into reading from 0.
 
-**What this replaced.** `CodexRPC.onNotification`, `CodexRuntime.handle`, and the reconcile
-machinery that used to order an async `thread/read` against that notification stream
-(`reconcile`, `reconcileByReading`, `runReconcile`, `applyReconciled`, `CodexThreadState`,
-and the fields that tracked an in-flight reconcile) are all deleted — not merely unused.
-Ordering a read against a notification stream was only ever needed because the notification
-stream existed; once events arrive as ordered lines in a file, there is nothing left to race.
+**What this replaced.** `CodexRuntime.handle` and the reconcile machinery that used to
+order an async `thread/read` against the notification stream (`reconcile`,
+`reconcileByReading`, `runReconcile`, `applyReconciled`, `CodexThreadState`, and the fields
+that tracked an in-flight reconcile) are all deleted — not merely unused. `CodexRPC.onNotification`
+survives as generic transport plumbing; only its production wiring is gone — `CodexRuntime.init`
+no longer sets it, so nothing consumes what it delivers. Ordering a read against a notification
+stream was only ever needed because the notification stream existed; once events arrive as
+ordered lines in a file, there is nothing left to race.
 
 **What `CodexRPC` still does**, because tailing can't: identity (`thread/start`), commit and
 rename (`thread/name/set`), and `thread/read` on the two paths that predate any file — `rebind`
