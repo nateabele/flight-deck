@@ -45,7 +45,7 @@ final class SessionStore: ObservableObject {
             // Activating a tab is what marks it read. Deliberately not gated on
             // `appIsActive()`: selecting a row is an explicit act, so it counts as looking
             // at it even if the window is not frontmost at that instant.
-            if let id = selectedSessionID { unreadIdle.remove(id) }
+            if let id = selectedSessionID { setUnread(id, false) }
             // Safety net against a stranded `renameRequest`: `SessionSidebar`'s Return
             // handler only sets it for a session with a rendered row, but the selection
             // it was issued for can still move out from under it afterward — collapsing
@@ -473,6 +473,23 @@ final class SessionStore: ObservableObject {
     private func emit(_ events: FleetEvent...) {
         guard let replicator, !events.isEmpty else { return }
         replicator.record(events)
+    }
+
+    /// The only writer of `unreadIdle`.
+    ///
+    /// Not style. There were seven `insert`/`remove` sites — a selection `didSet`, restore,
+    /// `markUnread`, `closeSession`, `applyReadState`, app activation, and a test seam — and
+    /// each one having to remember an event is the omission this whole mechanism is trying
+    /// to make impossible. Returning early on an unchanged flag also keeps a client from
+    /// receiving an event per poll for a session that has been unread for an hour.
+    @discardableResult
+    private func setUnread(_ id: UUID, _ isUnread: Bool) -> Bool {
+        let changed = isUnread
+            ? unreadIdle.insert(id).inserted
+            : unreadIdle.remove(id) != nil
+        guard changed else { return false }
+        emit(.unreadChanged(id: id, isUnread: isUnread))
+        return true
     }
 
     /// The wire form of a session as it stands right now.
@@ -1248,7 +1265,7 @@ final class SessionStore: ObservableObject {
             // were actually rebuilt — a session whose directory has gone has no row to draw a
             // mark on. Before the `selectedSessionID` assignment below on purpose: its
             // `didSet` clears the mark for the tab you land on, which is correct.
-            if entry.unread == true { unreadIdle.insert(entry.id) }
+            if entry.unread == true { setUnread(entry.id, true) }
 
             if autoResume,
                let activity = entry.activity.flatMap(SessionActivity.init(rawValue:)),
@@ -1453,7 +1470,7 @@ final class SessionStore: ObservableObject {
     /// Persists immediately, same as `rename(_:to:)`: unread marks are meant to survive a
     /// relaunch (see `unreadIdle`'s doc comment), so there is no "mark now, save later" here.
     func markUnread(_ id: UUID) {
-        unreadIdle.insert(id)
+        setUnread(id, true)
         persist()
     }
 
@@ -1522,7 +1539,12 @@ final class SessionStore: ObservableObject {
         // mark now outlives its process. But closing a tab removes its id from `repos`
         // entirely, so no future tick will ever see it again; leaving the mark in
         // `unreadIdle` here would leak it forever rather than merely have it persist.
-        unreadIdle.remove(id)
+        // Runs after `emit(.sessionRemoved(id:))` above, so a session that was unread emits
+        // a real `.unreadChanged` for an id the mirror has already dropped. That is not
+        // drift: `.unreadChanged` for an unknown id is a no-op by contract on the receiving
+        // side, and the store's own projection has no such session either — both sides
+        // agree once the batch settles.
+        setUnread(id, false)
         // Closing the row is the most literal case of "a prompt that will never resolve",
         // and applyRegistry cannot observe the waiting -> gone edge here because both its
         // before and after snapshots already lack this id.
@@ -1813,8 +1835,13 @@ final class SessionStore: ObservableObject {
     /// Test seam. Production statuses arrive through `applyRegistry`, which takes registry
     /// rows keyed by pid; a test that only cares about the sidebar's reading of a status
     /// should not have to fabricate those.
+    ///
+    /// Routed through `commitStatuses` rather than writing `statuses` directly: this seam
+    /// is a stand-in for a registry tick, and a tick that skipped read-state, notifications
+    /// and replication would make every test built on it exercise a path production never
+    /// takes.
     func applyRegistryForTesting(_ next: [UUID: SessionStatus]) {
-        statuses = next
+        commitStatuses(next)
     }
 
     /// Test seams. Production drives both from `applyRegistry`; a test that only cares about
@@ -1827,7 +1854,7 @@ final class SessionStore: ObservableObject {
     /// Test seam. Production marks come from `applyReadState` and from restore; a test that
     /// only cares about how a mark is *pruned* should not have to script an edge to create it.
     func markUnreadForTesting(_ ids: Set<UUID>) {
-        unreadIdle.formUnion(ids)
+        for id in ids { setUnread(id, true) }
     }
 
     /// Test seam. Production leaves this nil and injection goes to the live surface.
@@ -1893,6 +1920,7 @@ final class SessionStore: ObservableObject {
         else { return }
 
         repos[at.repo].sessions[at.session].title = name
+        emit(.renamed(id: id, title: name, origin: .user))
         persist()
 
         let session = repos[at.repo].sessions[at.session]
@@ -2073,6 +2101,7 @@ final class SessionStore: ObservableObject {
         else { return }
 
         repos[at.repo].sessions[at.session].title = name
+        emit(.renamed(id: id, title: name, origin: .agent))
         persist()
     }
 
@@ -2237,6 +2266,15 @@ final class SessionStore: ObservableObject {
         let transitions = Set(previous.keys).union(next.keys).map {
             StatusTransition(id: $0, old: previous[$0], new: next[$0])
         }
+        // Emitted first, ahead of `applyReadState`: `statuses` above is already mutated for
+        // every session in this tick, so the fleet's activity fields are already "actual"
+        // before any event has recorded them. `applyReadState` below records its own event
+        // per transition as it goes (through `setUnread`), and the DEBUG drift check runs
+        // after every one of those — if it ran before this, it would catch the live
+        // activity having changed with no event on the wire for it yet, which is real
+        // drift, just not a bug: the fix is recording activity first, not silencing the
+        // check.
+        emitActivity(transitions)
         applyReadState(transitions)
         deliverNotifications(transitions)
         cancelSupersededPrompts(transitions)
@@ -2259,9 +2297,9 @@ final class SessionStore: ObservableObject {
             case .none:
                 continue
             case .mark:
-                unreadIdle.insert(transition.id)
+                setUnread(transition.id, true)
             case .clear:
-                unreadIdle.remove(transition.id)
+                setUnread(transition.id, false)
             }
         }
     }
@@ -2285,6 +2323,24 @@ final class SessionStore: ObservableObject {
                 notifier.withdraw(sessionID: transition.id)
             }
         }
+    }
+
+    /// The fourth consumer of a tick's transitions. Reads off the same diff the other three
+    /// do, so a status a client sees is by construction the status that drove the sidebar,
+    /// the notification and the prompt cancellation.
+    private func emitActivity(_ transitions: [StatusTransition]) {
+        let changed = transitions.filter { $0.old != $0.new }
+        guard !changed.isEmpty else { return }
+        replicator?.record(changed.map { transition in
+            .activityChanged(
+                id: transition.id,
+                // nil rather than "idle": no status means no agent process, and the two
+                // render differently.
+                activity: transition.new?.activity.rawValue,
+                waitingFor: transition.new?.waitingFor,
+                subagentCount: transition.new?.subagentCount ?? 0
+            )
+        })
     }
 
     /// Click-to-activate. The window ordering is the AppDelegate's job; this only moves
@@ -2314,7 +2370,7 @@ final class SessionStore: ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let id = self.selectedSessionID else { return }
-                self.unreadIdle.remove(id)
+                self.setUnread(id, false)
             }
         }
     }
@@ -2350,6 +2406,10 @@ final class SessionStore: ObservableObject {
         guard var status = statuses[id] else { return }
         status.subagentCount = count
         statuses[id] = status
+        emit(.activityChanged(
+            id: id, activity: status.activity.rawValue,
+            waitingFor: status.waitingFor, subagentCount: status.subagentCount
+        ))
     }
 
     private func injector(for id: UUID) -> TextInjecting? {
