@@ -28,19 +28,33 @@ struct Session: Identifiable, Equatable {
     /// because a session Flight Deck starts uses its own tab id as `--session-id`. An
     /// in-session `/resume` repoints it at the resumed conversation.
     var pinnedConversationID: UUID
+    /// Which coding agent this tab runs. Defaulted to `.claude` so every session that
+    /// predates agent adapters keeps working: a snapshot with no `agent` key decodes to
+    /// claude, which is what it has always been.
+    var agent: AgentID = .claude
+    /// An absolute transcript path reported by the agent, for agents that report one.
+    ///
+    /// Distinct from `transcriptDirectory`, which is claude's *input* to path derivation and
+    /// follows the live cwd. Codex hands back a full path that does not move when the cwd
+    /// changes, so there is nothing to derive and nothing to retarget.
+    var transcriptPath: String?
 
     init(
         id: UUID = UUID(),
         title: String,
         workingDirectory: String,
         transcriptDirectory: String? = nil,
-        pinnedConversationID: UUID? = nil
+        pinnedConversationID: UUID? = nil,
+        agent: AgentID = .claude,
+        transcriptPath: String? = nil
     ) {
         self.id = id
         self.title = title
         self.workingDirectory = workingDirectory
         self.transcriptDirectory = transcriptDirectory ?? workingDirectory
         self.pinnedConversationID = pinnedConversationID ?? id
+        self.agent = agent
+        self.transcriptPath = transcriptPath
     }
 }
 

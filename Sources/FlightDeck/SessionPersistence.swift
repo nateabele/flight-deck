@@ -38,6 +38,10 @@ struct SessionSnapshot: Codable, Equatable {
         /// Whether this session finished while the user was looking elsewhere. Absent
         /// reads as false. Optional for the same reason as `activity`.
         var unread: Bool?
+        /// Absent in every snapshot written before agent adapters; `nil` means claude.
+        var agent: AgentID?
+        /// An absolute transcript path reported by the agent, mirroring `Session.transcriptPath`.
+        var transcriptPath: String?
 
         init(
             id: UUID,
@@ -46,7 +50,9 @@ struct SessionSnapshot: Codable, Equatable {
             transcriptDirectory: String? = nil,
             pinnedConversationID: UUID? = nil,
             activity: String? = nil,
-            unread: Bool? = nil
+            unread: Bool? = nil,
+            agent: AgentID? = nil,
+            transcriptPath: String? = nil
         ) {
             self.id = id
             self.title = title
@@ -55,6 +61,8 @@ struct SessionSnapshot: Codable, Equatable {
             self.pinnedConversationID = pinnedConversationID
             self.activity = activity
             self.unread = unread
+            self.agent = agent
+            self.transcriptPath = transcriptPath
         }
     }
 

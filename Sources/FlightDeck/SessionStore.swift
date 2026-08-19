@@ -690,7 +690,9 @@ final class SessionStore: ObservableObject {
                 title: entry.title,
                 workingDirectory: entry.workingDirectory,
                 transcriptDirectory: transcriptDirectory,
-                pinnedConversationID: conversationID
+                pinnedConversationID: conversationID,
+                agent: entry.agent ?? .claude,
+                transcriptPath: entry.transcriptPath
             )
             insertSession(
                 session,
@@ -757,7 +759,9 @@ final class SessionStore: ObservableObject {
                     activity: statuses[$0.id]?.activity.rawValue,
                     // `nil` rather than `false` so the common case adds no noise to a file
                     // that is meant to stay readable.
-                    unread: unreadIdle.contains($0.id) ? true : nil
+                    unread: unreadIdle.contains($0.id) ? true : nil,
+                    agent: $0.agent,
+                    transcriptPath: $0.transcriptPath
                 )
             },
             projects: repos.map { .init(path: $0.url.path, isCollapsed: $0.isCollapsed) },
