@@ -362,13 +362,20 @@ final class CodexIntegrationTests: XCTestCase {
         // SEPARATE `codex exec resume` process pick the thread back up at all. `stop()` is
         // idempotent, so the deferred call after it is still safe.
         //
-        // PRODUCTION NOTE (unresolved; not covered by this test): Flight Deck's real launch
-        // path never stops the app-server between `thread/start`/`thread/name/set` and
-        // spawning the interactive `codex resume <id>` TUI in a pty, so on codex-cli 0.148.0
-        // that resume is very likely hitting this same "active writer" error in production.
-        // This test cannot exercise the live-app-server case (see the class-level doc comment
-        // above) and deliberately does not attempt to fix production behaviour here; it is
-        // being tracked and surfaced separately.
+        // PRODUCTION NOTE: this lock is real in production too, but `CodexAdapter.prepare`
+        // already releases it — right after naming, it issues `thread/archive` then
+        // `thread/unarchive` on this same connection, which frees the thread before
+        // `launchCommand` ever spawns the interactive `codex resume <id>` TUI. See the
+        // comment at that call site, and item 5 in this file's class-level doc comment for
+        // `testPrepareReleasesTheWriterLockSoASecondConnectionCanResumeTheThread`, which
+        // proves the release headlessly against a second app-server connection.
+        //
+        // This test still stops the transport here, rather than only in the `defer` below,
+        // for a different reason that remains true regardless: its whole point is that a
+        // genuinely SEPARATE process — not a second connection off this same app-server —
+        // still appends `task_started`/`task_complete` to the rollout `thread/start` named.
+        // Going through `CodexAdapter.prepare`'s archive/unarchive round trip here would
+        // prove nothing about that; only the app-server actually exiting does.
         transport.stop()
 
         var seen: [AgentEvent] = []
