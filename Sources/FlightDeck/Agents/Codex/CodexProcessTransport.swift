@@ -67,7 +67,11 @@ enum CodexVersionProbe {
     }
 
     /// codex prints e.g. `codex-cli 0.142.4` on the first line of `--version` — the version
-    /// is the last whitespace-separated token, and it starts with a digit.
+    /// is the last whitespace-separated token, and it starts with a digit. Verified against
+    /// the real binary at codex-cli 0.142.4, not derived from documentation; if a future
+    /// release appends a build hash or channel tag as its own token, this parses closed into
+    /// `.notInstalled` rather than a wrong-but-plausible version — re-verify against that
+    /// release's actual `--version` output before assuming this still holds.
     static func parse(_ output: String) -> String? {
         guard let firstLine = output.split(separator: "\n", maxSplits: 1).first,
               let token = firstLine.split(separator: " ").last.map(String.init),
@@ -100,7 +104,13 @@ enum CodexVersionProbe {
         process.arguments = [executable, "--version"]
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()
+        // `--version` output is far too small to ever fill a pipe buffer, so an unread
+        // stderr `Pipe()` here isn't a live deadlock risk — but it's the shape of the classic
+        // Foundation.Process deadlock (child blocks writing to a full, undrained pipe), and
+        // `CodexProcessTransport.start()` already does the right thing for the real
+        // transport's stderr. Match it rather than leave a foot-gun for the next caller who
+        // copies this and points it at something chattier.
+        process.standardError = FileHandle.nullDevice
         try process.run()
         process.waitUntilExit()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
@@ -116,11 +126,21 @@ enum CodexVersionProbe {
 final class CodexProcessTransport: CodexTransport {
     var onLine: ((String) -> Void)?
 
+    /// Fires at most once, however this transport's process stops running: an explicit
+    /// `stop()`, `codex app-server` crashing (`terminationHandler`), or exiting cleanly (EOF
+    /// — an empty chunk from `readabilityHandler`, which can arrive before, after, or instead
+    /// of `terminationHandler`). Wiring this to `rpc.transportClosed()` is the next task's
+    /// job — without it, `CodexRPC.request`'s "nothing here can hang a caller forever on a
+    /// dead app-server" guarantee breaks the moment the app-server actually dies mid-session,
+    /// because nothing else would ever call `transportClosed()`.
+    var onTerminate: (() -> Void)?
+
     private let executable: String
     private let process = Process()
     private let stdin = Pipe()
     private let stdout = Pipe()
     private var reassembler = LineReassembler()
+    private var hasTerminated = false
 
     init(executable: String = "codex") { self.executable = executable }
 
@@ -136,16 +156,31 @@ final class CodexProcessTransport: CodexTransport {
         process.standardOutput = stdout
         process.standardError = FileHandle.nullDevice
 
+        // An empty chunk from `availableData` IS end-of-file, not "nothing happened yet" — it
+        // means the pipe's write end closed, which means the process is gone. Routing it to
+        // `terminate()` rather than silently dropping it is what lets a crash be noticed at
+        // all; without this there is no mechanism, not even a callback, by which anything
+        // downstream could learn the app-server exited.
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
+            guard !chunk.isEmpty else {
+                Task { @MainActor in self?.terminate() }
+                return
+            }
             Task { @MainActor in self?.consume(chunk) }
+        }
+
+        // Belt-and-suspenders alongside the EOF check above: EOF and `terminationHandler` can
+        // arrive in either order, so both funnel into the same de-duplicated `terminate()`.
+        process.terminationHandler = { [weak self] _ in
+            Task { @MainActor in self?.terminate() }
         }
 
         do {
             try process.run()
         } catch {
             stdout.fileHandleForReading.readabilityHandler = nil
+            process.terminationHandler = nil
             throw AgentLaunchError.notInstalled(executable)
         }
     }
@@ -156,14 +191,54 @@ final class CodexProcessTransport: CodexTransport {
     }
 
     /// Idempotent: closing tabs and app quit can both reach this for the same process.
+    /// Routes through `terminate()` so an explicit stop leaves the object in exactly the
+    /// state a crash would — same handlers torn down, same `onTerminate` firing exactly once.
     func stop() {
-        stdout.fileHandleForReading.readabilityHandler = nil
         if process.isRunning { process.terminate() }
+        terminate()
+    }
+
+    /// The single place every way this process can stop running funnels through: explicit
+    /// `stop()`, a crash (`terminationHandler`), or a clean exit (EOF). Guarded so
+    /// `onTerminate` fires at most once regardless of how many of those actually happen —
+    /// `codex app-server` exiting can trigger both EOF and `terminationHandler` for the same
+    /// exit, and `stop()` can race either.
+    private func terminate() {
+        guard !hasTerminated else { return }
+        hasTerminated = true
+        stdout.fileHandleForReading.readabilityHandler = nil
+        process.terminationHandler = nil
+        onTerminate?()
     }
 
     private func consume(_ chunk: Data) {
         for line in reassembler.feed(chunk) { onLine?(line) }
     }
+
+    /// Backstop for the last strong reference going away without `stop()` ever being called —
+    /// a spawn failure with no explicit teardown, a tab closing mid-flight. Direct access to
+    /// `process`/the pipes here is legal: `deinit` has unique, non-concurrent access to
+    /// `self` during teardown, so no actor hop is needed despite the class being `@MainActor`
+    /// (same reasoning as `CodexRPC.deinit`). Deliberately does NOT call `terminate()` /
+    /// `onTerminate`: that callback exists to notify a still-alive owner of an unexpected
+    /// exit, and by the time `deinit` runs there is no owner left to notify — its only job is
+    /// making sure the real OS subprocess doesn't outlive the Swift object that owns it.
+    deinit {
+        stdout.fileHandleForReading.readabilityHandler = nil
+        process.terminationHandler = nil
+        if process.isRunning { process.terminate() }
+    }
+}
+
+extension CodexProcessTransport {
+    /// Test-only: exercises the exact path `readabilityHandler` takes on an empty chunk
+    /// (i.e. EOF) — `terminate()` is private and EOF can otherwise only be produced by a real
+    /// pipe closing, which the committed suite must not spawn a process to do.
+    func simulateEOFForTesting() { terminate() }
+
+    /// Test-only: exercises the exact path `process.terminationHandler` takes, without
+    /// spawning a real process to trigger it.
+    func simulateProcessTerminationForTesting() { terminate() }
 }
 
 extension CodexProcessTransport {
