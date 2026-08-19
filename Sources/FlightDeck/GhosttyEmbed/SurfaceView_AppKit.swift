@@ -927,7 +927,21 @@ extension Ghostty {
             ghostty_surface_set_content_scale(surface, xScale, yScale)
             // Flight Deck: the one place the pushed scale changes, so the one place the cache
             // `sizeDidChange` reads while unparented has to be brought along.
-            pushedContentScale = (xScale, yScale)
+            //
+            // Sanitized, not the raw xScale/yScale above: a window can exist before this view
+            // has been laid out, so `self.frame.size` can still be `.zero` here, making both
+            // divisions 0/0 — NaN. `ghostty_surface_set_content_scale` above is passed the raw
+            // values on purpose; libghostty sanitizes NaN to 1 on receipt
+            // (`updateContentScale` in embedded.zig), so mirroring that here is what keeps this
+            // cache equal to the value libghostty actually holds instead of diverging from it.
+            // That equality is worth enforcing on its own, but it's also load-bearing: this
+            // cache gets multiplied into a size in `sizeDidChange` that is passed to
+            // `UInt32(...)`, and `UInt32(CGFloat.nan)` traps — so a retained NaN here doesn't
+            // just mis-size the grid, it crashes the app on the next settled resize fan-out to
+            // a backgrounded surface.
+            pushedContentScale = (
+                max(1, xScale.isNaN ? 1 : xScale),
+                max(1, yScale.isNaN ? 1 : yScale))
 
             // When our scale factor changes, so does our fb size so we send that too.
             //
