@@ -1,16 +1,18 @@
 import XCTest
 @testable import FlightDeck
 
-/// The seam that keeps an agent's path derivation out of the tools subsystem. Each adapter
-/// states its own location, and the requirement is overridable — so a third agent can decline
-/// to use transcriptDirectory and the compiler catches one that forgets to implement it.
+/// The seam that keeps an agent's path derivation out of the tools subsystem. `location(for:)`
+/// is a REQUIRED protocol member with no default implementation — each adapter states its own
+/// answer, so a third agent whose cwd is not `transcriptDirectory` has somewhere to say so, and
+/// the compiler, not a default, is what stops a new adapter from silently inheriting the wrong
+/// directory.
 @MainActor
 final class AgentLocationTests: XCTestCase {
     private func session(cwd: String, live: String) -> Session {
         Session(title: "w", workingDirectory: cwd, transcriptDirectory: live)
     }
 
-    func testDefaultReportsTheAgentsLiveDirectoryNotTheFiledProject() {
+    func testClaudeReportsTheAgentsLiveDirectoryNotTheFiledProject() {
         // A worktree is the case that separates the two: the tab stays filed under the
         // project, but the agent is working somewhere else and that is where a tool goes.
         let s = session(cwd: "/w/a", live: "/w/a/.claude/worktrees/tools")
@@ -20,17 +22,23 @@ final class AgentLocationTests: XCTestCase {
         )
     }
 
-    func testDefaultCarriesTheAdaptersOwnBinding() {
+    func testClaudeCarriesItsOwnBinding() {
         let adapter = ClaudeAdapter()
         let s = session(cwd: "/w/a", live: "/w/a")
         XCTAssertEqual(adapter.location(for: s).binding, adapter.binding(for: s),
                        "a location must not invent a second identity rule")
     }
 
-    func testAnAdapterMayOverrideTheDefault() {
-        // The whole point of the seam: an agent whose cwd is not `transcriptDirectory` has
-        // somewhere to say so. Without an override point this would be a field read.
-        let s = session(cwd: "/w/a", live: "/w/a")
+    func testEachAdapterStatesItsOwnAnswerRatherThanSharingOne() {
+        // The property the seam exists for: two adapters given the SAME session must be free
+        // to disagree about where the agent is working. A shared default (extension method or
+        // a base-class field read) could not let `RelocatingAdapter` diverge from
+        // `ClaudeAdapter` the way this asserts it does.
+        let s = session(cwd: "/w/a", live: "/w/a/.claude/worktrees/tools")
+        XCTAssertEqual(
+            ClaudeAdapter().location(for: s).workingDirectory,
+            "/w/a/.claude/worktrees/tools"
+        )
         XCTAssertEqual(RelocatingAdapter().location(for: s).workingDirectory, "/elsewhere")
     }
 

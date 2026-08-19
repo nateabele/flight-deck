@@ -10,7 +10,11 @@ struct ToolOverlay: View {
     @ObservedObject var model: ToolOverlayModel
 
     let monitor: ToolOverlayInputMonitor
-    var launcher: ToolLaunching = ShellToolLauncher()
+    /// No bare-default `ShellToolLauncher()` here on purpose: that default silently ignores the
+    /// Shell & Environment pane, and a same-looking property with two different unconfigured
+    /// defaults (here and in `AppDelegate`) is exactly how that went unnoticed before. Callers
+    /// build one from `ShellToolLauncher.configured(preferences)` instead.
+    var launcher: ToolLaunching
 
     private var visibleTools: [ToolDefinition] {
         preferences.tools.filter(\.showsInOverlay)
