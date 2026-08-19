@@ -3,6 +3,7 @@ options:
   bundleIdPrefix: dev.flightdeck
   deploymentTarget:
     macOS: "14.0"
+    iOS: "17.0"
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -23,6 +24,8 @@ targets:
     dependencies:
       - framework: vendor/ghostty-artifacts/GhosttyKit.xcframework
         embed: false
+      - target: FleetKit
+        embed: true
     settings:
       base:
         # `productName:` above only renames the product *reference* (and the
@@ -57,6 +60,10 @@ targets:
         buildPhase: resources
     dependencies:
       - target: FlightDeck
+      # Linked, not embedded: the copy inside "Flight Deck.app/Contents/Frameworks" is the
+      # one that loads at runtime. See the DYLD_FRAMEWORK_PATH note in scripts/test-unit.sh.
+      - target: FleetKit
+        embed: false
     settings:
       base: { GENERATE_INFOPLIST_FILE: "YES" }
   FlightDeckUITests:
@@ -67,3 +74,42 @@ targets:
       - target: FlightDeck
     settings:
       base: { GENERATE_INFOPLIST_FILE: "YES" }
+  FleetKit:
+    type: framework
+    platform: macOS
+    sources: [Sources/FleetKit]
+    settings:
+      base:
+        # Swift 6 here, Swift 5 project-wide. The project-wide floor exists for vendored
+        # Ghostty (not Swift-6 clean); FleetKit vendors nothing and carries the wire types
+        # that cross a thread boundary on every frame, which is exactly the code that wants
+        # `Sendable` checked rather than assumed. A Swift 6 module imports cleanly into a
+        # Swift 5 target, so nothing else has to move.
+        SWIFT_VERSION: "6.0"
+        PRODUCT_MODULE_NAME: FleetKit
+        GENERATE_INFOPLIST_FILE: "YES"
+
+  # Same sources, iOS slice. This target ships nothing on its own — it is the enforcement
+  # mechanism for "FleetKit imports Foundation and Network only". An `import AppKit` that
+  # slipped into the shared sources compiles fine for macOS and fails here, which is the
+  # only cheap way to catch it before the phone app exists. See scripts/build-ios.sh.
+  FleetKitiOS:
+    type: framework
+    platform: iOS
+    sources: [Sources/FleetKit]
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        PRODUCT_MODULE_NAME: FleetKit
+        GENERATE_INFOPLIST_FILE: "YES"
+        CODE_SIGNING_ALLOWED: "NO"
+
+# FleetKitiOS needs a persisted shared scheme, not xcodebuild's own implicit synthesis for
+# a buildable target — that synthesis is unpersisted, undocumented, and exactly what
+# scripts/build-ios.sh's `-scheme` (over `-target`) is meant not to depend on. See the
+# comment there for why `-scheme` is required at all on this Xcode version.
+schemes:
+  FleetKitiOS:
+    build:
+      targets:
+        FleetKitiOS: [run]
