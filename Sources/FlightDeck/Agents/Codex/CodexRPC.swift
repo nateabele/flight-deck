@@ -67,6 +67,17 @@ final class CodexRPC {
         nextID += 1
         let id = nextID
         var body: [String: Any] = ["jsonrpc": "2.0", "id": id, "method": method]
+        // Kept deliberately, not a bug left in place: omitting `params` entirely when the
+        // caller passes nothing is correct per JSON-RPC 2.0, which marks `params` OPTIONAL.
+        // This exact line caused a real incident — `CodexProcessTransport.verifyHandshake`
+        // used to call `rpc.request("initialize", [:])`, which reads as "no params to send"
+        // but produced a message real codex rejected outright, because `InitializeParams`
+        // requires `clientInfo`. The fix that incident needed was at the *call site* (send
+        // real `clientInfo`), not here: had this line instead always sent `"params": {}` for
+        // an empty dictionary, `initialize` would still have failed — just with "missing
+        // field `clientInfo`" instead of "missing field `params`". Omitted-vs-empty was never
+        // the defect; a call site asking for something that needs specific content while
+        // handing over nothing was. See the task-10a report for the full incident.
         if !params.isEmpty { body["params"] = params }
         guard let data = try? JSONSerialization.data(withJSONObject: body),
               let line = String(data: data, encoding: .utf8)
