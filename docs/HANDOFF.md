@@ -4,6 +4,14 @@
 
 Start here if you're picking up Flight Deck fresh. This is the map; the linked docs have the detail.
 
+> **▶ Agent Adapters (2026-08-19) — in progress, one decided step remaining.**
+> Any tab can now run **claude or codex**. Claude's half is complete and unchanged; codex
+> creates, resumes and renames, but its observation half (title sync, status, sub-agent
+> counts, unread) is inert because codex's app-server notifications turn out to be scoped to
+> the connection that made the change — and turns run in a separate `codex resume` process.
+> The fix is decided (tail the rollout `.jsonl`) and not yet built.
+> **Start at [HANDOFF-agent-adapters.md](HANDOFF-agent-adapters.md) §2 before touching codex.**
+
 > **✅ Two phases are merged to `master` and green.**
 >
 > **Multi-Session Foundation** — repo-grouped session sidebar with create/switch/close, a
