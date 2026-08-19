@@ -261,9 +261,9 @@ extension CodexProcessTransport {
     /// never validates params. See this task's report for the incident.
     static func verifyHandshake(_ rpc: CodexRPC, timeoutSeconds: Double = 5) async throws {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
-        let clientInfo: [String: Any] = ["clientInfo": ["name": "flight-deck", "version": version]]
+        let params: [String: Any] = ["clientInfo": ["name": "flight-deck", "version": version]]
         try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask { _ = try await rpc.request("initialize", clientInfo) }
+            group.addTask { _ = try await rpc.request("initialize", params) }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
                 throw CodexRPCError.timeout

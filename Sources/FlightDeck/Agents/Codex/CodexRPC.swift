@@ -102,6 +102,10 @@ final class CodexRPC {
     }
 
     /// Fire-and-forget notification: no `id`, no reply expected.
+    ///
+    /// Same omit-empty rule as `request` (see its comment above), and easier to fall into
+    /// here: the default `= [:]` makes calling this with no params the path of least
+    /// resistance, for whichever method eventually needs one that requires specific content.
     func notify(_ method: String, _ params: [String: Any] = [:]) {
         var body: [String: Any] = ["jsonrpc": "2.0", "method": method]
         if !params.isEmpty { body["params"] = params }

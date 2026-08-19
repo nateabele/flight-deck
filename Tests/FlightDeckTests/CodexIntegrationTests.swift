@@ -19,8 +19,11 @@ import XCTest
 ///    `terminationHandler` wiring `start()` installs is still connected to it.
 ///    `testKillingARealAppServerFiresTheTerminationHookAndFailsInFlightRequests` below.
 /// 3. **The restore/startCodex-failure heal** — `resumeRestoredCodex` re-attaches a restored
-///    tab's watcher when `startCodex()` fails for real. See that test's own doc comment for
-///    how this test forces a real failure without a real, buggy codex to lean on.
+///    tab's watcher when `startCodex()` fails for real. Forces that failure with a fake
+///    `codex` shell script ahead of the real one on `PATH` for the duration of the test — a
+///    `/bin/sh` stub that only `exit 1`s, needing no installed or logged-in codex at all —
+///    rather than depending on any particular real binary misbehaving. See that test's own
+///    doc comment for what the heal is actually responsible for and how this test isolates it.
 ///
 /// Every thread a test here creates is deleted by that same test, by the id codex handed
 /// back — never by name or recency, which could catch the user's real history. Every
@@ -57,19 +60,34 @@ final class CodexIntegrationTests: XCTestCase {
         try await CodexProcessTransport.verifyHandshake(rpc)
 
         let started = try await rpc.request("thread/start", ["cwd": cwd.path])
-        let id = try XCTUnwrap((started["thread"] as? [String: Any])?["id"] as? String)
+        let thread = try XCTUnwrap(started["thread"] as? [String: Any])
+        let id = try XCTUnwrap(thread["id"] as? String)
+        // `thread/start`'s reply already names the rollout file it will eventually write —
+        // the commit rule is about whether that path becomes real, not just about the sqlite
+        // row, so the negative check below must watch both.
+        let rolloutPath = try XCTUnwrap(thread["path"] as? String)
 
         // Cleanup is id-scoped and runs whether the assertions below pass or throw — a
         // `do`/`catch` rather than `defer`, because deleting needs an `await` and `defer`
         // bodies cannot suspend.
         do {
-            XCTAssertFalse(try threadRowExists(id), "thread/start is expected NOT to persist")
+            // "Even seconds later" is the rule, not "immediately after" — a zero-delay check
+            // right after `thread/start` would also pass for a codex that persists on a
+            // short async delay. `staysFalse` polls the whole window instead, with the
+            // app-server alive throughout, and fails the instant either artifact appears.
+            let staysUnpersisted = try await staysFalse(for: 3) {
+                try self.threadRowExists(id) || FileManager.default.fileExists(atPath: rolloutPath)
+            }
+            XCTAssertTrue(staysUnpersisted,
+                "thread/start must not persist a row or a rollout file, even seconds later")
 
             _ = try await rpc.request(
                 "thread/name/set", ["threadId": id, "name": "flight-deck integration probe"]
             )
-            let committed = try await waitUntil(timeout: 5) { try self.threadRowExists(id) }
-            XCTAssertTrue(committed, "thread/name/set is expected to commit")
+            let committed = try await waitUntil(timeout: 5) {
+                try self.threadRowExists(id) && FileManager.default.fileExists(atPath: rolloutPath)
+            }
+            XCTAssertTrue(committed, "thread/name/set is expected to commit both the row and the rollout file")
         } catch {
             await deleteThreadBestEffort(id, via: rpc)
             throw error
@@ -219,6 +237,32 @@ final class CodexIntegrationTests: XCTestCase {
         XCTAssertEqual(store.pinnedConversationID(of: tabID), existing,
             "a failed startCodex() must fall back to the pinned thread rather than inventing a new one")
         XCTAssertEqual(injector.sent, ["codex resume \(existing.uuidString.lowercased())"])
+
+        // The assertions above hold whether or not the heal exists: `hasCodexStackForTesting`
+        // above flips true from `resumeRestoredCodex`'s own `self.adapter(for: .codex)`
+        // fallback line — reached before the heal ever runs — and the pin/injector checks
+        // only prove `startCodex()` failed and the tab degraded to its pin, not that anything
+        // got re-attached. What the heal is actually responsible for is which *runtime
+        // instance* holds this tab's attachment: `CodexRuntime.handle` looks a notification's
+        // `threadId` up in a private, per-instance `attachments` dict, so a notification only
+        // reaches this tab if `.attach()` was called on the exact runtime object
+        // `store.runtime(for: .codex)` returns now. `stopWatching`/`startWatching` in the heal
+        // is what makes that call; without it, this tab's attachment is still the one
+        // `insertSession`'s original `startWatching` made, against a runtime `startCodex()`'s
+        // failure already tore down — an orphaned object nothing routes notifications to
+        // anymore. Deleting the heal block and re-running this test confirms exactly that:
+        // this assertion goes red while every assertion above it stays green.
+        let currentRuntime = try XCTUnwrap(store.runtime(for: .codex) as? CodexRuntime,
+            "codex's runtime is always a CodexRuntime; `handle` below is how a real " +
+            "notification reaches it, which is not part of the shared AgentRuntime protocol")
+        currentRuntime.handle(
+            method: "thread/name/updated",
+            params: ["threadId": existing.uuidString, "threadName": "post-heal-rename"]
+        )
+        let renamedTab = store.repos.flatMap(\.sessions).first { $0.id == tabID }
+        XCTAssertEqual(renamedTab?.title, "post-heal-rename",
+            "a notification delivered on the current runtime must still reach this tab — true " +
+            "only if the heal re-attached it there")
     }
 
     // MARK: - Test doubles
@@ -251,20 +295,49 @@ final class CodexIntegrationTests: XCTestCase {
         return dir
     }
 
+    /// Thrown by `threadRowExists` instead of reading either failure as "no row found" — see
+    /// that method's doc comment for why conflating them would be the wrong default.
+    private enum ThreadProbeError: Error, CustomStringConvertible {
+        case invalidID(String)
+        case queryFailed(status: Int32, stderr: String)
+
+        var description: String {
+            switch self {
+            case .invalidID(let id): return "refusing to build SQL from a non-UUID id: \(id)"
+            case .queryFailed(let status, let stderr): return "sqlite3 exited \(status): \(stderr)"
+            }
+        }
+    }
+
     /// Reads codex's own state store directly — the ground truth the whole commit rule is
     /// about — rather than asking codex about itself, which would only prove the app-server's
     /// in-memory view agrees with itself.
+    ///
+    /// A non-zero `sqlite3` exit — a missing db, a renamed `state_6.sqlite`, an absent
+    /// `threads` table on some future codex — throws rather than reading as "no row found":
+    /// treating "the probe looked at nothing" the same as "the probe looked and found
+    /// nothing" is exactly how this file would go quiet the moment codex changes underneath
+    /// it, instead of failing loudly the way a broken probe should.
     private func threadRowExists(_ id: String) throws -> Bool {
+        // The one construct here by which a hostile value could reach the user's real
+        // database. Unreachable in practice — codex mints UUIDs — but cheap to close.
+        guard UUID(uuidString: id) != nil else { throw ThreadProbeError.invalidID(id) }
+
         let db = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/state_5.sqlite").path
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
         p.arguments = [db, "select count(*) from threads where id='\(id)';"]
         let out = Pipe()
+        let err = Pipe()
         p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
+        p.standardError = err
         try p.run()
         p.waitUntilExit()
-        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "0"
+        guard p.terminationStatus == 0 else {
+            let errText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw ThreadProbeError.queryFailed(status: p.terminationStatus, stderr: errText)
+        }
+        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         return text.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
     }
 
@@ -283,6 +356,16 @@ final class CodexIntegrationTests: XCTestCase {
             guard let result = try await group.next() else { throw CodexRPCError.timeout }
             return result
         }
+
+        // Logged, not asserted: a cleanup failure must not fail the test it is cleaning up
+        // after, but going unnoticed is how a committed thread ends up stuck in the user's
+        // real history with nobody the wiser.
+        if let stillThere = try? threadRowExists(id), stillThere {
+            XCTContext.runActivity(named: "codex integration cleanup leak") { activity in
+                activity.add(XCTAttachment(string:
+                    "thread/delete did not remove \(id) from ~/.codex/state_5.sqlite — needs manual cleanup"))
+            }
+        }
     }
 
     /// Polls `condition` until it is true or `timeout` elapses. Every wait in this file is
@@ -297,5 +380,21 @@ final class CodexIntegrationTests: XCTestCase {
             if Date() >= deadline { return false }
             try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
         }
+    }
+
+    /// The opposite of `waitUntil`: polls `condition` for the whole `timeout` window and
+    /// fails fast the instant it becomes true, rather than succeeding fast. A single check
+    /// taken immediately after an action proves nothing about a claim like "not persisted,
+    /// even seconds later" — something that persists on a short async delay would sail
+    /// through a zero-delay check just as easily as something that never persists at all.
+    private func staysFalse(
+        for timeout: TimeInterval, interval: TimeInterval = 0.1, _ condition: () throws -> Bool
+    ) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if try condition() { return false }
+            try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+        }
+        return true
     }
 }
