@@ -24,6 +24,12 @@
     "no schema for these formats exists — `codex app-server generate-json-schema` covers the",
     "protocol only. That makes these files the weakest ground truth in the suite: they record",
     "what codex DID on one day, not what it DECLARES. `CodexIntegrationTests` is what notices",
-    "when that stops being true; run it with FLIGHT_DECK_CODEX_INTEGRATION=1."
+    "when that stops being true; run it with FLIGHT_DECK_CODEX_INTEGRATION=1.",
+    "",
+    "Every fixture in this directory MUST be named *.captured.* to signal that it is verbatim",
+    "captured output, not authored. Tests must reference captures by their documented name; if",
+    "a test cannot find its fixture, correct the lookup name in the test, never add an undocumented",
+    "copy under another name. Undocumented copies hide the data source and can silently diverge from",
+    "the original when concurrent sessions commit. This rule prevents that category of bug."
   ]
 }
