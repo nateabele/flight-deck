@@ -277,6 +277,87 @@ final class CodexIntegrationTests: XCTestCase {
             "only if the heal re-attached it there")
     }
 
+    // MARK: - 4. The rollout vocabulary
+
+    /// The one test that can catch codex renaming the records this app reads.
+    ///
+    /// It pins two things at once, and both are load-bearing:
+    ///
+    /// 1. **A separate process appends to the rollout `thread/start` named.** This is the
+    ///    fact the entire observation design rests on — our app-server does not run the turn,
+    ///    and it does not have to.
+    /// 2. **`task_started` and `task_complete` are still what a turn looks like.**
+    ///    `rollout.captured.jsonl` records what codex wrote on one day, and no schema exists
+    ///    for that format, so nothing else in the suite would notice a rename. The failure
+    ///    mode without this test is silent: codex tabs simply stop moving.
+    ///
+    /// Everything happens under an isolated `CODEX_HOME` in a temp directory, so no thread
+    /// cleanup is needed — the whole home is deleted — and the user's real codex history is
+    /// neither read nor written.
+    func testARealResumedTurnAppendsTheTurnRecordsToTheRolloutThreadStartNamed() async throws {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let cwd = home.appendingPathComponent("work", isDirectory: true)
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        // Trusted in THIS home only. Without it `codex exec` refuses the directory, and the
+        // TUI would raise a modal — neither of which a committed test may provoke.
+        try """
+        [projects."\(cwd.path)"]
+        trust_level = "trusted"
+        """.write(to: home.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+
+        let auth = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/auth.json")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: auth.path),
+                          "needs a logged-in codex: ~/.codex/auth.json")
+        try FileManager.default.copyItem(at: auth, to: home.appendingPathComponent("auth.json"))
+
+        let transport = CodexProcessTransport(environment: ["CODEX_HOME": home.path])
+        try transport.start()
+        defer { transport.stop() }
+        let rpc = CodexRPC(transport: transport)
+        try await CodexProcessTransport.verifyHandshake(rpc)
+
+        let started = try await rpc.request("thread/start", ["cwd": cwd.path])
+        let thread = try XCTUnwrap(started["thread"] as? [String: Any])
+        let id = try XCTUnwrap(thread["id"] as? String)
+        let rollout = URL(fileURLWithPath: try XCTUnwrap(thread["path"] as? String))
+        // Naming commits the thread. An unnamed one cannot be resumed at all — see
+        // `testThreadStartAloneDoesNotPersistButNamingCommits` above.
+        _ = try await rpc.request("thread/name/set", ["threadId": id, "name": "rollout vocabulary"])
+        // Our own app-server holds an exclusive writer lock on the thread it just created —
+        // `codex exec resume` below refuses to attach while that lock is held ("thread ...
+        // already has an active writer"). Stopping the transport here, rather than only in
+        // the `defer` below, is what lets a SEPARATE process pick the thread back up at all;
+        // `stop()` is idempotent, so the deferred call after it is still safe.
+        transport.stop()
+
+        var seen: [AgentEvent] = []
+        let watcher = CodexRolloutWatcher(url: rollout) { seen.append($0) }
+        watcher.drain() // prime past the session_meta header
+
+        let codex = Process()
+        codex.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        codex.arguments = ["codex", "exec", "resume", "--skip-git-repo-check", id,
+                           "Reply with exactly the word: ok"]
+        codex.currentDirectoryURL = cwd
+        codex.environment = ProcessInfo.processInfo.environment
+            .merging(["CODEX_HOME": home.path]) { _, override in override }
+        codex.standardOutput = FileHandle.nullDevice
+        codex.standardError = FileHandle.nullDevice
+        try codex.run()
+        codex.waitUntilExit()
+        XCTAssertEqual(codex.terminationStatus, 0, "codex exec resume failed")
+
+        watcher.drain()
+        XCTAssertEqual(seen, [.activity(.busy), .activity(.idle), .turnEnded],
+                       "a turn run by a process our app-server does not own must still append "
+                       + "task_started then task_complete to the rollout it named; if this "
+                       + "fails, every codex tab has silently stopped moving")
+    }
+
     // MARK: - Test doubles
 
     private final class FakePersistence: SessionPersisting {
