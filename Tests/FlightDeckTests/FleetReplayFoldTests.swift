@@ -107,6 +107,55 @@ final class FleetReplayFoldTests: XCTestCase {
         assertFoldPreservesOutcome(events)
     }
 
+    /// Reorders are state-dependent transforms, not last-write-wins fields: `reorder` leaves
+    /// unmentioned ids "in place", so dropping an earlier reorder changes where the survivor
+    /// puts everything it does not name. This is the sequence that proves it.
+    func testTwoReordersStraddlingAnInsertionAreNotCollapsed() {
+        let projA = UUID(), projB = UUID(), projC = UUID()
+        let start = FleetSnapshot(projects: [
+            WireProject(id: projA, name: "a", path: "/a"),
+            WireProject(id: projB, name: "b", path: "/b")
+        ])
+        let events: [FleetEvent] = [
+            .projectsReordered(order: [projB, projA]),
+            .projectAdded(WireProject(id: projC, name: "c", path: "/c"), at: 1),
+            .projectsReordered(order: [projA])
+        ]
+        XCTAssertEqual(
+            start.applying(FleetReplay.fold(events)),
+            start.applying(events),
+            "the fold changed the resulting fleet"
+        )
+    }
+
+    /// A project removed and re-added under the same id must survive intact. Dropping both
+    /// events leaves the client holding the project's PRE-window sessions — stale data the
+    /// server already deleted, which is a worse failure than an extra frame.
+    func testAProjectRemovedAndReAddedInTheGapDoesNotResurrectStaleSessions() {
+        let events: [FleetEvent] = [
+            .projectRemoved(id: projectID),
+            .projectAdded(WireProject(id: projectID, name: "fd", path: "/w/fd"), at: 0)
+        ]
+        assertFoldPreservesOutcome(events)
+    }
+
+    /// `sessionMoved` must stay positional for the same reason reorders must: its `at:`
+    /// index resolves against the list as it stands when it runs. A regression that added it
+    /// to `FoldKey` would reintroduce Bug 1 for moves, silently.
+    func testSessionMovesAreNotCollapsedIntoTheLastOne() {
+        let other = UUID()
+        var start = base()
+        start.projects.append(WireProject(id: other, name: "b", path: "/w/b"))
+        let events: [FleetEvent] = [
+            .sessionMoved(id: a, project: other, at: 0),
+            .sessionMoved(id: b, project: other, at: 0),
+            .sessionMoved(id: a, project: other, at: 1)
+        ]
+        XCTAssertEqual(FleetReplay.fold(events).count, 3,
+                       "moves are positional, not last-write-wins")
+        XCTAssertEqual(start.applying(FleetReplay.fold(events)), start.applying(events))
+    }
+
     func testAnEmptyGapFoldsToNothing() {
         XCTAssertTrue(FleetReplay.fold([]).isEmpty)
     }

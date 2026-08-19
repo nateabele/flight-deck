@@ -49,45 +49,57 @@ public enum FleetReplay {
         var projectsBornInWindow: Set<UUID> = []
     }
 
+    /// One forward pass recording, per subject, where it was last added and last removed.
+    ///
+    /// A subject is doomed only when its last removal comes *after* its last addition. That
+    /// ordering test is what lets a remove-then-re-add under the same id survive intact:
+    /// dropping both events would leave the client holding the subject's pre-window contents,
+    /// which is stale data rather than a missing frame — the worse of the two failures.
+    ///
+    /// The symmetry between sessions and projects is load-bearing. An earlier version
+    /// defended sessions only, and a project removed and re-added inside one window
+    /// resurrected every session it used to hold.
     private static func subjectsRemovedInWindow(_ events: [FleetEvent]) -> Doomed {
-        var doomed = Doomed()
-        for event in events {
+        var lastSessionAdd: [UUID: Int] = [:], lastSessionRemove: [UUID: Int] = [:]
+        var lastProjectAdd: [UUID: Int] = [:], lastProjectRemove: [UUID: Int] = [:]
+        for (index, event) in events.enumerated() {
             switch event {
-            case .sessionRemoved(let id): doomed.sessions.insert(id)
-            case .projectRemoved(let id): doomed.projects.insert(id)
-            case .sessionAdded(let s, _, _): doomed.sessionsBornInWindow.insert(s.id)
-            case .projectAdded(let p, _): doomed.projectsBornInWindow.insert(p.id)
+            case .sessionAdded(let session, _, _): lastSessionAdd[session.id] = index
+            case .sessionRemoved(let id): lastSessionRemove[id] = index
+            case .projectAdded(let project, _): lastProjectAdd[project.id] = index
+            case .projectRemoved(let id): lastProjectRemove[id] = index
             default: continue
             }
         }
-        // A session removed and then re-added under the same id is not doomed — its final
-        // state is "present". `repos` never reuses a tab id, so this is defensive rather
-        // than expected, but the alternative is silently dropping a live session.
-        for event in events.reversed() {
-            if case .sessionAdded(let s, _, _) = event, doomed.sessions.contains(s.id) {
-                if lastIndexOfRemoval(of: s.id, in: events) < lastIndexOfAdd(of: s.id, in: events) {
-                    doomed.sessions.remove(s.id)
-                }
-            }
+
+        var doomed = Doomed()
+        for (id, removedAt) in lastSessionRemove where (lastSessionAdd[id] ?? -1) < removedAt {
+            doomed.sessions.insert(id)
+            // Added *and* removed inside the window: the client never held it, so even the
+            // removal is noise.
+            if lastSessionAdd[id] != nil { doomed.sessionsBornInWindow.insert(id) }
+        }
+        for (id, removedAt) in lastProjectRemove where (lastProjectAdd[id] ?? -1) < removedAt {
+            doomed.projects.insert(id)
+            if lastProjectAdd[id] != nil { doomed.projectsBornInWindow.insert(id) }
         }
         return doomed
-    }
-
-    private static func lastIndexOfRemoval(of id: UUID, in events: [FleetEvent]) -> Int {
-        events.lastIndex { if case .sessionRemoved(let r) = $0 { return r == id }; return false } ?? -1
-    }
-
-    private static func lastIndexOfAdd(of id: UUID, in events: [FleetEvent]) -> Int {
-        events.lastIndex { if case .sessionAdded(let s, _, _) = $0 { return s.id == id }; return false } ?? -1
     }
 
     // MARK: Last-write-wins collapsing
 
     /// The kinds where only the final value can matter, keyed by what they are final *for*.
-    /// Anything not listed here is positional and is left exactly where it is.
+    ///
+    /// Reorders and moves are deliberately absent, and that is a correctness requirement
+    /// rather than caution. `reorder` leaves any id its order does not mention "in place", so
+    /// a reorder's result depends on the list it runs against — it is a state-dependent
+    /// transform, not a field. Collapsing two reorders that straddle an insertion silently
+    /// changes the surviving order: with [A,B], `reorder→[B,A]`, `add C at 1`, `reorder
+    /// pinning only A` yields [A,B,C] raw and [A,C,B] folded. There is nothing to gain by
+    /// collapsing them either — reorders are human drag gestures, while the volume this fold
+    /// exists to absorb is machine-generated status flaps.
     private enum FoldKey: Hashable {
-        case activity(UUID), rename(UUID), unread(UUID)
-        case collapsed(UUID), sessionsOrder(UUID), projectsOrder
+        case activity(UUID), rename(UUID), unread(UUID), collapsed(UUID)
     }
 
     private static func key(_ event: FleetEvent) -> FoldKey? {
@@ -96,8 +108,6 @@ public enum FleetReplay {
         case .renamed(let id, _, _): return .rename(id)
         case .unreadChanged(let id, _): return .unread(id)
         case .projectCollapsed(let id, _): return .collapsed(id)
-        case .sessionsReordered(let id, _): return .sessionsOrder(id)
-        case .projectsReordered: return .projectsOrder
         default: return nil
         }
     }
