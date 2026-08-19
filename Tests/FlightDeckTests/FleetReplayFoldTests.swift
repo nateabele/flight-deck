@@ -170,6 +170,6 @@ final class FleetReplayFoldTests: XCTestCase {
     }
 
     func testAnEmptyGapFoldsToNothing() {
-        XCTAssertTrue(FleetReplay.fold([]).isEmpty)
+        XCTAssertTrue(FleetReplay.fold([FleetEvent]()).isEmpty)
     }
 }
