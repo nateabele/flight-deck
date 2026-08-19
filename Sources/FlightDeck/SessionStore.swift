@@ -192,6 +192,20 @@ final class SessionStore: ObservableObject {
     /// per tab. See `AgentRuntime`.
     private lazy var runtimes: [AgentID: any AgentRuntime] = [.claude: ClaudeRuntime(clock: clock)]
 
+    /// The settings payload that goes with an agent, chosen from the same `AgentID` the
+    /// adapter is. Pairing them here — rather than letting a call site pass whichever it
+    /// happens to hold — is what makes handing `ClaudeAdapter` a `.codex` payload (which it
+    /// degrades from rather than traps on) unreachable by construction.
+    ///
+    /// `project` is a path, not a session: preferences are resolved from the project a tab is
+    /// *filed under*, which is not where `claude` is necessarily writing. See `restore`.
+    private func options(for agent: AgentID, project: String) -> AgentOptions {
+        switch agent {
+        case .claude: .claude(preferences?.resolvedFlags(forProject: project) ?? FlagSet())
+        case .codex: .codex(CodexThreadOptions())
+        }
+    }
+
     func adapter(for agent: AgentID) -> any AgentAdapter { adapters[agent] ?? ClaudeAdapter() }
     func runtime(for agent: AgentID) -> any AgentRuntime { runtimes[agent] ?? ClaudeRuntime() }
 
@@ -509,14 +523,12 @@ final class SessionStore: ObservableObject {
         let session = Session(
             title: "session \(sessionCounter)", workingDirectory: url.path
         )
+        let adapter = adapter(for: session.agent)
+        let options = options(for: session.agent, project: url.path)
         insertSession(
             session,
             in: url,
-            initialInput: ClaudeSession.launchCommand(
-                sessionID: session.id,
-                title: session.title,
-                flags: preferences?.resolvedFlags(forProject: url.path) ?? FlagSet()
-            ),
+            initialInput: adapter.launchCommand(adapter.binding(for: session), session, options),
             at: index
         )
         // A session landing in a collapsed project is otherwise invisible: `SidebarRow.rows`
@@ -737,20 +749,22 @@ final class SessionStore: ObservableObject {
                 agent: entry.agent ?? .claude,
                 transcriptPath: entry.transcriptPath
             )
+            let adapter = adapter(for: session.agent)
             insertSession(
                 session,
                 in: url,
-                initialInput: ClaudeSession.resumeCommand(
-                    // The pinned conversation, not the tab's own id — a tab that resumed an
-                    // existing conversation must keep following that one across relaunches.
-                    sessionID: conversationID,
-                    title: entry.title,
+                initialInput: adapter.resumeCommand(
+                    // The binding carries the pinned conversation, not the tab's own id — a
+                    // tab that resumed an existing conversation must keep following that one
+                    // across relaunches.
+                    adapter.binding(for: session),
+                    session,
                     // Resolved per entry, from that entry's own *project* directory rather
                     // than from wherever `claude` was writing, so a restored session picks
                     // up its project's overrides rather than the first repo's — and a
                     // session restored inside a worktree still gets its project's, which
                     // resolving from the transcript directory would silently lose.
-                    flags: preferences?.resolvedFlags(forProject: entry.workingDirectory) ?? FlagSet()
+                    options(for: session.agent, project: entry.workingDirectory)
                 )
             )
             // Seeded here rather than after the loop so it covers exactly the sessions that
