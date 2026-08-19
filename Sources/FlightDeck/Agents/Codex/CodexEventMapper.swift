@@ -29,7 +29,10 @@ enum CodexEventMapper {
     /// is the load-bearing part: a status codex adds in some future release reads as
     /// finished, which under-reports a count for one release, rather than pinning a spinner
     /// on forever with no way for the user to clear it.
-    private static let liveStates: Set<String> = ["pendingInit", "running"]
+    /// Internal rather than private so `CodexSchemaConformanceTests` can assert the real
+    /// value against codex's generated schema instead of a copy of it. A copy is how the
+    /// wrong four values survived review in the first place.
+    static let liveStates: Set<String> = ["pendingInit", "running"]
 
     static func events(
         method: String, params: [String: Any], state: inout CodexThreadState
@@ -42,7 +45,11 @@ enum CodexEventMapper {
         case "turn/started":
             return [.activity(.busy)]
 
-        case "turn/completed", "turn/aborted":
+        // `turn/completed` only. There is no `turn/aborted` notification — it appears
+        // nowhere in `ServerNotification` in the schema codex generates, at either protocol
+        // version, so the case that used to sit here could never fire. An interrupted turn
+        // still ends with `turn/completed`, and `thread/status/changed` backs it up.
+        case "turn/completed":
             return [.activity(.idle), .turnEnded]
 
         case "thread/status/changed":

@@ -8,8 +8,12 @@ struct CodexOptionsForm: View {
     @ObservedObject var preferences: PreferencesStore
     @State private var newDir = ""
 
-    private static let sandboxes = ["read-only", "workspace-write", "danger-full-access"]
-    private static let approvalPolicies = ["untrusted", "on-request", "never"]
+    /// Internal rather than private so `CodexSchemaConformanceTests` can assert these against
+    /// `SandboxMode` and `AskForApproval` in codex's generated schema — a picker offering a
+    /// value codex does not accept is a silently broken setting, which is the class of bug
+    /// this whole file's adapter layer keeps producing.
+    static let sandboxes = ["read-only", "workspace-write", "danger-full-access"]
+    static let approvalPolicies = ["untrusted", "on-request", "never"]
 
     /// Reads and writes the codex row's options within `preferences.agents`, wherever that
     /// row currently sits — the list's order is the shortcut binding, not a storage index, so
