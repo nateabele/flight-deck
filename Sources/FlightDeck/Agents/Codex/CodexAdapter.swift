@@ -17,13 +17,16 @@ struct CodexAdapter: AgentAdapter {
     /// stays out of the `AgentAdapter.rebind` signature, which is not codex's to shape.
     var readTimeout: Double = 5
 
-    /// Start, then name. NOT optional and NOT reorderable.
+    /// Start, then name, then archive/unarchive. NOT optional and NOT reorderable.
     ///
     /// `thread/start` does not persist anything: no `threads` row, no rollout file, even
     /// with the app-server left alive. `thread/name/set` — issued to the same app-server
     /// process — commits it. Skip the name and `codex resume <id>` dies with
     /// `ERROR: No saved session found with ID …`, which is a tab that can never launch.
-    /// Naming costs nothing anyway: the tab already has the title we want to set.
+    /// Naming costs nothing anyway: the tab already has the title we want to set. The
+    /// archive/unarchive round trip that follows releases the writer lock `thread/start`
+    /// took out — see the comment at that call below for why it exists and must come
+    /// after naming, not before.
     func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
         let params = threadOptions(options).asThreadStartParams(cwd: session.transcriptDirectory)
         let result = try await rpc.request("thread/start", params)
@@ -36,6 +39,37 @@ struct CodexAdapter: AgentAdapter {
         // Commit. A failure here must propagate: a bound-but-uncommitted thread is worse
         // than no tab, because it looks fine until the terminal reports it cannot resume.
         _ = try await rpc.request("thread/name/set", ["threadId": raw, "name": session.title])
+
+        // Release the writer lock `thread/start` just took, or `codex resume <id>` — what
+        // `launchCommand` spawns next, in its own pty — refuses on codex-cli 0.148.0 with
+        // `thread/resume failed: thread <id> already has an active writer (code -32600)`.
+        // This app-server is the one long-lived process that created the thread, and it
+        // cannot simply be stopped: a thread belongs to the process that created it, and
+        // this same process is also what renames it and reads its status later.
+        //
+        // `thread/unsubscribe` looks like the obvious release and is NOT one — probed
+        // directly against a live app-server: it answers `{"status":"unsubscribed"}` while
+        // the thread stays in `thread/loaded/list` and the lock stays held. What actually
+        // works, also probed directly: `thread/archive` followed by `thread/unarchive` on
+        // the same connection unloads the thread (`thread/loaded/list` goes from `[<id>]`
+        // to `[]`) and releases the lock, and a real `codex resume` TUI then attaches with
+        // this app-server still alive. The round trip is otherwise inert: it writes nothing
+        // to `session_index.jsonl` (so `CodexNameWatcher` sees no spurious title event), and
+        // `thread/name/set`/`thread/read` still succeed here afterward even while the TUI
+        // holds the thread as writer — so `rename` and `read`/`rebind` need no change.
+        //
+        // A failure between these two calls must still propagate, same reasoning as the
+        // naming commit above — but here the failure mode is worse than "no tab": if
+        // `thread/archive` succeeds and `thread/unarchive` then fails, the thread is left
+        // archived, and codex refuses to resume it at all ("session is archived. Run `codex
+        // unarchive <id>`") rather than merely refusing while the lock is held. Swallowing
+        // that and returning success anyway would hide it behind a tab that looks bound and
+        // then can never launch, which is strictly harder to diagnose than today's lock
+        // error. So this throws rather than catches, exactly like the naming commit: a
+        // caller that sees `prepare` fail here knows to retry or fall back, rather than
+        // discovering the break only when the terminal reports it.
+        _ = try await rpc.request("thread/archive", ["threadId": raw])
+        _ = try await rpc.request("thread/unarchive", ["threadId": raw])
 
         return AgentBinding(
             conversationID: id,

@@ -263,8 +263,10 @@ final class CodexLaunchFailureTests: XCTestCase {
                        "codex reports its rollout path; the tab must keep it")
         XCTAssertEqual(provider.configs.last?.initialInput,
                        "codex resume \(threadID.uuidString.lowercased())\n")
-        XCTAssertEqual(transport.methods, ["thread/start", "thread/name/set"],
-                       "start then name, in that order — naming is what commits the thread")
+        XCTAssertEqual(transport.methods,
+                       ["thread/start", "thread/name/set", "thread/archive", "thread/unarchive"],
+                       "start then name, in that order — naming is what commits the thread — "
+                       + "then archive/unarchive to release the writer lock thread/start took out")
     }
 
     /// Claude mints its own id and cannot fail, so it must keep the synchronous path

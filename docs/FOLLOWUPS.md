@@ -384,22 +384,28 @@ boundaries and the app-wide `session_index.jsonl` for renames. Spec:
 [superpowers/specs/2026-08-19-codex-rollout-observation-design.md](superpowers/specs/2026-08-19-codex-rollout-observation-design.md).
 Everything below was found by that branch's reviews, triaged, and deliberately not fixed.
 
-### Blocking, and NOT caused by that branch
+### Fixed
 
-- **`codex resume` fails against a live app-server on codex-cli 0.148.0.** Codex holds a
-  writer lock on a thread, and the interactive TUI refuses with `thread/resume failed:
-  thread <id> already has an active writer (code -32600)`. Flight Deck keeps ONE long-lived
-  app-server (a thread belongs to the process that created it) and then spawns `codex resume
-  <id>`, which is exactly the refused shape — so codex tabs appear unable to launch on 0.148.
-  Reproduced directly in that production shape; the adapter was built against 0.142.4/0.147.0,
-  and `~/.codex` now has a `thread-writer-locks` directory, so this looks like newer codex
-  behaviour rather than a regression here.
+- **`codex resume` failed against a live app-server on codex-cli 0.148.0 — FIXED.** Codex
+  holds a writer lock on a thread, and the interactive TUI refused with `thread/resume
+  failed: thread <id> already has an active writer (code -32600)`. Flight Deck keeps ONE
+  long-lived app-server (a thread belongs to the process that created it) and then spawns
+  `codex resume <id>`, which is exactly the refused shape — so codex tabs appeared unable to
+  launch on 0.148. Reproduced directly in that production shape; the adapter was built
+  against 0.142.4/0.147.0, and `~/.codex` now has a `thread-writer-locks` directory, so this
+  looked like newer codex behaviour rather than a regression here.
 
-  `thread/unsubscribe` is NOT the release: it answers `{"status":"unsubscribed"}` and the lock
-  stays held. The only release observed is the app-server process exiting. Untried candidates:
-  `thread/archive`, or not holding a long-lived app-server at all — which is now a live option
-  precisely because observation no longer depends on the app-server. Written up at the point of
-  the workaround in `Tests/FlightDeckTests/CodexIntegrationTests.swift`.
+  `thread/unsubscribe` is NOT the release: it answers `{"status":"unsubscribed"}` and the
+  lock stays held. The fix is `CodexAdapter.prepare` issuing `thread/archive` then
+  `thread/unarchive` on the same connection right after `thread/name/set` — that round trip
+  unloads the thread (`thread/loaded/list` goes from `[<id>]` to `[]`) and releases the lock
+  while the app-server stays alive, with no need to stop or restart it. See the comment at
+  that call site in `Sources/FlightDeck/Agents/Codex/CodexAdapter.swift` for the full
+  reasoning, including the archive-then-unarchive ordering hazard. Pinned hermetically in
+  `Tests/FlightDeckTests/CodexAdapterTests.swift`, `CodexResumeTests.swift`, and
+  `CodexLaunchFailureTests.swift`, and proven against a real app-server — a second connection
+  successfully resuming the thread while the first stays up — by
+  `CodexIntegrationTests.testPrepareReleasesTheWriterLockSoASecondConnectionCanResumeTheThread`.
 
 ### Worth doing
 
