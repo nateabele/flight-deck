@@ -115,7 +115,9 @@ final class CodexLaunchFailureTests: XCTestCase {
         // A tab bound to a thread that was never committed looks fine until the terminal
         // says it cannot resume. No tab plus a named error beats a tab that silently
         // degrades — the exact failure class this codebase keeps fixing.
-        guard case .failure = result else { return XCTFail("expected a hard failure") }
+        guard case .failure(let error) = result else { return XCTFail("expected a hard failure") }
+        XCTAssertEqual(error, .prepareFailed("the Codex app-server stopped before it answered."),
+                       "an alert reading \"transportClosed\" has told the user nothing")
         XCTAssertEqual(store.repos.flatMap(\.sessions).count, before,
                        "no tab may survive a failed prepare")
     }
@@ -129,8 +131,9 @@ final class CodexLaunchFailureTests: XCTestCase {
         let result = await store.createSession(agent: .codex, in: NSTemporaryDirectory())
 
         guard case .failure(let error) = result else { return XCTFail("expected a hard failure") }
-        XCTAssertTrue(error.errorDescription?.contains("cwd is not trusted") ?? false,
-                      "the alert must repeat what codex said, not swallow it: \(error)")
+        XCTAssertEqual(error, .prepareFailed("cwd is not trusted"),
+                       "codex's own message is the most specific thing anyone knows about "
+                       + "the failure; the alert must repeat it rather than show a case name")
         XCTAssertTrue(store.repos.flatMap(\.sessions).isEmpty)
     }
 
