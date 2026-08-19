@@ -2,14 +2,17 @@
 
 **Date:** 2026-08-19 · **Branch:** `master` · **Tip:** `502d2ad` · **Tests:** 748 unit, 0 failures, 5 skipped (4 of those opt-in integration)
 
-Flight Deck can now run **claude or codex** in any tab. Claude's half is complete and clean.
-Codex creates, resumes, renames and reads state — but its **observation half is inert**, for a
-reason that is a design fact rather than a bug. That is the next piece of work, and it is
-already decided. Read §2 before touching anything.
+Flight Deck can now run **claude or codex** in any tab, and observe both. Claude's half is
+complete and clean. Codex creates, resumes, renames, reads state, and — as of
+2026-08-19 — observes: title, activity and unread all come from tailing the files codex
+itself writes, not from app-server notifications, for a reason that is a design fact rather
+than a bug. Read §2 before touching anything.
 
 - **Spec:** [superpowers/specs/2026-08-18-agent-adapters-design.md](superpowers/specs/2026-08-18-agent-adapters-design.md)
 - **Plan:** [superpowers/plans/2026-08-18-agent-adapters.md](superpowers/plans/2026-08-18-agent-adapters.md) (16 tasks, all executed)
 - **Execution ledger, reports, every ruling:** `.superpowers/sdd/2026-08-18-agent-adapters/progress.md` (git-ignored; still on disk)
+- **Codex observation spec (binding authority for §2-§3 below):** [superpowers/specs/2026-08-19-codex-rollout-observation-design.md](superpowers/specs/2026-08-19-codex-rollout-observation-design.md)
+- **That work's execution ledger:** `.superpowers/sdd/2026-08-19-codex-rollout-observation/progress.md` (git-ignored; still on disk)
 
 ---
 
@@ -34,8 +37,10 @@ the pty. Behaviour is unchanged — the whole-branch review found no regression 
 **Codex** — `Sources/FlightDeck/Agents/Codex/`: `CodexRPC` (newline-delimited JSON-RPC,
 cancellation-aware), `CodexProcessTransport` (spawn, line reassembly, termination hook,
 version probe), `CodexAdapter` (start→name commit transaction, `read`, `rebind`),
-`CodexEventMapper` + `CodexThreadStatus`, `CodexRuntime` (per-thread routing,
-reconcile-on-first-contact).
+`CodexEventMapper` (rollout record → `AgentEvent`) + `CodexThreadStatus` (`thread/read`'s
+status union), `CodexRolloutWatcher` (one per tab, tails the rollout `thread/start`
+returned), `CodexNameWatcher` (one, app-wide, tails `session_index.jsonl` for renames),
+`CodexRuntime` (fans both out to the right tab). See §3.
 
 **UI** — the Claude preferences tab is now an **Agents** tab: reorderable list, per-agent
 options pane. **List order is the shortcut binding**: position 1 = ⌘N, 2 = ⌘⇧N, 3 = ⌘⇧⌥N. The
@@ -46,9 +51,10 @@ with no agent list default to `[claude, codex]`, so ⌘N still opens claude.
 
 ---
 
-## 2. Why codex observation is inert — read this first
+## 2. Why codex observation tails files instead of listening for notifications
 
-**Codex app-server notifications are scoped to the connection that made the change.**
+**Codex app-server notifications are scoped to the connection that made the change.** This is
+the constraint the design in §3 is built around, not a bug to route around later.
 
 Established by experiment (`.superpowers/.../progress.md`, and reproducible in ~20 lines):
 
@@ -63,56 +69,67 @@ Flight Deck runs turns in a `codex resume <id>` TUI, which is a **different proc
 therefore a different connection**. So the app-server that created the thread never receives
 `turn/*`, `item/*`, `thread/status/changed` or `thread/name/updated` for anything the user does.
 
-**Consequence:** `CodexEventMapper`'s notification decoding is correct but is dead code in
-production, and `CodexRuntime.handle` never fires. Title sync, status, sub-agent counts and
-unread are all inert for codex today. `CodexThreadStatus` is *not* dead — it is also on the
-`thread/read` path and stays live either way.
+**Consequence:** the notification path — `CodexEventMapper`'s notification decoding,
+`CodexRuntime.handle`, `CodexRPC.onNotification`, and the reconcile machinery that ordered a
+read against that stream — is deleted, not merely dead. Title, status and unread for codex
+now come from tailing the rollout `thread/start` returns and the app-wide
+`session_index.jsonl`, exactly as §3 describes. `CodexThreadStatus` survives unchanged — it
+was never on the notification path, only on `thread/read`, which `rebind` and restore still
+use.
 
 This was found by the final whole-branch review asking a question nobody had tested, then
-settled by experiment. It cost nothing to check and would have cost a rewrite to discover later.
+settled by experiment. It cost nothing to check and would have cost a rewrite to discover
+later — instead it decided the design in §3 before any of that code shipped.
 
 ---
 
-## 3. The decided next step: tail the rollout `.jsonl`
+## 3. What ships: tailing the rollout `.jsonl` and the session index
 
-**Approved direction.** Source codex's events from its rollout file rather than from
-notifications, exactly as claude's `TranscriptWatcher` already does.
+Built 2026-08-19 against the design in
+`docs/superpowers/specs/2026-08-19-codex-rollout-observation-design.md` — that spec is the
+binding authority for anything below that goes stale; this section is a summary.
 
-Why this over the alternatives:
-- `thread/start` already returns the rollout path as `thread.path` — no discovery needed.
-- The path is date+UUID based (`~/.codex/sessions/YYYY/MM/DD/rollout-<ISO>-<uuid>.jsonl`), so
-  unlike claude's it is **not** cwd-derived. *(Reasoned from the path shape and from the
-  `retarget` analysis in spec §1.1.8 — not directly tested. Worth confirming with one `cd`.)*
-- It works regardless of which process drives the turn, which is the property the notification
-  route lacks.
-- It reuses `TranscriptWatcher` and `WatchClock` — the most battle-tested machinery in the app.
+Codex's events are sourced from the files codex itself writes, not from notifications,
+exactly as claude's `TranscriptWatcher` already does. `TailReader`
+(`Sources/FlightDeck/TailReader.swift`) is the primitive underneath all three watchers now:
+extracted from `TranscriptWatcher`'s `Scan.read`, pure bytes-in/lines-out, deciding where to
+start (file missing → ours from byte 0; file present → tail from the end) and holding back a
+partial trailing line so a read landing mid-write can't split a record.
 
-**What changes**
-1. `CodexRuntime`'s event source moves from `CodexRPC.onNotification` to a `TranscriptWatcher`
-   over `binding.transcriptURL`.
-2. `CodexEventMapper` is re-pointed from app-server notification payloads to **rollout record
-   shapes**, which are entirely different:
+| Watcher | Scope | Tails | Emits |
+|---|---|---|---|
+| `TranscriptWatcher` | one per claude tab | the claude transcript | `.title`, `.subagentCount` |
+| `CodexRolloutWatcher` | one per codex tab | `binding.transcriptURL` (the rollout `thread/start` returned) | `.activity`, `.turnEnded` |
+| `CodexNameWatcher` | one, app-wide | `<codex home>/session_index.jsonl` | `.title`, routed by thread id |
 
-   | Record `type` | Carries |
-   |---|---|
-   | `session_meta` | `id`, `cwd`, `git`, `cli_version` — written at thread creation |
-   | `event_msg` | `payload.type`: `task_started`, `task_complete`, `turn_aborted`, `agent_message`, `user_message`, `token_count`, `mcp_tool_call_end`, `patch_apply_end`, `context_compacted`, `thread_rolled_back` |
-   | `response_item` | message/tool records |
-   | `turn_context`, `compacted` | context bookkeeping |
+`CodexEventMapper.events(inRolloutLine:)` maps `event_msg` records: `task_started` →
+`.activity(.busy)`; `task_complete` / `turn_aborted` → `.activity(.idle)`, `.turnEnded`;
+everything else is ignored. `session_index.jsonl` carries one `{id, thread_name, updated_at}`
+line per rename, from either `thread/name/set` or the TUI's own `/rename`; the name watcher
+routes each line by `id` to whichever tab holds that conversation and drops ids no tab holds.
 
-   So busy/idle comes from `task_started` / `task_complete` / `turn_aborted`, and `.turnEnded`
-   (which drives unread) from `task_complete`.
-3. **Sub-agent counts need re-deriving from rollout records** — the `collabAgentToolCall`
-   shape is an app-server item type, and the rollout equivalent has not been surveyed. Do that
-   first; it may be the piece that decides how much of §4.3 survives.
-4. `CodexRPC` stays for what it is genuinely good at: identity (`thread/start`), commit and
-   rename (`thread/name/set`), and authoritative reads (`thread/read`). Keep it.
+**A codex rollout file already exists, with its `session_meta` header, by the time
+`thread/start` returns.** `TailReader`'s existing rule sends an existing file to the end,
+which is correct here — the header is not a turn — but do not "fix" it into reading from 0.
 
-**One subtlety when reusing `TranscriptWatcher`:** it decides where to start reading on its
-first look — file *missing* means "ours from byte 0", file *present* means "tail from the end"
-(this is deliberate; see `Scan.read`). A codex rollout file **already exists** when
-`thread/start` returns, carrying `session_meta`. Tailing from the end is therefore correct —
-you want turns, not the header — but do not "fix" it into reading from 0.
+**What this replaced.** `CodexRPC.onNotification`, `CodexRuntime.handle`, and the reconcile
+machinery that used to order an async `thread/read` against that notification stream
+(`reconcile`, `reconcileByReading`, `runReconcile`, `applyReconciled`, `CodexThreadState`,
+and the fields that tracked an in-flight reconcile) are all deleted — not merely unused.
+Ordering a read against a notification stream was only ever needed because the notification
+stream existed; once events arrive as ordered lines in a file, there is nothing left to race.
+
+**What `CodexRPC` still does**, because tailing can't: identity (`thread/start`), commit and
+rename (`thread/name/set`), and `thread/read` on the two paths that predate any file — `rebind`
+settling a restored tab's identity, and `resumeRestoredCodex`'s follow-up read, which applies
+**only the title** (never the activity — `thread/read` reports `notLoaded` for a thread a TUI
+drives) to recover a rename made while Flight Deck was closed. Both watchers start at
+end-of-file, so that's the one gap a file-only design can't close on its own.
+
+**Known limitations, stated in the code and not worked around** (spec §5): no `.waiting` for
+codex — nothing is written to the rollout when codex starts waiting on approval, so a codex
+tab reads busy through an approval prompt. No `.subagentCount` for codex — no `collab` record
+exists in any of 492 surveyed rollouts, so there is no ground truth to map it from.
 
 ---
 
