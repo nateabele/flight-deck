@@ -52,7 +52,7 @@ struct ProjectsSettingsTab: View {
                         FlagEditor(
                             flags: binding(for: selected),
                             inherited: preferences.preferences.globalFlags,
-                            lockedPrefix: ClaudeSettingsTab.placeholderPrefix
+                            lockedPrefix: ClaudeOptionsPane.placeholderPrefix
                         )
                         .id(selected)
                     }
