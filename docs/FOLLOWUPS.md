@@ -409,21 +409,17 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
 
 ### Worth doing
 
-- **`CodexRuntime`'s two `watcher.stop()` calls are unasserted** (`CodexRuntime.swift:44,53`).
-  `drainForTesting` only iterates live attachments, so a regression dropping either still passes
-  the detach test. The replacement-stop at :44 carries a four-line comment calling it
-  load-bearing and has no coverage at all.
-- **`testTheDefaultPathFollowsCodexHome` cannot prove the `CODEX_HOME` branch.** It reads the
-  ambient environment, so on a normal machine only the `~/.codex` fallback is exercised — while
-  the spec's §7 risk 4 names this as the thing tests assert. Split a pure
-  `indexURL(codexHome:home:)` and test both branches.
-- **Unit tests tail the user's real `~/.codex/session_index.jsonl`.** `SessionStore.codexIndexURL`
-  exists as a seam but defaults to the real path, and only `CodexIntegrationTests` overrides it.
-  Read-only and assertions are unaffected (random UUIDs), but the spec says tests never touch it.
-- **`CodexRPC.onNotification` has no production consumer.** The hook survives as generic
-  transport plumbing, wired to nothing and exercised only by `CodexRPCTests`.
-- **`TailReader`'s shrink branch lost a sentence** in the extraction: that only a *smaller*
-  replacement is detectable, and a same-size-or-larger one reads as a continuation.
+- **`CodexRuntime`'s two `watcher.stop()` calls are unasserted, and investigation found no
+  black-box test can currently fail against their removal** (`CodexRuntime.swift:44,53`).
+  Both calls are followed immediately by the only strong reference to that watcher being
+  dropped (a dict overwrite or a `nil`), so ARC deallocates it synchronously either way, and
+  `WatchClock.fire()` already prunes a dead owner before ticking it (see
+  `WatchClockTests.testDroppedOwnerIsPrunedWithoutStop`) — confirmed by temporarily deleting
+  each `.stop()` call in turn and rerunning a real-`WatchClock` regression test against it,
+  which passed both with and without the call. The calls stay defensive (a future retention
+  elsewhere would need them), but closing this gap for real would need a production-only test
+  seam to retain the replaced/detached watcher, which felt like more than this cleanup should
+  add unasked.
 
 ### Not worth doing
 
