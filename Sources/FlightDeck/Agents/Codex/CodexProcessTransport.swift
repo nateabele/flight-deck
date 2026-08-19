@@ -219,13 +219,22 @@ final class CodexProcessTransport: CodexTransport {
     var onTerminate: (() -> Void)?
 
     private let executable: String
+    /// Extra environment for the spawned app-server, merged over the process's own.
+    ///
+    /// Empty in production. A committed test uses it to point a real `codex app-server` at an
+    /// isolated `CODEX_HOME`, which is what lets that test create and resume threads without
+    /// writing anything into the user's real `~/.codex`.
+    private let environment: [String: String]
     private let process = Process()
     private let stdin = Pipe()
     private let stdout = Pipe()
     private var reassembler = LineReassembler()
     private var hasTerminated = false
 
-    init(executable: String = "codex") { self.executable = executable }
+    init(executable: String = "codex", environment: [String: String] = [:]) {
+        self.executable = executable
+        self.environment = environment
+    }
 
     /// Spawns the process. `/usr/bin/env` resolves `executable` against `$PATH`, same as
     /// `CodexVersionProbe`. The `process.run()` failure this catches is the degenerate case
@@ -238,6 +247,11 @@ final class CodexProcessTransport: CodexTransport {
         process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = FileHandle.nullDevice
+
+        if !environment.isEmpty {
+            process.environment = ProcessInfo.processInfo.environment
+                .merging(environment) { _, override in override }
+        }
 
         // An empty chunk from `availableData` IS end-of-file, not "nothing happened yet" — it
         // means the pipe's write end closed, which means the process is gone. Routing it to
