@@ -41,3 +41,18 @@ struct CodexThreadOptions: Codable, Equatable, Sendable {
         return params
     }
 }
+
+extension CodexThreadOptions {
+    /// Codex's counterpart to `FlagSetMerge.merge`. A nil project field inherits; a set field
+    /// overrides. `addDirs` has no nil to test, so emptiness stands in for it — an empty
+    /// project list inherits rather than clearing the global one, because "I set no extra
+    /// directories here" is the overwhelmingly common state and must not erase a global.
+    static func merge(global: CodexThreadOptions, project: CodexThreadOptions) -> CodexThreadOptions {
+        CodexThreadOptions(
+            model: project.model ?? global.model,
+            sandbox: project.sandbox ?? global.sandbox,
+            approvalPolicy: project.approvalPolicy ?? global.approvalPolicy,
+            addDirs: project.addDirs.isEmpty ? global.addDirs : project.addDirs
+        )
+    }
+}

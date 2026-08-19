@@ -67,3 +67,9 @@ enum AgentOptions: Equatable, Sendable {
         }
     }
 }
+
+/// So `[AgentID: T]` encodes as a JSON object keyed `"claude"` / `"codex"` rather than Swift's
+/// default alternating-array form. The stdlib supplies the whole implementation for a
+/// `String`-backed `RawRepresentable` (SE-0320), which is why the body is empty — and the raw
+/// values are already documented above as a storage format, so this keeps that promise legible.
+extension AgentID: CodingKeyRepresentable {}
