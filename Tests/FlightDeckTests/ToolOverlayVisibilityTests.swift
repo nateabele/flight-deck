@@ -81,4 +81,32 @@ final class ToolOverlayVisibilityTests: XCTestCase {
         typed.keyPressed()
         XCTAssertNil(typed.idleDeadline(), "a suppressed overlay has nothing left to time out")
     }
+
+    func testHiddenAtExactlyTheIdleTimeout() {
+        // isVisible uses <, not <=, so at exactly five seconds the buttons are hidden.
+        // This boundary is the deliberate choice; this test pins it.
+        var v = ToolOverlayVisibility()
+        v.mouseMoved(at: t0)
+        XCTAssertFalse(v.isVisible(at: t0.advanced(by: .seconds(5))))
+    }
+
+    func testIdleDeadlineIsNilWhileHovering() {
+        // The guard enforces this: hovering pins the cluster indefinitely, so the caller
+        // must schedule no wake at all. A wake-while-hovering would fire pointlessly.
+        var v = ToolOverlayVisibility()
+        v.mouseMoved(at: t0)
+        v.hoverChanged(true)
+        XCTAssertNil(v.idleDeadline())
+    }
+
+    func testHoverDominatesSuppression() {
+        // Typing hides the buttons, but hovering the cluster while typing shows them again.
+        // The user types, then reaches for a button, and it must not vanish under their
+        // pointer. The early return on isHovering { return true } is what makes this work.
+        var v = ToolOverlayVisibility()
+        v.mouseMoved(at: t0)
+        v.keyPressed()
+        v.hoverChanged(true)
+        XCTAssertTrue(v.isVisible(at: at(10)))
+    }
 }

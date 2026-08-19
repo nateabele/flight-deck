@@ -13,9 +13,13 @@ struct ToolOverlayVisibility: Equatable {
 
     private var lastMove: ContinuousClock.Instant?
     private var isHovering = false
-    /// Separate from clearing `lastMove`, and the difference matters: without a flag, the
-    /// stamp from the last mouse move would bring the buttons straight back on the next
-    /// redraw while the user is still typing.
+    /// A separate flag rather than clearing `lastMove` when typing. The two designs are
+    /// behaviourally identical: both fail the guard in `isVisible`, both fail in
+    /// `idleDeadline`, and both are restored by `mouseMoved(at:)`. We keep the flag to
+    /// represent two independent facts distinctly: `lastMove` means "when did the mouse last
+    /// move" and `suppressedByTyping` means "should we hide anyway". Without this separation,
+    /// nil on `lastMove` would carry two unrelated meanings ("never moved" or "user is typing"),
+    /// confusing future readers about why typing means the mouse never moved.
     private var suppressedByTyping = false
 
     mutating func mouseMoved(at now: ContinuousClock.Instant) {
