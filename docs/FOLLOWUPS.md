@@ -347,3 +347,32 @@ is already open. Design record:
   `ClaudeSession.transcriptURL(sessionID:workingDirectory:)` deliberately keeps its label —
   it is a pure path encoder whose argument really is "the directory `claude` is running in",
   it has no fallback and so no echo, and renaming it is a separate, genuinely cosmetic pass.
+
+## From the mobile companion design (2026-08-18)
+
+- **`SessionStore`'s fleet state should be encapsulated so a write cannot skip the event log —
+  designed, deferred, not scheduled.** The mobile companion replicates the fleet by shipping an
+  event log to the phone, and that has exactly one failure mode: a mutation site that changes
+  `repos`/`statuses`/`unreadIdle` without appending its event leaves every connected client
+  silently and permanently wrong until the next reconnect. Nothing crashes and no existing test
+  fails, and the symptom on the phone reads as a network bug rather than a missing line in the
+  store. The fix is to move the three fields into a `FleetState` value type whose storage is
+  private and whose every mutating method records — making the omission unwriteable rather than
+  merely detectable. Affordable because those fields are already `@Published private(set)` and
+  reads outnumber writes heavily (72 referencing lines, a minority of them writes), so only the
+  writes move and every read site stays as it is.
+
+  Deferred purely on sequencing: it rewrites every write site in `SessionStore.swift`, which is
+  the file the agent-adapter work is most actively changing, with codex session creation,
+  codex auto-resume, and the agent preferences UI still outstanding — each adding mutation
+  sites. Do it **after** those land, so one pass covers the codex sites too. Full event sourcing
+  (a pure reducer) was considered and rejected for now: it forces every method to split into
+  pure state change plus side effects, and that ordering is load-bearing in `createSession`,
+  where getting it wrong reintroduces the half-bound-tab bug the codex work spent commits
+  removing. Design, API shape, and the migration order are in
+  [specs/2026-08-18-fleet-state-encapsulation-design.md](superpowers/specs/2026-08-18-fleet-state-encapsulation-design.md).
+
+  **Until it lands, the mobile work carries an assertion instead** — after each tick, in tests
+  and `#if DEBUG`, that folding the emitted events over the previous projection equals a fresh
+  projection of the store. That assertion is the only thing standing between a new mutation
+  site and a stale phone; do not remove it before the encapsulation replaces it.
