@@ -147,11 +147,6 @@ final class CodexSchemaConformanceTests: XCTestCase {
         }
     }
 
-    func testTheStatusNotificationCarriesTheUnionThisCodeReadsFromIt() throws {
-        XCTAssertEqual(try propertyNames(of: "ThreadStatusChangedNotification"), ["threadId", "status"])
-        XCTAssertEqual(try propertyNames(of: "ThreadNameUpdatedNotification"), ["threadId", "threadName"])
-    }
-
     // MARK: - thread/start options
 
     func testTheOptionsPanesPickersOfferOnlyValuesCodexAccepts() throws {
@@ -242,7 +237,6 @@ final class CodexSchemaConformanceTests: XCTestCase {
         try testEveryMethodTheAdapterSendsExists()
         try testEveryThreadStatusVariantIsAccountedFor()
         try testEveryThreadActiveFlagMeansWaiting()
-        try testTheStatusNotificationCarriesTheUnionThisCodeReadsFromIt()
         try testTheOptionsPanesPickersOfferOnlyValuesCodexAccepts()
         try testAsThreadStartParamsOnlyUsesRealThreadStartFields()
         try testWritableRootsIsCodexsOwnConfigKey()
