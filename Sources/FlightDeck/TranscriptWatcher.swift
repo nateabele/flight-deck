@@ -161,60 +161,11 @@ struct Scan: Sendable {
         hasChosenStart: Bool,
         sessionID: UUID
     ) -> Scan {
-        var result = Scan(offset: offset, hasChosenStart: hasChosenStart)
-
-        guard let handle = try? FileHandle(forReadingFrom: url) else {
-            // Nothing on disk, but that settles where reading will start: a transcript that
-            // does not exist while we are *already* watching has no history to skip, so
-            // whatever `claude` creates here later is ours from byte 0.
-            //
-            // Deciding it here rather than on the first successful open is what makes the
-            // first `/rename` of a session arrive. `claude` buffers its startup records and
-            // does not create the transcript until it first has something to persist —
-            // for a session renamed before its first turn, that is the rename itself. The
-            // file therefore does not appear empty and then grow: it springs into existence
-            // with the `custom-title` record already inside, and the branch below would
-            // seek straight past it. Every later rename appended to a file we are by then
-            // tracking, which is why only the first one went missing.
-            result.hasChosenStart = true
-            return result
+        let tail = TailReader.read(url: url, offset: offset, hasChosenStart: hasChosenStart)
+        var result = Scan(offset: tail.offset, hasChosenStart: tail.hasChosenStart)
+        for line in tail.lines {
+            result.events += ClaudeSession.events(inLine: line, sessionID: sessionID)
         }
-        defer { try? handle.close() }
-
-        let size = (try? handle.seekToEnd()) ?? 0
-
-        // The file already existed on our first look, so it predates the watcher: start
-        // tailing from its current end rather than from 0. A restored session points at a
-        // transcript that may be huge (a whole prior conversation); without this, the first
-        // read would replay every old `custom-title` record — most recently clobbering a
-        // rename made while `claude` wasn't running — and would parse the entire file.
-        if !result.hasChosenStart {
-            result.hasChosenStart = true
-            result.offset = size
-        } else if size < result.offset {
-            // A shorter file means it was replaced; start over. This only detects a
-            // *smaller* replacement — a same-or-larger replacement at the same path would
-            // be treated as a continuation. That's acceptable here because the URL is
-            // keyed to one session UUID for the watcher's whole lifetime.
-            result.offset = 0
-        }
-        guard size > result.offset else { return result }
-
-        try? handle.seek(toOffset: result.offset)
-        guard let data = try? handle.readToEnd(), !data.isEmpty else { return result }
-
-        // Consume only through the last complete line. A trailing partial line is left
-        // unread so the next read sees it whole — `claude` appends this file while we
-        // read it, and a read can land mid-write.
-        guard let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) else { return result }
-        let consumed = data.distance(from: data.startIndex, to: lastNewline) + 1
-        result.offset += UInt64(consumed)
-
-        for raw in String(decoding: data[..<lastNewline], as: UTF8.self)
-            .split(separator: "\n", omittingEmptySubsequences: true) {
-            result.events += ClaudeSession.events(inLine: String(raw), sessionID: sessionID)
-        }
-
         return result
     }
 }
