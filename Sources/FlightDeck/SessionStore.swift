@@ -151,8 +151,59 @@ final class SessionStore: ObservableObject {
     /// and returns at once instead of blocking the UI.
     private var parkedSurfaces: [UUID: Ghostty.SurfaceView] = [:]
 
-    /// One transcript watcher per session, torn down with the session.
-    private var watchers: [UUID: TranscriptWatcher] = [:]
+    /// What one tab is currently observing, and through which agent.
+    ///
+    /// The agent is carried here rather than looked up from `repos` on demand because
+    /// `closeSession` removes the session before it detaches, so by then there is nothing
+    /// left to ask.
+    private struct TabAttachment {
+        let agent: AgentID
+        let binding: AgentBinding
+    }
+
+    /// One agent attachment per tab, torn down with the tab. Replaces the per-session
+    /// `TranscriptWatcher` this used to hold: the watcher now lives inside `ClaudeRuntime`,
+    /// and what the store keeps is the binding it attached — which is also what tells it
+    /// which tabs a conversation's report belongs to.
+    private var attachments: [UUID: TabAttachment] = [:]
+
+    /// The agent integrations, one instance per agent for the life of the store.
+    ///
+    /// `lazy` so the closures below can capture `self`, and so a store that never creates a
+    /// tab never builds one. Options are chosen alongside the adapter in `options(for:)`,
+    /// which is what makes `ClaudeAdapter`'s "a codex payload here is a programming error"
+    /// true by construction rather than by convention.
+    private lazy var adapters: [AgentID: any AgentAdapter] = [
+        .claude: ClaudeAdapter(
+            projectsRoot: { [weak self] in self?.projectsRoot ?? ClaudeSession.defaultProjectsRoot },
+            injectRename: { [weak self] conversationID, title in
+                // The adapter speaks conversation ids; `pendingRenames` is keyed by tab, and
+                // two tabs can follow one conversation. See `tabs(following:)`.
+                guard let self else { return }
+                for tab in self.tabs(following: conversationID) {
+                    self.injectPendingRename(tab, title)
+                }
+            }
+        ),
+    ]
+
+    /// The observation half, also one per agent: both agents multiplex a single app-wide
+    /// source across every tab, so a runtime per tab would re-scan claude's registry once
+    /// per tab. See `AgentRuntime`.
+    private lazy var runtimes: [AgentID: any AgentRuntime] = [.claude: ClaudeRuntime(clock: clock)]
+
+    func adapter(for agent: AgentID) -> any AgentAdapter { adapters[agent] ?? ClaudeAdapter() }
+    func runtime(for agent: AgentID) -> any AgentRuntime { runtimes[agent] ?? ClaudeRuntime() }
+
+    /// Test seams, in the style of `injectorOverride`. Both are needed: runtime tests fake
+    /// the event source, adapter tests fake identity negotiation and command construction.
+    func overrideRuntime(_ runtime: any AgentRuntime, for agent: AgentID) {
+        runtimes[agent] = runtime
+    }
+
+    func overrideAdapter(_ adapter: any AgentAdapter, for agent: AgentID) {
+        adapters[agent] = adapter
+    }
 
     /// The one timer behind every watcher above, plus `statusWatcher`. Created lazily so a
     /// store built by a test that never starts watching never schedules anything; see
@@ -599,15 +650,7 @@ final class SessionStore: ObservableObject {
         report(terminalSize, to: session.id)
         provider?.tick()
 
-        startWatching(
-            tabID: session.id,
-            conversationID: session.pinnedConversationID,
-            url: ClaudeSession.transcriptURL(
-                sessionID: session.pinnedConversationID,
-                workingDirectory: session.transcriptDirectory,
-                projectsRoot: projectsRoot
-            )
-        )
+        startWatching(tabID: session.id)
         return session
     }
 
@@ -879,8 +922,7 @@ final class SessionStore: ObservableObject {
         // forgetting it here — before the reap has even started — is the bug.
         let doomed = processRegistry.process(for: id)
 
-        watchers[id]?.stop()
-        watchers.removeValue(forKey: id)
+        stopWatching(id)
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
@@ -1187,15 +1229,15 @@ final class SessionStore: ObservableObject {
         return repos[at.repo].sessions[at.session].pinnedConversationID
     }
 
-    /// Test seam: which tabs currently have a live `TranscriptWatcher`. `watchers` itself
-    /// stays private; this exposes just enough to assert a closed tab's late `repin`
+    /// Test seam: which tabs are currently attached to an agent runtime. `attachments`
+    /// itself stays private; this exposes just enough to assert a closed tab's late `repin`
     /// completion did not resurrect one.
-    var watchedSessionIDs: Set<UUID> { Set(watchers.keys) }
+    var watchedSessionIDs: Set<UUID> { Set(attachments.keys) }
 
     /// Test seam, the other half of `watchedSessionIDs`: *which* transcript a tab is
     /// tailing. Presence alone cannot catch a watcher left behind on the pre-retarget or
     /// pre-repin path, which is the failure both of those paths exist to prevent.
-    func watchedTranscriptURL(of id: UUID) -> URL? { watchers[id]?.url }
+    func watchedTranscriptURL(of id: UUID) -> URL? { attachments[id]?.binding.transcriptURL }
 
     func title(of id: UUID) -> String? {
         guard let at = locate(id) else { return nil }
@@ -1221,8 +1263,17 @@ final class SessionStore: ObservableObject {
 
         repos[at.repo].sessions[at.session].title = name
         persist()
-        // One pending rename per tab, replaced rather than queued: renaming twice before
-        // the injection lands should type the second name once, not both names in turn.
+        injectPendingRename(id, name)
+    }
+
+    /// Queues a rename for `claude` and tries it at once. The one route into `pendingRenames`
+    /// — `SessionStore.rename` above and `ClaudeAdapter.rename` (which is how a future agent
+    /// with no pty reaches the same behaviour) both land here, so `inject`'s `injecting`
+    /// guard stays the single place a second injection into a busy tab can be refused.
+    ///
+    /// One pending rename per tab, replaced rather than queued: renaming twice before the
+    /// injection lands should type the second name once, not both names in turn.
+    private func injectPendingRename(_ id: UUID, _ name: String) {
         pendingRenames[id] = name
         flushPendingRename(id)
     }
@@ -1664,17 +1715,19 @@ final class SessionStore: ObservableObject {
         // Editing `statuses` here would corrupt that "before" picture.
         subagentCounts[tabID] = 0
 
-        watchers[tabID]?.stop()
-        watchers.removeValue(forKey: tabID)
+        stopWatching(tabID)
 
-        // Directory comes from the registry row, not the tab: a resumed conversation
-        // carries its own project path, and the row is authoritative about where `claude`
-        // is actually writing.
-        let url = ClaudeSession.transcriptURL(
-            sessionID: conversationID,
-            workingDirectory: transcriptDirectory,
-            projectsRoot: projectsRoot
-        )
+        // Derived from the session as just mutated above, so the directory is the registry
+        // row's — a resumed conversation carries its own project path, and the row is
+        // authoritative about where `claude` is actually writing.
+        guard let updated = session(for: tabID) else { return }
+        guard let url = adapter(for: updated.agent).binding(for: updated).transcriptURL else {
+            // An agent with no transcript to read has no title to resolve from one; it
+            // reports titles through its runtime instead.
+            startWatching(tabID: tabID)
+            persist()
+            return
+        }
         titleResolver(url) { [weak self] title in
             // Two things can happen during a read that is a whole-file load: the tab can
             // close, and the tab can be repinned again (a second resume, or a fork).
@@ -1693,8 +1746,8 @@ final class SessionStore: ObservableObject {
             // and already pointed one at the tab's *newer* directory; `url` was built from
             // the pre-retarget one. A project move cannot be the cause: `moveSession` stopped
             // touching watchers when the transcript path stopped depending on the project.
-            if self.watchers[tabID] == nil {
-                self.startWatching(tabID: tabID, conversationID: conversationID, url: url)
+            if self.attachments[tabID] == nil {
+                self.startWatching(tabID: tabID)
             }
         }
 
@@ -1717,7 +1770,6 @@ final class SessionStore: ObservableObject {
     private func retarget(_ tabID: UUID, to directory: String) {
         guard let at = locate(tabID) else { return }
         repos[at.repo].sessions[at.session].transcriptDirectory = directory
-        let conversationID = repos[at.repo].sessions[at.session].pinnedConversationID
 
         // Same reasoning as `repin`, and for the same reason it is only the backing count:
         // the new watcher starts with an empty `outstandingAgents`, so an `agentFinished`
@@ -1726,16 +1778,8 @@ final class SessionStore: ObservableObject {
         // non-empty set, which for a tab that entered a worktree mid-turn may be never.
         subagentCounts[tabID] = 0
 
-        watchers[tabID]?.stop()
-        startWatching(
-            tabID: tabID,
-            conversationID: conversationID,
-            url: ClaudeSession.transcriptURL(
-                sessionID: conversationID,
-                workingDirectory: directory,
-                projectsRoot: projectsRoot
-            )
-        )
+        stopWatching(tabID)
+        startWatching(tabID: tabID)
         persist()
     }
 
@@ -1784,21 +1828,79 @@ final class SessionStore: ObservableObject {
         persist()
     }
 
-    /// `tabID` keys our own state; `conversationID` is what the transcript is named after
-    /// and what its rename records are stamped with. They differ after a resume.
-    private func startWatching(tabID: UUID, conversationID: UUID, url: URL) {
-        let watcher = TranscriptWatcher(
-            sessionID: conversationID,
-            url: url,
-            clock: clock
-        ) { [weak self] title in
-            self?.applyExternalTitle(tabID, title)
-        } onSubagentCount: { [weak self] count in
-            self?.applySubagentCount(tabID, count)
+    /// Points a tab's agent runtime at whatever conversation the tab currently follows.
+    ///
+    /// Takes only the tab id, deliberately: the conversation and the directory it is written
+    /// in both live on the session, and every caller here mutates the session first and then
+    /// re-derives. Passing them separately is how a caller ends up watching a conversation
+    /// the tab has already left.
+    private func startWatching(tabID: UUID) {
+        guard let session = session(for: tabID) else { return }
+        let binding = adapter(for: session.agent).binding(for: session)
+        // Recorded before the attach, because the fan-out closure below reads it.
+        attachments[tabID] = TabAttachment(agent: session.agent, binding: binding)
+        runtime(for: session.agent).attach(binding) { [weak self] event in
+            guard let self else { return }
+            // Fanned out here rather than in the runtime because a runtime keys its one
+            // source by conversation, and two tabs can follow the same conversation — a user
+            // resuming it twice, which `conflictedSessionIDs` already flags. Both tabs used
+            // to hold their own watcher on that one transcript and both used to rename; this
+            // is what keeps that true with a single attachment behind them.
+            for tab in self.tabs(following: binding.conversationID) {
+                self.apply(event, to: tab)
+            }
         }
-        watcher.start()
-        watchers[tabID] = watcher
     }
+
+    /// Drops a tab's attachment, and the runtime's only when this was the last tab on it.
+    ///
+    /// That guard is the other half of the fan-out above: the runtime is keyed by
+    /// conversation, so detaching for one of two tabs sharing one would silently stop the
+    /// other tab's observation too.
+    private func stopWatching(_ tabID: UUID) {
+        guard let attachment = attachments.removeValue(forKey: tabID) else { return }
+        guard tabs(following: attachment.binding.conversationID).isEmpty else { return }
+        runtime(for: attachment.agent).detach(attachment.binding)
+    }
+
+    /// Which tabs are currently attached to a conversation. Usually one.
+    private func tabs(following conversationID: UUID) -> [UUID] {
+        attachments
+            .filter { $0.value.binding.conversationID == conversationID }
+            .map(\.key)
+    }
+
+    /// One place where an agent's report becomes tab state, whichever agent reported it.
+    private func apply(_ event: AgentEvent, to tabID: UUID) {
+        switch event {
+        case .title(let title): applyExternalTitle(tabID, title)
+        case .activity(let activity): applyActivity(activity, to: tabID)
+        case .subagentCount(let count): applySubagentCount(tabID, count)
+        case .turnEnded: applyTurnEnded(to: tabID)
+        }
+    }
+
+    /// An agent reported what it is doing.
+    ///
+    /// Shaped like `applySubagentCount`: it edits an existing status rather than creating
+    /// one, because `applyRegistry` owns which tabs *have* a status — that decision runs
+    /// through `ConversationPin.resolve` and each tab's anchored pid, and a second writer
+    /// inventing entries would hand the sidebar rows the pin logic deliberately withheld.
+    /// For claude this is therefore a no-op by construction: the registry tick that produced
+    /// the event has already written the same activity from the same row.
+    private func applyActivity(_ activity: SessionActivity, to tabID: UUID) {
+        guard var status = statuses[tabID], status.activity != activity else { return }
+        status.activity = activity
+        statuses[tabID] = status
+    }
+
+    /// An agent finished a turn.
+    ///
+    /// Nothing for claude to do: its turn boundary reaches the store as a status transition
+    /// to `.idle` on the next registry tick, and `applyRegistry` is what turns that into
+    /// unread marks and notifications. Codex has no registry to tick and reports the
+    /// boundary outright — this is the seam that will carry it.
+    private func applyTurnEnded(to tabID: UUID) {}
 
     private func indexOfRepo(for url: URL) -> Int? {
         let target = Self.comparablePath(url.path)
