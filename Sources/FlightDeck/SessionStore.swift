@@ -2568,6 +2568,36 @@ final class SessionStore: ObservableObject {
             .standardizedFileURL.resolvingSymlinksInPath().path
     }
 
+    /// What a tool's command template is expanded against, for the current selection.
+    ///
+    /// Assembled here rather than in the tools subsystem because this type owns both halves:
+    /// `adapter(for:)` resolves the agent, and `repos` knows which project the tab is filed
+    /// under. Tools code never holds an adapter.
+    ///
+    /// Everything agent-shaped goes through `AgentAdapter.location(for:)` — never through
+    /// `Session.transcriptDirectory` or `ClaudeSession` — so that claude deriving its
+    /// transcript path from the cwd does not become a rule every future agent inherits. See
+    /// `ClaudeAdapter`'s doc comment, which keeps `encodedProjectDirName` off the protocol for
+    /// the same reason.
+    ///
+    /// nil when nothing is selected: there is no working directory then, and a tool expanded
+    /// against blanks would run somewhere arbitrary. Callers disable themselves instead.
+    func toolContext() -> ToolContext? {
+        guard let id = selectedSessionID, let at = locate(id) else { return nil }
+        let repo = repos[at.repo]
+        let session = repo.sessions[at.session]
+        let location = adapter(for: session.agent).location(for: session)
+        return ToolContext(
+            workingDirectory: location.workingDirectory,
+            projectPath: repo.url.path,
+            projectName: repo.displayName,
+            sessionTitle: session.title,
+            agent: session.agent,
+            conversationID: location.binding.conversationID,
+            transcriptPath: location.binding.transcriptURL?.path
+        )
+    }
+
     private func session(for id: UUID) -> Session? {
         guard let at = locate(id) else { return nil }
         return repos[at.repo].sessions[at.session]
