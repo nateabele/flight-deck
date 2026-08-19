@@ -231,12 +231,24 @@ final class SessionStore: ObservableObject {
             // the failure mode `CodexRPC` documents as the worst it can have. Weak so the
             // transport's callback does not retain the client that already owns it.
             transport.onTerminate = { [weak rpc] in rpc?.transportClosed() }
-            // `runtime.reconcile` is deliberately left at its no-op default. Wiring it to
-            // `thread/read` needs the ordering hazard solved first: `reconcile` is `async`
-            // while `CodexRuntime.handle` is synchronous, so a reconcile scheduled by one
-            // notification can land *after* later notifications have already advanced the
-            // tab, overwriting fresh state with stale. Task 15 owns that ordering along with
-            // the `thread/read` call itself.
+            // Reconcile-on-first-contact, finally pointed at `thread/read`.
+            //
+            // This closure reads and nothing else. The ordering hazard it would otherwise
+            // have — `reconcile` is `async` while `CodexRuntime.handle` is not, so an answer
+            // can arrive after later notifications have already advanced the tab — is solved
+            // by handing the result back to `applyReconciled` rather than applying it here:
+            // that is where the per-thread version counter lives, and it drops a read a
+            // notification overtook. Nothing in here may write tab state directly.
+            //
+            // The adapter is captured by value (a struct over the same `rpc`); the runtime
+            // weakly, because it is what owns this closure.
+            let reader = adapter
+            runtime.reconcile = { [weak runtime] id in
+                guard let state = try? await reader.read(
+                    AgentBinding(conversationID: id, transcriptURL: nil)
+                ) else { return }
+                runtime?.applyReconciled(title: state.title, activity: state.activity, for: id)
+            }
         }
     }
 
@@ -258,6 +270,18 @@ final class SessionStore: ObservableObject {
     /// Test seam. Proves the app-server's lifetime — lazy on first codex use, gone with the
     /// last codex tab or with its process — without spawning a process to observe it.
     var hasCodexStackForTesting: Bool { codexStack != nil }
+
+    /// Test seam. Counts how many times a path asked for a *started* app-server, which is
+    /// the thing a restored codex tab was missing and the thing no committed test may let
+    /// actually happen. `hasCodexStackForTesting` cannot stand in for it: building the stack
+    /// spawns nothing, and `restore` built one long before it started one.
+    private(set) var codexServerRequestsForTesting = 0
+
+    /// Test seam. The restore path's codex work is asynchronous by necessity — it starts an
+    /// app-server and asks it whether a thread still exists — but `restore` itself must stay
+    /// synchronous for `SessionStore.init`. Exposing the task is what lets a test await that
+    /// work instead of polling for it.
+    private(set) var codexRestoreTask: Task<Void, Never>?
 
     /// Test seam. Drives the exact path a crashed `codex app-server` takes, which can
     /// otherwise only be produced by killing a real process the committed suite may not spawn.
@@ -799,6 +823,10 @@ final class SessionStore: ObservableObject {
     /// behind it, so nothing is spawned for it — which is also what keeps the committed test
     /// suite from ever running `codex`.
     private func preparedAdapter(for agent: AgentID) async throws -> any AgentAdapter {
+        // Counted before the override check, deliberately: what the tests need to assert is
+        // that a path *asked* for a running app-server, and a test that let it actually start
+        // one would spawn `codex`.
+        if agent == .codex { codexServerRequestsForTesting += 1 }
         if let registered = adapters[agent] { return registered }
         guard agent == .codex else { return adapter(for: agent) }
         try await startCodex()
@@ -1053,6 +1081,10 @@ final class SessionStore: ObservableObject {
             repos.append(Repo(url: url, isCollapsed: project.isCollapsed))
         }
 
+        // Codex tabs whose resume command has not been typed yet. Collected rather than
+        // handled in the loop because settling each one is `async` and this is not.
+        var deferredCodexResumes: [UUID] = []
+
         // Pass two: file the sessions. `insertSession` appends a repo for any working
         // directory pass one did not cover, which is what keeps a v1 snapshot working.
         for entry in snapshot.sessions where directoryExists(entry.workingDirectory) {
@@ -1078,10 +1110,19 @@ final class SessionStore: ObservableObject {
                 transcriptPath: entry.transcriptPath
             )
             let adapter = adapter(for: session.agent)
+            // Codex's resume text is deferred, and only codex's. `binding(for:)` is a pure
+            // read of the pin — codex's own doc calls its contract "identity already
+            // settled" — so it cannot tell a thread that still exists from one the user
+            // deleted or archived between launches, and typing `codex resume <gone>` here
+            // would open the tab onto an error instead of a session. `resumeRestoredCodex`
+            // settles that against the app-server and types the command afterwards. Claude
+            // needs none of it: its resume command carries `--resume || --session-id`.
+            let deferred = session.agent == .codex
+            if deferred { deferredCodexResumes.append(session.id) }
             insertSession(
                 session,
                 in: url,
-                initialInput: adapter.resumeCommand(
+                initialInput: deferred ? "" : adapter.resumeCommand(
                     // The binding carries the pinned conversation, not the tab's own id — a
                     // tab that resumed an existing conversation must keep following that one
                     // across relaunches.
@@ -1113,12 +1154,94 @@ final class SessionStore: ObservableObject {
             restoredIDs.contains($0) ? $0 : nil
         } ?? restoredIDs.first
         persist()
+        // Started only when a codex tab actually came back, which is what keeps the app-server
+        // lazy: a user who restores nothing but claude tabs must never have `codex` spawned
+        // behind their back at launch. See `resumeRestoredCodex`.
+        if !deferredCodexResumes.isEmpty {
+            codexRestoreTask = Task { [weak self] in
+                await self?.resumeRestoredCodex(deferredCodexResumes)
+            }
+        }
         // Projects count as "restored something": `SessionStore.init` reads this as
         // `if resetState || !restore() { seedInitialSession() }`, and seeding a home-directory
         // session on top of a restored project list would be wrong. (`seedInitialSession`
         // guards on `repos.isEmpty` too, so this is belt and braces — but the return value is
         // also read by tests, and it should mean what it says.)
         return !restoredIDs.isEmpty || !repos.isEmpty
+    }
+
+    /// Settles every restored codex tab against the app-server, then types its resume
+    /// command. The asynchronous tail of `restore`.
+    ///
+    /// Three things happen here that a restored claude tab needs none of:
+    ///
+    /// - **The app-server is started.** A restored codex tab used to get a `CodexRuntime`
+    ///   attached to a transport nobody had ever started: it reported no activity and never
+    ///   marked unread until the user happened to create a *new* codex tab, which started the
+    ///   memoized stack and incidentally revived it. `preparedAdapter` is what starts it, and
+    ///   this method only runs when a codex tab came back, so the laziness holds.
+    /// - **Identity is settled** with `rebind` rather than read off the pin, and the tab is
+    ///   re-pinned when codex answers with a different thread. See `CodexAdapter.rebind`.
+    /// - **The resume command is typed afterwards**, which is why `restore` left
+    ///   `initialInput` empty for these tabs.
+    ///
+    /// Degrades to the pinned thread whenever it cannot ask — no app-server, or one that will
+    /// not answer. Not knowing whether a thread is gone is not the same as knowing it is, and
+    /// the command this types then is exactly the one restore used to type unconditionally.
+    private func resumeRestoredCodex(_ tabIDs: [UUID]) async {
+        let prepared = try? await preparedAdapter(for: .codex)
+        let adapter = prepared ?? self.adapter(for: .codex)
+
+        for tabID in tabIDs {
+            // A tab the user closed while the app-server was starting has nothing to resume,
+            // and re-pinning it would file state against a row that no longer exists.
+            guard let session = session(for: tabID) else { continue }
+            let options = options(for: .codex, project: session.workingDirectory)
+
+            var binding = adapter.binding(for: session)
+            if prepared != nil,
+               let settled = try? await adapter.rebind(for: session, options: options) {
+                binding = settled
+            }
+            if binding.conversationID != session.pinnedConversationID {
+                repinRestoredCodex(tabID, to: binding)
+            }
+            // Re-read: the re-pin above rewrote the row, and the command names the session.
+            guard let repinned = self.session(for: tabID) else { continue }
+            sendToShell(adapter.resumeCommand(binding, repinned, options), into: tabID)
+        }
+    }
+
+    /// The restored tab's thread was gone and codex started it a new one.
+    ///
+    /// Deliberately not `repin`: that one is claude's in-session `/resume`, and every step it
+    /// takes past the pin describes an agent this is not — a transcript *directory* codex
+    /// does not derive paths from, a sub-agent count no registry feeds, a title read out of a
+    /// transcript file that has just been created empty. What has to happen here is narrower:
+    /// follow the new thread, keep the rollout path codex reported for it, and repoint the
+    /// runtime, because the attachment `insertSession` made names the dead thread and no
+    /// notification will ever arrive on it.
+    private func repinRestoredCodex(_ tabID: UUID, to binding: AgentBinding) {
+        guard let at = locate(tabID) else { return }
+        repos[at.repo].sessions[at.session].pinnedConversationID = binding.conversationID
+        repos[at.repo].sessions[at.session].transcriptPath = binding.transcriptURL?.path
+        stopWatching(tabID)
+        startWatching(tabID: tabID)
+        persist()
+    }
+
+    /// Types a command at a tab's *shell*, the way `initialInput` would have — just later.
+    ///
+    /// `inject` is the wrong tool and is deliberately not reused: every gate it applies
+    /// (an idle status, a readable one-row `InputBar`, the kill-and-yank draft dance)
+    /// describes Claude Code's TUI, and none of it exists at the bare shell prompt a restored
+    /// tab is sitting at. The text/Return split is kept, though, and for the reason
+    /// `TextInjecting.sendReturn()` gives: `sendText` is a paste, and a newline inside a
+    /// bracketed paste is inserted rather than submitted.
+    private func sendToShell(_ command: String, into tabID: UUID) {
+        guard let injector = injector(for: tabID) else { return }
+        injector.sendText(command.trimmingCharacters(in: .newlines))
+        injector.sendReturn()
     }
 
     /// Saved on every mutation rather than at terminate, so a crash cannot lose the list.
