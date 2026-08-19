@@ -26,7 +26,12 @@ final class CodexResumeTests: XCTestCase {
             methods.append(method)
             switch method {
             case "thread/read" where threadMissing:
-                onLine?(#"{"id":\#(id),"error":{"code":-32602,"message":"no such thread"}}"#)
+                // codex's ACTUAL answer for a thread with no rollout, probed against
+                // codex-cli 0.147.0. This stub used to say `-32602 "no such thread"`, which
+                // codex has never sent: every app-server error is `-32600`, and the message
+                // names the thread. `CodexAdapter.isThreadGone` keys on the message for
+                // exactly that reason, so a stub that invented one proved nothing.
+                onLine?(#"{"id":\#(id),"error":{"code":-32600,"message":"thread not loaded: 01a01269-baa6-7493-8d15-8fa21bcb602b"}}"#)
             case "thread/read":
                 onLine?(#"{"id":\#(id),"result":{"thread":{"id":"01a01269-baa6-7493-8d15-8fa21bcb602b","name":"restored","status":\#(readStatus),"path":"/r/x.jsonl","cwd":"/w/a"}}}"#)
             case "thread/start":
@@ -113,6 +118,66 @@ final class CodexResumeTests: XCTestCase {
         // must not strand the tab. Re-pinning is the caller's job once this returns.
         XCTAssertNotEqual(binding.conversationID, existing)
         XCTAssertEqual(t.methods, ["thread/read", "thread/start", "thread/name/set"])
+    }
+
+    /// The under-narrowing this replaced: `catch CodexRPCError.remote(_, _)` treated every
+    /// remote refusal as "the thread is gone" and re-pinned the tab onto a fresh empty
+    /// thread — throwing away the pin that was the only record of where the conversation
+    /// was. Each message below is one codex really sends.
+    func testOnlyANoSuchThreadRefusalCountsAsGone() {
+        let id = "01a01269-baa6-7493-8d15-8fa21bcb602b"
+
+        // Observed against a live app-server at codex-cli 0.147.0.
+        XCTAssertTrue(CodexAdapter.isThreadGone(message: "thread not loaded: \(id)", threadID: id))
+        XCTAssertTrue(CodexAdapter.isThreadGone(
+            message: "no rollout found for thread id \(id)", threadID: id))
+
+        // Generic protocol failures. None of these says the thread is gone, and none of them
+        // names it — which is exactly what makes the message, not the code, the signal.
+        for message in [
+            "Invalid request: unknown variant `thread/read`",
+            "Invalid request: missing field `threadId`",
+            "Method not found",
+            "thread is busy and cannot be read right now",
+            "thread requires migration before it can be opened",
+        ] {
+            XCTAssertFalse(CodexAdapter.isThreadGone(message: message, threadID: id),
+                           "must propagate rather than re-pin: \(message)")
+        }
+
+        // Names a thread, but not ours.
+        XCTAssertFalse(CodexAdapter.isThreadGone(
+            message: "thread not loaded: 01a01705-bd49-7b70-a0a1-4514d4bda5dd", threadID: id))
+    }
+
+    /// End to end through `rebind`: a refusal that is not "gone" must reach the caller so it
+    /// can degrade to the thread it already had.
+    func testRebindPropagatesARefusalThatDoesNotMeanGone() async {
+        final class BusyTransport: CodexTransport {
+            var onLine: ((String) -> Void)?
+            private(set) var methods: [String] = []
+            func send(_ line: String) {
+                guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                      let method = obj["method"] as? String, let id = obj["id"] as? Int else { return }
+                methods.append(method)
+                onLine?(#"{"id":\#(id),"error":{"code":-32600,"message":"thread is busy"}}"#)
+            }
+        }
+        let t = BusyTransport()
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+        let session = Session(title: "t", workingDirectory: "/w/a", pinnedConversationID: existing)
+
+        do {
+            _ = try await adapter.rebind(for: session, options: .codex(CodexThreadOptions()))
+            XCTFail("a busy thread is not a deleted one — re-pinning here is unrecoverable")
+        } catch {
+            XCTAssertEqual(error as? CodexRPCError, .remote(code: -32600, message: "thread is busy"))
+        }
+        // The route, not just the error. A transport that refuses everything throws the same
+        // error from `thread/start` as from `thread/read`, so asserting only the error would
+        // pass against the very under-narrowing this test exists to catch.
+        XCTAssertEqual(t.methods, ["thread/read"],
+                       "a refusal that does not mean `gone` must never reach thread/start")
     }
 
     /// A silent app-server says nothing about whether the thread exists, so answering it by

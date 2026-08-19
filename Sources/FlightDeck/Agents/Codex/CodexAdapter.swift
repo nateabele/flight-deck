@@ -111,23 +111,64 @@ struct CodexAdapter: AgentAdapter {
     /// the user archived or deleted between launches must not strand the tab. The caller
     /// re-pins `pinnedConversationID` when the returned id differs.
     ///
-    /// Only a *refusal* means gone. A timeout or a closed transport says nothing about
-    /// whether the thread exists, and starting a fresh one on that evidence would re-pin the
-    /// tab away from the user's real conversation onto an empty one — a worse loss than the
-    /// one this method exists to prevent, and an unrecoverable one, because the pin is what
-    /// remembered where the conversation was. Those propagate instead, and the caller
-    /// degrades to the thread it already had.
+    /// Only a refusal that specifically means "no such thread" counts as gone. A timeout, a
+    /// closed transport, a malformed request, an unknown method — none of those say anything
+    /// about whether the thread exists, and starting a fresh one on that evidence would
+    /// re-pin the tab away from the user's real conversation onto an empty one. That is a
+    /// worse loss than the one this method exists to prevent, and an unrecoverable one,
+    /// because the pin is what remembered where the conversation was. Everything else
+    /// propagates, and the caller degrades to the thread it already had.
     func rebind(for session: Session, options: AgentOptions) async throws -> AgentBinding {
+        let threadID = session.pinnedConversationID.uuidString.lowercased()
         let existing = AgentBinding(conversationID: session.pinnedConversationID, transcriptURL: nil)
         do {
             _ = try await read(existing)
-        } catch CodexRPCError.remote(_, _) {
+        } catch CodexRPCError.remote(_, let message)
+            where Self.isThreadGone(message: message, threadID: threadID) {
             return try await prepare(for: session, options: options)
         }
         return AgentBinding(
             conversationID: session.pinnedConversationID,
             transcriptURL: session.transcriptPath.map { URL(fileURLWithPath: $0) }
         )
+    }
+
+    /// Whether a remote error about `threadID` means that thread is GONE, as opposed to
+    /// merely refused, malformed or unimplemented.
+    ///
+    /// This used to be "any `.remote` error at all", which swept up `-32601 method not
+    /// found`, `-32602 invalid params`, `-32600 invalid request` and every future
+    /// "busy / locked / needs migration" — each of which would have re-pinned the tab onto a
+    /// brand-new empty thread and thrown away the pin that remembered where the real
+    /// conversation was.
+    ///
+    /// Establishing the actual signal took a live probe, because the schema does not carry
+    /// error semantics, and the answer is not what the JSON-RPC spec would suggest. At
+    /// codex-cli 0.147.0, `codex app-server` answers **`-32600` for everything**:
+    ///
+    ///     thread/read     on a thread that does not exist -> -32600 "thread not loaded: <id>"
+    ///     thread/name/set on a thread that does not exist -> -32600 "no rollout found for thread id <id>"
+    ///     an unknown method                              -> -32600 "Invalid request: unknown variant `x`"
+    ///     a missing required param                       -> -32600 "Invalid request: missing field `threadId`"
+    ///
+    /// So the code discriminates nothing, and excluding the JSON-RPC reserved range — the
+    /// obvious defensive move — would have disabled the gone-detection entirely. The signal
+    /// that does discriminate is the message naming the thread we asked about: a protocol
+    /// error never echoes the id, and an error about a specific thread always does. Both
+    /// conditions are required, so neither a generic failure nor an unrelated message
+    /// mentioning a uuid can be read as "gone".
+    ///
+    /// "thread not loaded" reads like a transient state and is not one. Probed directly: a
+    /// thread that exists on disk but is not open in this app-server process answers
+    /// `thread/read` **successfully**, with `status.type == "notLoaded"`. Only a thread with
+    /// no rollout at all produces the error form.
+    /// Takes no error code on purpose: see above, codex answers `-32600` for every one of
+    /// these, so the code carries no information to key on.
+    static func isThreadGone(message: String, threadID: String) -> Bool {
+        let text = message.lowercased()
+        guard text.contains(threadID.lowercased()) else { return false }
+        return ["not loaded", "no rollout", "not found", "no such thread"]
+            .contains { text.contains($0) }
     }
 
     func rename(_ binding: AgentBinding, to title: String) async throws {
