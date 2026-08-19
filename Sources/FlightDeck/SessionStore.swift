@@ -452,7 +452,8 @@ final class SessionStore: ObservableObject {
 
     /// Read at session-creation time only. Preferences configure *new* sessions; a
     /// running `claude` is never reconfigured, because its command line is already spent.
-    private let preferences: PreferencesStore?
+    /// Not `private`: `AppDelegate` reads this to wire the Tools menu to the same store.
+    let preferences: PreferencesStore?
 
     /// Test seam. Production sets this from the convenience init.
     var notifier: Notifying?
