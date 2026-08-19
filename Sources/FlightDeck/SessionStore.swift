@@ -317,19 +317,37 @@ final class SessionStore: ObservableObject {
     /// server. Keeping it alive instead would leave a process running for the rest of the
     /// run on the strength of a tab the user closed.
     private func stopCodexIfUnused() {
-        guard codexStack != nil else { return }
+        guard let stack = codexStack else { return }
+        // A codex creation that has not inserted its tab yet is invisible to the check
+        // below, and killing the app-server out from under it between `thread/start` and
+        // `thread/name/set` EVAPORATES the thread — naming is what commits it. So a tab
+        // closed mid-creation defers the teardown rather than skipping it: `createSession`
+        // re-runs this on its way out.
+        guard codexCreationsInFlight == 0 else { return }
         guard !repos.flatMap(\.sessions).contains(where: { $0.agent == .codex }) else { return }
-        stopCodex()
+        stopCodex(expected: stack)
     }
 
-    /// Tears the stack down whatever the reason. `stop()` funnels into the transport's
-    /// termination hook, so every request still in flight fails rather than hanging its
-    /// caller — the same guarantee a crash gets, and by the same route: that hook is also
-    /// what nils the two fields below. They are cleared again here rather than left to it,
-    /// because `stop()` on a transport whose process never ran is a no-op the hook may have
-    /// already consumed.
-    private func stopCodex() {
-        codexStack?.transport.stop()
+    /// How many codex creations are between "asked for an app-server" and "tab inserted".
+    ///
+    /// A counter and not a `Bool`: two tabs can be created at once, and the second finishing
+    /// must not clear a guard the first still needs.
+    private var codexCreationsInFlight = 0
+
+    /// Tears down the stack the caller meant, whatever the reason. `stop()` funnels into the
+    /// transport's termination hook, so every request still in flight fails rather than
+    /// hanging its caller — the same guarantee a crash gets, and by the same route: that hook
+    /// is also what nils the two fields below. They are cleared again here rather than left
+    /// to it, because `stop()` on a transport whose process never ran is a no-op the hook may
+    /// have already consumed.
+    ///
+    /// `expected` is the same identity check the crash hook has had all along, and for the
+    /// same reason: a failure path that started before the current stack existed must not
+    /// stop the one a concurrent creation just built. `stopCodex()` had no such guard, so a
+    /// stale `startCodex` failure could tear down a healthy successor.
+    private func stopCodex(expected: CodexStack?) {
+        guard let expected, codexStack === expected else { return }
+        expected.transport.stop()
         codexStack = nil
         codexHandshake = nil
     }
@@ -748,6 +766,22 @@ final class SessionStore: ObservableObject {
             title: nextSessionTitle(), workingDirectory: directory, agent: agent
         )
         let options = options(for: agent, project: directory)
+
+        // Held across the whole negotiation, not just `prepare`. `closeSession` on the last
+        // remaining codex tab runs `stopCodexIfUnused`, which counts tabs in `repos` — and
+        // this one is not in `repos` until `addSession` below. Without this the app-server
+        // could be killed between `thread/start` and `thread/name/set`, which evaporates the
+        // thread, because naming is what commits it.
+        codexCreationsInFlight += 1
+        defer {
+            codexCreationsInFlight -= 1
+            // Deferred, not skipped. A tab closed while this was in flight had its teardown
+            // declined above; if this creation failed, nothing else will ever run it, and the
+            // app-server would outlive every codex tab. A creation that SUCCEEDED inserted
+            // its tab already, so the tab count below refuses the teardown by itself.
+            stopCodexIfUnused()
+        }
+
         let binding: AgentBinding
         do {
             binding = try await preparedAdapter(for: agent).prepare(for: draft, options: options)
@@ -859,7 +893,9 @@ final class SessionStore: ObservableObject {
             // reasoning two files away, and would break the moment anything took a second
             // strong reference to the transport. `ClaudeRuntime.attach` refuses to lean on
             // exactly that; so does this.
-            stopCodex()
+            // The stack THIS attempt built, not whatever is current: a slow failure here can
+            // land after a later creation has already replaced it.
+            stopCodex(expected: stack)
             throw error
         }
     }
@@ -1632,8 +1668,10 @@ final class SessionStore: ObservableObject {
         // come looking for it: it has no entry in `processRegistry`, so a quit that skipped
         // this would leave `codex app-server` running with nobody left to talk to it. Above
         // the `live.isEmpty` return below, deliberately — quitting with no tabs still has to
-        // stop it.
-        stopCodex()
+        // stop it. `expected: codexStack` is the whole stack, unconditionally: on quit there
+        // is no successor to protect, so this is the one caller for which the identity guard
+        // is a formality.
+        stopCodex(expected: codexStack)
         let live = processRegistry.all
         guard !live.isEmpty else { return }
 
