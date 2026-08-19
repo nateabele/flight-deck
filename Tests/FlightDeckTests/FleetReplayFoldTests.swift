@@ -69,17 +69,18 @@ final class FleetReplayFoldTests: XCTestCase {
         assertFoldPreservesOutcome(events)
     }
 
-    /// A session that both appeared and vanished inside the gap never existed as far as the
-    /// client is concerned. Emitting its removal would be harmless but emitting its *add*
-    /// would not, and keeping the pair is pure noise.
-    func testASessionAddedAndRemovedInTheGapDisappearsEntirely() {
+    /// A session that appeared and vanished inside the gap collapses to its removal alone.
+    /// The removal survives rather than the pair vanishing: see `survives(_:_:)` — the fold
+    /// cannot know whether the client already held this id, and a removal it did not need is
+    /// inert, while a removal it did need and never got is a phantom session.
+    func testASessionAddedAndRemovedInTheGapCollapsesToItsRemoval() {
         let ghost = UUID()
         let events: [FleetEvent] = [
             .sessionAdded(session(ghost, "ghost"), project: projectID, at: 0),
             .activityChanged(id: ghost, activity: "busy", waitingFor: nil, subagentCount: 0),
             .sessionRemoved(id: ghost)
         ]
-        XCTAssertTrue(FleetReplay.fold(events).isEmpty)
+        XCTAssertEqual(FleetReplay.fold(events), [.sessionRemoved(id: ghost)])
         assertFoldPreservesOutcome(events)
     }
 
@@ -154,6 +155,18 @@ final class FleetReplayFoldTests: XCTestCase {
         XCTAssertEqual(FleetReplay.fold(events).count, 3,
                        "moves are positional, not last-write-wins")
         XCTAssertEqual(start.applying(FleetReplay.fold(events)), start.applying(events))
+    }
+
+    /// The fold sees events, never the snapshot they apply to, so it cannot tell a genesis
+    /// add from a redundant one on a session the client already holds. It must therefore
+    /// never use "an add appeared in this window" as licence to drop the removal — doing so
+    /// leaves the client holding a session the server deleted.
+    func testASessionRemovedAfterARedundantReAddIsStillRemoved() {
+        let events: [FleetEvent] = [
+            .sessionAdded(session(a, "a-again"), project: projectID, at: 0),
+            .sessionRemoved(id: a)
+        ]
+        assertFoldPreservesOutcome(events)
     }
 
     func testAnEmptyGapFoldsToNothing() {
