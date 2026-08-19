@@ -19,6 +19,16 @@ enum CodexEventMapper {
     ///
     /// Only `event_msg` records carry turn boundaries. `response_item`, `turn_context`,
     /// `world_state` and `session_meta` are conversation content and bookkeeping.
+    ///
+    /// Two things this can never emit, both stated as limitations rather than approximated
+    /// (spec §5):
+    ///
+    /// - **`.waiting`.** Codex writes nothing when it starts waiting on approval — verified
+    ///   with an approval prompt live on screen, where the rollout's last record was a
+    ///   `custom_tool_call` with no output and no `task_complete`. A codex tab therefore
+    ///   reads busy through a prompt; `.waiting` is not derivable from this file.
+    /// - **`.subagentCount`.** No `collab` record exists in any of 492 surveyed rollouts, so
+    ///   there is no ground truth to map it from. Deliberately never emitted for codex.
     static func events(inRolloutLine line: String) -> [AgentEvent] {
         guard let raw = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
               let record = raw as? [String: Any],

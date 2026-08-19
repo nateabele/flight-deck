@@ -27,6 +27,17 @@ final class CodexRolloutMapperTests: XCTestCase {
                        + "tool call with no output is a guess this app does not make")
     }
 
+    /// No `collab` record exists in any of 492 surveyed rollouts, so `.subagentCount` has no
+    /// ground truth for codex and the mapper must never emit it. Nothing would fail today if
+    /// a count were reintroduced without evidence — this pins the absence.
+    func testNoSubagentCountIsEverEmittedForCodex() throws {
+        let events = try CodexRolloutFixtureTests.lines("rollout.captured")
+            .flatMap { CodexEventMapper.events(inRolloutLine: $0) }
+        XCTAssertFalse(events.contains { if case .subagentCount = $0 { return true } else { return false } },
+                       "codex has no rollout evidence for sub-agent counts; the mapper must "
+                       + "not invent one")
+    }
+
     func testAnAbortedTurnEndsTheTurnJustLikeACompletedOne() throws {
         let line = try XCTUnwrap(CodexRolloutFixtureTests.lines("turn-aborted.captured").first)
         XCTAssertEqual(CodexEventMapper.events(inRolloutLine: line),
