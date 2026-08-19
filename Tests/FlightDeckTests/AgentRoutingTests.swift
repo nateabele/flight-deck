@@ -66,6 +66,29 @@ final class AgentRoutingTests: XCTestCase {
         XCTAssertEqual(provider.configs.last?.initialInput, "stub-launch")
     }
 
+    /// The status registry is claude's app-wide source and `SessionStore` scans it once per
+    /// tick, so the runtime is *fed* rather than owning a scanner. This pins that the feed is
+    /// actually connected — in production it agrees with `applyRegistry` by construction, so
+    /// only a second, disagreeing scan can show the wire is live.
+    func testTheStatusRegistryFansOutThroughTheRuntime() {
+        let store = makeStore()
+        let session = store.newSession(in: tmp)
+
+        store.applyRegistry([1: entry(session.pinnedConversationID, activity: .busy)])
+        XCTAssertEqual(store.status(for: session.id)?.activity, .busy)
+
+        store.ingestStatusEntriesForTesting(
+            [1: entry(session.pinnedConversationID, activity: .waiting)]
+        )
+        XCTAssertEqual(store.status(for: session.id)?.activity, .waiting,
+                       "a registry row must reach the tab through its runtime")
+    }
+
+    private func entry(_ conversation: UUID, activity: SessionActivity) -> ClaudeStatusFile.Entry {
+        .init(pid: 1, sessionID: conversation, activity: activity, waitingFor: nil,
+              startedAt: 1, cwd: tmp.path)
+    }
+
     /// Mirrors `ClaudeAdapter` with every command replaced by a constant, so a test can see
     /// which of the two the store asked for.
     private struct StubAdapter: AgentAdapter {

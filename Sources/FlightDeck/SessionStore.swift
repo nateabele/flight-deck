@@ -1456,9 +1456,38 @@ final class SessionStore: ObservableObject {
             clock: clock
         ) { [weak self] entries in
             self?.applyRegistry(entries)
+            self?.ingestStatusEntries(entries)
         }
         watcher.start()
         statusWatcher = watcher
+    }
+
+    /// Hands one registry scan to the claude runtime, which fans it out as `.activity` to
+    /// every tab attached to it. The registry is claude's single app-wide source and is
+    /// scanned exactly once per tick, here, which is why the runtime is fed rather than
+    /// owning a scanner of its own — see `AgentRuntime`.
+    ///
+    /// **After `applyRegistry`, never before.** That method owns `statuses`: it decides which
+    /// tabs have one at all, from each tab's anchored pid via `ConversationPin.resolve`, and
+    /// every unread mark and notification this tick is read off the before/after diff it
+    /// computes. A writer landing ahead of it would perturb that diff. Landing after it, the
+    /// two agree by construction — the event carries the activity from the same row
+    /// `applyRegistry` just used — which is exactly what makes this safe to add to a working
+    /// claude path.
+    ///
+    /// The cast is deliberate and not a protocol gap: a pid-keyed claude status directory is
+    /// claude's alone, and nothing about it generalises to an agent that reports over RPC.
+    private func ingestStatusEntries(_ entries: [pid_t: ClaudeStatusFile.Entry]) {
+        // Same reason `applyRegistry` returns here: a tick landing mid-quit reads an emptied
+        // registry, not a real one.
+        guard !isTerminating else { return }
+        (runtime(for: .claude) as? ClaudeRuntime)?.ingest(entries)
+    }
+
+    /// Test seam. Production drives this from the status watcher's callback above, which
+    /// only a store built by the production initializer ever installs.
+    func ingestStatusEntriesForTesting(_ entries: [pid_t: ClaudeStatusFile.Entry]) {
+        ingestStatusEntries(entries)
     }
 
     /// Rebuilds `statuses` from a registry scan and keeps each tab's anchor current.
