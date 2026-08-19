@@ -28,6 +28,10 @@ through a dozen terminal windows you can't tell apart.
   closes the session rather than the window.
 - Agent flags are set globally and overridden per project, from real controls instead
   of a half-remembered command line.
+- Editors, terminals and git clients open on whatever the selected session is working on —
+  ⌘O, ⌘T, or the buttons that fade in over the terminal when you move the mouse. Each is a
+  shell command you can edit, so `$EDITOR` and your own tools work the way they do in a
+  terminal.
 
 ## Status
 
