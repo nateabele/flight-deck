@@ -87,6 +87,90 @@ final class AgentRoutingTests: XCTestCase {
         XCTAssertEqual(provider.configs.last?.initialInput, "stub-launch")
     }
 
+    // MARK: - Which route the SIDEBAR's rename takes
+
+    /// Answers `thread/name/set` and records every method it was asked for.
+    private final class RenameTransport: CodexTransport {
+        var onLine: ((String) -> Void)?
+        private(set) var methods: [String] = []
+        private(set) var names: [String] = []
+
+        func send(_ line: String) {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let method = obj["method"] as? String, let id = obj["id"] as? Int else { return }
+            methods.append(method)
+            if method == "thread/name/set",
+               let name = (obj["params"] as? [String: Any])?["name"] as? String {
+                names.append(name)
+            }
+            switch method {
+            case "thread/start":
+                onLine?(#"{"id":\#(id),"result":{"thread":{"id":"01a01269-baa6-7493-8d15-8fa21bcb602b","cwd":"/w/a","path":"/r/x.jsonl"}}}"#)
+            default:
+                onLine?(#"{"id":\#(id),"result":{}}"#)
+            }
+        }
+    }
+
+    private struct SilentReporter: AgentLaunchFailureReporting {
+        func report(_ error: AgentLaunchError) {}
+    }
+
+    /// `SessionSidebar` calls `store.rename` for every tab regardless of agent, so this is
+    /// the route production actually takes — unlike
+    /// `testTheAdaptersRenameTypesThroughTheStoresOwnInjectionRoute` below, which calls the
+    /// adapter directly and therefore could not have caught a store that never dispatched.
+    func testRenamingACodexTabRenamesTheCodexThread() async throws {
+        let store = makeStore()
+        store.launchFailureReporter = SilentReporter()
+        let t = RenameTransport()
+        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: t)), for: .codex)
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { $0() }
+        guard case .success(let id) = await store.createSession(agent: .codex, in: tmp.path) else {
+            return XCTFail("codex tab creation must succeed against a scripted transport")
+        }
+        spy.events.removeAll()
+        // Creation already named the thread once — `thread/name/set` is what commits it — so
+        // the rename is the SECOND name, not the first.
+        let namesAfterCreation = t.names.count
+
+        store.rename(id, to: "renamed")
+        // The rename is dispatched, not awaited: the sidebar must not block on the RPC. So
+        // the request lands in a later turn of the run loop, and a bare `Task.yield()` is one
+        // scheduling assumption too many — spin until it arrives, bounded.
+        for _ in 0..<100 where t.names.count == namesAfterCreation { await Task.yield() }
+
+        XCTAssertEqual(store.title(of: id), "renamed", "the sidebar is authoritative and immediate")
+        XCTAssertEqual(t.names.last, "renamed",
+                       "renaming a codex tab must send thread/name/set — the thread name is what "
+                       + "thread/read returns, so a divergence flicks the title back on reconcile")
+        XCTAssertTrue(spy.events.isEmpty,
+                      "a codex tab must never queue `/rename` for the pty: nothing retires the "
+                      + "entry, and a match would paste it into the user's live codex session")
+    }
+
+    /// The other half, and the one that must not have moved: claude still types.
+    func testRenamingAClaudeTabStillTypesIntoThePtyAndSendsNoRequest() {
+        let store = makeStore()
+        let t = RenameTransport()
+        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: t)), for: .codex)
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { $0() }
+        let session = store.newSession(in: tmp)
+        store.applyRegistry([1: entry(session.pinnedConversationID, activity: .idle)])
+        spy.events.removeAll()
+
+        store.rename(session.id, to: "renamed")
+
+        // Synchronously, in the same turn of the run loop, exactly as before the dispatch
+        // existed: `inject` decides *now* whether the input bar is busy.
+        XCTAssertEqual(spy.events, [.killLine, .text("/rename renamed"), .ret])
+        XCTAssertTrue(t.methods.isEmpty, "claude's rename must not reach codex's app-server")
+    }
+
     /// `AgentAdapter.rename` is how an agent that owns its own conversation name gets asked
     /// to change it. For claude that is still `/rename` typed into the pty, so it must land
     /// on the *same* route `SessionStore.rename` uses — one `pendingRenames` entry behind one
