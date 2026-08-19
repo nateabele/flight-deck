@@ -193,6 +193,36 @@ final class CodexLaunchFailureTests: XCTestCase {
         XCTAssertEqual(session?.pinnedConversationID, tabID)
     }
 
+    /// A crashed app-server must be forgotten, not reused.
+    ///
+    /// `CodexRPC.transportClosed()` fails what is pending *at that moment* and latches
+    /// nothing, so a stack kept past the crash would take the next creation's `thread/start`,
+    /// swallow the write into a dead pipe, and suspend it on a continuation nothing will ever
+    /// resume — no alert, no failed `Result`, just a session that never appears.
+    ///
+    /// Deterministic and bounded: nothing here awaits a process, so a regression fails on the
+    /// assertions rather than stalling the suite.
+    func testACrashedAppServerIsForgottenSoTheNextSessionRespawns() async {
+        let (store, _) = makeStore()
+        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport())), for: .codex)
+        let first = await store.createSession(agent: .codex, in: NSTemporaryDirectory())
+        guard case .success = first else { return XCTFail("expected success: \(first)") }
+        let before = store.runtime(for: .codex) as AnyObject
+        XCTAssertTrue(store.hasCodexStackForTesting)
+
+        store.simulateCodexTerminationForTesting()
+
+        XCTAssertFalse(store.hasCodexStackForTesting,
+                       "the store must forget an app-server that stopped running")
+
+        // The next creation completes rather than hanging, and is served by a *new* stack.
+        let second = await store.createSession(agent: .codex, in: NSTemporaryDirectory())
+        guard case .success = second else { return XCTFail("expected success: \(second)") }
+        XCTAssertTrue(store.hasCodexStackForTesting)
+        XCTAssertFalse(store.runtime(for: .codex) === before,
+                       "a creation after a crash must re-spawn, not talk to the corpse")
+    }
+
     /// The app-server is app-wide and lazy: nothing spawns it until a codex tab exists, and
     /// nothing keeps it alive once the last one is gone. Building the stack starts no
     /// process, so this test observes the lifetime without ever running `codex`.
