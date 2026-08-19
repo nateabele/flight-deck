@@ -29,6 +29,11 @@ final class ClaudeRuntime: AgentRuntime {
             )
             watcher?.start()
         }
+        // Stopped explicitly rather than left to the replaced `Attachment` being released:
+        // it survives its owner by its registration on the shared `WatchClock`, and although
+        // that registration is weak and self-prunes, an invariant that holds only because of
+        // a retention detail two files away is not one to lean on.
+        attachments[id]?.watcher?.stop()
         attachments[id] = Attachment(onEvent: onEvent, watcher: watcher)
     }
 

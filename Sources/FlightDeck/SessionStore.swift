@@ -206,8 +206,29 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    func adapter(for agent: AgentID) -> any AgentAdapter { adapters[agent] ?? ClaudeAdapter() }
-    func runtime(for agent: AgentID) -> any AgentRuntime { runtimes[agent] ?? ClaudeRuntime() }
+    /// Falls back to claude's registered adapter, wiring and all. A bare `ClaudeAdapter()`
+    /// would carry neither this store's `projectsRoot` nor its rename route, so a tab on an
+    /// agent nobody registered would derive transcript paths under the real
+    /// `~/.claude/projects` even inside a test.
+    func adapter(for agent: AgentID) -> any AgentAdapter {
+        adapters[agent] ?? adapters[.claude] ?? ClaudeAdapter()
+    }
+
+    /// Memoized on a miss, never freshly built per call.
+    ///
+    /// A runtime is stateful — it holds the attachment `detach` has to find — so answering
+    /// two calls with two instances starts a `TranscriptWatcher` nothing can ever stop and
+    /// makes `detach` a no-op on an empty object. The miss is reachable without a line of new
+    /// code: `restore` rebuilds whatever `agent` a snapshot names, so an unregistered agent is
+    /// a *data* possibility, not just a future-code one. Degrading to claude's runtime keeps a
+    /// mislabelled tab working; trapping would turn a hand-edited `sessions.json` into a
+    /// launch crash.
+    func runtime(for agent: AgentID) -> any AgentRuntime {
+        if let existing = runtimes[agent] { return existing }
+        let runtime = ClaudeRuntime(clock: clock)
+        runtimes[agent] = runtime
+        return runtime
+    }
 
     /// Test seams, in the style of `injectorOverride`. Both are needed: runtime tests fake
     /// the event source, adapter tests fake identity negotiation and command construction.
@@ -1281,13 +1302,21 @@ final class SessionStore: ObservableObject {
     }
 
     /// Queues a rename for `claude` and tries it at once. The one route into `pendingRenames`
-    /// — `SessionStore.rename` above and `ClaudeAdapter.rename` (which is how a future agent
-    /// with no pty reaches the same behaviour) both land here, so `inject`'s `injecting`
-    /// guard stays the single place a second injection into a busy tab can be refused.
+    /// — `SessionStore.rename` above and `ClaudeAdapter.rename` (which is how an agent that
+    /// owns its own conversation name reaches the same behaviour) both land here, so
+    /// `inject`'s `injecting` guard stays the single place a second injection into a busy tab
+    /// can be refused.
+    ///
+    /// Sanitized *here*, not only in `rename`: what this queues becomes text typed into a
+    /// pty, and an adapter's caller arrives with whatever its agent was handed. `rename` runs
+    /// the same filter first for a different job — it needs the cleaned value for the sidebar
+    /// title, and must reject an unusable one before touching it — and the filter is
+    /// idempotent, so an already-clean name passes through unchanged.
     ///
     /// One pending rename per tab, replaced rather than queued: renaming twice before the
     /// injection lands should type the second name once, not both names in turn.
-    private func injectPendingRename(_ id: UUID, _ name: String) {
+    private func injectPendingRename(_ id: UUID, _ title: String) {
+        guard let name = ClaudeSession.sanitizedName(title) else { return }
         pendingRenames[id] = name
         flushPendingRename(id)
     }
@@ -1456,38 +1485,9 @@ final class SessionStore: ObservableObject {
             clock: clock
         ) { [weak self] entries in
             self?.applyRegistry(entries)
-            self?.ingestStatusEntries(entries)
         }
         watcher.start()
         statusWatcher = watcher
-    }
-
-    /// Hands one registry scan to the claude runtime, which fans it out as `.activity` to
-    /// every tab attached to it. The registry is claude's single app-wide source and is
-    /// scanned exactly once per tick, here, which is why the runtime is fed rather than
-    /// owning a scanner of its own — see `AgentRuntime`.
-    ///
-    /// **After `applyRegistry`, never before.** That method owns `statuses`: it decides which
-    /// tabs have one at all, from each tab's anchored pid via `ConversationPin.resolve`, and
-    /// every unread mark and notification this tick is read off the before/after diff it
-    /// computes. A writer landing ahead of it would perturb that diff. Landing after it, the
-    /// two agree by construction — the event carries the activity from the same row
-    /// `applyRegistry` just used — which is exactly what makes this safe to add to a working
-    /// claude path.
-    ///
-    /// The cast is deliberate and not a protocol gap: a pid-keyed claude status directory is
-    /// claude's alone, and nothing about it generalises to an agent that reports over RPC.
-    private func ingestStatusEntries(_ entries: [pid_t: ClaudeStatusFile.Entry]) {
-        // Same reason `applyRegistry` returns here: a tick landing mid-quit reads an emptied
-        // registry, not a real one.
-        guard !isTerminating else { return }
-        (runtime(for: .claude) as? ClaudeRuntime)?.ingest(entries)
-    }
-
-    /// Test seam. Production drives this from the status watcher's callback above, which
-    /// only a store built by the production initializer ever installs.
-    func ingestStatusEntriesForTesting(_ entries: [pid_t: ClaudeStatusFile.Entry]) {
-        ingestStatusEntries(entries)
     }
 
     /// Rebuilds `statuses` from a registry scan and keeps each tab's anchor current.
@@ -1923,19 +1923,25 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// An agent reported what it is doing.
+    /// An agent reported what it is doing. Not routed yet, deliberately.
     ///
-    /// Shaped like `applySubagentCount`: it edits an existing status rather than creating
-    /// one, because `applyRegistry` owns which tabs *have* a status — that decision runs
-    /// through `ConversationPin.resolve` and each tab's anchored pid, and a second writer
-    /// inventing entries would hand the sidebar rows the pin logic deliberately withheld.
-    /// For claude this is therefore a no-op by construction: the registry tick that produced
-    /// the event has already written the same activity from the same row.
-    private func applyActivity(_ activity: SessionActivity, to tabID: UUID) {
-        guard var status = statuses[tabID], status.activity != activity else { return }
-        status.activity = activity
-        statuses[tabID] = status
-    }
+    /// `applyRegistry` owns `statuses` outright, and not merely as a matter of style: it
+    /// picks each tab's row through `ConversationPin.resolve`, which validates `procStart`
+    /// against pid recycling and applies a newest-wins tiebreak precisely because two
+    /// processes really can hold one conversation once resumes are in play. It then diffs
+    /// the whole map — `previous` against `next` — and every unread mark, notification,
+    /// superseded resume prompt and `persist()` on that tick is read off that one diff.
+    ///
+    /// Writing `statuses` from here would bypass all of it, and would do so on a *different*
+    /// row-selection rule: an `.activity` event names a conversation, not an anchored pid.
+    /// The corrupted value then becomes the `previous` snapshot the next tick diffs against,
+    /// so a later tick can fabricate or swallow a `busy → idle` edge. Claude has no need of
+    /// this route at all — its registry tick already carries activity — so it stays a stub
+    /// rather than a second writer.
+    ///
+    /// Task 10 owns routing codex's activity event *through* `applyRegistry`'s transition
+    /// machinery rather than around it.
+    private func applyActivity(_ activity: SessionActivity, to tabID: UUID) {}
 
     /// An agent finished a turn.
     ///
