@@ -11,6 +11,12 @@ struct CodexAdapter: AgentAdapter {
 
     let rpc: CodexRPC
 
+    /// Deadline for `read`, in seconds. `CodexRPC.request` has none of its own — only the
+    /// handshake verifier produces `.timeout` — and `read` is the one call a *restored* tab
+    /// waits on before anything can be typed at it. A property rather than an argument so it
+    /// stays out of the `AgentAdapter.rebind` signature, which is not codex's to shape.
+    var readTimeout: Double = 5
+
     /// Start, then name. NOT optional and NOT reorderable.
     ///
     /// `thread/start` does not persist anything: no `threads` row, no rollout file, even
@@ -60,6 +66,66 @@ struct CodexAdapter: AgentAdapter {
 
     func resumeCommand(_ binding: AgentBinding, _ session: Session, _ options: AgentOptions) -> String {
         launchCommand(binding, session, options)
+    }
+
+    /// Authoritative title and status for an already-bound thread.
+    ///
+    /// Used by reconcile-on-first-contact: a session whose codex sat behind the
+    /// directory-trust or hooks-review prompt emits nothing until the user clears it, so its
+    /// title is stale by exactly one read rather than by a stream of missed notifications.
+    ///
+    /// Bounded by `readTimeout` rather than left to `CodexRPC.request`, which has no deadline
+    /// at all. An app-server that answered `initialize` and then went quiet would otherwise
+    /// leave a restored tab suspended here forever, waiting for a resume command that never
+    /// gets typed. Same shape as `CodexProcessTransport.verifyHandshake`, and for the same
+    /// reason.
+    func read(_ binding: AgentBinding) async throws -> (title: String?, activity: SessionActivity?) {
+        let rpc = self.rpc
+        let threadID = binding.conversationID.uuidString.lowercased()
+        let seconds = readTimeout
+        return try await withThrowingTaskGroup(of: (String?, SessionActivity?).self) { group in
+            group.addTask { @MainActor in
+                let result = try await rpc.request("thread/read", ["threadId": threadID])
+                let thread = result["thread"] as? [String: Any] ?? [:]
+                let status = (thread["status"] as? [String: Any])?["type"] as? String
+                return (
+                    thread["name"] as? String,
+                    status.map { $0 == "running" || $0 == "busy" ? .busy : .idle }
+                )
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw CodexRPCError.timeout
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw CodexRPCError.timeout }
+            return (title: first.0, activity: first.1)
+        }
+    }
+
+    /// Re-attaches a restored tab to its thread, starting a fresh one if that thread is gone.
+    ///
+    /// The codex counterpart of `claude --resume <id> || claude --session-id <id>`: a thread
+    /// the user archived or deleted between launches must not strand the tab. The caller
+    /// re-pins `pinnedConversationID` when the returned id differs.
+    ///
+    /// Only a *refusal* means gone. A timeout or a closed transport says nothing about
+    /// whether the thread exists, and starting a fresh one on that evidence would re-pin the
+    /// tab away from the user's real conversation onto an empty one — a worse loss than the
+    /// one this method exists to prevent, and an unrecoverable one, because the pin is what
+    /// remembered where the conversation was. Those propagate instead, and the caller
+    /// degrades to the thread it already had.
+    func rebind(for session: Session, options: AgentOptions) async throws -> AgentBinding {
+        let existing = AgentBinding(conversationID: session.pinnedConversationID, transcriptURL: nil)
+        do {
+            _ = try await read(existing)
+        } catch CodexRPCError.remote(_, _) {
+            return try await prepare(for: session, options: options)
+        }
+        return AgentBinding(
+            conversationID: session.pinnedConversationID,
+            transcriptURL: session.transcriptPath.map { URL(fileURLWithPath: $0) }
+        )
     }
 
     func rename(_ binding: AgentBinding, to title: String) async throws {

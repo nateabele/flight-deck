@@ -33,7 +33,27 @@ protocol AgentAdapter {
     func launchCommand(_ binding: AgentBinding, _ session: Session, _ options: AgentOptions) -> String
     func resumeCommand(_ binding: AgentBinding, _ session: Session, _ options: AgentOptions) -> String
 
+    /// The binding for a RESTORED tab, settled against what the agent still has.
+    ///
+    /// `binding(for:)` is a pure read of the pin and cannot tell a conversation that still
+    /// exists from one deleted between launches. Claude does not need it to — its resume
+    /// command carries its own fallback, `--resume <id> || --session-id <id>` — so the
+    /// default below is claude's whole implementation. Codex has no such fallback: `codex
+    /// resume <gone>` simply fails, so it settles identity with a round trip here and may
+    /// hand back a *different* conversation. The caller re-pins when it does.
+    func rebind(for session: Session, options: AgentOptions) async throws -> AgentBinding
+
     /// Renames the agent's own conversation. Claude types `/rename` into the pty; codex
     /// sends a request. Throwing is legal — the caller keeps the local title either way.
     func rename(_ binding: AgentBinding, to title: String) async throws
+}
+
+extension AgentAdapter {
+    /// Nothing to settle for an agent whose resume command already carries its own fallback.
+    /// Being the default rather than a per-agent override is the point: an agent has to opt
+    /// *in* to a round trip on the restore path, which is where the app is slowest and least
+    /// able to report a failure.
+    func rebind(for session: Session, options: AgentOptions) async throws -> AgentBinding {
+        binding(for: session)
+    }
 }
