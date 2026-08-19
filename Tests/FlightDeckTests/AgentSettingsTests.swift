@@ -32,4 +32,39 @@ final class AgentSettingsTests: XCTestCase {
 
         XCTAssertEqual(back.agents.map(\.id), [.codex, .claude], "reordering must persist")
     }
+
+    /// The discriminator, not key presence, must decide which branch decodes. A JSON blob
+    /// tagged `"agent":"claude"` but carrying only a `"codex"` payload (no `"flags"` key) must
+    /// throw rather than silently succeed by falling through to whichever key happens to be
+    /// present — a silent mis-decode there would hand claude's tab codex's options, or vice
+    /// versa. Covers `AgentOptions.init(from:)` in `AgentSettings.swift`.
+    func testAClaudeTaggedPayloadCannotDecodeFromACodexOnlyBody() {
+        let json = """
+        {"id":"claude","options":{"agent":"claude","codex":{"addDirs":[]}}}
+        """
+
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(AgentSettings.self, from: Data(json.utf8))
+        ) { error in
+            guard case DecodingError.keyNotFound = error else {
+                return XCTFail("expected a missing-key decode failure, got \(error)")
+            }
+        }
+    }
+
+    /// The mirror image: a `"codex"`-tagged blob carrying only a `"flags"` payload must also
+    /// throw, not silently decode as claude's options.
+    func testACodexTaggedPayloadCannotDecodeFromAClaudeOnlyBody() {
+        let json = """
+        {"id":"codex","options":{"agent":"codex","flags":{"values":{},"passthrough":[]}}}
+        """
+
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(AgentSettings.self, from: Data(json.utf8))
+        ) { error in
+            guard case DecodingError.keyNotFound = error else {
+                return XCTFail("expected a missing-key decode failure, got \(error)")
+            }
+        }
+    }
 }
