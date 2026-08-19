@@ -48,6 +48,28 @@ final class ToolShortcutTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(ToolDefinition.self, from: data), tool)
     }
 
+    func testDecodingUnnormalizedValuesAppliesNormalization() throws {
+        // testCodableRoundTrip round-trips an already-normalized value, so encode→decode can
+        // never produce un-normalized input — the decoder could only verify that already-normalized
+        // input remains normalized. This test decodes a deliberately un-normalized blob (uppercase
+        // key and caps-lock bit in modifiers raw value, as could be hand-edited in UserDefaults
+        // or left by an older app version) and asserts the result equals a normalized shortcut
+        // built through init(key:modifiers:), proving both code paths apply the same invariants.
+        let unnormalizedJSON = """
+        {
+            "key": "O",
+            "modifiers": \(NSEvent.ModifierFlags([.command, .capsLock]).rawValue)
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(ToolShortcut.self, from: unnormalizedJSON)
+        let normalized = ToolShortcut(key: "O", modifiers: [.command, .capsLock])
+
+        XCTAssertEqual(decoded, normalized)
+        XCTAssertEqual(decoded.key, "o")
+        XCTAssertFalse(decoded.modifierFlags.contains(.capsLock))
+    }
+
     func testAToolDefaultsToShowingInTheOverlay() {
         XCTAssertTrue(ToolDefinition(name: "x", symbol: "gear", command: "true").showsInOverlay)
     }
