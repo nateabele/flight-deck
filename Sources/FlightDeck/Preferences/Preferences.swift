@@ -71,6 +71,13 @@ struct Preferences: Codable, Equatable {
     /// agent adapters decodes cleanly, and `migrateAgentsIfNeeded()` fills it in from today's
     /// single-agent settings rather than failing the whole decode.
     var storedAgents: [AgentSettings]?
+    /// Ordered; position is the overlay's left-to-right order.
+    ///
+    /// Optional in storage for exactly the reason `confirmations` is — see that property's
+    /// comment. `nil` means "never materialised", which `migrateToolsIfNeeded` fills in.
+    /// An *empty* array is a different thing entirely: it means the user deleted every tool,
+    /// and it must stay empty.
+    var storedTools: [ToolDefinition]?
 
     init(
         globalFlags: FlagSet = FlagSet(),
@@ -78,7 +85,8 @@ struct Preferences: Codable, Equatable {
         shell: ShellPreferences = ShellPreferences(),
         confirmations: ConfirmationPreferences? = nil,
         claude: ClaudePreferences? = nil,
-        storedAgents: [AgentSettings]? = nil
+        storedAgents: [AgentSettings]? = nil,
+        storedTools: [ToolDefinition]? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
@@ -86,6 +94,7 @@ struct Preferences: Codable, Equatable {
         self.confirmations = confirmations
         self.claude = claude
         self.storedAgents = storedAgents
+        self.storedTools = storedTools
     }
 
     /// Falls back to claude-then-codex so a `Preferences` that has never been migrated
@@ -117,5 +126,45 @@ struct Preferences: Codable, Equatable {
         var list = agents
         list.move(fromOffsets: source, toOffset: destination)
         agents = list
+    }
+
+    /// Reads through the optional so a `Preferences` that predates materialisation still has
+    /// tools. Writes go straight to `storedTools`, which is what lets an emptied list persist
+    /// as empty rather than falling back to the defaults on the next read.
+    var tools: [ToolDefinition] {
+        get { storedTools ?? Self.defaultTools(terminalCommand: Self.fallbackTerminalCommand) }
+        set { storedTools = newValue }
+    }
+
+    /// Used only by the getter above, for a blob that somehow reaches a reader before
+    /// `migrateToolsIfNeeded` has run. Deliberately does not probe: a getter is not a place to
+    /// touch `NSWorkspace`.
+    static let fallbackTerminalCommand = "open -b com.apple.Terminal ${cwd}"
+
+    static func defaultTools(terminalCommand: String) -> [ToolDefinition] {
+        [
+            ToolDefinition(
+                name: "Editor",
+                symbol: "chevron.left.forwardslash.chevron.right",
+                // `$EDITOR` is left for the login shell to resolve — see `ToolTemplate.expand`
+                // and `ShellToolLauncher`. Flight Deck's own process has no `$EDITOR` at all
+                // when it is launched from Finder.
+                command: "$EDITOR ${cwd}",
+                shortcut: ToolShortcut(key: "o", modifiers: [.command])
+            ),
+            ToolDefinition(
+                name: "Terminal",
+                symbol: "terminal",
+                command: terminalCommand,
+                shortcut: ToolShortcut(key: "t", modifiers: [.command])
+            ),
+        ]
+    }
+
+    /// Fills in the starting tools once. Idempotent — safe on every load — so it never
+    /// overwrites a list the user has edited, reordered, or emptied.
+    mutating func migrateToolsIfNeeded(terminalCommand: String) {
+        guard storedTools == nil else { return }
+        storedTools = Self.defaultTools(terminalCommand: terminalCommand)
     }
 }
