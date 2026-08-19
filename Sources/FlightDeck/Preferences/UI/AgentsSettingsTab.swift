@@ -46,17 +46,35 @@ struct AgentsSettingsTab: View {
 /// Global defaults: the flags every new session starts with, in every project.
 ///
 /// Formerly `ClaudeSettingsTab`, the app's only Preferences tab before agent adapters — this
-/// is that same body, moved under the Agents list's claude row. Deliberately still bound to
-/// `globalFlags` rather than the claude entry's `AgentOptions` in `preferences.agents`:
-/// `SessionStore.options(for:project:)` resolves a launch's flags from `globalFlags` (via
-/// `PreferencesStore.resolvedFlags`), and repointing this pane at the list entry instead
-/// would edit a value nothing reads while leaving the one that matters untouched.
+/// is that same body, moved under the Agents list's claude row. Bound to the claude row's
+/// `AgentOptions` in `preferences.agents`, not `globalFlags`: `SessionStore.options(for:project:)`
+/// resolves a launch's flags via `PreferencesStore.resolvedOptions(for:project:)`, which reads
+/// that row, and `globalFlags` survives only as a decode-only legacy field.
 struct ClaudeOptionsPane: View {
     @ObservedObject var preferences: PreferencesStore
 
+    /// Reads and writes the claude row's flags within `preferences.agents`, wherever that row
+    /// currently sits — the list's order is the shortcut binding, not a storage index, so this
+    /// looks the row up by id rather than assuming a position. Mirrors `CodexOptionsForm.options`.
+    private var flags: Binding<FlagSet> {
+        Binding(
+            get: {
+                guard case .claude(let flags)? = preferences.preferences.agents
+                    .first(where: { $0.id == .claude })?.options
+                else { return FlagSet() }
+                return flags
+            },
+            set: { newValue in
+                guard let index = preferences.preferences.agents.firstIndex(where: { $0.id == .claude })
+                else { return }
+                preferences.preferences.agents[index].options = .claude(newValue)
+            }
+        )
+    }
+
     var body: some View {
         FlagEditor(
-            flags: $preferences.preferences.globalFlags,
+            flags: flags,
             inherited: nil,
             lockedPrefix: Self.placeholderPrefix,
             header: {

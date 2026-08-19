@@ -45,6 +45,12 @@ final class PreferencesStore: ObservableObject {
         self.persistence = persistence
         var loaded = persistence?.load() ?? Preferences()
         loaded.migrateAgentsIfNeeded()
+        // Accounts must exist before anything resolves against them, project settings before
+        // the global-flags fold has a claude row to land on either side of, so this order is
+        // load-bearing, not incidental.
+        loaded.migrateAccountsIfNeeded()
+        loaded.migrateProjectSettingsIfNeeded()
+        loaded.migrateGlobalFlagsIfNeeded()
         // Probes for an installed terminal, so it is done here rather than in the `tools`
         // getter: a computed property is not a place to touch `NSWorkspace`. The probe is
         // idempotent and only runs while `storedTools` is nil, so at worst it repeats once per
@@ -57,51 +63,106 @@ final class PreferencesStore: ObservableObject {
         self.init(persistence: UserDefaultsPreferencesPersistence())
     }
 
-    // MARK: Flags
-
-    /// The flags a new session in `path` launches with: globals with the project's
-    /// override applied per flag.
-    func resolvedFlags(forProject path: String) -> FlagSet {
-        FlagSetMerge.merge(
-            global: preferences.globalFlags,
-            project: preferences.projectFlags[Self.key(path)] ?? FlagSet()
-        )
-    }
-
-    /// The `thread/start` options a new codex tab launches with.
-    ///
-    /// Codex's counterpart to `resolvedFlags(forProject:)`, minus the project layer: there
-    /// is no per-project codex storage, so this is the one global row. Looked up by id
-    /// rather than by position, because the list's order is the New Session shortcut
-    /// binding and the user can reorder it — the same lookup `CodexOptionsForm` writes
-    /// through, so the pane and the launch path cannot disagree about which row is codex's.
-    func resolvedCodexOptions() -> CodexThreadOptions {
-        guard case .codex(let options)? = preferences.agents.first(where: { $0.id == .codex })?.options
-        else { return CodexThreadOptions() }
-        return options
-    }
-
-    func projectOverride(_ path: String) -> FlagSet {
-        preferences.projectFlags[Self.key(path)] ?? FlagSet()
-    }
-
-    func setProjectOverride(_ path: String, _ flags: FlagSet) {
-        preferences.projectFlags[Self.key(path)] = flags
-    }
-
-    func removeProjectOverride(_ path: String) {
-        preferences.projectFlags.removeValue(forKey: Self.key(path))
-    }
-
-    /// Sorted so the Projects tab's list order is stable across launches.
-    var overriddenProjectPaths: [String] {
-        preferences.projectFlags.keys.sorted()
-    }
+    // MARK: Accounts
 
     /// Matches `SessionStore.indexOfRepo`, which compares `standardizedFileURL.path`.
     private static func key(_ path: String) -> String {
         URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.path
     }
+
+    func account(id: UUID) -> AgentAccount? { preferences.accounts.first { $0.id == id } }
+
+    /// The account a new session for `agent` in `project` launches under. nil is BROKEN — an
+    /// explicit assignment that no longer resolves must never silently become another login.
+    func account(for agent: AgentID, project: String) -> AgentAccount? {
+        if let assigned = preferences.projectSettings[Self.key(project)]?.accounts[agent] {
+            return account(id: assigned)
+        }
+        return preferences.accounts.first { $0.agent == agent }
+    }
+
+    /// Normalises a stored `Session.accountID`. nil means the agent's built-in home — not "the
+    /// current default" — so a legacy tab and a tab created today on that home share one
+    /// identity, and one home can never carry two instance keys.
+    func resolvedAccountID(for agent: AgentID, in stored: UUID?) -> UUID? {
+        if let stored { return account(id: stored)?.id }
+        return preferences.accounts.first { $0.agent == agent && $0.isBuiltIn }?.id
+    }
+
+    /// Global agent options merged with the project's. Applies whenever that agent launches
+    /// here, independently of `defaultAgent` — the Projects dropdown chooses what you edit and
+    /// what ⌘N picks, not whether an override is in force.
+    func resolvedOptions(for agent: AgentID, project: String) -> AgentOptions {
+        let global = preferences.agents.first { $0.id == agent }?.options
+        let override = preferences.projectSettings[Self.key(project)]?.options[agent]
+        switch (global ?? Self.emptyOptions(for: agent), override) {
+        case (.claude(let g), .claude(let p)?): return .claude(FlagSetMerge.merge(global: g, project: p))
+        case (.codex(let g), .codex(let p)?):   return .codex(CodexThreadOptions.merge(global: g, project: p))
+        case (let g, _):                        return g
+        }
+    }
+
+    private static func emptyOptions(for agent: AgentID) -> AgentOptions {
+        switch agent {
+        case .claude: return .claude(FlagSet())
+        case .codex:  return .codex(CodexThreadOptions())
+        }
+    }
+
+    /// The agent list as this project sees it: its default agent promoted to the front, every
+    /// other agent following in global order. Feeds `NewSessionAffordance`, so ⌘N is always the
+    /// project's agent and no agent is left unreachable by shortcut.
+    func agentOrder(forProject project: String) -> [AgentSettings] {
+        let global = preferences.agents
+        guard let preferred = preferences.projectSettings[Self.key(project)]?.defaultAgent,
+              let row = global.first(where: { $0.id == preferred })
+        else { return global }
+        return [row] + global.filter { $0.id != preferred }
+    }
+
+    func homeIsTaken(_ home: URL, excluding id: UUID?) -> Bool {
+        preferences.accounts.contains { $0.id != id && AgentAccount.key($0.home) == AgentAccount.key(home) }
+    }
+
+    func addAccount(_ account: AgentAccount) { preferences.accounts.append(account) }
+
+    func renameAccount(id: UUID, to name: String) {
+        guard let index = preferences.accounts.firstIndex(where: { $0.id == id }) else { return }
+        preferences.accounts[index].displayName = name
+    }
+
+    func relocateAccount(id: UUID, to home: URL) {
+        guard let index = preferences.accounts.firstIndex(where: { $0.id == id }) else { return }
+        preferences.accounts[index].home = home
+        preferences.accounts[index].cachedIdentity =
+            AccountDirectory.identity(atHome: home, agent: preferences.accounts[index].agent)
+    }
+
+    /// Drops the account AND every project assignment naming it, so nothing is left pointing at
+    /// an id that no longer resolves. A record emptied by that clearing is removed, matching how
+    /// an emptied flag override already drops a project from the list.
+    func removeAccount(id: UUID) {
+        preferences.accounts.removeAll { $0.id == id }
+        for (path, var settings) in preferences.projectSettings {
+            let before = settings.accounts
+            settings.accounts = settings.accounts.filter { $0.value != id }
+            guard settings.accounts != before else { continue }
+            preferences.projectSettings[path] = settings.isEmpty ? nil : settings
+        }
+    }
+
+    func projectSettings(_ path: String) -> ProjectSettings {
+        preferences.projectSettings[Self.key(path)] ?? ProjectSettings()
+    }
+
+    /// The single write path, so an emptied record can never linger with its badge hidden and
+    /// its Remove button disabled.
+    func setProjectSettings(_ path: String, _ settings: ProjectSettings) {
+        preferences.projectSettings[Self.key(path)] = settings.isEmpty ? nil : settings
+    }
+
+    /// Sorted so the Projects tab's list order is stable across launches.
+    var configuredProjectPaths: [String] { preferences.projectSettings.keys.sorted() }
 
     // MARK: Shell
 
