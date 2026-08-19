@@ -45,6 +45,11 @@ final class PreferencesStore: ObservableObject {
         self.persistence = persistence
         var loaded = persistence?.load() ?? Preferences()
         loaded.migrateAgentsIfNeeded()
+        // Probes for an installed terminal, so it is done here rather than in the `tools`
+        // getter: a computed property is not a place to touch `NSWorkspace`. The probe is
+        // idempotent and only runs while `storedTools` is nil, so at worst it repeats once per
+        // launch until the user's first edit persists the list.
+        loaded.migrateToolsIfNeeded(terminalCommand: DefaultTerminalResolver.command())
         self.preferences = loaded
     }
 
@@ -147,5 +152,14 @@ final class PreferencesStore: ObservableObject {
             claude.autoResumeRunningSessions = newValue
             preferences.claude = claude
         }
+    }
+
+    // MARK: Tools
+
+    /// The configured tools, in overlay order. The single accessor the menu, the overlay and
+    /// the preferences pane all read and write through.
+    var tools: [ToolDefinition] {
+        get { preferences.tools }
+        set { preferences.tools = newValue }
     }
 }
