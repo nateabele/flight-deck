@@ -1,3 +1,4 @@
+import Foundation
 import Network
 import XCTest
 import FleetKit
@@ -33,12 +34,12 @@ final class FleetSocketLoopbackTests: XCTestCase {
         key: FleetDeviceKey,
         hello: @escaping (UUID, Int) -> [ServerFrame],
         command: @escaping (UUID, Int, FleetCommand) -> ServerFrame = { _, cid, _ in .ack(cid: cid) }
-    ) throws -> NWEndpoint.Port {
+    ) async throws -> NWEndpoint.Port {
         let server = FleetSocketServer()
         server.onHello = hello
         server.onCommand = command
         self.server = server
-        return try server.start(keys: [key], port: nil)
+        return try await server.start(keys: [key], port: nil)
     }
 
     private func connect(key: FleetDeviceKey, port: NWEndpoint.Port, lastSeq: Int = 0) -> FleetClient {
@@ -50,10 +51,10 @@ final class FleetSocketLoopbackTests: XCTestCase {
         return client
     }
 
-    func testAPairedClientReceivesTheSnapshotItAskedFor() throws {
+    func testAPairedClientReceivesTheSnapshotItAskedFor() async throws {
         let key = FleetDeviceKey.mint()
         let expected = fleet("one")
-        let port = try startServer(key: key, hello: { _, lastSeq in
+        let port = try await startServer(key: key, hello: { _, lastSeq in
             XCTAssertEqual(lastSeq, 0)
             return [.snapshot(seq: 7, fleet: expected, reason: .initial)]
         })
@@ -67,9 +68,9 @@ final class FleetSocketLoopbackTests: XCTestCase {
         XCTAssertEqual(frames, [.snapshot(seq: 7, fleet: expected, reason: .initial)])
     }
 
-    func testLiveEventsReachAnAttachedClient() throws {
+    func testLiveEventsReachAnAttachedClient() async throws {
         let key = FleetDeviceKey.mint()
-        let port = try startServer(key: key, hello: { _, _ in
+        let port = try await startServer(key: key, hello: { _, _ in
             [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)]
         })
 
@@ -87,10 +88,10 @@ final class FleetSocketLoopbackTests: XCTestCase {
         wait(for: [sawEvent], timeout: 10)
     }
 
-    func testResumingSendsTheSequenceTheClientAlreadyHas() throws {
+    func testResumingSendsTheSequenceTheClientAlreadyHas() async throws {
         let key = FleetDeviceKey.mint()
         let asked = expectation(description: "hello with lastSeq")
-        let port = try startServer(key: key, hello: { _, lastSeq in
+        let port = try await startServer(key: key, hello: { _, lastSeq in
             if lastSeq == 812 { asked.fulfill() }
             return [.snapshot(seq: 900, fleet: self.fleet("one"), reason: .seqTooOld)]
         })
@@ -98,10 +99,10 @@ final class FleetSocketLoopbackTests: XCTestCase {
         wait(for: [asked], timeout: 10)
     }
 
-    func testACommandIsAcknowledgedAgainstItsOwnCorrelationID() throws {
+    func testACommandIsAcknowledgedAgainstItsOwnCorrelationID() async throws {
         let key = FleetDeviceKey.mint()
         let delivered = expectation(description: "command reached the server")
-        let port = try startServer(
+        let port = try await startServer(
             key: key,
             hello: { _, _ in [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)] },
             command: { _, cid, command in
@@ -123,8 +124,8 @@ final class FleetSocketLoopbackTests: XCTestCase {
 
     /// The trust boundary again, this time through the whole stack rather than at the TLS
     /// layer alone: an unpaired device must never reach `onHello`.
-    func testAnUnpairedClientNeverReachesApplicationCode() throws {
-        let port = try startServer(key: .mint(), hello: { _, _ in
+    func testAnUnpairedClientNeverReachesApplicationCode() async throws {
+        let port = try await startServer(key: .mint(), hello: { _, _ in
             XCTFail("an unpaired device reached the application layer")
             return []
         })
@@ -141,9 +142,9 @@ final class FleetSocketLoopbackTests: XCTestCase {
     /// One dropped socket must produce exactly one `onDisconnect`. Three code paths reach
     /// that closure and a single failure trips at least two of them, so without the guard the
     /// reconnect policy built on it schedules a retry per firing.
-    func testDisconnectIsReportedAtMostOncePerConnection() throws {
+    func testDisconnectIsReportedAtMostOncePerConnection() async throws {
         let key = FleetDeviceKey.mint()
-        let port = try startServer(key: key, hello: { _, _ in
+        let port = try await startServer(key: key, hello: { _, _ in
             [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)]
         })
         let client = connect(key: key, port: port)
@@ -165,9 +166,9 @@ final class FleetSocketLoopbackTests: XCTestCase {
     /// A teardown we asked for is not a disconnection to react to. If `disconnect()` reported
     /// through `onDisconnect`, a client that raced several endpoints and cancelled the losers
     /// would immediately try to reconnect to each of them.
-    func testAskingToDisconnectDoesNotReportADisconnection() throws {
+    func testAskingToDisconnectDoesNotReportADisconnection() async throws {
         let key = FleetDeviceKey.mint()
-        let port = try startServer(key: key, hello: { _, _ in
+        let port = try await startServer(key: key, hello: { _, _ in
             [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)]
         })
         let client = connect(key: key, port: port)
@@ -188,13 +189,13 @@ final class FleetSocketLoopbackTests: XCTestCase {
     /// A peer that completes a handshake and then says nothing must not hold a slot open
     /// forever — that is a resource leak reachable by anyone holding a revoked-but-not-yet-
     /// deleted key.
-    func testASilentClientIsDroppedAfterTheAuthDeadline() throws {
+    func testASilentClientIsDroppedAfterTheAuthDeadline() async throws {
         let key = FleetDeviceKey.mint()
         let server = FleetSocketServer()
         server.authDeadline = 0.5
         server.onHello = { _, _ in [] }
         self.server = server
-        let port = try server.start(keys: [key], port: nil)
+        let port = try await server.start(keys: [key], port: nil)
 
         // A raw TLS connection that never speaks WebSocket-frames-with-a-hello, so it never
         // reaches `attached` and `onAttachedCountChanged` never fires for it — that callback
@@ -210,5 +211,83 @@ final class FleetSocketLoopbackTests: XCTestCase {
         silent.start(queue: .main)
         wait(for: [dropped], timeout: 10)
         silent.cancel()
+    }
+
+    /// A connection that completed its handshake but has not said `hello` yet is not
+    /// "attached", so an earlier version of `stop()` walked straight past it and left it
+    /// alive with nothing holding a reference that could ever cancel it. Key rotation
+    /// restarts the listener, so this happened whenever a phone was mid-handshake.
+    func testStoppingCancelsAConnectionThatNeverAttached() async throws {
+        let key = FleetDeviceKey.mint()
+        let server = FleetSocketServer()
+        server.authDeadline = 60          // long, so the deadline cannot be what closes it
+        server.onHello = { _, _ in [] }
+        self.server = server
+        let port = try await server.start(keys: [key], port: nil)
+
+        let silent = NWConnection(
+            host: "127.0.0.1", port: port, using: FleetTLS.clientParameters(key: key)
+        )
+        let ready = expectation(description: "handshake complete")
+        silent.stateUpdateHandler = { if case .ready = $0 { ready.fulfill() } }
+        silent.start(queue: .main)
+        wait(for: [ready], timeout: 10)
+
+        let closed = expectation(description: "server closed it")
+        silent.receiveMessage { _, _, isComplete, error in
+            if isComplete || error != nil { closed.fulfill() }
+        }
+        server.stop()
+        wait(for: [closed], timeout: 10)
+        silent.cancel()
+    }
+
+    /// A command from a peer that has not said `hello` must close the connection rather than
+    /// being answered — otherwise a peer that skipped the handshake step could drive the Mac.
+    ///
+    /// Not reachable through `FleetClient`: `connect(to:lastSeq:)` writes `hello` to the
+    /// connection before calling `onReady`, and Network.framework preserves send order on a
+    /// connection, so anything sent from `onReady` is guaranteed to arrive after `hello`, not
+    /// before it. So this speaks WebSocket by hand instead — the same two building blocks
+    /// `FleetSocket` uses internally (a `.url` endpoint and an `NWProtocolWebSocket` text
+    /// frame over `FleetTLS.clientParameters`), just skipping `hello` entirely — to exercise
+    /// the path the public API cannot reach.
+    func testACommandBeforeHelloClosesTheConnection() async throws {
+        let key = FleetDeviceKey.mint()
+        let port = try await startServer(key: key, hello: { _, _ in
+            XCTFail("hello must not have been reached")
+            return []
+        }, command: { _, cid, _ in
+            XCTFail("a command before hello must not be answered")
+            return .ack(cid: cid)
+        })
+
+        let options = NWProtocolWebSocket.Options()
+        options.autoReplyPing = true
+        let parameters = FleetTLS.clientParameters(key: key)
+        parameters.defaultProtocolStack.applicationProtocols.insert(options, at: 0)
+        let connection = NWConnection(
+            to: .url(URL(string: "wss://127.0.0.1:\(port.rawValue)/")!), using: parameters
+        )
+
+        // Proof the server closed it, not that the client gave up on its own: a pending
+        // receive completing, same idiom as the other raw-connection tests in this file.
+        let closed = expectation(description: "closed")
+        connection.receiveMessage { _, _, isComplete, error in
+            if isComplete || error != nil { closed.fulfill() }
+        }
+        connection.stateUpdateHandler = { state in
+            guard case .ready = state else { return }
+            let data = try! JSONEncoder().encode(ClientFrame.cmd(cid: 1, .markRead(id: UUID())))
+            let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
+            let context = NWConnection.ContentContext(identifier: "frame", metadata: [metadata])
+            connection.send(
+                content: data, contentContext: context, isComplete: true,
+                completion: .contentProcessed { _ in }
+            )
+        }
+        connection.start(queue: .main)
+        wait(for: [closed], timeout: 10)
+        connection.cancel()
     }
 }
