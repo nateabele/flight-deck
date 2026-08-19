@@ -391,6 +391,16 @@ extension Ghostty {
             }
             self.surfaceModel = Ghostty.Surface(cSurface: surface)
 
+            // Flight Deck: remember the content scale libghostty was just handed, because
+            // `ghostty.h` exposes a setter (`ghostty_surface_set_content_scale`) and no getter
+            // — the Swift side is the only place this value can be read back. Same expression
+            // `SurfaceConfiguration.withCValue` uses for `config.scale_factor` a few lines
+            // above, so surface and cache start in agreement. libghostty takes one scalar at
+            // creation, so both axes seed from it. The `?? 1` is unreachable: `withCValue` has
+            // already force-unwrapped `NSScreen.main` to build the config we just consumed.
+            let creationScale = NSScreen.main?.backingScaleFactor ?? 1
+            self.pushedContentScale = (creationScale, creationScale)
+
             // Setup our tracking area so we get mouse moved events
             updateTrackingAreas()
 
@@ -477,19 +487,31 @@ extension Ghostty {
             // Flight Deck: `convertToBacking` returns the size *unchanged* for a view with no
             // window, and this app sizes surfaces before they are ever parented — a restored
             // session's shell is forked from `SessionStore.init`, long before SwiftUI builds the
-            // scene body. Falling back to the main screen's scale keeps that report honest, and
-            // matches what `SurfaceConfiguration.withCValue` already hands `ghostty_surface_new`
-            // as `scale_factor`. That match is about the expression, not a guaranteed value:
-            // `NSScreen.main` is whichever screen currently holds the key window, not a fixed
-            // primary display, so on a mixed-DPI setup the two can still disagree by the time
-            // this fires. Once the view is in a window, `convertToBacking` is authoritative
-            // again — it accounts for which screen the window is actually on.
+            // scene body, and `TerminalPane` then keeps every unselected surface out of the view
+            // hierarchy entirely. Falling back to `pushedContentScale` keeps that report honest.
+            //
+            // It has to be the *pushed* scale rather than `NSScreen.main`'s. What libghostty
+            // holds for this surface is whatever was last given to it: `config.scale_factor` at
+            // creation, or `ghostty_surface_set_content_scale` from
+            // `viewDidChangeBackingProperties` the last time this view was in a window. Neither
+            // tracks `NSScreen.main`, which is whichever screen currently holds the key window.
+            // Drag the window from a 2x display to a 1x one and a background surface still holds
+            // content scale 2 — nothing notified it — so scaling its next report by the now-1x
+            // `NSScreen.main` would hand it a framebuffer half the pixels its own cell metrics
+            // are cut for, halving the column count and hard-wrapping that session's scrollback
+            // for good. Scaling by what the surface was actually told keeps size and
+            // `content_scale` consistent by construction, whatever display the window is on.
+            //
+            // Once the view is in a window, `convertToBacking` is authoritative again — it
+            // accounts for which screen the window is actually on, and
+            // `viewDidChangeBackingProperties` has by then re-pushed the matching content scale.
             let scaledSize: CGSize
             if window != nil {
                 scaledSize = convertToBacking(size)
             } else {
-                let scale = NSScreen.main?.backingScaleFactor ?? 1
-                scaledSize = CGSize(width: size.width * scale, height: size.height * scale)
+                scaledSize = CGSize(
+                    width: size.width * pushedContentScale.x,
+                    height: size.height * pushedContentScale.y)
             }
 
             setSurfaceSize(width: UInt32(scaledSize.width), height: UInt32(scaledSize.height))
@@ -500,6 +522,18 @@ extension Ghostty {
         /// The last framebuffer size handed to libghostty, so a repeat report costs nothing.
         /// `nil` means "next report always lands" — see `viewDidChangeBackingProperties`.
         private var lastSurfacePixelSize: CGSize?
+
+        /// Flight Deck: the content scale libghostty is currently holding for this surface —
+        /// seeded at creation and re-set wherever `ghostty_surface_set_content_scale` is called,
+        /// which is the only place it can change. `sizeDidChange` reads it to size an unparented
+        /// surface in the same units the surface's own cell metrics were computed in.
+        ///
+        /// Both axes are kept, not one: `viewDidChangeBackingProperties` derives x and y
+        /// independently from the backing rect and pushes them as separate arguments, so
+        /// collapsing them here would make the cache a lossy copy of the thing it exists to
+        /// mirror. They are equal on every Mac display shipping today; that is a fact about
+        /// current hardware, not an invariant libghostty's API asserts.
+        private var pushedContentScale: (x: CGFloat, y: CGFloat) = (1, 1)
 
         private func setSurfaceSize(width: UInt32, height: UInt32) {
             guard let surface = self.surface else { return }
@@ -891,6 +925,9 @@ extension Ghostty {
             let xScale = fbFrame.size.width / self.frame.size.width
             let yScale = fbFrame.size.height / self.frame.size.height
             ghostty_surface_set_content_scale(surface, xScale, yScale)
+            // Flight Deck: the one place the pushed scale changes, so the one place the cache
+            // `sizeDidChange` reads while unparented has to be brought along.
+            pushedContentScale = (xScale, yScale)
 
             // When our scale factor changes, so does our fb size so we send that too.
             //
