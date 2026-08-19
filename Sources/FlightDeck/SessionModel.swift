@@ -32,6 +32,12 @@ struct Session: Identifiable, Equatable {
     /// predates agent adapters keeps working: a snapshot with no `agent` key decodes to
     /// claude, which is what it has always been.
     var agent: AgentID = .claude
+    /// Which login this tab runs as. **nil means the agent's built-in home** (`~/.claude`,
+    /// `~/.codex`), not "the current default": every tab that predates accounts decodes as
+    /// nil, and its conversation really does live in the built-in home, so it stays correct
+    /// even after another account is dragged to the top of the list.
+    /// `PreferencesStore.resolvedAccountID(for:in:)` normalises it before use.
+    var accountID: UUID?
     /// An absolute transcript path reported by the agent, for agents that report one.
     ///
     /// Distinct from `transcriptDirectory`, which is claude's *input* to path derivation and
@@ -46,6 +52,7 @@ struct Session: Identifiable, Equatable {
         transcriptDirectory: String? = nil,
         pinnedConversationID: UUID? = nil,
         agent: AgentID = .claude,
+        accountID: UUID? = nil,
         transcriptPath: String? = nil
     ) {
         self.id = id
@@ -54,6 +61,7 @@ struct Session: Identifiable, Equatable {
         self.transcriptDirectory = transcriptDirectory ?? workingDirectory
         self.pinnedConversationID = pinnedConversationID ?? id
         self.agent = agent
+        self.accountID = accountID
         self.transcriptPath = transcriptPath
     }
 }
