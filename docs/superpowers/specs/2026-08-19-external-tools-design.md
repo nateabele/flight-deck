@@ -103,10 +103,19 @@ struct ToolDefinition: Codable, Equatable, Identifiable {
 }
 
 struct ToolShortcut: Codable, Equatable {
-    var key: String    // the character, lowercased: "o"
-    var modifiers: UInt // NSEvent.ModifierFlags.deviceIndependentFlagsMask raw value
+    private(set) var key: String       // the character, lowercased: "o"
+    private(set) var modifiers: UInt   // NSEvent.ModifierFlags raw value, allow-listed to ⌘⌃⌥⇧
 }
 ```
+
+Both properties are `private(set)`, and `init(from:)` is written by hand to delegate to
+`init(key:modifiers:)` rather than letting `Codable` synthesize a decode. Synthesized decoding
+assigns straight to the stored properties, which would let a `UserDefaults` blob — editable by
+`defaults write`, and this app's users are developers — carry an uppercase key past
+normalization. That is not cosmetic: §6 assigns `key` directly to `NSMenuItem.keyEquivalent`,
+which is case-sensitive, so an uppercase letter there silently adds Shift to the chord and the
+shortcut the user recorded stops firing. Normalization is defined in exactly one place so the
+recording path and the decode path cannot drift apart.
 
 `ToolShortcut` maps 1:1 onto `NSMenuItem.keyEquivalent` / `keyEquivalentModifierMask`, which is
 the whole point of storing it in `NSEvent`'s vocabulary rather than SwiftUI's `EventModifiers`.
