@@ -193,6 +193,69 @@ The menu items are the *mechanism*, not decoration. AppKit gives the Ghostty sur
 feature the keys were claimed by the surface and the resulting `previous_tab`/`next_tab` action
 went nowhere.
 
+## External tools
+
+`Sources/FlightDeck/Tools/` runs a shell command template — an editor, a terminal, a git
+client, anything the user configures — against whichever session is selected. A tool
+(`ToolDefinition`) is a name, an SF Symbol, a command template and an optional recorded
+chord. Two ship by default, Editor (`$EDITOR ${cwd}`, ⌘O) and Terminal (a probed terminal
+emulator, ⌘T); users add their own in the Tools preferences pane.
+
+The spine: `ToolsMenuController` (the AppKit Tools menu) and `ToolOverlay` (the buttons that
+fade in over the terminal) both call `ToolRunner.run(_:store:launcher:)` — the one path that
+keeps a menu launch and a button launch from drifting apart. `ToolRunner` reads
+`SessionStore.toolContext()`, expands the tool's command with `ToolTemplate.expand`, and
+hands the result to a `ToolLaunching` (`ShellToolLauncher` in production), which runs it as
+`$SHELL -lc <command>`, detached, with `currentDirectoryURL` set to the resolved working
+directory. The login shell rather than a bare `Process` invocation because Flight Deck
+launched from Finder has no `$EDITOR` and no user `PATH` — `-lc` sources the profile, so a
+template behaves exactly as it would if typed into a terminal.
+
+**`SessionStore.toolContext()` is the only bridge into the tools subsystem.** Every agent
+fact it carries — working directory, conversation id, transcript path — comes from
+`AgentAdapter.location(for:)`, never from `Session.transcriptDirectory`,
+`Session.transcriptPath` or `Session.pinnedConversationID` directly, and nothing under
+`Sources/FlightDeck/Tools/` calls `ClaudeSession`. That mirrors why `ClaudeAdapter`
+deliberately keeps `encodedProjectDirName` off the protocol: a claude-only path-derivation
+detail has no business being reachable from the tools subsystem, or from any future adapter.
+`location(for:)` is a required protocol member with no default, so a future adapter cannot
+silently inherit another agent's working-directory logic — the compiler makes it answer for
+its own.
+
+**The Tools menu is AppKit, not a SwiftUI `Commands` group**, for the reason
+`SessionCommands` already documents: SwiftUI cannot vary a `.keyboardShortcut` at runtime,
+and a user-recorded chord is dynamic by definition. `ToolsMenuController` assigns each
+tool's `ToolShortcut` straight onto `NSMenuItem.keyEquivalent` /
+`keyEquivalentModifierMask`, which is a plain property and can change whenever the
+preferences pane changes it. `MenuKeyEquivalents` covers the new menu with **no change at
+all** — it walks the whole main menu and names no specific shortcut, so a Tools item added
+after that file was written routes the same way ⌘Q already does.
+
+**The overlay's fade is a clock-free state machine.** `ToolOverlayVisibility` owns no clock
+of its own — every method takes "now" from its caller, `ToolOverlayModel` — so "fades after
+five idle seconds" is a test that runs instantly rather than one that sleeps. It is driven
+by one passive local `NSEvent` monitor, `ToolOverlayInputMonitor`, modelled on
+`SidebarInputMonitor`: it never consumes an event, so terminal input and hit-testing cannot
+change. Mouse movement is available over the terminal at all only because
+`Ghostty.SurfaceView.updateTrackingAreas` installs an `NSTrackingArea` with `.mouseMoved` —
+record that as a dependency on adapt-copied vendored code: a future re-pull of Ghostty that
+drops the flag would break fade-in with nothing here failing to say so.
+
+Command expansion (`ToolTemplate.expand`) is a pure function with three deliberately
+distinct rules: a known variable (`${cwd}`, `${transcript}`, …) is substituted and
+shell-quoted, so a path with a space stays one argument; a known variable with no value (an
+agent that reports no transcript) becomes `''` rather than nothing, so the command cannot
+silently absorb its next argument into the empty position; an unknown `${…}` is left
+literal, braces and all, and reaches the login shell unchanged — which is what makes
+`$EDITOR` and `${HOME}` behave exactly as they would if typed.
+
+`ShellToolLauncher` drains a launched tool's stderr continuously from a background thread
+rather than reading it after the fact: a `Pipe` has a 64 KiB kernel buffer, and a child
+blocked writing to a full one still reports `isRunning == true`, so an un-drained pipe would
+make a failed-but-verbose launch read identical to a successful one. A non-zero exit inside
+a 2-second grace window is reported through `ToolLaunchFailureReporting`; still running past
+that window counts as success.
+
 ## Not yet built (design, not code)
 
 Harness adapters, the shared code index, the context engine, and the sidebar are **design only** so far — see the [spec](superpowers/specs/2026-07-09-flight-deck-design.md) §1–§9. Nothing in the current codebase implements them.
