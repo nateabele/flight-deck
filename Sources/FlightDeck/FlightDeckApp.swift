@@ -183,7 +183,7 @@ struct FlightDeckApp: App {
     var body: some Scene {
         RootWindow(store: store, preferences: preferences)
             .commands {
-                SessionCommands(store: store)
+                SessionCommands(store: store, preferences: preferences)
                 EditCommands()
                 TabNavigationCommands(store: store)
             }
