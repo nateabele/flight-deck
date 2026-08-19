@@ -168,21 +168,23 @@ struct AgentLocation: Equatable, Sendable {
 func location(for session: Session) -> AgentLocation
 ```
 
-with a protocol-extension default:
+**No protocol-extension default. Every adapter states its own answer.**
 
-```swift
-extension AgentAdapter {
-    func location(for session: Session) -> AgentLocation {
-        AgentLocation(workingDirectory: session.transcriptDirectory, binding: binding(for: session))
-    }
-}
-```
+An earlier draft of this spec gave `location(for:)` a default returning
+`session.transcriptDirectory`, and justified it as "shaped exactly like `rebind`'s". Review of
+Task 1 showed that premise is false, so the conclusion it supported does not stand.
+`rebind`'s default delegates to `binding(for:)` — a protocol *requirement* — which makes it
+correct by construction for **every** conformer, present or future. A `location` default
+hardcoding `transcriptDirectory` has no such property: that field is not derived from the
+adapter at all, so a third adapter that simply failed to override would inherit an
+unguaranteed working directory, with no compile error and no failing test to say so. Today's
+agreement between claude and codex is a coincidence of two implementations, not a derivable
+rule, and a default would have encoded the coincidence as though it were the rule.
 
-The default is deliberate, and shaped exactly like `rebind`'s: today both adapters genuinely
-agree that `transcriptDirectory` is the agent's cwd — `CodexAdapter.prepare` passes it as codex's
-thread cwd — so the shared rule is stated **once, in the adapter layer**, and an agent whose cwd
-works differently overrides it. That is the whole difference from reading the field at the call
-site: the override point exists, and it is where a future agent's author would look.
+Requiring the member costs two three-line implementations and buys compiler enforcement: a new
+adapter cannot be written without answering "where does my agent work?". That the change forced
+`location(for:)` onto five existing test stubs is the enforcement working — a default would
+have silently absorbed all five.
 
 `SessionStore` owns adapter resolution (`adapter(for:)`), so it is also where a context is
 assembled — tools code never touches an adapter:
@@ -424,12 +426,11 @@ both adapter resolution and the `Repo` a session is filed under, and neither is 
   so a future re-pull that drops `.mouseMoved` would silently break fade-in. The overlay
   visibility tests cover the state machine, not the event source, so this would surface as a
   behaviour report rather than a red test.
-- **`location(for:)`'s default is an inherited answer.** A future agent whose working directory
-  is not `transcriptDirectory` gets the wrong `${cwd}` silently if its author does not override
-  the default — the same failure mode `rebind`'s default already carries, and accepted for the
-  same reason: opting *in* to a per-agent answer is safer than forcing every adapter to restate
-  the common one. The mitigation is that the override point is named and documented on the
-  protocol, so it is visible to anyone writing a third adapter.
+- ~~**`location(for:)`'s default is an inherited answer.**~~ **Resolved during Task 1**, not
+  accepted. The risk as first written — a future agent silently inheriting the wrong `${cwd}` —
+  was real, and the mitigation offered here (a documented override point) was too weak for it:
+  nothing would have failed. `location(for:)` is now a protocol requirement with no default, so
+  the compiler refuses an adapter that has not answered. See §3.1.
 - **Menu insertion index.** SwiftUI owns `NSApp.mainMenu` and builds it asynchronously;
   `ToolsMenuController` must tolerate installing before the menu is fully populated and place
   itself by title lookup rather than a fixed index.
