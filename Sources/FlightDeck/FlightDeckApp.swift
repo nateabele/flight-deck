@@ -244,6 +244,13 @@ private final class DeferredOnce<Value> {
     init(_ make: @escaping () -> Value) { self.make = make }
 
     func callAsFunction() -> Value {
+        // Not actor-isolated — `_store` and `_fleet`'s `@StateObject` autoclosures are
+        // evaluated by SwiftUI on the main thread, and `resolved` is read-then-written here
+        // with no lock. `FleetService.onAttachedCountChanged` guards the identical
+        // main-thread-only hazard explicitly (see its comment); this does the same rather
+        // than leaving the assumption to be rediscovered by whoever calls this from
+        // somewhere else and gets two stores instead of one.
+        dispatchPrecondition(condition: .onQueue(.main))
         if let resolved { return resolved }
         let value = make()
         resolved = value

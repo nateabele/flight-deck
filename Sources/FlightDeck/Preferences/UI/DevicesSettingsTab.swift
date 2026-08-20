@@ -1,4 +1,5 @@
 import FleetKit
+import OSLog
 import SwiftUI
 
 /// Where the user arms pairing, sees who is attached, and revokes.
@@ -7,6 +8,10 @@ import SwiftUI
 /// that a paired phone is fully privileged, and these two controls are the only place the
 /// user can see or undo that.
 struct DevicesSettingsTab: View {
+    private static let logger = Logger(
+        subsystem: "dev.flightdeck.FlightDeck", category: "fleet"
+    )
+
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var service: FleetService
 
@@ -90,8 +95,24 @@ struct DevicesSettingsTab: View {
 
     private func revoke(_ device: PairedDevice) {
         preferences.revokeDevice(slot: device.slot)
-        Task { try? await service.reloadKeys() }
         pendingRevocation = nil
+        armError = nil
+        Task {
+            do {
+                try await service.reloadKeys()
+            } catch {
+                // The device is already gone from `preferences.pairedDevices`, so the list is
+                // correct — but a listener that failed to restart is still running with its
+                // old key set, which means it may keep accepting this device until relaunch.
+                // Silently swallowing that (the old `try?`) let the UI claim revocation was
+                // total when it might not have been.
+                Self.logger.error(
+                    "revoke failed to reload the listener's key set: \(error.localizedDescription, privacy: .public)"
+                )
+                armError =
+                    "\(device.name) was removed from the list, but Flight Deck could not restart its listener — this Mac may still accept it until Flight Deck restarts."
+            }
+        }
     }
 }
 
