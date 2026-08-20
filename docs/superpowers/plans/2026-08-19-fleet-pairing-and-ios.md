@@ -480,6 +480,18 @@ struct PairedDevice: Codable, Equatable, Identifiable {
     var id: UUID { slot }
     var isProvisional: Bool { pairedAt == nil }
 
+    /// Whether this device's key should still be honoured.
+    ///
+    /// A paired device carries no `armedUntil` and is live until revoked. A *provisional* one
+    /// is live only until its window closes — and this is what makes that durable. Expiry used
+    /// to be enforced solely by whoever remembered to call `expire()`, which meant a pairing
+    /// sheet dismissed early left its key live indefinitely, across relaunches, contradicting
+    /// the "expires in 2 minutes" the user was shown.
+    func isLive(at now: Date) -> Bool {
+        guard let armedUntil else { return true }
+        return now <= armedUntil
+    }
+
     func key() -> FleetDeviceKey { FleetDeviceKey(slot: slot, secret: secret) }
 }
 ```
@@ -524,6 +536,15 @@ final class PairingArmer {
     }
 
     func cancel() { pending = nil }
+
+    /// The armer's notion of now, exposed so everything that judges a window's liveness uses
+    /// one clock.
+    ///
+    /// Filtering `deviceKeys(at:)` against real `Date()` while the armer runs on an injected
+    /// one is not a test-only wrinkle: it makes the key set disagree with the state machine
+    /// that issued the key. Under a test clock a freshly-armed window is judged already
+    /// expired and the handshake fails outright — which is exactly how this was found.
+    var currentTime: Date { now() }
 
     /// A device completed a handshake on `slot`. Returns whether that closes the window —
     /// i.e. whether this is the device the user just armed for.
@@ -754,8 +775,16 @@ In `PreferencesStore`, in a `// MARK: Paired devices` section:
     let installSuffix: String
 
     /// What `FleetService` starts its listener with. A revoked device is absent here, which
-    /// is the entirety of what revocation means.
-    func deviceKeys() -> [FleetDeviceKey] { pairedDevices.map { $0.key() } }
+    /// is the entirety of what revocation means — and so is a provisional device whose window
+    /// has closed.
+    ///
+    /// That second filter is why expiry is a property of the data rather than of whoever
+    /// remembers to call `expire()`. Without it, a pairing sheet dismissed before its deadline
+    /// left a live key in the accepted set forever, surviving relaunch, while the user had been
+    /// told it expires in two minutes.
+    func deviceKeys(at now: Date = Date()) -> [FleetDeviceKey] {
+        pairedDevices.filter { $0.isLive(at: now) }.map { $0.key() }
+    }
 
     func upsert(_ device: PairedDevice) {
         var devices = pairedDevices
@@ -949,6 +978,24 @@ final class FleetPairingFlowTests: XCTestCase {
         _ = XCTWaiter().wait(for: [refused], timeout: 8)
     }
 
+    /// The hole this closes: expiry used to be enforced only by the pairing sheet's timer,
+    /// which dies with the sheet. Dismissing it early left the key live in the accepted set
+    /// indefinitely — across relaunch — while the user had been told it expires in two minutes.
+    /// Now the data itself refuses an expired key, so nothing has to remember to prune it.
+    func testAnExpiredProvisionalKeyIsRefusedEvenIfNothingPrunedIt() async throws {
+        let (_, preferences, service) = try await standUp()
+        let payload = try await service.arm()
+
+        // The device is still in the list — nobody has called expire — but its window has run
+        // out, and that alone must take it out of what the listener would accept.
+        let afterExpiry = Date().addingTimeInterval(PairingArmer.window + 1)
+        XCTAssertFalse(preferences.pairedDevices.isEmpty)
+        XCTAssertFalse(
+            preferences.deviceKeys(at: afterExpiry).contains { $0.slot == payload.key.slot },
+            "an expired window must not still be a key"
+        )
+    }
+
     func testArmingTwiceLeavesOnlyTheNewestCodeLive() async throws {
         let (_, preferences, service) = try standUp()
         let first = try await service.arm()
@@ -1068,6 +1115,9 @@ Replace the `keys:` closure with the preferences store and the armer, and add th
     private(set) var boundPort: NWEndpoint.Port?
     @Published private(set) var attachedSlots: Set<UUID> = []
 
+    /// Fires the arming window's expiry independently of any UI. See `scheduleExpiry(at:)`.
+    private var expiryTask: Task<Void, Never>?
+
     /// The Bonjour instance name this Mac advertises under, and the name the phone stores so
     /// it can prefer the Mac it paired with.
     ///
@@ -1160,15 +1210,39 @@ Replace the `keys:` closure with the preferences store and the armer, and add th
             serviceName: serviceName,
             endpoints: LocalEndpoints.current(port: port)
         )
-        if let pending = armer.pending { preferences.upsert(pending) }
+        if let pending = armer.pending {
+            preferences.upsert(pending)
+            if let armedUntil = pending.armedUntil { scheduleExpiry(at: armedUntil) }
+        }
         try await reloadKeys()
         return payload
     }
 
     func cancelArming() async throws {
+        expiryTask?.cancel()
+        expiryTask = nil
         if let pending = armer.pending { preferences.revokeDevice(slot: pending.slot) }
         armer.cancel()
         try await reloadKeys()
+    }
+
+    /// Schedules the window's own expiry, so a code stops being a key on time whether or not
+    /// anything is still on screen.
+    ///
+    /// The pairing sheet also calls `expireArming()` on a timer, but that timer dies with the
+    /// sheet: dismissing it early — ⌘W, clicking away, quitting — used to leave the key live
+    /// indefinitely. `deviceKeys(at:)` already refuses an expired key, so this is belt to that
+    /// braces: it makes the *listener* drop it promptly rather than at the next reload.
+    private func scheduleExpiry(at deadline: Date) {
+        expiryTask?.cancel()
+        expiryTask = Task { [weak self] in
+            let seconds = deadline.timeIntervalSinceNow
+            if seconds > 0 {
+                try? await Task.sleep(for: .seconds(seconds))
+            }
+            guard !Task.isCancelled else { return }
+            try? await self?.expireArming()
+        }
     }
 
     /// Drops a window that ran out. Called on a timer by the pairing sheet, and again before
@@ -1221,6 +1295,9 @@ completes:
         attachedSlots.insert(slot)
         let now = Date()
         if armer.claim(slot: slot), var device = preferences.pairedDevices.first(where: { $0.slot == slot }) {
+            // Claimed, so the window is closed and its expiry no longer has anything to do.
+            expiryTask?.cancel()
+            expiryTask = nil
             device.pairedAt = now
             device.armedUntil = nil
             device.lastSeenAt = now
