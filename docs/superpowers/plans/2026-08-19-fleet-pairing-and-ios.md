@@ -2937,13 +2937,20 @@ Covering, in the house voice:
   *could* settle by reading has already been settled and is deliberately absent here — a
   checklist that lists the answerable alongside the unanswerable is one nobody finishes.
 
-  1. **Dismiss the pairing screen and watch the camera indicator go out.** This is the definitive
-     test for the teardown fix. If the orange dot stays lit, `dismantleUIView` is not running or
-     `teardown()` is not reaching `stopRunning()`.
-  2. **Confirm `QRScannerContainerView.deinit` actually runs** — a breakpoint or a print in a
-     debug build. `AVCaptureMetadataOutput` may retain its delegate, which would mean the view
+  1. **Dismiss the pairing screen and watch the camera indicator go out.** The definitive test
+     for the teardown path, and the single highest-value item here: that path took three review
+     rounds to get right, and every round found a real defect the previous one had introduced or
+     missed. If the orange dot stays lit, the chain `dismantleUIView` →
+     `QRScannerContainerView.teardown()` → `QRScannerController.stop()` → `stopRunning()` is
+     broken somewhere along its length.
+  2. **Confirm `QRScannerController.deinit` actually runs** — a breakpoint or a print in a debug
+     build. `AVCaptureMetadataOutput` may retain its delegate (its header declares the property
+     with no ownership qualifier, so this is genuinely unknown), which would mean the controller
      never deallocates and the camera runs for the life of the process. Clearing the delegate in
-     `teardown()` is what is supposed to prevent that; this is how you find out whether it did.
+     `stop()` is what is supposed to prevent that; this is how you find out whether it did.
+     Note the fallback in `deinit` was itself inert for one round — it captured `[weak self]`,
+     which is always nil by the time a deinit-scheduled block runs — so this is checking a
+     mechanism that has already been wrong once in exactly this way.
   3. **Time the pairing screen's first appearance.** `startRunning()` now runs off the main
      thread; the check is that there is no visible hitch, especially on a cold launch while the
      camera warms.
