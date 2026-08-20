@@ -26,23 +26,26 @@ struct AgentsSettingsTab: View {
                     preferences.preferences.moveAgents(fromOffsets: offsets, toOffset: destination)
                 }
             }
-            .frame(minWidth: 160)
+            // `idealWidth` is what HSplitView opens at; `minWidth` alone let the list claim
+            // whatever width its longest row wanted, which was most of the window.
+            .frame(minWidth: 140, idealWidth: 160, maxWidth: 280)
 
-            VStack(alignment: .leading, spacing: 0) {
+            Group {
                 let agent = selection ?? preferences.preferences.agents.first?.id ?? .claude
-                Group {
-                    switch agent {
-                    case .codex: CodexOptionsForm(preferences: preferences)
-                    default:     ClaudeOptionsPane(preferences: preferences)
-                    }
+                // Accounts ride in as each pane's leading section rather than as a region
+                // below it, so the whole detail side is one scroll: accounts, then the
+                // agent's options, then the launch command last.
+                let accounts = {
+                    AnyView(
+                        Section("Accounts") {
+                            AccountsSection(preferences: preferences, sessions: sessions, agent: agent)
+                        }
+                    )
                 }
-                .frame(maxHeight: .infinity)
-
-                Divider()
-
-                AccountsSection(preferences: preferences, sessions: sessions, agent: agent)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
+                switch agent {
+                case .codex: CodexOptionsForm(preferences: preferences, header: accounts)
+                default:     ClaudeOptionsPane(preferences: preferences, leading: accounts)
+                }
             }
             .frame(minWidth: 380)
         }
@@ -63,6 +66,9 @@ struct AgentsSettingsTab: View {
 /// that row, and `globalFlags` survives only as a decode-only legacy field.
 struct ClaudeOptionsPane: View {
     @ObservedObject var preferences: PreferencesStore
+    /// Emitted above this pane's own "Startup" section, inside the same `Form`. The Agents tab
+    /// uses it for the accounts list; the Projects tab passes nothing.
+    var leading: (() -> AnyView)?
 
     /// Reads and writes the claude row's flags within `preferences.agents`, wherever that row
     /// currently sits — the list's order is the shortcut binding, not a storage index, so this
@@ -90,21 +96,24 @@ struct ClaudeOptionsPane: View {
             lockedPrefix: Self.placeholderPrefix,
             header: {
                 AnyView(
-                    Section("Startup") {
-                        Toggle(
-                            "Auto-resume running sessions on restart",
-                            isOn: Binding(
-                                get: { preferences.autoResumesRunningSessions },
-                                set: { preferences.autoResumesRunningSessions = $0 }
+                    Group {
+                        if let leading { leading() }
+                        Section("Startup") {
+                            Toggle(
+                                "Auto-resume running sessions on restart",
+                                isOn: Binding(
+                                    get: { preferences.autoResumesRunningSessions },
+                                    set: { preferences.autoResumesRunningSessions = $0 }
+                                )
                             )
-                        )
-                        .accessibilityIdentifier("prefs-auto-resume")
+                            .accessibilityIdentifier("prefs-auto-resume")
                         // States the busy/shell rule in the user's terms: "running" is not
                         // self-evident from the label, and the exclusions are the surprising
                         // half.
                         Text("Sessions that were working when Flight Deck last quit are asked to continue once they have resumed. Sessions that were idle, or waiting on you, are left alone.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 )
             }

@@ -46,9 +46,13 @@ struct FlagEditor: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Form {
-                if let header { header() }
+        // One scroll area, not three. The pane used to be a `Form` that scrolled, a pinned
+        // command field below it, and an accounts box below that — so on a short window the
+        // flags scrolled inside a sliver while two fixed regions held the height. Everything
+        // now lives in this single `Form`: the caller's header first (accounts, then any
+        // agent-specific preamble), the flag sections, and the command field last.
+        Form {
+            if let header { header() }
                 ForEach(FlagSpec.Section.allCases, id: \.self) { section in
                     Section(section.rawValue) {
                         // Keyed by `spec.canonical`, not index/offset: `FlagRow` holds
@@ -74,14 +78,7 @@ struct FlagEditor: View {
                         }
                     }
                 }
-            }
-            .formStyle(.grouped)
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Launch command")
-                    .font(.subheadline.weight(.medium))
+            Section("Launch command") {
                 LockedPrefixCommandField(
                     lockedPrefix: lockedPrefix,
                     tail: $tail,
@@ -105,8 +102,8 @@ struct FlagEditor: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .padding(12)
         }
+        .formStyle(.grouped)
         .onAppear { syncTextFromControls() }
         // `flags`/`inherited` can change out from under this view without going through
         // `binding(for:)` or `applyTextToControls` — e.g. a master/detail Projects list

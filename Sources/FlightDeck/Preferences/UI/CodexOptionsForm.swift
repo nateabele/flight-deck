@@ -10,6 +10,9 @@ struct CodexOptionsForm: View {
     /// global codex row `options` otherwise resolves through `preferences`. Mirrors how
     /// `FlagEditor` takes `flags` from its caller rather than always reading the global row.
     var projectOverride: Binding<CodexThreadOptions>?
+    /// Rendered as the leading `Section` of this `Form`, mirroring `FlagEditor.header`. The
+    /// Agents tab uses it for the accounts list; the Projects tab passes nothing.
+    var header: (() -> AnyView)?
     @State private var newDir = ""
 
     /// Internal rather than private so `CodexSchemaConformanceTests` can assert these against
@@ -41,6 +44,7 @@ struct CodexOptionsForm: View {
 
     var body: some View {
         Form {
+            if let header { header() }
             Section("Model") {
                 TextField(
                     "codex's default",
