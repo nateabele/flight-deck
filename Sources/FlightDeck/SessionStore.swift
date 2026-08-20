@@ -289,8 +289,13 @@ final class SessionStore: ObservableObject {
     /// Test seam. The restore path's codex work is asynchronous by necessity — it starts an
     /// app-server and asks it whether a thread still exists — but `restore` itself must stay
     /// synchronous for `SessionStore.init`. Exposing the task is what lets a test await that
-    /// work instead of polling for it.
+    /// work instead of polling for it. `reopenLastClosed` reuses it for the same reason.
     private(set) var codexRestoreTask: Task<Void, Never>?
+
+    /// What ⌘⇧T walks back through. Not `@Published` and never persisted: nothing renders it,
+    /// and a relaunch already restores the deck you left — a stack that survived one would
+    /// offer to reopen tabs from a run you have since replaced. See `ClosedSessionHistory`.
+    private var closedSessions = ClosedSessionHistory()
 
     /// Test seam. Drives the exact path a crashed `codex app-server` takes, which can
     /// otherwise only be produced by killing a real process the committed suite may not spawn.
@@ -1990,11 +1995,25 @@ final class SessionStore: ObservableObject {
         selectedSessionID = ordered[destination].id
     }
 
-    func closeSession(_ id: UUID) {
+    /// - Parameter recordingHistory: whether this close is offered to ⌘⇧T. Only
+    ///   `closeProject` passes false, because it records one grouped entry of its own rather
+    ///   than one per child — see `closeProject`.
+    func closeSession(_ id: UUID, recordingHistory: Bool = true) {
         guard let (repoIndex, sessionIndex) = locate(id) else { return }
         // Read before the removal below: codex teardown is per account, and once the row is
         // gone there is nothing left to ask which account this tab was running as.
         let closed = instance(for: repos[repoIndex].sessions[sessionIndex])
+        // Recorded before the removal, for the same reason and from the same row. The whole
+        // `Session` value goes in, not a copy of its fields: reopening reuses its `id` and
+        // `pinnedConversationID`, which is what makes the rebuilt tab resume this
+        // conversation rather than start a new one.
+        if recordingHistory {
+            closedSessions.record(.session(ClosedSessionHistory.ClosedSession(
+                session: repos[repoIndex].sessions[sessionIndex],
+                projectPath: repos[repoIndex].url.path,
+                indexInProject: sessionIndex
+            )))
+        }
         repos[repoIndex].sessions.remove(at: sessionIndex)
         emit(.sessionRemoved(id: id))
 
@@ -2254,12 +2273,168 @@ final class SessionStore: ObservableObject {
     /// teardown: that method is where surface release, watcher shutdown, status and
     /// subagent-count removal, anchor removal, and notification withdrawal all live, and a
     /// second copy of that list would rot.
+    /// ⌘⇧T. Brings back the most recently closed tab — or, if a whole project was closed, the
+    /// project and everything that was in it — and walks further back on each press until the
+    /// history runs out.
+    ///
+    /// A reopened tab is rebuilt exactly the way `restore` rebuilds a persisted one, through
+    /// `reinsertClosed`: same resume command, same missing-login refusal, same codex
+    /// deferral. The two are the same operation on different inputs, and anything that
+    /// diverges here is a bug in one of them.
+    ///
+    /// No-ops on an empty history, which is also what the menu item relies on: it stays
+    /// enabled in every state (a disabled `NSMenuItem` does not fire its key equivalent) and
+    /// guards here instead.
+    /// ⌘W. Closes the selected session, reporting whether there was one.
+    ///
+    /// The menu item binds here rather than to AppKit's `performClose:` because that route
+    /// only works while focus is inside the terminal. `TerminalHostView` implements
+    /// `performClose:` and sits below the terminal pane, so the responder chain reaches it
+    /// from a focused surface — but from a focused *sidebar* there is nothing between the
+    /// sidebar and the window, `NSWindow` implements `performClose:` itself, and the window
+    /// claims the key. In a single-window app whose window closing quits
+    /// (`applicationShouldTerminateAfterLastWindowClosed`), that turned ⌘W into ⌘Q.
+    ///
+    /// The `Bool` is what keeps the empty state honest: with no session there is nothing to
+    /// close, and the caller falls back to closing the window rather than swallowing the key.
+    @discardableResult
+    func closeSelectedSession() -> Bool {
+        guard let id = selectedSessionID else { return false }
+        closeSession(id)
+        return true
+    }
+    func reopenLastClosed(
+        directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) {
+        guard let entry = closedSessions.takeLast() else { return }
+
+        // Same collection-then-launch shape as `restore`: settling a codex thread is `async`
+        // and this is not.
+        var deferredCodexResumes: [UUID] = []
+
+        switch entry {
+        case .session(let closed):
+            if reinsertClosed(closed, directoryExists: directoryExists) {
+                deferredCodexResumes.append(closed.session.id)
+            }
+            // Matching `addSession` rather than `insertSession`: a tab reopened into a
+            // collapsed project would otherwise come back invisible, since `SidebarRow.rows`
+            // renders only the header for a collapsed repo. The `.project` case below
+            // deliberately does not do this — a project that was collapsed when it was closed
+            // is restored collapsed, because that is the state being undone.
+            let url = URL(fileURLWithPath: closed.projectPath, isDirectory: true)
+            if let target = indexOfRepo(for: url), repos[target].isCollapsed {
+                repos[target].isCollapsed = false
+                emit(.projectCollapsed(id: repos[target].id, isCollapsed: false))
+            }
+            selectedSessionID = closed.session.id
+
+        case .project(let closed):
+            let url = URL(fileURLWithPath: closed.path, isDirectory: true)
+            // Seeded at its recorded sidebar position before the sessions go in, so they land
+            // in it rather than making `insertSession` append a fresh repo at the end. Skipped
+            // when the project is already back — a session closed before the project was, then
+            // reopened first, recreates it.
+            if indexOfRepo(for: url) == nil {
+                let repo = Repo(url: url, isCollapsed: closed.isCollapsed)
+                // Clamped: sessions may have been closed or projects added since, so the
+                // recorded index can be past the end of a shorter sidebar.
+                let at = min(max(closed.indexInSidebar, 0), repos.count)
+                repos.insert(repo, at: at)
+                emit(.projectAdded(
+                    FleetProjection.project(repo, statuses: statuses, unread: unreadIdle), at: at
+                ))
+            }
+            for child in closed.sessions {
+                if reinsertClosed(child, directoryExists: directoryExists) {
+                    deferredCodexResumes.append(child.session.id)
+                }
+            }
+            // The top row of what just came back, which is where the eye goes. A project
+            // records no "active tab" of its own to return to.
+            if let first = closed.sessions.first { selectedSessionID = first.session.id }
+        }
+
+        persist()
+        // Reuses `restore`'s task handle rather than adding a second one: the two never run
+        // concurrently in production — `restore` happens once at launch, before any tab can
+        // be closed — and sharing it keeps one place to await a settling codex tab.
+        if !deferredCodexResumes.isEmpty {
+            codexRestoreTask = Task { [weak self] in
+                await self?.resumeRestoredCodex(deferredCodexResumes)
+            }
+        }
+    }
+
+    /// Rebuilds one recorded tab. Returns true when it is a codex tab whose resume text still
+    /// has to be settled against the app-server and typed afterwards.
+    ///
+    /// Every rule here is `restore`'s, and the doc comments there are the explanation:
+    /// a transcript directory that has since gone (a deleted worktree, usually) falls back to
+    /// the project directory so `--resume` runs where claude actually wrote; a tab whose login
+    /// has been deleted is rebuilt but never launched; and codex is typed at only after
+    /// `resumeRestoredCodex` has confirmed its thread still exists.
+    @discardableResult
+    private func reinsertClosed(
+        _ closed: ClosedSessionHistory.ClosedSession,
+        directoryExists: (String) -> Bool
+    ) -> Bool {
+        var session = closed.session
+        if !directoryExists(session.transcriptDirectory) {
+            session.transcriptDirectory = session.workingDirectory
+        }
+
+        let orphaned = accountIsMissing(for: session)
+        let deferred = session.agent == .codex
+        let initialInput: String
+        if orphaned || deferred {
+            initialInput = ""
+        } else {
+            // Built inside the else, as in `restore`, so an orphaned tab does not memoize an
+            // adapter — and a status watcher behind it — for the built-in account its
+            // dangling id would otherwise collapse to.
+            let adapter = adapter(for: instance(for: session))
+            initialInput = adapter.resumeCommand(
+                adapter.binding(for: session),
+                session,
+                // From the tab's *project*, not from wherever it was last writing, so a tab
+                // reopened inside a worktree still gets its project's overrides.
+                options(for: session.agent, project: session.workingDirectory)
+            )
+        }
+
+        insertSession(
+            session,
+            in: URL(fileURLWithPath: closed.projectPath, isDirectory: true),
+            initialInput: initialInput,
+            at: closed.indexInProject
+        )
+        return deferred && !orphaned
+    }
     func closeProject(_ id: Repo.ID) {
         guard let index = repos.firstIndex(where: { $0.id == id }) else { return }
+        // One history entry for the whole project, and the children below are closed with
+        // `recordingHistory: false` so they do not each push one as well. That is what makes
+        // a closed project cost a single ⌘⇧T rather than one per tab — the same way a browser
+        // reopens a closed window rather than making you undo its tabs one at a time.
+        //
+        // Recorded before the closes, from the live repo: `closeSession` rewrites `repos`,
+        // and by the end of the loop there is nothing left here to read.
+        let repo = repos[index]
+        closedSessions.record(.project(ClosedSessionHistory.ClosedProject(
+            path: repo.url.path,
+            isCollapsed: repo.isCollapsed,
+            indexInSidebar: index,
+            sessions: repo.sessions.enumerated().map { offset, session in
+                ClosedSessionHistory.ClosedSession(
+                    session: session, projectPath: repo.url.path, indexInProject: offset
+                )
+            }
+        )))
         // Snapshot the ids first: `closeSession` mutates `repos`, so iterating the live
         // array would walk off the end.
         for sessionID in repos[index].sessions.map(\.id) {
-            closeSession(sessionID)
+            closeSession(sessionID, recordingHistory: false)
         }
         // Re-found rather than reusing `index`: every `closeSession` above rewrote `repos`.
         repos.removeAll { $0.id == id }
