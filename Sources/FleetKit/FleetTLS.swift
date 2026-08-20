@@ -41,7 +41,7 @@ public enum FleetTLS {
         // Key rotation restarts the listener on the *same* port on every arm, expiry and
         // revocation (`FleetService.reloadKeys()`). `FleetSocketServer.start` now waits for
         // the old listener's cancellation to be confirmed before rebinding (its
-        // `releaseListener()`), which is what actually prevents `EADDRINUSE` against a
+        // `releaseListenerOnQueue`), which is what actually prevents `EADDRINUSE` against a
         // still-live listener — this flag alone cannot, since two sockets cannot both
         // LISTEN on one port regardless of it. It stays set for the narrower case that
         // confirmation does not cover: a socket the OS is still draining in `TIME_WAIT`

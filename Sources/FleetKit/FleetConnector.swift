@@ -233,9 +233,9 @@ public final class FleetConnector: @unchecked Sendable {
     /// frame. Do not add a receive-timeout that assumes a frame always follows `hello`.
     private func apply(_ frame: ServerFrame) {
         switch frame {
-        case .snapshot(let seq, let snapshot, let reason):
+        case .snapshot(let seq, let snapshot, _):
             fleet = snapshot
-            adopt(seq, reason: reason)
+            adopt(seq)
         case .event(let seq, let event):
             fleet.apply(event)
             advance(to: seq)
@@ -247,18 +247,18 @@ public final class FleetConnector: @unchecked Sendable {
     }
 
     /// A `.snapshot` sets `lastSeq` ABSOLUTELY, not just when it is higher.
-    /// `FleetReplicator.seq` restarts at 0 on every Mac process launch, and `reason` names
-    /// exactly the case where that surfaces here: `.seqTooOld` is the server answering "you
-    /// asked to resume from before what I can offer", which after a restart means offering a
-    /// `seq` LOWER than what this phone already has stored. Frames on one connection are
-    /// ordered, so whatever seq the snapshot being applied right now carries IS the truth for
-    /// this connection — higher or lower than the old value. Guarding this with the same `>`
-    /// rule `.event` uses (the rule this used to share) would pin `lastSeq` at the pre-restart
-    /// value forever: the *display* stays correct regardless, because `fleet.apply` runs
-    /// unconditionally and events are idempotent, but every future reconnect would then
-    /// re-download the whole snapshot instead of resuming — a permanent, invisible
-    /// degradation with nothing on screen to explain it.
-    private func adopt(_ seq: Int, reason: SnapshotReason) {
+    /// `FleetReplicator.seq` restarts at 0 on every Mac process launch, and the case where
+    /// that surfaces here is `.seqTooOld`: the server answering "you asked to resume from
+    /// before what I can offer", which after a restart means offering a `seq` LOWER than
+    /// what this phone already has stored. Frames on one connection are ordered, so whatever
+    /// seq the snapshot being applied right now carries IS the truth for this connection —
+    /// higher or lower than the old value, regardless of which `SnapshotReason` produced it.
+    /// Guarding this with the same `>` rule `.event` uses (the rule this used to share) would
+    /// pin `lastSeq` at the pre-restart value forever: the *display* stays correct
+    /// regardless, because `fleet.apply` runs unconditionally and events are idempotent, but
+    /// every future reconnect would then re-download the whole snapshot instead of resuming
+    /// — a permanent, invisible degradation with nothing on screen to explain it.
+    private func adopt(_ seq: Int) {
         mac.lastSeq = seq
         store.save(mac)
     }

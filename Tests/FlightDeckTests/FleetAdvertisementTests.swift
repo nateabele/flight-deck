@@ -2,6 +2,7 @@ import Network
 import XCTest
 import FleetKit
 
+@MainActor
 final class FleetAdvertisementTests: XCTestCase {
     private var server: FleetSocketServer?
     private var browser: NWBrowser?

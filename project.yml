@@ -109,9 +109,8 @@ targets:
         GENERATE_INFOPLIST_FILE: "YES"
         CODE_SIGNING_ALLOWED: "NO"
 
-  # Scaffolding only (Task 7): launches, shows "Not paired", links FleetKit. Proves the
-  # module actually resolves for an iOS *application* (not just a framework target) — the
-  # pairing screens land on top of this in a later task. Compile-checked only: see
+  # The iOS companion app: pairing (QR scan or typed code) and the live fleet list, both on
+  # top of `FleetKitiOS` above. See docs/MOBILE.md. Compile-checked only: see
   # scripts/build-ios.sh for why nothing here can be run on this machine.
   FlightDeckMobile:
     type: application

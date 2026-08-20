@@ -251,7 +251,7 @@ final class FleetConnectorTests: XCTestCase {
         // Give the race a moment to settle before broadcasting; the server holds nothing
         // for a client that has not attached.
         let attached = expectation(description: "attached")
-        servers[0].onAttachedCountChanged = { if $0 == 1 { attached.fulfill() } }
+        servers[0].onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
         await fulfillment(of: [attached], timeout: 20)
         servers[0].broadcast(.event(seq: 2, .renamed(id: sessionID, title: "two", origin: .user)))
         await fulfillment(of: [renamed], timeout: 20)

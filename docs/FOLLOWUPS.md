@@ -52,9 +52,15 @@ carried forward on trust.
   Keychain.** That is a plist in the user's home directory, readable by anything running as
   them — the same exposure `sessions.json` and the agents' own credentials already have, and
   it is consistent with the mobile companion spec §3's trust model ("a QR on an unlocked Mac
-  is seen only by someone who could already use the Mac"). It is not Keychain-grade, and
-  someone will eventually ask why. Revisit if paired devices ever need to survive a
-  `defaults delete`, or if the trust model changes to assume a less-trusted local user.
+  is seen only by someone who could already use the Mac"), not an oversight. What it does and
+  does not expose: reading the plist gets you every paired device's 32-byte PSK, which is
+  enough to connect to this Mac's fleet listener as that device until it is revoked; it does
+  not get you anything already on disk elsewhere (session content, agent credentials) that a
+  local attacker with plist-reading access could not already reach some other way. The
+  phone's own copy is Keychain-backed (`KeychainPairedMacStore`) precisely because the phone
+  is the side that leaves the building. It is not Keychain-grade on the Mac side, and someone
+  will eventually ask why. Revisit if paired devices ever need to survive a `defaults delete`,
+  or if the trust model changes to assume a less-trusted local user.
 - **`SWIFT_VERSION: "5.0"`** in `project.yml` (Swift 5 language mode under the Swift 6.3
   compiler) — chosen to compile the vendored Ghostty code without Swift-6 strict-concurrency
   breakage. Diverges from the plan's `6.0`/spec's "Swift 6"; revisit only if Flight Deck's own
@@ -460,8 +466,8 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
 - **`FleetSocketServer`'s safety rests on its queue being serial, which `init(queue:)` does not
   enforce.** Every current caller passes the `.main` default. A concurrent queue would compile
   without complaint and break two things that both assume single-queue confinement: the
-  `resumed` guard in `start()`, a plain `Bool` read and written from the listener's
-  `stateUpdateHandler` with no lock, and `FleetService`'s `onAttachedCountChanged` handler,
+  `resumed` guard in `start()`'s `bind` helper, a plain `Bool` read and written from the
+  listener's `stateUpdateHandler` with no lock, and `FleetService`'s `onAttachedSlotsChanged` handler,
   which reaches into `MainActor.assumeIsolated` on the strength of that same assumption (see the
   comment at that call site). Nothing catches a non-serial queue at compile time; passing one
   would surface only at runtime, as either a data race or a trap.
@@ -483,15 +489,8 @@ discovery, and `FlightDeckMobile` on top of the spine above. What its own review
 did not fix:
 
 - **Paired secrets live in `UserDefaults` on the Mac** (`Preferences.pairedDevices`, added in
-  Task 3), not Keychain. That is a plist readable by anything running as this user — the same
-  exposure `sessions.json` and the agents' own credentials already have, and it is the
-  documented trade-off in the mobile companion spec's §3, not an oversight. What it does and
-  does not expose: reading the plist gets you every paired device's 32-byte PSK, which is
-  enough to connect to this Mac's fleet listener as that device until it is revoked; it does
-  not get you anything already on disk elsewhere (session content, agent credentials) that a
-  local attacker with plist-reading access could not already reach some other way. The phone's
-  own copy is Keychain-backed (`KeychainPairedMacStore`) precisely because the phone is the
-  side that leaves the building.
+  Task 3) — recorded under "Deliberate choices worth remembering" above, which this entry
+  does not repeat.
 
 - **A key change restarts the listener**, dropping every attached client for the length of a
   reconnect — recorded in the section directly above this one (`FleetService.reloadKeys`),
@@ -499,7 +498,7 @@ did not fix:
 
 - **Bonjour resolution, roaming and off-LAN reachability are manually verified only.** There is
   no automated coverage and there cannot be on one machine with one network interface — the
-  eleven-item checklist in [docs/MOBILE.md](MOBILE.md) is what stands in for it.
+  twelve-item checklist in [docs/MOBILE.md](MOBILE.md) is what stands in for it.
 
 - **No relay**, so reaching the Mac from off-LAN needs a VPN. Designed for as a further
   candidate endpoint (spec §3, §12), not built in either plan.
@@ -514,13 +513,19 @@ did not fix:
   was never built either. Both are still the documented escape hatch if either platform's
   behavior here ever regresses.
 
-- **`FleetSocketServer` does not guard its public entry points the way `FleetConnector` now
-  does.** Both are `@unchecked Sendable` with state confined to `queue`; the connector asserts
-  `dispatchPrecondition` on `start`/`stop`/`send`, the server asserts only that its own
-  callbacks land on `queue` and catches a bad `queue:` argument at the first connection instead.
-  Both are honest today only because every caller is `@MainActor` and every `queue` defaults to
-  `.main` — a property of the callers, not of the types. Worth deciding deliberately rather than
-  leaving the two inconsistent.
+- **`FleetSocketServer.start()` cannot assert `dispatchPrecondition(.onQueue(queue))` as a
+  first line the way `stop()`/`broadcast()` and `FleetConnector`'s entry points do.** Tried
+  during the final review pass, and it trapped every time, `@MainActor` callers included:
+  `start()` is a plain `nonisolated async` method, and Swift's concurrency runtime schedules a
+  bare `await` call to one of those onto the default global executor regardless of the caller's
+  queue — and, less obviously, resuming a `withCheckedContinuation` from inside `queue.async`
+  does not make the *rest* of the async function's body keep running on `queue` either, since
+  that resumption is scheduled by the task, not by whichever GCD queue happened to call
+  `resume()`. The fix that landed: `start()` now dispatches its own body onto `queue` via
+  `queue.async`, bridged back to `async`/`await` by one outer continuation, rather than
+  asserting the caller already put it there — see the doc comments on `start()` and `bind(...)`.
+  `stop()` and `broadcast()` are synchronous and unaffected by any of this; they keep the
+  literal `FleetConnector`-style assertion as their first line.
 
 - **The phone persists `lastSeq` on every applied frame**, deliberately: with the keychain item
   updated in place there is no write window, and the event rate is bounded by the Mac's

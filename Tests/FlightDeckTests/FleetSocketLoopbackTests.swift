@@ -10,15 +10,28 @@ final class FleetSocketLoopbackTests: XCTestCase {
     private var server: FleetSocketServer?
     private var client: FleetClient?
 
-    override func tearDown() {
+    override func tearDown() async throws {
         client?.disconnect()
-        server?.stop()
+        if let server { try await onMain { server.stop() } }
         client = nil
         server = nil
-        super.tearDown()
     }
 
     private let sessionID = UUID()
+
+    /// `FleetSocketServer.start`/`stop`/`broadcast` each assert
+    /// `dispatchPrecondition(.onQueue(.main))` (see that class's doc comment) — deliberately,
+    /// so nothing touches the state those calls mutate from any queue but the one
+    /// `NWListener`/`NWConnection` deliver their own callbacks on. This class is deliberately
+    /// NOT `@MainActor` itself: its tests block with `wait(for:)`, and blocking the main
+    /// actor's own executor would starve the very callbacks the wait is waiting on — the same
+    /// hazard documented on the `@MainActor` test classes that use `await fulfillment(of:)`
+    /// instead. Hopping only the one call that needs to prove it is on `.main`, rather than
+    /// the whole test method, keeps both promises intact.
+    @MainActor
+    private func onMain<T>(_ body: @MainActor () async throws -> T) async throws -> T {
+        try await body()
+    }
 
     private func fleet(_ title: String) -> FleetSnapshot {
         FleetSnapshot(projects: [
@@ -39,7 +52,7 @@ final class FleetSocketLoopbackTests: XCTestCase {
         server.onHello = hello
         server.onCommand = command
         self.server = server
-        return try await server.start(keys: [key], port: nil)
+        return try await onMain { try await server.start(keys: [key], port: nil) }
     }
 
     private func connect(key: FleetDeviceKey, port: NWEndpoint.Port, lastSeq: Int = 0) -> FleetClient {
@@ -82,9 +95,11 @@ final class FleetSocketLoopbackTests: XCTestCase {
         // Broadcast only after the client is attached, or the frame has nowhere to go —
         // the server holds no queue for a client that has not connected yet.
         let attached = expectation(description: "attached")
-        server?.onAttachedCountChanged = { if $0 == 1 { attached.fulfill() } }
+        server?.onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
         wait(for: [attached], timeout: 10)
-        server?.broadcast(.event(seq: 2, .renamed(id: sessionID, title: "two", origin: .user)))
+        if let server {
+            try await onMain { server.broadcast(.event(seq: 2, .renamed(id: sessionID, title: "two", origin: .user))) }
+        }
         wait(for: [sawEvent], timeout: 10)
     }
 
@@ -152,7 +167,7 @@ final class FleetSocketLoopbackTests: XCTestCase {
             return []
         }
         self.server = server
-        let port = try await server.start(keys: [], port: nil)
+        let port = try await onMain { try await server.start(keys: [], port: nil) }
 
         let client = FleetClient(key: .mint())
         self.client = client
@@ -174,13 +189,13 @@ final class FleetSocketLoopbackTests: XCTestCase {
         })
         let client = connect(key: key, port: port)
         let attached = expectation(description: "attached")
-        server?.onAttachedCountChanged = { if $0 == 1 { attached.fulfill() } }
+        server?.onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
         wait(for: [attached], timeout: 10)
 
         var endings = 0
         client.onDisconnect = { _ in endings += 1 }
         // Drop the socket from the far end, which is what a Mac going away looks like.
-        server?.stop()
+        if let server { try await onMain { server.stop() } }
 
         let settled = expectation(description: "settled")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { settled.fulfill() }
@@ -198,7 +213,7 @@ final class FleetSocketLoopbackTests: XCTestCase {
         })
         let client = connect(key: key, port: port)
         let attached = expectation(description: "attached")
-        server?.onAttachedCountChanged = { if $0 == 1 { attached.fulfill() } }
+        server?.onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
         wait(for: [attached], timeout: 10)
 
         var endings = 0
@@ -220,10 +235,10 @@ final class FleetSocketLoopbackTests: XCTestCase {
         server.authDeadline = 0.5
         server.onHello = { _, _ in [] }
         self.server = server
-        let port = try await server.start(keys: [key], port: nil)
+        let port = try await onMain { try await server.start(keys: [key], port: nil) }
 
         // A raw TLS connection that never speaks WebSocket-frames-with-a-hello, so it never
-        // reaches `attached` and `onAttachedCountChanged` never fires for it — that callback
+        // reaches `attached` and `onAttachedSlotsChanged` never fires for it — that callback
         // only reports peers the server actually let in. The proof the server dropped it is
         // a pending `receiveMessage` completing: Network.framework does not surface a peer's
         // close through `stateUpdateHandler` on this side, only through a receive that was
@@ -248,7 +263,7 @@ final class FleetSocketLoopbackTests: XCTestCase {
         server.authDeadline = 60          // long, so the deadline cannot be what closes it
         server.onHello = { _, _ in [] }
         self.server = server
-        let port = try await server.start(keys: [key], port: nil)
+        let port = try await onMain { try await server.start(keys: [key], port: nil) }
 
         let silent = NWConnection(
             host: "127.0.0.1", port: port, using: FleetTLS.clientParameters(key: key)
@@ -262,7 +277,7 @@ final class FleetSocketLoopbackTests: XCTestCase {
         silent.receiveMessage { _, _, isComplete, error in
             if isComplete || error != nil { closed.fulfill() }
         }
-        server.stop()
+        try await onMain { server.stop() }
         wait(for: [closed], timeout: 10)
         silent.cancel()
     }

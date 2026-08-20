@@ -5,12 +5,15 @@ public struct PairedMac: Codable, Equatable, Sendable {
     public var key: FleetDeviceKey
     public var macName: String
     public var serviceName: String
-    /// Every REMEMBERED address that has worked, best-first. Updated as the phone learns
-    /// better ones — the endpoint from the QR is stale the moment the Mac changes network,
-    /// and a phone that only remembered the original would need re-pairing to follow it.
-    /// A Mac found via Bonjour is deliberately absent from this list: Bonjour is a
-    /// rediscovery mechanism, not a memory, so it is retried on every launch rather than
-    /// being written here — see `FleetConnector.Candidate.isRemembered`.
+    /// Every REMEMBERED address, best-first — seeded once from the pairing payload's QR and
+    /// never grown after that. `FleetConnector.promote` only REORDERS this list, moving
+    /// whichever address just won a race to the front so the next launch connects on its
+    /// first attempt; it never adds an address that was not already here. Following a Mac
+    /// that changed network is not this list's job at all — it is done entirely by Bonjour
+    /// rediscovery, which is deliberately absent from this list (Bonjour is retried on every
+    /// launch rather than remembered — see `FleetConnector.Candidate.isRemembered`), so a
+    /// Mac reachable only by a new address is found by the browser, not by anything written
+    /// here.
     public var endpoints: [String]
     /// The highest sequence this phone has applied. Persisted so a relaunch resumes instead
     /// of re-downloading the fleet.

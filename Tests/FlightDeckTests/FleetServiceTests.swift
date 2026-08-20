@@ -81,10 +81,10 @@ final class FleetServiceTests: XCTestCase {
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
 
         let attached = expectation(description: "attached")
-        // Poll rather than sleep: `attachedDeviceCount` is the service's own published fact.
+        // Poll rather than sleep: `attachedSlots` is the service's own published fact.
         let observer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
             MainActor.assumeIsolated {
-                if self.service?.attachedDeviceCount == 1 { attached.fulfill() }
+                if self.service?.attachedSlots.count == 1 { attached.fulfill() }
             }
         }
         // See the comment on the first test: `await fulfillment`, not `wait(for:)`, so the
