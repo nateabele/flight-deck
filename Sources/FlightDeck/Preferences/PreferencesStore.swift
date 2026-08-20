@@ -51,7 +51,20 @@ final class PreferencesStore: ObservableObject {
         // idempotent and only runs while `storedTools` is nil, so at worst it repeats once per
         // launch until the user's first edit persists the list.
         loaded.migrateToolsIfNeeded(terminalCommand: DefaultTerminalResolver.command())
+
+        // Minted here rather than on first read of `installSuffix`, so that stays a pure read
+        // — see its doc comment.
+        let mintedNow = loaded.installID == nil
+        if mintedNow { loaded.installID = UUID() }
+        self.installSuffix = String(
+            (loaded.installID ?? UUID()).uuidString.prefix(4)
+        ).lowercased()
         self.preferences = loaded
+
+        // Explicit, because `preferences`'s `didSet` does not fire during `init`. Without
+        // this a freshly minted id never reaches disk and the next launch mints a different
+        // one, which is the one failure this identifier exists to prevent.
+        if mintedNow { persistence?.save(loaded) }
     }
 
     convenience init() {
@@ -168,18 +181,16 @@ final class PreferencesStore: ObservableObject {
 
     var pairedDevices: [PairedDevice] { preferences.pairedDevices ?? [] }
 
-    /// Four hex characters disambiguating this Mac's advertised service name. Minted on
-    /// first read and written back, so the name a phone remembers keeps resolving after a
-    /// relaunch — a suffix regenerated each launch would make Bonjour rediscovery fail in
-    /// exactly the case it exists for.
-    var installSuffix: String {
-        if let existing = preferences.installID {
-            return String(existing.uuidString.prefix(4)).lowercased()
-        }
-        let minted = UUID()
-        preferences.installID = minted
-        return String(minted.uuidString.prefix(4)).lowercased()
-    }
+    /// Four hex characters disambiguating this Mac's advertised Bonjour name, so a phone that
+    /// remembers which Mac it paired with keeps resolving it after a relaunch. A suffix
+    /// regenerated per launch would break rediscovery in exactly the case it exists for.
+    ///
+    /// Computed once in `init` rather than minted on first read. It is displayed in the
+    /// pairing UI, and a getter that minted-and-persisted would mutate `@Published` state
+    /// during a SwiftUI `body` evaluation — the "Modifying state during view update" hazard.
+    /// Making it a stored `let` means the read is pure by construction rather than by
+    /// convention about who is allowed to call it.
+    let installSuffix: String
 
     /// What `FleetService` starts its listener with. A revoked device is absent here, which
     /// is the entirety of what revocation means.
