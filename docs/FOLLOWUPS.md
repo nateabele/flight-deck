@@ -579,10 +579,11 @@ commit message.
   `.receive` would need the same move for `onError`/`onEnd`/`onFrame`/`type` before any of the
   four callers'-worth of closures would type-check clean.
 
-- **PSK slot misattribution with 2+ paired devices — real, found while writing the
-  `onAttachedSlotsChanged` two-device regression test the review asked for.** Corrects the
-  "Neither documented fallback was needed" bullet directly above (2026-08-19 section); this is
-  the full writeup that bullet points to.
+- **PSK slot misattribution with 2+ paired devices — FIXED (2026-08-20), writeup kept for the
+  reasoning trail.** Found while writing the `onAttachedSlotsChanged` two-device regression test
+  the review asked for. Corrects the "Neither documented fallback was needed" bullet directly
+  above (2026-08-19 section); this is the full writeup that bullet points to. What the fix
+  turned out to be is at the end of this entry.
 
   `FleetSocketServer.slot(of:)` reads a connection's PSK identity via
   `sec_protocol_metadata_access_pre_shared_keys`. That call's own header doc says it returns
@@ -609,23 +610,49 @@ commit message.
   cannot reliably tell two attached phones apart, and a disconnect can update or clear the
   wrong slot's badge.
 
-  **Also crashes the test host.** A fuller version of the reproduction above — two clients,
-  one client disconnecting after both are attached — twice produced a reproducible `SIGABRT`
-  ("freed pointer was not the last allocation") during XCTest's tearDown, crashing the whole
-  `xctest` process rather than just failing an assertion (crash reports captured under
-  `~/Library/Logs/DiagnosticReports/xctest-*.ips`; faulting thread inside Swift Concurrency's
-  `_swift_task_dealloc_specific`). Not root-caused further — this needs its own investigation,
-  separate from the misattribution — but it means any test exercising 2+ PSK keys with 2+ real
-  connections and a disconnect can take down an entire `test-unit.sh` run, not just itself.
-  No such test is checked in for exactly this reason.
+  **The fix, and the API that turned out to do the job.** The second of the two sketched
+  directions was right, and the doubt attached to it here ("a client-hint API, so this
+  direction is unconfirmed") was wrong.
+  `sec_protocol_options_set_pre_shared_key_selection_block` is documented from the client's
+  point of view (`SecProtocolOptions.h:406-420`, "when the client must choose a PSK identity
+  given a hint from its peer"), but installed on *listener* options it fires once per incoming
+  connection with the hint carrying the identity the **client** offered — measured against a
+  real two-key listener, not inferred. The `sec_protocol_metadata_t` it is handed is the same
+  object the connection later exposes as `NWProtocolTLS.Metadata.securityProtocolMetadata`
+  (pointer-identical, also measured), so the recorded identity can be looked up per connection.
+  `FleetPSKIdentities` in `Sources/FleetKit/FleetTLS.swift` is that record;
+  `FleetSocketServer.slot(of:id:)` reads it and caches the answer per connection.
+  `sec_protocol_metadata_access_pre_shared_keys` is no longer used for attribution. The client
+  never names its own slot, so the other sketched fallback — a nonce/HMAC round trip in `hello`
+  — was not needed, and neither was any protocol change.
 
-  Two fixes were sketched and deliberately not attempted here (out of scope for "add a
-  regression test," and this is the TLS/security layer): have the client self-report its slot
-  in `hello` and verify it cryptographically against the negotiated secret (this plan's Task 4
-  named exactly this as the documented fallback, before the 2026-08-19 entry wrongly declared
-  it unneeded); or correlate `sec_protocol_options_set_pre_shared_key_selection_block` (a
-  client-hint API, so this direction is unconfirmed) against `ObjectIdentifier`s per
-  connection. Needs sign-off before either is attempted.
+  Authorization is untouched, and that was checked rather than assumed: with the selection block
+  installed, a *paired* identity presented with the wrong secret is still refused (`bad MAC`,
+  -9846) and an unregistered identity is still refused (`unknown PSK identity`, -9864). The
+  identity is a claim; the PSK remains the credential. Guarded by
+  `Tests/FlightDeckTests/FleetSlotAttributionTests.swift` (two keys, two real `FleetClient`s),
+  which fails against the old implementation on all three tests.
+
+  **The test-host `SIGABRT`: investigated, and the evidence says it is not ours.** A fuller
+  version of the reproduction above — two clients, one disconnecting after both are attached —
+  twice produced a `SIGABRT` ("freed pointer was not the last allocation") during XCTest's
+  tearDown, crashing the whole `xctest` process (reports under
+  `~/Library/Logs/DiagnosticReports/xctest-2026-08-20-1450*.ips`). Re-examined 2026-08-20:
+  the faulting stack is `_swift_task_dealloc_specific` ->
+  `XCTSwiftErrorObservation._observeErrors(in:)` -> `-[XCTestCase
+  _performTearDownSequenceWithSelector:]`, entirely inside XCTest's async-tearDown machinery.
+  **No FleetKit, FlightDeckTests or Network.framework frame appears on the faulting thread or
+  on any other thread in either report**, and the assertion is the Swift *task* allocator's
+  LIFO check, not a heap free — memory sockets never touch. Attempts to reproduce it: the
+  two-client attach/attach/disconnect scenario run 25x in isolation, 10x alongside every other
+  socket test class in one process, and in four further shapes (a red assertion, a timed-out
+  expectation, tearDown racing the drop, stopping the server with both attached) — against both
+  the fixed and the *unfixed* server, ~90 test processes in all. Zero aborts; no new crash
+  report was written. So it is treated as an XCTest harness artifact, not a use-after-free in
+  `FleetSocket`/`FleetClient`, and the two-device disconnect test is now checked in
+  (`testDroppingOneDeviceLeavesTheOtherOnItsOwnSlot`). Not *proven* absent — an intermittent
+  harness bug that has not recurred cannot be — so if it ever resurfaces, the thing to capture
+  is the fresh `.ips`: a FleetKit frame appearing in one would overturn this reading.
 ## Agent accounts (2026-08-19) — what the work left behind
 
 Spec: [superpowers/specs/2026-08-19-agent-accounts-design.md](superpowers/specs/2026-08-19-agent-accounts-design.md).
