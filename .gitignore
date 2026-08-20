@@ -6,6 +6,12 @@ build/
 vendor/ghostty-artifacts
 DerivedData/
 *.xcodeproj
+# Written to disk by `xcodegen generate` from project.yml's FlightDeckMobile `info:` block
+# (needed for NSBonjourServices, an array — INFOPLIST_KEY_ build settings can't express one).
+# Every other target synthesizes its Info.plist at build time via GENERATE_INFOPLIST_FILE;
+# this is the one physical copy, regenerated identically on every build, so it stays out of
+# git like the rest of the generated project.
+Sources/FlightDeckMobile/Info.plist
 vendor/.zig-toolchain
 vendor/.build-shim
 *.profraw

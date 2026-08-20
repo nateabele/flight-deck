@@ -109,12 +109,55 @@ targets:
         GENERATE_INFOPLIST_FILE: "YES"
         CODE_SIGNING_ALLOWED: "NO"
 
-# FleetKitiOS needs a persisted shared scheme, not xcodebuild's own implicit synthesis for
-# a buildable target — that synthesis is unpersisted, undocumented, and exactly what
-# scripts/build-ios.sh's `-scheme` (over `-target`) is meant not to depend on. See the
-# comment there for why `-scheme` is required at all on this Xcode version.
+  # Scaffolding only (Task 7): launches, shows "Not paired", links FleetKit. Proves the
+  # module actually resolves for an iOS *application* (not just a framework target) — the
+  # pairing screens land on top of this in a later task. Compile-checked only: see
+  # scripts/build-ios.sh for why nothing here can be run on this machine.
+  FlightDeckMobile:
+    type: application
+    platform: iOS
+    productName: Flight Deck
+    sources: [Sources/FlightDeckMobile]
+    dependencies:
+      - target: FleetKitiOS
+        embed: true
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        PRODUCT_MODULE_NAME: FlightDeckMobile
+        PRODUCT_BUNDLE_IDENTIFIER: dev.flightdeck.FlightDeckMobile
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # No DEVELOPMENT_TEAM: there is no provisioning profile on this machine, and pinning
+        # a team would break the simulator compile check that is this target's only
+        # automated verification. Set it when installing on hardware.
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: Sources/FlightDeckMobile/Info.plist
+      properties:
+        CFBundleDisplayName: Flight Deck
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # The camera is for one thing only, and the string says so — a vague reason is what
+        # gets an app rejected and, worse, what makes a user decline.
+        NSCameraUsageDescription: Flight Deck scans the pairing code shown on your Mac.
+        NSLocalNetworkUsageDescription: Flight Deck connects to your Mac over the local network to show your sessions.
+        # Required to browse at all on iOS 14+. A missing entry here does not error — the
+        # browser simply never returns a result, which reads as "my Mac isn't on the network".
+        NSBonjourServices:
+          - _flightdeck._tcp
+
+# FleetKitiOS and FlightDeckMobile both need a persisted shared scheme, not xcodebuild's
+# own implicit synthesis for a buildable target — that synthesis is unpersisted,
+# undocumented, and exactly what scripts/build-ios.sh's `-scheme` (over `-target`) is
+# meant not to depend on. See the comment there for why `-scheme` is required at all on
+# this Xcode version.
 schemes:
   FleetKitiOS:
     build:
       targets:
         FleetKitiOS: [run]
+  FlightDeckMobile:
+    build:
+      targets:
+        FlightDeckMobile: [run]
