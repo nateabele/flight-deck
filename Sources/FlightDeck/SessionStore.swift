@@ -151,13 +151,15 @@ final class SessionStore: ObservableObject {
     /// and returns at once instead of blocking the UI.
     private var parkedSurfaces: [UUID: Ghostty.SurfaceView] = [:]
 
-    /// What one tab is currently observing, and through which agent.
+    /// What one tab is currently observing, and through which agent-as-account.
     ///
-    /// The agent is carried here rather than looked up from `repos` on demand because
+    /// The instance is carried here rather than looked up from `repos` on demand because
     /// `closeSession` removes the session before it detaches, so by then there is nothing
-    /// left to ask.
+    /// left to ask. The account half matters as much as the agent half: the runtime holding
+    /// this attachment is one account's, and `detach` on another account's would silently
+    /// leave the watcher running.
     private struct TabAttachment {
-        let agent: AgentID
+        let instance: AgentInstance
         let binding: AgentBinding
     }
 
@@ -167,30 +169,24 @@ final class SessionStore: ObservableObject {
     /// which tabs a conversation's report belongs to.
     private var attachments: [UUID: TabAttachment] = [:]
 
-    /// The agent integrations, one instance per agent for the life of the store.
+    /// The agent integrations, one per `AgentInstance` — an agent *as an account*, not per
+    /// agent. Two logins are two adapters: what binds a process to a login is a home
+    /// directory, so one adapter answering for both would have to be told which on every
+    /// call, and would be exactly one forgotten argument away from running a tab as the
+    /// wrong user.
     ///
-    /// `lazy` so the closures below can capture `self`, and so a store that never creates a
-    /// tab never builds one. Options are chosen alongside the adapter in `options(for:)`,
-    /// which is what makes `ClaudeAdapter`'s "a codex payload here is a programming error"
-    /// true by construction rather than by convention.
-    private lazy var adapters: [AgentID: any AgentAdapter] = [
-        .claude: ClaudeAdapter(
-            projectsRoot: { [weak self] in self?.projectsRoot ?? ClaudeSession.defaultProjectsRoot },
-            injectRename: { [weak self] conversationID, title in
-                // The adapter speaks conversation ids; `pendingRenames` is keyed by tab, and
-                // two tabs can follow one conversation. See `tabs(following:)`.
-                guard let self else { return }
-                for tab in self.tabs(following: conversationID) {
-                    self.injectPendingRename(tab, title)
-                }
-            }
-        ),
-    ]
+    /// Built on first request rather than from a `lazy` literal, so a store that never
+    /// creates a tab still builds nothing and no account is assumed at construction time.
+    /// Options are chosen alongside the adapter in `options(for:)`, which is what makes
+    /// `ClaudeAdapter`'s "a codex payload here is a programming error" true by construction
+    /// rather than by convention.
+    private var adapters: [AgentInstance: any AgentAdapter] = [:]
 
-    /// The observation half, also one per agent: both agents multiplex a single app-wide
-    /// source across every tab, so a runtime per tab would re-scan claude's registry once
-    /// per tab. See `AgentRuntime`.
-    private lazy var runtimes: [AgentID: any AgentRuntime] = [.claude: ClaudeRuntime(clock: clock)]
+    /// The observation half, also one per instance: both agents multiplex a single app-wide
+    /// source across every tab *of one account*, so a runtime per tab would re-scan claude's
+    /// registry once per tab, while a runtime per agent would have one attachment table
+    /// standing for two homes. See `AgentRuntime`.
+    private var runtimes: [AgentInstance: any AgentRuntime] = [:]
 
     /// The settings payload that goes with an agent, chosen from the same `AgentID` the
     /// adapter is. Pairing them here — rather than letting a call site pass whichever it
@@ -240,24 +236,45 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// Codex's stack, built on first use and dropped with the last codex tab.
+    /// Codex's stacks, one per account, each built on first use and dropped with that
+    /// account's last codex tab.
     ///
-    /// Nil until something actually needs codex: a user who never opens a codex tab must
-    /// never have `codex app-server` spawned behind their back, so neither this nor the
-    /// process it eventually holds is created at launch. Building it spawns nothing either —
-    /// `startCodex()` is the only thing that runs a process, and only `createSession` calls it.
-    private var codexStack: CodexStack?
+    /// Empty until something actually needs codex: a user who never opens a codex tab must
+    /// never have `codex app-server` spawned behind their back, so neither an entry here nor
+    /// the process it eventually holds is created at launch. Building one spawns nothing
+    /// either — `startCodex()` is the only thing that runs a process, and only
+    /// `createSession` and `resumeRestoredCodex` reach it.
+    ///
+    /// One per account rather than one outright, because a `CODEX_HOME` is chosen when the
+    /// process is spawned: a single app-server can only ever answer for a single login. The
+    /// key is `AgentInstance.account`, nil included — see there for why a nil key and an id
+    /// key can never both stand for the same home, which is what keeps two app-servers off
+    /// one `session_index.jsonl`.
+    private var codexStacks: [UUID?: CodexStack] = [:]
 
-    /// Serialises spawn + handshake so N tabs created at once produce one app-server.
+    /// Serialises spawn + handshake so N tabs created at once produce one app-server per
+    /// account — and so a second account's first tab does not queue behind the first
+    /// account's `initialize`.
     ///
     /// A `Task` rather than a `Bool` because the handshake is `async`: a second creation
     /// racing the first has to *wait* for the same `initialize` to be answered, not proceed
     /// against a process that has not spoken yet.
-    private var codexHandshake: Task<Void, Error>?
+    private var codexHandshake: [UUID?: Task<Void, Error>] = [:]
 
     /// Test seam. Proves the app-server's lifetime — lazy on first codex use, gone with the
     /// last codex tab or with its process — without spawning a process to observe it.
-    var hasCodexStackForTesting: Bool { codexStack != nil }
+    var hasCodexStackForTesting: Bool { !codexStacks.isEmpty }
+
+    /// Test seam. The per-account half of the above: "one home, one app-server" is a count,
+    /// not a boolean, and only a count can catch a second stack on a home that already had
+    /// one.
+    var codexStackCountForTesting: Int { codexStacks.count }
+
+    /// Test seams for the same fact about the other two registries. Sizes rather than
+    /// identities because `ClaudeAdapter` is a struct: there is nothing to compare two
+    /// adapters by, so how many were built is the only thing observable from outside.
+    var adapterCountForTesting: Int { adapters.count }
+    var runtimeCountForTesting: Int { runtimes.count }
 
     /// Test seam. Counts how many times a path asked for a *started* app-server, which is
     /// the thing a restored codex tab was missing and the thing no committed test may let
@@ -273,13 +290,16 @@ final class SessionStore: ObservableObject {
 
     /// Test seam. Drives the exact path a crashed `codex app-server` takes, which can
     /// otherwise only be produced by killing a real process the committed suite may not spawn.
-    func simulateCodexTerminationForTesting() {
-        codexStack?.transport.simulateProcessTerminationForTesting()
+    /// Takes the account explicitly rather than terminating whatever is running: a test that
+    /// means to crash one login's app-server must not silently crash the other's.
+    func simulateCodexTerminationForTesting(account: UUID?) {
+        codexStacks[account]?.transport.simulateProcessTerminationForTesting()
     }
 
-    /// Builds the stack on first ask and memoizes it. Starts no process; see `startCodex`.
-    private func makeCodexStackIfNeeded() -> CodexStack {
-        if let codexStack { return codexStack }
+    /// Builds this account's stack on first ask and memoizes it. Starts no process; see
+    /// `startCodex`.
+    private func makeCodexStackIfNeeded(account: UUID?) -> CodexStack {
+        if let existing = codexStacks[account] { return existing }
         let stack = CodexStack(clock: clock, indexURL: codexIndexURL)
         // Composed on top of the stack's own hook rather than replacing it: failing every
         // in-flight request is the stack's job, forgetting the stack is the store's, and both
@@ -287,47 +307,58 @@ final class SessionStore: ObservableObject {
         //
         // Forgetting is what keeps a crash from wedging codex for the rest of the run.
         // `transportClosed()` resumes what is pending at that moment and latches nothing, so
-        // a `codexStack`/`codexHandshake` left standing means the next creation returns the
-        // already-succeeded handshake without re-probing, writes `thread/start` into a dead
-        // pipe (`send` swallows the failure), and suspends on a continuation nothing will ever
-        // resume — the same hang one session later, with no alert and no failed `Result`.
+        // a `codexStacks`/`codexHandshake` entry left standing means the next creation on
+        // that account returns the already-succeeded handshake without re-probing, writes
+        // `thread/start` into a dead pipe (`send` swallows the failure), and suspends on a
+        // continuation nothing will ever resume — the same hang one session later, with no
+        // alert and no failed `Result`.
         let failInFlightRequests = stack.transport.onTerminate
         stack.transport.onTerminate = { [weak self, weak stack] in
             failInFlightRequests?()
-            // Identity-checked: a late termination from a *replaced* stack must not tear down
-            // the live one that succeeded it.
-            guard let self, let stack, self.codexStack === stack else { return }
-            self.codexStack = nil
-            self.codexHandshake = nil
+            // Identity-checked, and against this account's entry only: a late termination
+            // from a *replaced* stack must not tear down the live one that succeeded it, and
+            // one login's crash must not forget another login's healthy server.
+            guard let self, let stack, self.codexStacks[account] === stack else { return }
+            self.codexStacks[account] = nil
+            self.codexHandshake[account] = nil
         }
-        codexStack = stack
+        codexStacks[account] = stack
         return stack
     }
 
-    /// Stops the app-server once the last codex tab is gone.
+    /// Stops one account's app-server once that account's last codex tab is gone.
     ///
     /// Safe to do, and not merely tidy: `thread/start` + `thread/name/set` committed every
     /// thread to codex's own storage, which is exactly what makes `codex resume <id>` work
     /// across processes — so nothing is lost, and the next codex session spawns a fresh
     /// server. Keeping it alive instead would leave a process running for the rest of the
     /// run on the strength of a tab the user closed.
-    private func stopCodexIfUnused() {
-        guard let stack = codexStack else { return }
+    ///
+    /// Narrowed from "no codex tabs remain anywhere" to "no tabs remain on *this* account":
+    /// the wider predicate would keep one login's app-server alive for the whole run because
+    /// a different login still had a tab open, which is precisely the leak this exists to
+    /// prevent. Only the closing tab's own account is examined, because it is the only one
+    /// whose tab count can have just dropped.
+    private func stopCodexIfUnused(account: UUID?) {
+        guard let stack = codexStacks[account] else { return }
         // A codex creation that has not inserted its tab yet is invisible to the check
         // below, and killing the app-server out from under it between `thread/start` and
         // `thread/name/set` EVAPORATES the thread — naming is what commits it. So a tab
         // closed mid-creation defers the teardown rather than skipping it: `createSession`
-        // re-runs this on its way out.
-        guard codexCreationsInFlight == 0 else { return }
-        guard !repos.flatMap(\.sessions).contains(where: { $0.agent == .codex }) else { return }
-        stopCodex(expected: stack)
+        // re-runs this on its way out. Per account, like everything else here: a creation on
+        // one login must not pin another login's server open.
+        guard codexCreationsInFlight[account, default: 0] == 0 else { return }
+        let live = AgentInstance(agent: .codex, account: account)
+        guard !repos.flatMap(\.sessions).contains(where: { instance(for: $0) == live }) else { return }
+        stopCodex(account: account, expected: stack)
     }
 
-    /// How many codex creations are between "asked for an app-server" and "tab inserted".
+    /// How many codex creations are between "asked for an app-server" and "tab inserted",
+    /// per account.
     ///
     /// A counter and not a `Bool`: two tabs can be created at once, and the second finishing
     /// must not clear a guard the first still needs.
-    private var codexCreationsInFlight = 0
+    private var codexCreationsInFlight: [UUID?: Int] = [:]
 
     /// Tears down the stack the caller meant, whatever the reason. `stop()` funnels into the
     /// transport's termination hook, so every request still in flight fails rather than
@@ -340,56 +371,117 @@ final class SessionStore: ObservableObject {
     /// same reason: a failure path that started before the current stack existed must not
     /// stop the one a concurrent creation just built. `stopCodex()` had no such guard, so a
     /// stale `startCodex` failure could tear down a healthy successor.
-    private func stopCodex(expected: CodexStack?) {
-        guard let expected, codexStack === expected else { return }
+    private func stopCodex(account: UUID?, expected: CodexStack?) {
+        guard let expected, codexStacks[account] === expected else { return }
         expected.transport.stop()
-        codexStack = nil
-        codexHandshake = nil
+        codexStacks[account] = nil
+        codexHandshake[account] = nil
     }
 
-    /// Falls back to claude's registered adapter, wiring and all. A bare `ClaudeAdapter()`
-    /// would carry neither this store's `projectsRoot` nor its rename route, so a tab on an
-    /// agent nobody registered would derive transcript paths under the real
-    /// `~/.claude/projects` even inside a test.
+    /// The registry key a tab runs under: its agent, as the account it is signed in with.
     ///
-    /// Codex is answered from `codexStack` rather than from `adapters`, so that an override
-    /// installed through `overrideAdapter` keeps winning and the stack stays droppable in one
-    /// place. `adapters` therefore holds only claude's entry and whatever a caller injected.
-    func adapter(for agent: AgentID) -> any AgentAdapter {
-        if let existing = adapters[agent] { return existing }
-        if agent == .codex { return makeCodexStackIfNeeded().adapter }
-        return adapters[.claude] ?? ClaudeAdapter()
+    /// One place, so that no call site invents its own normalisation. `Session.accountID` is
+    /// *storage* — nil there means the agent's built-in home, not "no account" — and
+    /// `PreferencesStore.resolvedAccountID(for:in:)` is what turns it into the identity every
+    /// registry is keyed by. Two call sites disagreeing about that is exactly how one home
+    /// ends up with two `CodexStack`s on one `session_index.jsonl`.
+    ///
+    /// The account comes back nil only from a store with no `PreferencesStore` at all, where
+    /// there is no account to name and one nil key serves the one home. See `AgentInstance`
+    /// for why that can never coexist with an id key for the same home.
+    private func instance(for session: Session) -> AgentInstance {
+        AgentInstance(
+            agent: session.agent,
+            account: preferences?.resolvedAccountID(for: session.agent, in: session.accountID)
+        )
+    }
+
+    /// Claude's adapter with this store's wiring on it.
+    ///
+    /// A builder rather than a stored literal now that there is one per account, but the
+    /// wiring is the point: a bare `ClaudeAdapter()` carries neither this store's
+    /// `projectsRoot` — a test would then derive transcript paths under the developer's real
+    /// `~/.claude/projects` — nor the route a title claude reports takes back to the tabs
+    /// following that conversation.
+    private func makeClaudeAdapter() -> ClaudeAdapter {
+        ClaudeAdapter(
+            projectsRoot: { [weak self] in self?.projectsRoot ?? ClaudeSession.defaultProjectsRoot },
+            injectRename: { [weak self] conversationID, title in
+                // The adapter speaks conversation ids; `pendingRenames` is keyed by tab, and
+                // two tabs can follow one conversation. See `tabs(following:)`.
+                guard let self else { return }
+                for tab in self.tabs(following: conversationID) {
+                    self.injectPendingRename(tab, title)
+                }
+            }
+        )
+    }
+
+    /// The adapter for one agent-as-account, memoized on a miss.
+    ///
+    /// An agent this store has no case for degrades to claude's adapter, wiring and all —
+    /// `restore` rebuilds whatever `agent` a snapshot names, so an unregistered agent is a
+    /// *data* possibility rather than only a future-code one, and a hand-edited
+    /// `sessions.json` must not become a launch crash.
+    ///
+    /// Codex is answered from its account's stack rather than from `adapters`, so that an
+    /// override installed through `overrideAdapter` keeps winning and the stack stays
+    /// droppable in one place. `adapters` therefore holds only the claude entries built here
+    /// and whatever a caller injected.
+    func adapter(for instance: AgentInstance) -> any AgentAdapter {
+        if let existing = adapters[instance] { return existing }
+        if instance.agent == .codex {
+            return makeCodexStackIfNeeded(account: instance.account).adapter
+        }
+        let adapter = makeClaudeAdapter()
+        adapters[instance] = adapter
+        return adapter
+    }
+
+    func adapter(for agent: AgentID, account: UUID?) -> any AgentAdapter {
+        adapter(for: AgentInstance(agent: agent, account: account))
     }
 
     /// Memoized on a miss, never freshly built per call.
     ///
     /// A runtime is stateful — it holds the attachment `detach` has to find — so answering
-    /// two calls with two instances starts a `TranscriptWatcher` nothing can ever stop and
-    /// makes `detach` a no-op on an empty object. The miss is reachable without a line of new
-    /// code: `restore` rebuilds whatever `agent` a snapshot names, so an unregistered agent is
-    /// a *data* possibility, not just a future-code one. Degrading to claude's runtime keeps a
-    /// mislabelled tab working; trapping would turn a hand-edited `sessions.json` into a
-    /// launch crash.
+    /// two calls for one key with two instances starts a `TranscriptWatcher` nothing can ever
+    /// stop and makes `detach` a no-op on an empty object. Adding the account to the key does
+    /// not soften that: it splits the keyspace, it does not license a second answer within
+    /// one key. The miss is reachable without a line of new code, for the reason
+    /// `adapter(for:)` above gives, and degrading to a claude runtime keeps a mislabelled tab
+    /// working.
     ///
     /// Codex gets its own real runtime, not that degraded fallback: a `ClaudeRuntime` here
     /// would sit on a codex tab tailing a transcript nothing writes, and the notifications the
     /// app-server does send would reach nobody.
-    func runtime(for agent: AgentID) -> any AgentRuntime {
-        if let existing = runtimes[agent] { return existing }
-        if agent == .codex { return makeCodexStackIfNeeded().runtime }
+    func runtime(for instance: AgentInstance) -> any AgentRuntime {
+        if let existing = runtimes[instance] { return existing }
+        if instance.agent == .codex {
+            return makeCodexStackIfNeeded(account: instance.account).runtime
+        }
         let runtime = ClaudeRuntime(clock: clock)
-        runtimes[agent] = runtime
+        runtimes[instance] = runtime
         return runtime
+    }
+
+    func runtime(for agent: AgentID, account: UUID?) -> any AgentRuntime {
+        runtime(for: AgentInstance(agent: agent, account: account))
     }
 
     /// Test seams, in the style of `injectorOverride`. Both are needed: runtime tests fake
     /// the event source, adapter tests fake identity negotiation and command construction.
-    func overrideRuntime(_ runtime: any AgentRuntime, for agent: AgentID) {
-        runtimes[agent] = runtime
+    ///
+    /// Scoped to one account, because that is what production looks up: an override installed
+    /// against the wrong one is not found, silently, and for codex "not found" means building
+    /// a real stack and eventually spawning a real `codex app-server`. A store built without
+    /// preferences resolves every tab to `nil`, which is the account those tests name.
+    func overrideRuntime(_ runtime: any AgentRuntime, for agent: AgentID, account: UUID?) {
+        runtimes[AgentInstance(agent: agent, account: account)] = runtime
     }
 
-    func overrideAdapter(_ adapter: any AgentAdapter, for agent: AgentID) {
-        adapters[agent] = adapter
+    func overrideAdapter(_ adapter: any AgentAdapter, for agent: AgentID, account: UUID?) {
+        adapters[AgentInstance(agent: agent, account: account)] = adapter
     }
 
     /// The one timer behind every watcher above, plus `statusWatcher`. Created lazily so a
@@ -729,7 +821,7 @@ final class SessionStore: ObservableObject {
     @discardableResult
     func newSession(in url: URL, at index: Int? = nil) -> Session {
         let session = Session(title: nextSessionTitle(), workingDirectory: url.path)
-        let adapter = adapter(for: session.agent)
+        let adapter = adapter(for: instance(for: session))
         let options = options(for: session.agent, project: url.path)
         return addSession(
             session,
@@ -766,25 +858,30 @@ final class SessionStore: ObservableObject {
             title: nextSessionTitle(), workingDirectory: directory, agent: agent
         )
         let options = options(for: agent, project: directory)
+        // Resolved once, from the draft, and used for every registry the creation touches:
+        // the adapter it prepares against, the app-server it holds open, and the teardown it
+        // defers all have to name the same account, or the creation guards a stack nobody is
+        // building.
+        let instance = instance(for: draft)
 
         // Held across the whole negotiation, not just `prepare`. `closeSession` on the last
         // remaining codex tab runs `stopCodexIfUnused`, which counts tabs in `repos` — and
         // this one is not in `repos` until `addSession` below. Without this the app-server
         // could be killed between `thread/start` and `thread/name/set`, which evaporates the
         // thread, because naming is what commits it.
-        codexCreationsInFlight += 1
+        codexCreationsInFlight[instance.account, default: 0] += 1
         defer {
-            codexCreationsInFlight -= 1
+            codexCreationsInFlight[instance.account, default: 0] -= 1
             // Deferred, not skipped. A tab closed while this was in flight had its teardown
             // declined above; if this creation failed, nothing else will ever run it, and the
             // app-server would outlive every codex tab. A creation that SUCCEEDED inserted
             // its tab already, so the tab count below refuses the teardown by itself.
-            stopCodexIfUnused()
+            stopCodexIfUnused(account: instance.account)
         }
 
         let binding: AgentBinding
         do {
-            binding = try await preparedAdapter(for: agent).prepare(for: draft, options: options)
+            binding = try await preparedAdapter(for: instance).prepare(for: draft, options: options)
         } catch {
             let failure = launchError(from: error)
             launchFailureReporter.report(failure)
@@ -800,9 +897,12 @@ final class SessionStore: ObservableObject {
             workingDirectory: directory,
             pinnedConversationID: binding.conversationID,
             agent: agent,
+            // Carried over from the draft, like `id`: the tab has to keep the account its
+            // app-server was started for, or its next lookup keys a different instance.
+            accountID: draft.accountID,
             transcriptPath: binding.transcriptURL?.path
         )
-        let adapter = adapter(for: agent)
+        let adapter = adapter(for: instance)
         addSession(
             session,
             in: url,
@@ -849,15 +949,15 @@ final class SessionStore: ObservableObject {
     /// A caller that installed its own adapter through `overrideAdapter` owns the transport
     /// behind it, so nothing is spawned for it — which is also what keeps the committed test
     /// suite from ever running `codex`.
-    private func preparedAdapter(for agent: AgentID) async throws -> any AgentAdapter {
+    private func preparedAdapter(for instance: AgentInstance) async throws -> any AgentAdapter {
         // Counted before the override check, deliberately: what the tests need to assert is
         // that a path *asked* for a running app-server, and a test that let it actually start
-        // one would spawn `codex`.
-        if agent == .codex { codexServerRequestsForTesting += 1 }
-        if let registered = adapters[agent] { return registered }
-        guard agent == .codex else { return adapter(for: agent) }
-        try await startCodex()
-        return makeCodexStackIfNeeded().adapter
+        // one would spawn `codex`. One ask is one account's — two logins asking is two.
+        if instance.agent == .codex { codexServerRequestsForTesting += 1 }
+        if let registered = adapters[instance] { return registered }
+        guard instance.agent == .codex else { return adapter(for: instance) }
+        try await startCodex(account: instance.account)
+        return makeCodexStackIfNeeded(account: instance.account).adapter
     }
 
     /// Probes the installed `codex`, spawns its app-server and completes the handshake —
@@ -866,20 +966,20 @@ final class SessionStore: ObservableObject {
     /// The version probe runs off the main actor because it spawns `codex --version` and
     /// waits for it, which is a visible hitch where the UI lives. Everything after it is
     /// main-actor work by construction: the transport and the client both are.
-    private func startCodex() async throws {
-        if let codexHandshake { return try await codexHandshake.value }
-        let stack = makeCodexStackIfNeeded()
+    private func startCodex(account: UUID?) async throws {
+        if let handshake = codexHandshake[account] { return try await handshake.value }
+        let stack = makeCodexStackIfNeeded(account: account)
         let task = Task { @MainActor in
             // Bounded, and that matters more here than anywhere else in this method: this
             // task is memoized in `codexHandshake`, so an unbounded probe would hang not
-            // just this creation but every codex creation for the rest of the run, all of
-            // them awaiting the same wedged task. `verifyHandshake` below was already
-            // bounded; the step in front of it was not. See `checkOffMainActor`.
+            // just this creation but every codex creation on this account for the rest of
+            // the run, all of them awaiting the same wedged task. `verifyHandshake` below was
+            // already bounded; the step in front of it was not. See `checkOffMainActor`.
             try await CodexVersionProbe.checkOffMainActor()
             try stack.transport.start()
             try await CodexProcessTransport.verifyHandshake(stack.rpc)
         }
-        codexHandshake = task
+        codexHandshake[account] = task
         do {
             try await task.value
         } catch {
@@ -895,7 +995,7 @@ final class SessionStore: ObservableObject {
             // exactly that; so does this.
             // The stack THIS attempt built, not whatever is current: a slow failure here can
             // land after a later creation has already replaced it.
-            stopCodex(expected: stack)
+            stopCodex(account: account, expected: stack)
             throw error
         }
     }
@@ -1184,7 +1284,7 @@ final class SessionStore: ObservableObject {
                 accountID: entry.accountID,
                 transcriptPath: entry.transcriptPath
             )
-            let adapter = adapter(for: session.agent)
+            let adapter = adapter(for: instance(for: session))
             // Codex's resume text is deferred, and only codex's. `binding(for:)` is a pure
             // read of the pin — codex's own doc calls its contract "identity already
             // settled" — so it cannot tell a thread that still exists from one the user
@@ -1264,13 +1364,26 @@ final class SessionStore: ObservableObject {
     /// not answer. Not knowing whether a thread is gone is not the same as knowing it is, and
     /// the command this types then is exactly the one restore used to type unconditionally.
     private func resumeRestoredCodex(_ tabIDs: [UUID]) async {
-        let prepared = try? await preparedAdapter(for: .codex)
-        let adapter = prepared ?? self.adapter(for: .codex)
+        // One prepare per account, not per tab. `startCodex` already memoizes the handshake,
+        // so a second ask would not spawn a second app-server — but it would count as a
+        // second ask (see `codexServerRequestsForTesting`) and re-await a settled task for
+        // every restored tab. Restoring two accounts' tabs starts two servers, neither
+        // waiting on the other's `initialize`.
+        var preparedPerAccount: [AgentInstance: (any AgentAdapter)?] = [:]
 
         for tabID in tabIDs {
             // A tab the user closed while the app-server was starting has nothing to resume,
             // and re-pinning it would file state against a row that no longer exists.
             guard let session = session(for: tabID) else { continue }
+            let instance = instance(for: session)
+            let prepared: (any AgentAdapter)?
+            if let already = preparedPerAccount[instance] {
+                prepared = already
+            } else {
+                prepared = try? await preparedAdapter(for: instance)
+                preparedPerAccount[instance] = prepared
+            }
+            let adapter = prepared ?? self.adapter(for: instance)
             let options = options(for: .codex, project: session.workingDirectory)
 
             // A failed probe or handshake tore the stack down — `startCodex` calls
@@ -1467,6 +1580,9 @@ final class SessionStore: ObservableObject {
 
     func closeSession(_ id: UUID) {
         guard let (repoIndex, sessionIndex) = locate(id) else { return }
+        // Read before the removal below: codex teardown is per account, and once the row is
+        // gone there is nothing left to ask which account this tab was running as.
+        let closed = instance(for: repos[repoIndex].sessions[sessionIndex])
         repos[repoIndex].sessions.remove(at: sessionIndex)
 
         // Detach and park rather than release. Two reasons this is not just `= nil`:
@@ -1489,8 +1605,12 @@ final class SessionStore: ObservableObject {
         let doomed = processRegistry.process(for: id)
 
         stopWatching(id)
-        // After `stopWatching`, which still needs the runtime this may drop.
-        stopCodexIfUnused()
+        // After `stopWatching`, which still needs the runtime this may drop. Only the closed
+        // tab's own account is considered: no other account's tab count changed here. A
+        // claude tab's account keys no codex stack, so this is a no-op for it — except in a
+        // store with no accounts configured at all, where the one nil key serves everything
+        // and closing any tab runs exactly the check it always did.
+        stopCodexIfUnused(account: closed.account)
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
@@ -1679,14 +1799,14 @@ final class SessionStore: ObservableObject {
     func reapAllForQuit(budget: Double = SessionStore.quitBudget) async {
         // Before any `await` — see `isTerminating`'s doc comment for the race this closes.
         isTerminating = true
-        // The app-server is our child too, and unlike a tab's shell nothing else will ever
-        // come looking for it: it has no entry in `processRegistry`, so a quit that skipped
-        // this would leave `codex app-server` running with nobody left to talk to it. Above
-        // the `live.isEmpty` return below, deliberately — quitting with no tabs still has to
-        // stop it. `expected: codexStack` is the whole stack, unconditionally: on quit there
-        // is no successor to protect, so this is the one caller for which the identity guard
-        // is a formality.
-        stopCodex(expected: codexStack)
+        // The app-servers are our children too, and unlike a tab's shell nothing else will
+        // ever come looking for them: they have no entry in `processRegistry`, so a quit that
+        // skipped this would leave `codex app-server` running with nobody left to talk to it.
+        // Above the `live.isEmpty` return below, deliberately — quitting with no tabs still
+        // has to stop them. Every account's, and each `expected:` is that account's own live
+        // stack: on quit there is no successor to protect, so the identity guard is a
+        // formality here and this is the one caller that sweeps the whole map.
+        for (account, stack) in codexStacks { stopCodex(account: account, expected: stack) }
         let live = processRegistry.all
         guard !live.isEmpty else { return }
 
@@ -1859,7 +1979,7 @@ final class SessionStore: ObservableObject {
             // this same method, and `AgentRoutingTests` covers that it does.
             injectPendingRename(id, name)
         case .codex:
-            let adapter = adapter(for: session.agent)
+            let adapter = adapter(for: instance(for: session))
             let binding = adapter.binding(for: session)
             // Fire and forget: the sidebar already has the name, and a thread that refuses
             // the rename (or an app-server that is gone) must not block the user's edit or
@@ -2354,7 +2474,7 @@ final class SessionStore: ObservableObject {
         // row's — a resumed conversation carries its own project path, and the row is
         // authoritative about where `claude` is actually writing.
         guard let updated = session(for: tabID) else { return }
-        guard let url = adapter(for: updated.agent).binding(for: updated).transcriptURL else {
+        guard let url = adapter(for: instance(for: updated)).binding(for: updated).transcriptURL else {
             // An agent with no transcript to read has no title to resolve from one; it
             // reports titles through its runtime instead.
             startWatching(tabID: tabID)
@@ -2469,10 +2589,11 @@ final class SessionStore: ObservableObject {
     /// the tab has already left.
     private func startWatching(tabID: UUID) {
         guard let session = session(for: tabID) else { return }
-        let binding = adapter(for: session.agent).binding(for: session)
+        let instance = instance(for: session)
+        let binding = adapter(for: instance).binding(for: session)
         // Recorded before the attach, because the fan-out closure below reads it.
-        attachments[tabID] = TabAttachment(agent: session.agent, binding: binding)
-        runtime(for: session.agent).attach(binding) { [weak self] event in
+        attachments[tabID] = TabAttachment(instance: instance, binding: binding)
+        runtime(for: instance).attach(binding) { [weak self] event in
             guard let self else { return }
             // Fanned out here rather than in the runtime because a runtime keys its one
             // source by conversation, and two tabs can follow the same conversation — a user
@@ -2493,7 +2614,7 @@ final class SessionStore: ObservableObject {
     private func stopWatching(_ tabID: UUID) {
         guard let attachment = attachments.removeValue(forKey: tabID) else { return }
         guard tabs(following: attachment.binding.conversationID).isEmpty else { return }
-        runtime(for: attachment.agent).detach(attachment.binding)
+        runtime(for: attachment.instance).detach(attachment.binding)
     }
 
     /// Which tabs are currently attached to a conversation. Usually one.
@@ -2602,7 +2723,7 @@ final class SessionStore: ObservableObject {
         guard let id = selectedSessionID, let at = locate(id) else { return nil }
         let repo = repos[at.repo]
         let session = repo.sessions[at.session]
-        let location = adapter(for: session.agent).location(for: session)
+        let location = adapter(for: instance(for: session)).location(for: session)
         return ToolContext(
             workingDirectory: location.workingDirectory,
             projectPath: repo.url.path,

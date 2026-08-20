@@ -37,14 +37,14 @@ final class ToolContextTests: XCTestCase {
         // ever passes with a field read, the seam is decorative.
         let store = makeStore()
         store.newSession(in: URL(fileURLWithPath: "/tmp/repo", isDirectory: true))
-        store.overrideAdapter(RelocatingAdapter(), for: .claude)
+        store.overrideAdapter(RelocatingAdapter(), for: .claude, account: nil)
         XCTAssertEqual(store.toolContext()?.workingDirectory, "/elsewhere")
     }
 
     func testIdentityAndTranscriptComeFromTheAdaptersBinding() {
         let store = makeStore()
         store.newSession(in: URL(fileURLWithPath: "/tmp/repo", isDirectory: true))
-        store.overrideAdapter(RelocatingAdapter(), for: .claude)
+        store.overrideAdapter(RelocatingAdapter(), for: .claude, account: nil)
         let context = store.toolContext()
         XCTAssertEqual(context?.conversationID, RelocatingAdapter.pinned)
         XCTAssertEqual(context?.transcriptPath, "/t/fixed.jsonl")
@@ -53,7 +53,7 @@ final class ToolContextTests: XCTestCase {
     func testProjectFactsComeFromTheRepoNotFromTheAgent() {
         let store = makeStore()
         store.newSession(in: URL(fileURLWithPath: "/tmp/repo", isDirectory: true))
-        store.overrideAdapter(RelocatingAdapter(), for: .claude)
+        store.overrideAdapter(RelocatingAdapter(), for: .claude, account: nil)
         let context = store.toolContext()
         XCTAssertEqual(context?.projectPath, "/tmp/repo")
         XCTAssertEqual(context?.projectName, "repo")
