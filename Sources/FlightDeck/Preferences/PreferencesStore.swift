@@ -43,20 +43,35 @@ final class PreferencesStore: ObservableObject {
 
     init(persistence: PreferencesPersisting?) {
         self.persistence = persistence
-        var loaded = persistence?.load() ?? Preferences()
-        loaded.migrateAgentsIfNeeded()
+        let loaded = persistence?.load()
+        var migrated = loaded ?? Preferences()
+        migrated.migrateAgentsIfNeeded()
         // Accounts must exist before anything resolves against them, project settings before
         // the global-flags fold has a claude row to land on either side of, so this order is
         // load-bearing, not incidental.
-        loaded.migrateAccountsIfNeeded()
-        loaded.migrateProjectSettingsIfNeeded()
-        loaded.migrateGlobalFlagsIfNeeded()
+        migrated.migrateAccountsIfNeeded()
+        migrated.migrateProjectSettingsIfNeeded()
+        migrated.migrateGlobalFlagsIfNeeded()
         // Probes for an installed terminal, so it is done here rather than in the `tools`
         // getter: a computed property is not a place to touch `NSWorkspace`. The probe is
-        // idempotent and only runs while `storedTools` is nil, so at worst it repeats once per
-        // launch until the user's first edit persists the list.
-        loaded.migrateToolsIfNeeded(terminalCommand: DefaultTerminalResolver.command())
-        self.preferences = loaded
+        // idempotent and only runs while `storedTools` is nil, and the write below settles it
+        // on the launch that first runs it rather than leaving it to repeat until the user's
+        // first edit.
+        migrated.migrateToolsIfNeeded(terminalCommand: DefaultTerminalResolver.command())
+        self.preferences = migrated
+        // Migration has to reach disk *here*. Assigning `preferences` inside `init` does not
+        // fire the `didSet` above — Swift skips property observers on an initializing
+        // assignment — so the only other write path is the user happening to edit a preference.
+        // Without this the seeded accounts are re-minted with fresh `UUID()`s on every launch:
+        // a `Session.accountID` stamped on launch 1 dangles on launch 2, and the tab restores
+        // orphaned (no resume text, no `CLAUDE_CONFIG_DIR`, no watcher) under an "account no
+        // longer exists" alert, re-persisting the dangling id so it never recovers.
+        //
+        // Guarded twice. A nil persistence stays hermetic — tests and `-FlightDeckResetState`
+        // must not write anywhere — and a blob that migration did not actually change is not
+        // rewritten, comparing against exactly what `load()` returned so a steady-state launch
+        // touches no defaults key.
+        if let persistence, migrated != loaded { persistence.save(migrated) }
     }
 
     convenience init() {
