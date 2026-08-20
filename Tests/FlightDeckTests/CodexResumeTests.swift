@@ -323,17 +323,19 @@ final class CodexResumeTests: XCTestCase {
         let provider = RecordingProvider()
         retained.append(provider)
         let store = SessionStore(provider: provider, persistence: persistence)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         // Never the user's real `~/.codex/session_index.jsonl`: restoring a codex session
         // below builds a real `CodexStack`, whose `CodexNameWatcher` would otherwise tail it.
-        store.codexIndexURL = projectsRoot.appendingPathComponent("session_index.jsonl")
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()
         let injector = SpyInjector()
         store.injectorOverride = injector
         if let transport {
             store.overrideAdapter(
                 CodexAdapter(rpc: CodexRPC(transport: transport), readTimeout: readTimeout),
-                for: .codex
+                // No `PreferencesStore` on this store, so every tab resolves to the nil
+                // account — the key the restore path will look this up under.
+                for: .codex, account: nil
             )
         }
         return (store, provider, injector, tabID)

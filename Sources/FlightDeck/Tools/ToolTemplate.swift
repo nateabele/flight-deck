@@ -9,6 +9,7 @@ enum ToolTemplate {
     static let knownNames: Set<String> = [
         "cwd", "project", "root", "projectName",
         "session", "agent", "conversationID", "transcript", "home",
+        "account", "accountHome",
     ]
 
     /// Wraps a value so the shell sees exactly one argument.
@@ -74,6 +75,8 @@ enum ToolTemplate {
         case "conversationID": return context.conversationID.uuidString
         case "transcript": return context.transcriptPath
         case "home": return context.home
+        case "account": return context.accountName
+        case "accountHome": return context.accountHome
         default: return nil
         }
     }

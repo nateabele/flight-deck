@@ -58,4 +58,25 @@ final class SidebarRowTests: XCTestCase {
 
         XCTAssertNotEqual(SidebarRow.project(a.id).id, SidebarRow.empty(a.id).id)
     }
+
+    // MARK: - accountMismatched
+
+    func testMatchingAccountsAreNotAMismatch() {
+        let id = UUID()
+        XCTAssertFalse(SidebarRow.accountMismatched(session: id, project: id))
+    }
+
+    func testNoAccountEitherSideIsNotAMismatch() {
+        XCTAssertFalse(SidebarRow.accountMismatched(session: nil, project: nil))
+    }
+
+    func testDifferingAccountsAreAMismatch() {
+        XCTAssertTrue(SidebarRow.accountMismatched(session: UUID(), project: UUID()))
+    }
+
+    /// A session pinned to a real account inside a project that resolves to none at all — the
+    /// project's own settings changed out from under it — is still a mismatch worth flagging.
+    func testAnAccountAgainstNoAccountIsAMismatch() {
+        XCTAssertTrue(SidebarRow.accountMismatched(session: UUID(), project: nil))
+    }
 }

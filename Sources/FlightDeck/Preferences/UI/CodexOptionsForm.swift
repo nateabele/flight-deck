@@ -1,11 +1,18 @@
 import SwiftUI
 
-/// Codex's pane in the Agents tab. No flag catalog, parser, serializer or shell quoting —
-/// unlike claude, codex takes these as typed `thread/start` params over JSON-RPC, so there is
-/// no command line to build at all. A plain `Form` binding `CodexThreadOptions`'s fields is
-/// the whole of it.
+/// Codex's pane in the Agents tab, and — via `projectOverride` — in the Projects tab too. No
+/// flag catalog, parser, serializer or shell quoting — unlike claude, codex takes these as
+/// typed `thread/start` params over JSON-RPC, so there is no command line to build at all. A
+/// plain `Form` binding `CodexThreadOptions`'s fields is the whole of it.
 struct CodexOptionsForm: View {
     @ObservedObject var preferences: PreferencesStore
+    /// Non-nil in the Projects tab: bind straight to that project's override instead of the
+    /// global codex row `options` otherwise resolves through `preferences`. Mirrors how
+    /// `FlagEditor` takes `flags` from its caller rather than always reading the global row.
+    var projectOverride: Binding<CodexThreadOptions>?
+    /// Rendered as the leading `Section` of this `Form`, mirroring `FlagEditor.header`. The
+    /// Agents tab uses it for the accounts list; the Projects tab passes nothing.
+    var header: (() -> AnyView)?
     @State private var newDir = ""
 
     /// Internal rather than private so `CodexSchemaConformanceTests` can assert these against
@@ -17,9 +24,10 @@ struct CodexOptionsForm: View {
 
     /// Reads and writes the codex row's options within `preferences.agents`, wherever that
     /// row currently sits — the list's order is the shortcut binding, not a storage index, so
-    /// this looks the row up by id rather than assuming a position.
+    /// this looks the row up by id rather than assuming a position. Skipped entirely when a
+    /// `projectOverride` binding was supplied.
     private var options: Binding<CodexThreadOptions> {
-        Binding(
+        projectOverride ?? Binding(
             get: {
                 guard case .codex(let opts)? = preferences.preferences.agents
                     .first(where: { $0.id == .codex })?.options
@@ -36,6 +44,7 @@ struct CodexOptionsForm: View {
 
     var body: some View {
         Form {
+            if let header { header() }
             Section("Model") {
                 TextField(
                     "codex's default",

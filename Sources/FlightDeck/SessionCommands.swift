@@ -12,16 +12,67 @@ struct SessionCommands: Commands {
     // reference-type instance either way.
     let store: SessionStore
     // `@ObservedObject`, unlike `store` above: this menu's items ARE built from
-    // `preferences.agents`, so a reorder in the Agents tab has to rebuild it. SwiftUI cannot
-    // vary a `.keyboardShortcut` at runtime, so each agent list position gets its own
-    // statically-chorded item here — the *button* in the sidebar is the one that reads live.
+    // `preferences.agents` (by way of `agentOrder(forProject:)`, ordered for whichever project
+    // `currentProject.path` names right now), so a reorder in the Agents tab has to rebuild it.
+    // SwiftUI cannot vary a `.keyboardShortcut` at runtime, so each agent list position gets
+    // its own statically-chorded item here — the *button* in the sidebar is the one that reads
+    // live.
     @ObservedObject var preferences: PreferencesStore
+    // Also `@ObservedObject`, for the project half of the same problem: `store` staying a
+    // plain `let` above means nothing here would otherwise notice a project switch that
+    // happens without a `preferences` change, and ⌘N's key equivalent closes over `slot.agent`
+    // captured at the *last* `body` build — a stale build after such a switch would still fire
+    // the previous project's agent. `CurrentProjectObserver` narrows observation to exactly
+    // that one derived value, so a title edit, an unread flag, or the transcript watcher's poll
+    // still rebuild nothing here. See its own doc comment for why plain `let store` cannot
+    // simply widen to `@ObservedObject`.
+    @ObservedObject private var currentProject: CurrentProjectObserver
+
+    init(store: SessionStore, preferences: PreferencesStore) {
+        self.store = store
+        self.preferences = preferences
+        _currentProject = ObservedObject(wrappedValue: CurrentProjectObserver(store: store))
+    }
+
+    private var agentsForCurrentProject: [AgentSettings] {
+        guard let project = currentProject.path else { return preferences.preferences.agents }
+        return preferences.agentOrder(forProject: project)
+    }
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            ForEach(Array(NewSessionAffordance.slots(for: preferences.preferences.agents).enumerated()), id: \.offset) { _, slot in
+            ForEach(Array(NewSessionAffordance.slots(for: agentsForCurrentProject).enumerated()), id: \.offset) { _, slot in
                 Button(slot.label) { Task { await store.createFromMenu(agent: slot.agent) } }
                     .keyboardShortcut("n", modifiers: NewSessionAffordance.eventModifiers(slot.modifiers))
+            }
+
+            // Mouse-only account submenus, alongside the shortcut items above rather than
+            // replacing any of them: a submenu-bearing `NSMenuItem` cannot also carry a key
+            // equivalent that fires directly, so an agent with more than one account gets a
+            // second, un-chorded entry here purely to reach the non-default login. Flat
+            // single-account rows are omitted — the shortcut item above already reaches them.
+            if let project = currentProject.path {
+                let agents = agentsForCurrentProject
+                let entries = NewSessionAffordance.menu(
+                    agents: agents, accounts: preferences.preferences.accounts,
+                    resolved: preferences.resolvedAccounts(for: agents, project: project)
+                )
+                ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
+                    if case .submenu(let agent, let rows) = entry {
+                        Menu("New \(agent.displayName) Session") {
+                            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                                if case .agent(let agent, let account, let isResolved) = row {
+                                    Button {
+                                        Task { await store.createFromMenu(agent: agent, account: account) }
+                                    } label: {
+                                        let name = preferences.account(id: account)?.displayName ?? agent.displayName
+                                        if isResolved { Label(name, systemImage: "checkmark") } else { Text(name) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             Button("Add Project…") { store.addProjectFromMenu() }

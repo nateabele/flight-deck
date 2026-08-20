@@ -6,6 +6,10 @@ private struct SessionRow: View {
     @ObservedObject var store: SessionStore
     let session: Session
     let isConflicted: Bool
+    /// Whether this tab's stamped account differs from what its own project resolves to
+    /// today — see `SidebarRow.accountMismatched`. A work session left open in a personal
+    /// repo shows up here rather than silently running as the wrong login.
+    let isAccountMismatched: Bool
 
     @State private var isEditing = false
     @State private var draft = ""
@@ -78,6 +82,14 @@ private struct SessionRow: View {
                     .accessibilityIdentifier("session-row-title")
             }
             Spacer()
+            if isAccountMismatched {
+                // Small and quiet on purpose — this fires for the rare tab, not the common
+                // one, and must not compete with the conflict marker below for attention.
+                Image(systemName: "person.crop.circle.badge.exclamationmark")
+                    .foregroundStyle(.secondary)
+                    .help("Running as a different account than this project uses")
+                    .accessibilityIdentifier("session-account-mismatch")
+            }
             if isConflicted {
                 Image(systemName: "person.2.fill")
                     .foregroundStyle(.secondary)
@@ -237,17 +249,25 @@ struct SessionSidebar: View {
     /// pressed on the way to ⌘⇧N — see `NewSessionAffordance.resolve`.
     @StateObject private var modifiers = ModifierWatcher()
 
-    /// The slot the New Session button currently claims. `nil` preferences (some previews and
-    /// tests construct the sidebar without one) falls back to the same claude-then-codex
-    /// default `Preferences.agents` uses.
+    /// This project's agent order — its default agent promoted to the front, per
+    /// `PreferencesStore.agentOrder(forProject:)` — which is what makes ⌘N always the agent
+    /// this project uses rather than a global default. Falls back to the plain
+    /// claude-then-codex default when there is no preferences store (some previews and tests
+    /// construct the sidebar without one) or no project to resolve against yet.
+    private var agentsForCurrentProject: [AgentSettings] {
+        guard let preferences else { return Preferences.defaultAgents }
+        guard let project = store.currentProjectPath else { return preferences.preferences.agents }
+        return preferences.agentOrder(forProject: project)
+    }
+
+    /// The slot the New Session button currently claims.
     private var affordance: NewSessionAffordance.Slot? {
-        NewSessionAffordance.resolve(
-            modifiers.flags, in: preferences?.preferences.agents ?? Preferences.defaultAgents
-        )
+        NewSessionAffordance.resolve(modifiers.flags, in: agentsForCurrentProject)
     }
 
     var body: some View {
         let conflicted = store.conflictedSessionIDs
+        let mismatched = store.accountMismatchedSessionIDs
         return List(selection: $store.selectedSessionID) {
             // One flat ForEach rather than a Section per project: `.onMove` is not supported
             // on a ForEach that yields Sections, and this is what lets one gesture reorder
@@ -268,7 +288,8 @@ struct SessionSidebar: View {
                         SessionRow(
                             store: store,
                             session: session,
-                            isConflicted: conflicted.contains(session.id)
+                            isConflicted: conflicted.contains(session.id),
+                            isAccountMismatched: mismatched.contains(session.id)
                         )
                         .tag(session.id)
                     }
@@ -325,34 +346,92 @@ struct SessionSidebar: View {
             store.acceptDroppedURLs(urls) != nil
         }
         .safeAreaInset(edge: .bottom) {
-            Button {
-                let agent = affordance?.agent ?? Preferences.defaultAgents[0].id
-                Task { await store.createFromMenu(agent: agent) }
-            } label: {
-                HStack {
-                    // The agent name is dynamic — "New Claude Session" by default, changing
-                    // live to "New Codex Session" the instant ⇧ is held on the way to ⌘⇧N.
-                    // See `NewSessionAffordance.resolve`.
-                    Label(isEmpty ? "Add Project" : (affordance?.label ?? "New Session"),
-                          systemImage: "plus")
-                    Spacer()
-                    // Apple's HIG puts shortcuts on menu items, not buttons. Shown here
-                    // deliberately so the binding is discoverable without opening the menu;
-                    // the File menu carries the same shortcuts, one item per agent slot.
-                    Text(isEmpty ? "⇧⌘A" : (affordance?.shortcutDisplay ?? "⌘N"))
-                        .foregroundStyle(.secondary)
-                        .accessibilityHidden(true)
+            HStack(spacing: 4) {
+                Button {
+                    let agent = affordance?.agent ?? Preferences.defaultAgents[0].id
+                    Task { await store.createFromMenu(agent: agent) }
+                } label: {
+                    HStack {
+                        // The agent name is dynamic — "New Claude Session" by default, changing
+                        // live to "New Codex Session" the instant ⇧ is held on the way to ⌘⇧N.
+                        // See `NewSessionAffordance.resolve`.
+                        Label(isEmpty ? "Add Project" : (affordance?.label ?? "New Session"),
+                              systemImage: "plus")
+                        Spacer()
+                        // Apple's HIG puts shortcuts on menu items, not buttons. Shown here
+                        // deliberately so the binding is discoverable without opening the menu;
+                        // the File menu carries the same shortcuts, one item per agent slot.
+                        Text(isEmpty ? "⇧⌘A" : (affordance?.shortcutDisplay ?? "⌘N"))
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                    }
+                    .frame(maxWidth: .infinity)
                 }
-                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("new-session")
+                .keyboardShortcut(isEmpty ? .init("a", modifiers: [.command, .shift])
+                                         : .init("n", modifiers: NewSessionAffordance.eventModifiers(
+                                             affordance?.modifiers ?? [.command]
+                                         )))
+
+                // A mouse-only escape hatch beside the shortcut button: pick a *specific*
+                // account — including a non-default one — without disturbing what ⌘N does.
+                // Absent while empty, since "Add Project" has no agent or account to choose
+                // between, and absent with no project to resolve against yet.
+                if !isEmpty, let preferences, let project = store.currentProjectPath {
+                    Menu {
+                        newSessionMenuEntries(preferences: preferences, project: project)
+                    } label: {
+                        Image(systemName: "chevron.down")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 16)
+                    .accessibilityIdentifier("new-session-accounts")
+                }
             }
-            .accessibilityIdentifier("new-session")
-            .keyboardShortcut(isEmpty ? .init("a", modifiers: [.command, .shift])
-                                     : .init("n", modifiers: NewSessionAffordance.eventModifiers(
-                                         affordance?.modifiers ?? [.command]
-                                     )))
             .padding(8)
             .onAppear { modifiers.start() }
             .onDisappear { modifiers.stop() }
+        }
+    }
+
+    /// Renders `NewSessionAffordance.menu(agents:accounts:resolved:)` as SwiftUI menu content:
+    /// one row per agent, nested only when it has more than one account — the pure function
+    /// decides the shape, this only decides how a row looks.
+    @ViewBuilder
+    private func newSessionMenuEntries(preferences: PreferencesStore, project: String) -> some View {
+        let agents = preferences.agentOrder(forProject: project)
+        let entries = NewSessionAffordance.menu(
+            agents: agents, accounts: preferences.preferences.accounts,
+            resolved: preferences.resolvedAccounts(for: agents, project: project)
+        )
+        ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
+            switch entry {
+            case .agent(let agent, let account, let isResolved):
+                newSessionMenuRow(agent: agent, account: account, isResolved: isResolved, flat: true)
+            case .submenu(let agent, let rows):
+                Menu("New \(agent.displayName) Session") {
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                        if case .agent(let agent, let account, let isResolved) = row {
+                            newSessionMenuRow(agent: agent, account: account, isResolved: isResolved, flat: false)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// One clickable row: "New <Agent> Session" for the common flat case (unchanged from
+    /// before nested accounts existed), or the account's own name once nested beneath its
+    /// agent. The checkmark is `isResolved` — whichever account ⌘N would actually use.
+    private func newSessionMenuRow(
+        agent: AgentID, account: UUID, isResolved: Bool, flat: Bool
+    ) -> some View {
+        let name = flat ? "New \(agent.displayName) Session"
+                         : (preferences?.account(id: account)?.displayName ?? agent.displayName)
+        return Button {
+            Task { await store.createFromMenu(agent: agent, account: account) }
+        } label: {
+            if isResolved { Label(name, systemImage: "checkmark") } else { Text(name) }
         }
     }
 

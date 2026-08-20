@@ -25,6 +25,41 @@ final class PreferencesStoreTests: XCTestCase {
         XCTAssertEqual(store.preferences.globalFlags.values["--model"], .value("opus"))
     }
 
+    /// Migration has to reach disk inside `init`, and this is the test that proves it: Swift
+    /// does not fire the `preferences` `didSet` on an initializing assignment, so the only
+    /// other write path is the user happening to edit a preference. Without the write, every
+    /// launch re-mints the seeded accounts with fresh `UUID()`s — a `Session.accountID` stamped
+    /// on launch 1 dangles on launch 2, and the tab restores orphaned under an "account no
+    /// longer exists" alert it can never recover from.
+    func testMigratedAccountIDsSurviveASecondStoreOverTheSamePersistence() {
+        let persistence = MemoryPersistence()
+        let ids = PreferencesStore(persistence: persistence).preferences.accounts.map(\.id)
+        XCTAssertFalse(ids.isEmpty, "migration seeds a built-in account per agent")
+
+        let relaunched = PreferencesStore(persistence: persistence)
+        XCTAssertEqual(relaunched.preferences.accounts.map(\.id), ids,
+                       "the migrated blob must be on disk, not re-derived per launch")
+    }
+
+    /// The other half of the guard: a launch that migrates nothing writes nothing, so a
+    /// steady-state start does not touch the defaults key at all.
+    func testALaunchWithNothingToMigrateDoesNotRewriteTheBlob() {
+        let persistence = MemoryPersistence()
+        _ = PreferencesStore(persistence: persistence)
+        let settled = persistence.saveCount
+        XCTAssertGreaterThan(settled, 0, "the first launch has migrations to persist")
+
+        _ = PreferencesStore(persistence: persistence)
+        XCTAssertEqual(persistence.saveCount, settled)
+    }
+
+    /// A nil persistence stays hermetic — the `-FlightDeckResetState` gate and every test that
+    /// passes nil must not acquire a write path by way of migration.
+    func testANilPersistenceStillMigratesInMemoryAndWritesNowhere() {
+        let store = PreferencesStore(persistence: nil)
+        XCTAssertFalse(store.preferences.accounts.isEmpty)
+    }
+
     func testMutationPersists() {
         let persistence = MemoryPersistence()
         let store = PreferencesStore(persistence: persistence)
@@ -32,52 +67,83 @@ final class PreferencesStoreTests: XCTestCase {
         XCTAssertEqual(persistence.stored?.globalFlags.values["--verbose"], .on)
     }
 
-    func testResolvedFlagsMergeProjectOverProject() {
+    func testResolvedOptionsMergeProjectOverGlobalPerFlag() {
         let store = PreferencesStore(persistence: MemoryPersistence())
-        store.preferences.globalFlags = FlagSet(values: ["--model": .value("opus"), "--effort": .value("high")])
-        store.setProjectOverride("/tmp/repo", FlagSet(values: ["--model": .value("sonnet")]))
-        let resolved = store.resolvedFlags(forProject: "/tmp/repo")
+        store.preferences.agents = [
+            AgentSettings(
+                id: .claude,
+                options: .claude(FlagSet(values: ["--model": .value("opus"), "--effort": .value("high")]))
+            )
+        ]
+        store.setProjectSettings(
+            "/tmp/repo",
+            ProjectSettings(options: [.claude: .claude(FlagSet(values: ["--model": .value("sonnet")]))])
+        )
+        guard case .claude(let resolved) = store.resolvedOptions(for: .claude, project: "/tmp/repo") else {
+            return XCTFail("expected claude options")
+        }
         XCTAssertEqual(resolved.values["--model"], .value("sonnet"))
         XCTAssertEqual(resolved.values["--effort"], .value("high"))
     }
 
-    func testProjectWithoutOverrideResolvesToGlobals() {
+    func testProjectWithoutOverrideResolvesToGlobalAgentOptions() {
         let store = PreferencesStore(persistence: MemoryPersistence())
-        store.preferences.globalFlags = FlagSet(values: ["--model": .value("opus")])
-        XCTAssertEqual(store.resolvedFlags(forProject: "/tmp/other"), store.preferences.globalFlags)
+        let globalFlags = FlagSet(values: ["--model": .value("opus")])
+        store.preferences.agents = [AgentSettings(id: .claude, options: .claude(globalFlags))]
+        guard case .claude(let resolved) = store.resolvedOptions(for: .claude, project: "/tmp/other") else {
+            return XCTFail("expected claude options")
+        }
+        XCTAssertEqual(resolved, globalFlags)
     }
 
     func testPathsAreStandardizedSoEquivalentPathsShareAnOverride() {
         let store = PreferencesStore(persistence: MemoryPersistence())
-        store.setProjectOverride("/tmp/repo/", FlagSet(values: ["--verbose": .on]))
-        XCTAssertEqual(store.resolvedFlags(forProject: "/tmp/repo").values["--verbose"], .on)
+        store.setProjectSettings(
+            "/tmp/repo/",
+            ProjectSettings(options: [.claude: .claude(FlagSet(values: ["--verbose": .on]))])
+        )
+        guard case .claude(let flags)? = store.projectSettings("/tmp/repo").options[.claude] else {
+            return XCTFail("expected claude options")
+        }
+        XCTAssertEqual(flags.values["--verbose"], .on)
     }
 
-    func testRemoveProjectOverrideFallsBackToGlobals() {
+    func testClearingProjectOptionsFallsBackToGlobals() {
         let store = PreferencesStore(persistence: MemoryPersistence())
-        store.preferences.globalFlags = FlagSet(values: ["--model": .value("opus")])
-        store.setProjectOverride("/tmp/repo", FlagSet(values: ["--model": .value("sonnet")]))
-        store.removeProjectOverride("/tmp/repo")
-        XCTAssertEqual(store.resolvedFlags(forProject: "/tmp/repo").values["--model"], .value("opus"))
-        XCTAssertTrue(store.overriddenProjectPaths.isEmpty)
+        store.preferences.agents = [
+            AgentSettings(id: .claude, options: .claude(FlagSet(values: ["--model": .value("opus")])))
+        ]
+        store.setProjectSettings(
+            "/tmp/repo",
+            ProjectSettings(options: [.claude: .claude(FlagSet(values: ["--model": .value("sonnet")]))])
+        )
+        store.setProjectSettings("/tmp/repo", ProjectSettings())
+        guard case .claude(let resolved) = store.resolvedOptions(for: .claude, project: "/tmp/repo") else {
+            return XCTFail("expected claude options")
+        }
+        XCTAssertEqual(resolved.values["--model"], .value("opus"))
+        XCTAssertTrue(store.configuredProjectPaths.isEmpty)
     }
 
-    /// An override outlives the project it belongs to — closing a project removes it from
-    /// `SessionStore` entirely — so the override must be enumerable independently of which
+    /// A project's settings outlive the project itself — closing a project removes it from
+    /// `SessionStore` entirely — so a configured path must be enumerable independently of which
     /// projects happen to be open.
-    func testOverridePathsSurviveIndependentlyOfOpenProjects() {
+    func testConfiguredProjectPathsSurviveIndependentlyOfOpenProjects() {
         let persistence = MemoryPersistence()
         let store = PreferencesStore(persistence: persistence)
-        store.setProjectOverride("/tmp/repo", FlagSet(values: ["--verbose": .on]))
+        store.setProjectSettings(
+            "/tmp/repo",
+            ProjectSettings(options: [.claude: .claude(FlagSet(values: ["--verbose": .on]))])
+        )
         let reloaded = PreferencesStore(persistence: persistence)
-        XCTAssertEqual(reloaded.overriddenProjectPaths, ["/tmp/repo"])
+        XCTAssertEqual(reloaded.configuredProjectPaths, ["/tmp/repo"])
     }
 
-    func testOverriddenPathsAreSorted() {
+    func testConfiguredProjectPathsAreSorted() {
         let store = PreferencesStore(persistence: MemoryPersistence())
-        store.setProjectOverride("/tmp/b", FlagSet(values: ["--verbose": .on]))
-        store.setProjectOverride("/tmp/a", FlagSet(values: ["--verbose": .on]))
-        XCTAssertEqual(store.overriddenProjectPaths, ["/tmp/a", "/tmp/b"])
+        store.setProjectSettings("/tmp/b", ProjectSettings(options: [.claude: .claude(FlagSet(values: ["--verbose": .on]))]))
+        store.setProjectSettings("/tmp/a", ProjectSettings(options: [.claude: .claude(FlagSet(values: ["--verbose": .on]))]))
+        XCTAssertEqual(store.configuredProjectPaths, ["/tmp/a", "/tmp/b"])
     }
 
     func testCodableRoundTrip() throws {

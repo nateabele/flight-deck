@@ -380,7 +380,8 @@ is already open. Design record:
 ## Codex rollout observation (2026-08-19) — landed, with these residues
 
 Codex observation now reads the files codex writes: a per-thread rollout `.jsonl` for turn
-boundaries and the app-wide `session_index.jsonl` for renames. Spec:
+boundaries and, per codex account, that account's `session_index.jsonl` for renames (rekeyed
+from one app-wide file by the 2026-08-19 accounts work — see the entry below). Spec:
 [superpowers/specs/2026-08-19-codex-rollout-observation-design.md](superpowers/specs/2026-08-19-codex-rollout-observation-design.md).
 Everything below was found by that branch's reviews, triaged, and deliberately not fixed.
 
@@ -389,11 +390,11 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
 - **`codex resume` failed against a live app-server on codex-cli 0.148.0 — FIXED.** Codex
   holds a writer lock on a thread, and the interactive TUI refused with `thread/resume
   failed: thread <id> already has an active writer (code -32600)`. Flight Deck keeps ONE
-  long-lived app-server (a thread belongs to the process that created it) and then spawns
-  `codex resume <id>`, which is exactly the refused shape — so codex tabs appeared unable to
-  launch on 0.148. Reproduced directly in that production shape; the adapter was built
-  against 0.142.4/0.147.0, and `~/.codex` now has a `thread-writer-locks` directory, so this
-  looked like newer codex behaviour rather than a regression here.
+  long-lived app-server per codex account (a thread belongs to the process that created it)
+  and then spawns `codex resume <id>`, which is exactly the refused shape — so codex tabs
+  appeared unable to launch on 0.148. Reproduced directly in that production shape; the
+  adapter was built against 0.142.4/0.147.0, and `~/.codex` now has a `thread-writer-locks`
+  directory, so this looked like newer codex behaviour rather than a regression here.
 
   `thread/unsubscribe` is NOT the release: it answers `{"status":"unsubscribed"}` and the
   lock stays held. The fix is `CodexAdapter.prepare` issuing `thread/archive` then
@@ -409,6 +410,13 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
 
 ### Worth doing
 
+- **`SessionStore.newSession` returns a `Session` it did not create** when the project's claude
+  account no longer resolves. The refusal is real — nothing is filed, no surface exists, and
+  `launchFailureReporter` tells the user — but the return value is an unfiled draft, because
+  widening the signature to `Session?` would touch ~140 call sites that all treat it as total
+  and act on nothing. The honest shape is `Session?` (or routing every UI creation through the
+  fallible `createSession`, which is where `ProjectHeaderRow`'s "New Session" and the folder
+  drop should probably go anyway); do it when one of those call sites next needs the answer.
 - **`CodexRuntime`'s two `watcher.stop()` calls are unasserted, and investigation found no
   black-box test can currently fail against their removal** (`CodexRuntime.swift:44,53`).
   Both calls are followed immediately by the only strong reference to that watcher being
@@ -468,3 +476,65 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
   It also costs roughly 100ms per call even when it works, which `wait(for:)` does not. A
   non-`@MainActor`-isolated test class is unaffected by any of this, which is what makes the
   failure confusing the first time it is hit.
+
+## Agent accounts (2026-08-19) — what the work left behind
+
+Spec: [superpowers/specs/2026-08-19-agent-accounts-design.md](superpowers/specs/2026-08-19-agent-accounts-design.md).
+An account is a login, identified by its config directory (`CLAUDE_CONFIG_DIR` /
+`CODEX_HOME`); every observation root that used to be an app-wide constant now derives from
+the account a session runs as. Three things this deliberately did not build:
+
+- **Relocating an account is blocked while any of its sessions are open — a refusal, not a
+  migration.** `PreferencesStore.relocateAccount` only rewrites the stored `home`; it never
+  moves a file. The guard that makes this safe is the same one `canRemove` uses for delete
+  (`AccountsSection.canRemove`, `Sources/FlightDeck/Preferences/UI/AccountsSection.swift`): an
+  account with a tab bound to it (`boundAccountIDs`) cannot be relocated either, so there is no
+  window where a live tab's transcript/registry watcher is pointed at a home nobody told it
+  about. There is no data-migration path (copying transcripts, re-pointing an in-flight
+  watcher) — the user closes the account's tabs first, or does not relocate it.
+- **"Scan for Accounts…" is the only way to pick up a home created after first launch.**
+  `Preferences.migrateAccountsIfNeeded` (`Sources/FlightDeck/Preferences/Preferences.swift`)
+  discovers sibling account directories exactly once, on first migration — deliberately not a
+  re-scan on every launch, because a re-scan would resurrect an account the user removed. A
+  `~/.claude-something` created afterwards (a new login added on the machine after Flight Deck
+  first ran) is invisible until the user opens Preferences → Accounts and runs "Scan for
+  Accounts…" by hand.
+- **A typed account Location is not tilde-expanded.** `AccountDraft.trimmedHome` builds the
+  home with `URL(fileURLWithPath:)` on the raw text, so a hand-typed `~/.codex-work` resolves
+  against the process working directory rather than `$HOME` — it then passes `validate` as
+  vacant and a bogus `./~/.codex-work` gets created. Not reachable through `Choose…`, which
+  hands over a real URL, and not reachable from the derived default. The only expansion in the
+  codebase is `FlightDeckApp.stateDirectory`'s; when this is fixed the expansion belongs in
+  `trimmedHome` so `validate` inspects the same directory Add creates. Noted here because the
+  one place that *did* expand a tilde in a home path — `CodexNameWatcher`'s read of Flight
+  Deck's own `CODEX_HOME` — was deleted by this work, and with it the only test for it.
+- **Codex's `-p` config profiles remain unimplemented, and are a different axis from
+  accounts.** `codex -p <name>` layers `$CODEX_HOME/<name>.config.toml` over one `CODEX_HOME` —
+  it is a config profile inside one login, not a second login. The design spec names this
+  explicitly (§2, §7.5 "Deferred") as a future `CodexThreadOptions` field; nothing in this work
+  reads or writes a `-p` profile, and an account switch does not change which profile (if any)
+  a codex thread would use.
+
+## Where accounts and the fleet meet (2026-08-20, from merging the two)
+
+- **A phone cannot tell which login a session runs as, and that is the decision, not an
+  oversight.** An account is a config directory, so it stays off the wire entirely — see
+  `docs/ARCHITECTURE.md` § "Fleet replication" and `FleetAccountEmissionTests`. If a client
+  ever needs to *distinguish* two logins visually, the thing to replicate is a stable opaque
+  handle minted for the wire plus the account's display name — never `AgentAccount.id` (it is
+  the key to a home path) and never the home itself.
+
+- **`accountMismatchedSessionIDs` is sidebar-only and deliberately not replicated.** It is
+  derived from preferences (which account a *project* would pick today) rather than from
+  `repos`/`statuses`/`unreadIdle`, so it changes with no `SessionStore` mutation and therefore
+  with no `FleetEvent` — replicating it would mean either a preferences observer feeding the
+  event log or a field that silently goes stale. Neither is worth it for a warning badge, but
+  a client that grows one will need the first.
+
+- **The per-account registry merge is not under the drift check.**
+  `SessionStore.applyRegistry(_:from:)` — which unions every account's last scan before
+  committing statuses — is private and only reachable through a real `SessionStatusWatcher`,
+  so no test drives it with a replicator attached. It funnels into the same
+  `applyRegistry(_:)` that `applyRegistryForTesting` does, which *is* covered, so the emission
+  itself is pinned; what is not pinned is the merge deciding *which* rows reach it. A seam for
+  the per-account entry point would close that.
