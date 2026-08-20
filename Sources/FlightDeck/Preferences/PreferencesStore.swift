@@ -120,6 +120,16 @@ final class PreferencesStore: ObservableObject {
         return [row] + global.filter { $0.id != preferred }
     }
 
+    /// The account each of `agents` currently resolves to for `project` — what
+    /// `NewSessionAffordance.menu`'s checkmark compares against, so a click in the dropdown
+    /// and a bare ⌘N can never disagree about which login either one would use. An agent this
+    /// project has no account for at all is simply absent from the map, not mapped to nil.
+    func resolvedAccounts(for agents: [AgentSettings], project: String) -> [AgentID: UUID] {
+        Dictionary(uniqueKeysWithValues: agents.compactMap { settings in
+            account(for: settings.id, project: project).map { (settings.id, $0.id) }
+        })
+    }
+
     func homeIsTaken(_ home: URL, excluding id: UUID?) -> Bool {
         preferences.accounts.contains { $0.id != id && AgentAccount.key($0.home) == AgentAccount.key(home) }
     }

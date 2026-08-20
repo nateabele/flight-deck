@@ -44,4 +44,16 @@ enum SidebarRow: Identifiable, Hashable {
             return [header] + repo.sessions.map { .session($0.id, project: repo.id) }
         }
     }
+
+    /// Whether a session's stamped account differs from what its own project resolves to
+    /// today, for the same agent. Pure so the sidebar's marker is testable without a window —
+    /// the comparison is two already-resolved ids, and that has nothing to do with SwiftUI.
+    ///
+    /// Quiet whenever the two ids already match (the overwhelmingly common case) and quiet
+    /// too when neither resolves to anything (nothing configured to compare), so the marker
+    /// only ever fires when a tab is genuinely running as a login its project would not have
+    /// picked — a work session left open in a personal repo, or the reverse.
+    static func accountMismatched(session sessionAccount: UUID?, project projectAccount: UUID?) -> Bool {
+        sessionAccount != projectAccount
+    }
 }

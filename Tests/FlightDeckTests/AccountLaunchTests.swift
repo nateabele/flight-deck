@@ -154,6 +154,29 @@ final class AccountLaunchTests: XCTestCase {
         XCTAssertEqual(tab.accountID, work.id)
     }
 
+    /// The New Session dropdown's whole point (Task 14): naming an account explicitly must
+    /// reach the tab it creates even when it disagrees with what the project would have
+    /// resolved on its own — that disagreement is exactly what the dropdown exists to let
+    /// past. Goes through `createFromMenu`, the same entry point the dropdown's `Button`
+    /// calls, not the lower-level `createSession` the earlier stamping tests use.
+    func testAnExplicitlyChosenAccountReachesTheStamp() async throws {
+        let (preferences, top) = configured(.claude)
+        let chosen = AgentAccount(agent: .claude, displayName: "Chosen", home: home("chosen"))
+        preferences.preferences.storedAccounts = [top, chosen]
+        let store = makeStore(preferences)
+        store.newSession(in: projectURL)   // an active project to add the chosen tab beside
+
+        let created = await store.createFromMenu(
+            agent: .claude, chooseFolder: { XCTFail("must not prompt"); return nil },
+            account: chosen.id
+        )
+
+        let tab = try XCTUnwrap(created, "the dropdown's choice must still produce a tab")
+        XCTAssertEqual(tab.accountID, chosen.id,
+                       "the account clicked in the dropdown, not the project's own default")
+        XCTAssertNotEqual(chosen.id, top.id, "the fixture must actually disagree with the default")
+    }
+
     // MARK: - What the shell is actually launched with
 
     func testTheLaunchedShellCarriesItsAccountsVariable() throws {
