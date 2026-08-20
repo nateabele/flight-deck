@@ -42,3 +42,10 @@ Early. It runs, and it's what I use to build it, but it is nowhere near finished
 Apple Silicon only. The build is ad-hoc signed rather than notarised, so the first
 launch needs a right-click → Open before macOS will let it start. Latest build is on
 the [releases page](../../releases/latest).
+
+## License
+
+Copyright (c) 2026 Nate Abele. Released under the [BSD 3-Clause License](LICENSE).
+
+Ghostty is vendored as a submodule and carries its own MIT license
+(Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors).
