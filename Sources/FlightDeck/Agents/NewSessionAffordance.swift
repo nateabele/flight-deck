@@ -76,6 +76,15 @@ enum NewSessionAffordance {
     enum MenuEntry: Equatable {
         case agent(AgentID, account: UUID, isResolved: Bool)
         indirect case submenu(AgentID, [MenuEntry])
+
+        /// Which agent this row (or submenu) belongs to, regardless of case — lets callers
+        /// key a lookup by agent without re-deriving the switch themselves.
+        var agent: AgentID {
+            switch self {
+            case .agent(let agent, _, _): return agent
+            case .submenu(let agent, _): return agent
+            }
+        }
     }
 
     static func menu(
@@ -89,5 +98,25 @@ enum NewSessionAffordance {
             }
             return mine.count == 1 ? rows[0] : .submenu(settings.id, rows)
         }
+    }
+
+    /// Which account, inside a multi-account submenu's rows, should carry the flat
+    /// keyboard shortcut that used to sit on the agent's own (now-nested) menu item.
+    ///
+    /// The resolved row wins — the same one the checkmark already marks, so the chord and
+    /// the visible default never disagree. If nothing is resolved (an unreachable state
+    /// today, since `resolved` always names one account when any exist), the first row
+    /// still gets it: an agent slot bound by `slots(for:)` must always answer somewhere,
+    /// never go silently dead because nothing happened to be marked resolved.
+    static func shortcutLeaf(in rows: [MenuEntry]) -> UUID? {
+        for row in rows {
+            if case .agent(_, let account, let isResolved) = row, isResolved {
+                return account
+            }
+        }
+        if case .agent(_, let account, _) = rows.first {
+            return account
+        }
+        return nil
     }
 }

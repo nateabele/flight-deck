@@ -81,4 +81,31 @@ final class NewSessionAffordanceTests: XCTestCase {
             ])
         ])
     }
+
+    /// The resolved leaf gets the chord that a submenu's parent item cannot itself carry —
+    /// the same row the checkmark already marks, so the shortcut and the visible default
+    /// never disagree.
+    func testShortcutLeafPicksTheResolvedAccount() {
+        let rows: [NewSessionAffordance.MenuEntry] = [
+            .agent(.claude, account: UUID(), isResolved: false),
+            .agent(.claude, account: UUID(), isResolved: true),
+        ]
+        guard case .agent(_, let resolved, true) = rows[1] else { return XCTFail("expected the resolved row") }
+        XCTAssertEqual(NewSessionAffordance.shortcutLeaf(in: rows), resolved)
+    }
+
+    /// A chord bound by list position must never simply go dead: if nothing in the submenu
+    /// happens to be resolved, the first row still answers it.
+    func testShortcutLeafFallsBackToTheFirstRowWhenNothingIsResolved() {
+        let first = UUID()
+        let rows: [NewSessionAffordance.MenuEntry] = [
+            .agent(.claude, account: first, isResolved: false),
+            .agent(.claude, account: UUID(), isResolved: false),
+        ]
+        XCTAssertEqual(NewSessionAffordance.shortcutLeaf(in: rows), first)
+    }
+
+    func testShortcutLeafOfEmptyRowsIsNil() {
+        XCTAssertNil(NewSessionAffordance.shortcutLeaf(in: []))
+    }
 }

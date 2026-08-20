@@ -363,6 +363,12 @@ struct SessionSidebar: View {
                         Task { await store.createFromMenu(agent: agent) }
                     }
                     .menuStyle(.button)
+                    // `newSessionLabel`'s own `.frame(maxWidth: .infinity)` sizes its
+                    // content but does not stretch the `Menu` control itself — measured:
+                    // the split button shrank to fit its label while the plain `Button`
+                    // branch below did not. The frame has to sit on the control, not just
+                    // inside its label, for the two branches to match widths.
+                    .frame(maxWidth: .infinity)
                     .accessibilityIdentifier("new-session")
                     .keyboardShortcut(isEmpty ? .init("a", modifiers: [.command, .shift])
                                              : .init("n", modifiers: NewSessionAffordance.eventModifiers(
@@ -375,6 +381,7 @@ struct SessionSidebar: View {
                     } label: {
                         newSessionLabel
                     }
+                    .frame(maxWidth: .infinity)
                     .accessibilityIdentifier("new-session")
                     .keyboardShortcut(isEmpty ? .init("a", modifiers: [.command, .shift])
                                              : .init("n", modifiers: NewSessionAffordance.eventModifiers(
