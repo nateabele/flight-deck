@@ -393,6 +393,20 @@ final class PairingArmerTests: XCTestCase {
         XCTAssertFalse(armer.claim(slot: payload.key.slot))
     }
 
+    /// The exact edge, which the tests either side of it do not touch. `claim` accepts at
+    /// `now == armedUntil` and `expire` drops only strictly past it, so the two boundaries
+    /// are complementary — there is no instant where one calls the window gone and the other
+    /// still honours it. Pinned because this file exists to enforce a boundary, and a later
+    /// edit tightening `<=` to `<` would otherwise pass every test here.
+    func testAClaimAtTheExactExpiryInstantIsStillHonoured() {
+        let armer = armer()
+        let payload = arm(armer)
+        now += PairingArmer.window
+        armer.expire()
+        XCTAssertNotNil(armer.pending, "expire must not drop a window at the instant it ends")
+        XCTAssertTrue(armer.claim(slot: payload.key.slot))
+    }
+
     func testAClaimForADifferentSlotIsRefused() {
         let armer = armer()
         _ = arm(armer)
