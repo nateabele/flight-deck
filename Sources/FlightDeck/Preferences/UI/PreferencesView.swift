@@ -6,7 +6,7 @@ struct PreferencesView: View {
 
     var body: some View {
         TabView {
-            AgentsSettingsTab(preferences: preferences)
+            AgentsSettingsTab(preferences: preferences, sessions: sessions)
                 .tabItem { Label("Agents", systemImage: "person.2") }
                 .accessibilityIdentifier("prefs-agents")
 

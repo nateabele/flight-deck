@@ -1153,6 +1153,29 @@ final class SessionStore: ObservableObject {
         return .success(session.id)
     }
 
+    /// The Accounts pane's "Sign In" / "Sign In Again" path: an ordinary tab, bound to a
+    /// specific account the caller names outright rather than one `launchAccount` would
+    /// resolve from project settings — a login is not the project's default agent, it is
+    /// whichever account the user just clicked.
+    ///
+    /// Deliberately bypasses `createSession`'s negotiation entirely rather than routing
+    /// through it with an override: a login has no conversation to resume and no title to
+    /// give codex, so the ordinary `--session-id … --name …` shape is wrong for it, and
+    /// negotiating a codex thread before the account has even authenticated would be actively
+    /// harmful — `thread/start` is not what `codex login` is. `typing` is `LoginInvocation`'s
+    /// own `command` (`"claude"`, `"codex login"`), sent verbatim rather than built from
+    /// `AgentAdapter.launchCommand`.
+    @discardableResult
+    func openSignInSession(for account: AgentAccount, in directory: String, typing: String) -> Session {
+        let session = Session(
+            title: nextSessionTitle(), workingDirectory: directory, agent: account.agent,
+            accountID: account.id
+        )
+        return addSession(
+            session, in: URL(fileURLWithPath: directory, isDirectory: true), initialInput: typing
+        )
+    }
+
     /// The tail every creation shares: file the tab, reveal it, select it, save.
     ///
     /// Split from `insertSession` rather than folded into it because `restore` calls that one
