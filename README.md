@@ -40,3 +40,9 @@ Early. It runs, and it's what I use to build it, but it is nowhere near finished
 Apple Silicon only. The build is ad-hoc signed rather than notarised, so the first
 launch needs a right-click → Open before macOS will let it start. Latest build is on
 the [releases page](../../releases/latest).
+
+There's also an early iPhone companion — pair it by scanning a QR from the Mac's
+Preferences and it shows the same fleet over your local network, renamed and marked
+read from either side. Earlier still than the Mac app: it needs your own Apple
+developer signing to install, since nobody else's team id belongs in this repo. See
+[docs/MOBILE.md](docs/MOBILE.md).

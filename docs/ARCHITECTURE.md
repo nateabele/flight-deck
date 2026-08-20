@@ -272,19 +272,24 @@ make a failed-but-verbose launch read identical to a successful one. A non-zero 
 a 2-second grace window is reported through `ToolLaunchFailureReporting`; still running past
 that window counts as success.
 
-## Fleet replication (`FleetKit` / `Sources/FlightDeck/Fleet/`)
+## Fleet replication, pairing, and the phone (`FleetKit` / `Sources/FlightDeck/Fleet/` / `Sources/FlightDeckMobile/`)
 
-The spine a mobile companion replicates the fleet over — not wired to any UI yet (Plan 2:
-`docs/superpowers/plans/2026-08-19-fleet-pairing-and-ios.md`), but live end to end: a real
-client over a real TLS-PSK WebSocket can already receive a snapshot of a running
-`SessionStore`, follow its mutations, and mark a session read. Two modules:
+Live end to end: a paired iPhone scans a QR off the Mac's screen, finds it over Bonjour or by
+racing remembered addresses, and shows the running fleet in the terminal's own idiom — one
+project section per open project, one row per session, renamed and marked read from either
+side. Plan 2 built the phone and the pairing UI on top of the spine Plan 1 built (Plan 1:
+`docs/superpowers/plans/2026-08-19-fleet-replication-spine.md`; Plan 2:
+`docs/superpowers/plans/2026-08-19-fleet-pairing-and-ios.md`). The manual checklist for what
+only a real device on a real network can prove is [docs/MOBILE.md](MOBILE.md). Three modules:
 
 - **`Sources/FleetKit/`** — the wire types (`FleetSnapshot`, `WireProject`, `WireSession`), the
   delta vocabulary (`FleetEvent`), snapshot application, the replay fold, a hand-written frame
-  codec, the TLS pre-shared-key parameters, and both socket halves (`FleetSocketServer`,
-  `FleetClient`). It imports only `Foundation`, `Network`, and `Security` — never `AppKit` —
-  and that boundary is enforced mechanically, not by convention: the same source directory is
-  also compiled as an iOS target (`FleetKitiOS` in `project.yml`, checked by
+  codec, the TLS pre-shared-key parameters, both socket halves (`FleetSocketServer`,
+  `FleetClient`), the pairing payload (`PairingPayload`) that the QR encodes, and the phone's
+  Keychain-backed pairing store (`KeychainPairedMacStore`) and network-discovery connector
+  (`FleetConnector`). It imports only `Foundation`, `Network`, and `Security` — never `AppKit`
+  — and that boundary is enforced mechanically, not by convention: the same source directory
+  is also compiled as an iOS target (`FleetKitiOS` in `project.yml`, checked by
   `scripts/build-ios.sh`), so a stray `import AppKit` fails that build immediately rather than
   surfacing later as a phone-side compile error nobody is watching for.
 - **`Sources/FlightDeck/Fleet/`** — the desktop side. `FleetProjection` is a pure read of
@@ -292,7 +297,17 @@ client over a real TLS-PSK WebSocket can already receive a snapshot of a running
   event log and holds a bounded ring for replaying across a reconnect. `FleetService` is the
   only type that knows both a `SessionStore` and a socket — deliberately: `FleetSocketServer`
   stays testable with no store, `SessionStore` stays testable with no network, and everything
-  that needs both is here where it can be read at once.
+  that needs both is here where it can be read at once. `PairingArmer` is a pure state machine
+  over an injected clock holding the one-slot-at-a-time arming window; the Devices tab
+  (`Sources/FlightDeck/Preferences/UI/DevicesSettingsTab.swift`) is the only place a user can
+  arm pairing, see who is attached, or revoke a device.
+- **`Sources/FlightDeckMobile/`** — the phone app. `FleetModel` owns a `PairedMacStoring` and a
+  `FleetConnector` and is the only thing either screen talks to; `PairingScreen` scans a QR (or
+  takes a typed code, the only route that works on a simulator) and adopts it, `FleetListScreen`
+  renders the replicated fleet. Most of `PairingScreen.swift` is its QR scanner
+  (`AVCaptureSession` wrapped in a `UIViewRepresentable`), whose teardown path — stop the
+  session, clear the delegate, let `deinit` run — took three review rounds to get right; see
+  [docs/MOBILE.md](MOBILE.md) for what that history means for the manual checklist.
 
 **The event log, and the drift assertion standing in for encapsulating it.** `SessionStore`
 emits a `FleetEvent` for every change to `repos`, `statuses`, or `unreadIdle` (`unreadIdle` now
@@ -331,6 +346,31 @@ mismatched identity rather than sending an alert, which closes off an identity o
 several devices' keys at once and picks the right one per connection from the PSK identity —
 this was the plan's central open question, now verified, so revoking one device (delete its
 slot's key, restart the listener) does not disturb any other paired device.
+
+**Pairing is a QR, a 2-minute window, and nothing else.** `PairingArmer.arm` mints a fresh
+`FleetDeviceKey`, opens a 120-second window, and hands back a `PairingPayload` —
+`flightdeck1:` plus base64url JSON carrying the key, the Mac's name, its Bonjour instance name,
+and every address `LocalEndpoints.current` can see for it. The version digits are checked
+before any base64 or JSON decoding happens, so a code from a newer Mac is refused as *too-new*
+rather than as *damaged* — the two failures send the user in opposite directions. The window is
+enforced by the armer itself, not by the UI: `PairingArmer.claim(slot:)` re-checks `armedUntil`
+against its own clock, so a code that expires unscanned stays refused even if the sheet
+displaying it is still on screen. The Mac advertises `_flightdeck._tcp` over Bonjour
+(`NSBonjourServices`, `NSCameraUsageDescription`, and `NSLocalNetworkUsageDescription` are all
+declared in `project.yml` — macOS 15+ and iOS both gate their respective access behind a user
+prompt, and an app with no usage description never gets to show it, so the failure is silent
+rather than a crash); the phone's `FleetConnector` finds the Mac by racing Bonjour resolution
+alongside every endpoint the payload carried, live or dead, and keeps whichever answers first —
+which is what roaming across Wi-Fi and cellular falls out of, with no stable hostname assumed
+anywhere.
+
+**Paired-device state is deliberately not the same shape on both sides.** The Mac keeps
+`[PairedDevice]` — including a device's key — in `Preferences`, persisted as JSON in
+`UserDefaults` alongside every other preference; the phone keeps one `PairedMac` in a single
+Keychain item (`KeychainPairedMacStore`), updated in place rather than deleted-and-re-added so
+there is never a window with no pairing on disk (`PairedMacStore.swift` has the reasoning
+comment on why that shape was tried first and rejected). The Mac's copy is not Keychain-grade;
+see docs/FOLLOWUPS.md.
 
 ## Not yet built (design, not code)
 
