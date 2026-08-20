@@ -2917,7 +2917,9 @@ Covering, in the house voice:
 - **Running it at all**: install an iOS Simulator runtime *or* set `DEVELOPMENT_TEAM` and a bundle id you own, then `xcodebuild -target FlightDeckMobile -sdk iphoneos`. Say plainly that neither is configured in the repo and why (no profile on the build machine; a hard-coded team is a merge conflict waiting to happen).
 - **The manual checklist**, each item stated as an observable outcome:
   1. Pair by scanning; the Mac's Devices tab shows the phone as Connected.
-  2. Pair by typing the code; same outcome. (The simulator path.)
+  2. Pair by typing the code instead of scanning; same outcome. This is not a lesser path —
+     it is what a user falls back to when they decline the camera, and it is the only pairing
+     route that works at all on a simulator.
   3. Rename a session on the Mac — the phone's row changes within a second.
   4. Let a session finish while looking elsewhere — the unread dot appears on both.
   5. Tap the row on the phone — the dot clears on the Mac. Unread is one fleet-wide fact (§8).
@@ -2927,6 +2929,43 @@ Covering, in the house voice:
   9. Leave the phone off the network for ten minutes, then return — it resumes rather than re-downloading (check the Mac's log for a replay rather than a snapshot).
   10. Revoke the device on the Mac — the phone disconnects and cannot reconnect.
   11. Let a pairing code expire unscanned, then scan it — it is refused.
+- **A second checklist: the iOS plumbing.** The eleven items above test the *feature* — that
+  pairing, replication, resume and revocation behave. These test the *app*, and they are
+  separated because they have a different character: each one was identified during review as
+  something no amount of reading or type-checking on the build machine could settle, and each
+  has a specific observable outcome rather than "check it looks right". Everything reviewers
+  *could* settle by reading has already been settled and is deliberately absent here — a
+  checklist that lists the answerable alongside the unanswerable is one nobody finishes.
+
+  1. **Dismiss the pairing screen and watch the camera indicator go out.** This is the definitive
+     test for the teardown fix. If the orange dot stays lit, `dismantleUIView` is not running or
+     `teardown()` is not reaching `stopRunning()`.
+  2. **Confirm `QRScannerContainerView.deinit` actually runs** — a breakpoint or a print in a
+     debug build. `AVCaptureMetadataOutput` may retain its delegate, which would mean the view
+     never deallocates and the camera runs for the life of the process. Clearing the delegate in
+     `teardown()` is what is supposed to prevent that; this is how you find out whether it did.
+  3. **Time the pairing screen's first appearance.** `startRunning()` now runs off the main
+     thread; the check is that there is no visible hitch, especially on a cold launch while the
+     camera warms.
+  4. **The first-launch camera prompt**: it appears over the pairing screen, and granting it
+     transitions to a live preview without needing a relaunch.
+  5. **Scan a real code from a real Mac screen**, at the distance someone would actually hold a
+     phone. Nothing on the build machine can test this — a simulator has no camera — so the
+     decode, the dedup-by-last-string, and the preview layer's sizing are all unexercised until
+     this runs.
+  6. **Watch the keychain write on the first successful scan.** `KeychainPairedMacStore.save`
+     traps via `assertionFailure` on any unexpected status, and a debug build on hardware
+     without the right keychain entitlement will hit that the instant pairing succeeds. It is
+     the first thing that runs after a scan, so it is the first thing that can fail.
+  7. **Adopt and unpair, and watch the root view re-route both ways.** Reading `@Observable`
+     state in a `Scene`'s content closure is a known-fragile spot; this is the one item flagged
+     in review as plausible-but-unproven rather than merely unverified.
+  8. **Look at the layout.** The status glyph column lining up down the list, a ~200-character
+     base64 code in the manual-entry field, failure copy wrapping rather than truncating, and
+     the toolbar button and confirmation dialog landing sensibly.
+  9. **Background and foreground the pairing screen.** AVFoundation's interruption handling is
+     untested here and interacts with the teardown path above.
+
 - **The trust model**, restated in one paragraph for whoever reads this doc first: a QR on an unlocked Mac, a 2-minute window, single use, and a paired phone is fully privileged until revoked.
 
 - [ ] **Step 2: Update the other docs**
@@ -2940,6 +2979,20 @@ Covering, in the house voice:
   - **Bonjour resolution, roaming and off-LAN reachability are manually verified only** — there is no automated coverage and there cannot be on one machine.
   - **No relay**, so off-LAN needs a VPN. Designed for as a further candidate endpoint (§3), not built.
   - Whichever fallbacks were taken in spine Task 6 or this plan's Task 4, if any.
+  - **`FleetSocketServer` does not guard its public entry points the way `FleetConnector` now
+    does.** Both are `@unchecked Sendable` with state confined to `queue`; the connector asserts
+    `dispatchPrecondition` on `start`/`stop`/`send`, the server asserts only that its own
+    callbacks land on `queue` and catches a bad `queue:` argument at the first connection
+    instead. Both are honest today because every caller is `@MainActor` and every `queue`
+    defaults to `.main` — which is a property of the callers, not of the types. Worth deciding
+    deliberately rather than leaving the two inconsistent.
+  - **The phone persists `lastSeq` on every applied frame**, deliberately: with the keychain
+    item updated in place there is no write window, and the event rate is bounded by the Mac's
+    activity filter and poll interval to roughly two per second per session. The cost that is
+    real and unmeasured is that each write is a synchronous `securityd` round-trip on the
+    connector's queue — which defaults to `.main`, the thread drawing the fleet list. If this
+    ever shows up as scroll hitching, the fix is moving the write off the main queue, not
+    throttling it.
 
 - [ ] **Step 3: Final verification**
 
@@ -2961,7 +3014,13 @@ git commit -m "docs: describe pairing, the phone, and what only a device can pro
 ## Done when
 
 - `./scripts/test-unit.sh` passes, including the pairing flow tests: a device pairs on its first handshake inside an armed window, a revoked device cannot reconnect, an unclaimed code expires out of the accepted keys, and a connector finds its Mac by racing dead endpoints alongside a live one.
-- `./scripts/build-ios.sh` builds `FleetKitiOS` and `FlightDeckMobile`.
+- `./scripts/build-ios.sh` builds `FleetKitiOS`. It does **not** build `FlightDeckMobile` on a
+  machine with no iOS platform installed — an app target cannot resolve a destination without
+  one — so the script says so loudly and falls back to type-checking the app's sources against
+  the framework. That fallback is a real check (it fails the script on a genuine compile error)
+  and a narrow one: it proves the source compiles, and nothing about layout, navigation,
+  lifecycle, or whether the app launches. Install the platform and the script covers the app
+  target too.
 - The Mac's Preferences has a Devices tab that arms pairing, lists paired devices, shows which are connected, and revokes.
 - `docs/MOBILE.md` carries the eleven-item manual checklist, unrun, for the user to work through when they set up signing.
 
