@@ -256,7 +256,7 @@ final class SessionPersistenceTests: XCTestCase {
 
     /// End-to-end regression for the restore bug: reaches the watcher only through the
     /// store (as production does), so the store↔watcher↔`applyExternalTitle` wiring is
-    /// actually exercised. `SessionStore.projectsRoot` exists precisely for this.
+    /// actually exercised. `SessionStore.transcriptsRootOverride` exists precisely for this.
     ///
     /// Restores a session whose transcript already contains a `custom-title` line with a
     /// *different* title (as if a rename had happened in a prior run, or the file were
@@ -298,7 +298,7 @@ final class SessionPersistenceTests: XCTestCase {
         )
 
         let store = SessionStore(provider: CapturingProvider(), persistence: fake)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         // Poll at the foreground cadence: this test asserts on watcher ticks in real time,
         // and a headless run is never frontmost. See `waitForWatcher`.
         store.appIsActive = { true }
@@ -559,7 +559,7 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(
             store.watchedTranscriptURL(of: id),
             ClaudeSession.transcriptURL(
-                sessionID: id, workingDirectory: worktree, projectsRoot: store.projectsRoot
+                sessionID: id, workingDirectory: worktree, projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
         XCTAssertEqual(persistence.stored?.sessions.first?.transcriptDirectory, worktree)
@@ -595,7 +595,7 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(
             store.watchedTranscriptURL(of: id),
             ClaudeSession.transcriptURL(
-                sessionID: id, workingDirectory: "/w", projectsRoot: store.projectsRoot
+                sessionID: id, workingDirectory: "/w", projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
         XCTAssertEqual(persistence.stored?.sessions.first?.transcriptDirectory, "/w")
@@ -621,7 +621,7 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(
             store.watchedTranscriptURL(of: id),
             ClaudeSession.transcriptURL(
-                sessionID: id, workingDirectory: "/w", projectsRoot: store.projectsRoot
+                sessionID: id, workingDirectory: "/w", projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
         XCTAssertEqual(persistence.stored?.sessions.first?.transcriptDirectory, "/w")
@@ -741,6 +741,26 @@ final class SessionPersistenceTests: XCTestCase {
         let decoded = try JSONDecoder().decode(SessionSnapshot.self, from: data)
 
         XCTAssertEqual(decoded.terminalSize, .init(width: 742.5, height: 618))
+    }
+
+    /// The migration that needs no migration: an absent key is nil is the built-in home.
+    func testASnapshotWithoutAnAccountDecodesAsNil() throws {
+        let json = Data(#"{"sessions":[{"id":"00000000-0000-0000-0000-000000000001","title":"s","workingDirectory":"/p"}],"sessionCounter":1}"#.utf8)
+        let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: json)
+        XCTAssertNil(snapshot.sessions[0].accountID)
+    }
+
+    func testAnAccountSurvivesTheRoundTrip() throws {
+        let id = UUID()
+        let entry = SessionSnapshot.Entry(
+            id: UUID(), title: "s", workingDirectory: "/p", accountID: id
+        )
+        var snapshot = SessionSnapshot()
+        snapshot.sessions = [entry]
+        let decoded = try JSONDecoder().decode(
+            SessionSnapshot.self, from: try JSONEncoder().encode(snapshot)
+        )
+        XCTAssertEqual(decoded.sessions[0].accountID, id)
     }
 
 }

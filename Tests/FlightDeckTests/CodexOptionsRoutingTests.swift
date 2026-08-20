@@ -6,8 +6,9 @@ import XCTest
 /// The store used to answer `options(for: .codex, project:)` with a hardcoded
 /// `CodexThreadOptions()`, so every control in that pane was inert — a user who chose the
 /// `read-only` sandbox silently got codex's default instead, which is a safety expectation
-/// the UI was breaking. Claude never had this problem because `ClaudeOptionsPane` binds
-/// `globalFlags`, which is what `resolvedFlags` reads.
+/// the UI was breaking. Claude never had this problem because `ClaudeOptionsPane` binds the
+/// claude row in `preferences.agents`, which is exactly what `resolvedOptions(for:project:)`
+/// reads.
 @MainActor
 final class CodexOptionsRoutingTests: XCTestCase {
     private final class MemoryPreferences: PreferencesPersisting {
@@ -42,6 +43,7 @@ final class CodexOptionsRoutingTests: XCTestCase {
         func launchCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
         func resumeCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
         func rename(_: AgentBinding, to: String) async throws {}
+        func loginInvocation(for account: AgentAccount) -> LoginInvocation { LoginInvocation(command: "", inject: nil) }
     }
 
     private var projectsRoot: URL!
@@ -72,12 +74,17 @@ final class CodexOptionsRoutingTests: XCTestCase {
             approvalPolicy: "untrusted", addDirs: ["/w/extra"]
         ))
         let store = SessionStore(provider: nil, persistence: nil, preferences: preferences)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         // Never the user's real `~/.codex/session_index.jsonl`: this test creates a codex tab.
-        store.codexIndexURL = projectsRoot.appendingPathComponent("session_index.jsonl")
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()
         let adapter = RecordingCodexAdapter()
-        store.overrideAdapter(adapter, for: .codex)
+        // Filed under the account the tab will actually resolve to. This store HAS
+        // preferences, and the accounts migration seeds a built-in account per agent, so the
+        // key here is that account's id and not nil — an override filed under nil would not
+        // be found, and `createSession` would go and spawn a real `codex app-server`.
+        store.overrideAdapter(adapter, for: .codex,
+                              account: preferences.resolvedAccountID(for: .codex, in: nil))
 
         _ = await store.createSession(agent: .codex, in: projectsRoot.path)
 
@@ -93,11 +100,12 @@ final class CodexOptionsRoutingTests: XCTestCase {
 
     func testAStoreWithNoPreferencesStillLaunchesOnCodexsOwnDefaults() async throws {
         let store = SessionStore(provider: nil, persistence: nil)
-        store.projectsRoot = projectsRoot
-        store.codexIndexURL = projectsRoot.appendingPathComponent("session_index.jsonl")
+        store.transcriptsRootOverride = projectsRoot
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()
         let adapter = RecordingCodexAdapter()
-        store.overrideAdapter(adapter, for: .codex)
+        // No preferences on this one, so nothing resolves and nil is the key.
+        store.overrideAdapter(adapter, for: .codex, account: nil)
 
         _ = await store.createSession(agent: .codex, in: projectsRoot.path)
 

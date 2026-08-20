@@ -1871,10 +1871,12 @@ Add to `NewSessionAffordance`:
 ```
 
 Then: the sidebar's New Session button gets a trailing chevron rendering that menu; the app's
-New Session menu item (already AppKit-built, `258dc2f`) renders the same; `SessionCommands` and
-the sidebar read `agentOrder(forProject:)` for the selected project instead of
-`preferences.agents`; and `SidebarRow` shows a small account marker when a session's resolved
-account differs from its project's.
+New Session menu item renders the same — it is SwiftUI (`SessionCommands.swift`), not AppKit;
+`258dc2f` never touched it (that commit built the *Tools* menu, over
+`AppDelegate.swift`/`RootView.swift`/`Sources/FlightDeck/Tools/*`). `SessionCommands` and the
+sidebar read `agentOrder(forProject:)` for the selected project instead of `preferences.agents`,
+which is how the per-project ordering reaches this menu; and `SidebarRow` shows a small account
+marker when a session's resolved account differs from its project's.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 

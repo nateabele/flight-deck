@@ -11,10 +11,11 @@ import Foundation
 struct ClaudeAdapter: AgentAdapter {
     static let id: AgentID = .claude
 
-    /// Where `~/.claude/projects` lives, read on every derivation rather than captured as a
-    /// value. `SessionStore.projectsRoot` is a test seam assigned *after* the store is
-    /// constructed, and a struct that snapshotted it at construction would keep pointing at
-    /// the real projects directory for the life of a fixture or test run.
+    /// Where this account's `projects` directory lives, read on every derivation rather than
+    /// captured as a value. It is derived from the home of the account the adapter was built
+    /// for, and `SessionStore.transcriptsRootOverride` — a fixture/test seam — is assigned
+    /// *after* the store is constructed, so a struct that snapshotted a URL at construction
+    /// would keep pointing at the real projects directory for the life of a fixture run.
     var projectsRoot: () -> URL = { ClaudeSession.defaultProjectsRoot }
 
     /// How a rename reaches `claude`: by typing `/rename <name>` into the tab's pty.
@@ -61,6 +62,13 @@ struct ClaudeAdapter: AgentAdapter {
 
     func rename(_ binding: AgentBinding, to title: String) async throws {
         await injectRename(binding.conversationID, title)
+    }
+
+    /// Claude has no shell-level login subcommand — it authenticates inside a running
+    /// session — so signing in means launching claude plain and then typing `/login` at it,
+    /// unlike codex's one-shot `codex login`.
+    func loginInvocation(for account: AgentAccount) -> LoginInvocation {
+        LoginInvocation(command: "claude", inject: "/login")
     }
 
     /// A codex payload here is a programming error, not a runtime condition: the store picks

@@ -1,8 +1,13 @@
 import AppKit
 
-/// Seam over "tell the user this tab could not be created", so `SessionStore.createSession`
-/// can be tested without putting a panel on screen — the same shape and the same reason as
+/// Seam over "tell the user this tab could not be created or relaunched", so the three
+/// `SessionStore` paths that refuse one — `createSession`, `newSession`, and `restore` — can
+/// be tested without putting a panel on screen. The same shape and the same reason as
 /// `ProjectCloseConfirming`.
+///
+/// `newSession` and `restore` report through here *only*: neither has a `Result` to hand back
+/// (one is claude's synchronous path, the other rebuilds the whole deck), so this is not a
+/// convenience for them, it is the entire error channel.
 @MainActor
 protocol AgentLaunchFailureReporting {
     func report(_ error: AgentLaunchError)

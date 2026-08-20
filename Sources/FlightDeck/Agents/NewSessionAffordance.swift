@@ -64,4 +64,59 @@ enum NewSessionAffordance {
         if modifiers.contains(.command) { s += "⌘" }
         return s + "N"
     }
+
+    /// One entry per agent, nesting its accounts only when it has more than one. The checkmark
+    /// rides on `isResolved` so the menu shows what ⌘N would actually do in this project.
+    ///
+    /// Deliberately separate from `slots(for:)`: shortcuts bind to *agent* position, and never
+    /// move when an account is merely chosen from here — choosing "Work" over the project's
+    /// default is a mouse-only act, not a rebind. An agent absent from `accounts` entirely
+    /// (nothing logged in yet) contributes no row at all, rather than a dead one nothing can
+    /// launch.
+    enum MenuEntry: Equatable {
+        case agent(AgentID, account: UUID, isResolved: Bool)
+        indirect case submenu(AgentID, [MenuEntry])
+
+        /// Which agent this row (or submenu) belongs to, regardless of case — lets callers
+        /// key a lookup by agent without re-deriving the switch themselves.
+        var agent: AgentID {
+            switch self {
+            case .agent(let agent, _, _): return agent
+            case .submenu(let agent, _): return agent
+            }
+        }
+    }
+
+    static func menu(
+        agents: [AgentSettings], accounts: [AgentAccount], resolved: [AgentID: UUID]
+    ) -> [MenuEntry] {
+        agents.compactMap { settings in
+            let mine = accounts.filter { $0.agent == settings.id }
+            guard !mine.isEmpty else { return nil }
+            let rows = mine.map {
+                MenuEntry.agent(settings.id, account: $0.id, isResolved: resolved[settings.id] == $0.id)
+            }
+            return mine.count == 1 ? rows[0] : .submenu(settings.id, rows)
+        }
+    }
+
+    /// Which account, inside a multi-account submenu's rows, should carry the flat
+    /// keyboard shortcut that used to sit on the agent's own (now-nested) menu item.
+    ///
+    /// The resolved row wins — the same one the checkmark already marks, so the chord and
+    /// the visible default never disagree. If nothing is resolved (an unreachable state
+    /// today, since `resolved` always names one account when any exist), the first row
+    /// still gets it: an agent slot bound by `slots(for:)` must always answer somewhere,
+    /// never go silently dead because nothing happened to be marked resolved.
+    static func shortcutLeaf(in rows: [MenuEntry]) -> UUID? {
+        for row in rows {
+            if case .agent(_, let account, let isResolved) = row, isResolved {
+                return account
+            }
+        }
+        if case .agent(_, let account, _) = rows.first {
+            return account
+        }
+        return nil
+    }
 }

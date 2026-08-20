@@ -36,7 +36,9 @@ final class SessionLaunchTests: XCTestCase {
 
     func testNewSessionLaunchesWithResolvedFlags() {
         let preferences = PreferencesStore(persistence: PreferencesStoreTests.MemoryPersistence())
-        preferences.preferences.globalFlags = FlagSet(values: ["--model": .value("opus")])
+        preferences.preferences.agents = [
+            AgentSettings(id: .claude, options: .claude(FlagSet(values: ["--model": .value("opus")])))
+        ]
         let provider = CapturingProvider()
         let store = SessionStore(provider: provider, persistence: nil, preferences: preferences)
 
@@ -47,8 +49,13 @@ final class SessionLaunchTests: XCTestCase {
 
     func testProjectOverrideBeatsGlobalAtLaunch() {
         let preferences = PreferencesStore(persistence: PreferencesStoreTests.MemoryPersistence())
-        preferences.preferences.globalFlags = FlagSet(values: ["--model": .value("opus")])
-        preferences.setProjectOverride("/tmp", FlagSet(values: ["--model": .value("sonnet")]))
+        preferences.preferences.agents = [
+            AgentSettings(id: .claude, options: .claude(FlagSet(values: ["--model": .value("opus")])))
+        ]
+        preferences.setProjectSettings(
+            "/tmp",
+            ProjectSettings(options: [.claude: .claude(FlagSet(values: ["--model": .value("sonnet")]))])
+        )
         let provider = CapturingProvider()
         let store = SessionStore(provider: provider, persistence: nil, preferences: preferences)
 
@@ -101,8 +108,13 @@ final class SessionLaunchTests: XCTestCase {
             sessionCounter: 2
         )
         let preferences = PreferencesStore(persistence: PreferencesStoreTests.MemoryPersistence())
-        preferences.preferences.globalFlags = FlagSet(values: ["--model": .value("opus")])
-        preferences.setProjectOverride("/tmp/two", FlagSet(values: ["--model": .value("sonnet")]))
+        preferences.preferences.agents = [
+            AgentSettings(id: .claude, options: .claude(FlagSet(values: ["--model": .value("opus")])))
+        ]
+        preferences.setProjectSettings(
+            "/tmp/two",
+            ProjectSettings(options: [.claude: .claude(FlagSet(values: ["--model": .value("sonnet")]))])
+        )
         let provider = CapturingProvider()
         let store = SessionStore(
             provider: provider, persistence: sessionPersistence, preferences: preferences

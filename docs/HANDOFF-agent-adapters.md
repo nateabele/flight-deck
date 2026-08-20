@@ -27,7 +27,7 @@ than a bug. Read §2 before touching anything.
 | `AgentEvent` | `.title` / `.activity` / `.subagentCount` / `.turnEnded` — the only vocabulary `SessionStore` speaks |
 | `AgentOptions` | `.claude(FlagSet)` / `.codex(CodexThreadOptions)` — a union, so neither agent's shape leaks into the other |
 | `AgentAdapter` | identity + launch text + rename. `prepare` (async, negotiated), `binding(for:)` (sync, already-settled identity only), `rebind` (restore, defaults to `binding(for:)`) |
-| `AgentRuntime` | observation. App-wide **per agent kind**, not per session — one status registry for claude, one app-server for codex, N tabs each |
+| `AgentRuntime` | observation. Per **(agent, account)**, not per session — one status registry per claude account, one app-server `CodexStack` per codex account, N tabs each. The 2026-08-19 accounts work (`docs/superpowers/specs/2026-08-19-agent-accounts-design.md`) rekeyed both from app-wide to per-account; see `SessionStore.adapters`/`.runtimes`/`.codexStacks`, all keyed by `AgentInstance` |
 
 **Claude** conforms over its existing machinery: mints its own UUID, derives the transcript
 path from cwd, `TranscriptWatcher` + `SessionStatusWatcher`, rename by typing `/rename` into
@@ -39,7 +39,8 @@ cancellation-aware), `CodexProcessTransport` (spawn, line reassembly, terminatio
 version probe), `CodexAdapter` (start→name commit transaction, `read`, `rebind`),
 `CodexEventMapper` (rollout record → `AgentEvent`) + `CodexThreadStatus` (`thread/read`'s
 status union), `CodexRolloutWatcher` (one per tab, tails the rollout `thread/start`
-returned), `CodexNameWatcher` (one, app-wide, tails `session_index.jsonl` for renames),
+returned), `CodexNameWatcher` (one per codex account, tails that account's `session_index.jsonl` for
+renames — see the 2026-08-19 accounts work),
 `CodexRuntime` (fans both out to the right tab). See §3.
 
 **UI** — the Claude preferences tab is now an **Agents** tab: reorderable list, per-agent
@@ -74,7 +75,7 @@ therefore a different connection**. So the app-server that created the thread ne
 is deleted, not merely dead. `CodexRPC.onNotification` itself is not deleted — it is generic
 transport plumbing — but nothing in production sets it any more, so it has no consumer.
 Title, status and unread for codex now come from tailing the rollout `thread/start` returns
-and the app-wide `session_index.jsonl`, exactly as §3 describes. `CodexThreadStatus` survives
+and that account's `session_index.jsonl`, exactly as §3 describes. `CodexThreadStatus` survives
 unchanged — it was never on the notification path, only on `thread/read`, which `rebind` and
 restore still use.
 
@@ -101,7 +102,7 @@ partial trailing line so a read landing mid-write can't split a record.
 |---|---|---|---|
 | `TranscriptWatcher` | one per claude tab | the claude transcript | `.title`, `.subagentCount` |
 | `CodexRolloutWatcher` | one per codex tab | `binding.transcriptURL` (the rollout `thread/start` returned) | `.activity`, `.turnEnded` |
-| `CodexNameWatcher` | one, app-wide | `<codex home>/session_index.jsonl` | `.title`, routed by thread id |
+| `CodexNameWatcher` | one per codex account | `<codex home>/session_index.jsonl` | `.title`, routed by thread id |
 
 `CodexEventMapper.events(inRolloutLine:)` maps `event_msg` records: `task_started` →
 `.activity(.busy)`; `task_complete` / `turn_aborted` → `.activity(.idle)`, `.turnEnded`;
@@ -146,7 +147,8 @@ and is checked in: `Tests/FlightDeckTests/Fixtures/Codex/codex-app-server-v2.gen
    seconds later with the app-server alive. **`thread/name/set` commits it**, and must be
    issued to the *same* app-server process. An unnamed thread cannot be resumed.
 2. **A thread belongs to the app-server process that created it** — one long-lived app-server
-   for the whole app.
+   per codex account (`SessionStore.CodexStack`, one per `AgentInstance.account`, as of the
+   2026-08-19 accounts work), not one for the whole app.
 3. **Identity is returned, never minted.** `ThreadStartParams` has no `threadId`.
 4. **`initialize` requires real `clientInfo`.** Sending empty params omits the key entirely and
    codex answers `-32600 missing field 'params'`. This broke every codex launch end-to-end and
