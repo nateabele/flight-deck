@@ -79,4 +79,25 @@ final class AccountResolutionTests: XCTestCase {
         XCTAssertNil(store.preferences.projectSettings["/p"], "the record became empty and was dropped")
         XCTAssertEqual(store.preferences.accounts.map(\.id), [keep.id])
     }
+
+    /// Feeds `NewSessionAffordance.menu`'s checkmark: one entry per agent that has a
+    /// resolvable account, and an agent this project cannot resolve at all — the dangling
+    /// case above — is simply absent, not mapped to some placeholder id.
+    func testResolvedAccountsMapsEachAgentToWhatItWouldLaunchHereToday() {
+        let claudeTop = account(.claude, "claude-top"), codexTop = account(.codex, "codex-top")
+        let claudeChosen = account(.claude, "claude-chosen")
+        let store = store(
+            [claudeTop, codexTop, claudeChosen],
+            projects: ["/p": ProjectSettings(accounts: [.claude: claudeChosen.id, .codex: UUID()])]
+        )
+        let agents = [
+            AgentSettings(id: .claude, options: .claude(FlagSet())),
+            AgentSettings(id: .codex, options: .codex(CodexThreadOptions())),
+        ]
+
+        let resolved = store.resolvedAccounts(for: agents, project: "/p")
+
+        XCTAssertEqual(resolved[.claude], claudeChosen.id, "the project's own assignment wins")
+        XCTAssertNil(resolved[.codex], "a dangling assignment resolves to nothing, not a guess")
+    }
 }

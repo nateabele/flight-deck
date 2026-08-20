@@ -476,17 +476,30 @@ final class SessionStore: ObservableObject {
     /// derived, not stored — there is nothing to relocate — and a user who has installed an
     /// agent but never run it legitimately has no such directory yet; refusing there would
     /// mean the app could not create the very first tab that creates the home.
+    ///
+    /// `choosing` is the New Session dropdown's escape hatch (Task 14): a caller that already
+    /// knows exactly which account it wants — because the user clicked it — names it directly
+    /// and skips `PreferencesStore.account(for:project:)` entirely. It still runs through the
+    /// same home check below, because a dropdown built moments ago can still be one relocate
+    /// or one deletion stale by the time it is clicked.
     private func launchAccount(
-        for agent: AgentID, project: String
+        for agent: AgentID, project: String, choosing explicit: UUID? = nil
     ) -> Result<AgentAccount?, AgentLaunchError> {
         guard let preferences else { return .success(nil) }
-        if let assigned = preferences.projectSettings(project).accounts[agent],
-           preferences.account(id: assigned) == nil {
-            return .failure(.accountMissing(agent.displayName))
+        let account: AgentAccount?
+        if let explicit {
+            guard let named = preferences.account(id: explicit) else {
+                return .failure(.accountMissing(agent.displayName))
+            }
+            account = named
+        } else {
+            if let assigned = preferences.projectSettings(project).accounts[agent],
+               preferences.account(id: assigned) == nil {
+                return .failure(.accountMissing(agent.displayName))
+            }
+            account = preferences.account(for: agent, project: project)
         }
-        guard let account = preferences.account(for: agent, project: project) else {
-            return .success(nil)
-        }
+        guard let account else { return .success(nil) }
         guard account.isBuiltIn || FileManager.default.fileExists(atPath: account.home.path) else {
             return .failure(.accountHomeMissing(account.displayName))
         }
@@ -1027,11 +1040,16 @@ final class SessionStore: ObservableObject {
     /// `repos`, no surface exists, and no project was created to hold one. A caller that needs
     /// to *know* uses `createSession(agent:in:)`, which returns a `Result`; every caller here
     /// either discards the value or hands it to something that looks it up and finds nothing.
+    ///
+    /// `account`, when given, names the login directly — the New Session dropdown's chosen
+    /// account (Task 14) rather than whatever `launchAccount` would otherwise resolve from
+    /// project settings. Every other caller leaves it nil and gets the resolved default,
+    /// unchanged.
     @discardableResult
-    func newSession(in url: URL, at index: Int? = nil) -> Session {
+    func newSession(in url: URL, at index: Int? = nil, account explicit: UUID? = nil) -> Session {
         // Resolved before the title is minted, so a refusal does not burn a session number.
         let account: AgentAccount?
-        switch launchAccount(for: .claude, project: url.path) {
+        switch launchAccount(for: .claude, project: url.path, choosing: explicit) {
         case .success(let resolved): account = resolved
         case .failure(let error):
             launchFailureReporter.report(error)
@@ -1066,9 +1084,12 @@ final class SessionStore: ObservableObject {
     /// Both reports the failure and returns it: the alert is what the user sees (a failed
     /// creation leaves no tab on which to notice anything), and the `Result` is what a caller
     /// that wants to react — a test, a menu action selecting the new tab — reads.
+    ///
+    /// `account`, when given, bypasses `launchAccount`'s project-settings resolution the same
+    /// way `newSession`'s does — the New Session dropdown's chosen account, not the default.
     @discardableResult
     func createSession(
-        agent: AgentID, in directory: String, at index: Int? = nil
+        agent: AgentID, in directory: String, at index: Int? = nil, account explicit: UUID? = nil
     ) async -> Result<UUID, AgentLaunchError> {
         let url = URL(fileURLWithPath: directory, isDirectory: true)
         // FIRST, before a draft exists and before anything codex-shaped is touched. A login
@@ -1078,13 +1099,15 @@ final class SessionStore: ObservableObject {
         // else. Claude's path is checked here too, by falling through this switch before it
         // delegates: `newSession` reports the same refusal, but only this shape can return it.
         let account: AgentAccount?
-        switch launchAccount(for: agent, project: directory) {
+        switch launchAccount(for: agent, project: directory, choosing: explicit) {
         case .success(let resolved): account = resolved
         case .failure(let error):
             launchFailureReporter.report(error)
             return .failure(error)
         }
-        guard agent != .claude else { return .success(newSession(in: url, at: index).id) }
+        guard agent != .claude else {
+            return .success(newSession(in: url, at: index, account: explicit).id)
+        }
 
         // Named before `prepare`, not after: `thread/name/set` is what commits the thread,
         // and it sends this title. A failed creation therefore burns a number — "session 4"
@@ -1343,35 +1366,41 @@ final class SessionStore: ObservableObject {
     /// because that is the only path able to start codex. Kept separate from the plain
     /// `createFromMenu()` above rather than folding an `agent` parameter into it, so every
     /// existing claude-only call site — and the regression suite pinning it — is untouched.
+    ///
+    /// `account`, when given, is the New Session dropdown's chosen login (Task 14) rather than
+    /// this project's resolved default — threaded straight through to `create`/`createSession`,
+    /// which is where it actually overrides `launchAccount`'s resolution.
     @discardableResult
     func createFromMenu(
-        agent: AgentID, chooseFolder: () -> URL? = { FolderPicker.choose() }
+        agent: AgentID, chooseFolder: () -> URL? = { FolderPicker.choose() }, account: UUID? = nil
     ) async -> Session? {
         switch SessionCreateAction.forState(hasProjects: !repos.isEmpty) {
         case .newSession:
             if let activeID = selectedSessionID, let at = locate(activeID) {
                 let active = repos[at.repo].sessions[at.session]
-                return await create(agent, in: active.workingDirectory, at: at.session + 1)
+                return await create(agent, in: active.workingDirectory, at: at.session + 1, account: account)
             }
             if let url = lastActiveProjectURL, indexOfRepo(for: url) != nil {
-                return await create(agent, in: url.path)
+                return await create(agent, in: url.path, account: account)
             }
             if let first = repos.first {
-                return await create(agent, in: first.url.path)
+                return await create(agent, in: first.url.path, account: account)
             }
             guard let url = chooseFolder() else { return nil }
-            return await create(agent, in: url.path)
+            return await create(agent, in: url.path, account: account)
         case .addProject:
             guard let url = chooseFolder() else { return nil }
-            return await create(agent, in: url.path)
+            return await create(agent, in: url.path, account: account)
         }
     }
 
     /// `createSession`'s `Result` collapsed to the `Session?` shape the menu/button want —
     /// a failure already reported itself through `launchFailureReporter` inside
     /// `createSession`, so there is nothing left for the caller to do with it but stop.
-    private func create(_ agent: AgentID, in path: String, at index: Int? = nil) async -> Session? {
-        guard case .success(let id) = await createSession(agent: agent, in: path, at: index)
+    private func create(
+        _ agent: AgentID, in path: String, at index: Int? = nil, account: UUID? = nil
+    ) async -> Session? {
+        guard case .success(let id) = await createSession(agent: agent, in: path, at: index, account: account)
         else { return nil }
         return session(for: id)
     }
@@ -2472,6 +2501,37 @@ final class SessionStore: ObservableObject {
     /// re-evaluates this on the next view update.
     var conflictedSessionIDs: Set<UUID> {
         ConversationPin.conflicted(repos.flatMap(\.sessions))
+    }
+
+    /// Tabs running as a login their own project would not have picked today — a work session
+    /// left open in a personal repo, or the reverse. Empty whenever there is no
+    /// `PreferencesStore` to resolve against, same as `conflictedSessionIDs` degrades to
+    /// nothing rather than guessing.
+    var accountMismatchedSessionIDs: Set<UUID> {
+        guard let preferences else { return [] }
+        return Set(repos.flatMap { repo in
+            repo.sessions.filter { session in
+                let sessionAccount = preferences.resolvedAccountID(for: session.agent, in: session.accountID)
+                let projectAccount = preferences.account(for: session.agent, project: repo.url.path)?.id
+                return SidebarRow.accountMismatched(session: sessionAccount, project: projectAccount)
+            }.map(\.id)
+        })
+    }
+
+    /// The project new-session UI reasons about when nothing else names one explicitly: the
+    /// active session's project, else the last one that was active, else the first repo.
+    /// Mirrors `createFromMenu`'s own routing (which folder a new tab lands in) but has no
+    /// side effects — no folder picker, no creation — so `SessionSidebar`'s account dropdown
+    /// and `SessionCommands`'s File menu can both ask "which project" without duplicating that
+    /// walk or triggering it.
+    var currentProjectPath: String? {
+        if let activeID = selectedSessionID, let at = locate(activeID) {
+            return repos[at.repo].sessions[at.session].workingDirectory
+        }
+        if let url = lastActiveProjectURL, indexOfRepo(for: url) != nil {
+            return url.path
+        }
+        return repos.first?.url.path
     }
 
     func status(for id: UUID) -> SessionStatus? { statuses[id] }

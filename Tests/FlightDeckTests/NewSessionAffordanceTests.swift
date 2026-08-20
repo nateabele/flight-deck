@@ -49,4 +49,36 @@ final class NewSessionAffordanceTests: XCTestCase {
         XCTAssertEqual(slots[0].shortcutDisplay, "⌘N")
         XCTAssertEqual(slots[1].shortcutDisplay, "⇧⌘N")
     }
+
+    /// Shortcuts follow the project's order, so ⌘N is always the agent this project uses.
+    func testSlotsFollowTheProjectOrder() {
+        let order = [
+            AgentSettings(id: .codex, options: .codex(CodexThreadOptions())),
+            AgentSettings(id: .claude, options: .claude(FlagSet())),
+        ]
+        XCTAssertEqual(NewSessionAffordance.slots(for: order).first?.agent, .codex)
+    }
+
+    /// An agent with one account contributes one flat row; more than one nests them, so the
+    /// common case does not grow a submenu.
+    func testTheMenuNestsOnlyWhenAnAgentHasSeveralAccounts() {
+        let one = AgentAccount(agent: .claude, displayName: "Personal", home: URL(fileURLWithPath: "/a"))
+        let two = AgentAccount(agent: .claude, displayName: "Work", home: URL(fileURLWithPath: "/b"))
+        let flat = NewSessionAffordance.menu(
+            agents: [AgentSettings(id: .claude, options: .claude(FlagSet()))],
+            accounts: [one], resolved: [.claude: one.id]
+        )
+        XCTAssertEqual(flat, [.agent(.claude, account: one.id, isResolved: true)])
+
+        let nested = NewSessionAffordance.menu(
+            agents: [AgentSettings(id: .claude, options: .claude(FlagSet()))],
+            accounts: [one, two], resolved: [.claude: two.id]
+        )
+        XCTAssertEqual(nested, [
+            .submenu(.claude, [
+                .agent(.claude, account: one.id, isResolved: false),
+                .agent(.claude, account: two.id, isResolved: true),
+            ])
+        ])
+    }
 }

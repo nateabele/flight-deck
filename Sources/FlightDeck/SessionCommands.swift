@@ -12,16 +12,56 @@ struct SessionCommands: Commands {
     // reference-type instance either way.
     let store: SessionStore
     // `@ObservedObject`, unlike `store` above: this menu's items ARE built from
-    // `preferences.agents`, so a reorder in the Agents tab has to rebuild it. SwiftUI cannot
-    // vary a `.keyboardShortcut` at runtime, so each agent list position gets its own
-    // statically-chorded item here — the *button* in the sidebar is the one that reads live.
+    // `preferences.agents` (by way of `agentOrder(forProject:)`, ordered for whichever project
+    // `store.currentProjectPath` names right now), so a reorder in the Agents tab has to
+    // rebuild it. SwiftUI cannot vary a `.keyboardShortcut` at runtime, so each agent list
+    // position gets its own statically-chorded item here — the *button* in the sidebar is the
+    // one that reads live. `store.currentProjectPath` is read once per body build rather than
+    // observed — `store` staying a plain `let` is deliberate (see above) — so an active-project
+    // change that happens without a `preferences` change (switching tabs) leaves this stale
+    // until the next preferences-driven rebuild; the sidebar's own affordance always shows the
+    // current truth, so this is a minor discoverability lag, not a functional gap.
     @ObservedObject var preferences: PreferencesStore
+
+    private var agentsForCurrentProject: [AgentSettings] {
+        guard let project = store.currentProjectPath else { return preferences.preferences.agents }
+        return preferences.agentOrder(forProject: project)
+    }
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            ForEach(Array(NewSessionAffordance.slots(for: preferences.preferences.agents).enumerated()), id: \.offset) { _, slot in
+            ForEach(Array(NewSessionAffordance.slots(for: agentsForCurrentProject).enumerated()), id: \.offset) { _, slot in
                 Button(slot.label) { Task { await store.createFromMenu(agent: slot.agent) } }
                     .keyboardShortcut("n", modifiers: NewSessionAffordance.eventModifiers(slot.modifiers))
+            }
+
+            // Mouse-only account submenus, alongside the shortcut items above rather than
+            // replacing any of them: a submenu-bearing `NSMenuItem` cannot also carry a key
+            // equivalent that fires directly, so an agent with more than one account gets a
+            // second, un-chorded entry here purely to reach the non-default login. Flat
+            // single-account rows are omitted — the shortcut item above already reaches them.
+            if let project = store.currentProjectPath {
+                let agents = agentsForCurrentProject
+                let entries = NewSessionAffordance.menu(
+                    agents: agents, accounts: preferences.preferences.accounts,
+                    resolved: preferences.resolvedAccounts(for: agents, project: project)
+                )
+                ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
+                    if case .submenu(let agent, let rows) = entry {
+                        Menu("New \(agent.displayName) Session") {
+                            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                                if case .agent(let agent, let account, let isResolved) = row {
+                                    Button {
+                                        Task { await store.createFromMenu(agent: agent, account: account) }
+                                    } label: {
+                                        let name = preferences.account(id: account)?.displayName ?? agent.displayName
+                                        if isResolved { Label(name, systemImage: "checkmark") } else { Text(name) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             Button("Add Project…") { store.addProjectFromMenu() }
