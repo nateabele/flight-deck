@@ -2,6 +2,7 @@ import Network
 import XCTest
 import FleetKit
 
+@MainActor
 final class FleetConnectorTests: XCTestCase {
     private var servers: [FleetSocketServer] = []
     private var connector: FleetConnector?
@@ -146,12 +147,92 @@ final class FleetConnectorTests: XCTestCase {
         )
     }
 
+    /// A narrower probe than the test above, aimed at the half-fix this task was amended
+    /// away from: bumping `generation` only in `race()`, not also in `scheduleRetry()`. That
+    /// half-fix already stops a stale timer from retiring a LIVE connection — the test above
+    /// still passes under it — which is exactly why it does not discriminate this bug. What
+    /// it does not stop: a race whose sole candidate fails fast enough to trigger
+    /// `noteDisconnect`'s own `scheduleRetry()` call leaves that race's `raceTimeout` timer
+    /// stale but still pending. Under the half-fix that stale timer's captured generation
+    /// still matches `self.generation` when it fires mid-backoff, so it calls
+    /// `scheduleRetry()` a SECOND time — accelerating the backoff and reporting a spurious
+    /// extra `.lost`, without an intervening `.searching`.
+    ///
+    /// `127.0.0.1:1` is used rather than the `192.0.2.1` blackhole other tests use: a
+    /// blackholed address never fails on its own inside this test's window (see
+    /// `testNoReachableCandidateEndsInLostRatherThanSearchingForever`, which is bound by
+    /// `raceTimeout` alone), so `noteDisconnect` would never fire first and the race timer
+    /// would never go stale — nothing to reproduce. A closed loopback port refuses instantly,
+    /// which is what leaves `raceTimeout`'s timer stranded while `scheduleRetry()`'s own
+    /// (shorter) retry timer is already running.
+    ///
+    /// Under the half-fix the trace is `[.searching, .lost(0.5), .lost(5.0), .searching, …]`
+    /// — backoff jumping straight from 0.5 to 5.0 within what should be a single race. Under
+    /// the full fix there is at most one `.lost` between any two `.searching` states.
+    func testAStaleRaceTimeoutDuringBackoffDoesNotDoubleTheRetry() async throws {
+        let connector = connector(key: .mint(), endpoints: ["127.0.0.1:1"])
+        connector.raceTimeout = 0.2
+        connector.retryDelays = [0.5, 5.0]
+
+        var states: [FleetConnector.State] = []
+        connector.onState = { states.append($0) }
+        connector.start()
+
+        try await Task.sleep(for: .seconds(2))
+        connector.stop()
+
+        var lostSinceSearching = 0
+        for state in states {
+            switch state {
+            case .searching:
+                lostSinceSearching = 0
+            case .lost:
+                lostSinceSearching += 1
+            default:
+                break
+            }
+            XCTAssertLessThanOrEqual(
+                lostSinceSearching, 1,
+                "a stale race timeout during backoff must not schedule a second retry: \(states)"
+            )
+        }
+    }
+
     func testTheAppliedSequenceIsRememberedSoARelaunchResumes() async throws {
         let key = FleetDeviceKey.mint()
         let port = try await startServer(key: key, fleet: fleet("one"))
         let store = InMemoryPairedMacStore()
         let connected = expectation(description: "connected")
         let connector = connector(key: key, endpoints: ["127.0.0.1:\(port.rawValue)"], store: store)
+        connector.onFleet = { _ in connected.fulfill() }
+        connector.start()
+        await fulfillment(of: [connected], timeout: 20)
+        XCTAssertEqual(store.load()?.lastSeq, 1)
+    }
+
+    /// The Mac's own sequence counter (`FleetReplicator.seq`) restarts at 0 on every process
+    /// launch. A phone reconnecting after that restart is, from its own point of view, asking
+    /// to resume from a `lastSeq` that is now ahead of anything the Mac can offer — the server
+    /// answers with a snapshot rather than a replay, and that snapshot's `seq` is LOWER than
+    /// what this phone already has stored. `lastSeq` must adopt it anyway: frames on one
+    /// connection are ordered, so whatever seq the snapshot being applied right now carries
+    /// IS the truth for this connection. Guarding this the way `.event` is guarded would pin
+    /// `lastSeq` at the stale, pre-restart value forever — the display stays correct because
+    /// `fleet.apply` runs regardless and events are idempotent, but every future reconnect
+    /// would re-download the whole snapshot instead of resuming, a permanent and invisible
+    /// regression.
+    func testASnapshotWithALowerSeqThanStoredIsAdoptedAnyway() async throws {
+        let key = FleetDeviceKey.mint()
+        let port = try await startServer(key: key, fleet: fleet("one"))
+        let store = InMemoryPairedMacStore()
+        let mac = PairedMac(
+            key: key, macName: "Mac", serviceName: "none-\(UUID().uuidString)",
+            endpoints: ["127.0.0.1:\(port.rawValue)"], lastSeq: 500
+        )
+        store.save(mac)
+        let connector = FleetConnector(mac: mac, store: store, browse: false)
+        self.connector = connector
+        let connected = expectation(description: "connected")
         connector.onFleet = { _ in connected.fulfill() }
         connector.start()
         await fulfillment(of: [connected], timeout: 20)

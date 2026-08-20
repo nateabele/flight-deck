@@ -12,6 +12,20 @@ import Network
 /// idiom the rest of this module uses. Do not "fix" a concurrency diagnostic here by
 /// sprinkling `nonisolated(unsafe)`; if something needs to touch this off `queue`, that is a
 /// design change, not an annotation.
+///
+/// That confinement is a coincidence of `queue`'s default (`.main`, called from a
+/// `@MainActor` consumer) unless it is actually enforced: `init` accepts any `DispatchQueue`,
+/// and a caller that supplies a custom one while still calling `start()`/`stop()`/`send()`
+/// from `@MainActor` would get real data races on `running`, `attempt`, `generation` and
+/// `racers` — with zero compiler signal, since `@unchecked Sendable` is a promise, not a
+/// check. `start()`, `stop()` and `send()` each assert
+/// `dispatchPrecondition(condition: .onQueue(queue))` as their first line. `FleetSocketServer`
+/// asserts the same condition but the other direction — at the sites where it invokes a
+/// caller-supplied closure, to guarantee that closure lands on `queue` — because callers reach
+/// it through `async` entry points instead of a queue-confined API; this class's public
+/// methods are the queue-confined API, so the assertion belongs at their entry instead. (Any
+/// test driving this class from `@MainActor` satisfies the default `.main` queue the same way
+/// production's SwiftUI call sites do — `@MainActor`'s executor is the main dispatch queue.)
 public final class FleetConnector: @unchecked Sendable {
     public enum State: Equatable {
         case idle
@@ -72,13 +86,20 @@ public final class FleetConnector: @unchecked Sendable {
         self.queue = queue
     }
 
+    /// Idempotent. Task 10's SwiftUI call sites (`.onAppear`, a `scenePhase` change) invoke
+    /// this repeatedly by construction, not by mistake — calling it again mid-race would
+    /// otherwise tear down every live racer via `race()`'s own `teardown()` just to redial
+    /// the same candidates.
     public func start() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard !running else { return }
         running = true
         attempt = 0
         race()
     }
 
     public func stop() {
+        dispatchPrecondition(condition: .onQueue(queue))
         running = false
         invalidateDeferredWork()
         teardown()
@@ -87,6 +108,7 @@ public final class FleetConnector: @unchecked Sendable {
 
     /// `ack` means dispatched, not done — the effect arrives as a northbound event.
     public func send(_ command: FleetCommand) {
+        dispatchPrecondition(condition: .onQueue(queue))
         _ = winner?.send(command)
     }
 
@@ -105,10 +127,11 @@ public final class FleetConnector: @unchecked Sendable {
         if browse { startBrowsing() }
         // Without the generation guard: a race whose candidates all fail in 100ms retries at
         // ~1s, and THIS race's 8s timer later fires anyway, sees no winner, and schedules a
-        // second retry on top of the pending one. Two races then run against each other, the
-        // later one tearing down whatever the earlier one connected, and `attempt` advances
-        // twice as fast as `retryDelays` says. The symptom is a phone that gets harder to
-        // connect the longer it tries, which reads as a flaky network rather than a bug.
+        // second retry on top of the pending one. That is backoff acceleration and a spurious
+        // extra `.lost`, not two races actually running concurrently — the moment either
+        // deferred callback calls `race()`, its own generation bump invalidates whatever the
+        // other one still has pending. A live connection is never what gets torn down by
+        // this; see `testAStaleRaceTimeoutDuringBackoffDoesNotDoubleTheRetry` for the trace.
         queue.asyncAfter(deadline: .now() + raceTimeout) { [weak self] in
             guard let self, self.running, self.winner == nil,
                   generation == self.generation
@@ -139,6 +162,12 @@ public final class FleetConnector: @unchecked Sendable {
     }
 
     private func startBrowsing() {
+        // `race()` reports `.searching` before this is called, and an `onState` handler is
+        // free to call `stop()` re-entrantly from inside that callback. `dial()` already
+        // guards against running that way; without the same guard here, a browser started
+        // after `running` went false would never be cancelled — `stop()` already ran its
+        // `teardown()` and won't run it again.
+        guard running else { return }
         let browser = NWBrowser(
             for: .bonjour(type: FleetSocketServer.bonjourType, domain: nil), using: .tcp
         )
@@ -161,6 +190,17 @@ public final class FleetConnector: @unchecked Sendable {
     }
 
     private func accept(_ frame: ServerFrame, from candidate: Candidate, client: FleetClient) {
+        // A frame can still arrive from a client `teardown()` already disconnected:
+        // Network.framework hops the receive completion onto `queue` before `cancel()` runs,
+        // and cancellation cannot recall an in-flight block. `FleetClient.onFrame` is now
+        // gated on `!hasEnded` at the source (see `FleetClient.swift`), but this is a second,
+        // independent line of defense — refusing a client that is neither a live racer nor
+        // the current winner means a frame from a torn-down race can never be installed as
+        // `winner`, which would otherwise silently disconnect every racer a NEW race had just
+        // dialled.
+        guard running, racers[candidate.description] === client || client === winner else {
+            return
+        }
         if winner == nil {
             winner = client
             for (description, other) in racers where other !== client {
@@ -177,11 +217,16 @@ public final class FleetConnector: @unchecked Sendable {
         apply(frame)
     }
 
+    /// Note a gap the spine's review left here deliberately: when a resuming client is already
+    /// current, the server answers `.replay([])` and therefore sends *nothing*. The connector
+    /// cannot distinguish "you are up to date" from "your hello was ignored", so it must treat
+    /// reaching `.ready` and sending `hello` as the success signal — not the arrival of a
+    /// frame. Do not add a receive-timeout that assumes a frame always follows `hello`.
     private func apply(_ frame: ServerFrame) {
         switch frame {
-        case .snapshot(let seq, let snapshot, _):
+        case .snapshot(let seq, let snapshot, let reason):
             fleet = snapshot
-            advance(to: seq)
+            adopt(seq, reason: reason)
         case .event(let seq, let event):
             fleet.apply(event)
             advance(to: seq)
@@ -192,24 +237,37 @@ public final class FleetConnector: @unchecked Sendable {
         onFleet?(fleet)
     }
 
-    /// `lastSeq` advances only on frames actually applied, and is persisted immediately.
-    /// Advancing it optimistically would let a phone claim to have applied an event it
-    /// dropped, and the resume path would then never send it again — a fleet permanently
-    /// missing one change, with nothing to indicate it.
+    /// A `.snapshot` sets `lastSeq` ABSOLUTELY, not just when it is higher.
+    /// `FleetReplicator.seq` restarts at 0 on every Mac process launch, and `reason` names
+    /// exactly the case where that surfaces here: `.seqTooOld` is the server answering "you
+    /// asked to resume from before what I can offer", which after a restart means offering a
+    /// `seq` LOWER than what this phone already has stored. Frames on one connection are
+    /// ordered, so whatever seq the snapshot being applied right now carries IS the truth for
+    /// this connection — higher or lower than the old value. Guarding this with the same `>`
+    /// rule `.event` uses (the rule this used to share) would pin `lastSeq` at the pre-restart
+    /// value forever: the *display* stays correct regardless, because `fleet.apply` runs
+    /// unconditionally and events are idempotent, but every future reconnect would then
+    /// re-download the whole snapshot instead of resuming — a permanent, invisible
+    /// degradation with nothing on screen to explain it.
+    private func adopt(_ seq: Int, reason: SnapshotReason) {
+        mac.lastSeq = seq
+        store.save(mac)
+    }
+
+    /// An `.event`'s seq, unlike a snapshot's, only ever advances `lastSeq` when it is a real
+    /// advance: applying one twice must not un-advance a `lastSeq` that has already moved
+    /// past it.
     ///
-    /// Note a gap the spine's review left here deliberately: when a resuming client is already
-    /// current, the server answers `.replay([])` and therefore sends *nothing*. The connector
-    /// cannot distinguish "you are up to date" from "your hello was ignored", so it must treat
-    /// reaching `.ready` and sending `hello` as the success signal — not the arrival of a
-    /// frame. Do not add a receive-timeout that assumes a frame always follows `hello`.
-    ///
-    /// A `store.save` on every applied frame is eager rather than throttled, and that is a
-    /// decision, not an oversight: `KeychainPairedMacStore.save` updates in place, so there is
-    /// no delete-then-add window to make routine, only a `SecItemUpdate` per event. Throttling
-    /// would need its own durability path for a normal disconnect (persisting on
-    /// `noteDisconnect`, since a coalesced write could otherwise lag behind what the Mac has
-    /// already sent) for a value whose loss costs nothing worse than one extra snapshot
-    /// download on the next launch. That trade is not worth the extra state here.
+    /// `store.save` runs on every applied frame, unthrottled, and that stays a decision, not
+    /// an oversight — though on a different basis than the one first written here. It is NOT
+    /// bounded by the Mac-side replay fold, which runs only on the reconnect path; the live
+    /// path broadcasts one frame per event. What actually bounds it: `emitActivity` on the
+    /// Mac filters to genuine state transitions, and `WatchClock` polls at 500ms/2s, so status
+    /// events land at roughly 2/s per session, not per tick of activity. The real cost worth
+    /// naming is that `store.save` is a synchronous `securityd` XPC round trip made on
+    /// `queue`, which defaults to `.main` — the thread rendering the fleet list. If that ever
+    /// needs revisiting, the fix is moving the write off the main queue, not throttling how
+    /// often `lastSeq` changes.
     private func advance(to seq: Int) {
         guard seq > mac.lastSeq else { return }
         mac.lastSeq = seq
@@ -226,6 +284,14 @@ public final class FleetConnector: @unchecked Sendable {
     }
 
     private func noteDisconnect(_ candidate: Candidate, client: FleetClient) {
+        // Same staleness hazard as `accept()`, and the same fix: a disconnect callback for a
+        // client that is no longer registered under its own description (and isn't the
+        // winner) belongs to a race `teardown()` already moved past. Acting on it here would
+        // let an "all candidates failed" verdict fire for a generation that already retried,
+        // double-advancing the backoff — only reachable with Bonjour off (`browse: false`,
+        // as the tests run), since a live browser keeps `noteDisconnect`'s all-failed branch
+        // from ever being the sole trigger, but the guard costs nothing either way.
+        guard racers[candidate.description] === client || client === winner else { return }
         racers.removeValue(forKey: candidate.description)
         guard client === winner else {
             // A losing racer failing is expected and uninteresting — unless every candidate
