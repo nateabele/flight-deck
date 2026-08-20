@@ -105,13 +105,20 @@ targets:
     settings:
       base:
         SWIFT_VERSION: "6.0"
+        # Both names, and they have to agree. PRODUCT_MODULE_NAME alone gave a
+        # `FleetKitiOS.framework` whose module was `FleetKit`, and `-F` search resolves
+        # imports by *framework* name — so `import FleetKit` from FlightDeckMobile failed
+        # with "no such module" no matter how many framework search paths it was given. The
+        # macOS `FleetKit` target also builds a `FleetKit.framework`, but into `Debug/`
+        # while this one lands in `Debug-iphonesimulator/`, so the two never collide.
+        PRODUCT_NAME: FleetKit
         PRODUCT_MODULE_NAME: FleetKit
         GENERATE_INFOPLIST_FILE: "YES"
         CODE_SIGNING_ALLOWED: "NO"
 
   # The iOS companion app: pairing (QR scan or typed code) and the live fleet list, both on
-  # top of `FleetKitiOS` above. See docs/MOBILE.md. Compile-checked only: see
-  # scripts/build-ios.sh for why nothing here can be run on this machine.
+  # top of `FleetKitiOS` above. Built by scripts/build-ios.sh and runnable in a simulator —
+  # docs/MOBILE.md has the boot/install/pair sequence and what it can and cannot prove.
   FlightDeckMobile:
     type: application
     platform: iOS
@@ -130,6 +137,9 @@ targets:
         # a team would break the simulator compile check that is this target's only
         # automated verification. Set it when installing on hardware.
         CODE_SIGN_STYLE: Automatic
+        # Same reason as FleetKitiOS above: with no team and no profile, signing is the one
+        # thing that would fail a simulator build, and the simulator does not need it.
+        CODE_SIGNING_ALLOWED: "NO"
     info:
       path: Sources/FlightDeckMobile/Info.plist
       properties:

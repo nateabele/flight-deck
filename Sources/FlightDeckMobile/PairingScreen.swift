@@ -324,18 +324,26 @@ final class QRScannerController: NSObject, AVCaptureMetadataOutputObjectsDelegat
     // nonisolated protocol requirement, but `setMetadataObjectsDelegate(self, queue: .main)`
     // above guarantees this fires on the main queue, so `assumeIsolated` states a fact the
     // compiler cannot see rather than hiding a real hazard.
+    //
+    // The unwrap happens BEFORE the hop, and has to: `metadataObjects` is a non-Sendable
+    // `[AVMetadataObject]` arriving on a nonisolated parameter, so reaching into it from
+    // inside a `@MainActor` closure is "sending 'metadataObjects' risks causing data races"
+    // — a hard error in Swift 6. Only `value`, a `String`, crosses into the closure. This
+    // error is invisible to `swiftc -typecheck`, which is all scripts/build-ios.sh could run
+    // before an iOS runtime existed: region-based isolation is a SIL pass, so it only fires
+    // on a real build. It was the first thing the first real build of this target found.
     nonisolated func metadataOutput(
         _ output: AVCaptureMetadataOutput,
         didOutput metadataObjects: [AVMetadataObject],
         from connection: AVCaptureConnection
     ) {
+        guard
+            let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+            object.type == .qr,
+            let value = object.stringValue
+        else { return }
         MainActor.assumeIsolated {
-            guard
-                let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
-                object.type == .qr,
-                let value = object.stringValue,
-                value != lastCode
-            else { return }
+            guard value != lastCode else { return }
             lastCode = value
             onCode(value)
         }
