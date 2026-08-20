@@ -16,7 +16,7 @@
 
 - `SWIFT_VERSION: "5.0"` in `project.yml`'s `settings.base` is deliberate — vendored Ghostty is not Swift-6 clean. **Never "fix" it.** The new `FleetKit` targets override it to `6.0` in their own `settings.base`; a Swift 6 module imports into a Swift 5 target without complaint.
 - Deployment targets: macOS 14.0 (existing), iOS 17.0 (added by Task 1).
-- **`FleetKit` may import `Foundation` and `Network` only.** No AppKit, no UIKit, no SwiftUI, and nothing from the `FlightDeck` module. It must not use `Session`, `Repo`, `SessionStatus` or `AgentID` — those carry desktop-only fields (`transcriptDirectory`, `transcriptPath`) and live in a module FleetKit cannot see. Wire types are trimmed structs that duplicate only what a client renders.
+- **`FleetKit` may import `Foundation`, `Network`, and `Security` only.** No AppKit, no UIKit, no SwiftUI, and nothing from the `FlightDeck` module. It must not use `Session`, `Repo`, `SessionStatus` or `AgentID` — those carry desktop-only fields (`transcriptDirectory`, `transcriptPath`) and live in a module FleetKit cannot see. Wire types are trimmed structs that duplicate only what a client renders.
 - **No iOS Simulator runtime is installed on this machine** (`xcrun simctl list runtimes` is empty) and there is no provisioning profile. The iOS slice is therefore **compile-checked only** (`./scripts/build-ios.sh`), and every behavioural test in this plan runs in the existing macOS headless bundle. Do not add an iOS test target.
 - TDD, and **confirm the test fails against the missing/broken code before implementing.** Never weaken an assertion to go green.
 - Comments explain *why* and name the failure they prevent. That is the house style; match it.
