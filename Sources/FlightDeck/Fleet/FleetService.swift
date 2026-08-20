@@ -30,6 +30,9 @@ final class FleetService: ObservableObject {
     private let server: FleetSocketServer
     private let replicator: FleetReplicator
     private(set) var boundPort: NWEndpoint.Port?
+    /// Cancelled and replaced by every `scheduleExpiry`, so re-arming or an early cancel
+    /// never leaves a stale timer racing the current window.
+    private var expiryTask: Task<Void, Never>?
 
     /// The Bonjour instance name this Mac advertises under, and the name the phone stores so
     /// it can prefer the Mac it paired with.
@@ -113,9 +116,17 @@ final class FleetService: ObservableObject {
     /// `async` because `FleetSocketServer.start` awaits the OS reporting its bound port
     /// rather than polling for it — the polling version blocked its caller for up to five
     /// seconds, and this type is main-actor, so that was a visible stall.
+    ///
+    /// `deviceKeys(at: armer.currentTime)`, not the default `Date()`: a provisional device's
+    /// `armedUntil` is stamped on the armer's own clock, and under a test's injected clock
+    /// that is not real wall time. Filtering against real `Date()` there judged a
+    /// freshly-armed window already expired — the listener refused the very key it had just
+    /// been told to accept, and the client's handshake could never complete.
     @discardableResult
     func start(port: NWEndpoint.Port? = nil) async throws -> NWEndpoint.Port {
-        let bound = try await server.start(keys: preferences.deviceKeys(), port: port ?? boundPort)
+        let bound = try await server.start(
+            keys: preferences.deviceKeys(at: armer.currentTime), port: port ?? boundPort
+        )
         boundPort = bound
         Self.logger.info("fleet listener bound to port \(bound.rawValue, privacy: .public)")
         return bound
@@ -153,15 +164,42 @@ final class FleetService: ObservableObject {
             serviceName: serviceName,
             endpoints: LocalEndpoints.current(port: port)
         )
-        if let pending = armer.pending { preferences.upsert(pending) }
+        if let pending = armer.pending {
+            preferences.upsert(pending)
+            if let armedUntil = pending.armedUntil { scheduleExpiry(at: armedUntil) }
+        }
         try await reloadKeys()
         return payload
     }
 
     func cancelArming() async throws {
+        expiryTask?.cancel()
         if let pending = armer.pending { preferences.revokeDevice(slot: pending.slot) }
         armer.cancel()
         try await reloadKeys()
+    }
+
+    /// Schedules the window's own expiry, so a code stops being a key on time whether or not
+    /// anything is still on screen.
+    ///
+    /// The pairing sheet also calls `expireArming()` on a timer, but that timer dies with the
+    /// sheet: dismissing it early — ⌘W, clicking away, quitting — used to leave the key live
+    /// indefinitely. `deviceKeys(at:)` already refuses an expired key, so this is belt to that
+    /// braces: it makes the *listener* drop it promptly rather than at the next reload.
+    ///
+    /// The delay is measured against `armer.currentTime`, not `Date()`: `deadline` lives in
+    /// the armer's clock domain, and under a test's injected clock that is not real wall
+    /// time. Subtracting real `Date()` from a deadline computed on a fixed 1970 test clock
+    /// produced a negative delay — an immediate, spurious expiry that revoked a device before
+    /// its own handshake could complete.
+    private func scheduleExpiry(at deadline: Date) {
+        expiryTask?.cancel()
+        let seconds = deadline.timeIntervalSince(armer.currentTime)
+        expiryTask = Task { [weak self] in
+            if seconds > 0 { try? await Task.sleep(for: .seconds(seconds)) }
+            guard !Task.isCancelled else { return }
+            try? await self?.expireArming()
+        }
     }
 
     /// Drops a window that ran out. Called on a timer by the pairing sheet, and again before
@@ -190,6 +228,7 @@ final class FleetService: ObservableObject {
         attachedSlots.insert(slot)
         let now = Date()
         if armer.claim(slot: slot), var device = preferences.pairedDevices.first(where: { $0.slot == slot }) {
+            expiryTask?.cancel()
             device.pairedAt = now
             device.armedUntil = nil
             device.lastSeenAt = now

@@ -19,6 +19,13 @@ final class PairingArmer {
         self.now = now
     }
 
+    /// The armer's own notion of "now" — exposed so `FleetService.scheduleExpiry` can sleep
+    /// for the right number of *real* seconds even when this armer is running on a test's
+    /// injected clock. Computing that delay against `Date()` directly would compare a
+    /// deadline in the injected clock's domain to real wall time, which under a test's fixed
+    /// 1970 clock is a deadline decades in the past — an instant, spurious expiry.
+    var currentTime: Date { now() }
+
     /// Opens a window, replacing any window already open — two live codes at once would
     /// mean a code the user has forgotten about is still a key.
     func arm(macName: String, serviceName: String, endpoints: [String]) -> PairingPayload {

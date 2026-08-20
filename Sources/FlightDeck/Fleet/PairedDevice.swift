@@ -23,4 +23,16 @@ struct PairedDevice: Codable, Equatable, Identifiable {
     var isProvisional: Bool { pairedAt == nil }
 
     func key() -> FleetDeviceKey { FleetDeviceKey(slot: slot, secret: secret) }
+
+    /// Whether this device's key should still be honoured.
+    ///
+    /// A paired device carries no `armedUntil` and is live until revoked. A *provisional* one
+    /// is live only until its window closes — and this is what makes that durable. Expiry used
+    /// to be enforced solely by whoever remembered to call `expire()`, which meant a pairing
+    /// sheet dismissed early left its key live indefinitely, across relaunches, contradicting
+    /// the "expires in 2 minutes" the user was shown.
+    func isLive(at now: Date) -> Bool {
+        guard let armedUntil else { return true }
+        return now <= armedUntil
+    }
 }

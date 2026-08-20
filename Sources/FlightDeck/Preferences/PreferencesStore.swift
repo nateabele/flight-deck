@@ -193,8 +193,14 @@ final class PreferencesStore: ObservableObject {
     let installSuffix: String
 
     /// What `FleetService` starts its listener with. A revoked device is absent here, which
-    /// is the entirety of what revocation means.
-    func deviceKeys() -> [FleetDeviceKey] { pairedDevices.map { $0.key() } }
+    /// is the entirety of what revocation means — and an expired provisional one is filtered
+    /// here too, so an unclaimed pairing window stops being a key the instant anything asks
+    /// for the accepted set, rather than only once whoever is watching the clock remembers to
+    /// prune it. `at` defaults to `Date()` and is a parameter only so a test can pin "after
+    /// the window closed" without a real sleep.
+    func deviceKeys(at now: Date = Date()) -> [FleetDeviceKey] {
+        pairedDevices.filter { $0.isLive(at: now) }.map { $0.key() }
+    }
 
     func upsert(_ device: PairedDevice) {
         var devices = pairedDevices

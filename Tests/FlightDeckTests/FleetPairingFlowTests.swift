@@ -80,6 +80,22 @@ final class FleetPairingFlowTests: XCTestCase {
         XCTAssertFalse(preferences.deviceKeys().contains { $0.slot == payload.key.slot })
     }
 
+    /// The hole this closes: expiry used to be enforced only by the pairing sheet's timer,
+    /// which dies with the sheet. Dismissing it early left the key live in the accepted set
+    /// indefinitely — across relaunch — while the user had been told it expires in two minutes.
+    /// Now the data itself refuses an expired key, so nothing has to remember to prune it.
+    func testAnExpiredProvisionalKeyIsRefusedEvenIfNothingPrunedIt() async throws {
+        let (_, preferences, service) = try await standUp()
+        let payload = try await service.arm()
+
+        let afterExpiry = Date().addingTimeInterval(PairingArmer.window + 1)
+        XCTAssertFalse(preferences.pairedDevices.isEmpty)
+        XCTAssertFalse(
+            preferences.deviceKeys(at: afterExpiry).contains { $0.slot == payload.key.slot },
+            "an expired window must not still be a key"
+        )
+    }
+
     /// Revoking is deleting the key, and the listener must stop honouring it — not merely
     /// stop listing it.
     func testARevokedDeviceCanNoLongerConnect() async throws {
