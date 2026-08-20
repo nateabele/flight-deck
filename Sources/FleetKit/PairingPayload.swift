@@ -10,11 +10,18 @@ public enum PairingPayloadError: Error, Equatable {
 /// the two devices out of band.
 ///
 /// `flightdeck1:` + base64url of a small JSON object. Not a URL, deliberately — see the
-/// plan's Task 1. The prefix carries the version too, so a phone can reject a code it does
-/// not understand before decoding a byte of it.
+/// plan's Task 1. The digits in the prefix are the version, and they are checked before any
+/// base64 or JSON decoding happens, so a code from a newer Mac is refused *as* too-new rather
+/// than as damaged.
 public struct PairingPayload: Equatable, Sendable {
     public static let currentVersion = 1
-    private static let prefix = "flightdeck1:"
+    /// The scheme half of the code. The version is spelled into the prefix — `flightdeck1:` —
+    /// and that is load-bearing, not cosmetic: a payload from a newer Mac may rename or retype
+    /// fields, so decoding it under this version's schema would fail as *damaged*. The phone
+    /// shows different copy for damaged ("show a new code on your Mac") and too-new ("update
+    /// the app"), which send the user in opposite directions — so the version has to be
+    /// readable without decoding anything.
+    private static let scheme = "flightdeck"
 
     public var version: Int
     public var key: FleetDeviceKey
@@ -55,19 +62,35 @@ public struct PairingPayload: Equatable, Sendable {
         // `try!` is honest here: `Body` is all `Codable` primitives with no custom encoding,
         // so a throw would be a compiler bug rather than a runtime condition to handle.
         let json = try! JSONEncoder().encode(body)
-        return Self.prefix + json.base64URLEncodedString()
+        return "\(Self.scheme)\(version):" + json.base64URLEncodedString()
     }
 
     public init(decoding code: String) throws {
         let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix(Self.prefix) else { throw PairingPayloadError.notAPairingCode }
-        guard let json = Data(base64URLEncoded: String(trimmed.dropFirst(Self.prefix.count))),
+        guard trimmed.hasPrefix(Self.scheme), let colon = trimmed.firstIndex(of: ":")
+        else { throw PairingPayloadError.notAPairingCode }
+
+        let digits = trimmed[
+            trimmed.index(trimmed.startIndex, offsetBy: Self.scheme.count)..<colon
+        ]
+        guard !digits.isEmpty, let version = Int(digits) else {
+            throw PairingPayloadError.notAPairingCode
+        }
+        // Before a byte is decoded. A future payload may not parse under this schema at all,
+        // and failing it as "damaged" would send the user to show a fresh code when what they
+        // actually need is to update the app.
+        guard version == Self.currentVersion else {
+            throw PairingPayloadError.unsupportedVersion(version)
+        }
+
+        guard let json = Data(base64URLEncoded: String(trimmed[trimmed.index(after: colon)...])),
               let body = try? JSONDecoder().decode(Body.self, from: json),
               let secret = Data(base64URLEncoded: body.psk)
         else { throw PairingPayloadError.malformed }
-        guard body.v == Self.currentVersion else {
-            throw PairingPayloadError.unsupportedVersion(body.v)
-        }
+        // The body repeats the version so a hand-edited prefix cannot walk a mismatched body
+        // past the gate above.
+        guard body.v == version else { throw PairingPayloadError.malformed }
+
         self.init(
             version: body.v,
             key: FleetDeviceKey(slot: body.slot, secret: secret),
@@ -78,8 +101,9 @@ public struct PairingPayload: Equatable, Sendable {
 
 extension Data {
     /// base64url (RFC 4648 §5): no `+`, `/` or `=`, so the whole code survives being typed,
-    /// pasted, or read aloud without escaping.
-    func base64URLEncodedString() -> String {
+    /// pasted, or read aloud without escaping. `public` so tests (plain `import FleetKit`, no
+    /// `@testable`) can assert the secret doesn't appear in this form either.
+    public func base64URLEncodedString() -> String {
         base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
