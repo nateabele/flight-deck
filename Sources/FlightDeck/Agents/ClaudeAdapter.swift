@@ -11,10 +11,11 @@ import Foundation
 struct ClaudeAdapter: AgentAdapter {
     static let id: AgentID = .claude
 
-    /// Where `~/.claude/projects` lives, read on every derivation rather than captured as a
-    /// value. `SessionStore.projectsRoot` is a test seam assigned *after* the store is
-    /// constructed, and a struct that snapshotted it at construction would keep pointing at
-    /// the real projects directory for the life of a fixture or test run.
+    /// Where this account's `projects` directory lives, read on every derivation rather than
+    /// captured as a value. It is derived from the home of the account the adapter was built
+    /// for, and `SessionStore.transcriptsRootOverride` — a fixture/test seam — is assigned
+    /// *after* the store is constructed, so a struct that snapshotted a URL at construction
+    /// would keep pointing at the real projects directory for the life of a fixture run.
     var projectsRoot: () -> URL = { ClaudeSession.defaultProjectsRoot }
 
     /// How a rename reaches `claude`: by typing `/rename <name>` into the tab's pty.

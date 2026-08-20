@@ -22,7 +22,7 @@ final class ToolContextTests: XCTestCase {
 
     private func makeStore() -> SessionStore {
         let store = SessionStore(provider: nil, persistence: nil)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         return store
     }
 

@@ -234,7 +234,7 @@ final class CodexIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: indexDir) }
         let index = indexDir.appendingPathComponent("session_index.jsonl")
         FileManager.default.createFile(atPath: index.path, contents: Data())
-        store.codexIndexURL = index
+        store.codexIndexURLOverride = index
 
         XCTAssertTrue(store.restore(directoryExists: { _ in true }))
         XCTAssertTrue(store.hasCodexStackForTesting,

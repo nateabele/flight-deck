@@ -133,7 +133,7 @@ final class CodexLaunchFailureTests: XCTestCase {
         let provider = RecordingProvider()
         retained.append(provider)
         let store = SessionStore(provider: provider, persistence: nil)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         store.launchFailureReporter = reporter
         return (store, provider)
     }

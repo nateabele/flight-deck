@@ -300,7 +300,9 @@ final class SessionStore: ObservableObject {
     /// `startCodex`.
     private func makeCodexStackIfNeeded(account: UUID?) -> CodexStack {
         if let existing = codexStacks[account] { return existing }
-        let stack = CodexStack(clock: clock, indexURL: codexIndexURL)
+        // This account's index, not the app's: the stack's name watcher tails the file that
+        // this login's `CODEX_HOME` indexes, which is the only place its renames appear.
+        let stack = CodexStack(clock: clock, indexURL: codexIndexURL(for: account))
         // Composed on top of the stack's own hook rather than replacing it: failing every
         // in-flight request is the stack's job, forgetting the stack is the store's, and both
         // have to happen for the same event.
@@ -399,13 +401,22 @@ final class SessionStore: ObservableObject {
     /// Claude's adapter with this store's wiring on it.
     ///
     /// A builder rather than a stored literal now that there is one per account, but the
-    /// wiring is the point: a bare `ClaudeAdapter()` carries neither this store's
-    /// `projectsRoot` — a test would then derive transcript paths under the developer's real
-    /// `~/.claude/projects` — nor the route a title claude reports takes back to the tabs
-    /// following that conversation.
-    private func makeClaudeAdapter() -> ClaudeAdapter {
+    /// wiring is the point: a bare `ClaudeAdapter()` carries neither this account's
+    /// transcripts root — a test would then derive transcript paths under the developer's real
+    /// `~/.claude/projects`, and a second login would read the first login's transcripts —
+    /// nor the route a title claude reports takes back to the tabs following that
+    /// conversation.
+    ///
+    /// The account is captured as an id and resolved on every derivation, not baked into a
+    /// URL here: `projectsRoot` is a closure precisely so a home that moves (a relocated
+    /// account, a fixture root assigned after construction) is picked up rather than frozen
+    /// at the moment the adapter happened to be built.
+    private func makeClaudeAdapter(account: UUID?) -> ClaudeAdapter {
         ClaudeAdapter(
-            projectsRoot: { [weak self] in self?.projectsRoot ?? ClaudeSession.defaultProjectsRoot },
+            projectsRoot: { [weak self] in
+                guard let self else { return ClaudeSession.defaultProjectsRoot }
+                return self.transcriptsRoot(forAccount: account)
+            },
             injectRename: { [weak self] conversationID, title in
                 // The adapter speaks conversation ids; `pendingRenames` is keyed by tab, and
                 // two tabs can follow one conversation. See `tabs(following:)`.
@@ -433,7 +444,7 @@ final class SessionStore: ObservableObject {
         if instance.agent == .codex {
             return makeCodexStackIfNeeded(account: instance.account).adapter
         }
-        let adapter = makeClaudeAdapter()
+        let adapter = makeClaudeAdapter(account: instance.account)
         adapters[instance] = adapter
         return adapter
     }
@@ -484,7 +495,7 @@ final class SessionStore: ObservableObject {
         adapters[AgentInstance(agent: agent, account: account)] = adapter
     }
 
-    /// The one timer behind every watcher above, plus `statusWatcher`. Created lazily so a
+    /// The one timer behind every watcher above, plus `statusWatchers`. Created lazily so a
     /// store built by a test that never starts watching never schedules anything; see
     /// `WatchClock` for why the app polls from a single coalesced source.
     ///
@@ -496,15 +507,63 @@ final class SessionStore: ObservableObject {
         self?.appIsActive() ?? false
     })
 
-    /// Injectable so tests can point at a temp directory.
-    var projectsRoot: URL = ClaudeSession.defaultProjectsRoot
+    /// The three observation seams, all nil by default, all meaning "derive it from the
+    /// account". Injectable so a test or a fixture can point at a temp directory.
+    ///
+    /// Overrides rather than values, and consulted by the three accessors below rather than
+    /// read directly, because of what an override has to guarantee: it must win for EVERY
+    /// account. `SessionFixture` exists to keep a screenshot run out of the developer's real
+    /// `~/.claude`, and an override that retargeted only the login the fixture happened to
+    /// know about would let a second account's watcher — or worse, a second account's
+    /// `claude` — reach the live registry anyway. One nil check per root, in one place, is
+    /// what makes that property checkable; see `AccountObservationRootTests`.
+    var transcriptsRootOverride: URL?
+    var statusRootOverride: URL?
+    var codexIndexURLOverride: URL?
 
-    /// Injectable so tests can point at a temp directory.
-    var sessionsRoot: URL = SessionStatusWatcher.defaultRoot
+    /// Where this account's claude transcripts live.
+    func transcriptsRoot(for account: AgentAccount) -> URL { transcriptsRoot(forHome: account.home) }
 
-    /// Codex's rename index. A seam for the same reason `sessionsRoot` is one: the default is
-    /// a real file in the user's home, and a test that read it would be reading live state.
-    var codexIndexURL: URL = CodexNameWatcher.defaultIndexURL
+    /// Where this account's claude status registry lives.
+    func statusRoot(for account: AgentAccount) -> URL { statusRoot(forHome: account.home) }
+
+    /// The index this account's codex stack tails. Keyed by account id rather than by
+    /// `AgentAccount`, because that is what every codex registry here is keyed by.
+    func codexIndexURL(for account: UUID?) -> URL {
+        codexIndexURLOverride
+            ?? CodexNameWatcher.indexURL(forHome: home(ofAccount: account, agent: .codex))
+    }
+
+    /// The same two roots keyed the way every registry here is — by account id, nil meaning
+    /// the one home a store with no accounts configured serves. This is the form the adapter
+    /// and the registry watchers use, since an id is what an `AgentInstance` carries; the
+    /// `AgentAccount` overloads above are for callers holding the account itself.
+    func transcriptsRoot(forAccount account: UUID?) -> URL {
+        transcriptsRoot(forHome: home(ofAccount: account, agent: .claude))
+    }
+
+    func statusRoot(forAccount account: UUID?) -> URL {
+        statusRoot(forHome: home(ofAccount: account, agent: .claude))
+    }
+
+    private func transcriptsRoot(forHome home: URL) -> URL {
+        transcriptsRootOverride ?? home.appendingPathComponent("projects", isDirectory: true)
+    }
+
+    private func statusRoot(forHome home: URL) -> URL {
+        statusRootOverride ?? home.appendingPathComponent("sessions", isDirectory: true)
+    }
+
+    /// The home an instance key stands for, resolved on every use rather than cached.
+    ///
+    /// Nil answers the agent's built-in home, which is exactly what a nil key means: a store
+    /// with no `PreferencesStore` has no account to name and one home to serve (see
+    /// `AgentInstance`). A key naming an account preferences no longer holds falls there too
+    /// — the tab is refused before it can launch, and answering with a path is preferable to
+    /// trapping while a watcher asks where to look.
+    private func home(ofAccount account: UUID?, agent: AgentID) -> URL {
+        account.flatMap { preferences?.account(id: $0)?.home } ?? agent.builtInHome
+    }
 
     /// Liveness predicate for registry entries. Nil means the real one — a status file is
     /// believed only while its process is running. `SessionFixture` overrides it, because a
@@ -515,10 +574,39 @@ final class SessionStore: ObservableObject {
     /// Sub-agent counts kept separately so one arriving before the registry has been
     /// read is not lost, and so a registry refresh never clobbers it.
     private var subagentCounts: [UUID: Int] = [:]
-    private var statusWatcher: SessionStatusWatcher?
+
+    /// One registry watcher per account with a live claude tab, keyed like every other
+    /// registry here.
+    ///
+    /// Per account because the registry is a directory inside `CLAUDE_CONFIG_DIR`: a second
+    /// login writes its status files somewhere the first login's watcher never looks, so a
+    /// single watcher leaves those tabs with no glyph at all — silently, since an unwatched
+    /// registry is indistinguishable from an idle one.
+    private var statusWatchers: [UUID?: SessionStatusWatcher] = [:]
+
+    /// The last scan from each account's registry, merged before it reaches `applyRegistry`.
+    ///
+    /// Merged, not applied one watcher at a time, because `applyRegistry` rebuilds `statuses`
+    /// for EVERY claude tab out of the rows it is handed: a second account's tick carries only
+    /// its own pids, so the first account's tabs would find no row and be reported as exited —
+    /// a fabricated `busy → gone` edge per tab per tick, with the unread marks and withdrawn
+    /// banners that edge produces. Pids are machine-wide, so the union is itself a well-formed
+    /// registry.
+    private var registryRows: [UUID?: [pid_t: ClaudeStatusFile.Entry]] = [:]
+
+    /// Whether registry polling has been switched on at all. Only the production convenience
+    /// init calls `startStatusWatching()`, and watchers are now also built on the tab path —
+    /// so without this flag a store built by a test would start scanning the developer's real
+    /// `~/.claude/sessions` the moment it made a claude tab.
+    private var isStatusWatchingEnabled = false
+
+    /// Test seam. Which accounts are currently scanning a registry. A set rather than a count
+    /// because both halves matter: a missing key is a login with no glyphs, and a duplicate
+    /// registration on the shared `WatchClock` is a poll nothing can ever stop.
+    var statusWatcherAccountsForTesting: Set<UUID?> { Set(statusWatchers.keys) }
 
     /// Set the instant `reapAllForQuit` begins, before its first `await`. Nothing stops
-    /// `statusWatcher`'s poll or the `WatchClock` timer while that reap is in flight — there
+    /// a `statusWatchers` poll or the `WatchClock` timer while that reap is in flight — there
     /// is no `applicationWillTerminate` — so a tick can land mid-reap and see every tracked
     /// `claude` already gone. Every session's transition would then read `old != nil, new ==
     /// nil`, and the `persist()` at the end of `applyRegistry` would write `activity: nil`
@@ -783,11 +871,13 @@ final class SessionStore: ObservableObject {
         )
         self.notifier = notifier
         // Both assigned before `startStatusWatching()` below, which reads them when it builds
-        // the watcher — setting either afterwards would leave the watcher pointed at the real
-        // registry for the life of the run. Nil for every caller except a fixture launch.
-        if let statusRoot { sessionsRoot = statusRoot }
+        // each account's watcher — setting either afterwards would leave those watchers
+        // pointed at the real registry for the life of the run. Nil for every caller except a
+        // fixture launch, and an override rather than a value, so a fixture retargets every
+        // account rather than whichever one it knew to name.
+        if let statusRoot { statusRootOverride = statusRoot }
         // Before `restore()`, which attaches a transcript watcher per restored session.
-        if let transcriptsRoot { projectsRoot = transcriptsRoot }
+        if let transcriptsRoot { transcriptsRootOverride = transcriptsRoot }
         self.statusIsAlive = statusIsAlive
         // Before the sweep below, which reports through it.
         if let reapReporter { self.reapReporter = reapReporter }
@@ -1611,6 +1701,10 @@ final class SessionStore: ObservableObject {
         // store with no accounts configured at all, where the one nil key serves everything
         // and closing any tab runs exactly the check it always did.
         stopCodexIfUnused(account: closed.account)
+        // The claude half of the same rule: an account whose last claude tab just closed has
+        // no reason to keep scanning its registry, and a watcher left registered on the
+        // `WatchClock` outlives every tab that justified it.
+        stopStatusWatchingIfUnused(account: closed.account)
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
@@ -2161,20 +2255,65 @@ final class SessionStore: ObservableObject {
 
     func status(for id: UUID) -> SessionStatus? { statuses[id] }
 
-    /// Starts registry polling. Called from the production convenience init only, so
-    /// tests using `init(provider:persistence:)` never touch the real registry or spin
-    /// a timer.
+    /// Switches registry polling on and covers the tabs that already exist. Called from the
+    /// production convenience init only, so tests using `init(provider:persistence:)` never
+    /// touch the real registry or spin a timer.
+    ///
+    /// A sweep rather than a single watcher: restore has already put every tab back by the
+    /// time this runs, and each login among them has its own registry to scan. Tabs created
+    /// after this point are picked up by `startWatching(tabID:)`.
     func startStatusWatching() {
-        guard statusWatcher == nil else { return }
+        isStatusWatchingEnabled = true
+        for session in repos.flatMap(\.sessions) where session.agent == .claude {
+            startStatusWatching(account: instance(for: session).account)
+        }
+    }
+
+    /// Builds this account's registry watcher on first ask and memoizes it — the same
+    /// once-per-account guard `makeCodexStackIfNeeded` keeps, and for a sharper reason: a
+    /// watcher registers itself on the shared `WatchClock`, so a second one for an account
+    /// that already has one polls for the rest of the run with nothing holding a reference
+    /// able to stop it.
+    ///
+    /// Silent until `startStatusWatching()` has run. Watchers are created on the tab path now
+    /// rather than once at launch, and a test that made a claude tab must not thereby start
+    /// scanning the developer's live registry.
+    private func startStatusWatching(account: UUID?) {
+        guard isStatusWatchingEnabled, statusWatchers[account] == nil else { return }
         let watcher = SessionStatusWatcher(
-            root: sessionsRoot,
+            root: statusRoot(forAccount: account),
             isAlive: statusIsAlive ?? SessionStatusWatcher.processIsAlive,
             clock: clock
         ) { [weak self] entries in
-            self?.applyRegistry(entries)
+            self?.applyRegistry(entries, from: account)
         }
         watcher.start()
-        statusWatcher = watcher
+        statusWatchers[account] = watcher
+    }
+
+    /// Stops one account's registry scan once that account's last claude tab is gone — the
+    /// claude half of `stopCodexIfUnused`, narrowed the same way. Only the closing tab's own
+    /// account can have just lost its last tab.
+    ///
+    /// Its rows go with it: leaving them in `registryRows` would keep merging a dead login's
+    /// last scan into every later tick, and pids get reused.
+    private func stopStatusWatchingIfUnused(account: UUID?) {
+        guard let watcher = statusWatchers[account] else { return }
+        let live = AgentInstance(agent: .claude, account: account)
+        guard !repos.flatMap(\.sessions).contains(where: { instance(for: $0) == live }) else { return }
+        watcher.stop()
+        statusWatchers[account] = nil
+        registryRows[account] = nil
+    }
+
+    /// One account's scan, merged with every other account's before it becomes status. See
+    /// `registryRows` for why the merge is not optional.
+    private func applyRegistry(_ rows: [pid_t: ClaudeStatusFile.Entry], from account: UUID?) {
+        registryRows[account] = rows
+        guard registryRows.count > 1 else { return applyRegistry(rows) }
+        applyRegistry(registryRows.values.reduce(into: [:]) { merged, rows in
+            merged.merge(rows) { _, newer in newer }
+        })
     }
 
     /// Rebuilds `statuses` from a registry scan and keeps each tab's anchor current.
@@ -2591,6 +2730,11 @@ final class SessionStore: ObservableObject {
         guard let session = session(for: tabID) else { return }
         let instance = instance(for: session)
         let binding = adapter(for: instance).binding(for: session)
+        // Alongside the runtime, because it is the other half of observing this tab: the
+        // runtime tails its transcript, and its account's registry is where the status glyph
+        // comes from. A no-op for every account that already has one, and for codex, whose
+        // tabs have no registry behind them at all.
+        if instance.agent == .claude { startStatusWatching(account: instance.account) }
         // Recorded before the attach, because the fan-out closure below reads it.
         attachments[tabID] = TabAttachment(instance: instance, binding: binding)
         runtime(for: instance).attach(binding) { [weak self] event in

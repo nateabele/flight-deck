@@ -97,16 +97,15 @@ final class CodexNameWatcherTests: XCTestCase {
         XCTAssertEqual(seen, ["good"])
     }
 
-    /// Codex honours `CODEX_HOME`; a watcher that ignored it would tail a file codex is not
-    /// writing and report nothing, forever, with no error.
-    func testTheDefaultPathFollowsCodexHome() {
+    /// The index is derived from a home the caller names — a watcher pointed at the wrong
+    /// `CODEX_HOME` tails a file codex is not writing and reports nothing, forever, with no
+    /// error. This pins the fallback the account-less callers get; the per-account half, and
+    /// why reading `CODEX_HOME` out of Flight Deck's own environment here was a bug, are in
+    /// `AccountObservationRootTests`.
+    func testTheDefaultPathIsTheBuiltInHomesIndex() {
         let url = CodexNameWatcher.defaultIndexURL
+        XCTAssertEqual(url, CodexNameWatcher.indexURL(forHome: AgentID.codex.builtInHome))
         XCTAssertEqual(url.lastPathComponent, "session_index.jsonl")
-        if let home = ProcessInfo.processInfo.environment["CODEX_HOME"] {
-            XCTAssertEqual(url.deletingLastPathComponent().standardizedFileURL.path,
-                           URL(fileURLWithPath: home).standardizedFileURL.path)
-        } else {
-            XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, ".codex")
-        }
+        XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, ".codex")
     }
 }

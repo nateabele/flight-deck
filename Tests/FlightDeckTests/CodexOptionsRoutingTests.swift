@@ -74,7 +74,7 @@ final class CodexOptionsRoutingTests: XCTestCase {
             approvalPolicy: "untrusted", addDirs: ["/w/extra"]
         ))
         let store = SessionStore(provider: nil, persistence: nil, preferences: preferences)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         store.launchFailureReporter = SilentReporter()
         let adapter = RecordingCodexAdapter()
         // Filed under the account the tab will actually resolve to. This store HAS
@@ -98,7 +98,7 @@ final class CodexOptionsRoutingTests: XCTestCase {
 
     func testAStoreWithNoPreferencesStillLaunchesOnCodexsOwnDefaults() async throws {
         let store = SessionStore(provider: nil, persistence: nil)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         store.launchFailureReporter = SilentReporter()
         let adapter = RecordingCodexAdapter()
         // No preferences on this one, so nothing resolves and nil is the key.
