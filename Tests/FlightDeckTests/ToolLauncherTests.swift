@@ -119,6 +119,26 @@ final class ToolLauncherTests: XCTestCase {
         )
     }
 
+    func testEnvironmentOverridesWinOverTheLaunchersOwnEnvironment() {
+        // `environmentOverrides` is how `ToolRunner.run` applies a session's account — see the
+        // comment there for why that happens at the call site rather than inside `environment`.
+        // A pane value for the same key must not shadow it.
+        let reporter = RecordingReporter()
+        let expectation = expectation(description: "reported")
+        reporter.onReport = { expectation.fulfill() }
+
+        var launcher = makeLauncher(reporter)
+        launcher.environment = { ["CLAUDE_CONFIG_DIR": "/pane/only"] }
+
+        launcher.launch(
+            command: "echo $CLAUDE_CONFIG_DIR >&2; exit 1", in: "/tmp", named: "Probe",
+            environmentOverrides: ["CLAUDE_CONFIG_DIR": "/work/account"]
+        )
+
+        wait(for: [expectation], timeout: 5)
+        XCTAssertEqual(reporter.reports.first?.message, "/work/account")
+    }
+
     // MARK: .configured(_:)
 
     func testConfiguredHonoursTheShellOverride() {

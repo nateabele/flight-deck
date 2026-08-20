@@ -2,7 +2,18 @@ import Foundation
 
 @MainActor
 protocol ToolLaunching {
-    func launch(command: String, in directory: String, named: String)
+    /// `environmentOverrides` wins on collision with everything else the launcher would set —
+    /// see `ToolRunner.run` for why it is passed in here rather than folded into
+    /// `ShellToolLauncher`'s own `environment` closure.
+    func launch(command: String, in directory: String, named: String, environmentOverrides: [String: String])
+}
+
+extension ToolLaunching {
+    /// Convenience for the few call sites (previews, direct-launcher tests) with no session,
+    /// and so no account, to overlay.
+    func launch(command: String, in directory: String, named name: String) {
+        launch(command: command, in: directory, named: name, environmentOverrides: [:])
+    }
 }
 
 /// Bounded tail of a child's stderr, filled by a background reader that never stops draining.
@@ -73,14 +84,21 @@ struct ShellToolLauncher: ToolLaunching {
     /// remembers pressing the key.
     var grace: Duration = .seconds(2)
 
-    func launch(command: String, in directory: String, named name: String) {
+    func launch(
+        command: String, in directory: String, named name: String,
+        environmentOverrides: [String: String]
+    ) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: shell())
         process.arguments = ["-lc", command]
         // Relative paths in a template resolve where the user expects, and a tool that reads
         // its cwd rather than argv still lands in the right place.
         process.currentDirectoryURL = URL(fileURLWithPath: directory, isDirectory: true)
-        process.environment = environment()
+        // Overrides win last: they are the session's own account, which must never be shadowed
+        // by a Shell & Environment pane value typed for a different login.
+        var environment = environment()
+        environment.merge(environmentOverrides) { _, override in override }
+        process.environment = environment
 
         let errors = Pipe()
         process.standardError = errors

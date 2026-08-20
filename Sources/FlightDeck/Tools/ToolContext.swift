@@ -19,6 +19,17 @@ struct ToolContext: Equatable {
     var conversationID: UUID
     /// Optional because `AgentBinding.transcriptURL` is: an agent that reports no transcript
     /// is still usable. See `ToolTemplate.expand` for why this expands to `''`, not to "".
-    var transcriptPath: String?
+    var transcriptPath: String? = nil
     var home: String = NSHomeDirectory()
+
+    /// The account the session runs as, for `${account}` / `${accountHome}`. Both default to
+    /// nil rather than the built-in home, so a template that names them and gets no account
+    /// (see `SessionStore.toolContext()`) fails visibly through `ToolTemplate`'s "known name,
+    /// no value" rule instead of silently opening the wrong login's files.
+    var accountName: String?
+    var accountHome: String?
+    /// Merged over the launcher's environment at the launch call site — never inside
+    /// `ShellToolLauncher.configured(_:)`'s `environment` closure, which has no session to ask.
+    /// See `ToolRunner.run` for where and why.
+    var accountEnvironment: [String: String] = [:]
 }

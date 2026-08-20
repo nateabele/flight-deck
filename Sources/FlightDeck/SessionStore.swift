@@ -3061,11 +3061,19 @@ final class SessionStore: ObservableObject {
     ///
     /// nil when nothing is selected: there is no working directory then, and a tool expanded
     /// against blanks would run somewhere arbitrary. Callers disable themselves instead.
+    ///
+    /// The account fields come from `account(for:)`, which is nil for both "no accounts
+    /// configured" and "this tab's account was deleted" — and both leave `accountName`,
+    /// `accountHome` and `accountEnvironment` at their empty defaults rather than refusing to
+    /// build a context. A tool is not a session: opening an editor without an account's
+    /// variables is better than refusing to open it because a login went away.
     func toolContext() -> ToolContext? {
         guard let id = selectedSessionID, let at = locate(id) else { return nil }
         let repo = repos[at.repo]
         let session = repo.sessions[at.session]
-        let location = adapter(for: instance(for: session)).location(for: session)
+        let adapter = adapter(for: instance(for: session))
+        let location = adapter.location(for: session)
+        let account = account(for: session)
         return ToolContext(
             workingDirectory: location.workingDirectory,
             projectPath: repo.url.path,
@@ -3073,7 +3081,10 @@ final class SessionStore: ObservableObject {
             sessionTitle: session.title,
             agent: session.agent,
             conversationID: location.binding.conversationID,
-            transcriptPath: location.binding.transcriptURL?.path
+            transcriptPath: location.binding.transcriptURL?.path,
+            accountName: account?.displayName,
+            accountHome: account?.home.path,
+            accountEnvironment: account.map(adapter.environment(for:)) ?? [:]
         )
     }
 
