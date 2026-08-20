@@ -139,6 +139,31 @@ final class FleetSocketLoopbackTests: XCTestCase {
         _ = XCTWaiter().wait(for: [refused], timeout: 8)
     }
 
+    /// A listener with no paired devices must refuse everyone. This is not an edge case —
+    /// it is the state the listener starts in, before the user has paired anything, so if
+    /// an empty key set were somehow permissive it would be permissive at exactly the
+    /// moment nobody is watching. Fail-closed here rests on there being no local identity
+    /// configured anywhere: with no PSK and no certificate, the server has no credential to
+    /// present and cannot complete a handshake.
+    func testAListenerWithNoKeysRefusesEveryone() async throws {
+        let server = FleetSocketServer()
+        server.onHello = { _, _ in
+            XCTFail("a listener with no keys must not reach application code")
+            return []
+        }
+        self.server = server
+        let port = try await server.start(keys: [], port: nil)
+
+        let client = FleetClient(key: .mint())
+        self.client = client
+        let refused = expectation(description: "refused")
+        client.onDisconnect = { _ in refused.fulfill() }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        // A refusal can also present as silence; either way `onHello` must not have run,
+        // which is what the XCTFail above asserts.
+        _ = XCTWaiter().wait(for: [refused], timeout: 8)
+    }
+
     /// One dropped socket must produce exactly one `onDisconnect`. Three code paths reach
     /// that closure and a single failure trips at least two of them, so without the guard the
     /// reconnect policy built on it schedules a retry per firing.

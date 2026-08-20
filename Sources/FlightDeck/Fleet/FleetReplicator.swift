@@ -25,8 +25,11 @@ protocol FleetRecording: AnyObject {
 /// new mutation site from changing `repos`, `statuses` or `unreadIdle` without recording its
 /// event — and the consequence is not a crash but a client that is silently and permanently
 /// wrong until it reconnects. Comparing the folded mirror against a fresh projection after
-/// every batch is what turns that into a test failure at the moment the mutation is written.
-/// Do not remove it before the encapsulation replaces it.
+/// every batch is what turns that into a test failure in any test that attaches a replicator.
+/// Only the fleet test files do that, out of roughly a hundred `SessionStore(...)`
+/// constructions across the suite — so a mutation is caught immediately if the code path
+/// that exercises it also runs under one of those files, and not otherwise. Do not remove
+/// it before the encapsulation replaces it.
 @MainActor
 final class FleetReplicator: FleetRecording {
     enum Resume: Equatable {

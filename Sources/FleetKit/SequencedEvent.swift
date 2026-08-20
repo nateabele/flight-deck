@@ -2,7 +2,11 @@ import Foundation
 
 /// An event with the position it holds in the northbound stream. The sequence is what a
 /// client sends back as `hello(lastSeq:)` to resume.
-public struct SequencedEvent: Codable, Equatable, Sendable {
+///
+/// In-process only — this type is never encoded or decoded. The wire form is
+/// `ServerFrame.event(seq:_:)`, which deliberately flattens `seq` beside the event's own
+/// fields rather than nesting it the way a synthesized `Codable` on this struct would.
+public struct SequencedEvent: Equatable, Sendable {
     public let seq: Int
     public let event: FleetEvent
 

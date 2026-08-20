@@ -8,6 +8,10 @@ import Network
 /// `@unchecked Sendable`: same reasoning as `FleetClient` — Network.framework's handlers are
 /// typed `@Sendable`, but every one of them runs on `queue`, so the mutable state they touch
 /// (`listener`, `attached`) is confined to that queue rather than shared across threads.
+///
+/// Invariant: every caller-supplied closure (`onHello`, `onCommand`,
+/// `onAttachedCountChanged`) is invoked on `queue`, enforced at each invocation site with
+/// `dispatchPrecondition(condition: .onQueue(queue))`.
 public final class FleetSocketServer: @unchecked Sendable {
     /// How long a peer may hold a completed handshake without sending `hello` before it is
     /// dropped. Settable so the test does not have to wait the production value.
@@ -139,6 +143,12 @@ public final class FleetSocketServer: @unchecked Sendable {
 
         FleetSocket.receive(ClientFrame.self, from: connection) { [weak self] frame in
             guard let self else { return }
+            // Every closure this type invokes is called on `queue`, and every current consumer
+            // treats that as "the main actor" — one of them mutates the app's session store.
+            // `init(queue:)` enforces neither serial-ness nor main-ness, so a caller passing a
+            // concurrent or background queue would turn those into silent races rather than a
+            // compile error. Fail on the first connection instead.
+            dispatchPrecondition(condition: .onQueue(self.queue))
             switch frame {
             case .hello(let lastSeq):
                 if self.attached[id] == nil {
@@ -158,6 +168,12 @@ public final class FleetSocketServer: @unchecked Sendable {
             }
         } onEnd: { [weak self] _ in
             guard let self else { return }
+            // Every closure this type invokes is called on `queue`, and every current consumer
+            // treats that as "the main actor" — one of them mutates the app's session store.
+            // `init(queue:)` enforces neither serial-ness nor main-ness, so a caller passing a
+            // concurrent or background queue would turn those into silent races rather than a
+            // compile error. Fail on the first connection instead.
+            dispatchPrecondition(condition: .onQueue(self.queue))
             connection.cancel()
             self.pending.removeValue(forKey: id)
             guard self.attached.removeValue(forKey: id) != nil else { return }

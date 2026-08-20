@@ -345,7 +345,9 @@ final class SessionPersistenceTests: XCTestCase {
             a.id: SessionStatus(activity: .busy),
             b.id: SessionStatus(activity: .shell),
         ])
-        // `applyRegistryForTesting` only sets the map; force a save the way any mutation would.
+        // `applyRegistryForTesting` routes through `commitStatuses`, which already calls
+        // `persist()` itself on a real transition — the line below is not forcing a save,
+        // it is redundant with the one `commitStatuses` just did.
         store.selectedSessionID = a.id
 
         let stored = persistence.stored?.sessions ?? []

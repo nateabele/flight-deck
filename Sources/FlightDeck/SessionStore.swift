@@ -470,10 +470,12 @@ final class SessionStore: ObservableObject {
     /// structural fix that will eventually make it unwriteable.
     var replicator: (any FleetRecording)?
 
-    private func emit(_ events: FleetEvent...) {
+    private func emit(_ events: [FleetEvent]) {
         guard let replicator, !events.isEmpty else { return }
         replicator.record(events)
     }
+
+    private func emit(_ events: FleetEvent...) { emit(events) }
 
     /// The only writer of `unreadIdle`.
     ///
@@ -2344,8 +2346,7 @@ final class SessionStore: ObservableObject {
     /// the notification and the prompt cancellation.
     private func emitActivity(_ transitions: [StatusTransition]) {
         let changed = transitions.filter { $0.old != $0.new }
-        guard !changed.isEmpty else { return }
-        replicator?.record(changed.map { transition in
+        emit(changed.map { transition in
             .activityChanged(
                 id: transition.id,
                 // nil rather than "idle": no status means no agent process, and the two
