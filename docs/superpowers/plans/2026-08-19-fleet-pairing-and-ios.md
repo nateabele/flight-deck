@@ -20,6 +20,8 @@ Everything in the spine plan's Global Constraints still applies. In addition:
 - **All logic is tested on macOS.** The pairing payload, the arming window, the paired-device store, endpoint racing and connection state are plain values and go in `Tests/FlightDeckTests`. Only SwiftUI views live in the iOS target, and they are not unit-tested.
 - **The secret never reaches a URL, a log, or `UserDefaults` on iOS.** It goes in the Keychain, not synchronized, this-device-only. On the Mac it lives in the existing `preferences.v1` blob alongside the rest of Preferences, which is `UserDefaults` — that is a deliberate, stated limitation, not an oversight (see Task 3).
 - **Never `defaults delete dev.flightdeck.FlightDeck`.** Paired devices live in that domain now, so deleting it silently unpairs every phone.
+- **`wait(for:)` deadlocks in a `@MainActor` async XCTest method** under this repo's headless harness — it blocks the main actor's executor without suspending it, starving the very main-queue callbacks it awaits, so the test hangs rather than failing. Use `await fulfillment(of:timeout:)`. It also costs roughly 100ms per call even when it does work, and a non-isolated test class is unaffected, which is what makes the failure confusing the first time it is hit. Network.framework delivers its handlers on `.main` by default, so anything here touching a socket from a `@MainActor` test hits it immediately.
+- **`FleetSocketServer.start(keys:port:)` is `async throws`** — it awaits the OS reporting the bound port rather than polling for it, because polling blocked its caller for up to five seconds and these types are main-actor. Everything funnelling into it (`FleetService.start`, `reloadKeys`, `arm`, `cancelArming`, `expireArming`) is `async` too, and their tests await them.
 
 ---
 
@@ -738,15 +740,15 @@ final class FleetPairingFlowTests: XCTestCase {
             armer: PairingArmer(now: { self.now })
         )
         self.service = service
-        _ = try service.start(port: nil)
+        _ = try await service.start(port: nil)
         return (store, preferences, service)
     }
 
     /// The moment pairing actually completes. Nothing on the wire announces it — a
     /// successful handshake followed by a `hello` *is* the announcement.
-    func testTheFirstHelloOnAnArmedSlotPairsTheDevice() throws {
+    func testTheFirstHelloOnAnArmedSlotPairsTheDevice() async throws {
         let (_, preferences, service) = try standUp()
-        let payload = try service.arm()
+        let payload = try await service.arm()
         XCTAssertEqual(preferences.pairedDevices.first?.isProvisional, true)
 
         let attached = expectation(description: "paired")
@@ -754,7 +756,7 @@ final class FleetPairingFlowTests: XCTestCase {
         self.client = client
         client.onFrame = { if case .snapshot = $0 { attached.fulfill() } }
         client.connect(to: try service.loopbackEndpoint(), lastSeq: 0)
-        wait(for: [attached], timeout: 10)
+        await fulfillment(of: [attached], timeout: 10)
 
         let device = try XCTUnwrap(preferences.pairedDevices.first)
         XCTAssertEqual(device.slot, payload.key.slot)
@@ -763,9 +765,9 @@ final class FleetPairingFlowTests: XCTestCase {
         XCTAssertNil(device.armedUntil)
     }
 
-    func testTheServerLearnsWhichSlotConnected() throws {
+    func testTheServerLearnsWhichSlotConnected() async throws {
         let (_, _, service) = try standUp()
-        let payload = try service.arm()
+        let payload = try await service.arm()
         let seen = expectation(description: "slot observed")
         let client = FleetClient(key: payload.key)
         self.client = client
@@ -775,26 +777,26 @@ final class FleetPairingFlowTests: XCTestCase {
             }
         }
         client.connect(to: try service.loopbackEndpoint(), lastSeq: 0)
-        wait(for: [seen], timeout: 10)
+        await fulfillment(of: [seen], timeout: 10)
     }
 
     /// A code that was never claimed must stop being a key, not just stop being displayed.
-    func testAnUnclaimedWindowExpiresOutOfTheAcceptedKeys() throws {
+    func testAnUnclaimedWindowExpiresOutOfTheAcceptedKeys() async throws {
         let (_, preferences, service) = try standUp()
-        let payload = try service.arm()
+        let payload = try await service.arm()
         now += PairingArmer.window + 1
-        try service.expireArming()
+        try await service.expireArming()
         XCTAssertTrue(preferences.pairedDevices.isEmpty)
         XCTAssertFalse(preferences.deviceKeys().contains { $0.slot == payload.key.slot })
     }
 
     /// Revoking is deleting the key, and the listener must stop honouring it — not merely
     /// stop listing it.
-    func testARevokedDeviceCanNoLongerConnect() throws {
+    func testARevokedDeviceCanNoLongerConnect() async throws {
         let (_, preferences, service) = try standUp()
-        let payload = try service.arm()
+        let payload = try await service.arm()
         preferences.revokeDevice(slot: payload.key.slot)
-        try service.reloadKeys()
+        try await service.reloadKeys()
 
         let refused = expectation(description: "refused")
         let client = FleetClient(key: payload.key)
@@ -802,20 +804,20 @@ final class FleetPairingFlowTests: XCTestCase {
         client.onFrame = { _ in XCTFail("a revoked device reached the application layer") }
         client.onDisconnect = { _ in refused.fulfill() }
         client.connect(to: try service.loopbackEndpoint(), lastSeq: 0)
-        _ = XCTWaiter().wait(for: [refused], timeout: 8)
+        _ = XCTWaiter().await fulfillment(of: [refused], timeout: 8)
     }
 
-    func testArmingTwiceLeavesOnlyTheNewestCodeLive() throws {
+    func testArmingTwiceLeavesOnlyTheNewestCodeLive() async throws {
         let (_, preferences, service) = try standUp()
-        let first = try service.arm()
-        let second = try service.arm()
+        let first = try await service.arm()
+        let second = try await service.arm()
         XCTAssertEqual(preferences.pairedDevices.map(\.slot), [second.key.slot])
         XCTAssertFalse(preferences.deviceKeys().contains { $0.slot == first.key.slot })
     }
 
-    func testThePairingCodeAdvertisesTheListenersRealPort() throws {
+    func testThePairingCodeAdvertisesTheListenersRealPort() async throws {
         let (_, _, service) = try standUp()
-        let payload = try service.arm()
+        let payload = try await service.arm()
         let port = try XCTUnwrap(service.boundPort)
         XCTAssertFalse(payload.endpoints.isEmpty, "a code with no candidates cannot be raced")
         XCTAssertTrue(payload.endpoints.allSatisfy { $0.hasSuffix(":\(port.rawValue)") })
@@ -1000,7 +1002,7 @@ Replace the `keys:` closure with the preferences store and the armer, and add th
     /// The provisional slot is written to Preferences *before* the listener restarts,
     /// because the phone cannot complete a handshake against a key the listener does not
     /// hold — "armed" and "the key is live" are the same instant by construction.
-    func arm() throws -> PairingPayload {
+    func arm() async throws -> PairingPayload {
         armer.cancel()
         preferences.pairedDevices
             .filter(\.isProvisional)
@@ -1013,25 +1015,25 @@ Replace the `keys:` closure with the preferences store and the armer, and add th
             endpoints: LocalEndpoints.current(port: port)
         )
         if let pending = armer.pending { preferences.upsert(pending) }
-        try reloadKeys()
+        try await reloadKeys()
         return payload
     }
 
-    func cancelArming() throws {
+    func cancelArming() async throws {
         if let pending = armer.pending { preferences.revokeDevice(slot: pending.slot) }
         armer.cancel()
-        try reloadKeys()
+        try await reloadKeys()
     }
 
     /// Drops a window that ran out. Called on a timer by the pairing sheet, and again before
     /// the sheet closes, so an expired code stops being a key rather than merely stopping
     /// being drawn.
-    func expireArming() throws {
+    func expireArming() async throws {
         guard let pending = armer.pending else { return }
         armer.expire()
         guard armer.pending == nil else { return }
         preferences.revokeDevice(slot: pending.slot)
-        try reloadKeys()
+        try await reloadKeys()
     }
 
     /// Convenience for the tests and for nothing else — production dials a discovered or
@@ -1045,14 +1047,20 @@ Replace the `keys:` closure with the preferences store and the armer, and add th
 `start(port:)` records `boundPort`, and `reloadKeys()` restarts on it so the advertised port survives:
 
 ```swift
+    /// `async` because `FleetSocketServer.start` awaits the OS reporting its bound port
+    /// rather than polling for it — the polling version blocked its caller for up to five
+    /// seconds, and this type is main-actor, so that was a visible stall.
     @discardableResult
-    func start(port: NWEndpoint.Port? = nil) throws -> NWEndpoint.Port {
-        let bound = try server.start(keys: preferences.deviceKeys(), port: port ?? boundPort)
+    func start(port: NWEndpoint.Port? = nil) async throws -> NWEndpoint.Port {
+        let bound = try await server.start(keys: preferences.deviceKeys(), port: port ?? boundPort)
         boundPort = bound
         return bound
     }
 
-    func reloadKeys() throws { try start() }
+    /// Restarts the listener so a changed key set takes effect. Every arm, expiry and
+    /// revocation calls this, so it runs far more often than "revocation is rare" suggests —
+    /// see the note on `FleetSocketServer.stop()` in Task 4.
+    func reloadKeys() async throws { try await start() }
 ```
 
 `wireHandlers` above already routes `onHello` through `noteAttached`, which is where pairing
@@ -1077,14 +1085,62 @@ completes:
     }
 ```
 
-- [ ] **Step 6: Run the test to verify it passes**
+- [ ] **Step 6: Close the three listener-lifetime gaps the spine's final review deferred to here**
+
+These were found reviewing the spine and deliberately left for this plan, because all three
+become reachable the moment pairing starts calling `reloadKeys()` — which `arm`, `expireArming`
+and every revocation now do. They were one moment's work then and are one moment's work now;
+do them together.
+
+**(a) The bind timeout leaks a listener for five seconds after every successful start.**
+`FleetSocketServer.start`'s timeout is a bare closure handed to `queue.asyncAfter`, so there is
+nothing to cancel when the bind succeeds immediately. It fires five seconds later, no-ops
+against the `resumed` guard, and until then keeps that listener and its continuation alive. With
+`reloadKeys()` now running on every arm, expiry and revocation, those overlap. Convert it to a
+`DispatchWorkItem` held in a local, and `cancel()` it on the success and failure paths:
+
+```swift
+            let timeout = DispatchWorkItem { [weak listener] in
+                guard !resumed else { return }
+                resumed = true
+                listener?.cancel()
+                continuation.resume(throwing: FleetSocketError.didNotBind)
+            }
+            queue.asyncAfter(deadline: .now() + 5, execute: timeout)
+```
+
+…and call `timeout.cancel()` immediately before each `continuation.resume` in the state
+handler. **Re-derive resume-exactly-once afterwards** against all four interleavings
+(timer-then-ready, ready-then-timer, failed-then-timer, timer-then-failed) — the guard still
+carries the correctness; cancellation only stops the retention. Both closures run on the same
+serial `queue`, which is what makes the flag safe, and that must stay true.
+
+**(b) Nothing caps concurrent unauthenticated connections.** Each peer that completes a
+handshake holds a `pending` slot for `authDeadline` before being dropped. Bounded in time,
+unbounded in width. Add a modest cap in `accept(_:)` — reject beyond, say, 16 pending — and say
+in the comment that this is about a peer that can complete a TLS-PSK handshake, so it bounds a
+paired-but-misbehaving device rather than a stranger.
+
+**(c) `FleetReplicator.reset()` tells attached clients nothing.** It clears the ring and bumps
+the sequence, so a client that reconnects is correctly re-snapshotted — but one that is
+*currently attached* stays silently stale until it happens to drop. Unreachable in the spine
+(`restore()` runs inside `SessionStore.init`, before any service exists) and still unreachable
+here, but this plan is the first to hold a live service across configuration changes. Add one
+sentence to `reset()`'s doc comment saying it does not notify, and that a caller who invokes it
+while clients are attached must broadcast a fresh snapshot itself.
+
+Add a test for (a) proving the work item is cancelled — assert that a successful `start` does
+not leave the listener retained after resume — or, if that proves awkward to observe, say so in
+your report and cover (a) by inspection instead. Do **not** invent a flaky timing test.
+
+- [ ] **Step 7: Run the test to verify it passes**
 
 Run: `./scripts/test-unit.sh 2>&1 | tail -30`
 Expected: PASS, including the spine's `FleetServiceTests` (update its `FleetService(store:keys:)` call sites to the new initializer — that is expected churn, not a regression).
 
 If `testTheServerLearnsWhichSlotConnected` is the only failure, take the fallback documented at the top of this task.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add Sources/FleetKit/FleetSocketServer.swift Sources/FlightDeck/Fleet/LocalEndpoints.swift \
@@ -1292,12 +1348,12 @@ final class FleetAdvertisementTests: XCTestCase {
     /// Finds our own advertisement on this machine. If this hangs on a first run, macOS is
     /// asking for local-network permission — that is the prompt Task 6 exists to make sure
     /// the app can even receive, and answering it once fixes the run.
-    func testAStartedServerIsDiscoverable() throws {
+    func testAStartedServerIsDiscoverable() async throws {
         let name = "flightdeck-test-\(UUID().uuidString.prefix(8))"
         let server = FleetSocketServer()
         server.onHello = { _, _ in [] }
         self.server = server
-        _ = try server.start(keys: [.mint()], port: nil, serviceName: name)
+        _ = try await server.start(keys: [.mint()], port: nil, serviceName: name)
 
         let found = expectation(description: "browsed")
         let browser = NWBrowser(
@@ -1313,7 +1369,7 @@ final class FleetAdvertisementTests: XCTestCase {
             if names.contains(name) { found.fulfill() }
         }
         browser.start(queue: .main)
-        wait(for: [found], timeout: 20)
+        await fulfillment(of: [found], timeout: 20)
     }
 }
 ```
@@ -1346,7 +1402,7 @@ and in `start`, before `listener.start`:
         }
 ```
 
-`FleetService` already derives that name in Task 4 (`derivedServiceName`), and already puts it in the pairing payload — so this step is only `try server.start(keys:port:serviceName: serviceName)` in `FleetService.start`.
+`FleetService` already derives that name in Task 4 (`derivedServiceName`), and already puts it in the pairing payload — so this step is only `try await server.start(keys:port:serviceName: serviceName)` in `FleetService.start`.
 
 `PreferencesStore.installSuffix` is the one new piece: four hex characters from a UUID minted on first read and stored in `Preferences`, so the advertised name is stable across relaunches. It follows the same Optional rule as every other field there.
 
@@ -1747,12 +1803,14 @@ final class FleetConnectorTests: XCTestCase {
     }
 
     @discardableResult
-    private func startServer(key: FleetDeviceKey, fleet: FleetSnapshot) throws -> NWEndpoint.Port {
+    private func startServer(
+        key: FleetDeviceKey, fleet: FleetSnapshot
+    ) async throws -> NWEndpoint.Port {
         let server = FleetSocketServer()
         server.onHello = { _, _ in [.snapshot(seq: 1, fleet: fleet, reason: .initial)] }
         server.onCommand = { _, cid, _ in .ack(cid: cid) }
         servers.append(server)
-        return try server.start(keys: [key], port: nil)
+        return try await server.start(keys: [key], port: nil)
     }
 
     private func connector(
@@ -1770,9 +1828,9 @@ final class FleetConnectorTests: XCTestCase {
         return connector
     }
 
-    func testTheFirstReachableCandidateWins() throws {
+    func testTheFirstReachableCandidateWins() async throws {
         let key = FleetDeviceKey.mint()
-        let port = try startServer(key: key, fleet: fleet("one"))
+        let port = try await startServer(key: key, fleet: fleet("one"))
 
         let connected = expectation(description: "connected")
         var seen: FleetSnapshot?
@@ -1783,50 +1841,50 @@ final class FleetConnectorTests: XCTestCase {
         ])
         connector.onFleet = { seen = $0; connected.fulfill() }
         connector.start()
-        wait(for: [connected], timeout: 20)
+        await fulfillment(of: [connected], timeout: 20)
         XCTAssertEqual(seen, fleet("one"))
     }
 
-    func testTheStateReachesConnectedAndNamesTheMac() throws {
+    func testTheStateReachesConnectedAndNamesTheMac() async throws {
         let key = FleetDeviceKey.mint()
-        let port = try startServer(key: key, fleet: fleet("one"))
+        let port = try await startServer(key: key, fleet: fleet("one"))
         let connected = expectation(description: "state")
         let connector = connector(key: key, endpoints: ["127.0.0.1:\(port.rawValue)"])
         connector.onState = { if case .connected("Mac") = $0 { connected.fulfill() } }
         connector.start()
-        wait(for: [connected], timeout: 20)
+        await fulfillment(of: [connected], timeout: 20)
     }
 
     /// The endpoint that worked is remembered first, so the next launch connects on its
     /// first attempt instead of racing three dead addresses again.
-    func testTheWinningEndpointIsPromotedForNextTime() throws {
+    func testTheWinningEndpointIsPromotedForNextTime() async throws {
         let key = FleetDeviceKey.mint()
-        let port = try startServer(key: key, fleet: fleet("one"))
+        let port = try await startServer(key: key, fleet: fleet("one"))
         let store = InMemoryPairedMacStore()
         let winner = "127.0.0.1:\(port.rawValue)"
         let connected = expectation(description: "connected")
         let connector = connector(key: key, endpoints: ["192.0.2.1:9", winner], store: store)
         connector.onFleet = { _ in connected.fulfill() }
         connector.start()
-        wait(for: [connected], timeout: 20)
+        await fulfillment(of: [connected], timeout: 20)
         XCTAssertEqual(store.load()?.endpoints.first, winner)
     }
 
-    func testTheAppliedSequenceIsRememberedSoARelaunchResumes() throws {
+    func testTheAppliedSequenceIsRememberedSoARelaunchResumes() async throws {
         let key = FleetDeviceKey.mint()
-        let port = try startServer(key: key, fleet: fleet("one"))
+        let port = try await startServer(key: key, fleet: fleet("one"))
         let store = InMemoryPairedMacStore()
         let connected = expectation(description: "connected")
         let connector = connector(key: key, endpoints: ["127.0.0.1:\(port.rawValue)"], store: store)
         connector.onFleet = { _ in connected.fulfill() }
         connector.start()
-        wait(for: [connected], timeout: 20)
+        await fulfillment(of: [connected], timeout: 20)
         XCTAssertEqual(store.load()?.lastSeq, 1)
     }
 
-    func testLiveEventsAreAppliedToTheHeldSnapshot() throws {
+    func testLiveEventsAreAppliedToTheHeldSnapshot() async throws {
         let key = FleetDeviceKey.mint()
-        let port = try startServer(key: key, fleet: fleet("one"))
+        let port = try await startServer(key: key, fleet: fleet("one"))
         let renamed = expectation(description: "renamed")
         let connector = connector(key: key, endpoints: ["127.0.0.1:\(port.rawValue)"])
         connector.onFleet = { snapshot in
@@ -1837,17 +1895,17 @@ final class FleetConnectorTests: XCTestCase {
         // for a client that has not attached.
         let attached = expectation(description: "attached")
         servers[0].onAttachedCountChanged = { if $0 == 1 { attached.fulfill() } }
-        wait(for: [attached], timeout: 20)
+        await fulfillment(of: [attached], timeout: 20)
         servers[0].broadcast(.event(seq: 2, .renamed(id: sessionID, title: "two", origin: .user)))
-        wait(for: [renamed], timeout: 20)
+        await fulfillment(of: [renamed], timeout: 20)
     }
 
     /// A Mac that goes away must produce a visible "lost" state, not a fleet frozen at
     /// whatever it last said. A stale fleet that looks live is the single most misleading
     /// thing this app could show.
-    func testLosingTheMacIsReportedRatherThanLeavingAStaleFleetLookingLive() throws {
+    func testLosingTheMacIsReportedRatherThanLeavingAStaleFleetLookingLive() async throws {
         let key = FleetDeviceKey.mint()
-        let port = try startServer(key: key, fleet: fleet("one"))
+        let port = try await startServer(key: key, fleet: fleet("one"))
         let connected = expectation(description: "connected")
         let lost = expectation(description: "lost")
         let connector = connector(key: key, endpoints: ["127.0.0.1:\(port.rawValue)"])
@@ -1860,18 +1918,18 @@ final class FleetConnectorTests: XCTestCase {
             }
         }
         connector.start()
-        wait(for: [connected], timeout: 20)
+        await fulfillment(of: [connected], timeout: 20)
         servers[0].stop()
-        wait(for: [lost], timeout: 20)
+        await fulfillment(of: [lost], timeout: 20)
     }
 
-    func testNoReachableCandidateEndsInLostRatherThanSearchingForever() throws {
+    func testNoReachableCandidateEndsInLostRatherThanSearchingForever() async throws {
         let connector = connector(key: .mint(), endpoints: ["192.0.2.1:9"])
         connector.retryDelays = [0.2]
         let lost = expectation(description: "lost")
         connector.onState = { if case .lost = $0 { lost.fulfill() } }
         connector.start()
-        wait(for: [lost], timeout: 30)
+        await fulfillment(of: [lost], timeout: 30)
     }
 }
 ```
@@ -2051,6 +2109,12 @@ public final class FleetConnector {
     /// Advancing it optimistically would let a phone claim to have applied an event it
     /// dropped, and the resume path would then never send it again — a fleet permanently
     /// missing one change, with nothing to indicate it.
+    ///
+    /// Note a gap the spine's review left here deliberately: when a resuming client is already
+    /// current, the server answers `.replay([])` and therefore sends *nothing*. The connector
+    /// cannot distinguish "you are up to date" from "your hello was ignored", so it must treat
+    /// reaching `.ready` and sending `hello` as the success signal — not the arrival of a
+    /// frame. Do not add a receive-timeout that assumes a frame always follows `hello`.
     private func advance(to seq: Int) {
         guard seq > mac.lastSeq else { return }
         mac.lastSeq = seq
