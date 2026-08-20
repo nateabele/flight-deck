@@ -428,3 +428,43 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
   discloses the same thing.
 - `CodexProcessTransport.stop()` sends SIGTERM without awaiting exit. Theoretical, unobserved,
   and integration-test-only; a wait would need a timeout policy for no measured gain.
+
+## From the fleet replication spine (2026-08-19)
+
+- **The drift assertion is temporary and must not be removed** until the `FleetState`
+  encapsulation designed on 2026-08-18 lands — see the section directly above, which this entry
+  does not repeat. It is not diagnostics: it is the only thing standing between a mutation site
+  with no matching `FleetEvent` and a client that is silently and permanently wrong.
+
+- **"Mark as Read" exists as a store method and a phone command, but has no Mac menu item.**
+  `SessionStore.markRead` is the method the phone's `markRead` command lands on, added there
+  specifically because the spec's rule is that anything the phone can do the Mac's own UI
+  should too — but `SessionSidebar`'s row context menu offers only "Mark as Unread". There is
+  no way to mark a session read from the Mac short of selecting it (which clears the mark as a
+  side effect of viewing). Small, and deliberately not in this plan's scope.
+
+- **The listener restarts to pick up a key change** (`FleetService.reloadKeys`), which drops
+  every attached client for the length of a reconnect. Acceptable because revocation is rare and
+  a client reconnects on its own, but worth knowing before someone calls it on a timer.
+  `FleetSocketServer.stop()` drains both the `attached` and `pending` connection sets, so a
+  rotation that catches a device mid-handshake no longer orphans its socket — that was a real
+  leak, found in review, and the `pending` set exists for exactly this call path.
+
+- **`FleetSocketServer`'s safety rests on its queue being serial, which `init(queue:)` does not
+  enforce.** Every current caller passes the `.main` default. A concurrent queue would compile
+  without complaint and break two things that both assume single-queue confinement: the
+  `resumed` guard in `start()`, a plain `Bool` read and written from the listener's
+  `stateUpdateHandler` with no lock, and `FleetService`'s `onAttachedCountChanged` handler,
+  which reaches into `MainActor.assumeIsolated` on the strength of that same assumption (see the
+  comment at that call site). Nothing catches a non-serial queue at compile time; passing one
+  would surface only at runtime, as either a data race or a trap.
+
+- **`wait(for:)` deadlocks in a `@MainActor async` XCTest method under the headless harness.**
+  It blocks the main actor's executor in place without suspending it, which starves the very
+  main-queue callbacks — `FleetSocketServer` and `FleetClient` both default their `queue:` to
+  `.main` — that the wait is blocking on: the socket frame never arrives and the expectation
+  never fulfills. `await fulfillment(of:)` is a genuine suspension point, so the queue keeps
+  draining while the test waits; `FleetServiceTests` uses it throughout for exactly this reason.
+  It also costs roughly 100ms per call even when it works, which `wait(for:)` does not. A
+  non-`@MainActor`-isolated test class is unaffected by any of this, which is what makes the
+  failure confusing the first time it is hit.
