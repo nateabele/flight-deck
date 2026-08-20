@@ -88,10 +88,5 @@ final class FleetModel {
         connector.start()
     }
 
-    var isLive: Bool {
-        if case .connected = state { return true }
-        return false
-    }
-
     var macName: String { mac?.macName ?? "your Mac" }
 }

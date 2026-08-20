@@ -16,6 +16,13 @@ import SwiftUI
 /// (`circle.dotted`) — `questionmark.circle` was reused for both `waiting` and "unknown" in
 /// an earlier draft of this file, which is exactly the kind of collision this comment exists
 /// to prevent.
+///
+/// The accessibility labels mirror `SessionStatus.tooltip`/`tooltip(unread:)` in
+/// `Sources/FlightDeck/SessionStatus.swift` verbatim, string for string, including the
+/// singularization at `subagentCount == 1` and the idle+unread override to
+/// "Finished — not yet viewed" — a VoiceOver user hearing a different word than what the
+/// Mac's own tooltip says for the identical state is the same kind of disagreement a
+/// mismatched symbol would be.
 struct SessionStatusGlyph: View {
     let session: WireSession
 
@@ -27,7 +34,7 @@ struct SessionStatusGlyph: View {
             // element — there is nothing to announce for a tab with no agent process.
             Color.clear.frame(width: 18, height: 18)
         case "idle":
-            glyph(Circle().fill(.secondary).frame(width: 6, height: 6), label: "Idle")
+            glyph(Circle().fill(.secondary).frame(width: 6, height: 6), label: idleLabel)
         case "busy":
             glyph(
                 HStack(spacing: 2) {
@@ -36,19 +43,18 @@ struct SessionStatusGlyph: View {
                         Text("\(session.subagentCount)").font(.caption2.monospacedDigit())
                     }
                 },
-                label: session.subagentCount > 0
-                    ? "Busy, \(session.subagentCount) subagents" : "Busy"
+                label: busyLabel
             )
         case "shell":
             glyph(
                 Image(systemName: "terminal.fill").font(.caption).foregroundStyle(.green),
-                label: "Shell"
+                label: "Background command running"
             )
         case "waiting":
             glyph(
                 Image(systemName: "questionmark.circle.fill").font(.caption)
                     .foregroundStyle(.orange),
-                label: "Waiting for you"
+                label: waitingLabel
             )
         default:
             // An activity this build does not know about still renders as *something*,
@@ -58,6 +64,27 @@ struct SessionStatusGlyph: View {
                 label: "Unrecognized status"
             )
         }
+    }
+
+    /// `SessionStatus.tooltip(unread:)`'s one override: an idle session that hasn't been
+    /// opened yet reads as finished-but-unseen, not merely idle.
+    private var idleLabel: String {
+        session.isUnread ? "Finished — not yet viewed" : "Idle"
+    }
+
+    /// `SessionStatus.tooltip`'s `.busy` branch, singularization included.
+    private var busyLabel: String {
+        guard session.subagentCount > 0 else { return "Working" }
+        let noun = session.subagentCount == 1 ? "subagent" : "subagents"
+        return "Working — \(session.subagentCount) \(noun)"
+    }
+
+    /// `SessionStatus.tooltip`'s `.waiting` branch: the reason, when `claude` gave one.
+    private var waitingLabel: String {
+        guard let waitingFor = session.waitingFor, !waitingFor.isEmpty else {
+            return "Waiting for you"
+        }
+        return "Waiting for you — \(waitingFor)"
     }
 
     /// Fixes every glyph's column at the same width — `Color.clear`, a 6pt dot, an SF Symbol

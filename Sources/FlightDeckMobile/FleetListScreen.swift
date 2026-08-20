@@ -9,7 +9,12 @@ struct FleetListScreen: View {
         NavigationStack {
             List {
                 connectionBanner
-                if model.fleet.projects.isEmpty {
+                // Gated on `isConnected`, not just on the fleet being empty: on a cold
+                // launch or a fresh pairing the fleet is empty because nothing has arrived
+                // yet, not because there's genuinely nothing to show — and the "Connecting…"
+                // banner above already says that. Showing both at once claimed two different
+                // things about the same absence of data.
+                if model.fleet.projects.isEmpty && isConnected {
                     emptyState
                 }
                 ForEach(model.fleet.projects) { project in
@@ -80,6 +85,11 @@ struct FleetListScreen: View {
         return false
     }
 
+    private var isConnected: Bool {
+        if case .connected = model.state { return true }
+        return false
+    }
+
     @ViewBuilder
     private var connectionBanner: some View {
         switch model.state {
@@ -96,20 +106,27 @@ struct FleetListScreen: View {
 
     /// A disconnected fleet must look disconnected, and say what it's showing instead of
     /// current data. A list that keeps rendering the last thing it heard, indistinguishable
-    /// from a live one, is the single most misleading thing this app could show — and
-    /// claiming to show "what it last said" on a fleet that has never once been live would be
-    /// its own kind of misleading, which is why this only ever renders once `lastLive` exists.
+    /// from a live one, is the single most misleading thing this app could show.
+    ///
+    /// `.lost` is reachable straight from `.searching`, with no `.connected` in between — a
+    /// Mac that never once answered still eventually times out into `.lost`. So the *primary*
+    /// claim here, "showing what it last said", is gated on `model.lastLive` too, not only the
+    /// timestamp sentence beneath it: a fleet that has never been live has nothing it "last
+    /// said", and claiming otherwise was the whole bug this banner exists to not repeat.
     private func staleBanner(retryingIn: TimeInterval) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Label(
-                "Not connected to \(model.macName) — showing what it last said.",
-                systemImage: "wifi.slash"
-            )
             if let lastLive = model.lastLive {
+                Label(
+                    "Not connected to \(model.macName) — showing what it last said.",
+                    systemImage: "wifi.slash"
+                )
                 Text("Last live \(lastLive.formatted(.relative(presentation: .named))). "
                     + "Retrying in \(Int(retryingIn))s.")
             } else {
-                Text("Retrying in \(Int(retryingIn))s.")
+                Label(
+                    "Couldn't reach \(model.macName). Retrying in \(Int(retryingIn))s.",
+                    systemImage: "wifi.slash"
+                )
             }
         }
         .font(.footnote)
