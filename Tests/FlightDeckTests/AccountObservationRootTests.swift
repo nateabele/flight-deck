@@ -93,7 +93,7 @@ final class AccountObservationRootTests: XCTestCase {
     /// Hermetic by `statusRootOverride`, which every watcher here therefore shares: what is
     /// under test is the *keying*, and pointing two accounts at a temp directory is the only
     /// way to assert it without scanning the developer's real `~/.claude/sessions`.
-    func testEachAccountWithAClaudeTabGetsItsOwnStatusWatcher() {
+    func testEachAccountWithAClaudeTabGetsItsOwnStatusWatcher() throws {
         let (preferences, a, b) = accountsPair()
         let tabA = UUID(), tabB = UUID()
         let persistence = StubPersistence()
@@ -108,41 +108,79 @@ final class AccountObservationRootTests: XCTestCase {
             sessionCounter: 2
         )
         let store = SessionStore(provider: nil, persistence: persistence, preferences: preferences)
-        store.statusRootOverride = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("account-observation-status", isDirectory: true)
+        store.statusRootOverride = Self.temporaryStatusRoot
         XCTAssertTrue(store.restore(directoryExists: { _ in true }))
 
         store.startStatusWatching()
         XCTAssertEqual(store.statusWatcherAccountsForTesting, [a.id, b.id],
                        "a second login's tab is invisible until its own registry is scanned")
 
-        // A watcher registers on the shared `WatchClock`, so a second one for an account that
-        // already has one polls forever with nothing able to stop it.
+        // Identity, not the key count: rebuilding a watcher for an account that already has
+        // one overwrites the entry and leaves the map the same size, while the replaced
+        // object's registration on the shared `WatchClock` — keyed by `ObjectIdentifier`, so a
+        // new object never replaces it — keeps polling beside the new one. A count assertion
+        // cannot fail for the reason it was written.
+        let firstA = try XCTUnwrap(store.statusWatcherForTesting(account: a.id))
+        let firstB = try XCTUnwrap(store.statusWatcherForTesting(account: b.id))
         store.startStatusWatching()
-        XCTAssertEqual(store.statusWatcherAccountsForTesting.count, 2, "never two for one account")
+        XCTAssertTrue(store.statusWatcherForTesting(account: a.id) === firstA,
+                      "a second sweep must reuse this account's watcher, not register another")
+        XCTAssertTrue(store.statusWatcherForTesting(account: b.id) === firstB)
 
         store.closeSession(tabA)
         XCTAssertEqual(store.statusWatcherAccountsForTesting, [b.id],
                        "the closed tab's login stops scanning; the other login keeps its watcher")
     }
 
-    /// The other half of the teardown rule: `startWatching` is what builds a watcher for a tab
-    /// created after launch, and it must stay silent in a store that never started watching —
-    /// otherwise every test that makes a claude tab begins polling the real registry.
-    func testATabCreatedAfterLaunchStartsItsOwnAccountsWatcherAndOnlyIfWatchingBegan() {
-        let (preferences, a, _) = accountsPair()
+    /// The launch sweep covers the tabs that exist when it runs; a login whose first claude tab
+    /// arrives afterwards has to be picked up by `startWatching(tabID:)` instead. Here the
+    /// restored deck belongs entirely to the second login, so the built-in account has never
+    /// been scanned when the new tab lands on it — without the tab-path creation this store
+    /// keeps exactly one watcher and the new tab shows no status for the rest of the run.
+    func testATabCreatedAfterLaunchStartsItsOwnAccountsWatcher() {
+        let (preferences, builtIn, other) = accountsPair()
+        let tab = UUID()
+        let persistence = StubPersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [
+                .init(id: tab, title: "other", workingDirectory: NSTemporaryDirectory(),
+                      pinnedConversationID: UUID(), accountID: other.id),
+            ],
+            selectedSessionID: tab,
+            sessionCounter: 1
+        )
+        let store = SessionStore(provider: nil, persistence: persistence, preferences: preferences)
+        store.statusRootOverride = Self.temporaryStatusRoot
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        store.startStatusWatching()
+        XCTAssertEqual(store.statusWatcherAccountsForTesting, [other.id],
+                       "the sweep covers the tabs that already exist, and only those")
+
+        // A tab naming no account resolves to the built-in login — a login this store has
+        // never scanned, created after the one and only sweep has run.
+        store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true))
+
+        XCTAssertEqual(store.statusWatcherAccountsForTesting, [other.id, builtIn.id],
+                       "a tab created after launch must start its own login's scan")
+    }
+
+    /// And it must stay silent in a store that never started watching. Watchers are built on
+    /// the tab path now, so without that gate every test that makes a claude tab would begin
+    /// polling the developer's real registry.
+    func testATabCreatedInAStoreThatNeverStartedWatchingScansNothing() {
+        let (preferences, _, _) = accountsPair()
         let store = SessionStore(provider: nil, persistence: nil, preferences: preferences)
-        store.statusRootOverride = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("account-observation-status", isDirectory: true)
+        store.statusRootOverride = Self.temporaryStatusRoot
 
         store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true))
+
         XCTAssertTrue(store.statusWatcherAccountsForTesting.isEmpty,
                       "a store built by a test must never scan a registry")
-
-        store.startStatusWatching()
-        XCTAssertEqual(store.statusWatcherAccountsForTesting, [a.id],
-                       "the sweep covers the tabs that already exist")
     }
+
+    /// Never the real registry: every store in the watcher tests points its scans here.
+    private static let temporaryStatusRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("account-observation-status", isDirectory: true)
 
     /// Two claude logins: the built-in one, which is what a tab naming no account resolves to,
     /// and a second homed under a temp directory. Only the *keys* matter to these tests — both

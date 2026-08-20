@@ -600,10 +600,18 @@ final class SessionStore: ObservableObject {
     /// `~/.claude/sessions` the moment it made a claude tab.
     private var isStatusWatchingEnabled = false
 
-    /// Test seam. Which accounts are currently scanning a registry. A set rather than a count
-    /// because both halves matter: a missing key is a login with no glyphs, and a duplicate
-    /// registration on the shared `WatchClock` is a poll nothing can ever stop.
+    /// Test seam. Which accounts are currently scanning a registry — a missing key is a login
+    /// whose tabs have no glyphs.
     var statusWatcherAccountsForTesting: Set<UUID?> { Set(statusWatchers.keys) }
+
+    /// Test seam. The watcher object itself, so a test can assert the *same* one survived.
+    ///
+    /// Keys cannot see the hazard this exists for: rebuilding a watcher for an account that
+    /// already had one overwrites the entry, leaving the map exactly the size it was, while
+    /// the replaced object's registration on the shared `WatchClock` — keyed by
+    /// `ObjectIdentifier`, so a new object never replaces it — polls alongside the new one.
+    /// Only identity can fail that assertion.
+    func statusWatcherForTesting(account: UUID?) -> AnyObject? { statusWatchers[account] }
 
     /// Set the instant `reapAllForQuit` begins, before its first `await`. Nothing stops
     /// a `statusWatchers` poll or the `WatchClock` timer while that reap is in flight — there
