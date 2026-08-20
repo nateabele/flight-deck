@@ -1,8 +1,13 @@
 import Foundation
 
-/// Why a codex launch failed to produce a usable tab. Named causes rather than one generic
-/// string wherever the fix differs — "install/upgrade codex" reads differently from "codex
-/// refused this specific thread."
+/// Why a launch failed to produce a usable tab. Named causes rather than one generic string
+/// wherever the fix differs — "install/upgrade codex" reads differently from "codex refused
+/// this specific thread", and both read differently from "this project's login is gone."
+///
+/// Codex-only when it was written, and it still lives in codex's file for that reason: the
+/// first three cases are codex's, and the two account cases are every agent's — claude's
+/// `newSession` and `restore` both report `.accountMissing` through the same reporter. Moving
+/// the type up to `Agents/` is a tidy-up nobody has needed yet, not a correctness matter.
 enum AgentLaunchError: LocalizedError, Equatable {
     case notInstalled(String)
     case versionTooOld(found: String, minimum: String)

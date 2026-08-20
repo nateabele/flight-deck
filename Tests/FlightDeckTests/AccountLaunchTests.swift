@@ -191,6 +191,75 @@ final class AccountLaunchTests: XCTestCase {
         XCTAssertEqual(provider.configs.last?.environmentVariables["CLAUDE_CONFIG_DIR"], work.home.path)
     }
 
+    /// Deleting an account does not rewrite the tabs that ran as it — `removeAccount` clears
+    /// project *assignments*, while `Session.accountID` is history and must stay what it was.
+    /// So a restored tab can name a login that is gone, and relaunching it in the built-in home
+    /// would resume a conversation living in the deleted account's directory, find nothing, and
+    /// quietly start a fresh one. That is the same silent substitution creation already
+    /// refuses, arriving through the one door creation does not guard.
+    ///
+    /// Both tabs come back in one restore, deliberately: the healthy one is the control that
+    /// proves the refusal is aimed rather than a blanket "restore stopped resuming things".
+    func testARestoredTabWhoseLoginWasDeletedIsNotRelaunchedAsAnotherLogin() throws {
+        let (preferences, work) = configured(.claude)
+        let healthy = UUID(), orphan = UUID()
+        let provider = RecordingProvider()
+        retained.append(provider)
+        let persistence = StubPersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [
+                .init(id: healthy, title: "healthy", workingDirectory: projectURL.path,
+                      pinnedConversationID: UUID(), accountID: work.id),
+                // The login this one ran as was deleted between runs.
+                .init(id: orphan, title: "orphan", workingDirectory: projectURL.path,
+                      pinnedConversationID: UUID(), accountID: UUID()),
+            ],
+            sessionCounter: 2
+        )
+        let store = makeStore(preferences, provider: provider, persistence: persistence)
+
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+
+        // The tab is still there. A tab that vanished at relaunch would be its own bug: the
+        // user has to be able to see which tabs this hit, read their titles, and close them.
+        XCTAssertEqual(store.repos.flatMap(\.sessions).map(\.id), [healthy, orphan])
+
+        XCTAssertEqual(provider.configs.count, 2)
+        let restored = provider.configs[0], refused = provider.configs[1]
+        XCTAssertEqual(restored.environmentVariables["CLAUDE_CONFIG_DIR"], work.home.path)
+        XCTAssertEqual(restored.initialInput?.isEmpty, false, "the healthy tab still resumes")
+
+        XCTAssertNil(refused.environmentVariables["CLAUDE_CONFIG_DIR"],
+                     "no variable at all beats one naming somebody else's home")
+        XCTAssertEqual(refused.initialInput, "",
+                       "nothing may be typed into a tab that cannot launch as itself")
+        XCTAssertEqual(store.watchedSessionIDs, [healthy],
+                       "observation has to agree with the launch, and this one did not launch")
+        XCTAssertEqual(reporter.reported, [.accountMissing("Claude")],
+                       "a refusal nobody is told about is the silent wrong-login bug again")
+    }
+
+    /// A deleted login usually takes several tabs with it, and five identical sheets is not
+    /// five times the information.
+    func testEveryTabOnADeletedLoginRaisesOneAlert() {
+        let (preferences, _) = configured(.claude)
+        let gone = UUID()
+        let persistence = StubPersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: (0..<3).map { i in
+                .init(id: UUID(), title: "t\(i)", workingDirectory: projectURL.path,
+                      pinnedConversationID: UUID(), accountID: gone)
+            },
+            sessionCounter: 3
+        )
+        let store = makeStore(preferences, persistence: persistence)
+
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+
+        XCTAssertEqual(store.repos.flatMap(\.sessions).count, 3)
+        XCTAssertEqual(reporter.reported, [.accountMissing("Claude")])
+    }
+
     /// The app-server has to live in the same home as the tabs it serves: it is the process
     /// that writes `session_index.jsonl`, and a stack tailing one home while its process
     /// writes another sees no renames at all.

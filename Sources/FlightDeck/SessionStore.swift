@@ -418,11 +418,40 @@ final class SessionStore: ObservableObject {
     /// needs, since the shell is bound to a home by path, not by id. Follows `instance(for:)`
     /// exactly, so the account a tab is observed under and the account it is launched under
     /// can never be two different things.
+    ///
+    /// nil for a tab with no account to name AND for a tab whose stored account has been
+    /// deleted, because `resolvedAccountID` collapses both to nil. Those two are not the same
+    /// thing and must never be treated as one — `accountIsMissing(for:)` is what tells them
+    /// apart, and every caller that could *launch* something asks it first.
     private func account(for session: Session) -> AgentAccount? {
         guard let preferences,
               let id = preferences.resolvedAccountID(for: session.agent, in: session.accountID)
         else { return nil }
         return preferences.account(id: id)
+    }
+
+    /// Whether this tab names a login that no longer exists.
+    ///
+    /// The restore-time twin of `launchAccount`'s `.accountMissing` branch, and it exists
+    /// because deleting an account does not rewrite the tabs that ran as it: `removeAccount`
+    /// clears every *project assignment* naming the id, but `Session.accountID` is history —
+    /// it records where this tab's conversation was actually written, and rewriting it would
+    /// be a lie. So a restored tab can name an id nothing resolves, and the only safe reading
+    /// of that is BROKEN. Relaunching it in the built-in home would resume a conversation
+    /// that lives in the deleted account's directory, find nothing there, and quietly start a
+    /// fresh one — the silent wrong-login failure this whole feature exists to remove.
+    ///
+    /// Only the *dangling id* counts, deliberately: unlike creation, this does not also check
+    /// that the home still exists on disk. A launch happens when the user asks for it and can
+    /// be refused with a fix; a restore happens at every startup, and an account homed on a
+    /// network volume that has not mounted yet is not a deleted account. `restore` already
+    /// declines to prune projects for the same reason (see its doc comment).
+    ///
+    /// False whenever there is no `PreferencesStore` to check against: a store built by a test
+    /// or a fixture has no accounts and nothing to contradict.
+    private func accountIsMissing(for session: Session) -> Bool {
+        guard let preferences, let stored = session.accountID else { return false }
+        return preferences.account(id: stored) == nil
     }
 
     /// The login a *new* tab for `agent` in `project` would run as, or why it cannot run.
@@ -624,9 +653,15 @@ final class SessionStore: ObservableObject {
     ///
     /// Nil answers the agent's built-in home, which is exactly what a nil key means: a store
     /// with no `PreferencesStore` has no account to name and one home to serve (see
-    /// `AgentInstance`). A key naming an account preferences no longer holds falls there too
-    /// — the tab is refused before it can launch, and answering with a path is preferable to
-    /// trapping while a watcher asks where to look.
+    /// `AgentInstance`).
+    ///
+    /// A key naming an account preferences no longer holds falls there too, and that answer
+    /// is a fallback of last resort rather than a policy: no tab reaches it, because both
+    /// paths that could launch one refuse first — `launchAccount` at creation, and
+    /// `accountIsMissing(for:)` at restore, which also declines to start the watcher that
+    /// would ask this question. What is left is a registry keyed before the user deleted its
+    /// account mid-run, where answering with a path is preferable to trapping while a watcher
+    /// asks where to look.
     private func home(ofAccount account: UUID?, agent: AgentID) -> URL {
         account.flatMap { preferences?.account(id: $0)?.home } ?? agent.builtInHome
     }
@@ -1376,8 +1411,15 @@ final class SessionStore: ObservableObject {
         // forks below inherits these, and the agent reads its home out of one of them. Every
         // creation path and `restore` funnel through here, so a restored tab is relaunched as
         // the account it was created with rather than as today's default.
+        //
+        // A tab whose login has been deleted gets no variable at all, rather than the
+        // built-in home `account(for:)` would otherwise collapse its dangling id to. Nothing
+        // is typed into it either (`restore` passes an empty `initialInput`), so this shell
+        // starts no agent — and a surface configuration can only *set* a variable, never
+        // unset one, so "no variable" is the strongest refusal available here.
+        let orphaned = accountIsMissing(for: session)
         config.environmentVariables =
-            preferences?.sessionEnvironment(for: account(for: session)) ?? [:]
+            preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
         // Wrapped so the registry can identify the shell libghostty forks for this surface;
         // libghostty exposes no pid of its own. The identification finishes asynchronously,
         // after `makeSurface` returns — see `SurfaceProcessRegistry`.
@@ -1401,7 +1443,11 @@ final class SessionStore: ObservableObject {
         report(terminalSize, to: session.id)
         provider?.tick()
 
-        startWatching(tabID: session.id)
+        // Not for an orphaned tab: observation has to agree with the launch, and this one was
+        // not launched. Watching would attach it to the built-in account's registry and
+        // transcripts — the very substitution refused two dozen lines up — and report a status
+        // glyph and a title for a shell running nothing.
+        if !orphaned { startWatching(tabID: session.id) }
         return session
     }
 
@@ -1470,6 +1516,10 @@ final class SessionStore: ObservableObject {
         // handled in the loop because settling each one is `async` and this is not.
         var deferredCodexResumes: [UUID] = []
 
+        // The agents that lost at least one tab to a deleted login. Collected rather than
+        // reported in the loop so a login that took six tabs with it raises one alert.
+        var orphanedAgents: Set<AgentID> = []
+
         // Pass two: file the sessions. `insertSession` appends a repo for any working
         // directory pass one did not cover, which is what keeps a v1 snapshot working.
         for entry in snapshot.sessions where directoryExists(entry.workingDirectory) {
@@ -1495,7 +1545,16 @@ final class SessionStore: ObservableObject {
                 accountID: entry.accountID,
                 transcriptPath: entry.transcriptPath
             )
-            let adapter = adapter(for: instance(for: session))
+            // A tab whose login has been deleted since the last run. Rebuilt, but never
+            // resumed — see `accountIsMissing`. The tab still appears, because a tab that
+            // vanishes at relaunch is its own bug: the user has to be able to see which tabs
+            // this affected, read their titles, and close them. What it does not get is a
+            // resume command typed into its shell, an account variable naming somebody else's
+            // home, a watcher, or an auto-resume prompt — `insertSession` asks the same
+            // question for the last two, so every one of those refusals is made from one
+            // predicate rather than from a flag passed around.
+            let orphaned = accountIsMissing(for: session)
+            if orphaned { orphanedAgents.insert(session.agent) }
             // Codex's resume text is deferred, and only codex's. `binding(for:)` is a pure
             // read of the pin — codex's own doc calls its contract "identity already
             // settled" — so it cannot tell a thread that still exists from one the user
@@ -1503,12 +1562,20 @@ final class SessionStore: ObservableObject {
             // would open the tab onto an error instead of a session. `resumeRestoredCodex`
             // settles that against the app-server and types the command afterwards. Claude
             // needs none of it: its resume command carries `--resume || --session-id`.
+            //
+            // An orphaned codex tab is left out of that list rather than deferred into it:
+            // settling it would spawn an app-server for a login that no longer exists.
             let deferred = session.agent == .codex
-            if deferred { deferredCodexResumes.append(session.id) }
-            insertSession(
-                session,
-                in: url,
-                initialInput: deferred ? "" : adapter.resumeCommand(
+            if deferred, !orphaned { deferredCodexResumes.append(session.id) }
+            let initialInput: String
+            if orphaned || deferred {
+                initialInput = ""
+            } else {
+                // Built here rather than above the branch so an orphaned tab does not
+                // memoize an adapter — and a status watcher behind it — for the built-in
+                // account its stored id wrongly collapses to.
+                let adapter = adapter(for: instance(for: session))
+                initialInput = adapter.resumeCommand(
                     // The binding carries the pinned conversation, not the tab's own id — a
                     // tab that resumed an existing conversation must keep following that one
                     // across relaunches.
@@ -1521,18 +1588,28 @@ final class SessionStore: ObservableObject {
                     // resolving from the transcript directory would silently lose.
                     options(for: session.agent, project: entry.workingDirectory)
                 )
-            )
+            }
+            insertSession(session, in: url, initialInput: initialInput)
             // Seeded here rather than after the loop so it covers exactly the sessions that
             // were actually rebuilt — a session whose directory has gone has no row to draw a
             // mark on. Before the `selectedSessionID` assignment below on purpose: its
             // `didSet` clears the mark for the tab you land on, which is correct.
             if entry.unread == true { unreadIdle.insert(entry.id) }
 
-            if autoResume,
+            // `!orphaned`: offering to continue a tab that cannot be launched at all would
+            // put the wrong-login resume one click behind a prompt the app raised itself.
+            if autoResume, !orphaned,
                let activity = entry.activity.flatMap(SessionActivity.init(rawValue:)),
                Self.resumableActivities.contains(activity) {
                 pendingResumePrompts[entry.id] = promptDeadline
             }
+        }
+
+        // One alert per agent, not per tab: a deleted login usually takes several tabs with
+        // it, and five identical sheets is not five times the information. Ordered by
+        // `allCases` so two agents produce the same two alerts in the same order every run.
+        for agent in AgentID.allCases where orphanedAgents.contains(agent) {
+            launchFailureReporter.report(.accountMissing(agent.displayName))
         }
 
         let restoredIDs = repos.flatMap(\.sessions).map(\.id)
