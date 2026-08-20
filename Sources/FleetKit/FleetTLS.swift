@@ -37,7 +37,18 @@ public struct FleetDeviceKey: Equatable, Sendable {
 public enum FleetTLS {
     /// Server side: every currently-paired slot, registered up front.
     public static func listenerParameters(keys: [FleetDeviceKey]) -> NWParameters {
-        parameters(keys: keys)
+        let params = parameters(keys: keys)
+        // Key rotation restarts the listener on the *same* port on every arm, expiry and
+        // revocation (`FleetService.reloadKeys()`). `FleetSocketServer.start` now waits for
+        // the old listener's cancellation to be confirmed before rebinding (its
+        // `releaseListener()`), which is what actually prevents `EADDRINUSE` against a
+        // still-live listener — this flag alone cannot, since two sockets cannot both
+        // LISTEN on one port regardless of it. It stays set for the narrower case that
+        // confirmation does not cover: a socket the OS is still draining in `TIME_WAIT`
+        // from a *previous run* of this process (e.g. a crash or a killed test host), which
+        // is exactly what `SO_REUSEADDR` is for.
+        params.allowLocalEndpointReuse = true
+        return params
     }
 
     /// Client side: this device's one key.
