@@ -503,15 +503,17 @@ did not fix:
 - **No relay**, so reaching the Mac from off-LAN needs a VPN. Designed for as a further
   candidate endpoint (spec §3, §12), not built in either plan.
 
-- **Neither documented fallback was needed.** Spine Task 6 named a fallback for TLS-PSK
-  multi-key selection (register one fleet-wide PSK and move per-device identity into the
-  `hello` frame as an HMAC challenge) if a listener holding several devices' keys could not
-  pick the right one per connection; it could, verified by test, so the fallback was never
-  built. This plan's Task 4 named a fallback for identifying which slot connected (the client
-  naming its own slot in `hello`) if reading the PSK identity back off the connection did not
-  work; `sec_protocol_metadata_access_pre_shared_keys` genuinely yields it, so that fallback
-  was never built either. Both are still the documented escape hatch if either platform's
-  behavior here ever regresses.
+- **"Neither documented fallback was needed" — WRONG, corrected 2026-08-20.** This entry
+  originally claimed `sec_protocol_metadata_access_pre_shared_keys` "genuinely yields" the
+  PSK identity that actually negotiated a given connection, "verified by test." It does not,
+  and whatever verified it was not exercising the case that matters: with two or more keys
+  registered on one listener (i.e. two or more paired devices), the closure fires once per
+  *configured* key on every connection, overwriting a local variable each time, so
+  `FleetSocketServer.slot(of:)` returns whichever key was registered **last** — for every
+  connection, regardless of which device actually shook hands. `attachedSlots()` (a `Set`)
+  then collapses two genuinely distinct attached phones into one slot. Full writeup, repro,
+  and status in "PSK slot misattribution with 2+ paired devices" below — this bullet is kept,
+  corrected in place, so nobody re-reads the old claim as settled.
 
 - **`FleetSocketServer.start()` cannot assert `dispatchPrecondition(.onQueue(queue))` as a
   first line the way `stop()`/`broadcast()` and `FleetConnector`'s entry points do.** Tried
@@ -534,3 +536,85 @@ did not fix:
   connector's queue — which defaults to `.main`, the thread drawing the fleet list. If this
   ever shows up as scroll hitching, the fix is moving the write off the main queue, not
   throttling it.
+
+## From closing the review gaps (2026-08-20)
+
+Two small gaps left by the final review of the pairing branch: a missing regression test for
+`onAttachedSlotsChanged`, and a false "zero diagnostics" claim about the iOS build. Closing the
+first surfaced a third, unrelated finding serious enough to record here rather than only in a
+commit message.
+
+- **`FleetSocket.swift` has five real Swift 6 concurrency warnings — verified, not
+  hypothetical.** `Sources/FleetKit/FleetSocket.swift:34,47,58,58,68` — "capture of \<param\>
+  with non-Sendable type ... in a '@Sendable' closure" at 34 (`onError`), 47 (`onEnd`), 58
+  (`onFrame`), 68 (`type`), plus a second, distinct warning also at 58 ("capture of
+  non-Sendable type 'Frame.Type' in an isolated closure"). Confirmed by forcing a recompile of
+  just that file (`touch` + `xcodebuild -scheme FleetKit build` / `-scheme FleetKitiOS -sdk
+  iphonesimulator build`) — both targets emit the identical five warnings at the identical
+  lines. Not a regression from this branch: `FleetSocket.swift`'s last commit is an ancestor of
+  master, and type-checking it at `c590087` and `ba78b7e` gives byte-identical output.
+
+  Why nobody noticed: `./scripts/build.sh` and `./scripts/build-ios.sh`, run normally, see
+  these targets already up to date in DerivedData, so the compile task for this file is
+  skipped — "the build is clean" was never a claim either script could actually support as
+  normally invoked, only an artifact of incremental builds. `touch` the file, or clear
+  DerivedData, to see them.
+
+  Not urgent: `FleetSocket` is queue-confined the same way `FleetClient`/`FleetSocketServer`/
+  `FleetConnector` are (`@unchecked Sendable`, every touch on one queue), so these are
+  compiler noise about a real discipline the code already has, not a live data race. The shape
+  that resolves them is already in the tree: `QRScannerController` in
+  `Sources/FlightDeckMobile/PairingScreen.swift` moves the non-Sendable capture state
+  (`AVCaptureSession`/`AVCaptureMetadataOutput`) onto its own private `@unchecked Sendable`
+  reference type (`CaptureResources`) and captures *that* — a `Sendable` value — across the
+  `@Sendable` boundary instead of the non-Sendable types directly. `FleetSocket.send`/
+  `.receive` would need the same move for `onError`/`onEnd`/`onFrame`/`type` before any of the
+  four callers'-worth of closures would type-check clean.
+
+- **PSK slot misattribution with 2+ paired devices — real, found while writing the
+  `onAttachedSlotsChanged` two-device regression test the review asked for.** Corrects the
+  "Neither documented fallback was needed" bullet directly above (2026-08-19 section); this is
+  the full writeup that bullet points to.
+
+  `FleetSocketServer.slot(of:)` reads a connection's PSK identity via
+  `sec_protocol_metadata_access_pre_shared_keys`. That call's own header doc says it returns
+  "the PSKs supported by the local instance" — verified here to mean *every* PSK configured on
+  the *listener*, not the one a given peer's handshake actually negotiated. With one key
+  registered (every shipped test, and the common case of one paired device) that distinction is
+  invisible: there is only one PSK to enumerate. With two or more, the closure fires once per
+  configured key for every connection and overwrites a local variable each time, so
+  `slot(of:)` returns whichever key was registered **last**, for every connection, regardless
+  of which device actually shook hands. `attachedSlots()` (a `Set`) then collapses two
+  genuinely distinct attached phones into one slot.
+
+  Reproduced cleanly: two keys registered on one listener, two real `FleetClient`s connecting
+  **sequentially** — after only the first client (`firstKey`) attaches, the server's reported
+  slot set already reads `[secondKey.slot]`, not `[firstKey.slot]`. The handshake's
+  cryptography itself is unaffected — each client authenticates against its own secret
+  correctly; only the server's readback of *which* key negotiated is wrong.
+
+  Not a regression from this branch: `FleetTLS`'s use of
+  `sec_protocol_metadata_access_pre_shared_keys` predates the `onAttachedSlotsChanged` fix
+  under test, introduced in `45f1221`. It is a real production concern, not a test-only
+  artifact — `FleetService.start()` passes every currently-paired device's key to
+  `server.start(keys:)`, so any Mac with 2+ paired phones is affected today: the Devices tab
+  cannot reliably tell two attached phones apart, and a disconnect can update or clear the
+  wrong slot's badge.
+
+  **Also crashes the test host.** A fuller version of the reproduction above — two clients,
+  one client disconnecting after both are attached — twice produced a reproducible `SIGABRT`
+  ("freed pointer was not the last allocation") during XCTest's tearDown, crashing the whole
+  `xctest` process rather than just failing an assertion (crash reports captured under
+  `~/Library/Logs/DiagnosticReports/xctest-*.ips`; faulting thread inside Swift Concurrency's
+  `_swift_task_dealloc_specific`). Not root-caused further — this needs its own investigation,
+  separate from the misattribution — but it means any test exercising 2+ PSK keys with 2+ real
+  connections and a disconnect can take down an entire `test-unit.sh` run, not just itself.
+  No such test is checked in for exactly this reason.
+
+  Two fixes were sketched and deliberately not attempted here (out of scope for "add a
+  regression test," and this is the TLS/security layer): have the client self-report its slot
+  in `hello` and verify it cryptographically against the negotiated secret (this plan's Task 4
+  named exactly this as the documented fallback, before the 2026-08-19 entry wrongly declared
+  it unneeded); or correlate `sec_protocol_options_set_pre_shared_key_selection_block` (a
+  client-hint API, so this direction is unconfirmed) against `ObjectIdentifier`s per
+  connection. Needs sign-off before either is attempted.
