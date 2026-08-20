@@ -252,7 +252,7 @@ final class CodexIntegrationTests: XCTestCase {
         XCTAssertEqual(injector.sent, ["codex resume \(existing.uuidString.lowercased())"])
 
         // The assertions above hold whether or not the heal exists: `hasCodexStackForTesting`
-        // above flips true from `resumeRestoredCodex`'s own `self.adapter(for: .codex)`
+        // above flips true from `resumeRestoredCodex`'s own `self.adapter(for: instance)`
         // fallback line — reached before the heal ever runs — and the pin/injector checks
         // only prove `startCodex()` failed and the tab degraded to its pin, not that anything
         // got re-attached. What the heal is actually responsible for is which *runtime
@@ -265,7 +265,7 @@ final class CodexIntegrationTests: XCTestCase {
         // — an orphaned object whose watchers nothing reads. Deleting the heal block and
         // re-running this test confirms exactly that: this assertion goes red while every
         // assertion above it stays green.
-        let currentRuntime = try XCTUnwrap(store.runtime(for: .codex) as? CodexRuntime,
+        let currentRuntime = try XCTUnwrap(store.runtime(for: .codex, account: nil) as? CodexRuntime,
             "codex's runtime is always a CodexRuntime; draining its watchers below is how a "
             + "real rename reaches it, which is not part of the shared AgentRuntime protocol")
         // Prime, then append: the name watcher starts at end of file, so a line already

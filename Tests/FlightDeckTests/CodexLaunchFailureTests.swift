@@ -154,11 +154,13 @@ final class CodexLaunchFailureTests: XCTestCase {
         let (store, _) = makeStore()
         // Builds the stack without spawning anything — only `startCodex()` runs a process,
         // and the override below is what keeps `createSession` away from it. Building it
-        // first is what makes `stopCodexIfUnused` observable at all.
-        _ = store.adapter(for: .codex)
+        // first is what makes `stopCodexIfUnused` observable at all. `account: nil` is the
+        // key every tab in this file resolves to: these stores have no `PreferencesStore`,
+        // so there is no account to name.
+        _ = store.adapter(for: .codex, account: nil)
         XCTAssertTrue(store.hasCodexStackForTesting)
         let gate = GatedAdapter()
-        store.overrideAdapter(gate, for: .codex)
+        store.overrideAdapter(gate, for: .codex, account: nil)
         let claudeTab = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
 
         let creation = Task { await store.createSession(agent: .codex, in: NSTemporaryDirectory()) }
@@ -178,11 +180,11 @@ final class CodexLaunchFailureTests: XCTestCase {
     /// the session, which is the leak `stopCodexIfUnused` exists to prevent.
     func testTheDeferredTeardownRunsOnceTheCreationFinishes() async {
         let (store, _) = makeStore()
-        _ = store.adapter(for: .codex)
+        _ = store.adapter(for: .codex, account: nil)
         let transport = DeadTransport()
         let rpc = CodexRPC(transport: transport)
         transport.rpc = rpc            // this creation will fail, leaving no codex tab
-        store.overrideAdapter(CodexAdapter(rpc: rpc), for: .codex)
+        store.overrideAdapter(CodexAdapter(rpc: rpc), for: .codex, account: nil)
 
         _ = await store.createSession(agent: .codex, in: NSTemporaryDirectory())
 
@@ -195,7 +197,7 @@ final class CodexLaunchFailureTests: XCTestCase {
         let transport = DeadTransport()
         let rpc = CodexRPC(transport: transport)
         transport.rpc = rpc            // the app-server is gone before we start
-        store.overrideAdapter(CodexAdapter(rpc: rpc), for: .codex)
+        store.overrideAdapter(CodexAdapter(rpc: rpc), for: .codex, account: nil)
 
         let before = store.repos.flatMap(\.sessions).count
         let result = await store.createSession(agent: .codex, in: NSTemporaryDirectory())
@@ -214,7 +216,8 @@ final class CodexLaunchFailureTests: XCTestCase {
     /// name the thread has to fail the whole creation rather than leave a tab behind.
     func testARefusedThreadAlsoCreatesNoTab() async {
         let (store, _) = makeStore()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: RefusingTransport())), for: .codex)
+        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: RefusingTransport())),
+                              for: .codex, account: nil)
 
         let result = await store.createSession(agent: .codex, in: NSTemporaryDirectory())
 
@@ -237,7 +240,8 @@ final class CodexLaunchFailureTests: XCTestCase {
     /// call site — menu item, shortcut, drop — gets the alert without repeating the code.
     func testAFailedCreationReachesTheUser() async {
         let (store, _) = makeStore()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: RefusingTransport())), for: .codex)
+        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: RefusingTransport())),
+                              for: .codex, account: nil)
 
         _ = await store.createSession(agent: .codex, in: NSTemporaryDirectory())
 
@@ -250,7 +254,7 @@ final class CodexLaunchFailureTests: XCTestCase {
     func testACreatedCodexTabIsPinnedToTheThreadCodexNamed() async {
         let (store, provider) = makeStore()
         let transport = ScriptedTransport()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: transport)), for: .codex)
+        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: transport)), for: .codex, account: nil)
 
         let result = await store.createSession(agent: .codex, in: NSTemporaryDirectory())
 
@@ -292,13 +296,14 @@ final class CodexLaunchFailureTests: XCTestCase {
     /// assertions rather than stalling the suite.
     func testACrashedAppServerIsForgottenSoTheNextSessionRespawns() async {
         let (store, _) = makeStore()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport())), for: .codex)
+        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport())),
+                              for: .codex, account: nil)
         let first = await store.createSession(agent: .codex, in: NSTemporaryDirectory())
         guard case .success = first else { return XCTFail("expected success: \(first)") }
-        let before = store.runtime(for: .codex) as AnyObject
+        let before = store.runtime(for: .codex, account: nil) as AnyObject
         XCTAssertTrue(store.hasCodexStackForTesting)
 
-        store.simulateCodexTerminationForTesting()
+        store.simulateCodexTerminationForTesting(account: nil)
 
         XCTAssertFalse(store.hasCodexStackForTesting,
                        "the store must forget an app-server that stopped running")
@@ -307,7 +312,7 @@ final class CodexLaunchFailureTests: XCTestCase {
         let second = await store.createSession(agent: .codex, in: NSTemporaryDirectory())
         guard case .success = second else { return XCTFail("expected success: \(second)") }
         XCTAssertTrue(store.hasCodexStackForTesting)
-        XCTAssertFalse(store.runtime(for: .codex) === before,
+        XCTAssertFalse(store.runtime(for: .codex, account: nil) === before,
                        "a creation after a crash must re-spawn, not talk to the corpse")
     }
 
@@ -316,7 +321,8 @@ final class CodexLaunchFailureTests: XCTestCase {
     /// process, so this test observes the lifetime without ever running `codex`.
     func testTheStackIsBuiltOnFirstCodexUseAndDroppedWithTheLastCodexTab() async {
         let (store, _) = makeStore()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport())), for: .codex)
+        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport())),
+                              for: .codex, account: nil)
 
         XCTAssertFalse(store.hasCodexStackForTesting, "a store with no codex tab spawns nothing")
         _ = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true))

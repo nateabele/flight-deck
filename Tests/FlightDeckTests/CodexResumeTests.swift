@@ -271,7 +271,9 @@ final class CodexResumeTests: XCTestCase {
         if let transport {
             store.overrideAdapter(
                 CodexAdapter(rpc: CodexRPC(transport: transport), readTimeout: readTimeout),
-                for: .codex
+                // No `PreferencesStore` on this store, so every tab resolves to the nil
+                // account — the key the restore path will look this up under.
+                for: .codex, account: nil
             )
         }
         return (store, provider, injector, tabID)

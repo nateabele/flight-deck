@@ -77,7 +77,12 @@ final class CodexOptionsRoutingTests: XCTestCase {
         store.projectsRoot = projectsRoot
         store.launchFailureReporter = SilentReporter()
         let adapter = RecordingCodexAdapter()
-        store.overrideAdapter(adapter, for: .codex)
+        // Filed under the account the tab will actually resolve to. This store HAS
+        // preferences, and the accounts migration seeds a built-in account per agent, so the
+        // key here is that account's id and not nil — an override filed under nil would not
+        // be found, and `createSession` would go and spawn a real `codex app-server`.
+        store.overrideAdapter(adapter, for: .codex,
+                              account: preferences.resolvedAccountID(for: .codex, in: nil))
 
         _ = await store.createSession(agent: .codex, in: projectsRoot.path)
 
@@ -96,7 +101,8 @@ final class CodexOptionsRoutingTests: XCTestCase {
         store.projectsRoot = projectsRoot
         store.launchFailureReporter = SilentReporter()
         let adapter = RecordingCodexAdapter()
-        store.overrideAdapter(adapter, for: .codex)
+        // No preferences on this one, so nothing resolves and nil is the key.
+        store.overrideAdapter(adapter, for: .codex, account: nil)
 
         _ = await store.createSession(agent: .codex, in: projectsRoot.path)
 
