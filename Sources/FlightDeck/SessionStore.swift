@@ -404,9 +404,12 @@ final class SessionStore: ObservableObject {
     /// registry is keyed by. Two call sites disagreeing about that is exactly how one home
     /// ends up with two `CodexStack`s on one `session_index.jsonl`.
     ///
-    /// The account comes back nil only from a store with no `PreferencesStore` at all, where
-    /// there is no account to name and one nil key serves the one home. See `AgentInstance`
-    /// for why that can never coexist with an id key for the same home.
+    /// The account comes back nil whenever preferences hold no **isBuiltIn** account for the
+    /// agent to name — a store with no `PreferencesStore` at all, and equally one whose
+    /// built-in account has been relocated away or was migrated against a root that is not
+    /// `$HOME`. Either way there is no id-keyed instance for that home either, so the nil key
+    /// serves it alone; see `AgentInstance` for why that can never coexist with an id key for
+    /// the same home.
     private func instance(for session: Session) -> AgentInstance {
         AgentInstance(
             agent: session.agent,
