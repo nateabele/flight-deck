@@ -63,6 +63,13 @@ struct ClaudeAdapter: AgentAdapter {
         await injectRename(binding.conversationID, title)
     }
 
+    /// Claude has no shell-level login subcommand — it authenticates inside a running
+    /// session — so signing in means launching claude plain and then typing `/login` at it,
+    /// unlike codex's one-shot `codex login`.
+    func loginInvocation(for account: AgentAccount) -> LoginInvocation {
+        LoginInvocation(command: "claude", inject: "/login")
+    }
+
     /// A codex payload here is a programming error, not a runtime condition: the store picks
     /// the adapter and the options together. Degrade to defaults rather than trap.
     private func flags(_ options: AgentOptions) -> FlagSet {

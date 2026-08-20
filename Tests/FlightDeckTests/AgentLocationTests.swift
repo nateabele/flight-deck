@@ -57,6 +57,7 @@ final class AgentLocationTests: XCTestCase {
         func launchCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
         func resumeCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
         func rename(_: AgentBinding, to: String) async throws {}
+        func loginInvocation(for account: AgentAccount) -> LoginInvocation { LoginInvocation(command: "", inject: nil) }
     }
 
     func testCodexReportsTheAgentsLiveDirectoryAndItsOwnBinding() {

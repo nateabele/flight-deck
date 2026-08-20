@@ -219,6 +219,7 @@ final class AgentRoutingTests: XCTestCase {
         func launchCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "stub-launch" }
         func resumeCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "stub-resume" }
         func rename(_: AgentBinding, to: String) async throws {}
+        func loginInvocation(for account: AgentAccount) -> LoginInvocation { LoginInvocation(command: "", inject: nil) }
     }
 
     /// Keeps every configuration it was handed. `SessionCreationTests.StubProvider` throws
