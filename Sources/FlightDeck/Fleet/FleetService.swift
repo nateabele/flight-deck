@@ -122,10 +122,16 @@ final class FleetService: ObservableObject {
     /// that is not real wall time. Filtering against real `Date()` there judged a
     /// freshly-armed window already expired — the listener refused the very key it had just
     /// been told to accept, and the client's handshake could never complete.
+    ///
+    /// Invariant for any future `deviceKeys(` call site: liveness judgements for a
+    /// provisional device must use the armer's clock (`armer.currentTime`), never raw
+    /// `Date()` — see the paragraph above for the bug that found this the hard way.
     @discardableResult
     func start(port: NWEndpoint.Port? = nil) async throws -> NWEndpoint.Port {
         let bound = try await server.start(
-            keys: preferences.deviceKeys(at: armer.currentTime), port: port ?? boundPort
+            keys: preferences.deviceKeys(at: armer.currentTime),
+            port: port ?? boundPort,
+            serviceName: serviceName
         )
         boundPort = bound
         Self.logger.info("fleet listener bound to port \(bound.rawValue, privacy: .public)")
