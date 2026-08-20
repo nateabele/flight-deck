@@ -105,9 +105,8 @@ struct AccountsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Accounts")
-                .font(.headline)
-
+            // No heading of its own: this renders as a `Section("Accounts")` inside the pane's
+            // one `Form`, so drawing a second title here would stutter.
             List(selection: $selection) {
                 ForEach(accounts) { account in
                     row(for: account)
@@ -117,7 +116,10 @@ struct AccountsSection: View {
                     preferences.preferences.moveAccounts(forAgent: agent, fromOffsets: offsets, toOffset: destination)
                 }
             }
-            .frame(minHeight: 100, maxHeight: 160)
+            // Sized to its contents rather than to a fixed box. Two accounts is the common
+            // case and a flat 160pt left most of it empty; past four rows it scrolls instead
+            // of pushing the sections below it off-screen.
+            .frame(height: listHeight)
             .accessibilityIdentifier("accounts-list")
 
             HStack(spacing: 4) {
@@ -206,6 +208,14 @@ struct AccountsSection: View {
         } message: { _ in
             Text("Opens a session tab to log in.")
         }
+    }
+
+    /// A row is two lines — display name over `email · organization` — so this is the pair
+    /// plus its padding, not a single line height.
+    private static let rowHeight: CGFloat = 38
+
+    private var listHeight: CGFloat {
+        CGFloat(min(max(accounts.count, 1), 4)) * Self.rowHeight + 8
     }
 
     @ViewBuilder
