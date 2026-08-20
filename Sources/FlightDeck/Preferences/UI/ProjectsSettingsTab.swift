@@ -22,7 +22,13 @@ struct ProjectsSettingsTab: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            NavigationSplitView {
+            // `HSplitView`, matching the Agents tab, NOT `NavigationSplitView`. On macOS the
+            // navigation variant is a window-level container: it injects a sidebar-toggle
+            // button into the toolbar, re-centres the window title over the detail column
+            // alone, and renders its sidebar as an inset panel with capsule selection. Inside
+            // a preferences tab that produced a pane visibly unlike every sibling tab, with
+            // the tab strip pushed off-centre.
+            HSplitView {
                 List(paths, id: \.self, selection: $selected) { path in
                     VStack(alignment: .leading, spacing: 1) {
                         Text(URL(fileURLWithPath: path).lastPathComponent)
@@ -35,23 +41,27 @@ struct ProjectsSettingsTab: View {
                     .badge(preferences.projectSettings(path).isEmpty ? nil : Text("override"))
                     .tag(path)
                 }
-                .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+                // The same numbers the Agents list uses; paths already truncate from the head.
+                .frame(minWidth: 140, idealWidth: 160, maxWidth: 280)
                 .onChange(of: paths) { _, newPaths in
                     // Covers both "Remove Overrides" and reverting every override to empty
                     // (which also removes the record, see the option bindings below): either
                     // can drop the selected path from the list out from under the detail pane.
                     if let selected, !newPaths.contains(selected) { self.selected = nil }
                 }
-            } detail: {
-                if let selected {
-                    detail(for: selected)
-                } else {
-                    ContentUnavailableView(
-                        "No Project Selected",
-                        systemImage: "folder",
-                        description: Text("Select a project to override its agent options.")
-                    )
+
+                Group {
+                    if let selected {
+                        detail(for: selected)
+                    } else {
+                        ContentUnavailableView(
+                            "No Project Selected",
+                            systemImage: "folder",
+                            description: Text("Select a project to override its agent options.")
+                        )
+                    }
                 }
+                .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
             }
 
             Divider()
@@ -91,56 +101,68 @@ struct ProjectsSettingsTab: View {
                 .disabled(settings.isEmpty)
                 .accessibilityIdentifier("project-remove-overrides")
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 8)
+            .padding(.horizontal, 14)
+            // Symmetric, and enough of it that the button is not wearing the row as a collar:
+            // this was `.top, 8` with no bottom at all, so the button's lower edge sat flush
+            // against the form below it.
+            .padding(.vertical, 12)
 
-            Form {
-                Section("Agent") {
-                    Picker("Agent", selection: agentBinding(for: path)) {
-                        Text("<Use global settings>").tag(AgentID?.none)
-                        ForEach(AgentID.allCases, id: \.self) { agent in
-                            Text(agent.displayName).tag(AgentID?.some(agent))
-                        }
-                    }
-                    .labelsHidden()
-                    .accessibilityIdentifier("project-agent-picker")
+            // Same shape as the Agents pane: one scrolling `Form` per agent, its leading
+            // sections supplied by the caller and its launch command last. This pane used to
+            // stack a 220pt `Form` above a separate options view, which gave the two panes
+            // different layouts for the same job and squeezed the flags into whatever height
+            // was left.
+            let sections = {
+                AnyView(
+                    Group {
+                        Section("Agent") {
+                            Picker("Agent", selection: agentBinding(for: path)) {
+                                Text("<Use global settings>").tag(AgentID?.none)
+                                ForEach(AgentID.allCases, id: \.self) { agent in
+                                    Text(agent.displayName).tag(AgentID?.some(agent))
+                                }
+                            }
+                            .labelsHidden()
+                            .accessibilityIdentifier("project-agent-picker")
 
-                    if let summary = Self.hiddenOverrideSummary(settings, excluding: selectedAgent) {
-                        Text(summary)
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
-                }
-
-                let accounts = preferences.preferences.accounts(for: selectedAgent)
-                if accounts.count > 1 {
-                    Section("Account") {
-                        Picker("Account", selection: accountBinding(for: path, agent: selectedAgent)) {
-                            Text("Default (\(accounts.first?.displayName ?? ""))").tag(UUID?.none)
-                            ForEach(accounts) { account in
-                                Text(account.displayName).tag(UUID?.some(account.id))
+                            if let summary = Self.hiddenOverrideSummary(settings, excluding: selectedAgent) {
+                                Text(summary)
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
                             }
                         }
-                        .labelsHidden()
-                        .accessibilityIdentifier("project-account-picker")
+
+                        let accounts = preferences.preferences.accounts(for: selectedAgent)
+                        if accounts.count > 1 {
+                            Section("Account") {
+                                Picker("Account", selection: accountBinding(for: path, agent: selectedAgent)) {
+                                    Text("Default (\(accounts.first?.displayName ?? ""))").tag(UUID?.none)
+                                    ForEach(accounts) { account in
+                                        Text(account.displayName).tag(UUID?.some(account.id))
+                                    }
+                                }
+                                .labelsHidden()
+                                .accessibilityIdentifier("project-account-picker")
+                            }
+                        }
                     }
-                }
+                )
             }
-            .formStyle(.grouped)
-            .frame(maxHeight: 220)
 
             Group {
                 switch selectedAgent {
                 case .codex:
                     CodexOptionsForm(
                         preferences: preferences,
-                        projectOverride: codexOptionsBinding(for: path)
+                        projectOverride: codexOptionsBinding(for: path),
+                        header: sections
                     )
                 default:
                     FlagEditor(
                         flags: claudeFlagsBinding(for: path),
                         inherited: globalClaudeFlags,
-                        lockedPrefix: ClaudeOptionsPane.placeholderPrefix
+                        lockedPrefix: ClaudeOptionsPane.placeholderPrefix,
+                        header: sections
                     )
                 }
             }
