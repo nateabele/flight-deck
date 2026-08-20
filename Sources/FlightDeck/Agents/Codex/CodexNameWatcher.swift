@@ -2,9 +2,10 @@ import Foundation
 
 /// Tails codex's `session_index.jsonl` and reports thread renames.
 ///
-/// One instance for the whole app, not one per tab, for the same reason `SessionStatusWatcher`
-/// is shared: a single file carries every thread, so a per-tab watcher would read the same
-/// bytes N times.
+/// One instance per account, not one per tab, for the same reason `SessionStatusWatcher` is:
+/// a single file carries every thread that account owns, so a per-tab watcher would read the
+/// same bytes N times. It stops at the account, though — a second login is a second
+/// `CODEX_HOME` and therefore a second index file, which no shared watcher could ever tail.
 ///
 /// This file is the ONLY place a codex rename is observable. The rollout carries none — not
 /// from `thread/name/set`, not from a `/rename` typed into the TUI — and the app-server tells
@@ -12,20 +13,22 @@ import Foundation
 /// renames from two different writers produced three lines here and nothing anywhere else.
 @MainActor
 final class CodexNameWatcher {
-    /// Codex's index, honouring `CODEX_HOME` exactly as codex does. Getting this wrong fails
-    /// silently — a watcher on the wrong path simply never reports anything.
-    nonisolated static var defaultIndexURL: URL {
-        indexURL(codexHome: ProcessInfo.processInfo.environment["CODEX_HOME"],
-                 home: FileManager.default.homeDirectoryForCurrentUser)
+    /// The index inside one `CODEX_HOME`. Getting this wrong fails silently — a watcher on the
+    /// wrong path simply never reports anything.
+    ///
+    /// Takes the home rather than reading `CODEX_HOME` itself. It used to read Flight Deck's
+    /// OWN process environment, which resolved one path, once, for every tab — correct only
+    /// while the app had a single login, and wrong the moment a tab is spawned with a
+    /// different `CODEX_HOME` than the one Flight Deck was launched with. The account's home
+    /// is the only thing that knows where a given tab's threads are indexed.
+    nonisolated static func indexURL(forHome home: URL) -> URL {
+        home.appendingPathComponent("session_index.jsonl")
     }
 
-    /// Pure decision behind `defaultIndexURL`, split out so both branches are testable
-    /// without depending on whether `CODEX_HOME` happens to be set in the test process.
-    nonisolated static func indexURL(codexHome: String?, home: URL) -> URL {
-        let base = codexHome
-            .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true) }
-            ?? home.appendingPathComponent(".codex", isDirectory: true)
-        return base.appendingPathComponent("session_index.jsonl")
+    /// The built-in login's index. Kept for the callers that have no account in hand — the
+    /// `init` default below, and tests — never as "the" index.
+    nonisolated static var defaultIndexURL: URL {
+        indexURL(forHome: AgentID.codex.builtInHome)
     }
 
     let url: URL

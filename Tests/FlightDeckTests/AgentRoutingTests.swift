@@ -33,10 +33,10 @@ final class AgentRoutingTests: XCTestCase {
 
     private func makeStore() -> SessionStore {
         let store = SessionStore(provider: nil, persistence: nil)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         // Never the user's real `~/.codex/session_index.jsonl` — tests below create codex
         // tabs, and a real path would have those tabs' watchers tail the user's own home.
-        store.codexIndexURL = projectsRoot.appendingPathComponent("session_index.jsonl")
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         return store
     }
 
@@ -44,20 +44,24 @@ final class AgentRoutingTests: XCTestCase {
         let provider = RecordingProvider()
         retainedProviders.append(provider)
         let store = SessionStore(provider: provider, persistence: nil)
-        store.projectsRoot = projectsRoot
-        store.codexIndexURL = projectsRoot.appendingPathComponent("session_index.jsonl")
+        store.transcriptsRootOverride = projectsRoot
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         return (store, provider)
     }
 
+    /// `account: nil` throughout this file, and it is not a placeholder: every store here is
+    /// built with no `PreferencesStore`, so there is no account to name and `nil` is exactly
+    /// the key `SessionStore.instance(for:)` resolves for the tabs these tests create. An
+    /// override filed under any other account would simply not be found.
     func testTheStoreSelectsAnAdapterByTheSessionsAgent() {
         let store = makeStore()
-        XCTAssertEqual(type(of: store.adapter(for: .claude)).id, .claude)
+        XCTAssertEqual(type(of: store.adapter(for: .claude, account: nil)).id, .claude)
     }
 
     func testEventsFromARuntimeReachTheSessionTitle() {
         let store = makeStore()
         let fake = FakeAgentRuntime()
-        store.overrideRuntime(fake, for: .claude)
+        store.overrideRuntime(fake, for: .claude, account: nil)
 
         let session = store.newSession(in: tmp)
         XCTAssertEqual(fake.attached, [session.pinnedConversationID],
@@ -72,7 +76,7 @@ final class AgentRoutingTests: XCTestCase {
     func testClosingATabDetachesItsBinding() {
         let store = makeStore()
         let fake = FakeAgentRuntime()
-        store.overrideRuntime(fake, for: .claude)
+        store.overrideRuntime(fake, for: .claude, account: nil)
 
         let session = store.newSession(in: tmp)
         store.closeSession(session.id)
@@ -84,7 +88,7 @@ final class AgentRoutingTests: XCTestCase {
     /// pty is fed — otherwise the store is still talking to `ClaudeSession` behind its back.
     func testTheAdapterBuildsTheLaunchCommand() {
         let (store, provider) = makeRecordingStore()
-        store.overrideAdapter(StubAdapter(), for: .claude)
+        store.overrideAdapter(StubAdapter(), for: .claude, account: nil)
 
         _ = store.newSession(in: tmp)
 
@@ -128,7 +132,7 @@ final class AgentRoutingTests: XCTestCase {
         let store = makeStore()
         store.launchFailureReporter = SilentReporter()
         let t = RenameTransport()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: t)), for: .codex)
+        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: t)), for: .codex, account: nil)
         let spy = SpyInjector()
         store.injectorOverride = spy
         store.injectionSettle = { $0() }
@@ -160,7 +164,7 @@ final class AgentRoutingTests: XCTestCase {
     func testRenamingAClaudeTabStillTypesIntoThePtyAndSendsNoRequest() {
         let store = makeStore()
         let t = RenameTransport()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: t)), for: .codex)
+        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: t)), for: .codex, account: nil)
         let spy = SpyInjector()
         store.injectorOverride = spy
         store.injectionSettle = { $0() }
@@ -189,7 +193,7 @@ final class AgentRoutingTests: XCTestCase {
         store.applyRegistry([1: entry(session.pinnedConversationID, activity: .idle)])
         spy.events.removeAll()
 
-        let adapter = store.adapter(for: .claude)
+        let adapter = store.adapter(for: .claude, account: nil)
         // Deliberately unsanitized: the adapter route is the one an agent's own caller
         // reaches, and what it queues becomes text typed into a pty.
         try await adapter.rename(adapter.binding(for: session), to: "  from\nthe adapter  ")
@@ -223,6 +227,7 @@ final class AgentRoutingTests: XCTestCase {
         func launchCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "stub-launch" }
         func resumeCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "stub-resume" }
         func rename(_: AgentBinding, to: String) async throws {}
+        func loginInvocation(for account: AgentAccount) -> LoginInvocation { LoginInvocation(command: "", inject: nil) }
     }
 
     /// Keeps every configuration it was handed. `SessionCreationTests.StubProvider` throws

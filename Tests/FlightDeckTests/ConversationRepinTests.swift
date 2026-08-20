@@ -154,7 +154,7 @@ final class ConversationRepinTests: XCTestCase {
             ClaudeSession.transcriptURL(
                 sessionID: resumed,
                 workingDirectory: tmp.path,
-                projectsRoot: store.projectsRoot
+                projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
     }
@@ -185,7 +185,7 @@ final class ConversationRepinTests: XCTestCase {
             ClaudeSession.transcriptURL(
                 sessionID: newer,
                 workingDirectory: tmp.path,
-                projectsRoot: store.projectsRoot
+                projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
     }

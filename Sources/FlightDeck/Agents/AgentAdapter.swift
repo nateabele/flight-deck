@@ -4,8 +4,8 @@ import Foundation
 ///
 /// Four responsibilities: establish identity, produce the text typed into the pty, and
 /// rename. Observation is deliberately NOT here — it belongs to `AgentRuntime`, because
-/// both agents multiplex one app-wide source across N tabs rather than owning a per-tab
-/// channel. See the design doc §2.1.
+/// both agents multiplex one source per account across that account's tabs rather than
+/// owning a per-tab channel. See the design doc §2.1.
 @MainActor
 protocol AgentAdapter {
     static var id: AgentID { get }
@@ -54,6 +54,16 @@ protocol AgentAdapter {
     /// Renames the agent's own conversation. Claude types `/rename` into the pty; codex
     /// sends a request. Throwing is legal — the caller keeps the local title either way.
     func rename(_ binding: AgentBinding, to title: String) async throws
+
+    /// The environment that binds a process to this account. Claude answers `CLAUDE_CONFIG_DIR`,
+    /// codex `CODEX_HOME`; a third agent answers its own, and no caller ever learns which.
+    func environment(for account: AgentAccount) -> [String: String]
+
+    /// What to run, and what to type once it is up, to sign this account in.
+    ///
+    /// No default: there is no generically-correct answer, and a guessed one would silently
+    /// ship a wrong login command for a future agent. Every conformer states its own.
+    func loginInvocation(for account: AgentAccount) -> LoginInvocation
 }
 
 extension AgentAdapter {
@@ -64,4 +74,18 @@ extension AgentAdapter {
     func rebind(for session: Session, options: AgentOptions) async throws -> AgentBinding {
         binding(for: session)
     }
+
+    /// The variable's name is the only agent-specific part, and `AgentID` already knows it —
+    /// so this default is correct for every agent whose home is selected by one variable, and
+    /// an agent that needs more can still override.
+    func environment(for account: AgentAccount) -> [String: String] {
+        [account.agent.homeEnvironmentKey: account.home.path]
+    }
+}
+
+/// How to sign an account in. Two fields rather than one because the two agents differ in
+/// shape: codex has a `login` subcommand, claude authenticates inside a running session.
+struct LoginInvocation: Equatable, Sendable {
+    let command: String
+    let inject: String?
 }

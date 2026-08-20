@@ -39,6 +39,7 @@ final class CodexStatusRoutingTests: XCTestCase {
         }
 
         func rename(_: AgentBinding, to: String) async throws {}
+        func loginInvocation(for account: AgentAccount) -> LoginInvocation { LoginInvocation(command: "", inject: nil) }
     }
 
     private final class SpyNotifier: Notifying {
@@ -70,7 +71,7 @@ final class CodexStatusRoutingTests: XCTestCase {
 
     private func makeStore() -> SessionStore {
         let store = SessionStore(provider: nil, persistence: nil)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         store.launchFailureReporter = SilentReporter()
         // Deterministic rather than whatever `NSApp` reports under `xctest`: read state and
         // notification delivery both branch on it.
@@ -82,8 +83,8 @@ final class CodexStatusRoutingTests: XCTestCase {
     /// Returns the tab id and the fake runtime feeding it.
     private func makeCodexTab(in store: SessionStore) async throws -> (UUID, FakeAgentRuntime) {
         let runtime = FakeAgentRuntime()
-        store.overrideAdapter(StubCodexAdapter(thread: thread), for: .codex)
-        store.overrideRuntime(runtime, for: .codex)
+        store.overrideAdapter(StubCodexAdapter(thread: thread), for: .codex, account: nil)
+        store.overrideRuntime(runtime, for: .codex, account: nil)
         let result = await store.createSession(agent: .codex, in: tmp.path)
         guard case .success(let id) = result else {
             throw XCTSkip("createSession failed: \(result)")

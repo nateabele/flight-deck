@@ -3,8 +3,12 @@ import Foundation
 /// Polls Claude Code's per-process status registry and reports every live session's
 /// status, keyed by the session UUID Flight Deck assigned with `--session-id`.
 ///
-/// One instance serves the whole app: the registry is a single flat directory, so a
-/// per-session watcher would re-scan the same files N times.
+/// One instance per account, and no finer: the registry is a single flat directory *inside a
+/// config home*, so a per-session watcher would re-scan the same files N times — but a second
+/// login writes its status files into its own `CLAUDE_CONFIG_DIR`, which no other account's
+/// watcher will ever look at. An app-wide instance left every tab on a second account with no
+/// status at all, silently, since an unwatched registry reads exactly like an idle one.
+/// `SessionStore.statusWatchers` owns the per-account map.
 ///
 /// Polling rather than a vnode watch is forced by how `claude` writes the file — a
 /// non-atomic in-place `writeFile`, with no create/rename, so a directory watch would

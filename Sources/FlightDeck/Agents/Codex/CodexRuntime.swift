@@ -8,7 +8,8 @@ import Foundation
 /// created a thread is never told what the user does in it. Files have no such rule.
 ///
 /// The shape mirrors `ClaudeRuntime`: one watcher per tab over a per-conversation file, plus
-/// one shared watcher over an app-wide file, fanned out by conversation id.
+/// one shared watcher — one per codex account, not one for the whole app — over that
+/// account's `session_index.jsonl`, fanned out by conversation id.
 @MainActor
 final class CodexRuntime: AgentRuntime {
     private struct Attachment {
