@@ -43,6 +43,31 @@ struct AccountsSection: View {
         !account.isBuiltIn && !boundAccountIDs.contains(account.id)
     }
 
+    /// The full guard chain "Also Delete Files…" must clear immediately before it touches the
+    /// filesystem — not only what disables the menu item, which is one refactor away from being
+    /// bypassed. Re-reads the account fresh from `store` by id rather than trusting whatever
+    /// `AgentAccount` value the caller is holding, so a relocate that raced the confirm dialog
+    /// can never trash a since-abandoned home; `trash` always receives that freshly-read
+    /// `account.home` and nothing else, so there is no path in scope that isn't the account's
+    /// own. Defaults `trash` to the real Trash so production call sites need not know this
+    /// exists; tests substitute a spy to stay hermetic.
+    @MainActor
+    @discardableResult
+    static func deleteFiles(
+        accountID: UUID, boundAccountIDs: Set<UUID>, in store: PreferencesStore,
+        trash: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
+    ) -> Bool {
+        guard let account = store.account(id: accountID), !account.isBuiltIn,
+              !boundAccountIDs.contains(accountID)
+        else { return false }
+        do {
+            try trash(account.home)
+        } catch {
+            return false
+        }
+        return true
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Accounts")
@@ -109,24 +134,27 @@ struct AccountsSection: View {
         } message: { account in
             Text("The directory at \(account.home.path) is left in place.")
         }
-        // The second, separately-confirmed destructive action (spec §8.3): that directory
-        // holds OAuth credentials and every transcript for a login, so it is never reached by
-        // the default button. Actually deleting it is out of scope for this pass — this wires
-        // the two-step confirm the spec calls for; confirming here removes the registry entry
-        // only, same as the non-destructive action, until a follow-up task adds the recursive
-        // delete itself, gated the same way and never against a built-in home.
+        // The second, separately-confirmed destructive action (spec §8.3): that directory holds
+        // OAuth credentials and every transcript for a login, so it is never reached by the
+        // default button. Moves the directory to the Trash (recoverable, what "Delete Files"
+        // means on the Mac) rather than unlinking it outright, and only then drops the registry
+        // entry — `deleteFiles` re-checks the built-in/bound-session guards itself immediately
+        // before touching disk, so this button can never act on either even if `.disabled`
+        // above were ever wrong.
         .confirmationDialog(
             "Delete “\(pendingFileDelete?.home.path ?? "")”?",
             isPresented: Binding(get: { pendingFileDelete != nil }, set: { if !$0 { pendingFileDelete = nil } }),
             presenting: pendingFileDelete
         ) { account in
             Button("Delete", role: .destructive) {
-                preferences.removeAccount(id: account.id)
+                if AccountsSection.deleteFiles(accountID: account.id, boundAccountIDs: boundAccountIDs, in: preferences) {
+                    preferences.removeAccount(id: account.id)
+                }
                 pendingFileDelete = nil
             }
             Button("Cancel", role: .cancel) { pendingFileDelete = nil }
-        } message: { _ in
-            Text("This deletes every credential and transcript stored there. This cannot be undone.")
+        } message: { account in
+            Text("The directory at \(account.home.path) will be moved to the Trash.")
         }
         .alert(
             "Sign In to “\(justAdded?.displayName ?? "")”?",
@@ -218,9 +246,8 @@ struct AccountsSection: View {
     ///
     /// Reads the account's `LoginInvocation` off its adapter, opens an ordinary tab typing
     /// `command` verbatim (see `SessionStore.openSignInSession`), and — when `inject` is
-    /// non-nil — queues it through the adapter's own injection closure once the tab settles,
-    /// the same route `ClaudeAdapter.rename` already uses to type `/rename` into a running
-    /// session.
+    /// non-nil — queues it through `ClaudeAdapter.injectRename` once the tab settles, the same
+    /// closure `ClaudeAdapter.rename` itself calls to type `/rename` into a running session.
     private func signIn(_ account: AgentAccount) {
         let adapter = sessions.adapter(for: account.agent, account: account.id)
         let invocation = adapter.loginInvocation(for: account)
