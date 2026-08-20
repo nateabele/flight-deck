@@ -6,6 +6,7 @@ import SwiftUI
 /// rebinds ⌘N: see `Preferences.moveAgents` and `NewSessionAffordance`.
 struct AgentsSettingsTab: View {
     @ObservedObject var preferences: PreferencesStore
+    @ObservedObject var sessions: SessionStore
     @State private var selection: AgentID?
 
     var body: some View {
@@ -27,11 +28,21 @@ struct AgentsSettingsTab: View {
             }
             .frame(minWidth: 160)
 
-            Group {
-                switch selection ?? preferences.preferences.agents.first?.id {
-                case .codex: CodexOptionsForm(preferences: preferences)
-                default:     ClaudeOptionsPane(preferences: preferences)
+            VStack(alignment: .leading, spacing: 0) {
+                let agent = selection ?? preferences.preferences.agents.first?.id ?? .claude
+                Group {
+                    switch agent {
+                    case .codex: CodexOptionsForm(preferences: preferences)
+                    default:     ClaudeOptionsPane(preferences: preferences)
+                    }
                 }
+                .frame(maxHeight: .infinity)
+
+                Divider()
+
+                AccountsSection(preferences: preferences, sessions: sessions, agent: agent)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
             }
             .frame(minWidth: 380)
         }
