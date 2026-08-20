@@ -2147,6 +2147,55 @@ final class FleetConnectorTests: XCTestCase {
         XCTAssertEqual(store.load()?.endpoints.first, winner)
     }
 
+    /// The regression this guards, and why it is staged so carefully: a race's timeout used
+    /// to outlive the race that scheduled it. When every candidate failed fast, the retry was
+    /// already pending by the time the dead race's timer fired — and it scheduled a SECOND
+    /// retry. Two races then ran against each other, the later tearing down whatever the
+    /// earlier had connected. The visible effect is a connection that drops seconds after
+    /// coming up, for no reason on the wire, which reads as a flaky network.
+    ///
+    /// The first race must FAIL for this to be exercised at all: if it connects, the existing
+    /// `winner == nil` guard suppresses the timer and the test proves nothing. So the server
+    /// is down for the first race and back on the same port — the same instance, so
+    /// `start()`'s own release-then-rebind handles the port coming free — before the second.
+    func testAStaleRaceTimeoutDoesNotRetireTheRaceThatReplacedIt() async throws {
+        let key = FleetDeviceKey.mint()
+        let expected = fleet("one")
+        let server = FleetSocketServer()
+        server.onHello = { _, _ in [.snapshot(seq: 1, fleet: expected, reason: .initial)] }
+        servers.append(server)
+        let port = try await server.start(keys: [key], port: nil)
+        server.stop()
+
+        let connector = connector(key: key, endpoints: ["127.0.0.1:\(port.rawValue)"])
+        // The timeout has to land inside the backoff window — after the first race has
+        // already failed and scheduled its retry, and before that retry runs.
+        connector.raceTimeout = 1
+        connector.retryDelays = [1.5]
+
+        var states: [FleetConnector.State] = []
+        let connected = expectation(description: "connected")
+        connector.onState = { states.append($0) }
+        connector.onFleet = { _ in connected.fulfill() }
+        connector.start()
+
+        try await Task.sleep(for: .milliseconds(600))
+        _ = try await server.start(keys: [key], port: port)
+        await fulfillment(of: [connected], timeout: 20)
+
+        // Long enough for the stale timeout, and any retry it wrongly scheduled, to fire.
+        try await Task.sleep(for: .seconds(3))
+
+        let firstConnected = states.firstIndex {
+            if case .connected = $0 { return true } else { return false }
+        }
+        let after = states[((firstConnected ?? states.count - 1) + 1)...]
+        XCTAssertTrue(
+            after.allSatisfy { if case .connected = $0 { return true } else { return false } },
+            "a live connection must not be retired by a timer from an earlier race: \(states)"
+        )
+    }
+
     func testTheAppliedSequenceIsRememberedSoARelaunchResumes() async throws {
         let key = FleetDeviceKey.mint()
         let port = try await startServer(key: key, fleet: fleet("one"))
@@ -2225,7 +2274,17 @@ import Foundation
 import Network
 
 /// Finds the paired Mac and keeps a fleet in sync with it.
-public final class FleetConnector {
+///
+/// `@unchecked Sendable` for the same reason `FleetClient` is, and it is not optional here:
+/// FleetKit builds in Swift 6 language mode, and this class hands `[weak self]` closures to
+/// `DispatchQueue.asyncAfter` and `NWBrowser.browseResultsChangedHandler`, both of which are
+/// typed `@Sendable`. Without the conformance those captures are a compile error. Every
+/// mutation below happens on `queue` — the dials, the callbacks, the timers, the teardown —
+/// so the state is confined to one queue rather than protected by locks, which is the same
+/// idiom the rest of this module uses. Do not "fix" a concurrency diagnostic here by
+/// sprinkling `nonisolated(unsafe)`; if something needs to touch this off `queue`, that is a
+/// design change, not an annotation.
+public final class FleetConnector: @unchecked Sendable {
     public enum State: Equatable {
         case idle
         case searching
@@ -2261,6 +2320,19 @@ public final class FleetConnector {
     private var fleet = FleetSnapshot.empty
     private var attempt = 0
     private var running = false
+    /// Invalidates outstanding deferred work. `DispatchQueue.asyncAfter` cannot be
+    /// cancelled, so every timer here has to recognise that it is stale rather than be
+    /// stopped — it captures the generation current when it was scheduled and does nothing
+    /// if the connector has moved on since. Bumped by EVERY transition, not just `race()`:
+    /// a race timeout that fires during a backoff window would otherwise see an unchanged
+    /// generation and retry on top of the retry already pending.
+    private var generation = 0
+
+    @discardableResult
+    private func invalidateDeferredWork() -> Int {
+        generation += 1
+        return generation
+    }
 
     public init(
         mac: PairedMac, store: any PairedMacStoring,
@@ -2280,6 +2352,7 @@ public final class FleetConnector {
 
     public func stop() {
         running = false
+        invalidateDeferredWork()
         teardown()
         report(.idle)
     }
@@ -2299,10 +2372,19 @@ public final class FleetConnector {
         guard running else { return }
         teardown()
         report(.searching)
+        let generation = invalidateDeferredWork()
         for candidate in remembered() { dial(candidate) }
         if browse { startBrowsing() }
+        // Without the generation guard: a race whose candidates all fail in 100ms retries at
+        // ~1s, and THIS race's 8s timer later fires anyway, sees no winner, and schedules a
+        // second retry on top of the pending one. Two races then run against each other, the
+        // later one tearing down whatever the earlier one connected, and `attempt` advances
+        // twice as fast as `retryDelays` says. The symptom is a phone that gets harder to
+        // connect the longer it tries, which reads as a flaky network rather than a bug.
         queue.asyncAfter(deadline: .now() + raceTimeout) { [weak self] in
-            guard let self, self.running, self.winner == nil else { return }
+            guard let self, self.running, self.winner == nil,
+                  generation == self.generation
+            else { return }
             self.scheduleRetry()
         }
     }
@@ -2422,10 +2504,17 @@ public final class FleetConnector {
     private func scheduleRetry() {
         guard running else { return }
         teardown()
+        // Bumping here is what makes a timeout that fires DURING the backoff window
+        // harmless — at that moment no new race has started, so a generation bumped only by
+        // `race()` would still match and the retry would double.
+        let generation = invalidateDeferredWork()
         let delay = retryDelays[min(attempt, retryDelays.count - 1)]
         attempt += 1
         report(.lost(retryingIn: delay))
-        queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.race() }
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, generation == self.generation else { return }
+            self.race()
+        }
     }
 
     private func teardown() {
@@ -2545,8 +2634,22 @@ final class FleetModel {
     private func connect() {
         guard let mac else { return }
         let connector = FleetConnector(mac: mac, store: store)
-        connector.onFleet = { [weak self] in self?.fleet = $0 }
-        connector.onState = { [weak self] in self?.state = $0 }
+        // `MainActor.assumeIsolated`, not `Task { @MainActor in }`. FlightDeckMobile builds in
+        // Swift 6, and these callbacks are plain non-isolated closures, so assigning
+        // main-actor state from one is an error the compiler cannot see past on its own. But
+        // `FleetConnector`'s queue defaults to `.main`, so the closure genuinely IS on the
+        // main queue — `assumeIsolated` states a fact rather than hiding a hazard. A `Task`
+        // hop would instead add a real frame of latency to every fleet update and let two
+        // updates land out of order, which is a live bug in exchange for a tidier diagnostic.
+        //
+        // This is only true while the connector runs on `.main`. If it is ever given its own
+        // queue, these must become hops and this comment must go.
+        connector.onFleet = { [weak self] fleet in
+            MainActor.assumeIsolated { self?.fleet = fleet }
+        }
+        connector.onState = { [weak self] state in
+            MainActor.assumeIsolated { self?.state = state }
+        }
         self.connector = connector
         connector.start()
     }
