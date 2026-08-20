@@ -80,6 +80,19 @@ final class PairingPayloadTests: XCTestCase {
         XCTAssertNil(URL(string: encoded)?.host)
     }
 
+    /// The base64url transform, duplicated locally on purpose. `FleetKit`'s own helper is
+    /// `internal`, and widening it to `public` just so one negative assertion could reach it
+    /// would put a `Data` extension into every consumer's namespace — a permanent collision
+    /// risk bought for a single test. The transform is three lines of RFC 4648 §5, and this
+    /// assertion only needs a string to look for rather than production's exact code path;
+    /// the round-trip test above already exercises the real implementation.
+    private func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
     /// Checks both alphabets. The implementation encodes the secret as base64url *inside*
     /// the JSON before the whole body is encoded again, so only the standard-alphabet form
     /// being absent would leave the likelier bug — a body that skipped the outer wrap —
@@ -91,7 +104,7 @@ final class PairingPayloadTests: XCTestCase {
         ).encoded()
         XCTAssertFalse(encoded.contains(key.secret.base64EncodedString()),
                        "the body is base64url of JSON; a raw base64 secret would mean it is not")
-        XCTAssertFalse(encoded.contains(key.secret.base64URLEncodedString()),
+        XCTAssertFalse(encoded.contains(base64URL(key.secret)),
                        "the inner base64url secret must not survive into the outer encoding")
     }
 
@@ -124,7 +137,7 @@ final class PairingPayloadTests: XCTestCase {
     /// be read from the prefix, before any decoding.
     func testAFutureShapeIsRejectedAsTooNewNotAsDamaged() throws {
         let alienBody = Data(#"{"v":2,"slotId":"nope","secret":"nope"}"#.utf8)
-        let code = "flightdeck2:" + alienBody.base64URLEncodedString()
+        let code = "flightdeck2:" + base64URL(alienBody)
         XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
             XCTAssertEqual(error as? PairingPayloadError, .unsupportedVersion(2))
         }
@@ -133,7 +146,7 @@ final class PairingPayloadTests: XCTestCase {
     /// A prefix version that disagrees with the body's is a hand-edited code, not a newer one.
     func testAPrefixVersionDisagreeingWithTheBodyIsMalformed() throws {
         let body = Data(#"{"v":7,"slot":"00000000-0000-0000-0000-000000000000","psk":"AAAA","name":"m","svc":"s","eps":[]}"#.utf8)
-        let code = "flightdeck1:" + body.base64URLEncodedString()
+        let code = "flightdeck1:" + base64URL(body)
         XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
             XCTAssertEqual(error as? PairingPayloadError, .malformed)
         }
@@ -234,9 +247,14 @@ public struct PairingPayload: Equatable, Sendable {
         let digits = trimmed[
             trimmed.index(trimmed.startIndex, offsetBy: Self.scheme.count)..<colon
         ]
-        guard !digits.isEmpty, let version = Int(digits) else {
-            throw PairingPayloadError.notAPairingCode
-        }
+        // Digits only, not merely `Int`-parseable: `Int` accepts a leading `-` or `+`, so
+        // without this `flightdeck+1:` would sail past the gate as version 1, and
+        // `flightdeck-1:` would be reported as an unsupported version rather than as not a
+        // pairing code at all. `encoded()` never emits either, so both are malformed input.
+        guard !digits.isEmpty,
+              digits.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let version = Int(digits)
+        else { throw PairingPayloadError.notAPairingCode }
         // Before a byte is decoded. A future payload may not parse under this schema at all,
         // and failing it as "damaged" would send the user to show a fresh code when what they
         // actually need is to update the app.
