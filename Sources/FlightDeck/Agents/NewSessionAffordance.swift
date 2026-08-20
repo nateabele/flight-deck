@@ -64,4 +64,30 @@ enum NewSessionAffordance {
         if modifiers.contains(.command) { s += "⌘" }
         return s + "N"
     }
+
+    /// One entry per agent, nesting its accounts only when it has more than one. The checkmark
+    /// rides on `isResolved` so the menu shows what ⌘N would actually do in this project.
+    ///
+    /// Deliberately separate from `slots(for:)`: shortcuts bind to *agent* position, and never
+    /// move when an account is merely chosen from here — choosing "Work" over the project's
+    /// default is a mouse-only act, not a rebind. An agent absent from `accounts` entirely
+    /// (nothing logged in yet) contributes no row at all, rather than a dead one nothing can
+    /// launch.
+    enum MenuEntry: Equatable {
+        case agent(AgentID, account: UUID, isResolved: Bool)
+        indirect case submenu(AgentID, [MenuEntry])
+    }
+
+    static func menu(
+        agents: [AgentSettings], accounts: [AgentAccount], resolved: [AgentID: UUID]
+    ) -> [MenuEntry] {
+        agents.compactMap { settings in
+            let mine = accounts.filter { $0.agent == settings.id }
+            guard !mine.isEmpty else { return nil }
+            let rows = mine.map {
+                MenuEntry.agent(settings.id, account: $0.id, isResolved: resolved[settings.id] == $0.id)
+            }
+            return mine.count == 1 ? rows[0] : .submenu(settings.id, rows)
+        }
+    }
 }

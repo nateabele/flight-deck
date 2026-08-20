@@ -17,6 +17,12 @@ import OSLog
 ///  - `projects/`     — transcripts, read by `TranscriptWatcher` in place of
 ///                      `~/.claude/projects`. Supplies the sub-agent fan-out counts, and
 ///                      keeps a fixture run from reading the real transcript tree at all.
+///
+/// Those two roots are passed to `SessionStore` as *overrides*, and they retarget every
+/// account — not the built-in one. Each account otherwise derives its own roots from its home,
+/// so a fixture that covered only the login it knew about would leave a second account's
+/// watcher on the developer's real `~/.claude`, which is the corruption this type exists to
+/// prevent.
 ///  - `shell`         — an executable the seeded sessions run instead of the login shell.
 ///
 /// That last one is not a nicety. A session normally launches the user's login shell, whose

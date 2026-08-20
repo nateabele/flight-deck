@@ -281,8 +281,11 @@ The empty state stops saying "override its Claude options."
 
 The sidebar button gains a chevron on its right: a menu of every agent, each listing its accounts
 beneath when it has more than one, with a checkmark on whatever the project currently resolves
-to. The same menu hangs off the app's New Session menu item, which `258dc2f` already moved into
-AppKit so its contents can change at runtime.
+to. The app's New Session menu item renders the same entries — it is SwiftUI
+(`SessionCommands.swift`), not AppKit; `258dc2f` never touched it (that commit built the *Tools*
+menu, over `AppDelegate.swift`/`RootView.swift`/`Sources/FlightDeck/Tools/*`). The per-project
+agent ordering this menu needs is delivered through `SessionCommands` reading
+`agentOrder(forProject:)`, not through moving the menu into AppKit.
 
 ⌘N and its siblings keep launching the project's resolved default. The dropdown is for
 departures, not for the common case.

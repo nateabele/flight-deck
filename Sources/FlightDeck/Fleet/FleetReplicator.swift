@@ -30,6 +30,13 @@ protocol FleetRecording: AnyObject {
 /// constructions across the suite — so a mutation is caught immediately if the code path
 /// that exercises it also runs under one of those files, and not otherwise. Do not remove
 /// it before the encapsulation replaces it.
+///
+/// That narrowness is why a feature landing new mutation sites has to bring the check to
+/// them rather than assume it is already there. Agent accounts is the worked example:
+/// signing in, refusing a launch, restoring a tab whose login was deleted, and tearing down
+/// a per-account watcher are all new ways `repos`/`statuses` move, and none of the account
+/// suites attach a replicator — `FleetAccountEmissionTests` exists solely to run those four
+/// paths under this check.
 @MainActor
 final class FleetReplicator: FleetRecording {
     enum Resume: Equatable {

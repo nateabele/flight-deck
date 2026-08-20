@@ -239,7 +239,7 @@ final class CodexIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: indexDir) }
         let index = indexDir.appendingPathComponent("session_index.jsonl")
         FileManager.default.createFile(atPath: index.path, contents: Data())
-        store.codexIndexURL = index
+        store.codexIndexURLOverride = index
 
         XCTAssertTrue(store.restore(directoryExists: { _ in true }))
         XCTAssertTrue(store.hasCodexStackForTesting,
@@ -257,7 +257,7 @@ final class CodexIntegrationTests: XCTestCase {
         XCTAssertEqual(injector.sent, ["codex resume \(existing.uuidString.lowercased())"])
 
         // The assertions above hold whether or not the heal exists: `hasCodexStackForTesting`
-        // above flips true from `resumeRestoredCodex`'s own `self.adapter(for: .codex)`
+        // above flips true from `resumeRestoredCodex`'s own `self.adapter(for: instance)`
         // fallback line — reached before the heal ever runs — and the pin/injector checks
         // only prove `startCodex()` failed and the tab degraded to its pin, not that anything
         // got re-attached. What the heal is actually responsible for is which *runtime
@@ -270,7 +270,7 @@ final class CodexIntegrationTests: XCTestCase {
         // — an orphaned object whose watchers nothing reads. Deleting the heal block and
         // re-running this test confirms exactly that: this assertion goes red while every
         // assertion above it stays green.
-        let currentRuntime = try XCTUnwrap(store.runtime(for: .codex) as? CodexRuntime,
+        let currentRuntime = try XCTUnwrap(store.runtime(for: .codex, account: nil) as? CodexRuntime,
             "codex's runtime is always a CodexRuntime; draining its watchers below is how a "
             + "real rename reaches it, which is not part of the shared AgentRuntime protocol")
         // Prime, then append: the name watcher starts at end of file, so a line already
@@ -334,7 +334,7 @@ final class CodexIntegrationTests: XCTestCase {
                           "needs a logged-in codex: ~/.codex/auth.json")
         try FileManager.default.copyItem(at: auth, to: home.appendingPathComponent("auth.json"))
 
-        let transport = CodexProcessTransport(environment: ["CODEX_HOME": home.path])
+        let transport = CodexProcessTransport(home: home)
         try transport.start()
         defer { transport.stop() }
         let rpc = CodexRPC(transport: transport)
@@ -439,7 +439,7 @@ final class CodexIntegrationTests: XCTestCase {
         // The FIRST app-server: the one whose `CodexAdapter.prepare` creates, names, and
         // must un-stick the thread. Left running for the whole test — proving the release
         // works without it exiting is the entire point.
-        let creator = CodexProcessTransport(environment: ["CODEX_HOME": home.path])
+        let creator = CodexProcessTransport(home: home)
         try creator.start()
         defer { creator.stop() }
         let creatorRPC = CodexRPC(transport: creator)
@@ -453,7 +453,7 @@ final class CodexIntegrationTests: XCTestCase {
         // The SECOND app-server: a fresh connection that never created this thread, standing
         // in for the `codex resume <id>` TUI production spawns in its own pty. If the writer
         // lock were still held, this fails with the exact error quoted above.
-        let resumer = CodexProcessTransport(environment: ["CODEX_HOME": home.path])
+        let resumer = CodexProcessTransport(home: home)
         try resumer.start()
         defer { resumer.stop() }
         let resumerRPC = CodexRPC(transport: resumer)

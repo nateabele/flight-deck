@@ -147,15 +147,22 @@ to session-encounter order with every project expanded.
 Sidebar rows show what each Claude session is doing. Two sources feed one map:
 
 ```
-~/.claude/sessions/<pid>.json ──> SessionStatusWatcher ──┐
-  (Claude's own status registry,   (one per app, 500ms    │
-   polled; see the design spec)     poll, keyed by         ├──> SessionStore.statuses
-                                    sessionId)             │      [UUID: SessionStatus]
-<transcript>.jsonl ──────────────> TranscriptWatcher ─────┘             │
-  (outstanding Agent tool_use ids,  (one per session)                   v
-   cleared at each turn boundary)                              SessionStatusIcon
-                                                               SessionNotifier
+<account home>/sessions/<pid>.json ──> SessionStatusWatcher ──┐
+  (Claude's own status registry,        (one per claude        │
+   polled; see the design spec)          account, 500ms poll,  ├──> SessionStore.statuses
+                                         keyed by sessionId)    │      [UUID: SessionStatus]
+<transcript>.jsonl ────────────────────> TranscriptWatcher ────┘             │
+  (outstanding Agent tool_use ids,        (one per session)                  v
+   cleared at each turn boundary)                                   SessionStatusIcon
+                                                                     SessionNotifier
 ```
+
+`<account home>` is `CLAUDE_CONFIG_DIR` for that session's account (`~/.claude` for the
+built-in login) — resolved once per tab from the account the launching session runs as, not
+a fixed constant. Before the 2026-08-19 accounts work every tab shared one app-wide watcher
+rooted at `~/.claude/sessions`; now `SessionStore` keeps one `SessionStatusWatcher` per claude
+account (`statusWatchers[account]`), built on first tab and stopped when that account's last
+claude tab closes, so two logins' registries are never merged into one scan.
 
 - **`ClaudeStatusFile`** — pure decode of one registry file. Fails closed: an unknown
   `status`, a torn read, or a pid/filename mismatch all yield nil, and the watcher keeps
@@ -308,6 +315,20 @@ deferred:
 fresh, and assert the two agree. It is an interim measure, not the design, but it is not
 decorative either: it caught five real defects during this plan's own execution. It must not be
 removed before the encapsulation replaces it.
+
+**Accounts are deliberately not fleet state.** An account *is* a config directory —
+`CLAUDE_CONFIG_DIR` / `CODEX_HOME`, where that login's credentials live — so `WireSession`
+carries no account field and `FleetProjection` never reads `Session.accountID`, not even as an
+opaque id. The wire already refuses `transcriptDirectory`, `transcriptPath` and
+`pinnedConversationID` for the weaker reason that they are Mac path details; a config home is
+the credential-adjacent case of the same rule, and `FleetAccountEmissionTests` pins it against
+the serialized snapshot rather than field by field so a later addition to `WireSession` cannot
+quietly reintroduce it. Nothing is lost by the omission: `accountID` is stamped once at
+creation and never mutated, so there is no account change for an event to describe, and a
+client that cannot open the Mac's filesystem has nothing to do with a home path anyway.
+The one thing a phone *can* see is second-order — an orphaned tab (its login deleted between
+runs) is restored but never launched, so it replicates as a session with `activity: nil`,
+exactly like any other tab with no agent process behind it.
 
 **One socket carries everything, because there is no HTTP tier to split it across.**
 Network.framework has no HTTP server, and a listener carrying `NWProtocolWebSocket` can only

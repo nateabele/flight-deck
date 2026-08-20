@@ -97,32 +97,15 @@ final class CodexNameWatcherTests: XCTestCase {
         XCTAssertEqual(seen, ["good"])
     }
 
-    /// Codex honours `CODEX_HOME`; a watcher that ignored it would tail a file codex is not
-    /// writing and report nothing, forever, with no error. `defaultIndexURL` only supplies
-    /// the ambient environment to `indexURL(codexHome:home:)`, which is what actually
-    /// decides — tested directly below so both branches run regardless of whether
-    /// `CODEX_HOME` happens to be set in this test process.
-    func testTheDefaultPathFollowsCodexHome() {
+    /// The index is derived from a home the caller names — a watcher pointed at the wrong
+    /// `CODEX_HOME` tails a file codex is not writing and reports nothing, forever, with no
+    /// error. This pins the fallback the account-less callers get; the per-account half, and
+    /// why reading `CODEX_HOME` out of Flight Deck's own environment here was a bug, are in
+    /// `AccountObservationRootTests`.
+    func testTheDefaultPathIsTheBuiltInHomesIndex() {
         let url = CodexNameWatcher.defaultIndexURL
+        XCTAssertEqual(url, CodexNameWatcher.indexURL(forHome: AgentID.codex.builtInHome))
         XCTAssertEqual(url.lastPathComponent, "session_index.jsonl")
-    }
-
-    func testIndexURLUsesCodexHomeWhenSet() {
-        let url = CodexNameWatcher.indexURL(codexHome: "/custom/codex-home",
-                                            home: URL(fileURLWithPath: "/Users/someone"))
-        XCTAssertEqual(url.path, "/custom/codex-home/session_index.jsonl")
-    }
-
-    func testIndexURLExpandsATildeInCodexHome() {
-        let url = CodexNameWatcher.indexURL(codexHome: "~/elsewhere",
-                                            home: URL(fileURLWithPath: "/Users/someone"))
-        XCTAssertFalse(url.path.hasPrefix("~"), "a literal tilde would fail to tail anything")
-        XCTAssertTrue(url.path.hasSuffix("/elsewhere/session_index.jsonl"))
-    }
-
-    func testIndexURLFallsBackToDotCodexUnderHomeWhenUnset() {
-        let url = CodexNameWatcher.indexURL(codexHome: nil,
-                                            home: URL(fileURLWithPath: "/Users/someone"))
-        XCTAssertEqual(url.path, "/Users/someone/.codex/session_index.jsonl")
+        XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, ".codex")
     }
 }
