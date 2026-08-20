@@ -4,7 +4,7 @@
 
 **Goal:** Replicate the live fleet — projects, sessions, status, sub-agent count, unread — out of `SessionStore` to a remote client over one mutually-authenticated WebSocket, with resume, and prove it end-to-end without a phone.
 
-**Architecture:** A new `FleetKit` framework, built for **both** macOS and iOS from one source directory, holds the wire value types, the event fold, snapshot application, the frame codec, the TLS-PSK parameter factory, and both socket halves. It imports `Foundation` and `Network` and nothing else — the iOS slice is what enforces that. `SessionStore` gains one optional sink (`replicator`, injected exactly like `notifier`) that every fleet-state mutation reports to; `FleetReplicator` keeps a mirror snapshot plus a bounded ring, and in DEBUG asserts the mirror still equals a fresh projection of the store after every batch. That assertion is the only thing standing between a new mutation site and a silently stale client.
+**Architecture:** A new `FleetKit` framework, built for **both** macOS and iOS from one source directory, holds the wire value types, the event fold, snapshot application, the frame codec, the TLS-PSK parameter factory, and both socket halves. It imports `Foundation`, `Network` and `Security` and nothing else — the iOS slice is what enforces that. `SessionStore` gains one optional sink (`replicator`, injected exactly like `notifier`) that every fleet-state mutation reports to; `FleetReplicator` keeps a mirror snapshot plus a bounded ring, and in DEBUG asserts the mirror still equals a fresh projection of the store after every batch. That assertion is the only thing standing between a new mutation site and a silently stale client.
 
 **Tech Stack:** Swift 6 (FleetKit) / Swift 5 (app) / Network.framework / XCTest / xcodegen + xcodebuild.
 
@@ -33,7 +33,7 @@
 
 This task delivers no behaviour. It exists because every wiring hazard in the plan lives here, and finding them at Task 11 instead of Task 1 is what makes a plan overrun: a new framework target, its Swift-6 override, embedding into the app, the test bundle's `@rpath` lookup, and an iOS slice compiled from the same sources. One trivial public type is enough to prove all five.
 
-The iOS framework target is not premature. It is the **enforcement mechanism** for the "Foundation and Network only" constraint — a stray `import AppKit` in FleetKit fails `./scripts/build-ios.sh` immediately, where a convention in a doc would be discovered by the phone app weeks later.
+The iOS framework target is not premature. It is the **enforcement mechanism** for the "Foundation, Network and Security only" constraint — a stray `import AppKit` in FleetKit fails `./scripts/build-ios.sh` immediately, where a convention in a doc would be discovered by the phone app weeks later.
 
 **Files:**
 - Create: `Sources/FleetKit/FleetKitVersion.swift`
@@ -116,7 +116,7 @@ Add two targets. They share one source directory deliberately — `PRODUCT_MODUL
         GENERATE_INFOPLIST_FILE: "YES"
 
   # Same sources, iOS slice. This target ships nothing on its own — it is the enforcement
-  # mechanism for "FleetKit imports Foundation and Network only". An `import AppKit` that
+  # mechanism for "FleetKit imports Foundation, Network and Security only". An `import AppKit`
   # slipped into the shared sources compiles fine for macOS and fails here, which is the
   # only cheap way to catch it before the phone app exists. See scripts/build-ios.sh.
   FleetKitiOS:
@@ -3831,7 +3831,7 @@ Add a section in the house voice covering: the two modules and why `FleetKit` is
 In the Layout table:
 
 ```markdown
-| `Sources/FleetKit/` | Wire types, event fold and both socket halves. Swift 6, `Foundation`+`Network` only — compiled for iOS too, which is what enforces that. |
+| `Sources/FleetKit/` | Wire types, event fold and both socket halves. Swift 6, `Foundation`+`Network`+`Security` only — compiled for iOS too, which is what enforces that. |
 | `Sources/FlightDeck/Fleet/` | The desktop side: projection, replicator, and the service that binds the store to the socket. |
 ```
 
