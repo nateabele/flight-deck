@@ -12,3 +12,4 @@ vendor/.build-shim
 scripts/.smoke.log
 scripts/.release-build.log
 .superpowers/
+.claude/
