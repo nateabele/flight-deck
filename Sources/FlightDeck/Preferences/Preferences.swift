@@ -78,6 +78,20 @@ struct Preferences: Codable, Equatable {
     /// An *empty* array is a different thing entirely: it means the user deleted every tool,
     /// and it must stay empty.
     var storedTools: [ToolDefinition]?
+    /// Phones paired to this Mac, each holding the secret its TLS handshake is authenticated
+    /// with. Optional for exactly the reason `confirmations` is — see that property's
+    /// comment; a non-optional field here would fail to decode every existing
+    /// `preferences.v1` blob.
+    ///
+    /// These are secrets in `UserDefaults`, which is a plist readable by anything running as
+    /// this user. That is the same exposure as `sessions.json` and as the agents' own
+    /// credentials, and it matches the trust model in the mobile companion spec §3 — but it
+    /// is deliberately not Keychain-grade, and it is recorded in docs/FOLLOWUPS.md rather
+    /// than left to be discovered.
+    var pairedDevices: [PairedDevice]?
+    /// Minted once per install, and used only to make this Mac's Bonjour instance name
+    /// unique. Optional for the same reason as everything else here — see `confirmations`.
+    var installID: UUID?
 
     init(
         globalFlags: FlagSet = FlagSet(),
@@ -86,7 +100,9 @@ struct Preferences: Codable, Equatable {
         confirmations: ConfirmationPreferences? = nil,
         claude: ClaudePreferences? = nil,
         storedAgents: [AgentSettings]? = nil,
-        storedTools: [ToolDefinition]? = nil
+        storedTools: [ToolDefinition]? = nil,
+        pairedDevices: [PairedDevice]? = nil,
+        installID: UUID? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
@@ -95,6 +111,8 @@ struct Preferences: Codable, Equatable {
         self.claude = claude
         self.storedAgents = storedAgents
         self.storedTools = storedTools
+        self.pairedDevices = pairedDevices
+        self.installID = installID
     }
 
     /// Falls back to claude-then-codex so a `Preferences` that has never been migrated

@@ -48,6 +48,13 @@ carried forward on trust.
 
 ## Deliberate choices worth remembering (not defects)
 
+- **Paired-device secrets (`Preferences.pairedDevices`) live in `UserDefaults`, not the
+  Keychain.** That is a plist in the user's home directory, readable by anything running as
+  them — the same exposure `sessions.json` and the agents' own credentials already have, and
+  it is consistent with the mobile companion spec §3's trust model ("a QR on an unlocked Mac
+  is seen only by someone who could already use the Mac"). It is not Keychain-grade, and
+  someone will eventually ask why. Revisit if paired devices ever need to survive a
+  `defaults delete`, or if the trust model changes to assume a less-trusted local user.
 - **`SWIFT_VERSION: "5.0"`** in `project.yml` (Swift 5 language mode under the Swift 6.3
   compiler) — chosen to compile the vendored Ghostty code without Swift-6 strict-concurrency
   breakage. Diverges from the plan's `6.0`/spec's "Swift 6"; revisit only if Flight Deck's own
