@@ -330,4 +330,39 @@ final class FleetSocketLoopbackTests: XCTestCase {
         wait(for: [closed], timeout: 10)
         connection.cancel()
     }
+
+    /// `cancelConnections()` — walked on every listener restart, which every arm, expiry and
+    /// revocation performs — must fire `onAttachedSlotsChanged` with an empty set for a
+    /// still-attached phone it is dropping, not skip the callback entirely. Skipping it left a
+    /// stale "Connected" badge on screen until the next successful attach happened to
+    /// overwrite the set, which on a restart with nothing yet reconnected never comes.
+    func testAListenerRestartFiresAnEmptySlotSetForAStillAttachedClient() async throws {
+        let key = FleetDeviceKey.mint()
+        let port = try await startServer(key: key, hello: { _, _ in
+            [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)]
+        })
+        let client = connect(key: key, port: port)
+        let attached = expectation(description: "attached")
+        server?.onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
+        wait(for: [attached], timeout: 10)
+
+        let clearedWithEmptySet = expectation(description: "cleared")
+        var firedWith: Set<UUID>?
+        server?.onAttachedSlotsChanged = { slots in
+            firedWith = slots
+            clearedWithEmptySet.fulfill()
+        }
+        // A restart on the same port — the same operation `reloadKeys()` performs on every
+        // arm, expiry and revocation.
+        if let server {
+            _ = try await onMain { try await server.start(keys: [key], port: port) }
+        }
+        wait(for: [clearedWithEmptySet], timeout: 10)
+        XCTAssertEqual(
+            firedWith, Set<UUID>(),
+            "a listener restart must fire the drop, not skip it because nothing sent a frame to notice"
+        )
+
+        client.disconnect()
+    }
 }
