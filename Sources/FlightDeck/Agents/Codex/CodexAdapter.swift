@@ -185,6 +185,13 @@ struct CodexAdapter: AgentAdapter {
         ])
     }
 
+    /// Codex has its own shell-level login subcommand, so signing in is one command with
+    /// nothing to type afterward — unlike claude, which has to be launched and then told
+    /// `/login` from inside a running session.
+    func loginInvocation(for account: AgentAccount) -> LoginInvocation {
+        LoginInvocation(command: "codex login", inject: nil)
+    }
+
     /// A claude payload here is a programming error, not a runtime condition: the store
     /// picks the adapter and the options together. Degrade to defaults rather than trap.
     private func threadOptions(_ options: AgentOptions) -> CodexThreadOptions {

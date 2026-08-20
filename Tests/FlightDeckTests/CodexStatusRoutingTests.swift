@@ -39,6 +39,7 @@ final class CodexStatusRoutingTests: XCTestCase {
         }
 
         func rename(_: AgentBinding, to: String) async throws {}
+        func loginInvocation(for account: AgentAccount) -> LoginInvocation { LoginInvocation(command: "", inject: nil) }
     }
 
     private final class SpyNotifier: Notifying {
