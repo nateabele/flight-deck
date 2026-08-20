@@ -11,6 +11,19 @@ final class PairingPayloadTests: XCTestCase {
         )
     }
 
+    /// The base64url transform, duplicated locally on purpose. `FleetKit`'s own helper is
+    /// `internal`, and widening it to `public` just so one negative assertion could reach it
+    /// would put a `Data` extension into every consumer's namespace — a permanent collision
+    /// risk bought for a single test. The transform is three lines of RFC 4648 §5, and this
+    /// assertion only needs a string to look for rather than production's exact code path;
+    /// the round-trip test above already exercises the real implementation.
+    private func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
     func testAPayloadRoundTrips() throws {
         let original = payload()
         XCTAssertEqual(try PairingPayload(decoding: original.encoded()), original)
@@ -36,7 +49,7 @@ final class PairingPayloadTests: XCTestCase {
         ).encoded()
         XCTAssertFalse(encoded.contains(key.secret.base64EncodedString()),
                        "the body is base64url of JSON; a raw base64 secret would mean it is not")
-        XCTAssertFalse(encoded.contains(key.secret.base64URLEncodedString()),
+        XCTAssertFalse(encoded.contains(base64URL(key.secret)),
                        "the secret is embedded inside JSON that is itself base64url-encoded, " +
                        "so even the base64url form of the raw secret should not appear verbatim")
     }
@@ -67,7 +80,7 @@ final class PairingPayloadTests: XCTestCase {
     /// be read from the prefix, before any decoding.
     func testAFutureShapeIsRejectedAsTooNewNotAsDamaged() throws {
         let alienBody = Data(#"{"v":2,"slotId":"nope","secret":"nope"}"#.utf8)
-        let code = "flightdeck2:" + alienBody.base64URLEncodedString()
+        let code = "flightdeck2:" + base64URL(alienBody)
         XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
             XCTAssertEqual(error as? PairingPayloadError, .unsupportedVersion(2))
         }
@@ -76,9 +89,19 @@ final class PairingPayloadTests: XCTestCase {
     /// A prefix version that disagrees with the body's is a hand-edited code, not a newer one.
     func testAPrefixVersionDisagreeingWithTheBodyIsMalformed() throws {
         let body = Data(#"{"v":7,"slot":"00000000-0000-0000-0000-000000000000","psk":"AAAA","name":"m","svc":"s","eps":[]}"#.utf8)
-        let code = "flightdeck1:" + body.base64URLEncodedString()
+        let code = "flightdeck1:" + base64URL(body)
         XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
             XCTAssertEqual(error as? PairingPayloadError, .malformed)
+        }
+    }
+
+    /// A signed version is malformed input, not a version. `Int` would accept both, which
+    /// would let `flightdeck+1:` pass the gate as though it said `flightdeck1:`.
+    func testASignedVersionIsNotAVersion() {
+        for code in ["flightdeck+1:AAAA", "flightdeck-1:AAAA"] {
+            XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
+                XCTAssertEqual(error as? PairingPayloadError, .notAPairingCode, code)
+            }
         }
     }
 

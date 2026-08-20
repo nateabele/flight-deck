@@ -73,9 +73,14 @@ public struct PairingPayload: Equatable, Sendable {
         let digits = trimmed[
             trimmed.index(trimmed.startIndex, offsetBy: Self.scheme.count)..<colon
         ]
-        guard !digits.isEmpty, let version = Int(digits) else {
-            throw PairingPayloadError.notAPairingCode
-        }
+        // Digits only, not merely `Int`-parseable: `Int` accepts a leading `-` or `+`, so
+        // without this `flightdeck+1:` would sail past the gate as version 1, and
+        // `flightdeck-1:` would be reported as an unsupported version rather than as not a
+        // pairing code at all. `encoded()` never emits either, so both are malformed input.
+        guard !digits.isEmpty,
+              digits.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let version = Int(digits)
+        else { throw PairingPayloadError.notAPairingCode }
         // Before a byte is decoded. A future payload may not parse under this schema at all,
         // and failing it as "damaged" would send the user to show a fresh code when what they
         // actually need is to update the app.
@@ -101,9 +106,8 @@ public struct PairingPayload: Equatable, Sendable {
 
 extension Data {
     /// base64url (RFC 4648 §5): no `+`, `/` or `=`, so the whole code survives being typed,
-    /// pasted, or read aloud without escaping. `public` so tests (plain `import FleetKit`, no
-    /// `@testable`) can assert the secret doesn't appear in this form either.
-    public func base64URLEncodedString() -> String {
+    /// pasted, or read aloud without escaping.
+    func base64URLEncodedString() -> String {
         base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
