@@ -1,5 +1,6 @@
 // Sources/FlightDeck/SessionStore.swift
 import AppKit
+import FleetKit
 import Foundation
 import SwiftUI
 
@@ -44,7 +45,7 @@ final class SessionStore: ObservableObject {
             // Activating a tab is what marks it read. Deliberately not gated on
             // `appIsActive()`: selecting a row is an explicit act, so it counts as looking
             // at it even if the window is not frontmost at that instant.
-            if let id = selectedSessionID { unreadIdle.remove(id) }
+            if let id = selectedSessionID { setUnread(id, false) }
             // Safety net against a stranded `renameRequest`: `SessionSidebar`'s Return
             // handler only sets it for a session with a rendered row, but the selection
             // it was issued for can still move out from under it afterward — collapsing
@@ -762,6 +763,47 @@ final class SessionStore: ObservableObject {
     /// Test seam. Production sets this from the convenience init.
     var notifier: Notifying?
 
+    /// Where fleet changes are reported for replication to paired devices. Optional and nil
+    /// by default, exactly like `notifier`: nearly every test builds a store with no client
+    /// attached and must not be made to care.
+    ///
+    /// **If you add a mutation to `repos`, `statuses` or `unreadIdle`, it must `emit` its
+    /// event.** Forgetting leaves every connected phone silently wrong until it reconnects —
+    /// nothing crashes and no existing test fails. `FleetReplicator`'s DEBUG drift check is
+    /// what turns that omission into a failure; see
+    /// docs/superpowers/specs/2026-08-18-fleet-state-encapsulation-design.md for the
+    /// structural fix that will eventually make it unwriteable.
+    var replicator: (any FleetRecording)?
+
+    private func emit(_ events: [FleetEvent]) {
+        guard let replicator, !events.isEmpty else { return }
+        replicator.record(events)
+    }
+
+    private func emit(_ events: FleetEvent...) { emit(events) }
+
+    /// The only writer of `unreadIdle`.
+    ///
+    /// Not style. There were seven `insert`/`remove` sites — a selection `didSet`, restore,
+    /// `markUnread`, `closeSession`, `applyReadState`, app activation, and a test seam — and
+    /// each one having to remember an event is the omission this whole mechanism is trying
+    /// to make impossible. Returning early on an unchanged flag also keeps a client from
+    /// receiving an event per poll for a session that has been unread for an hour.
+    @discardableResult
+    private func setUnread(_ id: UUID, _ isUnread: Bool) -> Bool {
+        let changed = isUnread
+            ? unreadIdle.insert(id).inserted
+            : unreadIdle.remove(id) != nil
+        guard changed else { return false }
+        emit(.unreadChanged(id: id, isUnread: isUnread))
+        return true
+    }
+
+    /// The wire form of a session as it stands right now.
+    private func wire(_ session: Session) -> WireSession {
+        FleetProjection.project(session, status: statuses[session.id], unread: unreadIdle)
+    }
+
     /// How a refused session creation reaches the user. Defaulted rather than injected
     /// because every caller wants the same alert, and overridable so no test ever puts a
     /// panel on screen. See `AgentLaunchFailureReporting`.
@@ -1218,8 +1260,9 @@ final class SessionStore: ObservableObject {
         // than going through `newSession`, precisely so a project's persisted collapsed state
         // survives relaunch undisturbed. Moving this expansion down into `insertSession` would
         // spring every restored collapsed project open on the next launch.
-        if let target = indexOfRepo(for: url) {
+        if let target = indexOfRepo(for: url), repos[target].isCollapsed {
             repos[target].isCollapsed = false
+            emit(.projectCollapsed(id: repos[target].id, isCollapsed: false))
         }
         selectedSessionID = session.id
         persist()
@@ -1449,14 +1492,24 @@ final class SessionStore: ObservableObject {
         } else {
             repos.append(Repo(url: url))
             repoIndex = repos.count - 1
+            // Emitted here, before the session goes in, so a client never receives a
+            // `sessionAdded` naming a project it has not been told about.
+            emit(.projectAdded(
+                FleetProjection.project(repos[repoIndex], statuses: statuses, unread: unreadIdle),
+                at: repoIndex
+            ))
         }
         // `index` is a position within this repo's sessions; out-of-range falls back to
         // appending so a stale index can never trap.
+        let insertedAt: Int
         if let index, index >= 0, index <= repos[repoIndex].sessions.count {
             repos[repoIndex].sessions.insert(session, at: index)
+            insertedAt = index
         } else {
             repos[repoIndex].sessions.append(session)
+            insertedAt = repos[repoIndex].sessions.count - 1
         }
+        emit(.sessionAdded(wire(session), project: repos[repoIndex].id, at: insertedAt))
 
         var config = Ghostty.SurfaceConfiguration()
         config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
@@ -1649,7 +1702,7 @@ final class SessionStore: ObservableObject {
             // were actually rebuilt — a session whose directory has gone has no row to draw a
             // mark on. Before the `selectedSessionID` assignment below on purpose: its
             // `didSet` clears the mark for the tab you land on, which is correct.
-            if entry.unread == true { unreadIdle.insert(entry.id) }
+            if entry.unread == true { setUnread(entry.id, true) }
 
             // `!orphaned`: offering to continue a tab that cannot be launched at all would
             // put the wrong-login resume one click behind a prompt the app raised itself.
@@ -1685,6 +1738,10 @@ final class SessionStore: ObservableObject {
         // session on top of a restored project list would be wrong. (`seedInitialSession`
         // guards on `repos.isEmpty` too, so this is belt and braces — but the return value is
         // also read by tests, and it should mean what it says.)
+        // The fleet was replaced, not changed. There is no event sequence that describes
+        // that, and emitting one per restored row would be a lie about what happened — so
+        // the replicator re-reads and anyone behind is sent back for a snapshot.
+        replicator?.reset()
         return !restoredIDs.isEmpty || !repos.isEmpty
     }
 
@@ -1886,7 +1943,19 @@ final class SessionStore: ObservableObject {
     /// Persists immediately, same as `rename(_:to:)`: unread marks are meant to survive a
     /// relaunch (see `unreadIdle`'s doc comment), so there is no "mark now, save later" here.
     func markUnread(_ id: UUID) {
-        unreadIdle.insert(id)
+        setUnread(id, true)
+        persist()
+    }
+
+    /// The counterpart to `markUnread`, and the store method the phone's `markRead` command
+    /// lands on.
+    ///
+    /// Added here rather than special-cased in the replicator on purpose: anything the phone
+    /// can do, the Mac's own UI should be able to do, and a command with no store method
+    /// behind it is a feature that exists on one device only. Writes through `setUnread`, so
+    /// `unreadIdle` keeps its single writer.
+    func markRead(_ id: UUID) {
+        setUnread(id, false)
         persist()
     }
 
@@ -1927,6 +1996,7 @@ final class SessionStore: ObservableObject {
         // gone there is nothing left to ask which account this tab was running as.
         let closed = instance(for: repos[repoIndex].sessions[sessionIndex])
         repos[repoIndex].sessions.remove(at: sessionIndex)
+        emit(.sessionRemoved(id: id))
 
         // Detach and park rather than release. Two reasons this is not just `= nil`:
         //
@@ -1965,7 +2035,12 @@ final class SessionStore: ObservableObject {
         // mark now outlives its process. But closing a tab removes its id from `repos`
         // entirely, so no future tick will ever see it again; leaving the mark in
         // `unreadIdle` here would leak it forever rather than merely have it persist.
-        unreadIdle.remove(id)
+        // Runs after `emit(.sessionRemoved(id:))` above, so a session that was unread emits
+        // a real `.unreadChanged` for an id the mirror has already dropped. That is not
+        // drift: `.unreadChanged` for an unknown id is a no-op by contract on the receiving
+        // side, and the store's own projection has no such session either — both sides
+        // agree once the batch settles.
+        setUnread(id, false)
         // Closing the row is the most literal case of "a prompt that will never resolve",
         // and applyRegistry cannot observe the waiting -> gone edge here because both its
         // before and after snapshots already lack this id.
@@ -2188,6 +2263,7 @@ final class SessionStore: ObservableObject {
         }
         // Re-found rather than reusing `index`: every `closeSession` above rewrote `repos`.
         repos.removeAll { $0.id == id }
+        emit(.projectRemoved(id: id))
         persist()
     }
 
@@ -2201,6 +2277,7 @@ final class SessionStore: ObservableObject {
         guard let index = repos.firstIndex(where: { $0.id == id }),
               repos[index].isCollapsed != isCollapsed else { return }
         repos[index].isCollapsed = isCollapsed
+        emit(.projectCollapsed(id: id, isCollapsed: isCollapsed))
         persist()
     }
 
@@ -2210,8 +2287,27 @@ final class SessionStore: ObservableObject {
         guard let updated = SidebarReorder.apply(
             to: repos, rows: sidebarRows, from: source, to: destination
         ) else { return }
+        let before = repos
         repos = updated
+        emitReorder(from: before, to: updated)
         persist()
+    }
+
+    /// A reorder is the one mutation whose input is already a whole rebuilt array — the
+    /// policy lives in `SidebarReorder` and hands back `[Repo]`, not a move. Comparing the
+    /// two is therefore describing what the caller did, not the store-wide diffing the
+    /// design rejected: the comparison is bounded by one gesture.
+    private func emitReorder(from before: [Repo], to after: [Repo]) {
+        if before.map(\.id) != after.map(\.id) {
+            emit(.projectsReordered(order: after.map(\.id)))
+        }
+        for repo in after {
+            guard
+                let old = before.first(where: { $0.id == repo.id }),
+                old.sessions.map(\.id) != repo.sessions.map(\.id)
+            else { continue }
+            emit(.sessionsReordered(project: repo.id, order: repo.sessions.map(\.id)))
+        }
     }
 
     /// The one status a collapsed project header shows: the most demanding thing any child
@@ -2235,8 +2331,13 @@ final class SessionStore: ObservableObject {
     /// Test seam. Production statuses arrive through `applyRegistry`, which takes registry
     /// rows keyed by pid; a test that only cares about the sidebar's reading of a status
     /// should not have to fabricate those.
+    ///
+    /// Routed through `commitStatuses` rather than writing `statuses` directly: this seam
+    /// is a stand-in for a registry tick, and a tick that skipped read-state, notifications
+    /// and replication would make every test built on it exercise a path production never
+    /// takes.
     func applyRegistryForTesting(_ next: [UUID: SessionStatus]) {
-        statuses = next
+        commitStatuses(next)
     }
 
     /// Test seams. Production drives both from `applyRegistry`; a test that only cares about
@@ -2249,7 +2350,7 @@ final class SessionStore: ObservableObject {
     /// Test seam. Production marks come from `applyReadState` and from restore; a test that
     /// only cares about how a mark is *pruned* should not have to script an edge to create it.
     func markUnreadForTesting(_ ids: Set<UUID>) {
-        unreadIdle.formUnion(ids)
+        for id in ids { setUnread(id, true) }
     }
 
     /// Test seam. Production leaves this nil and injection goes to the live surface.
@@ -2316,6 +2417,7 @@ final class SessionStore: ObservableObject {
         else { return }
 
         repos[at.repo].sessions[at.session].title = name
+        emit(.renamed(id: id, title: name, origin: .user))
         persist()
 
         let session = repos[at.repo].sessions[at.session]
@@ -2496,6 +2598,7 @@ final class SessionStore: ObservableObject {
         else { return }
 
         repos[at.repo].sessions[at.session].title = name
+        emit(.renamed(id: id, title: name, origin: .agent))
         persist()
     }
 
@@ -2538,6 +2641,8 @@ final class SessionStore: ObservableObject {
     }
 
     func status(for id: UUID) -> SessionStatus? { statuses[id] }
+
+    func sessionExists(_ id: UUID) -> Bool { locate(id) != nil }
 
     /// Switches registry polling on and covers the tabs that already exist. Called from the
     /// production convenience init only, so tests using `init(provider:persistence:)` never
@@ -2736,6 +2841,15 @@ final class SessionStore: ObservableObject {
         let transitions = Set(previous.keys).union(next.keys).map {
             StatusTransition(id: $0, old: previous[$0], new: next[$0])
         }
+        // Emitted first, ahead of `applyReadState`: `statuses` above is already mutated for
+        // every session in this tick, so the fleet's activity fields are already "actual"
+        // before any event has recorded them. `applyReadState` below records its own event
+        // per transition as it goes (through `setUnread`), and the DEBUG drift check runs
+        // after every one of those — if it ran before this, it would catch the live
+        // activity having changed with no event on the wire for it yet, which is real
+        // drift, just not a bug: the fix is recording activity first, not silencing the
+        // check.
+        emitActivity(transitions)
         applyReadState(transitions)
         deliverNotifications(transitions)
         cancelSupersededPrompts(transitions)
@@ -2758,9 +2872,9 @@ final class SessionStore: ObservableObject {
             case .none:
                 continue
             case .mark:
-                unreadIdle.insert(transition.id)
+                setUnread(transition.id, true)
             case .clear:
-                unreadIdle.remove(transition.id)
+                setUnread(transition.id, false)
             }
         }
     }
@@ -2784,6 +2898,23 @@ final class SessionStore: ObservableObject {
                 notifier.withdraw(sessionID: transition.id)
             }
         }
+    }
+
+    /// The fourth consumer of a tick's transitions. Reads off the same diff the other three
+    /// do, so a status a client sees is by construction the status that drove the sidebar,
+    /// the notification and the prompt cancellation.
+    private func emitActivity(_ transitions: [StatusTransition]) {
+        let changed = transitions.filter { $0.old != $0.new }
+        emit(changed.map { transition in
+            .activityChanged(
+                id: transition.id,
+                // nil rather than "idle": no status means no agent process, and the two
+                // render differently.
+                activity: transition.new?.activity.rawValue,
+                waitingFor: transition.new?.waitingFor,
+                subagentCount: transition.new?.subagentCount ?? 0
+            )
+        })
     }
 
     /// Click-to-activate. The window ordering is the AppDelegate's job; this only moves
@@ -2813,7 +2944,7 @@ final class SessionStore: ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let id = self.selectedSessionID else { return }
-                self.unreadIdle.remove(id)
+                self.setUnread(id, false)
             }
         }
     }
@@ -2849,6 +2980,10 @@ final class SessionStore: ObservableObject {
         guard var status = statuses[id] else { return }
         status.subagentCount = count
         statuses[id] = status
+        emit(.activityChanged(
+            id: id, activity: status.activity.rawValue,
+            waitingFor: status.waitingFor, subagentCount: status.subagentCount
+        ))
     }
 
     private func injector(for id: UUID) -> TextInjecting? {
@@ -2980,25 +3115,41 @@ final class SessionStore: ObservableObject {
         guard Self.comparablePath(repos[at.repo].url.path)
                 != Self.comparablePath(target.path) else { return }
 
-        var session = repos[at.repo].sessions.remove(at: at.session)
-        // Stored as reported, not as compared: normalization is for deciding *whether* to
-        // move. `transcriptDirectory` is not touched — where `claude` writes has nothing to
-        // do with which project the user files this tab under.
-        session.workingDirectory = target.path
-
-        // Resolved after the removal so the index cannot be stale. Removing a *session*
-        // never removes a repo, so `at.repo` stays valid either way.
+        // Resolved before the removal below, and its `projectAdded` emitted immediately —
+        // not because the index would go stale otherwise (removing a *session* never removes
+        // a repo, so `at.repo` stays valid either way), but because the removal and the
+        // append are one logical move with no event of their own until `sessionMoved` below.
+        // Letting `projectAdded` land between them would emit it against a store that has
+        // already lost the session from its source project, one event ahead of where the
+        // folded mirror is — exactly the momentary mismatch the drift check exists to catch.
         let destination: Int
         if let existing = indexOfRepo(for: target) {
             destination = existing
         } else {
             repos.append(Repo(url: target))
             destination = repos.count - 1
+            emit(.projectAdded(
+                FleetProjection.project(repos[destination], statuses: statuses, unread: unreadIdle),
+                at: destination
+            ))
         }
+
+        var session = repos[at.repo].sessions.remove(at: at.session)
+        // Stored as reported, not as compared: normalization is for deciding *whether* to
+        // move. `transcriptDirectory` is not touched — where `claude` writes has nothing to
+        // do with which project the user files this tab under.
+        session.workingDirectory = target.path
         repos[destination].sessions.append(session)
+        emit(.sessionMoved(
+            id: id, project: repos[destination].id,
+            at: repos[destination].sessions.count - 1
+        ))
         // Same reasoning as `newSession`: a session landing in a collapsed destination must
         // make that destination visible, or the move is invisible in the sidebar.
-        repos[destination].isCollapsed = false
+        if repos[destination].isCollapsed {
+            repos[destination].isCollapsed = false
+            emit(.projectCollapsed(id: repos[destination].id, isCollapsed: false))
+        }
 
         if selectedSessionID == id { lastActiveProjectURL = target }
         persist()
