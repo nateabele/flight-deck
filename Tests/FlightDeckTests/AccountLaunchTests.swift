@@ -235,6 +235,34 @@ final class AccountLaunchTests: XCTestCase {
         )
     }
 
+    /// The default account's variable is written out, not left implicit.
+    ///
+    /// `CLAUDE_CONFIG_DIR=~/.claude` is exactly equivalent to setting nothing, which makes
+    /// "skip it for the built-in account" a tempting simplification — and a silent one, since
+    /// every other test here uses a *configured* account and would still pass. It is not
+    /// equivalent: unset means the agent inherits whatever Flight Deck itself was launched
+    /// with, so a Flight Deck started from a shell that exports `CLAUDE_CONFIG_DIR` would put
+    /// every default-account tab on someone else's login. Always stating it removes the
+    /// inheritance entirely.
+    func testTheDefaultAccountsVariableIsStatedExplicitlyRatherThanInherited() {
+        let builtIn = AgentAccount(
+            agent: .claude, displayName: "Default", home: AgentID.claude.builtInHome
+        )
+        let preferences = PreferencesStore(persistence: nil)
+        preferences.preferences.storedAccounts = [builtIn]
+        let provider = RecordingProvider()
+        retained.append(provider)
+        let store = makeStore(preferences, provider: provider)
+
+        store.newSession(in: projectURL)
+
+        XCTAssertEqual(
+            provider.configs.last?.environmentVariables["CLAUDE_CONFIG_DIR"],
+            AgentID.claude.builtInHome.path,
+            "the built-in home must be spelled out, never left to the launch environment"
+        )
+    }
+
     /// A restored tab is launched too, and under the login it was created with rather than
     /// today's default — `restore` goes through the same `insertSession`.
     func testARestoredTabIsRelaunchedUnderTheAccountItWasCreatedWith() {
