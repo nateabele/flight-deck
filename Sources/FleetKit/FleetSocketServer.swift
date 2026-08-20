@@ -82,9 +82,18 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// server's deadline firing does nothing, and the receive loop's strong capture of
     /// `connection` keeps the socket alive with nothing left able to cancel it.
     private var pending: [UUID: NWConnection] = [:]
+    /// The paired slot each connection turned out to belong to, by connection id. Resolved
+    /// once, from `identities`, the first time a connection's slot is asked for, and kept
+    /// because the identity log is a handshake-time record that is consumed on read — see
+    /// `slot(of:id:)`.
+    private var slots: [UUID: UUID] = [:]
+    /// What each peer's handshake said it was. Written by the PSK selection block that
+    /// `FleetTLS.listenerParameters(keys:identities:)` installs, on this same `queue`.
+    private let identities: FleetPSKIdentities
 
     public init(queue: DispatchQueue = .main) {
         self.queue = queue
+        self.identities = FleetPSKIdentities(queue: queue)
     }
 
     /// `port: nil` asks the OS for one, which is what the tests use. Returns the port
@@ -137,7 +146,7 @@ public final class FleetSocketServer: @unchecked Sendable {
         continuation: CheckedContinuation<NWEndpoint.Port, Error>
     ) {
         let parameters = FleetSocket.webSocketParameters(
-            FleetTLS.listenerParameters(keys: keys)
+            FleetTLS.listenerParameters(keys: keys, identities: identities)
         )
         let listener: NWListener
         do {
@@ -257,6 +266,12 @@ public final class FleetSocketServer: @unchecked Sendable {
         attached.removeAll()
         for connection in pending.values { connection.cancel() }
         pending.removeAll()
+        // Both tables are keyed to connections that no longer exist: `slots` to the ones just
+        // cancelled, `identities` to handshakes against the listener being torn down. Leaving
+        // either would be a slow leak across the arm/expiry/revoke cycle, which restarts the
+        // listener every time.
+        slots.removeAll()
+        identities.removeAll()
         if hadAttachments { onAttachedSlotsChanged?([]) }
     }
 
@@ -316,31 +331,41 @@ public final class FleetSocketServer: @unchecked Sendable {
         }
     }
 
-    /// Recovers the PSK identity TLS negotiated, which is the paired slot's UUID.
+    /// Which paired slot this connection's peer holds the key for — the PSK identity its
+    /// handshake offered, which is the slot's UUID (`FleetDeviceKey.identity`).
     ///
-    /// The alternative — having the client name its own slot in `hello` — would let a
-    /// client mislabel which of the user's phones is attached. It cannot forge access
-    /// either way (TLS already proved it holds a paired key), so this is about attribution,
-    /// not authorization.
-    private func slot(of connection: NWConnection) -> UUID? {
+    /// Read from `identities`, filed by the PSK selection block during the handshake, and
+    /// **not** from `sec_protocol_metadata_access_pre_shared_keys`. That accessor answers a
+    /// different question than its name suggests — "the PSKs supported by the local instance",
+    /// i.e. every key on the listener — so with two paired devices it returned both, in
+    /// registration order, for every connection alike, and this method returned whichever was
+    /// registered last no matter who was on the other end. See `FleetPSKIdentities`.
+    ///
+    /// Resolved once and cached in `slots`: `take` consumes the handshake record, and the
+    /// answer is asked for more than once per connection (every frame, and again for every
+    /// recomputation of the attached set).
+    ///
+    /// The alternative — having the client name its own slot in `hello` — would let a client
+    /// mislabel which of the user's phones is attached. It cannot forge access either way (TLS
+    /// already proved it holds a paired key), so this is about attribution, not authorization.
+    private func slot(of connection: NWConnection, id: UUID) -> UUID? {
+        if let known = slots[id] { return known }
         guard
             let tls = connection.metadata(definition: NWProtocolTLS.definition)
-                as? NWProtocolTLS.Metadata
+                as? NWProtocolTLS.Metadata,
+            let identity = identities.take(tls.securityProtocolMetadata),
+            let slot = UUID(uuidString: String(decoding: identity, as: UTF8.self))
         else { return nil }
-        var identity: Data?
-        sec_protocol_metadata_access_pre_shared_keys(tls.securityProtocolMetadata) { _, pskIdentity in
-            identity = Data(pskIdentity as DispatchData)
-        }
-        guard let identity else { return nil }
-        return UUID(uuidString: String(decoding: identity, as: UTF8.self))
+        slots[id] = slot
+        return slot
     }
 
     /// The value `onAttachedSlotsChanged` is fired with: every currently-attached
     /// connection's slot, dropping the ones whose PSK identity could not be read back —
-    /// same distinction `FleetAttachment.slot` documents, just recomputed over all of
+    /// same distinction `FleetAttachment.slot` documents, just gathered over all of
     /// `attached` instead of one connection.
     private func attachedSlots() -> Set<UUID> {
-        Set(attached.values.compactMap(slot(of:)))
+        Set(attached.keys.compactMap { slots[$0] })
     }
 
     private func accept(_ connection: NWConnection) {
@@ -374,7 +399,7 @@ public final class FleetSocketServer: @unchecked Sendable {
             // concurrent or background queue would turn those into silent races rather than a
             // compile error. Fail on the first connection instead.
             dispatchPrecondition(condition: .onQueue(self.queue))
-            let attachment = FleetAttachment(id: id, slot: self.slot(of: connection))
+            let attachment = FleetAttachment(id: id, slot: self.slot(of: connection, id: id))
             switch frame {
             case .hello(let lastSeq):
                 if self.attached[id] == nil {
@@ -402,6 +427,9 @@ public final class FleetSocketServer: @unchecked Sendable {
             dispatchPrecondition(condition: .onQueue(self.queue))
             connection.cancel()
             self.pending.removeValue(forKey: id)
+            // Before the `attached` check, not after: a connection that never said `hello` is
+            // not in `attached` and returns below, but it can still have had its slot resolved.
+            self.slots.removeValue(forKey: id)
             guard self.attached.removeValue(forKey: id) != nil else { return }
             self.onAttachedSlotsChanged?(self.attachedSlots())
         }
