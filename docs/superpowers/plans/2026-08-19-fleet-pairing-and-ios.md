@@ -567,8 +567,36 @@ Where the list lives, and how a device is revoked. Follows the existing `Prefere
 
 **Files:**
 - Modify: `Sources/FlightDeck/Preferences/Preferences.swift`
-- Modify: `Sources/FlightDeck/Preferences/PreferencesStore.swift`
+- Modify: `Sources/FlightDeck/Preferences/PreferencesStore.swift` (including its `init`)
 - Test: `Tests/FlightDeckTests/PairedDeviceStoreTests.swift`
+
+**The `init` change is load-bearing and easy to get wrong.** Swift property observers do **not**
+fire during initialization, so minting `installID` into the loaded value and assigning it to
+`self.preferences` would never reach disk — every launch would mint a fresh suffix and Bonjour
+rediscovery would fail in exactly the case the suffix exists for. The mint must therefore be
+followed by an explicit save:
+
+```swift
+    init(persistence: PreferencesPersisting?) {
+        self.persistence = persistence
+        var loaded = persistence?.load() ?? Preferences()
+        loaded.migrateAgentsIfNeeded()
+
+        // Minted here rather than on first read of `installSuffix`, so that stays a pure read
+        // — see its doc comment.
+        let mintedNow = loaded.installID == nil
+        if mintedNow { loaded.installID = UUID() }
+        self.installSuffix = String(
+            (loaded.installID ?? UUID()).uuidString.prefix(4)
+        ).lowercased()
+        self.preferences = loaded
+
+        // Explicit, because `preferences`'s `didSet` does not fire during `init`. Without
+        // this a freshly minted id never reaches disk and the next launch mints a different
+        // one, which is the one failure this identifier exists to prevent.
+        if mintedNow { persistence?.save(loaded) }
+    }
+```
 
 **Interfaces:**
 - Consumes: `PairedDevice` (Task 2).
@@ -657,11 +685,15 @@ final class PairedDeviceStoreTests: XCTestCase {
     }
 
     /// The Bonjour instance name has to survive a relaunch, or a phone that remembers which
-    /// Mac it paired with stops recognising it after a restart.
+    /// Mac it paired with stops recognising it after a restart. The second store is a stand-in
+    /// for that relaunch: it reads the same persistence and must see the same suffix, which
+    /// only holds if the first store actually wrote the minted id to disk.
     func testTheInstallSuffixIsMintedOnceAndThenStable() {
         let persistence = MemoryPersistence()
         let first = PreferencesStore(persistence: persistence).installSuffix
         XCTAssertEqual(first.count, 4)
+        XCTAssertNotNil(persistence.stored?.installID,
+                        "a minted id that never reached disk would remint on the next launch")
         XCTAssertEqual(PreferencesStore(persistence: persistence).installSuffix, first)
     }
 
@@ -710,18 +742,16 @@ In `PreferencesStore`, in a `// MARK: Paired devices` section:
 ```swift
     var pairedDevices: [PairedDevice] { preferences.pairedDevices ?? [] }
 
-    /// Four hex characters disambiguating this Mac's advertised service name. Minted on
-    /// first read and written back, so the name a phone remembers keeps resolving after a
-    /// relaunch — a suffix regenerated each launch would make Bonjour rediscovery fail in
-    /// exactly the case it exists for.
-    var installSuffix: String {
-        if let existing = preferences.installID {
-            return String(existing.uuidString.prefix(4)).lowercased()
-        }
-        let minted = UUID()
-        preferences.installID = minted
-        return String(minted.uuidString.prefix(4)).lowercased()
-    }
+    /// Four hex characters disambiguating this Mac's advertised Bonjour name, so a phone that
+    /// remembers which Mac it paired with keeps resolving it after a relaunch. A suffix
+    /// regenerated per launch would break rediscovery in exactly the case it exists for.
+    ///
+    /// Computed once in `init` rather than minted on first read. It is displayed in the
+    /// pairing UI, and a getter that minted-and-persisted would mutate `@Published` state
+    /// during a SwiftUI `body` evaluation — the "Modifying state during view update" hazard.
+    /// Making it a stored `let` means the read is pure by construction rather than by
+    /// convention about who is allowed to call it.
+    let installSuffix: String
 
     /// What `FleetService` starts its listener with. A revoked device is absent here, which
     /// is the entirety of what revocation means.
