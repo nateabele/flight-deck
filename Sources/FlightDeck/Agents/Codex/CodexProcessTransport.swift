@@ -7,6 +7,13 @@ enum AgentLaunchError: LocalizedError, Equatable {
     case notInstalled(String)
     case versionTooOld(found: String, minimum: String)
     case prepareFailed(String)
+    /// This project names a login that no longer exists. Carries the *agent's* display name,
+    /// because the account's is exactly what nobody can look up any more.
+    case accountMissing(String)
+    /// The login exists, but the directory it names is gone. Carries the *account's* display
+    /// name: the fix is per-account, and "Claude's home is missing" tells a user with three
+    /// claude logins nothing.
+    case accountHomeMissing(String)
 
     var errorDescription: String? {
         switch self {
@@ -16,6 +23,15 @@ enum AgentLaunchError: LocalizedError, Equatable {
             "Codex \(found) is too old; the app-server protocol Flight Deck uses needs \(minimum) or newer."
         case .prepareFailed(let why):
             "Could not start a Codex session: \(why)"
+        // Refusing rather than falling back to another login is the whole point, so the
+        // message has to name the choice the user must make. A tab started under the wrong
+        // account finds none of its conversations and quietly begins a fresh one.
+        case .accountMissing(let agent):
+            "This project is set to a \(agent) account that no longer exists. "
+            + "Choose one in Preferences → Projects."
+        case .accountHomeMissing(let account):
+            "The home directory for the “\(account)” account is missing. "
+            + "Relocate it in Preferences → Accounts, or choose another account for this project."
         }
     }
 }
@@ -219,21 +235,38 @@ final class CodexProcessTransport: CodexTransport {
     var onTerminate: (() -> Void)?
 
     private let executable: String
-    /// Extra environment for the spawned app-server, merged over the process's own.
+    /// The `CODEX_HOME` this app-server is spawned in, or nil to inherit Flight Deck's own.
     ///
-    /// Empty in production. A committed test uses it to point a real `codex app-server` at an
-    /// isolated `CODEX_HOME`, which is what lets that test create and resume threads without
-    /// writing anything into the user's real `~/.codex`.
-    private let environment: [String: String]
+    /// One app-server can only ever answer for one login — a thread belongs to the process
+    /// that created it, and the process indexes it under the home it was launched with — so
+    /// the home is fixed here at construction, alongside `SessionStore`'s one-stack-per-account
+    /// keying. It must agree with the `session_index.jsonl` that stack tails, or the server
+    /// writes renames into a file nothing is watching.
+    ///
+    /// Also the seam `CodexIntegrationTests` uses to point a real `codex app-server` at an
+    /// isolated home, which is what lets that test create and resume threads without writing
+    /// anything into the developer's real `~/.codex`.
+    let home: URL?
     private let process = Process()
     private let stdin = Pipe()
     private let stdout = Pipe()
     private var reassembler = LineReassembler()
     private var hasTerminated = false
 
-    init(executable: String = "codex", environment: [String: String] = [:]) {
+    init(executable: String = "codex", home: URL? = nil) {
         self.executable = executable
-        self.environment = environment
+        self.home = home
+    }
+
+    /// The environment `start()` spawns with, or nil to inherit Flight Deck's own untouched.
+    ///
+    /// Split out of `start()` so the binding can be asserted without spawning anything: the
+    /// committed suite may never run `codex`, and "which home did the app-server get" is
+    /// otherwise only observable from inside a process that must not exist.
+    var spawnEnvironment: [String: String]? {
+        guard let home else { return nil }
+        return ProcessInfo.processInfo.environment
+            .merging([AgentID.codex.homeEnvironmentKey: home.path]) { _, override in override }
     }
 
     /// Spawns the process. `/usr/bin/env` resolves `executable` against `$PATH`, same as
@@ -248,10 +281,9 @@ final class CodexProcessTransport: CodexTransport {
         process.standardOutput = stdout
         process.standardError = FileHandle.nullDevice
 
-        if !environment.isEmpty {
-            process.environment = ProcessInfo.processInfo.environment
-                .merging(environment) { _, override in override }
-        }
+        // Left unset when there is no home, so an unconfigured transport inherits exactly what
+        // it always did rather than a snapshot of the environment taken at this instant.
+        if let spawnEnvironment { process.environment = spawnEnvironment }
 
         // An empty chunk from `availableData` IS end-of-file, not "nothing happened yet" — it
         // means the pipe's write end closed, which means the process is gone. Routing it to
