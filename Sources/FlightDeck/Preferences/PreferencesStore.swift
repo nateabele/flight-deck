@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 import SwiftUI
 
@@ -161,5 +162,55 @@ final class PreferencesStore: ObservableObject {
     var tools: [ToolDefinition] {
         get { preferences.tools }
         set { preferences.tools = newValue }
+    }
+
+    // MARK: Paired devices
+
+    var pairedDevices: [PairedDevice] { preferences.pairedDevices ?? [] }
+
+    /// Four hex characters disambiguating this Mac's advertised service name. Minted on
+    /// first read and written back, so the name a phone remembers keeps resolving after a
+    /// relaunch — a suffix regenerated each launch would make Bonjour rediscovery fail in
+    /// exactly the case it exists for.
+    var installSuffix: String {
+        if let existing = preferences.installID {
+            return String(existing.uuidString.prefix(4)).lowercased()
+        }
+        let minted = UUID()
+        preferences.installID = minted
+        return String(minted.uuidString.prefix(4)).lowercased()
+    }
+
+    /// What `FleetService` starts its listener with. A revoked device is absent here, which
+    /// is the entirety of what revocation means.
+    func deviceKeys() -> [FleetDeviceKey] { pairedDevices.map { $0.key() } }
+
+    func upsert(_ device: PairedDevice) {
+        var devices = pairedDevices
+        if let at = devices.firstIndex(where: { $0.slot == device.slot }) {
+            devices[at] = device
+        } else {
+            devices.append(device)
+        }
+        preferences.pairedDevices = devices
+    }
+
+    func revokeDevice(slot: UUID) {
+        preferences.pairedDevices = pairedDevices.filter { $0.slot != slot }
+    }
+
+    func renameDevice(slot: UUID, to name: String) {
+        mutateDevice(slot) { $0.name = name }
+    }
+
+    func noteDeviceSeen(slot: UUID, at date: Date) {
+        mutateDevice(slot) { $0.lastSeenAt = date }
+    }
+
+    private func mutateDevice(_ slot: UUID, _ body: (inout PairedDevice) -> Void) {
+        var devices = pairedDevices
+        guard let at = devices.firstIndex(where: { $0.slot == slot }) else { return }
+        body(&devices[at])
+        preferences.pairedDevices = devices
     }
 }
