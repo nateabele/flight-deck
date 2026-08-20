@@ -109,6 +109,29 @@ final class FleetPairingFlowTests: XCTestCase {
         XCTAssertFalse(preferences.deviceKeys().contains { $0.slot == first.key.slot })
     }
 
+    /// Cancelling must take the provisional key out of the accepted set, not merely stop
+    /// drawing the sheet. An armed code whose window was closed in the UI but whose key is
+    /// still live is the same hole as one that never expired.
+    func testCancellingArmingRevokesTheProvisionalKey() async throws {
+        let (_, preferences, service) = try await standUp()
+        let payload = try await service.arm()
+        try await service.cancelArming()
+
+        XCTAssertTrue(preferences.pairedDevices.isEmpty)
+        XCTAssertFalse(preferences.deviceKeys().contains { $0.slot == payload.key.slot })
+
+        let refused = expectation(description: "refused")
+        let client = FleetClient(key: payload.key)
+        self.client = client
+        client.onFrame = { _ in XCTFail("a cancelled code must not reach application code") }
+        client.onDisconnect = { _ in refused.fulfill() }
+        client.connect(to: try service.loopbackEndpoint(), lastSeq: 0)
+        // `wait(for:)` deadlocks a `@MainActor` async test under this repo's headless
+        // harness (see the class doc) — `await fulfillment(of:timeout:)` throughout this
+        // file instead, same as the coordinator's own `refused` pattern elsewhere.
+        await fulfillment(of: [refused], timeout: 8)
+    }
+
     func testThePairingCodeAdvertisesTheListenersRealPort() async throws {
         let (_, _, service) = try await standUp()
         let payload = try await service.arm()
