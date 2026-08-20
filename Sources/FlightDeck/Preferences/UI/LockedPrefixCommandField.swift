@@ -45,6 +45,10 @@ struct LockedPrefixCommandField: NSViewRepresentable {
     let lockedPrefix: String
     @Binding var tail: String
     var onCommit: (String) -> Void
+    /// Escape's counterpart to `onCommit`: throw the typed text away and re-render from the
+    /// controls. Separate from simply not committing, because the field holds its own edited
+    /// string — leaving that in place would show a discarded edit as if it were still live.
+    var onRevert: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -182,6 +186,11 @@ struct LockedPrefixCommandField: NSViewRepresentable {
             clampSelection()
         }
 
+        /// Set only across Escape's resign-first-responder, so the blur it causes does not
+        /// commit the text Escape exists to discard. `textDidEndEditing` fires on ANY resign,
+        /// with nothing in the notification to say what caused it.
+        private var isReverting = false
+
         /// Shared by blur (`textDidEndEditing`) and ⌘↩ (`CommandFieldTextView.onCommandReturn`).
         func commit() {
             parent.onCommit(currentTail)
@@ -210,7 +219,41 @@ struct LockedPrefixCommandField: NSViewRepresentable {
             parent.tail = currentTail
         }
 
+        /// Escape and Tab both leave the field, which commits through `textDidEndEditing`.
+        ///
+        /// Neither reaches `performKeyEquivalent` the way ⌘↩ does — they are unmodified keys,
+        /// so AppKit's standard key-binding dictionary turns them into selectors and offers
+        /// them here first. Left alone, `insertTab:` types a literal tab into the command and
+        /// `cancelOperation:` does nothing at all, so the only way out of the field was the
+        /// mouse.
+        ///
+        /// The two differ in what they do with the edit: Tab applies it (it is an ordinary
+        /// blur), Escape discards it. That split is the usual Mac convention and it is why
+        /// Escape needs `isReverting` — the blur it causes would otherwise commit the very
+        /// text it is meant to throw away.
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            switch commandSelector {
+            case #selector(NSResponder.insertTab(_:)):
+                // Hands focus onward rather than merely dropping it, so Tab keeps meaning
+                // "next control" inside a preferences pane.
+                textView.window?.selectNextKeyView(nil)
+                return true
+            case #selector(NSResponder.cancelOperation(_:)):
+                // Escape discards. The revert has to happen before the blur, so the text the
+                // field renders on its way out is the reverted one rather than a flash of the
+                // abandoned edit.
+                isReverting = true
+                parent.onRevert()
+                textView.window?.makeFirstResponder(nil)
+                isReverting = false
+                return true
+            default:
+                return false
+            }
+        }
+
         func textDidEndEditing(_ notification: Notification) {
+            guard !isReverting else { return }
             commit()
         }
 

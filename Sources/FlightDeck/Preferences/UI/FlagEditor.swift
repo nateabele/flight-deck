@@ -82,9 +82,20 @@ struct FlagEditor: View {
                 LockedPrefixCommandField(
                     lockedPrefix: lockedPrefix,
                     tail: $tail,
-                    onCommit: applyTextToControls
+                    onCommit: applyTextToControls,
+                    onRevert: {
+                        // Back to whatever the controls hold, which is the last committed
+                        // truth — and clear the notes, since they described text that no
+                        // longer exists.
+                        syncTextFromControls()
+                        parseDiagnostics = []
+                    }
                 )
                 .frame(height: 60)
+
+                Text("⌘↩ or clicking away applies. Esc discards. Tab moves on.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 ForEach(Array(diagnostics.enumerated()), id: \.offset) { _, diagnostic in
                     Label {
