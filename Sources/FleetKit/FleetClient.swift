@@ -67,8 +67,17 @@ public final class FleetClient: @unchecked Sendable {
                 break
             }
         }
+        // `onFrame` is gated on `!hasEnded` the same way `onDisconnect` already is via
+        // `end()`. Network.framework has already hopped this receive completion onto `queue`
+        // by the time `disconnect()` runs — `cancel()` cannot recall an in-flight block — so
+        // without this guard a frame from a connection this client has already been told to
+        // abandon can still arrive and be handled as though it were live. `onDisconnect` was
+        // the only one gated before this; that asymmetry was a trap for every consumer, not
+        // just `FleetConnector`, whose own `accept()` needed a second, independent guard
+        // against exactly this frame arriving after a `teardown()`.
         FleetSocket.receive(ServerFrame.self, from: connection) { [weak self] frame in
-            self?.onFrame?(frame)
+            guard let self, !self.hasEnded else { return }
+            self.onFrame?(frame)
         } onEnd: { [weak self] error in
             self?.end(error)
         }
