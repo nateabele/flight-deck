@@ -1,23 +1,63 @@
 import SwiftUI
 
-/// What the "+" sheet is filling in: a name and the home it will create. `home` starts as
+/// What the "+" sheet is filling in: a name and the home it will create. `homePath` starts as
 /// `defaultHome(for:name:)`'s derivation and is user-editable via the sheet's "Choose…" escape
 /// (spec §8.2), so the two fields are tracked separately — typing a new name after picking a
 /// custom location must not silently snap the location back onto the derived slug.
 struct AccountDraft: Equatable {
     var name: String
-    var home: URL
+    /// The Location field's *text*, not a URL, and that is load-bearing: `URL(fileURLWithPath: "")`
+    /// silently resolves to the process working directory, so a cleared field would reach
+    /// `validate` looking exactly like a deliberate choice of that directory — which "Also
+    /// Delete Files…" would later offer to move to the Trash. Keeping the raw text is what
+    /// lets an empty Location be refused *as* empty.
+    var homePath: String
+
+    /// The same value as the rest of the app names a home. Settable so `Choose…` and Relocate…
+    /// can keep handing over a URL; `validate` and `add()` go through `trimmedHome`, never this.
+    var home: URL {
+        get { URL(fileURLWithPath: homePath, isDirectory: true) }
+        set { homePath = newValue.path }
+    }
+
+    /// What Add actually files: the typed path with its stray whitespace removed, so the
+    /// directory created is the one `validate` inspected and not `"~/.claude-work "`.
+    var trimmedHome: URL {
+        URL(fileURLWithPath: homePath.trimmingCharacters(in: .whitespacesAndNewlines), isDirectory: true)
+    }
 
     /// What `AccountDraft.validate` answers. Not a `Bool`: the sheet's confirm button and its
     /// inline error text both read the *reason*, not just whether the draft is good.
     enum Validation: Equatable {
         case ok
+        case locationEmpty
         case homeAlreadyUsed
+        case notAnAgentHome
+
+        /// The inline caption under the Location field. nil for `.ok` — there is nothing to
+        /// say about a good draft. Lives on the reason rather than in the view so the wording
+        /// is testable, the same way every other rule in this pane is.
+        func message(for agent: AgentID) -> String? {
+            switch self {
+            case .ok:
+                return nil
+            case .locationEmpty:
+                return "Enter a location for this account's files."
+            case .homeAlreadyUsed:
+                return "Another account already uses this location."
+            case .notAnAgentHome:
+                return """
+                    That folder already holds files, and they are not a \(agent.displayName) \
+                    login. Choose an empty or new folder, or one \(agent.displayName) is \
+                    already signed in to.
+                    """
+            }
+        }
     }
 
     init(agent: AgentID) {
         name = ""
-        home = Self.defaultHome(for: agent, name: "")
+        homePath = Self.defaultHome(for: agent, name: "").path
     }
 
     /// `~/.claude-field-wealth` for "Field Wealth". Lowercased, non-alphanumerics collapsed to
@@ -32,14 +72,32 @@ struct AccountDraft: Equatable {
             .appendingPathComponent(slug.isEmpty ? base : "\(base)-\(slug)", isDirectory: true)
     }
 
-    /// Two accounts on one home would put two `CodexStack`s on one `session_index.jsonl`, so
-    /// the Add sheet's confirm button and Relocate… both gate on this before anything is
-    /// created or moved, rather than failing later at launch. `editing` is the account already
-    /// occupying `home`, if any — nil for the Add sheet, the account's own id for Relocate, so
-    /// relocating a home back onto itself is not mistaken for a collision.
+    /// The whole sanity rule the Add sheet's confirm button and Relocate… both gate on, before
+    /// anything is created or moved rather than failing later at launch.
+    ///
+    /// Three refusals, in the order that names the most specific problem first:
+    ///
+    /// 1. An empty Location. Taken from the text, because the URL cannot say — see `homePath`.
+    /// 2. A home another account already occupies. Two accounts on one home would put two
+    ///    `CodexStack`s on one `session_index.jsonl`. `editing` is the account already sitting
+    ///    there, if any — nil for the Add sheet, the account's own id for Relocate, so
+    ///    relocating a home back onto itself is not mistaken for a collision.
+    /// 3. A path that is neither one of this agent's homes nor vacant. Nothing else checked
+    ///    plausibility, so any typed path was accepted and filed — and "Also Delete Files…"
+    ///    would later offer to move that tree to the Trash. Both halves of the rule are needed:
+    ///    an existing login has files (so it is not vacant) and a brand-new home has no marker
+    ///    yet (so it does not look like one).
     @MainActor
-    static func validate(home: URL, editing id: UUID?, in store: PreferencesStore) -> Validation {
-        store.homeIsTaken(home, excluding: id) ? .homeAlreadyUsed : .ok
+    static func validate(
+        home path: String, agent: AgentID, editing id: UUID?, in store: PreferencesStore
+    ) -> Validation {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .locationEmpty }
+        let home = URL(fileURLWithPath: trimmed, isDirectory: true)
+        guard !store.homeIsTaken(home, excluding: id) else { return .homeAlreadyUsed }
+        guard AccountDirectory.looksLikeHome(home, agent: agent) || AccountDirectory.isVacant(home)
+        else { return .notAnAgentHome }
+        return .ok
     }
 }
 
@@ -68,7 +126,7 @@ struct AddAccountSheet: View {
     }
 
     private var validation: AccountDraft.Validation {
-        AccountDraft.validate(home: draft.home, editing: nil, in: preferences)
+        AccountDraft.validate(home: draft.homePath, agent: agent, editing: nil, in: preferences)
     }
 
     private var trimmedName: String {
@@ -100,9 +158,9 @@ struct AddAccountSheet: View {
                         TextField(
                             "",
                             text: Binding(
-                                get: { draft.home.path },
+                                get: { draft.homePath },
                                 set: {
-                                    draft.home = URL(fileURLWithPath: $0, isDirectory: true)
+                                    draft.homePath = $0
                                     homeEditedByHand = true
                                 }
                             )
@@ -117,8 +175,8 @@ struct AddAccountSheet: View {
                     }
                 }
 
-                if validation == .homeAlreadyUsed {
-                    Text("Another account already uses this location.")
+                if let message = validation.message(for: agent) {
+                    Text(message)
                         .font(.caption)
                         .foregroundStyle(.red)
                 }
@@ -140,11 +198,16 @@ struct AddAccountSheet: View {
     }
 
     private func add() {
+        // Re-checked here, not only in `.disabled` above: this is the call that creates a
+        // directory and files an account whose home "Also Delete Files…" will later offer to
+        // trash, and a guard that lives only in a view modifier is one refactor from gone.
+        guard !trimmedName.isEmpty, validation == .ok else { return }
+        let home = draft.trimmedHome
         // Best-effort: an account whose directory could not be created yet is still a valid
         // registry entry — the agent creates it itself on first launch, same as the built-in
         // home always has.
-        try? FileManager.default.createDirectory(at: draft.home, withIntermediateDirectories: true)
-        let account = AgentAccount(agent: agent, displayName: trimmedName, home: draft.home)
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let account = AgentAccount(agent: agent, displayName: trimmedName, home: home)
         preferences.addAccount(account)
         dismiss()
         onAdd(account)
