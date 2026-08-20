@@ -54,6 +54,12 @@ final class FleetService: ObservableObject {
             self?.apply(command, cid: cid) ?? .err(cid: cid, code: "stopped")
         }
         server.onAttachedCountChanged = { [weak self] count in
+            // Safe only because `FleetSocketServer`'s `queue` defaults to `.main` and nothing
+            // here overrides it: `assumeIsolated` traps rather than hopping if the caller
+            // turns out not to be on the main actor, and `init(queue:)` does not enforce
+            // serial-ness, let alone `.main` specifically — a caller passing a concurrent
+            // queue would compile cleanly and turn this into a runtime crash with no
+            // compiler signal.
             MainActor.assumeIsolated { self?.attachedDeviceCount = count }
         }
     }
