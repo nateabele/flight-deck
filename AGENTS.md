@@ -47,6 +47,8 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 # Flake hunting — loops one suspect sequence 20x in a single launch (rule 4).
 # The TEST_RUNNER_ prefix is mandatory; without it the case is silently SKIPPED.
 TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.sh
+
+./scripts/build-ios.sh          # compile-check FleetKit's iOS slice — run after touching Sources/FleetKit
 ```
 
 Every `xcodebuild` needs `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` and
@@ -61,6 +63,8 @@ Releases go through `scripts/swap-release.sh`, run detached — see
 | `Sources/FlightDeck/` | The app. `SessionStore` is the single source of truth (`@MainActor`). |
 | `Sources/FlightDeck/GhosttyEmbed/` | **Adapt-copied Ghostty** (MIT, provenance-marked). Vendored-ish — prefer re-pulling upstream to hand-editing. |
 | `Sources/FlightDeck/Preferences/` | Pure flag catalog/parser/serializer/merge + SwiftUI shell. |
+| `Sources/FleetKit/` | Wire types, event fold and both socket halves. Swift 6, `Foundation`+`Network` only — compiled for iOS too, which is what enforces that. |
+| `Sources/FlightDeck/Fleet/` | The desktop side: projection, replicator, and the service that binds the store to the socket. |
 | `Tests/FlightDeckTests/` | Headless unit tests. `UITests/` drives the real app. |
 | `project.yml` | Source of truth for the build; `.xcodeproj` is **generated** and git-ignored. |
 | `vendor/ghostty` | Submodule pinned to v1.3.1. Pristine — never modify. |
