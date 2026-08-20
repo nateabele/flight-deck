@@ -77,7 +77,21 @@ struct QRScannerView: UIViewRepresentable {
         QRScannerContainerView(onCode: onCode)
     }
 
-    func updateUIView(_ uiView: QRScannerContainerView, context: Context) {}
+    func updateUIView(_ uiView: QRScannerContainerView, context: Context) {
+        // `onCode` is fixed for this view's lifetime — `updateUIView` never re-assigns it to
+        // `uiView`. Latent but harmless today: the closure just forwards to `model.adopt`,
+        // and `model` is a stable reference held by `PairingScreen`, so a later `body`
+        // re-evaluation producing a new closure *value* still calls through to the same
+        // model. Left as a comment rather than "fixed" because there is no reachable path
+        // today where `onCode`'s behavior would actually need to change mid-lifetime.
+    }
+
+    /// The one hook SwiftUI documents for "this native view is going away": without it,
+    /// nothing ever stops the capture session or clears its delegate — see
+    /// `QRScannerContainerView.teardown()`.
+    static func dismantleUIView(_ uiView: QRScannerContainerView, coordinator: ()) {
+        uiView.teardown()
+    }
 }
 
 /// Owns the capture session and swaps between the live preview and the denied-access
@@ -90,6 +104,20 @@ final class QRScannerContainerView: UIView, AVCaptureMetadataOutputObjectsDelega
     private let onCode: (String) -> Void
     private var lastCode: String?
     private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var output: AVCaptureMetadataOutput?
+
+    // Apple documents `AVCaptureSession` configuration (`beginConfiguration`/add-input/
+    // add-output/`commitConfiguration`) and `startRunning()`/`stopRunning()` as blocking
+    // calls that must not run on the main thread — doing so risks a visible hitch, worst on a
+    // cold first launch while the camera warms up. Every one of those calls below happens on
+    // this private serial queue; only the preview layer, which is UIKit and must be touched
+    // from the main thread, hops back to `.main`.
+    //
+    // The metadata delegate's OWN callback queue, set in `configureSession()`, stays `.main`
+    // — that is exactly what makes `metadataOutput(_:didOutput:from:)`'s
+    // `MainActor.assumeIsolated` below sound, and moving it onto `sessionQueue` would turn a
+    // verified premise into a runtime crash. Do not "tidy" that.
+    private let sessionQueue = DispatchQueue(label: "com.flightdeck.mobile.qrscanner")
 
     private let deniedLabel: UILabel = {
         let label = UILabel()
@@ -120,6 +148,27 @@ final class QRScannerContainerView: UIView, AVCaptureMetadataOutputObjectsDelega
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not used; this view is only ever built by SwiftUI")
+    }
+
+    /// Stops the camera and clears the delegate. `AVCaptureMetadataOutput.h` declares
+    /// `metadataObjectsDelegate` `readonly, nullable` with no ownership qualifier and no
+    /// "does not retain" note, so a strong `output → delegate (== self)` reference is
+    /// plausible — paired with `session → output`, that is a retain cycle through `session`,
+    /// which this view also holds strongly. Left uncleared, this view — and its running
+    /// camera, in-use indicator included — would never deallocate. Called from SwiftUI's
+    /// `dismantleUIView`; `deinit` below repeats the stop as belt and braces in case that
+    /// hook is ever bypassed.
+    func teardown() {
+        output?.setMetadataObjectsDelegate(nil, queue: nil)
+        sessionQueue.async { [session] in session.stopRunning() }
+    }
+
+    deinit {
+        // Cannot call an instance method on `self` from `deinit`, so this repeats
+        // `teardown()`'s stop by hand rather than calling it — capturing only `session`,
+        // never `self`.
+        let session = session
+        sessionQueue.async { session.stopRunning() }
     }
 
     override func layoutSubviews() {
@@ -153,38 +202,53 @@ final class QRScannerContainerView: UIView, AVCaptureMetadataOutputObjectsDelega
     }
 
     private func configureSession() {
-        guard
-            let device = AVCaptureDevice.default(for: .video),
-            let input = try? AVCaptureDeviceInput(device: device),
-            session.canAddInput(input)
-        else {
-            showDenied()
-            return
+        // `session` is captured by value into the closure below rather than read
+        // repeatedly through `self.session` — both are the same object (`AVCaptureSession`
+        // is a class), but capturing it once here, on the main actor where reading it is
+        // unconditionally sound, means every subsequent use inside the closure is a plain
+        // local reference rather than a fresh actor-isolated property access.
+        let session = session
+        sessionQueue.async { [weak self, session] in
+            guard
+                let device = AVCaptureDevice.default(for: .video),
+                let input = try? AVCaptureDeviceInput(device: device),
+                session.canAddInput(input)
+            else {
+                DispatchQueue.main.async { self?.showDenied() }
+                return
+            }
+            session.beginConfiguration()
+            session.addInput(input)
+
+            let output = AVCaptureMetadataOutput()
+            guard session.canAddOutput(output) else {
+                session.commitConfiguration()
+                DispatchQueue.main.async { self?.showDenied() }
+                return
+            }
+            session.addOutput(output)
+            output.setMetadataObjectsDelegate(self, queue: .main)
+            output.metadataObjectTypes = [.qr]
+            session.commitConfiguration()
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.output = output
+                let previewLayer = AVCaptureVideoPreviewLayer(session: session)
+                previewLayer.videoGravity = .resizeAspectFill
+                previewLayer.frame = self.bounds
+                self.layer.insertSublayer(previewLayer, at: 0)
+                self.previewLayer = previewLayer
+            }
+
+            session.startRunning()
         }
-        session.addInput(input)
-
-        let output = AVCaptureMetadataOutput()
-        guard session.canAddOutput(output) else {
-            showDenied()
-            return
-        }
-        session.addOutput(output)
-        output.setMetadataObjectsDelegate(self, queue: .main)
-        output.metadataObjectTypes = [.qr]
-
-        let previewLayer = AVCaptureVideoPreviewLayer(session: session)
-        previewLayer.videoGravity = .resizeAspectFill
-        previewLayer.frame = bounds
-        layer.insertSublayer(previewLayer, at: 0)
-        self.previewLayer = previewLayer
-
-        session.startRunning()
     }
 
     // `nonisolated` + `MainActor.assumeIsolated`, the same idiom `FleetModel` uses for
     // `FleetConnector`'s callbacks: `AVCaptureMetadataOutputObjectsDelegate` is a plain
     // nonisolated protocol requirement, but `setMetadataObjectsDelegate(self, queue: .main)`
-    // below guarantees this fires on the main queue, so `assumeIsolated` states a fact the
+    // above guarantees this fires on the main queue, so `assumeIsolated` states a fact the
     // compiler cannot see rather than hiding a real hazard.
     nonisolated func metadataOutput(
         _ output: AVCaptureMetadataOutput,

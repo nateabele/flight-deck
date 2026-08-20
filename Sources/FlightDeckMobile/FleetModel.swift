@@ -14,6 +14,10 @@ final class FleetModel {
     private(set) var mac: PairedMac?
     private(set) var fleet = FleetSnapshot.empty
     private(set) var state = FleetConnector.State.idle
+    /// When `state` last became `.connected`. `nil` until the very first connection succeeds
+    /// — a fleet that has never been live must not claim it "last said" anything, which is
+    /// why the stale banner branches on this being `nil` rather than assuming a value.
+    private(set) var lastLive: Date?
 
     @ObservationIgnored private let store: any PairedMacStoring
     @ObservationIgnored private var connector: FleetConnector?
@@ -42,17 +46,24 @@ final class FleetModel {
         mac = nil
         fleet = .empty
         state = .idle
+        lastLive = nil
     }
 
     func markRead(_ id: UUID) { connector?.send(.markRead(id: id)) }
 
     func reconnect() {
-        connector?.stop()
         connect()
     }
 
     private func connect() {
         guard let mac else { return }
+        // `connect()` replaces `self.connector` unconditionally below. Without this stop, a
+        // second call while one is already running (e.g. `adopt(code:)` firing again because
+        // the QR scanner is still live and hands another frame to `onCode`, see C1 in the
+        // Task 10 review) orphans the previous connector rather than tearing it down — and
+        // the orphan keeps running against its own, now-stale `mac`, calling `store.save(mac)`
+        // on every event and silently overwriting the pairing this call just wrote.
+        connector?.stop()
         let connector = FleetConnector(mac: mac, store: store)
         // `MainActor.assumeIsolated`, not `Task { @MainActor in }`. FlightDeckMobile builds in
         // Swift 6, and these callbacks are plain non-isolated closures, so assigning
@@ -68,7 +79,10 @@ final class FleetModel {
             MainActor.assumeIsolated { self?.fleet = fleet }
         }
         connector.onState = { [weak self] state in
-            MainActor.assumeIsolated { self?.state = state }
+            MainActor.assumeIsolated {
+                self?.state = state
+                if case .connected = state { self?.lastLive = Date() }
+            }
         }
         self.connector = connector
         connector.start()
