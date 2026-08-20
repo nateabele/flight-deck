@@ -11,13 +11,11 @@ import OSLog
 /// a network, and everything that needs both is here where it can be read at once.
 @MainActor
 final class FleetService: ObservableObject {
-    /// How many phones are watching right now. Published because the Mac shows it — a
-    /// remotely-driveable machine that gives no sign of being attached to is the thing §11
-    /// of the spec calls out as not-polish.
-    @Published private(set) var attachedDeviceCount = 0
-    /// Which paired slots are currently attached, distinct from `attachedDeviceCount`
-    /// because a connection whose PSK identity could not be read back still counts toward
-    /// the count but cannot appear here — see `FleetAttachment.slot`.
+    /// Which paired slots are currently attached — a remotely-driveable machine that gives
+    /// no sign of being attached to is the thing §11 of the spec calls out as not-polish.
+    /// `DevicesSettingsTab` reads this directly to badge each device row; a connection whose
+    /// PSK identity could not be read back is attached but cannot appear here — see
+    /// `FleetAttachment.slot`.
     @Published private(set) var attachedSlots: Set<UUID> = []
 
     private static let logger = Logger(
@@ -33,6 +31,12 @@ final class FleetService: ObservableObject {
     /// Cancelled and replaced by every `scheduleExpiry`, so re-arming or an early cancel
     /// never leaves a stale timer racing the current window.
     private var expiryTask: Task<Void, Never>?
+    /// Whether `start()` has already run the launch-time reconciliation below. Guards it to
+    /// exactly the first call: every later call is a key rotation from `reloadKeys()`
+    /// (arm, expiry, revocation), and one of those — `arm()` itself — persists a fresh
+    /// provisional device and then calls `start()` before returning. Reconciling on every
+    /// call would revoke the device the user just armed for.
+    private var hasReconciledAtLaunch = false
 
     /// The Bonjour instance name this Mac advertises under, and the name the phone stores so
     /// it can prefer the Mac it paired with.
@@ -83,7 +87,7 @@ final class FleetService: ObservableObject {
         server.onCommand = { [weak self] _, cid, command in
             self?.apply(command, cid: cid) ?? .err(cid: cid, code: "stopped")
         }
-        server.onAttachedCountChanged = { [weak self] count in
+        server.onAttachedSlotsChanged = { [weak self] slots in
             // Safe only because `FleetSocketServer`'s `queue` defaults to `.main` and nothing
             // here overrides it: `assumeIsolated` traps rather than hopping if the caller
             // turns out not to be on the main actor, and `init(queue:)` does not enforce
@@ -94,8 +98,11 @@ final class FleetService: ObservableObject {
             // the source instead of here.
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.attachedDeviceCount = count
-                if count == 0 { self.attachedSlots.removeAll() }
+                // Assigned directly, not merged: `slots` is already the server's full,
+                // authoritative attached set at this instant, so keeping our own copy in
+                // sync by patching it per-event is exactly the stale-count bug this signal
+                // shape replaces.
+                self.attachedSlots = slots
             }
         }
     }
@@ -126,8 +133,24 @@ final class FleetService: ObservableObject {
     /// Invariant for any future `deviceKeys(` call site: liveness judgements for a
     /// provisional device must use the armer's clock (`armer.currentTime`), never raw
     /// `Date()` — see the paragraph above for the bug that found this the hard way.
+    ///
+    /// The reconciliation below runs only on this call's first invocation, and only that one
+    /// — see `hasReconciledAtLaunch`. A provisional device is a window the user opened and
+    /// has not yet walked a phone through; all three layers that enforce its 120-second
+    /// timeout (this armer, `expiryTask`, and `deviceKeys(at:)`'s filter) are established by
+    /// `arm()` and none of them survive a quit or crash. A provisional row that outlives the
+    /// process it was armed in is not a window anyone is still standing in front of, so it is
+    /// revoked outright here rather than re-timed — the same ruling `deviceKeys(at:)`'s doc
+    /// comment already made for expiry itself: durable behaviour is a property of the data,
+    /// not of who remembers to keep a clock running for it.
     @discardableResult
     func start(port: NWEndpoint.Port? = nil) async throws -> NWEndpoint.Port {
+        if !hasReconciledAtLaunch {
+            hasReconciledAtLaunch = true
+            preferences.pairedDevices
+                .filter(\.isProvisional)
+                .forEach { preferences.revokeDevice(slot: $0.slot) }
+        }
         let bound = try await server.start(
             keys: preferences.deviceKeys(at: armer.currentTime),
             port: port ?? boundPort,
@@ -139,9 +162,10 @@ final class FleetService: ObservableObject {
     }
 
     func stop() {
+        // `server.stop()` drops every attachment synchronously through `cancelConnections()`,
+        // which fires `onAttachedSlotsChanged` itself — see `wireHandlers()` — so
+        // `attachedSlots` is already empty by the time this returns; nothing to clear here.
         server.stop()
-        attachedDeviceCount = 0
-        attachedSlots.removeAll()
     }
 
     /// Restarts the listener so a changed key set takes effect. Every arm, expiry and
@@ -231,7 +255,9 @@ final class FleetService: ObservableObject {
     /// TLS-PSK handshake already proved everything a pairing exchange would have.
     private func noteAttached(_ attachment: FleetAttachment) {
         guard let slot = attachment.slot else { return }
-        attachedSlots.insert(slot)
+        // `attachedSlots` is not touched here: `wireHandlers()`'s `onAttachedSlotsChanged`
+        // already reflects this attachment by the time `onHello` — and therefore this
+        // method — runs; see `FleetSocketServer.accept()`'s ordering.
         let now = Date()
         if armer.claim(slot: slot), var device = preferences.pairedDevices.first(where: { $0.slot == slot }) {
             expiryTask?.cancel()

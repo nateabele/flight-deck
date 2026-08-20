@@ -44,10 +44,14 @@ run by anything on this machine.
    re-downloading (check the Mac's log for a replay rather than a snapshot).
 10. Revoke the device on the Mac — the phone disconnects and cannot reconnect.
 11. Let a pairing code expire unscanned, then scan it — it is refused.
+12. Arm a code, quit Flight Deck before it is scanned, relaunch, then wait out the window and
+    scan it — it is refused. Item 11 never restarts the app, so it cannot exercise this: a
+    provisional pairing row that outlives the process it was armed in must be revoked at the
+    next launch, not merely re-timed against a clock that reset when the app relaunched.
 
 ## A second checklist: the iOS plumbing
 
-The eleven items above test the *feature* — that pairing, replication, resume and revocation
+The twelve items above test the *feature* — that pairing, replication, resume and revocation
 behave. These nine test the *app*, and they are separated because they have a different
 character: each one was identified during review as something no amount of reading or
 type-checking on the build machine could settle, and each has a specific observable outcome.
