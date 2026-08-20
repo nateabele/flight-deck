@@ -31,7 +31,22 @@ struct AccountsSection: View {
     /// Every account with a tab open on it right now. `AgentAccount.id` is already scoped to
     /// one agent, so a session belonging to the other agent can never collide with it here.
     private var boundAccountIDs: Set<UUID> {
-        Set(sessions.repos.flatMap(\.sessions).compactMap(\.accountID))
+        Self.boundAccountIDs(in: sessions.repos.flatMap(\.sessions), resolvedBy: preferences)
+    }
+
+    /// The *resolved* ids, per spec §9: a tab whose `Session.accountID` is nil is bound to the
+    /// agent's built-in account, not to nothing. Reading the raw field would let the built-in
+    /// account look unbound while a legacy tab is running inside it — today the `isBuiltIn`
+    /// exemption blocks that removal on its own, but the guard must not depend on a second rule
+    /// staying in place. Removing an account out from under a live tab flips that tab's
+    /// `AgentInstance` key mid-run, which strands its watchers and builds a second codex stack
+    /// on the wrong home.
+    ///
+    /// Factored out `static` for the reason the rest of this file's predicates are: a SwiftUI
+    /// body cannot be unit tested, and this rule can.
+    @MainActor
+    static func boundAccountIDs(in sessions: [Session], resolvedBy store: PreferencesStore) -> Set<UUID> {
+        Set(sessions.compactMap { store.resolvedAccountID(for: $0.agent, in: $0.accountID) })
     }
 
     /// The built-in account is what `Session.accountID == nil` resolves to, so removing it
@@ -41,6 +56,26 @@ struct AccountsSection: View {
     /// be moved out from under its live tabs either.
     static func canRemove(_ account: AgentAccount, boundAccountIDs: Set<UUID>) -> Bool {
         !account.isBuiltIn && !boundAccountIDs.contains(account.id)
+    }
+
+    /// The full guard chain "Remove from Flight Deck" must clear immediately before it drops the
+    /// registry entry — not only what disables the `−` button, for the same reason `deleteFiles`
+    /// re-checks: the confirmation dialog can sit open while a tab binds to this account.
+    /// Removing it under a live tab flips that tab's `AgentInstance` key from `id` to nil
+    /// mid-run, so its existing `statusWatchers[id]` / `codexStacks[id]` can no longer be
+    /// matched by `stopStatusWatchingIfUnused` / `stopCodexIfUnused`, and the next runtime
+    /// lookup builds a *second* codex stack at the nil key pointed at `builtInHome` — two
+    /// app-servers, the new one tailing the wrong `session_index.jsonl`.
+    @MainActor
+    @discardableResult
+    static func remove(
+        accountID: UUID, boundAccountIDs: Set<UUID>, in store: PreferencesStore
+    ) -> Bool {
+        guard let account = store.account(id: accountID), !account.isBuiltIn,
+              !boundAccountIDs.contains(accountID)
+        else { return false }
+        store.removeAccount(id: accountID)
+        return true
     }
 
     /// The full guard chain "Also Delete Files…" must clear immediately before it touches the
@@ -123,7 +158,9 @@ struct AccountsSection: View {
             presenting: pendingRemoval
         ) { account in
             Button("Remove from Flight Deck") {
-                preferences.removeAccount(id: account.id)
+                AccountsSection.remove(
+                    accountID: account.id, boundAccountIDs: boundAccountIDs, in: preferences
+                )
                 pendingRemoval = nil
             }
             Button("Also Delete Files…", role: .destructive) {
@@ -228,7 +265,9 @@ struct AccountsSection: View {
     private func relocate(_ account: AgentAccount) {
         guard Self.canRemove(account, boundAccountIDs: boundAccountIDs),
               let chosen = FolderPicker.choose(),
-              AccountDraft.validate(home: chosen, editing: account.id, in: preferences) == .ok
+              AccountDraft.validate(
+                  home: chosen.path, agent: account.agent, editing: account.id, in: preferences
+              ) == .ok
         else { return }
         preferences.relocateAccount(id: account.id, to: chosen)
     }

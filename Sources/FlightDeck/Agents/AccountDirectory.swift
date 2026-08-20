@@ -18,6 +18,27 @@ enum AccountDirectory {
         FileManager.default.fileExists(atPath: url.appendingPathComponent(marker(for: agent)).path)
     }
 
+    /// Whether adopting `url` as a home would put an account on top of somebody else's files.
+    /// True when there is nothing there to lose: the path does not exist yet, or it is a
+    /// directory with no entries.
+    ///
+    /// This is the other half of the Add/Relocate sanity rule (`AccountDraft.validate`): a home
+    /// is acceptable if the agent already lives there (`looksLikeHome`) or if Flight Deck is
+    /// effectively creating it. Without it any typed path is accepted, and "Also Delete
+    /// Files…" would later offer to move that whole tree to the Trash.
+    ///
+    /// An existing *empty* directory counts as vacant rather than as a foreign tree — `mkdir`
+    /// first and then Add is an ordinary way to do this, the folder panel can create one, and
+    /// trashing an empty directory destroys nothing. A path that exists as a file is not
+    /// vacant: it is not a directory an agent could ever write a home into.
+    static func isVacant(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        else { return true }
+        guard isDirectory.boolValue else { return false }
+        return (try? FileManager.default.contentsOfDirectory(atPath: url.path))?.isEmpty ?? false
+    }
+
     /// Sibling homes under `directory`, excluding the agent's built-in one — which is seeded
     /// explicitly and must not be discovered twice.
     static func discover(in directory: URL, agent: AgentID) -> [URL] {
