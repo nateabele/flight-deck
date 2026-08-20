@@ -929,6 +929,26 @@ final class FleetPairingFlowTests: XCTestCase {
         _ = XCTWaiter().await fulfillment(of: [refused], timeout: 8)
     }
 
+    /// Cancelling must take the provisional key out of the accepted set, not merely stop
+    /// drawing the sheet. An armed code whose window was closed in the UI but whose key is
+    /// still live is the same hole as one that never expired.
+    func testCancellingArmingRevokesTheProvisionalKey() async throws {
+        let (_, preferences, service) = try await standUp()
+        let payload = try await service.arm()
+        try await service.cancelArming()
+
+        XCTAssertTrue(preferences.pairedDevices.isEmpty)
+        XCTAssertFalse(preferences.deviceKeys().contains { $0.slot == payload.key.slot })
+
+        let refused = expectation(description: "refused")
+        let client = FleetClient(key: payload.key)
+        self.client = client
+        client.onFrame = { _ in XCTFail("a cancelled code must not reach application code") }
+        client.onDisconnect = { _ in refused.fulfill() }
+        client.connect(to: try service.loopbackEndpoint(), lastSeq: 0)
+        _ = XCTWaiter().wait(for: [refused], timeout: 8)
+    }
+
     func testArmingTwiceLeavesOnlyTheNewestCodeLive() async throws {
         let (_, preferences, service) = try standUp()
         let first = try await service.arm()
@@ -1130,7 +1150,11 @@ Replace the `keys:` closure with the preferences store and the armer, and add th
             .filter(\.isProvisional)
             .forEach { preferences.revokeDevice(slot: $0.slot) }
 
-        let port = boundPort?.rawValue ?? 0
+        // A code built before the listener bound would carry `host:0` endpoints — the phone
+        // would race candidates that can never connect, and the failure would look like a
+        // network problem rather than a Mac that was not listening yet. Refuse instead.
+        guard let boundPort else { throw FleetSocketError.didNotBind }
+        let port = boundPort.rawValue
         let payload = armer.arm(
             macName: Host.current().localizedName ?? "Mac",
             serviceName: serviceName,
@@ -1236,6 +1260,60 @@ handler. **Re-derive resume-exactly-once afterwards** against all four interleav
 (timer-then-ready, ready-then-timer, failed-then-timer, timer-then-failed) — the guard still
 carries the correctness; cancellation only stops the retention. Both closures run on the same
 serial `queue`, which is what makes the flag safe, and that must stay true.
+
+**(a2) Whatever you do about (a), the release path needs the same bound.**
+
+`reloadKeys()` rebinds the *same port*, so stopping and restarting races Network.framework's
+asynchronous port release — the symptom is an intermittent `EADDRINUSE` on a path that now runs
+on every arm, expiry and revocation. Awaiting a confirmed `.cancelled`/`.failed` before
+rebinding is the right fix, **but an unbounded await there is the exact bug this file already
+had once** (see the bind timeout above, and `git log` for "bound the async bind"). If the
+listener never reports a terminal state, `start()` — and therefore every pairing action —
+wedges forever on the main actor.
+
+Bound it the same way, with one deliberate difference: on timeout it **resumes rather than
+throws**. The point of the wait is to give the port a moment to come free; if that confirmation
+never arrives, attempting the bind anyway is strictly better than hanging, and the bind has its
+own timeout to fail cleanly if the port really is still held.
+
+```swift
+    /// Cancels the listener and waits for the OS to confirm it, so a rebind on the same port
+    /// does not race the release. `reloadKeys()` makes that race routine rather than exotic.
+    ///
+    /// Bounded, and the bound is not decoration: an unbounded continuation here would wedge
+    /// every arm, expiry and revocation on the main actor if a terminal state never arrived.
+    /// On timeout it resumes rather than throwing — proceeding to a bind that has its own
+    /// timeout beats hanging, and a port that is genuinely still held will surface there as a
+    /// clean error instead of as a frozen UI.
+    private func releaseListener() async {
+        guard let listener else { return }
+        self.listener = nil
+        await withCheckedContinuation { continuation in
+            var resumed = false
+            let timeout = DispatchWorkItem {
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume()
+            }
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .cancelled, .failed:
+                    guard !resumed else { return }
+                    resumed = true
+                    timeout.cancel()
+                    continuation.resume()
+                default:
+                    break
+                }
+            }
+            queue.asyncAfter(deadline: .now() + 2, execute: timeout)
+            listener.cancel()
+        }
+    }
+```
+
+Both closures run on `queue`, which is what makes the `resumed` flag safe without further
+synchronisation — the same argument as the bind path, and it must stay true.
 
 **(b) Nothing caps concurrent unauthenticated connections.** Each peer that completes a
 handshake holds a `pending` slot for `authDeadline` before being dropped. Bounded in time,
