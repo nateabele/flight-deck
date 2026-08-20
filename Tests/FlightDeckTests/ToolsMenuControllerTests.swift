@@ -105,4 +105,59 @@ final class ToolsMenuControllerTests: XCTestCase {
         ToolsMenuController().install(in: main)
         XCTAssertEqual(main.items.map { $0.submenu?.title }, ["Tools", "Window"])
     }
+
+    func testAPrunedMenuReinstallsItself() {
+        // The bug this exists to prevent, observed in the running app: the menu installs
+        // correctly at `applicationDidFinishLaunching`, and SwiftUI's one-time main-menu
+        // reconciliation then REMOVES it — same NSMenu instance, foreign item pruned. With
+        // nothing to put it back, ⌘O reached no menu item, fell through to the terminal, and
+        // came out as a literal "o" in the running agent's prompt.
+        //
+        // Verified against the real app before writing this: the prune posts
+        // NSMenuDidRemoveItemNotification, which is why re-installation can be driven by an
+        // observer rather than by guessing a delay long enough to outlast SwiftUI.
+        let main = NSMenu()
+        main.addItem(withTitle: "View", action: nil, keyEquivalent: "").submenu = NSMenu(title: "View")
+        main.addItem(withTitle: "Window", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Window")
+
+        let controller = ToolsMenuController()
+        controller.tools = [tool("Editor", "o")]
+        controller.install(in: main)
+        XCTAssertTrue(main.items.contains { $0.submenu?.title == "Tools" }, "precondition")
+
+        // Exactly what SwiftUI does to it.
+        let at = try! XCTUnwrap(main.items.firstIndex { $0.submenu?.title == "Tools" })
+        main.removeItem(at: at)
+
+        // Re-insertion is deliberately asynchronous: mutating a menu from inside its own
+        // change notification is not safe, so the controller hops a turn first.
+        let healed = expectation(description: "reinstalled")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { healed.fulfill() }
+        wait(for: [healed], timeout: 2)
+
+        XCTAssertTrue(
+            main.items.contains { $0.submenu?.title == "Tools" },
+            "a pruned Tools menu must put itself back, or the shortcuts silently stop working"
+        )
+        XCTAssertEqual(
+            main.items.map { $0.submenu?.title }, ["View", "Tools", "Window"],
+            "and it must go back in the right place, not appended"
+        )
+    }
+
+    func testReinstallingDoesNotDuplicateWhenTheMenuIsStillPresent() {
+        // The observer fires for every removal, including the one `install(in:)` performs on
+        // its own previous copy. Acting on those unconditionally would append a second Tools.
+        let main = NSMenu()
+        main.addItem(withTitle: "Window", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Window")
+        let controller = ToolsMenuController()
+        controller.install(in: main)
+        controller.install(in: main)
+
+        let settled = expectation(description: "settled")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { settled.fulfill() }
+        wait(for: [settled], timeout: 2)
+
+        XCTAssertEqual(main.items.filter { $0.submenu?.title == "Tools" }.count, 1)
+    }
 }

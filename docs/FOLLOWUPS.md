@@ -385,23 +385,28 @@ from one app-wide file by the 2026-08-19 accounts work — see the entry below).
 [superpowers/specs/2026-08-19-codex-rollout-observation-design.md](superpowers/specs/2026-08-19-codex-rollout-observation-design.md).
 Everything below was found by that branch's reviews, triaged, and deliberately not fixed.
 
-### Blocking, and NOT caused by that branch
+### Fixed
 
-- **`codex resume` fails against a live app-server on codex-cli 0.148.0.** Codex holds a
-  writer lock on a thread, and the interactive TUI refuses with `thread/resume failed:
-  thread <id> already has an active writer (code -32600)`. Flight Deck keeps ONE long-lived
-  app-server per codex account (a thread belongs to the process that created it) and then
-  spawns `codex resume <id>`, which is exactly the refused shape — so codex tabs appear unable
-  to launch on 0.148.
-  Reproduced directly in that production shape; the adapter was built against 0.142.4/0.147.0,
-  and `~/.codex` now has a `thread-writer-locks` directory, so this looks like newer codex
-  behaviour rather than a regression here.
+- **`codex resume` failed against a live app-server on codex-cli 0.148.0 — FIXED.** Codex
+  holds a writer lock on a thread, and the interactive TUI refused with `thread/resume
+  failed: thread <id> already has an active writer (code -32600)`. Flight Deck keeps ONE
+  long-lived app-server per codex account (a thread belongs to the process that created it)
+  and then spawns `codex resume <id>`, which is exactly the refused shape — so codex tabs
+  appeared unable to launch on 0.148. Reproduced directly in that production shape; the
+  adapter was built against 0.142.4/0.147.0, and `~/.codex` now has a `thread-writer-locks`
+  directory, so this looked like newer codex behaviour rather than a regression here.
 
-  `thread/unsubscribe` is NOT the release: it answers `{"status":"unsubscribed"}` and the lock
-  stays held. The only release observed is the app-server process exiting. Untried candidates:
-  `thread/archive`, or not holding a long-lived app-server at all — which is now a live option
-  precisely because observation no longer depends on the app-server. Written up at the point of
-  the workaround in `Tests/FlightDeckTests/CodexIntegrationTests.swift`.
+  `thread/unsubscribe` is NOT the release: it answers `{"status":"unsubscribed"}` and the
+  lock stays held. The fix is `CodexAdapter.prepare` issuing `thread/archive` then
+  `thread/unarchive` on the same connection right after `thread/name/set` — that round trip
+  unloads the thread (`thread/loaded/list` goes from `[<id>]` to `[]`) and releases the lock
+  while the app-server stays alive, with no need to stop or restart it. See the comment at
+  that call site in `Sources/FlightDeck/Agents/Codex/CodexAdapter.swift` for the full
+  reasoning, including the archive-then-unarchive ordering hazard. Pinned hermetically in
+  `Tests/FlightDeckTests/CodexAdapterTests.swift`, `CodexResumeTests.swift`, and
+  `CodexLaunchFailureTests.swift`, and proven against a real app-server — a second connection
+  successfully resuming the thread while the first stays up — by
+  `CodexIntegrationTests.testPrepareReleasesTheWriterLockSoASecondConnectionCanResumeTheThread`.
 
 ### Worth doing
 
@@ -412,21 +417,17 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
   and act on nothing. The honest shape is `Session?` (or routing every UI creation through the
   fallible `createSession`, which is where `ProjectHeaderRow`'s "New Session" and the folder
   drop should probably go anyway); do it when one of those call sites next needs the answer.
-- **`CodexRuntime`'s two `watcher.stop()` calls are unasserted** (`CodexRuntime.swift:44,53`).
-  `drainForTesting` only iterates live attachments, so a regression dropping either still passes
-  the detach test. The replacement-stop at :44 carries a four-line comment calling it
-  load-bearing and has no coverage at all.
-- **`testTheDefaultPathFollowsCodexHome` cannot prove the `CODEX_HOME` branch.** It reads the
-  ambient environment, so on a normal machine only the `~/.codex` fallback is exercised — while
-  the spec's §7 risk 4 names this as the thing tests assert. Split a pure
-  `indexURL(codexHome:home:)` and test both branches.
-- **Unit tests tail the user's real `~/.codex/session_index.jsonl`.** `SessionStore.codexIndexURL`
-  exists as a seam but defaults to the real path, and only `CodexIntegrationTests` overrides it.
-  Read-only and assertions are unaffected (random UUIDs), but the spec says tests never touch it.
-- **`CodexRPC.onNotification` has no production consumer.** The hook survives as generic
-  transport plumbing, wired to nothing and exercised only by `CodexRPCTests`.
-- **`TailReader`'s shrink branch lost a sentence** in the extraction: that only a *smaller*
-  replacement is detectable, and a same-size-or-larger one reads as a continuation.
+- **`CodexRuntime`'s two `watcher.stop()` calls are unasserted, and investigation found no
+  black-box test can currently fail against their removal** (`CodexRuntime.swift:44,53`).
+  Both calls are followed immediately by the only strong reference to that watcher being
+  dropped (a dict overwrite or a `nil`), so ARC deallocates it synchronously either way, and
+  `WatchClock.fire()` already prunes a dead owner before ticking it (see
+  `WatchClockTests.testDroppedOwnerIsPrunedWithoutStop`) — confirmed by temporarily deleting
+  each `.stop()` call in turn and rerunning a real-`WatchClock` regression test against it,
+  which passed both with and without the call. The calls stay defensive (a future retention
+  elsewhere would need them), but closing this gap for real would need a production-only test
+  seam to retain the replaced/detached watcher, which felt like more than this cleanup should
+  add unasked.
 
 ### Not worth doing
 
@@ -458,6 +459,15 @@ the account a session runs as. Three things this deliberately did not build:
   `~/.claude-something` created afterwards (a new login added on the machine after Flight Deck
   first ran) is invisible until the user opens Preferences → Accounts and runs "Scan for
   Accounts…" by hand.
+- **A typed account Location is not tilde-expanded.** `AccountDraft.trimmedHome` builds the
+  home with `URL(fileURLWithPath:)` on the raw text, so a hand-typed `~/.codex-work` resolves
+  against the process working directory rather than `$HOME` — it then passes `validate` as
+  vacant and a bogus `./~/.codex-work` gets created. Not reachable through `Choose…`, which
+  hands over a real URL, and not reachable from the derived default. The only expansion in the
+  codebase is `FlightDeckApp.stateDirectory`'s; when this is fixed the expansion belongs in
+  `trimmedHome` so `validate` inspects the same directory Add creates. Noted here because the
+  one place that *did* expand a tilde in a home path — `CodexNameWatcher`'s read of Flight
+  Deck's own `CODEX_HOME` — was deleted by this work, and with it the only test for it.
 - **Codex's `-p` config profiles remain unimplemented, and are a different axis from
   accounts.** `codex -p <name>` layers `$CODEX_HOME/<name>.config.toml` over one `CODEX_HOME` —
   it is a config profile inside one login, not a second login. The design spec names this

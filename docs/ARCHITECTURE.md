@@ -238,6 +238,22 @@ preferences pane changes it. `MenuKeyEquivalents` covers the new menu with **no 
 all** — it walks the whole main menu and names no specific shortcut, so a Tools item added
 after that file was written routes the same way ⌘Q already does.
 
+**Being AppKit costs one thing, and it is not obvious: SwiftUI prunes the menu back out.**
+SwiftUI owns `NSApp.mainMenu` and removes items it did not author, on a reconciliation pass
+that runs *after* `applicationDidFinishLaunching`. So installing once always loses — the item
+lands correctly between View and Window, and is gone a moment later from that same `NSMenu`
+instance. The symptom is not a missing menu but broken shortcuts: with nothing to claim ⌘O,
+`SurfaceView.performKeyEquivalent` returns false, AppKit re-dispatches the same event, the
+`lastPerformKeyEvent` timestamp matches on the second pass, and the terminal receives a
+synthesized keyDown carrying `characters` — a literal "o" in the running agent's prompt.
+
+`ToolsMenuController` therefore keeps a weak reference to its host menu and observes
+`NSMenu.didRemoveItemNotification`, re-inserting whenever its item disappears. A timed
+re-install would have been enough at launch and wrong afterwards: SwiftUI rebuilds its
+commands when observed state changes, and `SessionCommands` observes preferences, so editing
+a tool can prune the menu again — killing the shortcuts at the exact moment the user
+configures them.
+
 **The overlay's fade is a clock-free state machine.** `ToolOverlayVisibility` owns no clock
 of its own — every method takes "now" from its caller, `ToolOverlayModel` — so "fades after
 five idle seconds" is a test that runs instantly rather than one that sleeps. It is driven

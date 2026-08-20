@@ -75,6 +75,8 @@ final class CodexOptionsRoutingTests: XCTestCase {
         ))
         let store = SessionStore(provider: nil, persistence: nil, preferences: preferences)
         store.transcriptsRootOverride = projectsRoot
+        // Never the user's real `~/.codex/session_index.jsonl`: this test creates a codex tab.
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()
         let adapter = RecordingCodexAdapter()
         // Filed under the account the tab will actually resolve to. This store HAS
@@ -99,6 +101,7 @@ final class CodexOptionsRoutingTests: XCTestCase {
     func testAStoreWithNoPreferencesStillLaunchesOnCodexsOwnDefaults() async throws {
         let store = SessionStore(provider: nil, persistence: nil)
         store.transcriptsRootOverride = projectsRoot
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()
         let adapter = RecordingCodexAdapter()
         // No preferences on this one, so nothing resolves and nil is the key.
