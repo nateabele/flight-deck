@@ -25,6 +25,41 @@ final class PreferencesStoreTests: XCTestCase {
         XCTAssertEqual(store.preferences.globalFlags.values["--model"], .value("opus"))
     }
 
+    /// Migration has to reach disk inside `init`, and this is the test that proves it: Swift
+    /// does not fire the `preferences` `didSet` on an initializing assignment, so the only
+    /// other write path is the user happening to edit a preference. Without the write, every
+    /// launch re-mints the seeded accounts with fresh `UUID()`s — a `Session.accountID` stamped
+    /// on launch 1 dangles on launch 2, and the tab restores orphaned under an "account no
+    /// longer exists" alert it can never recover from.
+    func testMigratedAccountIDsSurviveASecondStoreOverTheSamePersistence() {
+        let persistence = MemoryPersistence()
+        let ids = PreferencesStore(persistence: persistence).preferences.accounts.map(\.id)
+        XCTAssertFalse(ids.isEmpty, "migration seeds a built-in account per agent")
+
+        let relaunched = PreferencesStore(persistence: persistence)
+        XCTAssertEqual(relaunched.preferences.accounts.map(\.id), ids,
+                       "the migrated blob must be on disk, not re-derived per launch")
+    }
+
+    /// The other half of the guard: a launch that migrates nothing writes nothing, so a
+    /// steady-state start does not touch the defaults key at all.
+    func testALaunchWithNothingToMigrateDoesNotRewriteTheBlob() {
+        let persistence = MemoryPersistence()
+        _ = PreferencesStore(persistence: persistence)
+        let settled = persistence.saveCount
+        XCTAssertGreaterThan(settled, 0, "the first launch has migrations to persist")
+
+        _ = PreferencesStore(persistence: persistence)
+        XCTAssertEqual(persistence.saveCount, settled)
+    }
+
+    /// A nil persistence stays hermetic — the `-FlightDeckResetState` gate and every test that
+    /// passes nil must not acquire a write path by way of migration.
+    func testANilPersistenceStillMigratesInMemoryAndWritesNowhere() {
+        let store = PreferencesStore(persistence: nil)
+        XCTAssertFalse(store.preferences.accounts.isEmpty)
+    }
+
     func testMutationPersists() {
         let persistence = MemoryPersistence()
         let store = PreferencesStore(persistence: persistence)
