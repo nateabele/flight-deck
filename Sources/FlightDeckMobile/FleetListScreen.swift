@@ -71,7 +71,13 @@ struct FleetListScreen: View {
             Spacer()
             if session.isUnread {
                 Circle().fill(.tint).frame(width: 8, height: 8)
-                    .accessibilityLabel("Unread")
+                    // Silent when the glyph already carries the unread meaning. The Mac folds
+                    // the two together for an idle session — `SessionStatus.tooltip(unread:)`
+                    // returns "Finished — not yet viewed" rather than "Idle" — so announcing
+                    // "Unread" as well would read the same fact twice. For every other
+                    // activity there is no such override, and this dot is the ONLY channel
+                    // VoiceOver has for unread-ness, so it keeps its label there.
+                    .accessibilityLabel(session.activity == "idle" ? "" : "Unread")
             }
         }
     }
