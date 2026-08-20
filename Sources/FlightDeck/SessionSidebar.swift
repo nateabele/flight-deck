@@ -346,52 +346,67 @@ struct SessionSidebar: View {
             store.acceptDroppedURLs(urls) != nil
         }
         .safeAreaInset(edge: .bottom) {
-            HStack(spacing: 4) {
-                Button {
-                    let agent = affordance?.agent ?? Preferences.defaultAgents[0].id
-                    Task { await store.createFromMenu(agent: agent) }
-                } label: {
-                    HStack {
-                        // The agent name is dynamic — "New Claude Session" by default, changing
-                        // live to "New Codex Session" the instant ⇧ is held on the way to ⌘⇧N.
-                        // See `NewSessionAffordance.resolve`.
-                        Label(isEmpty ? "Add Project" : (affordance?.label ?? "New Session"),
-                              systemImage: "plus")
-                        Spacer()
-                        // Apple's HIG puts shortcuts on menu items, not buttons. Shown here
-                        // deliberately so the binding is discoverable without opening the menu;
-                        // the File menu carries the same shortcuts, one item per agent slot.
-                        Text(isEmpty ? "⇧⌘A" : (affordance?.shortcutDisplay ?? "⌘N"))
-                            .foregroundStyle(.secondary)
-                            .accessibilityHidden(true)
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .accessibilityIdentifier("new-session")
-                .keyboardShortcut(isEmpty ? .init("a", modifiers: [.command, .shift])
-                                         : .init("n", modifiers: NewSessionAffordance.eventModifiers(
-                                             affordance?.modifiers ?? [.command]
-                                         )))
-
-                // A mouse-only escape hatch beside the shortcut button: pick a *specific*
-                // account — including a non-default one — without disturbing what ⌘N does.
-                // Absent while empty, since "Add Project" has no agent or account to choose
-                // between, and absent with no project to resolve against yet.
+            Group {
+                // A native split button when there's a menu to offer: the label runs the
+                // default action, the trailing chevron segment opens the account/agent
+                // picker — one real AppKit control instead of a button glued to a
+                // borderless menu, so the divider, hover, and pressed states come free.
+                // Absent while empty, since "Add Project" has no agent or account to
+                // choose between, and absent with no project to resolve against yet.
                 if !isEmpty, let preferences, let project = store.currentProjectPath {
                     Menu {
                         newSessionMenuEntries(preferences: preferences, project: project)
                     } label: {
-                        Image(systemName: "chevron.down")
+                        newSessionLabel
+                    } primaryAction: {
+                        let agent = affordance?.agent ?? Preferences.defaultAgents[0].id
+                        Task { await store.createFromMenu(agent: agent) }
                     }
-                    .menuStyle(.borderlessButton)
-                    .frame(width: 16)
-                    .accessibilityIdentifier("new-session-accounts")
+                    .menuStyle(.button)
+                    .accessibilityIdentifier("new-session")
+                    .keyboardShortcut(isEmpty ? .init("a", modifiers: [.command, .shift])
+                                             : .init("n", modifiers: NewSessionAffordance.eventModifiers(
+                                                 affordance?.modifiers ?? [.command]
+                                             )))
+                } else {
+                    Button {
+                        let agent = affordance?.agent ?? Preferences.defaultAgents[0].id
+                        Task { await store.createFromMenu(agent: agent) }
+                    } label: {
+                        newSessionLabel
+                    }
+                    .accessibilityIdentifier("new-session")
+                    .keyboardShortcut(isEmpty ? .init("a", modifiers: [.command, .shift])
+                                             : .init("n", modifiers: NewSessionAffordance.eventModifiers(
+                                                 affordance?.modifiers ?? [.command]
+                                             )))
                 }
             }
             .padding(8)
             .onAppear { modifiers.start() }
             .onDisappear { modifiers.stop() }
         }
+    }
+
+    /// Shared label for both the split-button and plain-button forms of the new-session
+    /// control: the dynamic affordance text plus the shortcut hint. Kept flush against
+    /// `body` so it's obviously not intended for reuse outside it.
+    private var newSessionLabel: some View {
+        HStack {
+            // The agent name is dynamic — "New Claude Session" by default, changing
+            // live to "New Codex Session" the instant ⇧ is held on the way to ⌘⇧N.
+            // See `NewSessionAffordance.resolve`.
+            Label(isEmpty ? "Add Project" : (affordance?.label ?? "New Session"),
+                  systemImage: "plus")
+            Spacer()
+            // Apple's HIG puts shortcuts on menu items, not buttons. Shown here
+            // deliberately so the binding is discoverable without opening the menu;
+            // the File menu carries the same shortcuts, one item per agent slot.
+            Text(isEmpty ? "⇧⌘A" : (affordance?.shortcutDisplay ?? "⌘N"))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     /// Renders `NewSessionAffordance.menu(agents:accounts:resolved:)` as SwiftUI menu content:
