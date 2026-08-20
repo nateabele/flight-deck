@@ -163,24 +163,47 @@ final class QRScannerContainerView: UIView {
     }
 }
 
+/// The non-Sendable capture resources behind one `Sendable` reference, so every queue hop —
+/// including `deinit`'s, which cannot use `self` — captures a `Sendable` value rather than an
+/// `AVCaptureSession`/`AVCaptureMetadataOutput` directly. Confined to `queue`, same as the
+/// controller that owns it.
+///
+/// `stopped` exists for a narrower reason than the rest: on `.notDetermined`,
+/// `configureSession()` is enqueued from `AVCaptureDevice.requestAccess`'s completion, which
+/// can land after the user has already paired by typing the code and the view has been
+/// dismantled — `stop()` already ran, and nothing stops a `configureSession()` that lands
+/// after it. `configureSession()` checks this flag before doing anything, on `queue`, so the
+/// check and every mutation it guards share the same confinement as the rest of this class.
+private final class CaptureResources: @unchecked Sendable {
+    let session = AVCaptureSession()
+    var output: AVCaptureMetadataOutput?
+    var stopped = false
+}
+
 /// Owns `AVCaptureSession`/`AVCaptureMetadataOutput` and the metadata delegate conformance,
 /// confined to `queue` — the same idiom `FleetClient`/`FleetSocketServer`/`FleetConnector`
 /// use in `FleetKit`: every touch of the non-Sendable capture state happens on one queue, so
 /// the mutable state is never actually shared across threads even though nothing here is
 /// locked.
 ///
-/// This replaces an earlier version that kept the session directly on
-/// `QRScannerContainerView` and captured it (and `output`) by value into `sessionQueue`
-/// closures. That produced two problems, not one: three `SendableClosureCaptures` warnings
-/// (capturing a non-Sendable Apple type into a `@Sendable` closure), and a real race — `output`
-/// was assigned on `.main`, asynchronously, *after* the delegate had already been registered on
-/// `sessionQueue`, so a `teardown()` landing in that gap found `output` still `nil` and silently
-/// failed to clear a delegate that was already live, with no second `dismantleUIView` call ever
-/// coming to retry it. Routing every read and write of `session`/`output` through `self`
-/// (`weak`, and `@unchecked Sendable`) instead of capturing them directly, and keeping the
-/// delegate's registration and `output`'s assignment in the same queue hop, fixes both at once:
-/// there is no window where the delegate is live but `output` doesn't yet know about it, and
-/// `xcrun swiftc -typecheck -swift-version 6` on this shape reports zero diagnostics.
+/// The capture state itself lives on `resources` (see that type's doc comment), not directly
+/// on this class. An earlier version of this file kept `session`/`output` as properties here
+/// and read them through `self` (`weak`) inside every queue block, including `deinit`'s. That
+/// shape has a fatal flaw specific to `deinit`: by the time a `deinit` runs, the last strong
+/// reference is already gone, so a `[weak self]` capture inside a closure that runs *later*
+/// can never resolve — `deinit`'s cleanup silently did nothing, on every run, confirmed
+/// empirically by reproducing the shape in isolation. The fix has to satisfy two constraints
+/// that pull in opposite directions: cleanup that actually executes needs a *strong* capture
+/// of something, but strongly capturing `session`/`output` directly (both non-Sendable Apple
+/// types) into a `@Sendable` closure is exactly what `SendableClosureCaptures` warns about —
+/// measured directly: six warnings, the same regression round 3 spent eliminating. Moving the
+/// capture resources onto their own `@unchecked Sendable` reference type resolves both at
+/// once: `[resources]` is a strong capture of a `Sendable` value, so it executes and keeps the
+/// resources alive until the block runs, and captures no non-Sendable type across the closure
+/// boundary. Blocks that call back into this controller (`onDenied`, `onSession`) still need
+/// `[weak self]`, since those are genuinely optional and a dangling controller shouldn't be
+/// kept alive just to fire them. `xcrun swiftc -typecheck -swift-version 6` on this shape
+/// reports zero diagnostics.
 final class QRScannerController: NSObject, AVCaptureMetadataOutputObjectsDelegate, @unchecked Sendable {
     /// Fires on the main queue once the session has a running preview to show.
     var onSession: ((AVCaptureSession) -> Void)?
@@ -201,8 +224,7 @@ final class QRScannerController: NSObject, AVCaptureMetadataOutputObjectsDelegat
     // `MainActor.assumeIsolated` below sound, and moving it onto `queue` would turn a verified
     // premise into a runtime crash. Do not "tidy" that.
     private let queue = DispatchQueue(label: "com.flightdeck.mobile.qrscanner")
-    private let session = AVCaptureSession()
-    private var output: AVCaptureMetadataOutput?
+    private let resources = CaptureResources()
 
     init(onCode: @escaping (String) -> Void) {
         self.onCode = onCode
@@ -236,61 +258,63 @@ final class QRScannerController: NSObject, AVCaptureMetadataOutputObjectsDelegat
     /// clear itself, which used to race `output` being handed off on `.main`. Confining both
     /// the read and the write of `output` to this one queue means a `stop()` landing here can
     /// never observe `output` as `nil` while the delegate is still registered: the two are set
-    /// together, in the same queue hop, inside `configureSession()`. Called from
-    /// `QRScannerContainerView.teardown()`; `deinit` below repeats the stop as belt and braces
-    /// in case that hook is ever bypassed.
+    /// together, in the same queue hop, inside `configureSession()`. Also marks `resources` as
+    /// `stopped`, so a `configureSession()` still in flight from a late `.notDetermined` grant
+    /// finds out and does nothing rather than starting a camera nobody is looking at. Called
+    /// from `QRScannerContainerView.teardown()`; `deinit` below repeats the stop as belt and
+    /// braces in case that hook is ever bypassed.
     func stop() {
-        queue.async { [weak self] in
-            self?.output?.setMetadataObjectsDelegate(nil, queue: nil)
-            self?.output = nil
-            self?.session.stopRunning()
+        queue.async { [resources] in
+            resources.stopped = true
+            resources.output?.setMetadataObjectsDelegate(nil, queue: nil)
+            resources.output = nil
+            resources.session.stopRunning()
         }
     }
 
     deinit {
         // Cannot call an instance method on `self` from `deinit`, so this repeats `stop()`'s
-        // body by hand — `[weak self]` here is really just documentation, since a `deinit`
-        // already means the last strong reference is gone, but it keeps this line identical
-        // in shape to every other queue hop in this type.
-        queue.async { [weak self] in
-            self?.output?.setMetadataObjectsDelegate(nil, queue: nil)
-            self?.session.stopRunning()
+        // body by hand. `[resources]` is a *strong* capture of `Sendable` state, not `self` —
+        // see `resources`' and this type's doc comments for why a `[weak self]` capture here
+        // would silently never run.
+        queue.async { [resources] in
+            resources.output?.setMetadataObjectsDelegate(nil, queue: nil)
+            resources.session.stopRunning()
         }
     }
 
     private func configureSession() {
-        queue.async { [weak self] in
-            guard let self else { return }
+        queue.async { [weak self, resources] in
+            guard let self, !resources.stopped else { return }
             guard
                 let device = AVCaptureDevice.default(for: .video),
                 let input = try? AVCaptureDeviceInput(device: device),
-                self.session.canAddInput(input)
+                resources.session.canAddInput(input)
             else {
                 DispatchQueue.main.async { self.onDenied?() }
                 return
             }
-            self.session.beginConfiguration()
-            self.session.addInput(input)
+            resources.session.beginConfiguration()
+            resources.session.addInput(input)
 
             let output = AVCaptureMetadataOutput()
-            guard self.session.canAddOutput(output) else {
-                self.session.commitConfiguration()
+            guard resources.session.canAddOutput(output) else {
+                resources.session.commitConfiguration()
                 DispatchQueue.main.async { self.onDenied?() }
                 return
             }
-            self.session.addOutput(output)
+            resources.session.addOutput(output)
             output.setMetadataObjectsDelegate(self, queue: .main)
             output.metadataObjectTypes = [.qr]
-            self.session.commitConfiguration()
+            resources.session.commitConfiguration()
             // Assigned in the same queue hop that just registered the delegate above — see
-            // this type's doc comment for the race this closes.
-            self.output = output
+            // `resources`' doc comment for the race this closes.
+            resources.output = output
 
-            self.session.startRunning()
+            resources.session.startRunning()
 
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.onSession?(self.session)
+            DispatchQueue.main.async { [weak self, resources] in
+                self?.onSession?(resources.session)
             }
         }
     }
