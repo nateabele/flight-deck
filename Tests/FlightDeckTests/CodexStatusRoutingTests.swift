@@ -71,7 +71,7 @@ final class CodexStatusRoutingTests: XCTestCase {
 
     private func makeStore() -> SessionStore {
         let store = SessionStore(provider: nil, persistence: nil)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         store.launchFailureReporter = SilentReporter()
         // Deterministic rather than whatever `NSApp` reports under `xctest`: read state and
         // notification delivery both branch on it.

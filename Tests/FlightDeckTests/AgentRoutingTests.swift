@@ -33,7 +33,7 @@ final class AgentRoutingTests: XCTestCase {
 
     private func makeStore() -> SessionStore {
         let store = SessionStore(provider: nil, persistence: nil)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         return store
     }
 
@@ -41,7 +41,7 @@ final class AgentRoutingTests: XCTestCase {
         let provider = RecordingProvider()
         retainedProviders.append(provider)
         let store = SessionStore(provider: provider, persistence: nil)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         return (store, provider)
     }
 

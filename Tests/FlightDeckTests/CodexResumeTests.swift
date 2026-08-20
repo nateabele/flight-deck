@@ -264,7 +264,7 @@ final class CodexResumeTests: XCTestCase {
         let provider = RecordingProvider()
         retained.append(provider)
         let store = SessionStore(provider: provider, persistence: persistence)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         store.launchFailureReporter = SilentReporter()
         let injector = SpyInjector()
         store.injectorOverride = injector

@@ -155,7 +155,7 @@ final class SessionProjectMoveTests: XCTestCase {
             ClaudeSession.transcriptURL(
                 sessionID: a.pinnedConversationID,
                 workingDirectory: "/a/.claude/worktrees/w",
-                projectsRoot: store.projectsRoot
+                projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
     }
@@ -184,7 +184,7 @@ final class SessionProjectMoveTests: XCTestCase {
             ClaudeSession.transcriptURL(
                 sessionID: a.pinnedConversationID,
                 workingDirectory: "/a",
-                projectsRoot: store.projectsRoot
+                projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
     }
@@ -272,7 +272,7 @@ final class SessionProjectMoveTests: XCTestCase {
         XCTAssertEqual(
             store.watchedTranscriptURL(of: a.id),
             ClaudeSession.transcriptURL(
-                sessionID: resumed, workingDirectory: "/a", projectsRoot: store.projectsRoot
+                sessionID: resumed, workingDirectory: "/a", projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
     }
@@ -314,7 +314,7 @@ final class SessionProjectMoveTests: XCTestCase {
             ClaudeSession.transcriptURL(
                 sessionID: a.pinnedConversationID,
                 workingDirectory: "/a",
-                projectsRoot: store.projectsRoot
+                projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
     }
@@ -335,7 +335,7 @@ final class SessionProjectMoveTests: XCTestCase {
             ClaudeSession.transcriptURL(
                 sessionID: a.pinnedConversationID,
                 workingDirectory: "/moved",
-                projectsRoot: store.projectsRoot
+                projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
     }
@@ -358,7 +358,7 @@ final class SessionProjectMoveTests: XCTestCase {
             ClaudeSession.transcriptURL(
                 sessionID: resumed,
                 workingDirectory: "/moved",
-                projectsRoot: store.projectsRoot
+                projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
     }
@@ -384,7 +384,7 @@ final class SessionProjectMoveTests: XCTestCase {
             ClaudeSession.transcriptURL(
                 sessionID: resumed,
                 workingDirectory: "/moved",
-                projectsRoot: store.projectsRoot
+                projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
     }
@@ -428,7 +428,7 @@ final class SessionProjectMoveTests: XCTestCase {
             ClaudeSession.transcriptURL(
                 sessionID: a.pinnedConversationID,
                 workingDirectory: real.resolvingSymlinksInPath().path,
-                projectsRoot: store.projectsRoot
+                projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
     }

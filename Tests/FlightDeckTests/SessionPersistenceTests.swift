@@ -256,7 +256,7 @@ final class SessionPersistenceTests: XCTestCase {
 
     /// End-to-end regression for the restore bug: reaches the watcher only through the
     /// store (as production does), so the store↔watcher↔`applyExternalTitle` wiring is
-    /// actually exercised. `SessionStore.projectsRoot` exists precisely for this.
+    /// actually exercised. `SessionStore.transcriptsRootOverride` exists precisely for this.
     ///
     /// Restores a session whose transcript already contains a `custom-title` line with a
     /// *different* title (as if a rename had happened in a prior run, or the file were
@@ -298,7 +298,7 @@ final class SessionPersistenceTests: XCTestCase {
         )
 
         let store = SessionStore(provider: CapturingProvider(), persistence: fake)
-        store.projectsRoot = projectsRoot
+        store.transcriptsRootOverride = projectsRoot
         // Poll at the foreground cadence: this test asserts on watcher ticks in real time,
         // and a headless run is never frontmost. See `waitForWatcher`.
         store.appIsActive = { true }
@@ -557,7 +557,7 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(
             store.watchedTranscriptURL(of: id),
             ClaudeSession.transcriptURL(
-                sessionID: id, workingDirectory: worktree, projectsRoot: store.projectsRoot
+                sessionID: id, workingDirectory: worktree, projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
         XCTAssertEqual(persistence.stored?.sessions.first?.transcriptDirectory, worktree)
@@ -593,7 +593,7 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(
             store.watchedTranscriptURL(of: id),
             ClaudeSession.transcriptURL(
-                sessionID: id, workingDirectory: "/w", projectsRoot: store.projectsRoot
+                sessionID: id, workingDirectory: "/w", projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
         XCTAssertEqual(persistence.stored?.sessions.first?.transcriptDirectory, "/w")
@@ -619,7 +619,7 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(
             store.watchedTranscriptURL(of: id),
             ClaudeSession.transcriptURL(
-                sessionID: id, workingDirectory: "/w", projectsRoot: store.projectsRoot
+                sessionID: id, workingDirectory: "/w", projectsRoot: store.transcriptsRoot(forAccount: nil)
             )
         )
         XCTAssertEqual(persistence.stored?.sessions.first?.transcriptDirectory, "/w")
