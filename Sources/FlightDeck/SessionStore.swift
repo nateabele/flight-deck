@@ -182,7 +182,7 @@ final class SessionStore: ObservableObject {
     /// rather than by convention.
     private var adapters: [AgentInstance: any AgentAdapter] = [:]
 
-    /// The observation half, also one per instance: both agents multiplex a single app-wide
+    /// The observation half, also one per instance: both agents multiplex a single per-account
     /// source across every tab *of one account*, so a runtime per tab would re-scan claude's
     /// registry once per tab, while a runtime per agent would have one attachment table
     /// standing for two homes. See `AgentRuntime`.

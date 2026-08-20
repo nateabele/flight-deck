@@ -4,8 +4,8 @@ import Foundation
 ///
 /// Four responsibilities: establish identity, produce the text typed into the pty, and
 /// rename. Observation is deliberately NOT here — it belongs to `AgentRuntime`, because
-/// both agents multiplex one app-wide source across N tabs rather than owning a per-tab
-/// channel. See the design doc §2.1.
+/// both agents multiplex one source per account across that account's tabs rather than
+/// owning a per-tab channel. See the design doc §2.1.
 @MainActor
 protocol AgentAdapter {
     static var id: AgentID { get }
