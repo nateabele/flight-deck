@@ -380,7 +380,8 @@ is already open. Design record:
 ## Codex rollout observation (2026-08-19) — landed, with these residues
 
 Codex observation now reads the files codex writes: a per-thread rollout `.jsonl` for turn
-boundaries and the app-wide `session_index.jsonl` for renames. Spec:
+boundaries and, per codex account, that account's `session_index.jsonl` for renames (rekeyed
+from one app-wide file by the 2026-08-19 accounts work — see the entry below). Spec:
 [superpowers/specs/2026-08-19-codex-rollout-observation-design.md](superpowers/specs/2026-08-19-codex-rollout-observation-design.md).
 Everything below was found by that branch's reviews, triaged, and deliberately not fixed.
 
@@ -389,8 +390,9 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
 - **`codex resume` fails against a live app-server on codex-cli 0.148.0.** Codex holds a
   writer lock on a thread, and the interactive TUI refuses with `thread/resume failed:
   thread <id> already has an active writer (code -32600)`. Flight Deck keeps ONE long-lived
-  app-server (a thread belongs to the process that created it) and then spawns `codex resume
-  <id>`, which is exactly the refused shape — so codex tabs appear unable to launch on 0.148.
+  app-server per codex account (a thread belongs to the process that created it) and then
+  spawns `codex resume <id>`, which is exactly the refused shape — so codex tabs appear unable
+  to launch on 0.148.
   Reproduced directly in that production shape; the adapter was built against 0.142.4/0.147.0,
   and `~/.codex` now has a `thread-writer-locks` directory, so this looks like newer codex
   behaviour rather than a regression here.
@@ -433,3 +435,32 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
   discloses the same thing.
 - `CodexProcessTransport.stop()` sends SIGTERM without awaiting exit. Theoretical, unobserved,
   and integration-test-only; a wait would need a timeout policy for no measured gain.
+
+## Agent accounts (2026-08-19) — what the work left behind
+
+Spec: [superpowers/specs/2026-08-19-agent-accounts-design.md](superpowers/specs/2026-08-19-agent-accounts-design.md).
+An account is a login, identified by its config directory (`CLAUDE_CONFIG_DIR` /
+`CODEX_HOME`); every observation root that used to be an app-wide constant now derives from
+the account a session runs as. Three things this deliberately did not build:
+
+- **Relocating an account is blocked while any of its sessions are open — a refusal, not a
+  migration.** `PreferencesStore.relocateAccount` only rewrites the stored `home`; it never
+  moves a file. The guard that makes this safe is the same one `canRemove` uses for delete
+  (`AccountsSection.canRemove`, `Sources/FlightDeck/Preferences/UI/AccountsSection.swift`): an
+  account with a tab bound to it (`boundAccountIDs`) cannot be relocated either, so there is no
+  window where a live tab's transcript/registry watcher is pointed at a home nobody told it
+  about. There is no data-migration path (copying transcripts, re-pointing an in-flight
+  watcher) — the user closes the account's tabs first, or does not relocate it.
+- **"Scan for Accounts…" is the only way to pick up a home created after first launch.**
+  `Preferences.migrateAccountsIfNeeded` (`Sources/FlightDeck/Preferences/Preferences.swift`)
+  discovers sibling account directories exactly once, on first migration — deliberately not a
+  re-scan on every launch, because a re-scan would resurrect an account the user removed. A
+  `~/.claude-something` created afterwards (a new login added on the machine after Flight Deck
+  first ran) is invisible until the user opens Preferences → Accounts and runs "Scan for
+  Accounts…" by hand.
+- **Codex's `-p` config profiles remain unimplemented, and are a different axis from
+  accounts.** `codex -p <name>` layers `$CODEX_HOME/<name>.config.toml` over one `CODEX_HOME` —
+  it is a config profile inside one login, not a second login. The design spec names this
+  explicitly (§2, §7.5 "Deferred") as a future `CodexThreadOptions` field; nothing in this work
+  reads or writes a `-p` profile, and an account switch does not change which profile (if any)
+  a codex thread would use.

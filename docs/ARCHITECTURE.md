@@ -147,15 +147,22 @@ to session-encounter order with every project expanded.
 Sidebar rows show what each Claude session is doing. Two sources feed one map:
 
 ```
-~/.claude/sessions/<pid>.json ──> SessionStatusWatcher ──┐
-  (Claude's own status registry,   (one per app, 500ms    │
-   polled; see the design spec)     poll, keyed by         ├──> SessionStore.statuses
-                                    sessionId)             │      [UUID: SessionStatus]
-<transcript>.jsonl ──────────────> TranscriptWatcher ─────┘             │
-  (outstanding Agent tool_use ids,  (one per session)                   v
-   cleared at each turn boundary)                              SessionStatusIcon
-                                                               SessionNotifier
+<account home>/sessions/<pid>.json ──> SessionStatusWatcher ──┐
+  (Claude's own status registry,        (one per claude        │
+   polled; see the design spec)          account, 500ms poll,  ├──> SessionStore.statuses
+                                         keyed by sessionId)    │      [UUID: SessionStatus]
+<transcript>.jsonl ────────────────────> TranscriptWatcher ────┘             │
+  (outstanding Agent tool_use ids,        (one per session)                  v
+   cleared at each turn boundary)                                   SessionStatusIcon
+                                                                     SessionNotifier
 ```
+
+`<account home>` is `CLAUDE_CONFIG_DIR` for that session's account (`~/.claude` for the
+built-in login) — resolved once per tab from the account the launching session runs as, not
+a fixed constant. Before the 2026-08-19 accounts work every tab shared one app-wide watcher
+rooted at `~/.claude/sessions`; now `SessionStore` keeps one `SessionStatusWatcher` per claude
+account (`statusWatchers[account]`), built on first tab and stopped when that account's last
+claude tab closes, so two logins' registries are never merged into one scan.
 
 - **`ClaudeStatusFile`** — pure decode of one registry file. Fails closed: an unknown
   `status`, a torn read, or a pid/filename mismatch all yield nil, and the watcher keeps

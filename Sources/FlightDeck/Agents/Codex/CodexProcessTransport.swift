@@ -224,8 +224,10 @@ enum CodexVersionProbe {
 
 /// Spawns `codex app-server` and pumps newline-delimited JSON both ways.
 ///
-/// Long-lived and app-wide: a codex thread belongs to the app-server process that created
-/// it, so restarting per session would discard threads.
+/// Long-lived, and one per codex account rather than one for the whole app (`SessionStore`
+/// keeps one `CodexStack`, and so one of these, per account): a codex thread belongs to the
+/// app-server process that created it, so restarting per session would discard threads, and
+/// a process shared across accounts would spawn every login's threads under one `CODEX_HOME`.
 @MainActor
 final class CodexProcessTransport: CodexTransport {
     var onLine: ((String) -> Void)?
