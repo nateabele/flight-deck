@@ -4,7 +4,7 @@
 
 **Goal:** Replicate the live fleet — projects, sessions, status, sub-agent count, unread — out of `SessionStore` to a remote client over one mutually-authenticated WebSocket, with resume, and prove it end-to-end without a phone.
 
-**Architecture:** A new `FleetKit` framework, built for **both** macOS and iOS from one source directory, holds the wire value types, the event fold, snapshot application, the frame codec, the TLS-PSK parameter factory, and both socket halves. It imports `Foundation` and `Network` and nothing else — the iOS slice is what enforces that. `SessionStore` gains one optional sink (`replicator`, injected exactly like `notifier`) that every fleet-state mutation reports to; `FleetReplicator` keeps a mirror snapshot plus a bounded ring, and in DEBUG asserts the mirror still equals a fresh projection of the store after every batch. That assertion is the only thing standing between a new mutation site and a silently stale client.
+**Architecture:** A new `FleetKit` framework, built for **both** macOS and iOS from one source directory, holds the wire value types, the event fold, snapshot application, the frame codec, the TLS-PSK parameter factory, and both socket halves. It imports `Foundation`, `Network` and `Security` and nothing else — the iOS slice is what enforces that. `SessionStore` gains one optional sink (`replicator`, injected exactly like `notifier`) that every fleet-state mutation reports to; `FleetReplicator` keeps a mirror snapshot plus a bounded ring, and in DEBUG asserts the mirror still equals a fresh projection of the store after every batch. That assertion is the only thing standing between a new mutation site and a silently stale client.
 
 **Tech Stack:** Swift 6 (FleetKit) / Swift 5 (app) / Network.framework / XCTest / xcodegen + xcodebuild.
 
@@ -16,7 +16,7 @@
 
 - `SWIFT_VERSION: "5.0"` in `project.yml`'s `settings.base` is deliberate — vendored Ghostty is not Swift-6 clean. **Never "fix" it.** The new `FleetKit` targets override it to `6.0` in their own `settings.base`; a Swift 6 module imports into a Swift 5 target without complaint.
 - Deployment targets: macOS 14.0 (existing), iOS 17.0 (added by Task 1).
-- **`FleetKit` may import `Foundation` and `Network` only.** No AppKit, no UIKit, no SwiftUI, and nothing from the `FlightDeck` module. It must not use `Session`, `Repo`, `SessionStatus` or `AgentID` — those carry desktop-only fields (`transcriptDirectory`, `transcriptPath`) and live in a module FleetKit cannot see. Wire types are trimmed structs that duplicate only what a client renders.
+- **`FleetKit` may import `Foundation`, `Network`, and `Security` only.** No AppKit, no UIKit, no SwiftUI, and nothing from the `FlightDeck` module. It must not use `Session`, `Repo`, `SessionStatus` or `AgentID` — those carry desktop-only fields (`transcriptDirectory`, `transcriptPath`) and live in a module FleetKit cannot see. Wire types are trimmed structs that duplicate only what a client renders.
 - **No iOS Simulator runtime is installed on this machine** (`xcrun simctl list runtimes` is empty) and there is no provisioning profile. The iOS slice is therefore **compile-checked only** (`./scripts/build-ios.sh`), and every behavioural test in this plan runs in the existing macOS headless bundle. Do not add an iOS test target.
 - TDD, and **confirm the test fails against the missing/broken code before implementing.** Never weaken an assertion to go green.
 - Comments explain *why* and name the failure they prevent. That is the house style; match it.
@@ -33,7 +33,7 @@
 
 This task delivers no behaviour. It exists because every wiring hazard in the plan lives here, and finding them at Task 11 instead of Task 1 is what makes a plan overrun: a new framework target, its Swift-6 override, embedding into the app, the test bundle's `@rpath` lookup, and an iOS slice compiled from the same sources. One trivial public type is enough to prove all five.
 
-The iOS framework target is not premature. It is the **enforcement mechanism** for the "Foundation and Network only" constraint — a stray `import AppKit` in FleetKit fails `./scripts/build-ios.sh` immediately, where a convention in a doc would be discovered by the phone app weeks later.
+The iOS framework target is not premature. It is the **enforcement mechanism** for the "Foundation, Network and Security only" constraint — a stray `import AppKit` in FleetKit fails `./scripts/build-ios.sh` immediately, where a convention in a doc would be discovered by the phone app weeks later.
 
 **Files:**
 - Create: `Sources/FleetKit/FleetKitVersion.swift`
@@ -116,7 +116,7 @@ Add two targets. They share one source directory deliberately — `PRODUCT_MODUL
         GENERATE_INFOPLIST_FILE: "YES"
 
   # Same sources, iOS slice. This target ships nothing on its own — it is the enforcement
-  # mechanism for "FleetKit imports Foundation and Network only". An `import AppKit` that
+  # mechanism for "FleetKit imports Foundation, Network and Security only". An `import AppKit`
   # slipped into the shared sources compiles fine for macOS and fails here, which is the
   # only cheap way to catch it before the phone app exists. See scripts/build-ios.sh.
   FleetKitiOS:
@@ -831,17 +831,18 @@ final class FleetReplayFoldTests: XCTestCase {
         assertFoldPreservesOutcome(events)
     }
 
-    /// A session that both appeared and vanished inside the gap never existed as far as the
-    /// client is concerned. Emitting its removal would be harmless but emitting its *add*
-    /// would not, and keeping the pair is pure noise.
-    func testASessionAddedAndRemovedInTheGapDisappearsEntirely() {
+    /// A session that appeared and vanished inside the gap collapses to its removal alone.
+    /// The removal survives rather than the pair vanishing: the fold cannot know whether the
+    /// client already held this id, and a removal it did not need is inert, while a removal
+    /// it did need and never got is a phantom session.
+    func testASessionAddedAndRemovedInTheGapCollapsesToItsRemoval() {
         let ghost = UUID()
         let events: [FleetEvent] = [
             .sessionAdded(session(ghost, "ghost"), project: projectID, at: 0),
             .activityChanged(id: ghost, activity: "busy", waitingFor: nil, subagentCount: 0),
             .sessionRemoved(id: ghost)
         ]
-        XCTAssertTrue(FleetReplay.fold(events).isEmpty)
+        XCTAssertEqual(FleetReplay.fold(events), [.sessionRemoved(id: ghost)])
         assertFoldPreservesOutcome(events)
     }
 
@@ -912,69 +913,85 @@ public enum FleetReplay {
         return collapseLastWriteWins(survivors, in: events)
     }
 
-    /// A removal is the one event about a doomed subject that still matters — and only if
-    /// the client had the subject before the window opened. A subject that was both created
-    /// and destroyed in the gap never reached the client at all.
+    /// A removal is the only event about a doomed subject that still matters. Everything
+    /// earlier is superseded by it, and everything later cannot exist.
+    ///
+    /// The removal is kept unconditionally, even when this window also contains the subject's
+    /// creation. An earlier draft dropped it in that case, reasoning that a client which never
+    /// saw the subject need not hear it left — but the fold sees only events, never the
+    /// snapshot, so it cannot distinguish a genesis add from a redundant add on something the
+    /// client already holds, and guessing wrong left the client holding a deleted session.
+    /// Applying a removal for an unknown id is a silent no-op by contract, so keeping it costs
+    /// one inert frame and makes the property hold unconditionally.
     private static func survives(_ event: FleetEvent, _ doomed: Doomed) -> Bool {
         if let id = event.sessionID, doomed.sessions.contains(id) {
             guard case .sessionRemoved = event else { return false }
-            return !doomed.sessionsBornInWindow.contains(id)
+            return true
         }
         if let id = event.projectID, doomed.projects.contains(id) {
             guard case .projectRemoved = event else { return false }
-            return !doomed.projectsBornInWindow.contains(id)
+            return true
         }
         return true
     }
 
     // MARK: Removals
 
+    /// Subjects that are gone by the end of the window. There is deliberately no
+    /// "born in this window" companion — see `survives(_:_:)`.
     private struct Doomed {
         var sessions: Set<UUID> = []
         var projects: Set<UUID> = []
-        var sessionsBornInWindow: Set<UUID> = []
-        var projectsBornInWindow: Set<UUID> = []
     }
 
+    /// One forward pass recording, per subject, where it was last added and last removed.
+    ///
+    /// A subject is doomed only when its last removal comes *after* its last addition. That
+    /// ordering test is what lets a remove-then-re-add under the same id survive intact:
+    /// dropping both events would leave the client holding the subject's pre-window contents,
+    /// which is stale data rather than a missing frame — the worse of the two failures.
+    ///
+    /// The symmetry between sessions and projects is load-bearing. An earlier draft of this
+    /// plan defended sessions only, and a project removed and re-added inside one window
+    /// resurrected every session it used to hold.
     private static func subjectsRemovedInWindow(_ events: [FleetEvent]) -> Doomed {
-        var doomed = Doomed()
-        for event in events {
+        var lastSessionAdd: [UUID: Int] = [:], lastSessionRemove: [UUID: Int] = [:]
+        var lastProjectAdd: [UUID: Int] = [:], lastProjectRemove: [UUID: Int] = [:]
+        for (index, event) in events.enumerated() {
             switch event {
-            case .sessionRemoved(let id): doomed.sessions.insert(id)
-            case .projectRemoved(let id): doomed.projects.insert(id)
-            case .sessionAdded(let s, _, _): doomed.sessionsBornInWindow.insert(s.id)
-            case .projectAdded(let p, _): doomed.projectsBornInWindow.insert(p.id)
+            case .sessionAdded(let session, _, _): lastSessionAdd[session.id] = index
+            case .sessionRemoved(let id): lastSessionRemove[id] = index
+            case .projectAdded(let project, _): lastProjectAdd[project.id] = index
+            case .projectRemoved(let id): lastProjectRemove[id] = index
             default: continue
             }
         }
-        // A session removed and then re-added under the same id is not doomed — its final
-        // state is "present". `repos` never reuses a tab id, so this is defensive rather
-        // than expected, but the alternative is silently dropping a live session.
-        for event in events.reversed() {
-            if case .sessionAdded(let s, _, _) = event, doomed.sessions.contains(s.id) {
-                if lastIndexOfRemoval(of: s.id, in: events) < lastIndexOfAdd(of: s.id, in: events) {
-                    doomed.sessions.remove(s.id)
-                }
-            }
+
+        var doomed = Doomed()
+        for (id, removedAt) in lastSessionRemove where (lastSessionAdd[id] ?? -1) < removedAt {
+            doomed.sessions.insert(id)
+        }
+        for (id, removedAt) in lastProjectRemove where (lastProjectAdd[id] ?? -1) < removedAt {
+            doomed.projects.insert(id)
         }
         return doomed
-    }
-
-    private static func lastIndexOfRemoval(of id: UUID, in events: [FleetEvent]) -> Int {
-        events.lastIndex { if case .sessionRemoved(let r) = $0 { return r == id }; return false } ?? -1
-    }
-
-    private static func lastIndexOfAdd(of id: UUID, in events: [FleetEvent]) -> Int {
-        events.lastIndex { if case .sessionAdded(let s, _, _) = $0 { return s.id == id }; return false } ?? -1
     }
 
     // MARK: Last-write-wins collapsing
 
     /// The kinds where only the final value can matter, keyed by what they are final *for*.
     /// Anything not listed here is positional and is left exactly where it is.
+    ///
+    /// Reorders and moves are deliberately absent, and that is a correctness requirement
+    /// rather than caution. `reorder` leaves any id its order does not mention "in place", so
+    /// a reorder's result depends on the list it runs against — it is a state-dependent
+    /// transform, not a field. Collapsing two reorders that straddle an insertion silently
+    /// changes the surviving order: with [A,B], `reorder→[B,A]`, `add C at 1`, `reorder
+    /// pinning only A` yields [A,B,C] raw and [A,C,B] folded. There is nothing to gain by
+    /// collapsing them either — reorders are human drag gestures, while the volume this fold
+    /// exists to absorb is machine-generated status flaps.
     private enum FoldKey: Hashable {
-        case activity(UUID), rename(UUID), unread(UUID)
-        case collapsed(UUID), sessionsOrder(UUID), projectsOrder
+        case activity(UUID), rename(UUID), unread(UUID), collapsed(UUID)
     }
 
     private static func key(_ event: FleetEvent) -> FoldKey? {
@@ -983,8 +1000,6 @@ public enum FleetReplay {
         case .renamed(let id, _, _): return .rename(id)
         case .unreadChanged(let id, _): return .unread(id)
         case .projectCollapsed(let id, _): return .collapsed(id)
-        case .sessionsReordered(let id, _): return .sessionsOrder(id)
-        case .projectsReordered: return .projectsOrder
         default: return nil
         }
     }
@@ -2964,8 +2979,8 @@ That is the point of the split. The alternative, a server that reaches into the 
 **Interfaces:**
 - Consumes: `FleetTLS` (Task 6), `ClientFrame`/`ServerFrame` (Task 5).
 - Produces:
-  - `public final class FleetSocketServer` — `init(queue:)`, `start(keys:port:) throws -> NWEndpoint.Port`, `stop()`, `broadcast(_: ServerFrame)`, `var onHello: ((UUID, Int) -> [ServerFrame])?`, `var onCommand: ((UUID, Int, FleetCommand) -> ServerFrame)?`, `var onAttachedCountChanged: ((Int) -> Void)?`, `var authDeadline: TimeInterval`.
-  - `public final class FleetClient` — `init(key:queue:)`, `connect(to: NWEndpoint, lastSeq: Int)`, `disconnect()`, `send(_: FleetCommand) -> Int`, `var onFrame: ((ServerFrame) -> Void)?`, `var onReady: (() -> Void)?`, `var onDisconnect: ((Error?) -> Void)?`.
+  - `public final class FleetSocketServer` — `init(queue:)`, `start(keys:port:) async throws -> NWEndpoint.Port`, `stop()`, `broadcast(_: ServerFrame)`, `var onHello: ((UUID, Int) -> [ServerFrame])?`, `var onCommand: ((UUID, Int, FleetCommand) -> ServerFrame)?`, `var onAttachedCountChanged: ((Int) -> Void)?`, `var authDeadline: TimeInterval`.
+  - `public final class FleetClient` — `init(key:queue:)`, `connect(to: NWEndpoint, lastSeq: Int)`, `disconnect()`, `send(_: FleetCommand) -> Int`, `var onFrame: ((ServerFrame) -> Void)?`, `var onReady: (() -> Void)?`, `var onDisconnect: ((Error?) -> Void)?` — **guaranteed to fire at most once per connection, and never for a `disconnect()` the caller asked for.**
 - Task 12 wires the server's closures to the store.
 
 - [ ] **Step 1: Write the failing test**
@@ -3111,6 +3126,53 @@ final class FleetSocketLoopbackTests: XCTestCase {
         // A refusal can also present as silence; either way `onHello` must not have run,
         // which is what the XCTFail above asserts.
         _ = XCTWaiter().wait(for: [refused], timeout: 8)
+    }
+
+    /// One dropped socket must produce exactly one `onDisconnect`. Three code paths reach
+    /// that closure and a single failure trips at least two of them, so without the guard the
+    /// reconnect policy built on it schedules a retry per firing.
+    func testDisconnectIsReportedAtMostOncePerConnection() throws {
+        let key = FleetDeviceKey.mint()
+        let port = try startServer(key: key, hello: { _, _ in
+            [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)]
+        })
+        let client = connect(key: key, port: port)
+        let attached = expectation(description: "attached")
+        server?.onAttachedCountChanged = { if $0 == 1 { attached.fulfill() } }
+        wait(for: [attached], timeout: 10)
+
+        var endings = 0
+        client.onDisconnect = { _ in endings += 1 }
+        // Drop the socket from the far end, which is what a Mac going away looks like.
+        server?.stop()
+
+        let settled = expectation(description: "settled")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { settled.fulfill() }
+        wait(for: [settled], timeout: 10)
+        XCTAssertEqual(endings, 1, "onDisconnect fired \(endings) times for one drop")
+    }
+
+    /// A teardown we asked for is not a disconnection to react to. If `disconnect()` reported
+    /// through `onDisconnect`, a client that raced several endpoints and cancelled the losers
+    /// would immediately try to reconnect to each of them.
+    func testAskingToDisconnectDoesNotReportADisconnection() throws {
+        let key = FleetDeviceKey.mint()
+        let port = try startServer(key: key, hello: { _, _ in
+            [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)]
+        })
+        let client = connect(key: key, port: port)
+        let attached = expectation(description: "attached")
+        server?.onAttachedCountChanged = { if $0 == 1 { attached.fulfill() } }
+        wait(for: [attached], timeout: 10)
+
+        var endings = 0
+        client.onDisconnect = { _ in endings += 1 }
+        client.disconnect()
+
+        let settled = expectation(description: "settled")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { settled.fulfill() }
+        wait(for: [settled], timeout: 10)
+        XCTAssertEqual(endings, 0, "a self-initiated teardown must not read as a drop")
     }
 
     /// A peer that completes a handshake and then says nothing must not hold a slot open
@@ -3359,6 +3421,22 @@ public final class FleetClient {
     private var connection: NWConnection?
     private var nextCID = 1
 
+    /// Guards `onDisconnect` so it fires at most once per connection, and never for a
+    /// teardown we asked for ourselves.
+    ///
+    /// Three independent paths reach it — `stateUpdateHandler`'s `.failed`, its `.cancelled`,
+    /// and the receive loop's `onEnd` — and one dropped socket trips at least two of them,
+    /// because `receiveMessage` errors at the same moment the state goes `.failed`.
+    /// Network.framework adds a third: calling `cancel()` on a connection that has already
+    /// reached a terminal state still delivers a further asynchronous `.cancelled`, which was
+    /// measured while building the TLS handshake tests (it double-fulfilled an
+    /// `XCTestExpectation` and aborted the test host).
+    ///
+    /// The consumer of `onDisconnect` schedules a reconnect, so an unguarded closure turns a
+    /// single drop into a retry storm — and a deliberate `disconnect()` into a reconnect of
+    /// the thing we just chose to stop talking to.
+    private var hasEnded = false
+
     public init(key: FleetDeviceKey, queue: DispatchQueue = .main) {
         self.key = key
         self.queue = queue
@@ -3366,6 +3444,9 @@ public final class FleetClient {
 
     public func connect(to endpoint: NWEndpoint, lastSeq: Int) {
         disconnect()
+        // Cleared after `disconnect()`, which sets it: the flag is per-connection, and this
+        // is a new one.
+        hasEnded = false
         let parameters = FleetSocket.webSocketParameters(
             FleetTLS.clientParameters(key: key)
         )
@@ -3380,9 +3461,9 @@ public final class FleetClient {
                 FleetSocket.send(ClientFrame.hello(lastSeq: lastSeq), over: connection)
                 self.onReady?()
             case .failed(let error):
-                self.onDisconnect?(error)
+                self.end(error)
             case .cancelled:
-                self.onDisconnect?(nil)
+                self.end(nil)
             default:
                 break
             }
@@ -3390,12 +3471,24 @@ public final class FleetClient {
         FleetSocket.receive(ServerFrame.self, from: connection) { [weak self] frame in
             self?.onFrame?(frame)
         } onEnd: { [weak self] error in
-            self?.onDisconnect?(error)
+            self?.end(error)
         }
         connection.start(queue: queue)
     }
 
+    /// Reports the connection ending, exactly once. See `hasEnded`.
+    private func end(_ error: Error?) {
+        guard !hasEnded else { return }
+        hasEnded = true
+        onDisconnect?(error)
+    }
+
+    /// Stops talking to this peer. Deliberately does NOT report through `onDisconnect`:
+    /// `hasEnded` is set first, so the `.cancelled` this provokes is swallowed. That keeps
+    /// `onDisconnect` meaning one thing — "the peer went away without being asked" — which
+    /// is the only reading a reconnect policy can act on.
     public func disconnect() {
+        hasEnded = true
         connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
@@ -3449,7 +3542,7 @@ The spec's rule about commands is followed literally here: *where a command has 
 
 **Interfaces:**
 - Consumes: `FleetSocketServer` (Task 11), `FleetReplicator` (Task 8), `FleetProjection` (Task 7), `SessionStore`.
-- Produces: `@MainActor final class FleetService: ObservableObject` — `init(store:keys:)`, `start(port:) throws -> NWEndpoint.Port`, `stop()`, `@Published private(set) var attachedDeviceCount: Int`; and `SessionStore.markRead(_ id: UUID)`. Plan 2's pairing UI reads `attachedDeviceCount` and supplies `keys`.
+- Produces: `@MainActor final class FleetService: ObservableObject` — `init(store:keys:)`, `start(port:) async throws -> NWEndpoint.Port`, `stop()`, `@Published private(set) var attachedDeviceCount: Int`; and `SessionStore.markRead(_ id: UUID)`. Plan 2's pairing UI reads `attachedDeviceCount` and supplies `keys`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3475,16 +3568,16 @@ final class FleetServiceTests: XCTestCase {
         service = nil
     }
 
-    private func standUp() throws -> (SessionStore, FleetDeviceKey, NWEndpoint.Port) {
+    private func standUp() async throws -> (SessionStore, FleetDeviceKey, NWEndpoint.Port) {
         let store = SessionStore(provider: nil, persistence: nil)
         let key = FleetDeviceKey.mint()
         let service = FleetService(store: store, keys: { [key] })
         self.service = service
-        return (store, key, try service.start(port: nil))
+        return (store, key, try await service.start(port: nil))
     }
 
-    func testAConnectingClientIsHandedTheLiveFleet() throws {
-        let (store, key, port) = try standUp()
+    func testAConnectingClientIsHandedTheLiveFleet() async throws {
+        let (store, key, port) = try await standUp()
         let session = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
 
         let arrived = expectation(description: "snapshot")
@@ -3504,8 +3597,8 @@ final class FleetServiceTests: XCTestCase {
         XCTAssertEqual(snapshot?.projects.first?.sessions.map(\.id), [session.id])
     }
 
-    func testAMutationAfterAttachingReachesTheClient() throws {
-        let (store, key, port) = try standUp()
+    func testAMutationAfterAttachingReachesTheClient() async throws {
+        let (store, key, port) = try await standUp()
         let session = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
 
         let renamed = expectation(description: "rename reached the client")
@@ -3532,8 +3625,8 @@ final class FleetServiceTests: XCTestCase {
         wait(for: [renamed], timeout: 10)
     }
 
-    func testMarkingReadFromAClientClearsTheMarkOnTheMac() throws {
-        let (store, key, port) = try standUp()
+    func testMarkingReadFromAClientClearsTheMarkOnTheMac() async throws {
+        let (store, key, port) = try await standUp()
         let a = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
         let b = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
         store.selectSession(b.id)
@@ -3555,8 +3648,8 @@ final class FleetServiceTests: XCTestCase {
         XCTAssertFalse(store.unreadIdle.contains(a.id))
     }
 
-    func testACommandNamingASessionThatIsGoneIsRefusedNotIgnored() throws {
-        let (_, key, port) = try standUp()
+    func testACommandNamingASessionThatIsGoneIsRefusedNotIgnored() async throws {
+        let (_, key, port) = try await standUp()
         let refused = expectation(description: "err")
         let client = FleetClient(key: key)
         self.client = client
@@ -3661,9 +3754,12 @@ final class FleetService: ObservableObject {
     /// `port: nil` asks the OS for one. Plan 2's Bonjour advertisement publishes whatever
     /// comes back — no port is hard-coded anywhere, because a fixed port is a collision
     /// waiting for a second Mac app.
+    /// `async` because the listener half is: it awaits the OS reporting the bound port rather
+    /// than polling for it. The previous shape blocked its caller for up to five seconds, and
+    /// this type is main-actor — a visible stall in a terminal app.
     @discardableResult
-    func start(port: NWEndpoint.Port? = nil) throws -> NWEndpoint.Port {
-        let bound = try server.start(keys: keys(), port: port)
+    func start(port: NWEndpoint.Port? = nil) async throws -> NWEndpoint.Port {
+        let bound = try await server.start(keys: keys(), port: port)
         Self.logger.info("fleet listener bound to port \(bound.rawValue, privacy: .public)")
         return bound
     }
@@ -3676,8 +3772,8 @@ final class FleetService: ObservableObject {
     /// Restart the listener so a change to the paired-device list takes effect. Revoking a
     /// device is deleting its key, and a listener started with the old set would keep
     /// honouring it until the app quit.
-    func reloadKeys(port: NWEndpoint.Port? = nil) throws {
-        try start(port: port)
+    func reloadKeys(port: NWEndpoint.Port? = nil) async throws {
+        try await start(port: port)
     }
 
     private func apply(_ command: FleetCommand, cid: Int) -> ServerFrame {
@@ -3735,7 +3831,7 @@ Add a section in the house voice covering: the two modules and why `FleetKit` is
 In the Layout table:
 
 ```markdown
-| `Sources/FleetKit/` | Wire types, event fold and both socket halves. Swift 6, `Foundation`+`Network` only — compiled for iOS too, which is what enforces that. |
+| `Sources/FleetKit/` | Wire types, event fold and both socket halves. Swift 6, `Foundation`+`Network`+`Security` only — compiled for iOS too, which is what enforces that. |
 | `Sources/FlightDeck/Fleet/` | The desktop side: projection, replicator, and the service that binds the store to the socket. |
 ```
 
@@ -3751,7 +3847,7 @@ Add a dated section, in the existing style, covering exactly three things:
 
 1. **The drift assertion is temporary and must not be removed** until the `FleetState` encapsulation lands. Cross-reference the section already added on 2026-08-18 rather than repeating it.
 2. **"Mark as Read" exists as a store method and a phone command, but has no Mac menu item.** The spec's rule is that anything the phone can do the Mac should too; `SessionCommands`' context menu offers only "Mark as Unread". Small, and deliberately not in this plan's scope.
-3. **The listener restarts to pick up a key change** (`FleetService.reloadKeys`), which drops attached clients for the length of a reconnect. Acceptable because revocation is rare and a client reconnects on its own, but worth knowing before someone calls it on a timer.
+3. **The listener restarts to pick up a key change** (`FleetService.reloadKeys`), which drops attached clients for the length of a reconnect. Acceptable because revocation is rare and a client reconnects on its own, but worth knowing before someone calls it on a timer. `FleetSocketServer.stop()` drains both attached *and* pending connections, so a rotation that catches a device mid-handshake no longer orphans its socket — that was a real leak, found in review, and the `pending` set exists for exactly this call path.
 
 - [ ] **Step 4: Verify nothing regressed and commit**
 
