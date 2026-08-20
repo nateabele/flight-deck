@@ -37,6 +37,11 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Sources/FlightDeck/FlightDeck.entitlements
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
         INFOPLIST_KEY_CFBundleDisplayName: Flight Deck
+        # macOS 15+ gates local-network access behind a user prompt, and an app with no
+        # usage description never gets to show it — the listener binds, advertises, and is
+        # simply never discovered. The failure is silent, which is why this is here rather
+        # than added when someone reports "my phone can't find my Mac".
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Flight Deck uses the local network to let your paired iPhone see your sessions.
         GENERATE_INFOPLIST_FILE: "YES"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/FlightDeck/BridgingHeader.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/Sources/FlightDeck/GhosttyEmbed

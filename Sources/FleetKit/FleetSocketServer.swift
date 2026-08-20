@@ -24,6 +24,11 @@ public struct FleetAttachment: Equatable, Sendable {
 /// `onAttachedCountChanged`) is invoked on `queue`, enforced at each invocation site with
 /// `dispatchPrecondition(condition: .onQueue(queue))`.
 public final class FleetSocketServer: @unchecked Sendable {
+    /// The service the phone browses for. One constant, referenced by both ends, because a
+    /// service type that differs by a character between advertiser and browser fails by
+    /// finding nothing — which is indistinguishable from being on the wrong network.
+    public static let bonjourType = "_flightdeck._tcp"
+
     /// How long a peer may hold a completed handshake without sending `hello` before it is
     /// dropped. Settable so the test does not have to wait the production value.
     public var authDeadline: TimeInterval = 5
@@ -68,7 +73,9 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// blocking the calling thread for up to five seconds waiting for a bind is a visible UI
     /// stall, not a background hiccup.
     @discardableResult
-    public func start(keys: [FleetDeviceKey], port: NWEndpoint.Port?) async throws -> NWEndpoint.Port {
+    public func start(
+        keys: [FleetDeviceKey], port: NWEndpoint.Port?, serviceName: String? = nil
+    ) async throws -> NWEndpoint.Port {
         // `stop()`'s `listener?.cancel()` is fire-and-forget — Network.framework releases the
         // port asynchronously, on its own schedule. `reloadKeys()` restarts this listener on
         // the *same* port on every arm, expiry and revocation, so this is not a hypothetical
@@ -86,6 +93,13 @@ public final class FleetSocketServer: @unchecked Sendable {
             ?? NWListener(using: parameters)
         listener.newConnectionHandler = { [weak self] in self?.accept($0) }
         self.listener = listener
+        if let serviceName {
+            // Bonjour is a *rediscovery* mechanism, not the address of record: the pairing
+            // code's endpoints get the phone connected the first time, and this is how it
+            // finds the Mac again after either of them moved. The instance name is stable
+            // per Mac so a phone can prefer the one it paired with.
+            listener.service = NWListener.Service(name: serviceName, type: Self.bonjourType)
+        }
 
         // Awaiting the state handler rather than pumping a run loop: `listener.port` goes
         // non-nil the moment the listener has a socket, which is *before* the OS has
