@@ -475,3 +475,57 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
   It also costs roughly 100ms per call even when it works, which `wait(for:)` does not. A
   non-`@MainActor`-isolated test class is unaffected by any of this, which is what makes the
   failure confusing the first time it is hit.
+
+## From pairing and the phone (2026-08-19)
+
+Plan 2 (`docs/superpowers/plans/2026-08-19-fleet-pairing-and-ios.md`) built pairing, Bonjour
+discovery, and `FlightDeckMobile` on top of the spine above. What its own reviews found and
+did not fix:
+
+- **Paired secrets live in `UserDefaults` on the Mac** (`Preferences.pairedDevices`, added in
+  Task 3), not Keychain. That is a plist readable by anything running as this user — the same
+  exposure `sessions.json` and the agents' own credentials already have, and it is the
+  documented trade-off in the mobile companion spec's §3, not an oversight. What it does and
+  does not expose: reading the plist gets you every paired device's 32-byte PSK, which is
+  enough to connect to this Mac's fleet listener as that device until it is revoked; it does
+  not get you anything already on disk elsewhere (session content, agent credentials) that a
+  local attacker with plist-reading access could not already reach some other way. The phone's
+  own copy is Keychain-backed (`KeychainPairedMacStore`) precisely because the phone is the
+  side that leaves the building.
+
+- **A key change restarts the listener**, dropping every attached client for the length of a
+  reconnect — recorded in the section directly above this one (`FleetService.reloadKeys`),
+  which this entry does not repeat.
+
+- **Bonjour resolution, roaming and off-LAN reachability are manually verified only.** There is
+  no automated coverage and there cannot be on one machine with one network interface — the
+  eleven-item checklist in [docs/MOBILE.md](MOBILE.md) is what stands in for it.
+
+- **No relay**, so reaching the Mac from off-LAN needs a VPN. Designed for as a further
+  candidate endpoint (spec §3, §12), not built in either plan.
+
+- **Neither documented fallback was needed.** Spine Task 6 named a fallback for TLS-PSK
+  multi-key selection (register one fleet-wide PSK and move per-device identity into the
+  `hello` frame as an HMAC challenge) if a listener holding several devices' keys could not
+  pick the right one per connection; it could, verified by test, so the fallback was never
+  built. This plan's Task 4 named a fallback for identifying which slot connected (the client
+  naming its own slot in `hello`) if reading the PSK identity back off the connection did not
+  work; `sec_protocol_metadata_access_pre_shared_keys` genuinely yields it, so that fallback
+  was never built either. Both are still the documented escape hatch if either platform's
+  behavior here ever regresses.
+
+- **`FleetSocketServer` does not guard its public entry points the way `FleetConnector` now
+  does.** Both are `@unchecked Sendable` with state confined to `queue`; the connector asserts
+  `dispatchPrecondition` on `start`/`stop`/`send`, the server asserts only that its own
+  callbacks land on `queue` and catches a bad `queue:` argument at the first connection instead.
+  Both are honest today only because every caller is `@MainActor` and every `queue` defaults to
+  `.main` — a property of the callers, not of the types. Worth deciding deliberately rather than
+  leaving the two inconsistent.
+
+- **The phone persists `lastSeq` on every applied frame**, deliberately: with the keychain item
+  updated in place there is no write window, and the event rate is bounded by the Mac's
+  activity filter and poll interval to roughly two per second per session. The cost that is
+  real and unmeasured is that each write is a synchronous `securityd` round-trip on the
+  connector's queue — which defaults to `.main`, the thread drawing the fleet list. If this
+  ever shows up as scroll hitching, the fix is moving the write off the main queue, not
+  throttling it.
