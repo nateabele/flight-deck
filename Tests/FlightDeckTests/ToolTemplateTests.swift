@@ -82,4 +82,27 @@ final class ToolTemplateTests: XCTestCase {
     func testEmptyTemplateIsEmpty() {
         XCTAssertEqual(ToolTemplate.expand("", in: context()), "")
     }
+
+    func testAccountNamesExpandAndAreQuoted() {
+        var context = ToolContext(
+            workingDirectory: "/p", projectPath: "/p", projectName: "p", sessionTitle: "s",
+            agent: .claude, conversationID: UUID()
+        )
+        context.accountName = "Work Account"
+        context.accountHome = "/tmp/claude work"
+        XCTAssertEqual(
+            ToolTemplate.expand("x ${account} ${accountHome}", in: context),
+            "x 'Work Account' '/tmp/claude work'"
+        )
+    }
+
+    /// Unknown names still reach the login shell verbatim — which is what makes the account's
+    /// own variables usable without any template change.
+    func testTheAccountVariableIsLeftForTheShell() {
+        let context = ToolContext(
+            workingDirectory: "/p", projectPath: "/p", projectName: "p", sessionTitle: "s",
+            agent: .claude, conversationID: UUID()
+        )
+        XCTAssertEqual(ToolTemplate.expand("ls ${CLAUDE_CONFIG_DIR}", in: context), "ls ${CLAUDE_CONFIG_DIR}")
+    }
 }
