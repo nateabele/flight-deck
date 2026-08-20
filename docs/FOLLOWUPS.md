@@ -437,6 +437,46 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
 - `CodexProcessTransport.stop()` sends SIGTERM without awaiting exit. Theoretical, unobserved,
   and integration-test-only; a wait would need a timeout policy for no measured gain.
 
+## From the fleet replication spine (2026-08-19)
+
+- **The drift assertion is temporary and must not be removed** until the `FleetState`
+  encapsulation designed on 2026-08-18 lands — see the section directly above, which this entry
+  does not repeat. It is not diagnostics: it is the only thing standing between a mutation site
+  with no matching `FleetEvent` and a client that is silently and permanently wrong.
+
+- **"Mark as Read" exists as a store method and a phone command, but has no Mac menu item.**
+  `SessionStore.markRead` is the method the phone's `markRead` command lands on, added there
+  specifically because the spec's rule is that anything the phone can do the Mac's own UI
+  should too — but `SessionSidebar`'s row context menu offers only "Mark as Unread". There is
+  no way to mark a session read from the Mac short of selecting it (which clears the mark as a
+  side effect of viewing). Small, and deliberately not in this plan's scope.
+
+- **The listener restarts to pick up a key change** (`FleetService.reloadKeys`), which drops
+  every attached client for the length of a reconnect. Acceptable because revocation is rare and
+  a client reconnects on its own, but worth knowing before someone calls it on a timer.
+  `FleetSocketServer.stop()` drains both the `attached` and `pending` connection sets, so a
+  rotation that catches a device mid-handshake no longer orphans its socket — that was a real
+  leak, found in review, and the `pending` set exists for exactly this call path.
+
+- **`FleetSocketServer`'s safety rests on its queue being serial, which `init(queue:)` does not
+  enforce.** Every current caller passes the `.main` default. A concurrent queue would compile
+  without complaint and break two things that both assume single-queue confinement: the
+  `resumed` guard in `start()`, a plain `Bool` read and written from the listener's
+  `stateUpdateHandler` with no lock, and `FleetService`'s `onAttachedCountChanged` handler,
+  which reaches into `MainActor.assumeIsolated` on the strength of that same assumption (see the
+  comment at that call site). Nothing catches a non-serial queue at compile time; passing one
+  would surface only at runtime, as either a data race or a trap.
+
+- **`wait(for:)` deadlocks in a `@MainActor async` XCTest method under the headless harness.**
+  It blocks the main actor's executor in place without suspending it, which starves the very
+  main-queue callbacks — `FleetSocketServer` and `FleetClient` both default their `queue:` to
+  `.main` — that the wait is blocking on: the socket frame never arrives and the expectation
+  never fulfills. `await fulfillment(of:)` is a genuine suspension point, so the queue keeps
+  draining while the test waits; `FleetServiceTests` uses it throughout for exactly this reason.
+  It also costs roughly 100ms per call even when it works, which `wait(for:)` does not. A
+  non-`@MainActor`-isolated test class is unaffected by any of this, which is what makes the
+  failure confusing the first time it is hit.
+
 ## Agent accounts (2026-08-19) — what the work left behind
 
 Spec: [superpowers/specs/2026-08-19-agent-accounts-design.md](superpowers/specs/2026-08-19-agent-accounts-design.md).
@@ -474,3 +514,27 @@ the account a session runs as. Three things this deliberately did not build:
   explicitly (§2, §7.5 "Deferred") as a future `CodexThreadOptions` field; nothing in this work
   reads or writes a `-p` profile, and an account switch does not change which profile (if any)
   a codex thread would use.
+
+## Where accounts and the fleet meet (2026-08-20, from merging the two)
+
+- **A phone cannot tell which login a session runs as, and that is the decision, not an
+  oversight.** An account is a config directory, so it stays off the wire entirely — see
+  `docs/ARCHITECTURE.md` § "Fleet replication" and `FleetAccountEmissionTests`. If a client
+  ever needs to *distinguish* two logins visually, the thing to replicate is a stable opaque
+  handle minted for the wire plus the account's display name — never `AgentAccount.id` (it is
+  the key to a home path) and never the home itself.
+
+- **`accountMismatchedSessionIDs` is sidebar-only and deliberately not replicated.** It is
+  derived from preferences (which account a *project* would pick today) rather than from
+  `repos`/`statuses`/`unreadIdle`, so it changes with no `SessionStore` mutation and therefore
+  with no `FleetEvent` — replicating it would mean either a preferences observer feeding the
+  event log or a field that silently goes stale. Neither is worth it for a warning badge, but
+  a client that grows one will need the first.
+
+- **The per-account registry merge is not under the drift check.**
+  `SessionStore.applyRegistry(_:from:)` — which unions every account's last scan before
+  committing statuses — is private and only reachable through a real `SessionStatusWatcher`,
+  so no test drives it with a replicator attached. It funnels into the same
+  `applyRegistry(_:)` that `applyRegistryForTesting` does, which *is* covered, so the emission
+  itself is pinned; what is not pinned is the merge deciding *which* rows reach it. A seam for
+  the per-account entry point would close that.

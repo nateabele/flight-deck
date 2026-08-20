@@ -279,6 +279,80 @@ make a failed-but-verbose launch read identical to a successful one. A non-zero 
 a 2-second grace window is reported through `ToolLaunchFailureReporting`; still running past
 that window counts as success.
 
+## Fleet replication (`FleetKit` / `Sources/FlightDeck/Fleet/`)
+
+The spine a mobile companion replicates the fleet over — not wired to any UI yet (Plan 2:
+`docs/superpowers/plans/2026-08-19-fleet-pairing-and-ios.md`), but live end to end: a real
+client over a real TLS-PSK WebSocket can already receive a snapshot of a running
+`SessionStore`, follow its mutations, and mark a session read. Two modules:
+
+- **`Sources/FleetKit/`** — the wire types (`FleetSnapshot`, `WireProject`, `WireSession`), the
+  delta vocabulary (`FleetEvent`), snapshot application, the replay fold, a hand-written frame
+  codec, the TLS pre-shared-key parameters, and both socket halves (`FleetSocketServer`,
+  `FleetClient`). It imports only `Foundation`, `Network`, and `Security` — never `AppKit` —
+  and that boundary is enforced mechanically, not by convention: the same source directory is
+  also compiled as an iOS target (`FleetKitiOS` in `project.yml`, checked by
+  `scripts/build-ios.sh`), so a stray `import AppKit` fails that build immediately rather than
+  surfacing later as a phone-side compile error nobody is watching for.
+- **`Sources/FlightDeck/Fleet/`** — the desktop side. `FleetProjection` is a pure read of
+  `SessionStore` into wire shape. `FleetReplicator` mirrors the fleet from `SessionStore`'s
+  event log and holds a bounded ring for replaying across a reconnect. `FleetService` is the
+  only type that knows both a `SessionStore` and a socket — deliberately: `FleetSocketServer`
+  stays testable with no store, `SessionStore` stays testable with no network, and everything
+  that needs both is here where it can be read at once.
+
+**The event log, and the drift assertion standing in for encapsulating it.** `SessionStore`
+emits a `FleetEvent` for every change to `repos`, `statuses`, or `unreadIdle` (`unreadIdle` now
+has a single private writer, `setUnread`, for exactly this reason), and `FleetReplicator` folds
+that log into the mirror it hands a connecting client and the ring it replays across a gap.
+Nothing in the compiler stops a future mutation site from touching one of those three fields
+without recording its event, and the failure is not a crash — it is a client left silently and
+permanently wrong until it happens to reconnect. Until `SessionStore`'s fleet state is
+encapsulated behind a type whose every mutator records for itself (designed, deliberately
+deferred:
+[specs/2026-08-18-fleet-state-encapsulation-design.md](superpowers/specs/2026-08-18-fleet-state-encapsulation-design.md)),
+`FleetReplicator` runs a `#if DEBUG` check after every batch — fold the log, project the store
+fresh, and assert the two agree. It is an interim measure, not the design, but it is not
+decorative either: it caught five real defects during this plan's own execution. It must not be
+removed before the encapsulation replaces it.
+
+**Accounts are deliberately not fleet state.** An account *is* a config directory —
+`CLAUDE_CONFIG_DIR` / `CODEX_HOME`, where that login's credentials live — so `WireSession`
+carries no account field and `FleetProjection` never reads `Session.accountID`, not even as an
+opaque id. The wire already refuses `transcriptDirectory`, `transcriptPath` and
+`pinnedConversationID` for the weaker reason that they are Mac path details; a config home is
+the credential-adjacent case of the same rule, and `FleetAccountEmissionTests` pins it against
+the serialized snapshot rather than field by field so a later addition to `WireSession` cannot
+quietly reintroduce it. Nothing is lost by the omission: `accountID` is stamped once at
+creation and never mutated, so there is no account change for an event to describe, and a
+client that cannot open the Mac's filesystem has nothing to do with a home path anyway.
+The one thing a phone *can* see is second-order — an orphaned tab (its login deleted between
+runs) is restored but never launched, so it replicates as a session with `activity: nil`,
+exactly like any other tab with no agent process behind it.
+
+**One socket carries everything, because there is no HTTP tier to split it across.**
+Network.framework has no HTTP server, and a listener carrying `NWProtocolWebSocket` can only
+accept or reject a connection whole — there is nothing to route a request to within it. So one
+WebSocket per attached client carries authentication, the connect-time snapshot, every live
+event, and every command in both directions. `ack` means a command was *dispatched*, not that
+it completed: typing into a pty has no delivery confirmation, so the observable effect always
+arrives separately, as the same northbound `FleetEvent` a local mutation would have produced.
+
+**TLS-PSK is the whole authorization story.** Pairing mints a `FleetDeviceKey` — 32 CSPRNG
+bytes per device slot — and the listener registers every currently-paired key up front; the TLS
+handshake itself is the credential check, with no separate token or login layer above it. Two
+things about it cost real time to discover and are not documented anywhere but code comments:
+Apple's PSK support is the **TLS 1.2** ciphersuite family
+(`TLS_PSK_WITH_AES_128_GCM_SHA256`) — `sec_protocol_options_append_tls_ciphersuite` is
+mandatory, and pinning a minimum TLS version of 1.3, which reads as obvious hardening, silently
+breaks PSK instead, because the handshake then offers no suite the peer can agree to and simply
+hangs. And a refused handshake presents as *silence*, not a `.failed` state: Apple drops a
+mismatched identity rather than sending an alert, which closes off an identity oracle but means
+"wrong key" and "network trouble" look identical from the client's side. One listener can hold
+several devices' keys at once and picks the right one per connection from the PSK identity —
+this was the plan's central open question, now verified, so revoking one device (delete its
+slot's key, restart the listener) does not disturb any other paired device.
+
 ## Not yet built (design, not code)
 
 Harness adapters, the shared code index, the context engine, and the sidebar are **design only** so far — see the [spec](superpowers/specs/2026-07-09-flight-deck-design.md) §1–§9. Nothing in the current codebase implements them.

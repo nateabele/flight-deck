@@ -43,5 +43,18 @@ DYLIB="$APPMACOS/Flight Deck.debug.dylib"  # absolute: ln -s resolves relative t
 mkdir -p "$BUNDLE/Contents/Frameworks"
 ln -sf "$DYLIB" "$BUNDLE/Contents/Frameworks/Flight Deck.debug.dylib"
 
-DYLD_LIBRARY_PATH="$APPMACOS" DYLD_FRAMEWORK_PATH="$APPMACOS" \
-  xcrun xctest "$BUNDLE"
+APPFRAMEWORKS="$PWD/${PRODUCTS}/Flight Deck.app/Contents/Frameworks"
+
+# Resolve the real xctest binary instead of going through `xcrun xctest`. /usr/bin/xcrun
+# lives under a SIP-protected path, and dyld strips every DYLD_* variable before exec'ing
+# any binary there — so DYLD_FRAMEWORK_PATH below would be silently dropped before xctest
+# ever started, and FleetKit.framework would fail to resolve with no explanation. The
+# resolved path is under /Applications/Xcode.app, which isn't SIP-restricted, so invoking
+# it directly lets the variable survive.
+XCTEST="$(xcrun --find xctest)"
+
+# Contents/Frameworks joins the search path for FleetKit.framework, which the test bundle
+# links but does not embed. Without it `xctest` aborts at load with an @rpath failure that
+# reads like a missing symbol rather than a missing directory.
+DYLD_LIBRARY_PATH="$APPMACOS" DYLD_FRAMEWORK_PATH="$APPMACOS:$APPFRAMEWORKS" \
+  "$XCTEST" "$BUNDLE"
