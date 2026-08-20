@@ -68,6 +68,10 @@ final class PairingPayloadTests: XCTestCase {
     /// The code is deliberately not a URL: nothing in the system should offer to "open" it,
     /// because opening it means the secret has travelled through a URL handler and,
     /// eventually, a log.
+    /// Nothing in the system should offer to "open" this, because opening it means the
+    /// secret has travelled through a URL handler and, eventually, a log. Note `URL(string:)`
+    /// does return non-nil for an opaque `scheme:body` URI — the protection is the absence of
+    /// an authority component and a query string, not the absence of a `URL` value.
     func testTheCodeIsNotAURL() {
         let encoded = payload().encoded()
         XCTAssertTrue(encoded.hasPrefix("flightdeck1:"))
@@ -76,6 +80,10 @@ final class PairingPayloadTests: XCTestCase {
         XCTAssertNil(URL(string: encoded)?.host)
     }
 
+    /// Checks both alphabets. The implementation encodes the secret as base64url *inside*
+    /// the JSON before the whole body is encoded again, so only the standard-alphabet form
+    /// being absent would leave the likelier bug — a body that skipped the outer wrap —
+    /// undetected.
     func testTheSecretIsNotReadableFromTheCodeAsText() {
         let key = FleetDeviceKey.mint()
         let encoded = PairingPayload(
@@ -83,13 +91,20 @@ final class PairingPayloadTests: XCTestCase {
         ).encoded()
         XCTAssertFalse(encoded.contains(key.secret.base64EncodedString()),
                        "the body is base64url of JSON; a raw base64 secret would mean it is not")
+        XCTAssertFalse(encoded.contains(key.secret.base64URLEncodedString()),
+                       "the inner base64url secret must not survive into the outer encoding")
     }
 
     func testAnArbitraryStringIsRejectedRatherThanPartlyParsed() {
         XCTAssertThrowsError(try PairingPayload(decoding: "https://example.com")) { error in
             XCTAssertEqual(error as? PairingPayloadError, .notAPairingCode)
         }
-        XCTAssertThrowsError(try PairingPayload(decoding: "flightdeck1:not-base64!!"))
+        // Asserting the specific case, not merely that something threw: the phone shows
+        // different copy per case, so collapsing two of them into one is a real defect that a
+        // bare `XCTAssertThrowsError` would wave through.
+        XCTAssertThrowsError(try PairingPayload(decoding: "flightdeck1:not-base64!!")) { error in
+            XCTAssertEqual(error as? PairingPayloadError, .malformed)
+        }
     }
 
     /// A phone older than the Mac must say so rather than mis-parsing a newer payload into
@@ -99,6 +114,28 @@ final class PairingPayloadTests: XCTestCase {
         original.version = 99
         XCTAssertThrowsError(try PairingPayload(decoding: original.encoded())) { error in
             XCTAssertEqual(error as? PairingPayloadError, .unsupportedVersion(99))
+        }
+    }
+
+    /// The case the previous test cannot reach, and the one that actually matters: a future
+    /// payload whose *shape* differs. Decoding it under this version's schema fails, so a
+    /// version check that ran after the decode would report it as damaged — sending the user
+    /// to show a fresh code when the app is what needs updating. The version therefore has to
+    /// be read from the prefix, before any decoding.
+    func testAFutureShapeIsRejectedAsTooNewNotAsDamaged() throws {
+        let alienBody = Data(#"{"v":2,"slotId":"nope","secret":"nope"}"#.utf8)
+        let code = "flightdeck2:" + alienBody.base64URLEncodedString()
+        XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
+            XCTAssertEqual(error as? PairingPayloadError, .unsupportedVersion(2))
+        }
+    }
+
+    /// A prefix version that disagrees with the body's is a hand-edited code, not a newer one.
+    func testAPrefixVersionDisagreeingWithTheBodyIsMalformed() throws {
+        let body = Data(#"{"v":7,"slot":"00000000-0000-0000-0000-000000000000","psk":"AAAA","name":"m","svc":"s","eps":[]}"#.utf8)
+        let code = "flightdeck1:" + body.base64URLEncodedString()
+        XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
+            XCTAssertEqual(error as? PairingPayloadError, .malformed)
         }
     }
 
@@ -134,11 +171,18 @@ public enum PairingPayloadError: Error, Equatable {
 /// the two devices out of band.
 ///
 /// `flightdeck1:` + base64url of a small JSON object. Not a URL, deliberately — see the
-/// plan's Task 1. The prefix carries the version too, so a phone can reject a code it does
-/// not understand before decoding a byte of it.
+/// plan's Task 1. The digits in the prefix are the version, and they are checked before any
+/// base64 or JSON decoding happens, so a code from a newer Mac is refused *as* too-new rather
+/// than as damaged.
 public struct PairingPayload: Equatable, Sendable {
     public static let currentVersion = 1
-    private static let prefix = "flightdeck1:"
+    /// The scheme half of the code. The version is spelled into the prefix — `flightdeck1:` —
+    /// and that is load-bearing, not cosmetic: a payload from a newer Mac may rename or retype
+    /// fields, so decoding it under this version's schema would fail as *damaged*. The phone
+    /// shows different copy for damaged ("show a new code on your Mac") and too-new ("update
+    /// the app"), which send the user in opposite directions — so the version has to be
+    /// readable without decoding anything.
+    private static let scheme = "flightdeck"
 
     public var version: Int
     public var key: FleetDeviceKey
@@ -179,19 +223,35 @@ public struct PairingPayload: Equatable, Sendable {
         // `try!` is honest here: `Body` is all `Codable` primitives with no custom encoding,
         // so a throw would be a compiler bug rather than a runtime condition to handle.
         let json = try! JSONEncoder().encode(body)
-        return Self.prefix + json.base64URLEncodedString()
+        return "\(Self.scheme)\(version):" + json.base64URLEncodedString()
     }
 
     public init(decoding code: String) throws {
         let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix(Self.prefix) else { throw PairingPayloadError.notAPairingCode }
-        guard let json = Data(base64URLEncoded: String(trimmed.dropFirst(Self.prefix.count))),
+        guard trimmed.hasPrefix(Self.scheme), let colon = trimmed.firstIndex(of: ":")
+        else { throw PairingPayloadError.notAPairingCode }
+
+        let digits = trimmed[
+            trimmed.index(trimmed.startIndex, offsetBy: Self.scheme.count)..<colon
+        ]
+        guard !digits.isEmpty, let version = Int(digits) else {
+            throw PairingPayloadError.notAPairingCode
+        }
+        // Before a byte is decoded. A future payload may not parse under this schema at all,
+        // and failing it as "damaged" would send the user to show a fresh code when what they
+        // actually need is to update the app.
+        guard version == Self.currentVersion else {
+            throw PairingPayloadError.unsupportedVersion(version)
+        }
+
+        guard let json = Data(base64URLEncoded: String(trimmed[trimmed.index(after: colon)...])),
               let body = try? JSONDecoder().decode(Body.self, from: json),
               let secret = Data(base64URLEncoded: body.psk)
         else { throw PairingPayloadError.malformed }
-        guard body.v == Self.currentVersion else {
-            throw PairingPayloadError.unsupportedVersion(body.v)
-        }
+        // The body repeats the version so a hand-edited prefix cannot walk a mismatched body
+        // past the gate above.
+        guard body.v == version else { throw PairingPayloadError.malformed }
+
         self.init(
             version: body.v,
             key: FleetDeviceKey(slot: body.slot, secret: secret),
