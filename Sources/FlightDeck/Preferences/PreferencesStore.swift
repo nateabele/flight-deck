@@ -177,13 +177,29 @@ final class PreferencesStore: ObservableObject {
     ///
     /// The marker is blanked rather than removed because the surface config can only *set*
     /// variables, not unset them — and `claude` treats an empty value as absent.
+    ///
+    /// `account` is what actually binds the tab's shell to a login, and it is applied **last**
+    /// — over anything typed into the Shell pane. A user who typed `CLAUDE_CONFIG_DIR` there
+    /// must not be able to silently repoint a tab at another home: every watcher, every
+    /// registry key and every resumed conversation is derived from the account the tab was
+    /// stamped with, so a hand-typed variable that disagreed would produce a tab observed in
+    /// one home and running in another. nil means no account to bind to — a store with none
+    /// configured — and leaves the environment exactly as it was before accounts existed.
+    ///
+    /// The pair is built here rather than through `AgentAdapter.environment(for:)` on purpose:
+    /// preferences must not depend on the adapter layer, and `AgentID` already owns the
+    /// variable's name, so this is the same expression that default evaluates.
     func sessionEnvironment(
+        for account: AgentAccount? = nil,
         inherited: [String: String] = ProcessInfo.processInfo.environment
     ) -> [String: String] {
         var environment = preferences.shell.environment
         if preferences.shell.clearChildSessionMarker,
            inherited["CLAUDE_CODE_CHILD_SESSION"] != nil {
             environment["CLAUDE_CODE_CHILD_SESSION"] = ""
+        }
+        if let account {
+            environment[account.agent.homeEnvironmentKey] = account.home.path
         }
         return environment
     }

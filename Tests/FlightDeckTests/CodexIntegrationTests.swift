@@ -329,7 +329,7 @@ final class CodexIntegrationTests: XCTestCase {
                           "needs a logged-in codex: ~/.codex/auth.json")
         try FileManager.default.copyItem(at: auth, to: home.appendingPathComponent("auth.json"))
 
-        let transport = CodexProcessTransport(environment: ["CODEX_HOME": home.path])
+        let transport = CodexProcessTransport(home: home)
         try transport.start()
         defer { transport.stop() }
         let rpc = CodexRPC(transport: transport)

@@ -403,6 +403,13 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
 
 ### Worth doing
 
+- **`SessionStore.newSession` returns a `Session` it did not create** when the project's claude
+  account no longer resolves. The refusal is real — nothing is filed, no surface exists, and
+  `launchFailureReporter` tells the user — but the return value is an unfiled draft, because
+  widening the signature to `Session?` would touch ~140 call sites that all treat it as total
+  and act on nothing. The honest shape is `Session?` (or routing every UI creation through the
+  fallible `createSession`, which is where `ProjectHeaderRow`'s "New Session" and the folder
+  drop should probably go anyway); do it when one of those call sites next needs the answer.
 - **`CodexRuntime`'s two `watcher.stop()` calls are unasserted** (`CodexRuntime.swift:44,53`).
   `drainForTesting` only iterates live attachments, so a regression dropping either still passes
   the detach test. The replacement-stop at :44 carries a four-line comment calling it
