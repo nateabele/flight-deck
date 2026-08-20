@@ -1,3 +1,4 @@
+import OSLog
 import SwiftUI
 
 @main
@@ -5,6 +6,9 @@ struct FlightDeckApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var preferences: PreferencesStore
     @StateObject private var store: SessionStore
+    @StateObject private var fleet: FleetService
+
+    private static let logger = Logger(subsystem: "dev.flightdeck.FlightDeck", category: "fleet")
 
     /// `-FlightDeckResetState YES`, the UITest's "start from a known slate" switch.
     ///
@@ -116,7 +120,40 @@ struct FlightDeckApp: App {
         //    if this ever changes, but the ordering is still the primary path.
         //
         // Anyone tempted to construct the store here eagerly has to satisfy both.
-        _store = StateObject(wrappedValue: Self.makeStore(preferences: preferences))
+        //
+        // `fleet` needs that exact same instance — `FleetService` wires itself to a store's
+        // events on construction — but its own `@StateObject` autoclosure is a second,
+        // independent thunk with no way to read `_store`'s result back out (reading a
+        // `@StateObject`'s `wrappedValue` before the view is installed forces early
+        // evaluation, which is the very hazard `_store` is deferred to avoid). `deferredStore`
+        // is the shared, call-once seam both thunks resolve through instead, so whichever of
+        // the two SwiftUI happens to evaluate first builds the store and the other reuses it.
+        let deferredStore = DeferredOnce { Self.makeStore(preferences: preferences) }
+        _store = StateObject(wrappedValue: deferredStore())
+        _fleet = StateObject(wrappedValue: Self.makeFleetService(
+            store: deferredStore(), preferences: preferences
+        ))
+    }
+
+    /// Builds the fleet service and starts its listener, unless the launch is a UITest
+    /// reset — see the guard below. `@MainActor` because both `FleetService` and the
+    /// `Task` it starts are.
+    @MainActor
+    private static func makeFleetService(store: SessionStore, preferences: PreferencesStore) -> FleetService {
+        let service = FleetService(store: store, preferences: preferences, armer: PairingArmer())
+        // The UITest gate is hermetic: a listener advertising this Mac on the real LAN
+        // during a GUI test would be a live service, not a test fixture.
+        guard !isResettingState else { return service }
+        Task {
+            do {
+                try await service.start()
+            } catch {
+                // A listener that will not bind is a mobile companion that does not work,
+                // which is very different from an app that does not work. Log and carry on.
+                logger.error("fleet listener failed to bind: \(String(describing: error), privacy: .public)")
+            }
+        }
+        return service
     }
 
     @MainActor
@@ -190,7 +227,26 @@ struct FlightDeckApp: App {
 
         // A `Settings` scene gives ⌘, and the standard Preferences window for free.
         Settings {
-            PreferencesView(preferences: preferences, sessions: store)
+            PreferencesView(preferences: preferences, sessions: store, fleet: fleet)
         }
+    }
+}
+
+/// Lets `_store` and `_fleet`'s independent `@StateObject` autoclosures share exactly one
+/// `SessionStore` no matter which of the two SwiftUI happens to evaluate first — see the
+/// comment on `_store`'s assignment in `init()`. `make` must run at most once: calling
+/// `Self.makeStore` twice would build two stores, each posting `.flightDeckStoreReady` and
+/// spawning its own `claude --resume` per restored session.
+private final class DeferredOnce<Value> {
+    private let make: () -> Value
+    private var resolved: Value?
+
+    init(_ make: @escaping () -> Value) { self.make = make }
+
+    func callAsFunction() -> Value {
+        if let resolved { return resolved }
+        let value = make()
+        resolved = value
+        return value
     }
 }

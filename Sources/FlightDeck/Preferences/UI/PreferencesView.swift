@@ -3,6 +3,7 @@ import SwiftUI
 struct PreferencesView: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore
+    @ObservedObject var fleet: FleetService
 
     var body: some View {
         TabView {
@@ -21,6 +22,10 @@ struct PreferencesView: View {
             ToolsSettingsTab(preferences: preferences, sessions: sessions)
                 .tabItem { Label("Tools", systemImage: "wrench.and.screwdriver") }
                 .accessibilityIdentifier("prefs-tools")
+
+            DevicesSettingsTab(preferences: preferences, service: fleet)
+                .tabItem { Label("Devices", systemImage: "iphone.and.arrow.forward") }
+                .accessibilityIdentifier("prefs-devices")
         }
         .frame(width: 720, height: 560)
     }
