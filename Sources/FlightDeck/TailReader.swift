@@ -63,6 +63,11 @@ enum TailReader {
             result.hasChosenStart = true
             result.offset = size
         } else if size < result.offset {
+            // A file getting SHORTER than the offset we hold is the only way a replacement is
+            // detectable at all: a same-size-or-larger replacement at the same path reads as
+            // an ordinary continuation, indistinguishable from the original file simply having
+            // grown. That gap matters more here than it used to, now that this branch carries
+            // two different answers for what a shrink means.
             switch truncation {
             case .restartFromZero: result.offset = 0
             case .resumeAtEnd: result.offset = size

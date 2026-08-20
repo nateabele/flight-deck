@@ -26,8 +26,6 @@ final class CodexRPC {
     private var nextID = 0
     private var pending: [Int: CheckedContinuation<[String: Any], Error>] = [:]
 
-    var onNotification: ((String, [String: Any]) -> Void)?
-
     /// Test-only observability: how many requests are still awaiting a reply. Exists so a
     /// cancellation test can assert `request`'s `onCancel` actually removed its entry from
     /// `pending`, not merely that the caller unblocked.
@@ -142,8 +140,10 @@ final class CodexRPC {
             return
         }
 
-        if let method = obj["method"] as? String, obj["id"] == nil {
-            onNotification?(method, obj["params"] as? [String: Any] ?? [:])
-        }
+        // Anything left is a notification: no `id`, so nothing here is waiting on it. Codex
+        // sends these regardless of whether anyone is listening, and nothing does — see
+        // `CodexRuntime`'s doc comment on why the app-server's own notifications never
+        // describe anything a user did in a `codex resume` TUI — so they are simply read
+        // off the wire and dropped, not treated as malformed.
     }
 }

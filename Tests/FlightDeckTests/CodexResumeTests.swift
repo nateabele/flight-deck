@@ -107,6 +107,64 @@ final class CodexResumeTests: XCTestCase {
         XCTAssertFalse(t.methods.contains("thread/start"))
     }
 
+    // MARK: - prepare / the writer-lock release
+
+    /// The whole point of the fix: `thread/archive` and `thread/unarchive` must follow
+    /// `thread/name/set`, in that exact order — archiving before naming would fail (an
+    /// unnamed thread has no rollout to archive), and unarchiving before archiving is
+    /// meaningless. See the comment at the call site in `CodexAdapter.prepare` for why the
+    /// round trip exists at all: it releases the writer lock `thread/start` takes out, which
+    /// otherwise makes `codex resume <id>` refuse on codex-cli 0.148.0.
+    func testPrepareArchivesAndUnarchivesTheThreadAfterNamingIt() async throws {
+        let t = ScriptedTransport()
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+        let session = Session(title: "t", workingDirectory: "/w/a", pinnedConversationID: existing)
+
+        let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+
+        XCTAssertEqual(binding.conversationID, fresh)
+        XCTAssertEqual(t.methods, ["thread/start", "thread/name/set", "thread/archive", "thread/unarchive"])
+    }
+
+    /// The ordering hazard the fix has to get right: if `thread/archive` succeeds and
+    /// `thread/unarchive` then fails, the thread is left archived — worse than the writer
+    /// lock this round trip exists to release, because codex refuses to resume an archived
+    /// thread outright ("session is archived. Run `codex unarchive <id>`"). `prepare` must
+    /// propagate that failure rather than swallow it and return a binding that looks fine,
+    /// exactly the same reasoning that already governs a failed `thread/name/set`.
+    func testPrepareFailsRatherThanReturnAThreadItLeftArchived() async {
+        final class UnarchiveFailsTransport: CodexTransport {
+            var onLine: ((String) -> Void)?
+            private(set) var methods: [String] = []
+            func send(_ line: String) {
+                guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                      let method = obj["method"] as? String, let id = obj["id"] as? Int else { return }
+                methods.append(method)
+                switch method {
+                case "thread/start":
+                    onLine?(#"{"id":\#(id),"result":{"thread":{"id":"01a01705-bd49-7b70-a0a1-4514d4bda5dd","cwd":"/w/a","path":"/r/y.jsonl"}}}"#)
+                case "thread/unarchive":
+                    onLine?(#"{"id":\#(id),"error":{"code":-32600,"message":"internal error"}}"#)
+                default:
+                    onLine?(#"{"id":\#(id),"result":{}}"#)
+                }
+            }
+        }
+        let t = UnarchiveFailsTransport()
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+        let session = Session(title: "t", workingDirectory: "/w/a", pinnedConversationID: existing)
+
+        do {
+            _ = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+            XCTFail("a thread left archived by a failed unarchive must not be handed back as a usable binding")
+        } catch {
+            XCTAssertEqual(error as? CodexRPCError, .remote(code: -32600, message: "internal error"))
+        }
+        // Both were attempted, in order, before the failure reached the caller — proof this
+        // is the ordering hazard the comment describes, not some earlier request failing.
+        XCTAssertEqual(t.methods, ["thread/start", "thread/name/set", "thread/archive", "thread/unarchive"])
+    }
+
     func testRebindStartsAFreshThreadWhenTheOldOneIsGone() async throws {
         let t = ScriptedTransport()
         t.threadMissing = true
@@ -118,7 +176,8 @@ final class CodexResumeTests: XCTestCase {
         // Mirrors claude's `--resume || --session-id` fallback: a deleted or archived thread
         // must not strand the tab. Re-pinning is the caller's job once this returns.
         XCTAssertNotEqual(binding.conversationID, existing)
-        XCTAssertEqual(t.methods, ["thread/read", "thread/start", "thread/name/set"])
+        XCTAssertEqual(t.methods,
+                       ["thread/read", "thread/start", "thread/name/set", "thread/archive", "thread/unarchive"])
     }
 
     /// The under-narrowing this replaced: `catch CodexRPCError.remote(_, _)` treated every
@@ -265,6 +324,9 @@ final class CodexResumeTests: XCTestCase {
         retained.append(provider)
         let store = SessionStore(provider: provider, persistence: persistence)
         store.transcriptsRootOverride = projectsRoot
+        // Never the user's real `~/.codex/session_index.jsonl`: restoring a codex session
+        // below builds a real `CodexStack`, whose `CodexNameWatcher` would otherwise tail it.
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()
         let injector = SpyInjector()
         store.injectorOverride = injector

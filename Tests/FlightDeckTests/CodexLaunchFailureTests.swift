@@ -134,6 +134,10 @@ final class CodexLaunchFailureTests: XCTestCase {
         retained.append(provider)
         let store = SessionStore(provider: provider, persistence: nil)
         store.transcriptsRootOverride = projectsRoot
+        // Never the user's real `~/.codex/session_index.jsonl`: every test below creates a
+        // codex tab, and only the adapter is overridden — `runtime(for: .codex)` still builds
+        // a real `CodexStack`, whose `CodexNameWatcher` would otherwise tail the user's home.
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = reporter
         return (store, provider)
     }
@@ -268,8 +272,10 @@ final class CodexLaunchFailureTests: XCTestCase {
                        "codex reports its rollout path; the tab must keep it")
         XCTAssertEqual(provider.configs.last?.initialInput,
                        "codex resume \(threadID.uuidString.lowercased())\n")
-        XCTAssertEqual(transport.methods, ["thread/start", "thread/name/set"],
-                       "start then name, in that order — naming is what commits the thread")
+        XCTAssertEqual(transport.methods,
+                       ["thread/start", "thread/name/set", "thread/archive", "thread/unarchive"],
+                       "start then name, in that order — naming is what commits the thread — "
+                       + "then archive/unarchive to release the writer lock thread/start took out")
     }
 
     /// Claude mints its own id and cannot fail, so it must keep the synchronous path

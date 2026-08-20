@@ -34,6 +34,9 @@ final class AgentRoutingTests: XCTestCase {
     private func makeStore() -> SessionStore {
         let store = SessionStore(provider: nil, persistence: nil)
         store.transcriptsRootOverride = projectsRoot
+        // Never the user's real `~/.codex/session_index.jsonl` — tests below create codex
+        // tabs, and a real path would have those tabs' watchers tail the user's own home.
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         return store
     }
 
@@ -42,6 +45,7 @@ final class AgentRoutingTests: XCTestCase {
         retainedProviders.append(provider)
         let store = SessionStore(provider: provider, persistence: nil)
         store.transcriptsRootOverride = projectsRoot
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         return (store, provider)
     }
 
