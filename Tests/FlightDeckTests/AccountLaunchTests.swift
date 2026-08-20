@@ -177,6 +177,48 @@ final class AccountLaunchTests: XCTestCase {
         XCTAssertNotEqual(chosen.id, top.id, "the fixture must actually disagree with the default")
     }
 
+    // MARK: - The sidebar's account-mismatch marker
+
+    /// `accountMismatchedSessionIDs` is what actually decides which sessions get
+    /// `SessionSidebar`'s marker — `SidebarRow.accountMismatched` (a pure `UUID?` comparison)
+    /// and `PreferencesStore.resolvedAccounts` are each covered on their own elsewhere, but
+    /// neither test exercises the wiring here: which session field feeds which side of the
+    /// comparison, and against which project. A swapped argument or a wrong field would pass
+    /// both of those tests and this whole suite while silently marking every tab, or none.
+    ///
+    /// The common case first: a tab running as its own project's current default carries no
+    /// marker.
+    func testASessionMatchingItsProjectAccountIsNotMismatched() {
+        let (preferences, _) = configured(.claude)
+        let store = makeStore(preferences)
+        let session = store.newSession(in: projectURL)
+
+        XCTAssertFalse(store.accountMismatchedSessionIDs.contains(session.id))
+    }
+
+    /// A tab explicitly stamped with one login, left in a project whose own (unassigned)
+    /// default resolves to another — exactly what the marker exists to surface.
+    func testASessionOnADifferentAccountThanItsProjectIsMismatched() {
+        let (preferences, top) = configured(.claude)
+        let other = AgentAccount(agent: .claude, displayName: "Other", home: home("other"))
+        preferences.preferences.storedAccounts = [top, other]
+        let store = makeStore(preferences)
+
+        let session = store.newSession(in: projectURL, account: other.id)
+
+        XCTAssertNotEqual(other.id, top.id, "the fixture must actually disagree with the default")
+        XCTAssertTrue(store.accountMismatchedSessionIDs.contains(session.id))
+    }
+
+    /// Degrades to nothing rather than guessing, the same as `conflictedSessionIDs` does —
+    /// there is nothing to resolve a mismatch against without a `PreferencesStore`.
+    func testWithNoPreferencesStoreNothingIsEverMismatched() {
+        let store = SessionStore(provider: nil, persistence: nil)
+        store.newSession(in: projectURL)
+
+        XCTAssertTrue(store.accountMismatchedSessionIDs.isEmpty)
+    }
+
     // MARK: - What the shell is actually launched with
 
     func testTheLaunchedShellCarriesItsAccountsVariable() throws {
