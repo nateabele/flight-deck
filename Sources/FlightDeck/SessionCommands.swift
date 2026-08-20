@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// File-menu items for session creation and renaming. All stay enabled in every state: a
@@ -39,39 +40,90 @@ struct SessionCommands: Commands {
         return preferences.agentOrder(forProject: project)
     }
 
+    /// The flat, single-item row for an agent with 0 or 1 accounts. `account` stays nil on
+    /// the create call either way, so it resolves to the project's default — unchanged from
+    /// before nested accounts existed. Carries its list-position shortcut only when one
+    /// exists (`slots(for:)` caps at three agents).
+    @ViewBuilder
+    private func flatAgentRow(agent: AgentSettings, slot: NewSessionAffordance.Slot?) -> some View {
+        if let slot {
+            Button(slot.label) { Task { await store.createFromMenu(agent: agent.id) } }
+                .keyboardShortcut("n", modifiers: NewSessionAffordance.eventModifiers(slot.modifiers))
+        } else {
+            Button("New \(agent.id.displayName) Session") {
+                Task { await store.createFromMenu(agent: agent.id) }
+            }
+        }
+    }
+
+    /// One leaf inside a multi-account agent's submenu. `shortcutModifiers` is non-nil on
+    /// at most one leaf per submenu — the one `NewSessionAffordance.shortcutLeaf` picked —
+    /// everything else renders identically but un-chorded.
+    @ViewBuilder
+    private func accountMenuRow(
+        agent: AgentID, account: UUID, isResolved: Bool, shortcutModifiers: NSEvent.ModifierFlags?
+    ) -> some View {
+        let name = preferences.account(id: account)?.displayName ?? agent.displayName
+        if let shortcutModifiers {
+            Button {
+                Task { await store.createFromMenu(agent: agent, account: account) }
+            } label: {
+                if isResolved { Label(name, systemImage: "checkmark") } else { Text(name) }
+            }
+            .keyboardShortcut("n", modifiers: NewSessionAffordance.eventModifiers(shortcutModifiers))
+        } else {
+            Button {
+                Task { await store.createFromMenu(agent: agent, account: account) }
+            } label: {
+                if isResolved { Label(name, systemImage: "checkmark") } else { Text(name) }
+            }
+        }
+    }
+
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            ForEach(Array(NewSessionAffordance.slots(for: agentsForCurrentProject).enumerated()), id: \.offset) { _, slot in
-                Button(slot.label) { Task { await store.createFromMenu(agent: slot.agent) } }
-                    .keyboardShortcut("n", modifiers: NewSessionAffordance.eventModifiers(slot.modifiers))
+            // One entry per agent, in agent order — never two items with the same title.
+            // 0 or 1 accounts renders flat, exactly as before nested accounts existed; 2+
+            // renders as a submenu of account rows instead of a second, duplicate item.
+            //
+            // A submenu-bearing `NSMenuItem` cannot itself carry a key equivalent that
+            // fires while the menu is closed, so the shortcut for a nested agent moves
+            // onto one of its leaves instead of vanishing: AppKit's key-equivalent
+            // matching recurses into submenus, so a leaf's chord still fires without the
+            // submenu ever opening. `NewSessionAffordance.shortcutLeaf` picks the resolved
+            // leaf — the same one already wearing the checkmark — falling back to the
+            // first leaf so the chord is never simply dropped.
+            // Built with `reduce`, not `Dictionary(uniqueKeysWithValues:)`: the Agents list
+            // is meant to hold one row per `AgentID`, but nothing enforces that here, and a
+            // duplicate must not crash the menu — last position wins, same as any other
+            // last-write lookup.
+            let agents = agentsForCurrentProject
+            let slotByAgent = NewSessionAffordance.slots(for: agents).reduce(into: [AgentID: NewSessionAffordance.Slot]()) {
+                $0[$1.agent] = $1
             }
-
-            // Mouse-only account submenus, alongside the shortcut items above rather than
-            // replacing any of them: a submenu-bearing `NSMenuItem` cannot also carry a key
-            // equivalent that fires directly, so an agent with more than one account gets a
-            // second, un-chorded entry here purely to reach the non-default login. Flat
-            // single-account rows are omitted — the shortcut item above already reaches them.
-            if let project = currentProject.path {
-                let agents = agentsForCurrentProject
-                let entries = NewSessionAffordance.menu(
+            let entryByAgent: [AgentID: NewSessionAffordance.MenuEntry] = currentProject.path.map { project in
+                NewSessionAffordance.menu(
                     agents: agents, accounts: preferences.preferences.accounts,
                     resolved: preferences.resolvedAccounts(for: agents, project: project)
-                )
-                ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
-                    if case .submenu(let agent, let rows) = entry {
-                        Menu("New \(agent.displayName) Session") {
-                            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                                if case .agent(let agent, let account, let isResolved) = row {
-                                    Button {
-                                        Task { await store.createFromMenu(agent: agent, account: account) }
-                                    } label: {
-                                        let name = preferences.account(id: account)?.displayName ?? agent.displayName
-                                        if isResolved { Label(name, systemImage: "checkmark") } else { Text(name) }
-                                    }
-                                }
+                ).reduce(into: [AgentID: NewSessionAffordance.MenuEntry]()) { $0[$1.agent] = $1 }
+            } ?? [:]
+
+            ForEach(Array(agents.enumerated()), id: \.offset) { _, settings in
+                let slot = slotByAgent[settings.id]
+                if let entry = entryByAgent[settings.id], case .submenu(let agent, let rows) = entry {
+                    let shortcutAccount = slot != nil ? NewSessionAffordance.shortcutLeaf(in: rows) : nil
+                    Menu("New \(agent.displayName) Session") {
+                        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                            if case .agent(let rowAgent, let account, let isResolved) = row {
+                                accountMenuRow(
+                                    agent: rowAgent, account: account, isResolved: isResolved,
+                                    shortcutModifiers: account == shortcutAccount ? slot?.modifiers : nil
+                                )
                             }
                         }
                     }
+                } else {
+                    flatAgentRow(agent: settings, slot: slot)
                 }
             }
 
