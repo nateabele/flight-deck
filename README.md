@@ -25,7 +25,9 @@ through a dozen terminal windows you can't tell apart.
 - Renames go both ways. Rename from the sidebar and the agent follows, or let the
   conversation name itself and the sidebar follows.
 - ⌘N opens a session, ⌘⇧[ and ⌘⇧] walk the fleet across project boundaries, and ⌘W
-  closes the session rather than the window.
+  closes the session rather than the window. ⌘⇧T reopens what you just closed, the way a
+  browser reopens a tab — back on its own conversation, in its old row. Keep pressing to
+  walk further back; closing a whole project undoes in one press.
 - Agent flags are set globally and overridden per project, from real controls instead
   of a half-remembered command line.
 - Editors, terminals and git clients open on whatever the selected session is working on —
