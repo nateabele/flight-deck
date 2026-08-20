@@ -69,8 +69,12 @@ final class PairedDeviceStoreTests: XCTestCase {
     /// The brief's literal JSON used `"globalFlags":{"flags":[]}`, which does not match
     /// `FlagSet`'s actual `Codable` shape (`values`/`passthrough`) and would fail to decode
     /// for a reason unrelated to this test's point. Built from an encoded empty
-    /// `Preferences()` instead, with `pairedDevices` stripped out, so the fixture always
-    /// tracks the real wire shape.
+    /// `Preferences()` instead, so the fixture always tracks the real wire shape.
+    ///
+    /// The `removeValue(forKey: "pairedDevices")` below is defensive rather than load-bearing:
+    /// Swift's synthesized `Encodable` omits `nil` Optionals entirely rather than emitting
+    /// `"pairedDevices": null`, so an empty `Preferences()` never has the key to begin with.
+    /// Left in as cheap insurance against a future encoder change.
     func testAPreferencesBlobWithNoPairedDevicesKeyStillDecodes() throws {
         var object = try JSONSerialization.jsonObject(
             with: JSONEncoder().encode(Preferences())
@@ -86,11 +90,15 @@ final class PairedDeviceStoreTests: XCTestCase {
     }
 
     /// The Bonjour instance name has to survive a relaunch, or a phone that remembers which
-    /// Mac it paired with stops recognising it after a restart.
+    /// Mac it paired with stops recognising it after a restart. The second store is a stand-in
+    /// for that relaunch: it reads the same persistence and must see the same suffix, which
+    /// only holds if the first store actually wrote the minted id to disk.
     func testTheInstallSuffixIsMintedOnceAndThenStable() {
         let persistence = MemoryPersistence()
         let first = PreferencesStore(persistence: persistence).installSuffix
         XCTAssertEqual(first.count, 4)
+        XCTAssertNotNil(persistence.stored?.installID,
+                        "a minted id that never reached disk would remint on the next launch")
         XCTAssertEqual(PreferencesStore(persistence: persistence).installSuffix, first)
     }
 
