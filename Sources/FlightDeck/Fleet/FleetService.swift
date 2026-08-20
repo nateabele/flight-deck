@@ -143,7 +143,11 @@ final class FleetService: ObservableObject {
             .filter(\.isProvisional)
             .forEach { preferences.revokeDevice(slot: $0.slot) }
 
-        let port = boundPort?.rawValue ?? 0
+        // A code built before the listener bound would carry `host:0` endpoints — the phone
+        // would race candidates that can never connect, and the failure would look like a
+        // network problem rather than a Mac that was not listening yet. Refuse instead.
+        guard let boundPort else { throw FleetSocketError.didNotBind }
+        let port = boundPort.rawValue
         let payload = armer.arm(
             macName: Host.current().localizedName ?? "Mac",
             serviceName: serviceName,

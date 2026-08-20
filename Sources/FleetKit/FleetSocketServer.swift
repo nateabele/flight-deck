@@ -183,24 +183,44 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// listener is actually gone before returning, so the caller's rebind on the same port
     /// (routine — `reloadKeys()` does this on every arm, expiry and revocation) does not race
     /// a cancellation that is still in flight. See the comment at `start()`'s call site.
+    ///
+    /// Bounded, and the bound is not decoration: an unbounded continuation here would wedge
+    /// every arm, expiry and revocation on the main actor if a terminal state never arrived
+    /// — the identical hazard the bind continuation above already had to be fixed for once
+    /// (`f96c6c1`), reintroduced twenty lines away. On timeout it resumes rather than
+    /// throwing — proceeding to a bind that has its own timeout beats hanging, and a port
+    /// that is genuinely still held will surface there as a clean error instead of as a
+    /// frozen UI.
     private func releaseListener() async {
         cancelConnections()
         guard let listener else { return }
         self.listener = nil
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             // Same single-resume hazard as the bind continuation above, and the same fix:
-            // `.cancelled` and `.failed` can each fire, and firing twice would trap.
+            // `.cancelled`, `.failed` and the timeout can each fire, and firing twice would
+            // trap. Both the state handler and the timeout work item run on `queue`, which
+            // is what keeps this flag safe without a lock. `timeout` itself needs the same
+            // `nonisolated(unsafe)` as `resumed` — the state handler below captures it into
+            // a `@Sendable` closure to cancel it, and `DispatchWorkItem` is not `Sendable`,
+            // but that closure only ever runs on `queue` too.
             nonisolated(unsafe) var resumed = false
+            nonisolated(unsafe) let timeout = DispatchWorkItem {
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume()
+            }
             listener.stateUpdateHandler = { state in
                 guard !resumed else { return }
                 switch state {
                 case .cancelled, .failed:
                     resumed = true
+                    timeout.cancel()
                     continuation.resume()
                 default:
                     break
                 }
             }
+            queue.asyncAfter(deadline: .now() + 2, execute: timeout)
             listener.cancel()
         }
     }
