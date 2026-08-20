@@ -274,10 +274,19 @@ that window counts as success.
 
 ## Fleet replication, pairing, and the phone (`FleetKit` / `Sources/FlightDeck/Fleet/` / `Sources/FlightDeckMobile/`)
 
-Live end to end: a paired iPhone scans a QR off the Mac's screen, finds it over Bonjour or by
-racing remembered addresses, and shows the running fleet in the terminal's own idiom — one
-project section per open project, one row per session, renamed and marked read from either
-side. Plan 2 built the phone and the pairing UI on top of the spine Plan 1 built (Plan 1:
+The spine is live end to end and proven that way: a real client completes a TLS-PSK handshake
+against a real listener, takes a snapshot of a live `SessionStore`, follows its mutations,
+resumes after a drop and marks a session read — all inside `./scripts/test-unit.sh`.
+
+The phone is built on top of that and **has never been run**. It is designed to scan a QR off
+the Mac's screen, find the Mac over Bonjour or by racing remembered addresses, and show the
+running fleet in the terminal's own idiom — one project section per open project, one row per
+session, renamed and marked read from either side. Every part of that below the UI is covered by
+the macOS test suite, because it deliberately lives in `FleetKit`. The screens themselves, and
+the camera path in particular, have only ever been type-checked: this machine has no iOS
+platform installed, and a simulator has no camera even once it does. `docs/MOBILE.md` carries
+the checklist of what a device would have to confirm, and says plainly which parts are least
+proven. Plan 2 built the phone and the pairing UI on top of the spine Plan 1 built (Plan 1:
 `docs/superpowers/plans/2026-08-19-fleet-replication-spine.md`; Plan 2:
 `docs/superpowers/plans/2026-08-19-fleet-pairing-and-ios.md`). The manual checklist for what
 only a real device on a real network can prove is [docs/MOBILE.md](MOBILE.md). Three modules:

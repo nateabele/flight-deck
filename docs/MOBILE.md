@@ -92,7 +92,7 @@ found.
    picks `PairingScreen` vs. `FleetListScreen` by reading `@Observable` state directly in a
    `Scene`'s content closure — a known-fragile spot; this is the one item flagged in review as
    plausible-but-unproven rather than merely unverified.
-8. **Look at the layout.** The status glyph column lining up down the list, a ~200-character
+8. **Look at the layout.** The status glyph column lining up down the list, a ~300-character
    base64 code in the manual-entry field, failure copy wrapping rather than truncating, and
    the toolbar button and confirmation dialog landing sensibly.
 9. **Background and foreground the pairing screen.** AVFoundation's interruption handling is

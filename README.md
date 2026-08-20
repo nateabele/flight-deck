@@ -41,8 +41,12 @@ Apple Silicon only. The build is ad-hoc signed rather than notarised, so the fir
 launch needs a right-click → Open before macOS will let it start. Latest build is on
 the [releases page](../../releases/latest).
 
-There's also an early iPhone companion — pair it by scanning a QR from the Mac's
-Preferences and it shows the same fleet over your local network, renamed and marked
-read from either side. Earlier still than the Mac app: it needs your own Apple
-developer signing to install, since nobody else's team id belongs in this repo. See
-[docs/MOBILE.md](docs/MOBILE.md).
+There's also an iPhone companion, and it is a different order of early from everything
+above: it is written and compiles, and **it has never been run.** No one has installed
+it, launched it, or watched it scan anything — the machine it was built on has no iOS
+platform, so the app's own sources have only ever been type-checked. What it is meant to
+do is pair by scanning a QR from the Mac's Preferences, then show the same fleet over
+your local network, renamed and marked read from either side. The logic underneath it is
+covered by the Mac's test suite; the screens are not. Installing it needs your own Apple
+developer signing, since nobody else's team id belongs in this repo.
+[docs/MOBILE.md](docs/MOBILE.md) has the checklist of what a device still has to prove.
