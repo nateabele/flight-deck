@@ -86,10 +86,19 @@ public final class FleetConnector: @unchecked Sendable {
         self.queue = queue
     }
 
-    /// Idempotent. Task 10's SwiftUI call sites (`.onAppear`, a `scenePhase` change) invoke
-    /// this repeatedly by construction, not by mistake — calling it again mid-race would
-    /// otherwise tear down every live racer via `race()`'s own `teardown()` just to redial
-    /// the same candidates.
+    /// Idempotent, defensively rather than because anything currently calls it twice.
+    ///
+    /// Without the guard, `start()` on a running connector re-enters `race()`, whose
+    /// `teardown()` cancels every live racer just to redial the same candidates — and a frame
+    /// already hopped onto `queue` from one of those cancelled clients can then land in
+    /// `accept()` and be installed as `winner`, wedging the connector on a dead socket. That
+    /// wedge is closed at three levels (here, in `accept()`'s liveness guard, and by
+    /// `FleetClient` gating `onFrame` on `hasEnded`); this is the cheapest of the three and
+    /// the one that stops the sequence starting.
+    ///
+    /// The phone reconnects by discarding the connector and building a new one rather than by
+    /// re-calling `start()`, so today this guard never fires. It is here for the caller that
+    /// does not know that yet.
     public func start() {
         dispatchPrecondition(condition: .onQueue(queue))
         guard !running else { return }
