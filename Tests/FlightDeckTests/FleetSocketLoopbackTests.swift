@@ -32,8 +32,8 @@ final class FleetSocketLoopbackTests: XCTestCase {
     @discardableResult
     private func startServer(
         key: FleetDeviceKey,
-        hello: @escaping (UUID, Int) -> [ServerFrame],
-        command: @escaping (UUID, Int, FleetCommand) -> ServerFrame = { _, cid, _ in .ack(cid: cid) }
+        hello: @escaping (FleetAttachment, Int) -> [ServerFrame],
+        command: @escaping (FleetAttachment, Int, FleetCommand) -> ServerFrame = { _, cid, _ in .ack(cid: cid) }
     ) async throws -> NWEndpoint.Port {
         let server = FleetSocketServer()
         server.onHello = hello

@@ -1,5 +1,16 @@
 import Foundation
 import Network
+import Security
+
+/// Who is on the other end of one socket.
+public struct FleetAttachment: Equatable, Sendable {
+    /// This connection. Unique per socket, so two phones sharing a slot are still distinct.
+    public let id: UUID
+    /// The paired slot the TLS layer negotiated, when it will say. `nil` means the identity
+    /// could not be read back — the connection is still authenticated (it could not have
+    /// completed a handshake otherwise), it just cannot be attributed to a named device.
+    public let slot: UUID?
+}
 
 /// The listener, and one attached-client registry. Knows nothing about what a fleet is —
 /// every decision is a closure the app supplies, which is what lets the whole protocol be
@@ -19,10 +30,18 @@ public final class FleetSocketServer: @unchecked Sendable {
 
     /// Answers a client's first frame. Returns the frames to send back — a snapshot, or a
     /// folded replay.
-    public var onHello: ((_ client: UUID, _ lastSeq: Int) -> [ServerFrame])?
+    public var onHello: ((_ client: FleetAttachment, _ lastSeq: Int) -> [ServerFrame])?
     /// Answers a command. Returns the single frame to reply with (`ack` or `err`).
-    public var onCommand: ((_ client: UUID, _ cid: Int, _ command: FleetCommand) -> ServerFrame)?
+    public var onCommand: (
+        (_ client: FleetAttachment, _ cid: Int, _ command: FleetCommand) -> ServerFrame
+    )?
     public var onAttachedCountChanged: ((Int) -> Void)?
+
+    /// How many accepted-but-not-yet-`hello`'d connections may be outstanding at once.
+    /// Each has completed a TLS-PSK handshake — it cannot be a stranger — so this bounds a
+    /// paired-but-misbehaving device opening connections faster than `authDeadline` reaps
+    /// them, not an unauthenticated one.
+    private let maxPending = 16
 
     private let queue: DispatchQueue
     private var listener: NWListener?
@@ -50,7 +69,16 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// stall, not a background hiccup.
     @discardableResult
     public func start(keys: [FleetDeviceKey], port: NWEndpoint.Port?) async throws -> NWEndpoint.Port {
-        stop()
+        // `stop()`'s `listener?.cancel()` is fire-and-forget — Network.framework releases the
+        // port asynchronously, on its own schedule. `reloadKeys()` restarts this listener on
+        // the *same* port on every arm, expiry and revocation, so this is not a hypothetical
+        // race: cancelling and immediately rebinding regularly lost it outright, with
+        // `EADDRINUSE` surfacing before the state handler below ever saw `.waiting` — two
+        // sockets cannot both be LISTENing on one port at once, `allowLocalEndpointReuse`
+        // notwithstanding (that flag is about reusing a port stuck in TIME_WAIT, not about a
+        // still-live listener). `releaseListener()` waits for the OS to actually confirm the
+        // old listener is gone before this one tries to bind.
+        await releaseListener()
         let parameters = FleetSocket.webSocketParameters(
             FleetTLS.listenerParameters(keys: keys)
         )
@@ -70,11 +98,17 @@ public final class FleetSocketServer: @unchecked Sendable {
         // `stateUpdateHandler` fires repeatedly (`.setup`, `.waiting`, `.ready`, and
         // potentially `.failed`/`.cancelled` later) — hence the `resumed` guard.
         let bound: NWEndpoint.Port = try await withCheckedThrowingContinuation { continuation in
-            // `nonisolated(unsafe)`: written and read only from `stateUpdateHandler`, which
-            // Network.framework always invokes serially on `queue` — the same single-queue
-            // confinement argument as the class's `@unchecked Sendable` — but the compiler
-            // cannot see that a `@Sendable` closure calls back onto one queue, hence the flag.
+            // `nonisolated(unsafe)`: written and read only from `stateUpdateHandler` and the
+            // bind-timeout work item below, both of which Network.framework/`queue` always
+            // invoke serially on `queue` — the same single-queue confinement argument as the
+            // class's `@unchecked Sendable` — but the compiler cannot see that a `@Sendable`
+            // closure calls back onto one queue, hence the flag.
             nonisolated(unsafe) var resumed = false
+            // Forward-declared: the state handler below cancels it, and Swift requires the
+            // variable to exist lexically before a closure can reference it, even though the
+            // work item itself is only constructed after `listener.start`. Both closures run
+            // on `queue`, which is what keeps `resumed` (and this) safe without a lock.
+            nonisolated(unsafe) var timeout: DispatchWorkItem!
             listener.stateUpdateHandler = { state in
                 guard !resumed else { return }
                 switch state {
@@ -85,12 +119,19 @@ public final class FleetSocketServer: @unchecked Sendable {
                     // port instead of waiting for a real one.
                     guard let port = listener.port, port != .any else { return }
                     resumed = true
+                    // Cancelled on every resume path, not just this one: a bind that
+                    // succeeds (or fails) immediately must not leave the listener and this
+                    // continuation retained by a work item that still has five seconds left
+                    // to run — see the doc comment on `timeout` below.
+                    timeout.cancel()
                     continuation.resume(returning: port)
                 case .failed(let error):
                     resumed = true
+                    timeout.cancel()
                     continuation.resume(throwing: error)
                 case .cancelled:
                     resumed = true
+                    timeout.cancel()
                     continuation.resume(throwing: FleetSocketError.didNotBind)
                 default:
                     break
@@ -103,23 +144,65 @@ public final class FleetSocketServer: @unchecked Sendable {
             // way in, since a key rotation rebinds the same port. Without this, `start()`
             // never returns and the listener silently never comes up; the busy-wait this
             // replaced had a five-second bound and dropping it was a regression.
-            queue.asyncAfter(deadline: .now() + 5) {
+            //
+            // A `DispatchWorkItem` rather than a bare closure so the success/failure paths
+            // above can cancel it: a bare closure handed to `asyncAfter` has nothing to
+            // cancel, so it would fire five seconds after every successful bind, no-op
+            // against `resumed`, but keep this listener and continuation alive until then —
+            // and `reloadKeys()` now calls `start` on every arm, expiry and revocation, so
+            // those overlapping retentions stopped being theoretical the moment pairing
+            // landed.
+            timeout = DispatchWorkItem { [weak listener] in
                 guard !resumed else { return }
                 resumed = true
-                listener.cancel()
+                listener?.cancel()
                 continuation.resume(throwing: FleetSocketError.didNotBind)
             }
+            queue.asyncAfter(deadline: .now() + 5, execute: timeout)
         }
         return bound
     }
 
     public func stop() {
+        cancelConnections()
+        listener?.cancel()
+        listener = nil
+    }
+
+    /// Shared by `stop()` and `releaseListener()`: every attached and pending connection
+    /// belongs to the listener being torn down, so both paths must drop the same two
+    /// dictionaries or one of them would leak sockets the other already forgot about.
+    private func cancelConnections() {
         for connection in attached.values { connection.cancel() }
         attached.removeAll()
         for connection in pending.values { connection.cancel() }
         pending.removeAll()
-        listener?.cancel()
-        listener = nil
+    }
+
+    /// `start()`'s replacement for a bare `stop()`: waits for the OS to confirm the old
+    /// listener is actually gone before returning, so the caller's rebind on the same port
+    /// (routine — `reloadKeys()` does this on every arm, expiry and revocation) does not race
+    /// a cancellation that is still in flight. See the comment at `start()`'s call site.
+    private func releaseListener() async {
+        cancelConnections()
+        guard let listener else { return }
+        self.listener = nil
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            // Same single-resume hazard as the bind continuation above, and the same fix:
+            // `.cancelled` and `.failed` can each fire, and firing twice would trap.
+            nonisolated(unsafe) var resumed = false
+            listener.stateUpdateHandler = { state in
+                guard !resumed else { return }
+                switch state {
+                case .cancelled, .failed:
+                    resumed = true
+                    continuation.resume()
+                default:
+                    break
+                }
+            }
+            listener.cancel()
+        }
     }
 
     public func broadcast(_ frame: ServerFrame) {
@@ -128,7 +211,36 @@ public final class FleetSocketServer: @unchecked Sendable {
         }
     }
 
+    /// Recovers the PSK identity TLS negotiated, which is the paired slot's UUID.
+    ///
+    /// The alternative — having the client name its own slot in `hello` — would let a
+    /// client mislabel which of the user's phones is attached. It cannot forge access
+    /// either way (TLS already proved it holds a paired key), so this is about attribution,
+    /// not authorization.
+    private func slot(of connection: NWConnection) -> UUID? {
+        guard
+            let tls = connection.metadata(definition: NWProtocolTLS.definition)
+                as? NWProtocolTLS.Metadata
+        else { return nil }
+        var identity: Data?
+        sec_protocol_metadata_access_pre_shared_keys(tls.securityProtocolMetadata) { _, pskIdentity in
+            identity = Data(pskIdentity as DispatchData)
+        }
+        guard let identity else { return nil }
+        return UUID(uuidString: String(decoding: identity, as: UTF8.self))
+    }
+
     private func accept(_ connection: NWConnection) {
+        // Each entry here has, at most, completed a TLS-PSK handshake — it cannot be a
+        // stranger, since that handshake requires holding a paired key. So this bounds a
+        // paired-but-misbehaving device opening connections faster than `authDeadline`
+        // reaps them, not an unauthenticated one: `authDeadline` already bounds how long
+        // any one of them lingers, but nothing previously bounded how many could pile up
+        // in that window at once.
+        guard pending.count < maxPending else {
+            connection.cancel()
+            return
+        }
         let id = UUID()
         pending[id] = connection
         connection.start(queue: queue)
@@ -149,6 +261,7 @@ public final class FleetSocketServer: @unchecked Sendable {
             // concurrent or background queue would turn those into silent races rather than a
             // compile error. Fail on the first connection instead.
             dispatchPrecondition(condition: .onQueue(self.queue))
+            let attachment = FleetAttachment(id: id, slot: self.slot(of: connection))
             switch frame {
             case .hello(let lastSeq):
                 if self.attached[id] == nil {
@@ -156,14 +269,14 @@ public final class FleetSocketServer: @unchecked Sendable {
                     self.attached[id] = connection
                     self.onAttachedCountChanged?(self.attached.count)
                 }
-                for reply in self.onHello?(id, lastSeq) ?? [] {
+                for reply in self.onHello?(attachment, lastSeq) ?? [] {
                     FleetSocket.send(reply, over: connection)
                 }
             case .cmd(let cid, let command):
                 // A command before `hello` is a client that skipped the handshake step;
                 // answering it would let an unattached peer drive the Mac.
                 guard self.attached[id] != nil else { return connection.cancel() }
-                let reply = self.onCommand?(id, cid, command) ?? .err(cid: cid, code: "unhandled")
+                let reply = self.onCommand?(attachment, cid, command) ?? .err(cid: cid, code: "unhandled")
                 FleetSocket.send(reply, over: connection)
             }
         } onEnd: { [weak self] _ in

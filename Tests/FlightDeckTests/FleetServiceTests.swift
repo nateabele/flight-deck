@@ -17,10 +17,23 @@ final class FleetServiceTests: XCTestCase {
         service = nil
     }
 
+    private final class MemoryPersistence: PreferencesPersisting {
+        var stored: Preferences?
+        func load() -> Preferences? { stored }
+        func save(_ preferences: Preferences) { stored = preferences }
+    }
+
     private func standUp() async throws -> (SessionStore, FleetDeviceKey, NWEndpoint.Port) {
         let store = SessionStore(provider: nil, persistence: nil)
         let key = FleetDeviceKey.mint()
-        let service = FleetService(store: store, keys: { [key] })
+        let preferences = PreferencesStore(persistence: MemoryPersistence())
+        preferences.upsert(
+            PairedDevice(
+                slot: key.slot, name: "test device", secret: key.secret,
+                pairedAt: Date(), lastSeenAt: nil, armedUntil: nil
+            )
+        )
+        let service = FleetService(store: store, preferences: preferences, armer: PairingArmer())
         self.service = service
         return (store, key, try await service.start(port: nil))
     }
