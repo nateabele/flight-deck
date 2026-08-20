@@ -39,6 +39,16 @@ final class PreferencesStore: ObservableObject {
         didSet { persistence?.save(preferences) }
     }
 
+    /// Which pane the Settings window shows. Set by whoever opens Settings — the Tools menu's
+    /// "Configure Tools…" sets `.tools` before opening, which is the only way that item can
+    /// keep the promise its title makes.
+    ///
+    /// Deliberately a sibling of `preferences` rather than a field inside it: `preferences`
+    /// persists on every mutation (see the `didSet` above), so a pane stored in there would
+    /// rewrite `preferences.v1` on each tab click and would reopen Settings weeks later on
+    /// whatever pane was last touched. This is view state and resets every launch.
+    @Published var selectedTab: PreferencesTab = .agents
+
     private let persistence: PreferencesPersisting?
 
     init(persistence: PreferencesPersisting?) {
