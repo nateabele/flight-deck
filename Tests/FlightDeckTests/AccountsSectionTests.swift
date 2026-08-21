@@ -200,7 +200,9 @@ final class AccountsSectionTests: XCTestCase {
         store.preferences.storedAccounts = [work]
 
         XCTAssertTrue(AccountsSection.remove(accountID: work.id, boundAccountIDs: [], in: store))
-        XCTAssertTrue(store.preferences.accounts.isEmpty)
+        // Tombstoned, not dropped — see `AgentAccount.removedAt`. The record survives in the
+        // raw store; it is the LIST this section renders from that must be empty.
+        XCTAssertTrue(store.preferences.accounts(for: .claude).isEmpty)
     }
 
     /// The confirmation dialog can sit open while a tab binds to the account. Removing it then

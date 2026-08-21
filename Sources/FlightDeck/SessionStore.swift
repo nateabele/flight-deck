@@ -442,11 +442,13 @@ final class SessionStore: ObservableObject {
     /// Whether this tab names a login that no longer exists.
     ///
     /// The restore-time twin of `launchAccount`'s `.accountMissing` branch, and it exists
-    /// because deleting an account does not rewrite the tabs that ran as it: `removeAccount`
-    /// clears every *project assignment* naming the id, but `Session.accountID` is history —
-    /// it records where this tab's conversation was actually written, and rewriting it would
-    /// be a lie. So a restored tab can name an id nothing resolves, and the only safe reading
-    /// of that is BROKEN. Relaunching it in the built-in home would resume a conversation
+    /// because removing an account does not rewrite the tabs that ran as it: `markAccountRemoved`
+    /// tombstones the record and clears every *project assignment* naming the id, but
+    /// `Session.accountID` is history — it records where this tab's conversation was actually
+    /// written, and rewriting it would be a lie. A tombstone still resolves by id, which is the
+    /// point of it, so a restored tab only names an id nothing resolves once that tombstone has
+    /// been purged at launch, or the id never existed at all — and the only safe reading of
+    /// that is BROKEN. Relaunching it in the built-in home would resume a conversation
     /// that lives in the deleted account's directory, find nothing there, and quietly start a
     /// fresh one — the silent wrong-login failure this whole feature exists to remove.
     ///
