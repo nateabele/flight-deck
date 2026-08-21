@@ -42,4 +42,52 @@ final class AccountSignInTests: XCTestCase {
     func testAnAlreadyTerminatedCommandIsLeftAlone() {
         XCTAssertEqual(SessionStore.terminated("claude\n"), "claude\n")
     }
+
+    private func makeAccount(_ agent: AgentID, named name: String = "Work") -> AgentAccount {
+        AgentAccount(agent: agent, displayName: name, home: root.appendingPathComponent(name))
+    }
+
+    private func makeStore() -> (SessionStore, RecordingProvider) {
+        let provider = RecordingProvider()
+        retained.append(provider)
+        let store = SessionStore(provider: provider, persistence: nil)
+        store.transcriptsRootOverride = root.appendingPathComponent("projects")
+        store.statusRootOverride = root.appendingPathComponent("status")
+        return (store, provider)
+    }
+
+    /// The whole point of Task 1, asserted through the real path rather than on the helper.
+    func testTheSignInTabIsHandedANewlineTerminatedCommand() {
+        let (store, provider) = makeStore()
+        store.openSignInSession(
+            for: makeAccount(.claude), in: root.path,
+            using: LoginInvocation(command: "claude", inject: "/login")
+        )
+        XCTAssertEqual(provider.configs.last?.initialInput, "claude\n")
+    }
+
+    /// The regression test for the misrouting. `/login` must be queued as a prompt; queuing it
+    /// as a rename typed `/rename /login` at the tab, renaming the conversation instead of
+    /// authenticating and clobbering any genuine pending rename.
+    func testSignInQueuesTheInjectionAsAPromptAndNeverAsARename() {
+        let (store, _) = makeStore()
+        let session = store.openSignInSession(
+            for: makeAccount(.claude), in: root.path,
+            using: LoginInvocation(command: "claude", inject: "/login")
+        )
+        XCTAssertEqual(store.pendingPrompts[session.id]?.text, "/login")
+        XCTAssertTrue(store.pendingRenamesForTesting.isEmpty, "a login is not a rename")
+    }
+
+    /// Codex signs in with a one-shot subcommand and has nothing to type afterwards, so it
+    /// must not leave an entry sitting in the queue until its deadline.
+    func testAnAgentWithNothingToInjectQueuesNothing() {
+        let (store, provider) = makeStore()
+        let session = store.openSignInSession(
+            for: makeAccount(.codex), in: root.path,
+            using: LoginInvocation(command: "codex login", inject: nil)
+        )
+        XCTAssertEqual(provider.configs.last?.initialInput, "codex login\n")
+        XCTAssertNil(store.pendingPrompts[session.id])
+    }
 }
