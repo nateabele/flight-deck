@@ -449,14 +449,14 @@ struct SessionSidebar: View {
         .padding(.trailing, trailingInset)
     }
 
-    /// Renders `NewSessionAffordance.menu(agents:accounts:resolved:)` as SwiftUI menu content:
+    /// Renders `NewSessionAffordance.menu(agents:preferences:resolved:)` as SwiftUI menu content:
     /// one row per agent, nested only when it has more than one account — the pure function
     /// decides the shape, this only decides how a row looks.
     @ViewBuilder
     private func newSessionMenuEntries(preferences: PreferencesStore, project: String) -> some View {
         let agents = preferences.agentOrder(forProject: project)
         let entries = NewSessionAffordance.menu(
-            agents: agents, accounts: preferences.preferences.liveAccounts,
+            agents: agents, preferences: preferences.preferences,
             resolved: preferences.resolvedAccounts(for: agents, project: project)
         )
         // Same chord placement the File menu renders, from the same rule: `SessionCommands`

@@ -103,7 +103,7 @@ struct SessionCommands: Commands {
             }
             let entries: [NewSessionAffordance.MenuEntry] = currentProject.path.map { project in
                 NewSessionAffordance.menu(
-                    agents: agents, accounts: preferences.preferences.liveAccounts,
+                    agents: agents, preferences: preferences.preferences,
                     resolved: preferences.resolvedAccounts(for: agents, project: project)
                 )
             } ?? []

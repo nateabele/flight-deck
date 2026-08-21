@@ -110,9 +110,13 @@ final class AccountTombstoneTests: XCTestCase {
         XCTAssertFalse(decoded[0].isRemoved)
     }
 
-    /// Both "New … Session" menus build from `liveAccounts`. Two live accounts nest into a
-    /// submenu; tombstoning one drops the agent back to a single flat row — and
-    /// `NewSessionAffordance.chords` moves the agent's chord onto it, so no shortcut is lost.
+    /// Both "New … Session" menus call `NewSessionAffordance.menu(agents:preferences:resolved:)`,
+    /// which does the live-account filtering itself — this drives that overload with a
+    /// `Preferences` holding a tombstone, the same shape either call site passes, so it fails if
+    /// the overload (or a future third call site) ever reverts to the raw `accounts` array.
+    /// Two live accounts nest into a submenu; tombstoning one drops the agent back to a single
+    /// flat row — and `NewSessionAffordance.chords` moves the agent's chord onto it, so no
+    /// shortcut is lost.
     func testTombstonedAccountsLeaveTheNewSessionMenus() {
         let store = PreferencesStore(persistence: nil)
         let work = AgentAccount(agent: .claude, displayName: "Work", home: home("work"))
@@ -121,7 +125,7 @@ final class AccountTombstoneTests: XCTestCase {
         let agents = [AgentSettings(id: .claude, options: .claude(FlagSet()))]
 
         let before = NewSessionAffordance.menu(
-            agents: agents, accounts: store.preferences.liveAccounts,
+            agents: agents, preferences: store.preferences,
             resolved: [.claude: work.id]
         )
         guard case .submenu(_, let rows) = before.first else {
@@ -131,7 +135,7 @@ final class AccountTombstoneTests: XCTestCase {
 
         store.markAccountRemoved(id: personal.id)
         let after = NewSessionAffordance.menu(
-            agents: agents, accounts: store.preferences.liveAccounts,
+            agents: agents, preferences: store.preferences,
             resolved: [.claude: work.id]
         )
         XCTAssertEqual(after, [.agent(.claude, account: work.id, isResolved: true)])
