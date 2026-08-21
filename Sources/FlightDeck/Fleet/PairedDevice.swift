@@ -18,9 +18,22 @@ struct PairedDevice: Codable, Equatable, Identifiable {
     var lastSeenAt: Date?
     /// Set only while provisional; the instant after which this slot must be discarded.
     var armedUntil: Date?
+    /// Whether `name` was typed by the user here rather than claimed by the device itself.
+    ///
+    /// A phone claims a name in every `hello`, and the Mac adopts it — but a name the user
+    /// chose has to win, or renaming "iPhone" to "Nate's phone" would last exactly until the
+    /// next reconnect. Read through `isUserNamed`, never directly.
+    ///
+    /// Optional in storage, and it has to stay that way: synthesized `Codable` throws on a
+    /// missing key rather than falling back to a property default, so a non-optional field
+    /// here would fail to decode every `PairedDevice` already on disk — and take the whole
+    /// `preferences.v1` blob down with it. See `Preferences.confirmations` for the same
+    /// ruling. `nil` means "never renamed".
+    var storedUserNamed: Bool?
 
     var id: UUID { slot }
     var isProvisional: Bool { pairedAt == nil }
+    var isUserNamed: Bool { storedUserNamed ?? false }
 
     func key() -> FleetDeviceKey { FleetDeviceKey(slot: slot, secret: secret) }
 

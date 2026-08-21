@@ -317,8 +317,23 @@ final class PreferencesStore: ObservableObject {
         preferences.pairedDevices = pairedDevices.filter { $0.slot != slot }
     }
 
+    /// The user naming a device on this Mac. Sticky: it marks the device user-named, so the
+    /// name the phone claims in every `hello` stops overwriting it — see `adoptClaimedName`.
     func renameDevice(slot: UUID, to name: String) {
-        mutateDevice(slot) { $0.name = name }
+        mutateDevice(slot) {
+            $0.name = name
+            $0.storedUserNamed = true
+        }
+    }
+
+    /// The device saying what it calls itself. Adopted on every attach, so renaming the
+    /// phone shows up here too — but never over a name the user typed, which is the whole
+    /// point of `PairedDevice.isUserNamed`.
+    func adoptClaimedName(slot: UUID, _ name: String) {
+        mutateDevice(slot) {
+            guard !$0.isUserNamed else { return }
+            $0.name = name
+        }
     }
 
     func noteDeviceSeen(slot: UUID, at date: Date) {

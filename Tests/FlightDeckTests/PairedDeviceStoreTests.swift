@@ -85,6 +85,40 @@ final class PairedDeviceStoreTests: XCTestCase {
         XCTAssertNil(decoded.pairedDevices)
     }
 
+    /// The same rule, one level down, for the field that records a user rename: a
+    /// `PairedDevice` written before `storedUserNamed` existed must still decode. It is
+    /// nested inside `pairedDevices`, so a throw here does not degrade one row — it fails
+    /// the whole `preferences.v1` blob and silently resets every flag, override and shell
+    /// setting the user has, along with every paired device's key.
+    func testADeviceBlobWithNoUserNamedKeyStillDecodes() throws {
+        let phone = device("phone")
+        var object = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(phone)
+        ) as! [String: Any]
+        object.removeValue(forKey: "storedUserNamed")
+        let json = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(PairedDevice.self, from: json)
+        XCTAssertEqual(decoded, phone)
+        XCTAssertFalse(decoded.isUserNamed, "never renamed reads as not user-named")
+    }
+
+    /// Renaming on the Mac is sticky, and this is the flag that makes it so: without it the
+    /// next `hello` puts the phone's own name straight back over the user's choice.
+    func testRenamingMarksTheDeviceUserNamedAndAClaimedNameThenLoses() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        let phone = device("iPhone")
+        store.upsert(phone)
+
+        store.adoptClaimedName(slot: phone.slot, "iPhone 17")
+        XCTAssertEqual(store.pairedDevices.first?.name, "iPhone 17",
+                       "a device the user has not named adopts what it claims")
+
+        store.renameDevice(slot: phone.slot, to: "Work phone")
+        store.adoptClaimedName(slot: phone.slot, "iPhone 17")
+        XCTAssertEqual(store.pairedDevices.first?.name, "Work phone")
+        XCTAssertEqual(store.pairedDevices.first?.isUserNamed, true)
+    }
+
     func testNoDevicesMeansNoKeysRatherThanACrash() {
         XCTAssertTrue(PreferencesStore(persistence: MemoryPersistence()).deviceKeys().isEmpty)
     }

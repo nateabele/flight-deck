@@ -268,6 +268,15 @@ final class FleetService: ObservableObject {
         } else {
             preferences.noteDeviceSeen(slot: slot, at: now)
         }
+        // After the upsert above, not before: on the pairing attach that branch writes the
+        // whole provisional device back, which would put the placeholder name straight over
+        // an adopted one. Every attach, not just the first — the user may have renamed the
+        // phone since — and `adoptClaimedName` is what keeps that from overwriting a name
+        // the user chose here instead.
+        if let claimed = attachment.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !claimed.isEmpty {
+            preferences.adoptClaimedName(slot: slot, claimed)
+        }
     }
 
     private func apply(_ command: FleetCommand, cid: Int) -> ServerFrame {
