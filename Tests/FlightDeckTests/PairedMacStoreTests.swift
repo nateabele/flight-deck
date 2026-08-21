@@ -1,3 +1,4 @@
+import Security
 import XCTest
 import FleetKit
 
@@ -57,6 +58,44 @@ final class PairedMacStoreTests: XCTestCase {
         XCTAssertNil(store.load())
     }
 
+    /// The regression this file exists to pin from now on.
+    ///
+    /// `KeychainPairedMacStore.save` used to `assertionFailure` on any unexpected `OSStatus`,
+    /// which is the worst of both endings: in debug it killed the app (twice, on an unsigned
+    /// simulator build with no keychain access group — `errSecMissingEntitlement`, -34018),
+    /// and in release `assertionFailure` compiles out, so the write silently did nothing and
+    /// the user paired, saw success, and lost the pairing on the next launch. Neither ending
+    /// is observable by a caller, which is precisely the problem: the failure has to be able
+    /// to REACH the pairing screen.
+    ///
+    /// Asserted through `any PairedMacStoring`, because that is how `FleetModel` holds its
+    /// store — a failure that propagates through the concrete type but not the existential
+    /// would not reach the UI.
+    func testAFailingSaveIsReportedToTheCallerRatherThanSwallowed() {
+        let store: any PairedMacStoring = FailingPairedMacStore(
+            error: .keychainWriteFailed(status: errSecMissingEntitlement)
+        )
+        XCTAssertThrowsError(try store.save(PairedMac(adopting: payload()))) { error in
+            XCTAssertEqual(
+                error as? PairedMacStoreError,
+                .keychainWriteFailed(status: errSecMissingEntitlement),
+                "the status is the whole diagnosis — -34018 is an unsigned build, not a broken device"
+            )
+        }
+        XCTAssertNil(store.load(), "a save that threw must not leave a record behind")
+    }
+
+    /// The in-memory store is the other half of the protocol and must stay usable without
+    /// ceremony: it cannot fail, so it never throws, and a non-throwing method witnesses the
+    /// throwing requirement. This pins that it is still callable without `try` on the
+    /// concrete type, which is what keeps the existing tests and fixtures readable.
+    func testTheInMemoryStoreNeverFails() {
+        let store = InMemoryPairedMacStore()
+        let mac = PairedMac(adopting: payload())
+        store.save(mac)
+        XCTAssertEqual(store.load(), mac)
+    }
+
     /// The two attributes that keep the secret on one device. Asserted against the query the
     /// store builds rather than against the Keychain itself, because a test bundle cannot
     /// reach the app's keychain — the live path is verified by hand in Task 11.
@@ -69,4 +108,19 @@ final class PairedMacStoreTests: XCTestCase {
         )
         XCTAssertEqual(query[kSecClass as String] as? String, kSecClassGenericPassword as String)
     }
+}
+
+/// A store that cannot write, standing in for the keychain refusing one — which is not
+/// reproducible in a test bundle, since a test bundle cannot reach the app's keychain at all
+/// (see `testTheKeychainQueryRefusesToSyncOrTravel` for the same limitation).
+private final class FailingPairedMacStore: PairedMacStoring {
+    private let error: PairedMacStoreError
+
+    init(error: PairedMacStoreError) { self.error = error }
+
+    func load() -> PairedMac? { nil }
+
+    func save(_ mac: PairedMac) throws { throw error }
+
+    func clear() {}
 }
