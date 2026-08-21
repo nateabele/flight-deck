@@ -40,6 +40,25 @@ final class PreferencesStore: ObservableObject {
         didSet { persistence?.save(preferences) }
     }
 
+    /// Which pane the Settings window shows. Set by whoever opens Settings — the Tools menu's
+    /// "Configure Tools…" sets `.tools` before opening, which is the only way that item can
+    /// keep the promise its title makes.
+    ///
+    /// Deliberately a sibling of `preferences` rather than a field inside it: `preferences`
+    /// persists on every mutation (see the `didSet` above), so a pane stored in there would
+    /// rewrite `preferences.v1` on each tab click and would reopen Settings weeks later on
+    /// whatever pane was last touched. This is view state and resets every launch.
+    @Published var selectedTab: PreferencesTab = .agents
+
+    /// Which project the Projects pane has selected, when something outside the pane picked
+    /// it — the project row's "Configure…" sets this alongside `selectedTab` so the pane opens
+    /// on the project you right-clicked rather than on "No Project Selected".
+    ///
+    /// A *standardized* path, because that is what `ProjectsSettingsTab` tags its rows with; a
+    /// path spelled any other way selects nothing. Transient for the same reasons `selectedTab`
+    /// is, and nil whenever nobody has pointed the pane anywhere in particular.
+    @Published var selectedProjectPath: String?
+
     private let persistence: PreferencesPersisting?
 
     init(persistence: PreferencesPersisting?) {
@@ -51,6 +70,14 @@ final class PreferencesStore: ObservableObject {
         // the global-flags fold has a claude row to land on either side of, so this order is
         // load-bearing, not incidental.
         migrated.migrateAccountsIfNeeded()
+        // After seeding, so a first launch's freshly-minted accounts (none tombstoned yet)
+        // are never the ones purged, and before anything resolves against the list. This does
+        // NOT guarantee every agent keeps a live account afterward — if the user tombstoned
+        // every account for one, purge drops it to zero and nothing here reseeds it; see
+        // `purgeRemovedAccounts`. In this chain so it participates in the `migrated != loaded`
+        // comparison below and reaches disk on the launch that performs it, rather than
+        // waiting for the user's next preference edit.
+        migrated.purgeRemovedAccounts()
         migrated.migrateProjectSettingsIfNeeded()
         migrated.migrateGlobalFlagsIfNeeded()
         // Probes for an installed terminal, so it is done here rather than in the `tools`
@@ -104,16 +131,39 @@ final class PreferencesStore: ObservableObject {
     /// explicit assignment that no longer resolves must never silently become another login.
     func account(for agent: AgentID, project: String) -> AgentAccount? {
         if let assigned = preferences.projectSettings[Self.key(project)]?.accounts[agent] {
-            return account(id: assigned)
+            // A tombstone here is answered as nil — i.e. BROKEN — rather than by silently
+            // falling through to the topmost account, which is the wrong-login bug this
+            // method's nil exists to prevent. `markAccountRemoved` clears these assignments,
+            // so this is defence in depth rather than a reachable state.
+            return account(id: assigned).flatMap { $0.isRemoved ? nil : $0 }
         }
-        return preferences.accounts.first { $0.agent == agent }
+        return preferences.accounts.first { $0.agent == agent && !$0.isRemoved }
     }
 
     /// Normalises a stored `Session.accountID`. nil means the agent's built-in home — not "the
     /// current default" — so a legacy tab and a tab created today on that home share one
     /// identity, and one home can never carry two instance keys.
+    ///
+    /// BOTH branches are unfiltered on purpose: every caller passes an existing tab's
+    /// `Session.accountID`, so this is identity resolution and never a default. Choosing an
+    /// account for something *new* goes through `account(for:project:)`, which does filter.
     func resolvedAccountID(for agent: AgentID, in stored: UUID?) -> UUID? {
+        // A tombstoned account MUST still resolve here, or a live tab running as it re-keys
+        // mid-run. See `AgentAccount.removedAt`.
         if let stored { return account(id: stored)?.id }
+        // The nil branch skipped tombstones for a while, on the theory that it is a default.
+        // It is not: nil is what every tab persisted before accounts existed carries, so this
+        // is those tabs' identity. Filtering here left them unprotected by the very tombstone
+        // that protects a stored id — tombstone the built-in account with a legacy tab open
+        // and this answered nil, flipping that running tab's `instance(for:)` key from
+        // `builtIn.id` to nil while `home(ofAccount: nil, agent:)` names the same directory
+        // the tombstone does. One home under two keys is exactly the failure the tombstone
+        // exists to remove: a second `SessionStatusWatcher` on `~/.claude/sessions`, a second
+        // `codex app-server` on one `session_index.jsonl`, and `stopStatusWatchingIfUnused`
+        // unable to reach the old entries to tear them down for the rest of the run.
+        // (Removing the built-in account became possible when `AccountsSection.canRemove`
+        // dropped its `isBuiltIn` refusal.) After the launch purge no tombstoned built-in
+        // account survives, so this answers nil again for anyone who really has none.
         return preferences.accounts.first { $0.agent == agent && $0.isBuiltIn }?.id
     }
 
@@ -158,8 +208,19 @@ final class PreferencesStore: ObservableObject {
         })
     }
 
+    /// Whether any account — tombstoned included — already occupies this home.
+    ///
+    /// Tombstones were filtered here for a while, so that "recover from an accidental removal"
+    /// could re-add the same directory immediately. That is the collision this check exists to
+    /// refuse: the tombstone still keys the removed account's *live tabs* at the old id, while
+    /// the re-added record gets a fresh one, so one home ends up under two ids and the first
+    /// new tab on the new record puts a second `CodexStack` on that home's
+    /// `session_index.jsonl`. The launch purge releases the home instead, which is what
+    /// `AccountDraft.Validation.homeAlreadyUsed`'s message tells the user.
     func homeIsTaken(_ home: URL, excluding id: UUID?) -> Bool {
-        preferences.accounts.contains { $0.id != id && AgentAccount.key($0.home) == AgentAccount.key(home) }
+        preferences.accounts.contains {
+            $0.id != id && AgentAccount.key($0.home) == AgentAccount.key(home)
+        }
     }
 
     func addAccount(_ account: AgentAccount) { preferences.accounts.append(account) }
@@ -176,11 +237,15 @@ final class PreferencesStore: ObservableObject {
             AccountDirectory.identity(atHome: home, agent: preferences.accounts[index].agent)
     }
 
-    /// Drops the account AND every project assignment naming it, so nothing is left pointing at
-    /// an id that no longer resolves. A record emptied by that clearing is removed, matching how
-    /// an emptied flag override already drops a project from the list.
-    func removeAccount(id: UUID) {
-        preferences.accounts.removeAll { $0.id == id }
+    /// Tombstones the account AND drops every project assignment naming it, so nothing is left
+    /// pointing at a login the user removed. A record emptied by that clearing is removed,
+    /// matching how an emptied flag override already drops a project from the list.
+    ///
+    /// Stamps rather than deletes: see `AgentAccount.removedAt` for the running-tab identity
+    /// this protects.
+    func markAccountRemoved(id: UUID) {
+        guard let index = preferences.accounts.firstIndex(where: { $0.id == id }) else { return }
+        preferences.accounts[index].removedAt = Date()
         for (path, var settings) in preferences.projectSettings {
             let before = settings.accounts
             settings.accounts = settings.accounts.filter { $0.value != id }

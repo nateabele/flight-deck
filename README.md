@@ -25,7 +25,9 @@ through a dozen terminal windows you can't tell apart.
 - Renames go both ways. Rename from the sidebar and the agent follows, or let the
   conversation name itself and the sidebar follows.
 - ⌘N opens a session, ⌘⇧[ and ⌘⇧] walk the fleet across project boundaries, and ⌘W
-  closes the session rather than the window.
+  closes the session rather than the window. ⌘⇧T reopens what you just closed, the way a
+  browser reopens a tab — back on its own conversation, in its old row. Keep pressing to
+  walk further back; closing a whole project undoes in one press.
 - Agent flags are set globally and overridden per project, from real controls instead
   of a half-remembered command line.
 - Editors, terminals and git clients open on whatever the selected session is working on —
@@ -41,12 +43,17 @@ Apple Silicon only. The build is ad-hoc signed rather than notarised, so the fir
 launch needs a right-click → Open before macOS will let it start. Latest build is on
 the [releases page](../../releases/latest).
 
-There's also an iPhone companion, and it is a different order of early from everything
-above: it is written and compiles, and **it has never been run.** No one has installed
-it, launched it, or watched it scan anything — the machine it was built on has no iOS
-platform, so the app's own sources have only ever been type-checked. What it is meant to
-do is pair by scanning a QR from the Mac's Preferences, then show the same fleet over
-your local network, renamed and marked read from either side. The logic underneath it is
-covered by the Mac's test suite; the screens are not. Installing it needs your own Apple
-developer signing, since nobody else's team id belongs in this repo.
+There's also an iPhone companion, earlier than everything above. It builds, installs on
+an iOS Simulator, and pairs with a Mac over the local network to show the same fleet —
+renamed and marked read from either side. It has never run on real hardware, and the
+camera path in particular has only been exercised by typing the pairing code rather than
+scanning it, because a simulator has no camera. Installing it on a phone needs your own
+Apple developer signing, since nobody else's team id belongs in this repo.
 [docs/MOBILE.md](docs/MOBILE.md) has the checklist of what a device still has to prove.
+
+## License
+
+Copyright (c) 2026 Nate Abele. Released under the [BSD 3-Clause License](LICENSE).
+
+Ghostty is vendored as a submodule and carries its own MIT license
+(Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors).

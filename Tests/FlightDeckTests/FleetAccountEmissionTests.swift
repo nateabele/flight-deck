@@ -29,7 +29,7 @@ final class FleetAccountEmissionTests: XCTestCase {
         let replicator = attachedReplicator(to: store)
 
         let session = store.openSignInSession(
-            for: work, in: projectURL.path, typing: "claude"
+            for: work, in: projectURL.path, using: LoginInvocation(command: "claude", inject: nil)
         )
 
         guard case .projectAdded(let project, _) = replicator.recorded.first else {
@@ -147,7 +147,9 @@ final class FleetAccountEmissionTests: XCTestCase {
         preferences.preferences.storedAccounts = [work, other]
         let store = makeStore(preferences)
         let first = store.newSession(in: projectURL)
-        let second = store.openSignInSession(for: other, in: projectURL.path, typing: "claude")
+        let second = store.openSignInSession(
+            for: other, in: projectURL.path, using: LoginInvocation(command: "claude", inject: nil)
+        )
         store.applyRegistryForTesting([
             first.id: SessionStatus(activity: .busy),
             second.id: SessionStatus(activity: .busy),

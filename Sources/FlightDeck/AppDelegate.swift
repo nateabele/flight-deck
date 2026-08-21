@@ -82,12 +82,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let store else { return }
             ToolRunner.run(tool, store: store, launcher: ShellToolLauncher.configured(preferences))
         }
-        toolsMenu.openPreferences = {
-            // macOS renamed this selector at some point; a menu item that silently does
-            // nothing is worse than trying both spellings.
-            if !NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
-                _ = NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-            }
+        // Shared with the overlay's ⌘-revealed sprocket — see `ToolsPreferencesOpener`, which
+        // owns the pane-before-open sequencing this used to spell out inline.
+        toolsMenu.openPreferences = { [weak preferences] in
+            ToolsPreferencesOpener.open(preferences)
         }
         toolsMenu.tools = preferences.tools
 
