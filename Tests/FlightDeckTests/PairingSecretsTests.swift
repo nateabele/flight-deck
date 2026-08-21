@@ -2,6 +2,9 @@ import XCTest
 @testable import FleetKit
 
 final class PairingSecretsTests: XCTestCase {
+    /// Both sides take their transcript from their own session rather than sharing one local,
+    /// which is what a real deployment can do — `SPAKE2Session.transcript` is initiator-first
+    /// on both ends, so the two agree without either side knowing what the other assembled.
     private func agreeing() throws -> (PairingSecrets, PairingSecrets) {
         let code = PairingCode.mint()
         let phone = SPAKE2Session(role: .initiator, myName: Data("phone".utf8),
@@ -10,10 +13,11 @@ final class PairingSecretsTests: XCTestCase {
                                 theirName: Data("phone".utf8))
         let fromPhone = try phone.message(for: code)
         let fromMac = try mac.message(for: code)
-        let transcript = fromPhone + fromMac
+        let phoneMaterial = try phone.keyMaterial(from: fromMac)
+        let macMaterial = try mac.keyMaterial(from: fromPhone)
         return (
-            PairingSecrets(keyMaterial: try phone.keyMaterial(from: fromMac), transcript: transcript),
-            PairingSecrets(keyMaterial: try mac.keyMaterial(from: fromPhone), transcript: transcript)
+            PairingSecrets(keyMaterial: phoneMaterial, transcript: try phone.transcript),
+            PairingSecrets(keyMaterial: macMaterial, transcript: try mac.transcript)
         )
     }
 
@@ -38,12 +42,11 @@ final class PairingSecretsTests: XCTestCase {
                                 theirName: Data("phone".utf8))
         let fromPhone = try phone.message(for: .mint())
         let fromMac = try mac.message(for: .mint())
-        let transcript = fromPhone + fromMac
 
         let phoneSecrets = PairingSecrets(
-            keyMaterial: try phone.keyMaterial(from: fromMac), transcript: transcript)
+            keyMaterial: try phone.keyMaterial(from: fromMac), transcript: try phone.transcript)
         let macSecrets = PairingSecrets(
-            keyMaterial: try mac.keyMaterial(from: fromPhone), transcript: transcript)
+            keyMaterial: try mac.keyMaterial(from: fromPhone), transcript: try mac.transcript)
 
         XCTAssertNotEqual(phoneSecrets.initiatorConfirmation, macSecrets.initiatorConfirmation)
     }

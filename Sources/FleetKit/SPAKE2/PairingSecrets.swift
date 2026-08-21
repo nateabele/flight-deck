@@ -17,11 +17,18 @@ public enum PairingSealError: Error, Equatable {
 /// Every value — both confirmations and the sealing key — is bound to the transcript (both
 /// SPAKE2 messages, in a fixed order) so a proof or a sealed blob captured from one pairing
 /// window cannot be replayed into another.
+///
+/// **Take that transcript from `SPAKE2Session.transcript`, never assemble it at the call site.**
+/// It arrives here as opaque bytes, so this type cannot check the order — and the order is not a
+/// detail: the two ends must agree on it byte for byte or every confirmation mismatches and the
+/// Mac blames a correctly typed code. `SPAKE2Session` knows both messages and its own role, so
+/// it is where the order is settled; see the reasoning on that property.
 public struct PairingSecrets: Sendable {
-    // Not `private`: `PairingSecretsMutationTests` asserts these two are actually distinct
-    // keys via `@testable import`, which no black-box test can pin — with the keys collapsed,
-    // an attacker holding the published confirmation still cannot derive the (identical)
-    // sealing key, so nothing externally observable would change.
+    // Not `private`: `PairingSecretsTests` reaches these two through `@testable import` to
+    // assert they are distinct keys and that the seal is under the right one — neither of which
+    // any black-box test can pin. With the keys collapsed, an attacker holding the published
+    // confirmation still cannot derive the (identical) sealing key, so nothing externally
+    // observable would change.
     let confirmationKey: SymmetricKey
     let sealingKey: SymmetricKey
     private let transcript: Data
