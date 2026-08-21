@@ -24,6 +24,23 @@ xcodebuild -project FlightDeck.xcodeproj -scheme FleetKitiOS \
   -configuration Debug -sdk iphonesimulator \
   -derivedDataPath DerivedData build
 
+# And again for a real device. Everything else in this script is `-sdk iphonesimulator`,
+# which resolves the SIMULATOR slice of every vendored xcframework and never touches the
+# device one — so `vendor/boringssl-artifacts/BoringSSL.xcframework`'s `ios-arm64` slice
+# would be exercised by nothing at all, and a build-script change that dropped it would be
+# found by whoever first installed on hardware. `builtin-process-xcframework` fails hard
+# when no slice matches the platform, so this is a real check and a cheap one.
+#
+# A framework needs no provisioning profile, which is the only reason a device build is
+# possible here: FleetKitiOS sets CODE_SIGNING_ALLOWED=NO in project.yml, and it is repeated
+# on the command line so this line keeps working if that ever changes. The app target cannot
+# do this — it has no DEVELOPMENT_TEAM — which is why only the framework is built for device.
+xcodebuild -project FlightDeck.xcodeproj -scheme FleetKitiOS \
+  -configuration Debug -sdk iphoneos \
+  -destination 'generic/platform=iOS' \
+  CODE_SIGNING_ALLOWED=NO \
+  -derivedDataPath DerivedData build
+
 # FlightDeckMobile is an *application*, and an app build must resolve a concrete destination
 # even for `build` alone. That needs an iOS platform installed. On a machine that has one
 # this is a real build and the branch below never runs; on a machine that does not, no
