@@ -1236,8 +1236,8 @@ final class SessionStore: ObservableObject {
     /// give codex, so the ordinary `--session-id … --name …` shape is wrong for it, and
     /// negotiating a codex thread before the account has even authenticated would be actively
     /// harmful — `thread/start` is not what `codex login` is. `typing` is `LoginInvocation`'s
-    /// own `command` (`"claude"`, `"codex login"`), sent verbatim rather than built from
-    /// `AgentAdapter.launchCommand`.
+    /// own `command` (`"claude"`, `"codex login"`), newline-terminated by `terminated(_:)`
+    /// rather than built from `AgentAdapter.launchCommand`.
     @discardableResult
     func openSignInSession(for account: AgentAccount, in directory: String, typing: String) -> Session {
         let session = Session(
@@ -1245,8 +1245,23 @@ final class SessionStore: ObservableObject {
             accountID: account.id
         )
         return addSession(
-            session, in: URL(fileURLWithPath: directory, isDirectory: true), initialInput: typing
+            session, in: URL(fileURLWithPath: directory, isDirectory: true),
+            initialInput: Self.terminated(typing)
         )
+    }
+
+    /// Terminates a command so the shell actually runs it.
+    ///
+    /// `initial_input` reaches the pty as typed characters and nothing downstream presses
+    /// Return — which is why every other producer ends its own string with a newline
+    /// (`ClaudeSession.launchCommand`, `resumeCommand`). `LoginInvocation` does not, and the
+    /// symptom was a sign-in tab sitting at a prompt with `claude` typed into it forever.
+    ///
+    /// Normalized here rather than in each adapter's `LoginInvocation` deliberately: an
+    /// adapter is asked *what to run*, and a future agent's author has no reason to know the
+    /// answer is fed to a pty rather than to `Process`. One consumer cannot forget.
+    static func terminated(_ command: String) -> String {
+        command.hasSuffix("\n") ? command : command + "\n"
     }
 
     /// The tail every creation shares: file the tab, reveal it, select it, save.
