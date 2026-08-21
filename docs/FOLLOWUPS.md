@@ -717,18 +717,37 @@ the account a session runs as. Three things this deliberately did not build:
 
 ## Pairing crypto foundation (2026-08-21)
 
-- **`SPAKE2SessionTests` has no BoringSSL-sourced fixed test vector, and cannot get one from
-  the vendored source.** `vendor/boringssl/crypto/curve25519/spake25519_test.cc` line 29 says
-  outright: "TODO(agl): add tests with fixed vectors once SPAKE2 is nailed down" — that TODO
-  is still open upstream, so there is no documented input/output pair to assert against, and
-  every test in that file (including the canonical round trip, `TEST(SPAKE25519Test, SPAKE2)`
-  at line 109) is a randomized round trip for the same reason. Separately, even if BoringSSL
-  had one, `SPAKE2_generate_msg` draws its own ephemeral scalar and the public API gives no
-  way to fix it from outside, so a vector that pinned the ephemeral values would not be
-  drivable through `SPAKE2Session` regardless. `SPAKE2SessionTests
-  .testASecondIndependentSessionPairAlsoInteroperates` is the fallback: BoringSSL's own
-  default fixed names ("alice"/"bob") through a second, independently constructed session
-  pair. It proves the wrapper is consistent with itself, not with the specification — an
-  implementation deterministically wrong in the same way on both sides would still pass it.
-  Revisit if BoringSSL ever lands fixed vectors, or if another implementation (e.g. a
-  spec-reference SPAKE2 in a different library) becomes available to cross-check against.
+- **`SPAKE2SessionTests` has no fixed test vector, and there is no specification for one to
+  conform to — this vendored BoringSSL SPAKE2 is not CFRG SPAKE2.** Three divergences, all
+  read from `vendor/boringssl/crypto/curve25519/spake25519.cc`: its `M`/`N` points are
+  BoringSSL's own generated constants (line 47, "These points and their precomputation tables
+  are generated with..."), not RFC 9382's published ones; `disable_password_scalar_hack`
+  (checked at line 400) is a unilateral fix for a BoringSSL bug that is baked into the wire
+  format, not an interop option; and the transcript hashes `password_hash` (SHA-512 of the
+  password, line 374) rather than the derived scalar `w`, with cofactor multiplication folded
+  in — see `update_with_length_prefix` and the final `SHA512_Final` around lines 451-518.
+  SPAKE2+ (RFC 9383, which does ship test vectors) is not in this submodule pin either.
+  Separately, `vendor/boringssl/crypto/curve25519/spake25519_test.cc` line 29 confirms no
+  vector was ever added upstream ("TODO(agl): add tests with fixed vectors once SPAKE2 is
+  nailed down"), and `SPAKE2_generate_msg`'s public API gives no way to fix the ephemeral
+  scalar from outside, so even a hypothetical vector would not be drivable through
+  `SPAKE2Session`.
+
+  This means a fixed vector would not be validation — a *conforming* implementation would not
+  interoperate with BoringSSL's SPAKE2, and a vector conforming to BoringSSL's variant would
+  not check anything against a specification, because there is no specification for this
+  variant. The property that matters here is **agreement, not conformance**: both ends of a
+  pairing exchange run this same BoringSSL, so what needs proving is that this wrapper's two
+  ends agree with each other, which `SPAKE2SessionTests` already does.
+
+  The genuine residual risk is narrower than "is the algorithm right" and sits in this
+  wrapper's marshalling, not BoringSSL's math: a bug that swapped the role or the two names
+  would be wrong identically on both sides of an in-process test and pass every test here.
+  `testMismatchedNamesYieldDifferentKeys` proves the names reach the transcript at all, but
+  nothing yet proves `.initiator` maps to "alice" the same way across a real process or
+  architecture boundary — only an in-process pair is exercised today. The honest next check
+  is not a vector, it is a cross-process macOS-against-iOS pairing exchange, which the overall
+  plan gets for free once pairing runs end to end (a later task, not this one).
+
+  Revisit if either upstream BoringSSL lands fixed vectors, or the vendored submodule moves to
+  a version carrying SPAKE2+ (RFC 9383).

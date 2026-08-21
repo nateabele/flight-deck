@@ -8,6 +8,18 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
+    # Where `import BoringSSLShim` resolves: the directory holding the module.modulemap that
+    # names it (Sources/FleetKit/SPAKE2/module.modulemap). A path alone would only let clang
+    # FIND the header — Swift cannot import a bare header, so the modulemap beside it is what
+    # makes this work. Hoisted here rather than duplicated per target because it is identical
+    # everywhere it appears: Swift's explicit module build resolves a linked framework's full
+    # dependency graph, not just its public interface, so every target that builds FleetKit's
+    # sources directly, links FleetKit/FleetKitiOS, or links the BoringSSL xcframework itself
+    # needs it — including FlightDeck and FlightDeckMobile, which never `import BoringSSLShim`
+    # themselves. HEADER_SEARCH_PATHS stays duplicated per target instead of joining this: on
+    # FlightDeck it appends to an existing GhosttyEmbed path rather than replacing it, and
+    # that ordering is not safe to disturb by folding it into a single project-wide value.
+    SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
 targets:
   FlightDeck:
     type: application
@@ -48,12 +60,6 @@ targets:
         # libghostty (GhosttyKit) statically bundles C++ (glslang); link the C++
         # stdlib so its std::* symbols resolve. Matches Ghostty's own project.
         OTHER_LDFLAGS: -lstdc++
-        # FleetKit's own sources now `import BoringSSLShim` (SPAKE2Session). Swift's explicit
-        # module build resolves a linked framework's full dependency graph, not just its
-        # public interface, so an app that only ever calls `import FleetKit` still has to be
-        # able to find that module — same reason FlightDeckTests needs this (project.yml,
-        # below), just one hop further downstream.
-        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
   FlightDeckTests:
     type: bundle.unit-test
     platform: macOS
@@ -86,11 +92,10 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: "YES"
-        # The test bundle reaches the vendored SPAKE2 symbols directly, so it needs the same
-        # module search path FleetKit has. BoringSSLLinkTests is the one place that proves
-        # the xcframework is linked and callable at all, and a "no such module" here is the
-        # cheapest possible version of that failure.
-        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
+        # Where the shim's `#include <openssl/curve25519.h>` resolves — the test bundle
+        # reaches the vendored SPAKE2 symbols directly, and BoringSSLLinkTests is the one
+        # place that proves the xcframework is linked and callable at all. SWIFT_INCLUDE_PATHS
+        # (the module search path itself) is set project-wide, above.
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
   FlightDeckUITests:
     type: bundle.ui-testing
@@ -110,7 +115,8 @@ targets:
       # would be copied into FleetKit.framework/Headers while still `#include`-ing
       # <openssl/curve25519.h>, which is not shipped inside the framework. That is a public
       # header that cannot be parsed by anyone who imports FleetKit. Both files are reached
-      # through SWIFT_INCLUDE_PATHS below, which needs no target membership at all.
+      # through SWIFT_INCLUDE_PATHS (project-wide, top of file), which needs no target
+      # membership at all.
       - path: Sources/FleetKit
         excludes:
           - "SPAKE2/BoringSSLShim.h"
@@ -132,15 +138,12 @@ targets:
         SWIFT_VERSION: "6.0"
         PRODUCT_MODULE_NAME: FleetKit
         GENERATE_INFOPLIST_FILE: "YES"
-        # Where `import BoringSSLShim` resolves: the directory holding the module.modulemap
-        # that names that module. A path alone would only let clang FIND the header — Swift
-        # cannot import a bare header, so the modulemap beside it is what makes this work.
-        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
-        # And where the shim's `#include <openssl/curve25519.h>` resolves. These headers are
+        # Where the shim's `#include <openssl/curve25519.h>` resolves. These headers are
         # deliberately NOT inside the xcframework: Xcode resolves a library xcframework's
         # headers by copying them into BUILT_PRODUCTS_DIR/include, which is libghostty's
         # directory, and GhosttyKit's umbrella header claims everything in it. See the long
         # note in scripts/build-boringssl.sh — this is the setting that keeps them apart.
+        # SWIFT_INCLUDE_PATHS (the module search path itself) is set project-wide, above.
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
 
   # Same sources, iOS slice. This target ships nothing on its own — it is the enforcement
@@ -157,7 +160,8 @@ targets:
     settings:
       base:
         SWIFT_VERSION: "6.0"
-        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
+        # Where the shim's `#include <openssl/curve25519.h>` resolves; SWIFT_INCLUDE_PATHS
+        # (the module search path itself) is set project-wide, above.
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
         # Both names, and they have to agree. PRODUCT_MODULE_NAME alone gave a
         # `FleetKitiOS.framework` whose module was `FleetKit`, and `-F` search resolves
@@ -196,10 +200,9 @@ targets:
         CODE_SIGNING_ALLOWED: "NO"
         # Same reason as FlightDeck (macOS) above: FleetKitiOS's swiftmodule now depends on
         # BoringSSLShim (SPAKE2Session), and resolving that dependency graph is required even
-        # though FlightDeckMobile itself never imports it directly. Both paths are needed:
-        # SWIFT_INCLUDE_PATHS to find the module.modulemap, HEADER_SEARCH_PATHS so the module
-        # it declares (which #includes openssl/curve25519.h) actually compiles.
-        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
+        # though FlightDeckMobile itself never imports it directly. SWIFT_INCLUDE_PATHS (the
+        # module search path itself) is set project-wide; this is the other half, so the
+        # module it declares (which #includes openssl/curve25519.h) actually compiles.
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
     info:
       path: Sources/FlightDeckMobile/Info.plist
