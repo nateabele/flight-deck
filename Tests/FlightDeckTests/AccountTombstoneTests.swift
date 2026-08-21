@@ -109,4 +109,32 @@ final class AccountTombstoneTests: XCTestCase {
         XCTAssertNil(decoded[0].removedAt)
         XCTAssertFalse(decoded[0].isRemoved)
     }
+
+    /// Both "New … Session" menus build from `liveAccounts`. Two live accounts nest into a
+    /// submenu; tombstoning one drops the agent back to a single flat row — and
+    /// `NewSessionAffordance.chords` moves the agent's chord onto it, so no shortcut is lost.
+    func testTombstonedAccountsLeaveTheNewSessionMenus() {
+        let store = PreferencesStore(persistence: nil)
+        let work = AgentAccount(agent: .claude, displayName: "Work", home: home("work"))
+        let personal = AgentAccount(agent: .claude, displayName: "Personal", home: home("personal"))
+        store.preferences.storedAccounts = [work, personal]
+        let agents = [AgentSettings(id: .claude, options: .claude(FlagSet()))]
+
+        let before = NewSessionAffordance.menu(
+            agents: agents, accounts: store.preferences.liveAccounts,
+            resolved: [.claude: work.id]
+        )
+        guard case .submenu(_, let rows) = before.first else {
+            return XCTFail("two live accounts should nest, got \(String(describing: before.first))")
+        }
+        XCTAssertEqual(rows.count, 2)
+
+        store.markAccountRemoved(id: personal.id)
+        let after = NewSessionAffordance.menu(
+            agents: agents, accounts: store.preferences.liveAccounts,
+            resolved: [.claude: work.id]
+        )
+        XCTAssertEqual(after, [.agent(.claude, account: work.id, isResolved: true)])
+        XCTAssertEqual(NewSessionAffordance.chords(for: after, agents: agents)[work.id], [.command])
+    }
 }

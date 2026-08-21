@@ -69,10 +69,13 @@ final class PreferencesStore: ObservableObject {
         // the global-flags fold has a claude row to land on either side of, so this order is
         // load-bearing, not incidental.
         migrated.migrateAccountsIfNeeded()
-        // After seeding, so "at least one account per agent" already holds, and before
-        // anything resolves against the list. In this chain so it participates in the
-        // `migrated != loaded` comparison below and reaches disk on the launch that performs
-        // it, rather than waiting for the user's next preference edit.
+        // After seeding, so a first launch's freshly-minted accounts (none tombstoned yet)
+        // are never the ones purged, and before anything resolves against the list. This does
+        // NOT guarantee every agent keeps a live account afterward — if the user tombstoned
+        // every account for one, purge drops it to zero and nothing here reseeds it; see
+        // `purgeRemovedAccounts`. In this chain so it participates in the `migrated != loaded`
+        // comparison below and reaches disk on the launch that performs it, rather than
+        // waiting for the user's next preference edit.
         migrated.purgeRemovedAccounts()
         migrated.migrateProjectSettingsIfNeeded()
         migrated.migrateGlobalFlagsIfNeeded()
