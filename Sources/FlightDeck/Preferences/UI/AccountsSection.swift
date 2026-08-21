@@ -293,17 +293,17 @@ struct AccountsSection: View {
     /// menu) call — there is nothing to distinguish a first login from a re-login, per the
     /// spec's "re-login needs no separate machinery" note.
     ///
-    /// Reads the account's `LoginInvocation` off its adapter, opens an ordinary tab typing
-    /// `command` verbatim (see `SessionStore.openSignInSession`), and — when `inject` is
-    /// non-nil — queues it through `ClaudeAdapter.injectRename` once the tab settles, the same
-    /// closure `ClaudeAdapter.rename` itself calls to type `/rename` into a running session.
+    /// Reads the account's `LoginInvocation` off its adapter and hands the whole thing to the
+    /// store, which owns both halves. This view used to unwrap the invocation itself and push
+    /// the `/login` half through `ClaudeAdapter.injectRename` behind an `as? ClaudeAdapter`
+    /// downcast — that downcast is what dragged the *rename* channel into a login, and a view
+    /// has no business knowing which adapter class it is holding in the first place.
     private func signIn(_ account: AgentAccount) {
         let adapter = sessions.adapter(for: account.agent, account: account.id)
-        let invocation = adapter.loginInvocation(for: account)
         let directory = frontmostProjectPath ?? account.home.path
-        let session = sessions.openSignInSession(for: account, in: directory, typing: invocation.command)
-        guard let inject = invocation.inject, let claude = adapter as? ClaudeAdapter else { return }
-        Task { await claude.injectRename(session.pinnedConversationID, inject) }
+        sessions.openSignInSession(
+            for: account, in: directory, using: adapter.loginInvocation(for: account)
+        )
     }
 
     /// The project Sign In opens its tab in: whichever project holds the currently selected

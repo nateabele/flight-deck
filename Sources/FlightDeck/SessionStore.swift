@@ -825,6 +825,11 @@ final class SessionStore: ObservableObject {
     /// See `flushPendingRename` for why an injection waits.
     private var pendingRenames: [UUID: String] = [:]
 
+    /// Read-only view of the rename queue, so `AccountSignInTests` can assert that signing in
+    /// puts nothing in it. Sign-in used to queue `/login` *as a rename*, and the only way to
+    /// pin that regression is to look at this from outside.
+    var pendingRenamesForTesting: [UUID: String] { pendingRenames }
+
     /// One queued injection per tab: what to type, and when it stops being worth typing.
     ///
     /// Carries its text rather than assuming one, because two callers now share this queue —
@@ -837,6 +842,8 @@ final class SessionStore: ObservableObject {
         let deadline: Date
     }
 
+    /// Internal rather than private so tests can observe the queue without scripting a whole
+    /// surface; nothing outside this type writes it.
     private(set) var pendingPrompts: [UUID: DeferredPrompt] = [:]
 
     /// Tabs with a `sendKillLine()` already out and a settle still pending. Guarding here,
@@ -1240,19 +1247,36 @@ final class SessionStore: ObservableObject {
     /// through it with an override: a login has no conversation to resume and no title to
     /// give codex, so the ordinary `--session-id … --name …` shape is wrong for it, and
     /// negotiating a codex thread before the account has even authenticated would be actively
-    /// harmful — `thread/start` is not what `codex login` is. `typing` is `LoginInvocation`'s
-    /// own `command` (`"claude"`, `"codex login"`), newline-terminated by `terminated(_:)`
-    /// rather than built from `AgentAdapter.launchCommand`.
+    /// harmful — `thread/start` is not what `codex login` is.
+    ///
+    /// `invocation` is the agent's own `LoginInvocation`: its `command` (`"claude"`,
+    /// `"codex login"`) is newline-terminated and typed at the shell, and its `inject`
+    /// (`/login`, or nil) is queued for the agent once it is up. The store owns both halves so
+    /// no caller has to know which agent it is holding.
     @discardableResult
-    func openSignInSession(for account: AgentAccount, in directory: String, typing: String) -> Session {
+    func openSignInSession(
+        for account: AgentAccount, in directory: String, using invocation: LoginInvocation
+    ) -> Session {
         let session = Session(
             title: nextSessionTitle(), workingDirectory: directory, agent: account.agent,
             accountID: account.id
         )
-        return addSession(
+        let created = addSession(
             session, in: URL(fileURLWithPath: directory, isDirectory: true),
-            initialInput: Self.terminated(typing)
+            initialInput: Self.terminated(invocation.command)
         )
+        // Queued rather than sent: `inject` needs an idle status and a readable one-row
+        // InputBar, and this tab is a bare shell that has not even started the agent yet. The
+        // registry scan retries it until the agent is up, or the deadline passes.
+        //
+        // Deliberately NOT routed through `ClaudeAdapter.injectRename`, which is what this
+        // used to do: that is the *rename* channel, and it typed `/rename /login` at the tab.
+        if let inject = invocation.inject {
+            pendingPrompts[created.id] = DeferredPrompt(
+                text: inject, deadline: now().addingTimeInterval(Self.resumePromptWindow)
+            )
+        }
+        return created
     }
 
     /// Terminates a command so the shell actually runs it.
