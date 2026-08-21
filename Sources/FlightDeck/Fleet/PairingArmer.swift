@@ -30,6 +30,9 @@ final class PairingArmer {
     /// mean a code the user has forgotten about is still a key.
     func arm(macName: String, serviceName: String, endpoints: [String]) -> PairingPayload {
         let key = FleetDeviceKey.mint()
+        // A placeholder, and only ever briefly: the device names itself in its `hello`, and
+        // `FleetService.noteAttached` adopts that the instant it attaches. It survives only
+        // for a device that claims nothing — and a provisional row is never listed anyway.
         pending = PairedDevice(
             slot: key.slot, name: "New device", secret: key.secret,
             pairedAt: nil, lastSeenAt: nil, armedUntil: now().addingTimeInterval(Self.window)
