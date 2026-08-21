@@ -6,9 +6,9 @@ import SwiftUI
 /// states — inline rename, and the guarded remove/relocate/sign-in affordances.
 ///
 /// The predicates below are `static` and pure on purpose: a SwiftUI view body cannot be unit
-/// tested, so every rule worth pinning — the built-in exemption, the live-sessions guard — is
-/// factored out where `AccountsSectionTests` can call it directly. The view itself is a thin
-/// shell over them.
+/// tested, so every rule worth pinning — the last-account refusal that guards the `−` button,
+/// the built-in/live-session guard that still gates Relocate… — is factored out where
+/// `AccountsSectionTests` can call it directly. The view itself is a thin shell over them.
 struct AccountsSection: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore
@@ -36,11 +36,11 @@ struct AccountsSection: View {
 
     /// The *resolved* ids, per spec §9: a tab whose `Session.accountID` is nil is bound to the
     /// agent's built-in account, not to nothing. Reading the raw field would let the built-in
-    /// account look unbound while a legacy tab is running inside it — today the `isBuiltIn`
-    /// exemption blocks that removal on its own, but the guard must not depend on a second rule
-    /// staying in place. Removing an account out from under a live tab flips that tab's
-    /// `AgentInstance` key mid-run, which strands its watchers and builds a second codex stack
-    /// on the wrong home.
+    /// account look unbound while a legacy tab is running inside it. What this still guards is
+    /// `canRelocate`: moving a home out from under a live tab leaves that tab's already-forked
+    /// shell pointed at the old path. Removal no longer reads this set at all — tombstoning
+    /// means a removed account keeps resolving by id, so a live tab loses nothing when its
+    /// account is removed.
     ///
     /// Factored out `static` for the reason the rest of this file's predicates are: a SwiftUI
     /// body cannot be unit tested, and this rule can.
@@ -49,51 +49,66 @@ struct AccountsSection: View {
         Set(sessions.compactMap { store.resolvedAccountID(for: $0.agent, in: $0.accountID) })
     }
 
-    /// The built-in account is what `Session.accountID == nil` resolves to, so removing it
-    /// would strand every legacy tab. Bound accounts are refused for the ordinary reason:
-    /// their tabs are pointing at conversations inside that home right now. Shared by the `−`
-    /// button and by Relocate… in the context menu — an account whose home is in use must not
-    /// be moved out from under its live tabs either.
-    static func canRemove(_ account: AgentAccount, boundAccountIDs: Set<UUID>) -> Bool {
+    /// What the `−` button gates on: is there another live account for this agent to fall
+    /// back to.
+    ///
+    /// The only refusal left. Removal used to also refuse the built-in account and any account
+    /// with a live tab — the first because a nil `Session.accountID` resolves to it, the
+    /// second because dropping a record moved a running tab's runtime key. Tombstoning
+    /// (`AgentAccount.removedAt`) answers both: a removed account still resolves by id, so
+    /// neither the legacy tabs nor the running ones lose their identity. What remains is the
+    /// one rule that is about the user rather than the machinery — an agent with no accounts
+    /// at all has nothing to launch.
+    ///
+    /// `live` is the agent's already-filtered list (`Preferences.accounts(for:)`), so a
+    /// tombstone can never count as the sibling that licenses a removal.
+    static func canRemove(_ account: AgentAccount, among live: [AgentAccount]) -> Bool {
+        live.contains { $0.id != account.id && !$0.isRemoved }
+    }
+
+    /// What `Relocate…` gates on — deliberately NOT `canRemove`'s rule, though it used to be
+    /// the same predicate.
+    ///
+    /// Relocating is not removing. It moves the home directory itself, and a tab already
+    /// running as this account has a forked shell whose `CLAUDE_CONFIG_DIR` still names the
+    /// old path — so its watchers would follow the new home and see nothing. Relocating the
+    /// built-in account is worse than useless: `isBuiltIn` is computed from the home, so
+    /// moving it changes what a nil `Session.accountID` resolves to for every legacy tab.
+    static func canRelocate(_ account: AgentAccount, boundAccountIDs: Set<UUID>) -> Bool {
         !account.isBuiltIn && !boundAccountIDs.contains(account.id)
     }
 
-    /// The full guard chain "Remove from Flight Deck" must clear immediately before it drops the
-    /// registry entry — not only what disables the `−` button, for the same reason `deleteFiles`
-    /// re-checks: the confirmation dialog can sit open while a tab binds to this account.
-    /// Removing it under a live tab flips that tab's `AgentInstance` key from `id` to nil
-    /// mid-run, so its existing `statusWatchers[id]` / `codexStacks[id]` can no longer be
-    /// matched by `stopStatusWatchingIfUnused` / `stopCodexIfUnused`, and the next runtime
-    /// lookup builds a *second* codex stack at the nil key pointed at `builtInHome` — two
-    /// app-servers, the new one tailing the wrong `session_index.jsonl`.
+    /// The full guard chain the `−` button's confirmation must clear immediately before it
+    /// acts — not only what disables the button, because the dialog can sit open while the
+    /// account list changes underneath it.
     @MainActor
     @discardableResult
-    static func remove(
-        accountID: UUID, boundAccountIDs: Set<UUID>, in store: PreferencesStore
-    ) -> Bool {
-        guard let account = store.account(id: accountID), !account.isBuiltIn,
-              !boundAccountIDs.contains(accountID)
+    static func remove(accountID: UUID, in store: PreferencesStore) -> Bool {
+        guard let account = store.account(id: accountID), !account.isRemoved,
+              canRemove(account, among: store.preferences.accounts(for: account.agent))
         else { return false }
         store.markAccountRemoved(id: accountID)
         return true
     }
 
     /// The full guard chain "Also Delete Files…" must clear immediately before it touches the
-    /// filesystem — not only what disables the menu item, which is one refactor away from being
-    /// bypassed. Re-reads the account fresh from `store` by id rather than trusting whatever
+    /// filesystem. Re-reads the account fresh from `store` by id rather than trusting whatever
     /// `AgentAccount` value the caller is holding, so a relocate that raced the confirm dialog
     /// can never trash a since-abandoned home; `trash` always receives that freshly-read
-    /// `account.home` and nothing else, so there is no path in scope that isn't the account's
-    /// own. Defaults `trash` to the real Trash so production call sites need not know this
-    /// exists; tests substitute a spy to stay hermetic.
+    /// `account.home` and nothing else. Defaults `trash` to the real Trash so production call
+    /// sites need not know this exists; tests substitute a spy to stay hermetic.
+    ///
+    /// Live sessions no longer refuse this. That is deliberate and is the accepted cost of "the
+    /// button is never disabled": the second dialog names the sessions instead. See the spec's
+    /// §3g.
     @MainActor
     @discardableResult
     static func deleteFiles(
-        accountID: UUID, boundAccountIDs: Set<UUID>, in store: PreferencesStore,
+        accountID: UUID, in store: PreferencesStore,
         trash: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
     ) -> Bool {
-        guard let account = store.account(id: accountID), !account.isBuiltIn,
-              !boundAccountIDs.contains(accountID)
+        guard let account = store.account(id: accountID), !account.isRemoved,
+              canRemove(account, among: store.preferences.accounts(for: account.agent))
         else { return false }
         do {
             try trash(account.home)
@@ -136,7 +151,7 @@ struct AccountsSection: View {
                 } label: {
                     Image(systemName: "minus")
                 }
-                .disabled(!(selectedAccount.map { Self.canRemove($0, boundAccountIDs: boundAccountIDs) } ?? false))
+                .disabled(!(selectedAccount.map { Self.canRemove($0, among: accounts) } ?? false))
                 .accessibilityIdentifier("accounts-remove")
 
                 Spacer()
@@ -160,9 +175,7 @@ struct AccountsSection: View {
             presenting: pendingRemoval
         ) { account in
             Button("Remove from Flight Deck") {
-                AccountsSection.remove(
-                    accountID: account.id, boundAccountIDs: boundAccountIDs, in: preferences
-                )
+                AccountsSection.remove(accountID: account.id, in: preferences)
                 pendingRemoval = nil
             }
             Button("Also Delete Files…", role: .destructive) {
@@ -186,7 +199,7 @@ struct AccountsSection: View {
             presenting: pendingFileDelete
         ) { account in
             Button("Delete", role: .destructive) {
-                if AccountsSection.deleteFiles(accountID: account.id, boundAccountIDs: boundAccountIDs, in: preferences) {
+                if AccountsSection.deleteFiles(accountID: account.id, in: preferences) {
                     preferences.markAccountRemoved(id: account.id)
                 }
                 pendingFileDelete = nil
@@ -238,7 +251,7 @@ struct AccountsSection: View {
         }
         .contextMenu {
             Button("Relocate…") { relocate(account) }
-                .disabled(!Self.canRemove(account, boundAccountIDs: boundAccountIDs))
+                .disabled(!Self.canRelocate(account, boundAccountIDs: boundAccountIDs))
             Button("Sign In Again") { signIn(account) }
             Button("Reveal in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([account.home])
@@ -273,7 +286,7 @@ struct AccountsSection: View {
     }
 
     private func relocate(_ account: AgentAccount) {
-        guard Self.canRemove(account, boundAccountIDs: boundAccountIDs),
+        guard Self.canRelocate(account, boundAccountIDs: boundAccountIDs),
               let chosen = FolderPicker.choose(),
               AccountDraft.validate(
                   home: chosen.path, agent: account.agent, editing: account.id, in: preferences
