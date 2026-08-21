@@ -263,9 +263,19 @@ public final class FleetConnector: @unchecked Sendable {
     /// regardless, because `fleet.apply` runs unconditionally and events are idempotent, but
     /// every future reconnect would then re-download the whole snapshot instead of resuming
     /// — a permanent, invisible degradation with nothing on screen to explain it.
+    /// `try?`, and this is the one place in the codebase where discarding a `save` failure is
+    /// the right answer rather than the bug that made `save` throw in the first place. By the
+    /// time any of these three run there is already a `PairedMac` in the keychain — this is
+    /// bookkeeping on top of it (how far the phone has replayed, which address answered), not
+    /// the pairing itself. A write that fails here costs one full snapshot instead of a resume
+    /// on the next launch, which is invisible and self-correcting. A write that fails in
+    /// `FleetModel.adopt` costs the pairing, which is why that one is reported to the user.
+    ///
+    /// There is also nowhere for an error to go from here: these run inside frame application
+    /// on `queue`, per applied frame, with no user watching and no channel to reach one.
     private func adopt(_ seq: Int) {
         mac.lastSeq = seq
-        store.save(mac)
+        try? store.save(mac)
     }
 
     /// An `.event`'s seq, unlike a snapshot's, only ever advances `lastSeq` when it is a real
@@ -285,7 +295,7 @@ public final class FleetConnector: @unchecked Sendable {
     private func advance(to seq: Int) {
         guard seq > mac.lastSeq else { return }
         mac.lastSeq = seq
-        store.save(mac)
+        try? store.save(mac)
     }
 
     /// The address that worked goes to the front, so the next launch connects on its first
@@ -294,7 +304,7 @@ public final class FleetConnector: @unchecked Sendable {
         var endpoints = mac.endpoints.filter { $0 != description }
         endpoints.insert(description, at: 0)
         mac.endpoints = endpoints
-        store.save(mac)
+        try? store.save(mac)
     }
 
     private func noteDisconnect(_ candidate: Candidate, client: FleetClient) {

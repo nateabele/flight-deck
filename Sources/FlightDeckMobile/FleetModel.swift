@@ -29,11 +29,19 @@ final class FleetModel {
         if mac != nil { connect() }
     }
 
-    /// Throws `PairingPayloadError`, which the pairing screen turns into copy.
+    /// Throws `PairingPayloadError` or `PairedMacStoreError`, both of which the pairing
+    /// screen turns into copy.
+    ///
+    /// The save comes FIRST and its failure aborts the adoption, which is the whole point of
+    /// it throwing. A pairing that only exists in memory looks exactly like a working one —
+    /// the fleet arrives, the list fills in — right up until the next launch, when `load()`
+    /// returns nil and the phone is back at the QR screen with nothing to explain why. Better
+    /// to refuse the pairing now and say so than to hand the user a session that is already
+    /// over.
     func adopt(code: String) throws {
         let payload = try PairingPayload(decoding: code)
         let mac = PairedMac(adopting: payload)
-        store.save(mac)
+        try store.save(mac)
         self.mac = mac
         connect()
     }

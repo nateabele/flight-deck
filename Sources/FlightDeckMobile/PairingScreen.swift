@@ -45,6 +45,8 @@ struct PairingScreen: View {
             failure = nil
         } catch let error as PairingPayloadError {
             failure = Self.message(for: error)
+        } catch let error as PairedMacStoreError {
+            failure = Self.message(for: error)
         } catch {
             failure = "That code could not be used."
         }
@@ -60,6 +62,21 @@ struct PairingScreen: View {
             return "This code is from a newer version of Flight Deck. Update the app on your phone."
         case .malformed:
             return "That code is damaged. Show a new one on your Mac."
+        }
+    }
+
+    /// The code scanned fine; the phone could not keep it. Deliberately does NOT say "try
+    /// again" — rescanning runs the identical keychain write and fails identically, and the
+    /// two causes seen in practice (an unsigned build with no access group, a device that has
+    /// never been unlocked since boot) are neither of them fixed by another scan. The status
+    /// is in the message because it is the only thing that distinguishes them, and this
+    /// screen is the only place it will ever be seen.
+    static func message(for error: PairedMacStoreError) -> String {
+        switch error {
+        case .encodingFailed:
+            return "Couldn't save this pairing to the keychain."
+        case .keychainWriteFailed(let status):
+            return "Couldn't save this pairing to the keychain (error \(status))."
         }
     }
 }

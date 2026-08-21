@@ -41,8 +41,11 @@ final class FleetConnectorTests: XCTestCase {
         return try await server.start(keys: [key], port: nil)
     }
 
+    /// Concretely `InMemoryPairedMacStore`, not `any PairedMacStoring`: `save` throws on the
+    /// protocol, and this helper has never wanted anything but the in-memory store. The
+    /// throwing path is exercised deliberately, by `testAStoreThatCannotSaveStillDeliversTheFleet`.
     private func connector(
-        key: FleetDeviceKey, endpoints: [String], store: PairedMacStoring = InMemoryPairedMacStore()
+        key: FleetDeviceKey, endpoints: [String], store: InMemoryPairedMacStore = InMemoryPairedMacStore()
     ) -> FleetConnector {
         let mac = PairedMac(
             key: key, macName: "Mac", serviceName: "none-\(UUID().uuidString)",
@@ -210,6 +213,33 @@ final class FleetConnectorTests: XCTestCase {
         XCTAssertEqual(store.load()?.lastSeq, 1)
     }
 
+    /// The other half of making `PairedMacStoring.save` throw: the connector's three saves
+    /// discard the failure with `try?`, on purpose, and this pins that they keep doing so.
+    ///
+    /// The distinction is where in the pairing's life the write happens. `FleetModel.adopt`
+    /// writes the pairing itself, so a failure there means there is no pairing and the user
+    /// has to be told. These writes are bookkeeping on top of a record that already exists —
+    /// how far the phone has replayed, which address answered — and a failure costs one extra
+    /// snapshot on the next launch. If it ever propagated instead, a phone whose keychain had
+    /// gone read-only would stop showing the fleet entirely, which is a far worse outcome than
+    /// the stale `lastSeq` it is trying to avoid.
+    func testAStoreThatCannotSaveStillDeliversTheFleet() async throws {
+        let key = FleetDeviceKey.mint()
+        let port = try await startServer(key: key, fleet: fleet("one"))
+        let mac = PairedMac(
+            key: key, macName: "Mac", serviceName: "none-\(UUID().uuidString)",
+            endpoints: ["127.0.0.1:\(port.rawValue)"]
+        )
+        let connector = FleetConnector(mac: mac, store: AlwaysFailingPairedMacStore(), browse: false)
+        self.connector = connector
+        let connected = expectation(description: "connected")
+        var seen: FleetSnapshot?
+        connector.onFleet = { seen = $0; connected.fulfill() }
+        connector.start()
+        await fulfillment(of: [connected], timeout: 20)
+        XCTAssertEqual(seen, fleet("one"), "a keychain that cannot write must not blank the fleet")
+    }
+
     /// The Mac's own sequence counter (`FleetReplicator.seq`) restarts at 0 on every process
     /// launch. A phone reconnecting after that restart is, from its own point of view, asking
     /// to resume from a `lastSeq` that is now ahead of anything the Mac can offer — the server
@@ -288,4 +318,12 @@ final class FleetConnectorTests: XCTestCase {
         connector.start()
         await fulfillment(of: [lost], timeout: 30)
     }
+}
+
+/// Refuses every write, so the connector's `try?` sites are actually exercised rather than
+/// merely compiled.
+private final class AlwaysFailingPairedMacStore: PairedMacStoring {
+    func load() -> PairedMac? { nil }
+    func save(_ mac: PairedMac) throws { throw PairedMacStoreError.keychainWriteFailed(status: -34018) }
+    func clear() {}
 }
