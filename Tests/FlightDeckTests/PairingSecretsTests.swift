@@ -1,0 +1,90 @@
+import XCTest
+import FleetKit
+
+final class PairingSecretsTests: XCTestCase {
+    private func agreeing() throws -> (PairingSecrets, PairingSecrets) {
+        let code = PairingCode.mint()
+        let phone = SPAKE2Session(role: .initiator, myName: Data("phone".utf8),
+                                  theirName: Data("mac".utf8))
+        let mac = SPAKE2Session(role: .responder, myName: Data("mac".utf8),
+                                theirName: Data("phone".utf8))
+        let fromPhone = try phone.message(for: code)
+        let fromMac = try mac.message(for: code)
+        let transcript = fromPhone + fromMac
+        return (
+            PairingSecrets(keyMaterial: try phone.keyMaterial(from: fromMac), transcript: transcript),
+            PairingSecrets(keyMaterial: try mac.keyMaterial(from: fromPhone), transcript: transcript)
+        )
+    }
+
+    /// The point of the whole task: with the same code, each side can prove to the other that
+    /// it holds the same key material, and the proofs differ by direction so one cannot be
+    /// replayed back at its sender.
+    func testConfirmationsMatchAcrossSidesAndDifferByDirection() throws {
+        let (phone, mac) = try agreeing()
+        XCTAssertEqual(phone.initiatorConfirmation, mac.initiatorConfirmation)
+        XCTAssertEqual(phone.responderConfirmation, mac.responderConfirmation)
+        XCTAssertNotEqual(phone.initiatorConfirmation, phone.responderConfirmation)
+        XCTAssertEqual(phone.initiatorConfirmation.count, 32)
+    }
+
+    /// This is what the Mac's three-attempt budget actually counts. A wrong code produces
+    /// different key material (proved in Task 3) and therefore a confirmation that does not
+    /// match — which is the only signal distinguishing a typo from an attack.
+    func testAWrongCodeProducesANonMatchingConfirmation() throws {
+        let phone = SPAKE2Session(role: .initiator, myName: Data("phone".utf8),
+                                  theirName: Data("mac".utf8))
+        let mac = SPAKE2Session(role: .responder, myName: Data("mac".utf8),
+                                theirName: Data("phone".utf8))
+        let fromPhone = try phone.message(for: .mint())
+        let fromMac = try mac.message(for: .mint())
+        let transcript = fromPhone + fromMac
+
+        let phoneSecrets = PairingSecrets(
+            keyMaterial: try phone.keyMaterial(from: fromMac), transcript: transcript)
+        let macSecrets = PairingSecrets(
+            keyMaterial: try mac.keyMaterial(from: fromPhone), transcript: transcript)
+
+        XCTAssertNotEqual(phoneSecrets.initiatorConfirmation, macSecrets.initiatorConfirmation)
+    }
+
+    /// Two runs with the same code must not produce the same confirmations, or a captured
+    /// proof could be replayed into a later window.
+    func testConfirmationsAreBoundToTheTranscript() throws {
+        let material = Data(repeating: 0xAB, count: 64)
+        let first = PairingSecrets(keyMaterial: material, transcript: Data([0x01]))
+        let second = PairingSecrets(keyMaterial: material, transcript: Data([0x02]))
+        XCTAssertNotEqual(first.initiatorConfirmation, second.initiatorConfirmation)
+    }
+
+    func testTheDeviceKeyRoundTripsThroughSealing() throws {
+        let (phone, mac) = try agreeing()
+        let key = FleetDeviceKey.mint()
+        // `seal`'s `slot` is a caller-supplied identity, not derived from `key` — but every
+        // real caller (`PairingArmer`, `PairingPayload`) passes `key.slot` here, since that is
+        // what the phone must store and what later selects the TLS PSK. An unrelated slot
+        // would round-trip fine but would not be *this* key round-tripping.
+        let slot = key.slot
+        let sealed = try mac.seal(key, slot: slot, macName: "Nate's MacBook Pro")
+        let opened = try phone.open(sealed)
+        XCTAssertEqual(opened.key, key)
+        XCTAssertEqual(opened.macName, "Nate's MacBook Pro")
+    }
+
+    /// The sealed key is the one genuinely secret thing crossing the pairing channel, and that
+    /// channel offers no confidentiality of its own — its PSK is public. So this must fail for
+    /// anyone who did not complete the exchange.
+    func testSealedMaterialIsUselessWithoutTheSharedKey() throws {
+        let (_, mac) = try agreeing()
+        let (stranger, _) = try agreeing()
+        let sealed = try mac.seal(FleetDeviceKey.mint(), slot: UUID(), macName: "m")
+        XCTAssertThrowsError(try stranger.open(sealed))
+    }
+
+    func testATamperedSealIsRejected() throws {
+        let (phone, mac) = try agreeing()
+        var sealed = try mac.seal(FleetDeviceKey.mint(), slot: UUID(), macName: "m")
+        sealed[sealed.count - 1] ^= 0xFF
+        XCTAssertThrowsError(try phone.open(sealed))
+    }
+}
