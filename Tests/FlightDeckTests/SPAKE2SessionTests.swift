@@ -55,6 +55,48 @@ final class SPAKE2SessionTests: XCTestCase {
         )
     }
 
+    /// The seam this closes is not hypothetical, it is the *natural* implementation. Writing
+    /// both sides symmetrically from role-neutral locals — the identical line on each end,
+    /// `transcript: myMsg + theirMsg` — hands the initiator `initiator‖responder` and the
+    /// responder `responder‖initiator`. Different HKDF salts, different confirmation keys,
+    /// nothing matches. It fails closed, so it is not a hole; it is worse to diagnose than one,
+    /// because the Mac reports "wrong code" for a correctly typed one and spends an attempt
+    /// saying so. Three correct entries and the user is locked out with every log line
+    /// insisting they made a typo.
+    ///
+    /// So `transcript` is the fixed order rather than a convention a caller is asked to keep.
+    /// This asserts the property that makes it work: both sides report the *same bytes*, which
+    /// stops being true the moment the ordering is made role-relative.
+    func testBothSidesReportTheSameTranscriptRegardlessOfRole() throws {
+        let code = PairingCode.mint()
+        let initiator = SPAKE2Session(role: .initiator, myName: alice, theirName: bob)
+        let responder = SPAKE2Session(role: .responder, myName: bob, theirName: alice)
+
+        let fromInitiator = try initiator.message(for: code)
+        let fromResponder = try responder.message(for: code)
+        _ = try initiator.keyMaterial(from: fromResponder)
+        _ = try responder.keyMaterial(from: fromInitiator)
+
+        XCTAssertEqual(try initiator.transcript, try responder.transcript)
+        // And it is the initiator's message first, mirroring the order BoringSSL itself hashes
+        // in (`spake25519.cc:502-512`) rather than an order of our own invention.
+        XCTAssertEqual(try responder.transcript, fromInitiator + fromResponder)
+    }
+
+    /// A half-finished exchange has no transcript to bind anything to, and
+    /// `PairingSecrets.init` would take an empty one as a `precondition` crash rather than an
+    /// error. Refuse it here, where it is still recoverable.
+    func testTheTranscriptIsUnavailableUntilBothMessagesExist() throws {
+        let session = SPAKE2Session(role: .initiator, myName: alice, theirName: bob)
+        XCTAssertThrowsError(try session.transcript) {
+            XCTAssertEqual($0 as? SPAKE2Error, .wrongOrder)
+        }
+        _ = try session.message(for: .mint())
+        XCTAssertThrowsError(try session.transcript) {
+            XCTAssertEqual($0 as? SPAKE2Error, .wrongOrder)
+        }
+    }
+
     func testAMessageIsThirtyTwoBytes() throws {
         let session = SPAKE2Session(role: .initiator, myName: alice, theirName: bob)
         XCTAssertEqual(try session.message(for: .mint()).count, 32)
