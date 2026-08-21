@@ -100,6 +100,19 @@ enum NewSessionAffordance {
         }
     }
 
+    /// Same as `menu(agents:accounts:resolved:)`, but reads `preferences.liveAccounts` itself
+    /// rather than trusting the caller to pass the live list. The filtering has to live in the
+    /// signature, not in a convention each call site remembers: a call site that passed the raw
+    /// `accounts` array here would compile fine and would keep a removed login's row in the
+    /// menu, letting it launch a tab keyed on an id the next launch purges. `SessionCommands`
+    /// and `SessionSidebar` both call this instead of `menu(accounts:)` directly so that mistake
+    /// can't happen at either site — or a future third one.
+    static func menu(
+        agents: [AgentSettings], preferences: Preferences, resolved: [AgentID: UUID]
+    ) -> [MenuEntry] {
+        menu(agents: agents, accounts: preferences.liveAccounts, resolved: resolved)
+    }
+
     /// Which account, inside a multi-account submenu's rows, should carry the flat
     /// keyboard shortcut that used to sit on the agent's own (now-nested) menu item.
     ///
