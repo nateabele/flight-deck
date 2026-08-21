@@ -36,15 +36,38 @@ final class AccountsSectionTests: XCTestCase {
         XCTAssertEqual(AccountDraft.defaultHome(for: .codex, name: "Work").lastPathComponent, ".codex-work")
     }
 
-    func testTheBuiltInAccountCannotBeRemoved() {
+    /// The built-in account is removable like any other now. It is not special — it is simply
+    /// what a nil `Session.accountID` resolves to, and a tombstone keeps resolving.
+    func testTheBuiltInAccountCanBeRemovedWhenAnotherAccountRemains() {
         let builtIn = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
-        XCTAssertFalse(AccountsSection.canRemove(builtIn, boundAccountIDs: []))
+        let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
+        XCTAssertTrue(AccountsSection.canRemove(builtIn, among: [builtIn, work]))
     }
 
-    func testAnAccountWithLiveSessionsCannotBeRemovedOrRelocated() {
+    /// The one refusal left: there must always be at least one account per agent.
+    func testAnAgentsLastAccountCannotBeRemoved() {
+        let only = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
+        XCTAssertFalse(AccountsSection.canRemove(only, among: [only]))
+    }
+
+    /// Live sessions no longer refuse removal — they only change the warning. A tombstone
+    /// keeps the account resolvable, so those tabs keep their identity.
+    func testAnAccountWithLiveSessionsCanStillBeRemoved() {
         let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
-        XCTAssertFalse(AccountsSection.canRemove(work, boundAccountIDs: [work.id]))
-        XCTAssertTrue(AccountsSection.canRemove(work, boundAccountIDs: []))
+        let other = AgentAccount(agent: .claude, displayName: "O", home: temporary("o"))
+        XCTAssertTrue(AccountsSection.canRemove(work, among: [work, other]))
+    }
+
+    /// Relocating is NOT removing, and keeps the old guard. Moving a home out from under a
+    /// running agent leaves its already-forked shell pointed at the old path, and relocating
+    /// the built-in account makes `isBuiltIn` false — which changes what a nil
+    /// `Session.accountID` resolves to.
+    func testRelocateStillRefusesTheBuiltInAccountAndLiveSessions() {
+        let builtIn = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
+        let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
+        XCTAssertFalse(AccountsSection.canRelocate(builtIn, boundAccountIDs: []))
+        XCTAssertFalse(AccountsSection.canRelocate(work, boundAccountIDs: [work.id]))
+        XCTAssertTrue(AccountsSection.canRelocate(work, boundAccountIDs: []))
     }
 
     /// Two accounts on one home would put two `CodexStack`s on one `session_index.jsonl`, so the
@@ -69,10 +92,11 @@ final class AccountsSectionTests: XCTestCase {
     func testDeleteFilesTrashesTheAccountsOwnHomeForAnOrdinaryAccount() {
         let store = PreferencesStore(persistence: nil)
         let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
-        store.preferences.storedAccounts = [work]
+        let other = AgentAccount(agent: .claude, displayName: "O", home: temporary("o"))
+        store.preferences.storedAccounts = [work, other]
 
         var trashed: [URL] = []
-        let ok = AccountsSection.deleteFiles(accountID: work.id, boundAccountIDs: [], in: store) {
+        let ok = AccountsSection.deleteFiles(accountID: work.id, in: store) {
             trashed.append($0)
         }
 
@@ -80,36 +104,37 @@ final class AccountsSectionTests: XCTestCase {
         XCTAssertEqual(trashed, [work.home])
     }
 
-    /// The built-in home must never reach the trash closure, no matter what disables the menu
-    /// item — `deleteFiles` re-checks this itself immediately before the call.
-    func testDeleteFilesRefusesTheBuiltInAccount() {
+    /// An agent's last account must never reach the trash closure, no matter what disables the
+    /// menu item — `deleteFiles` re-checks this itself immediately before the call.
+    func testDeleteFilesRefusesAnAgentsLastAccount() {
         let store = PreferencesStore(persistence: nil)
-        let builtIn = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
-        store.preferences.storedAccounts = [builtIn]
+        let only = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
+        store.preferences.storedAccounts = [only]
 
         var trashed: [URL] = []
-        let ok = AccountsSection.deleteFiles(accountID: builtIn.id, boundAccountIDs: [], in: store) {
+        let ok = AccountsSection.deleteFiles(accountID: only.id, in: store) {
             trashed.append($0)
         }
 
         XCTAssertFalse(ok)
         XCTAssertTrue(trashed.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: only.home.path), "the refusal never touches disk")
     }
 
-    /// Same guard, the other reason: an account with a tab open on it right now must not have
-    /// its home pulled out from under that tab.
-    func testDeleteFilesRefusesAnAccountWithLiveSessions() {
+    /// Live sessions warn, they do not refuse — see the accepted risk in the spec.
+    func testDeleteFilesIsPermittedWithLiveSessions() {
         let store = PreferencesStore(persistence: nil)
         let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
-        store.preferences.storedAccounts = [work]
+        let other = AgentAccount(agent: .claude, displayName: "O", home: temporary("o"))
+        store.preferences.storedAccounts = [work, other]
 
         var trashed: [URL] = []
-        let ok = AccountsSection.deleteFiles(accountID: work.id, boundAccountIDs: [work.id], in: store) {
+        let ok = AccountsSection.deleteFiles(accountID: work.id, in: store) {
             trashed.append($0)
         }
 
-        XCTAssertFalse(ok)
-        XCTAssertTrue(trashed.isEmpty)
+        XCTAssertTrue(ok)
+        XCTAssertEqual(trashed, [work.home])
     }
 
     // MARK: Home plausibility
@@ -194,41 +219,34 @@ final class AccountsSectionTests: XCTestCase {
 
     // MARK: Remove, re-guarded at press time
 
-    func testRemoveDropsAnOrdinaryAccount() {
+    /// Removal is a soft delete now — the record stays, tombstoned, so a legacy or running tab
+    /// keeps resolving it. Only the LIST this section renders from must go empty.
+    func testRemoveTakesAnOrdinaryAccountOutOfTheList() {
         let store = PreferencesStore(persistence: nil)
         let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
-        store.preferences.storedAccounts = [work]
+        let other = AgentAccount(agent: .claude, displayName: "O", home: temporary("o"))
+        store.preferences.storedAccounts = [work, other]
 
-        XCTAssertTrue(AccountsSection.remove(accountID: work.id, boundAccountIDs: [], in: store))
-        // Tombstoned, not dropped — see `AgentAccount.removedAt`. The record survives in the
-        // raw store; it is the LIST this section renders from that must be empty.
-        XCTAssertTrue(store.preferences.accounts(for: .claude).isEmpty)
+        XCTAssertTrue(AccountsSection.remove(accountID: work.id, in: store))
+        XCTAssertTrue(store.account(id: work.id)?.isRemoved == true)
+        XCTAssertTrue(store.preferences.accounts(for: .claude).allSatisfy { $0.id != work.id })
     }
 
-    /// The confirmation dialog can sit open while a tab binds to the account. Removing it then
-    /// would flip that tab's `AgentInstance` key from `id` to nil mid-run — stranding its
-    /// watchers and building a second codex stack on `builtInHome` — so the press re-checks.
-    func testRemoveRefusesAnAccountABoundSessionAcquiredWhileTheDialogWasOpen() {
+    /// The confirmation dialog can sit open while the account list changes underneath it — an
+    /// agent's last account can be removed out from under the dialog just as easily as it can
+    /// arrive after the button was already disabled — so the press re-checks the same rule.
+    func testRemoveRefusesAnAgentsLastAccountEvenIfTheDialogWasAlreadyOpen() {
         let store = PreferencesStore(persistence: nil)
-        let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
-        store.preferences.storedAccounts = [work]
+        let only = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
+        store.preferences.storedAccounts = [only]
 
-        XCTAssertFalse(AccountsSection.remove(accountID: work.id, boundAccountIDs: [work.id], in: store))
-        XCTAssertEqual(store.preferences.accounts.map(\.id), [work.id], "the registry entry survives")
-    }
-
-    func testRemoveRefusesTheBuiltInAccount() {
-        let store = PreferencesStore(persistence: nil)
-        let builtIn = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
-        store.preferences.storedAccounts = [builtIn]
-
-        XCTAssertFalse(AccountsSection.remove(accountID: builtIn.id, boundAccountIDs: [], in: store))
-        XCTAssertEqual(store.preferences.accounts.map(\.id), [builtIn.id])
+        XCTAssertFalse(AccountsSection.remove(accountID: only.id, in: store))
+        XCTAssertEqual(store.preferences.accounts.map(\.id), [only.id], "the registry entry survives")
     }
 
     func testRemoveRefusesAnAccountThatIsAlreadyGone() {
         let store = PreferencesStore(persistence: nil)
-        XCTAssertFalse(AccountsSection.remove(accountID: UUID(), boundAccountIDs: [], in: store))
+        XCTAssertFalse(AccountsSection.remove(accountID: UUID(), in: store))
     }
 
     // MARK: Bound sessions, by resolved id
@@ -244,8 +262,6 @@ final class AccountsSectionTests: XCTestCase {
 
         let bound = AccountsSection.boundAccountIDs(in: [legacy], resolvedBy: store)
         XCTAssertEqual(bound, [builtIn.id])
-        XCTAssertFalse(AccountsSection.canRemove(builtIn, boundAccountIDs: bound))
-        XCTAssertFalse(AccountsSection.remove(accountID: builtIn.id, boundAccountIDs: bound, in: store))
     }
 
     /// The other two shapes, so the resolution is not just "always the built-in": a stored id
