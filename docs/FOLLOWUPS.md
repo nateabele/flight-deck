@@ -741,13 +741,31 @@ the account a session runs as. Three things this deliberately did not build:
   ends agree with each other, which `SPAKE2SessionTests` already does.
 
   The genuine residual risk is narrower than "is the algorithm right" and sits in this
-  wrapper's marshalling, not BoringSSL's math: a bug that swapped the role or the two names
-  would be wrong identically on both sides of an in-process test and pass every test here.
-  `testMismatchedNamesYieldDifferentKeys` proves the names reach the transcript at all, but
-  nothing yet proves `.initiator` maps to "alice" the same way across a real process or
-  architecture boundary — only an in-process pair is exercised today. The honest next check
-  is not a vector, it is a cross-process macOS-against-iOS pairing exchange, which the overall
-  plan gets for free once pairing runs end to end (a later task, not this one).
+  wrapper's marshalling, not BoringSSL's math: a bug that swapped `.initiator`/`.responder`, or
+  the two name arguments to `SPAKE2_CTX_new`, would be wrong identically on both sides and pass
+  every round-trip test. **This entry previously said a cross-process macOS-against-iOS exchange
+  was what would close that. That was wrong.** Both ends compile the same `FleetKit`, so a
+  consistent swap is applied on both sides of the wire and survives a cross-process test exactly
+  as it survives an in-process one. Demonstrated rather than argued: two mutants — roles
+  swapped, and names passed swapped — each pass all 17 SPAKE2 and `PairingSecrets` tests.
+
+  What closes it is a second implementation of the *caller*, not a second process.
+  `testTheWrapperAgreesWithTheRawCAPIAboutRoleAndNameOrder` drives one side through the raw C
+  API with a literal `spake2_role_alice` and the argument order `curve25519.h` declares, the
+  other through `SPAKE2Session`, and asserts the derived keys agree. The raw side is written
+  from the header rather than from the wrapper, so agreement pins the wrapper's mapping to
+  BoringSSL's own convention. Both mutants fail it. **Closed, in process.**
+
+  Worth recording what a swap would actually have cost, because it is less than the original
+  wording implied: a *consistent* role or name swap is pure relabelling. Both names still reach
+  the transcript, still in a fixed order, still distinguishing one device from another — so such
+  a wrapper would be unconventional, not insecure. The residual risk here was smaller than we
+  said, and is now pinned anyway.
+
+  A cross-process macOS-against-iOS exchange still belongs in the plan that wires pairing to a
+  socket, but for **caller-side asymmetry** — the two ends disagreeing about which is the
+  initiator, about the names they pass, or about how they assemble the transcript — which is the
+  thing that plan can genuinely get wrong and which no single-process test constructs.
 
   Revisit if either upstream BoringSSL lands fixed vectors, or the vendored submodule moves to
   a version carrying SPAKE2+ (RFC 9383).
