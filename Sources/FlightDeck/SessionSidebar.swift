@@ -456,7 +456,7 @@ struct SessionSidebar: View {
     private func newSessionMenuEntries(preferences: PreferencesStore, project: String) -> some View {
         let agents = preferences.agentOrder(forProject: project)
         let entries = NewSessionAffordance.menu(
-            agents: agents, accounts: preferences.preferences.accounts,
+            agents: agents, accounts: preferences.preferences.liveAccounts,
             resolved: preferences.resolvedAccounts(for: agents, project: project)
         )
         // Same chord placement the File menu renders, from the same rule: `SessionCommands`

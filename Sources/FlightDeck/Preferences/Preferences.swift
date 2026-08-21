@@ -204,7 +204,9 @@ struct Preferences: Codable, Equatable {
     /// there are none left to protect. Nothing else prunes them — one mechanism, not two.
     ///
     /// Cannot resurrect what the user removed: this never sets `storedAccounts` back to nil,
-    /// so `migrateAccountsIfNeeded`'s seed-once guard still holds on the next launch.
+    /// so `migrateAccountsIfNeeded` never reseeds on a later launch. That is deliberate for an
+    /// account the user removed, but it is not scoped per agent — if this purge empties one
+    /// agent's accounts entirely, that agent stays empty; nothing here (or afterward) restores it.
     mutating func purgeRemovedAccounts() {
         accounts.removeAll { $0.isRemoved }
     }
