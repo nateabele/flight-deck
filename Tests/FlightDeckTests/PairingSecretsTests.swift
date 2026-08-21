@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import FleetKit
 
@@ -78,6 +79,19 @@ final class PairingSecretsTests: XCTestCase {
         let second = PairingSecrets(keyMaterial: material, transcript: Data([0x02]))
         let sealed = try first.seal(FleetDeviceKey.mint(), macName: "m")
         XCTAssertThrowsError(try second.open(sealed))
+    }
+
+    /// `testConfirmationAndSealingKeysAreDistinct` proves the two keys differ; it does not
+    /// prove `seal` uses the right one. Point both `AES.GCM.seal` and `open` at
+    /// `confirmationKey` instead and every other test here stays green — the suite would be
+    /// just as happy with `sealingKey` dead. So open the box from outside the type, once with
+    /// each key, and require exactly one of them to work.
+    func testTheSealIsUnderTheSealingKeyAndNotTheConfirmationKey() throws {
+        let (phone, mac) = try agreeing()
+        let box = try AES.GCM.SealedBox(combined: try mac.seal(FleetDeviceKey.mint(),
+                                                               macName: "m"))
+        XCTAssertNoThrow(try AES.GCM.open(box, using: phone.sealingKey))
+        XCTAssertThrowsError(try AES.GCM.open(box, using: phone.confirmationKey))
     }
 
     func testTheDeviceKeyRoundTripsThroughSealing() throws {
