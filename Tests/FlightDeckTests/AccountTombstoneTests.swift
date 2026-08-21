@@ -53,17 +53,43 @@ final class AccountTombstoneTests: XCTestCase {
         XCTAssertEqual(store.preferences.liveAccounts.map(\.id), [work.id])
         // The topmost fallback for a project that has chosen nothing.
         XCTAssertEqual(store.account(for: .claude, project: root.path)?.id, work.id)
-        // And it stops being what a nil `Session.accountID` resolves to.
-        XCTAssertEqual(store.resolvedAccountID(for: .claude, in: nil), nil)
+        // But a nil `Session.accountID` is NOT one of those defaults — it is the identity of
+        // every tab persisted before accounts existed, so it keeps resolving to the built-in
+        // account tombstone and all. This assertion used to read `nil`, which pinned the hole
+        // in the tombstone: nil there moves such a tab's `instance(for:)` key off `builtIn.id`
+        // mid-run while both keys still name `~/.claude`, stranding its watchers and putting a
+        // second `codex app-server` on one `session_index.jsonl`.
+        XCTAssertEqual(store.resolvedAccountID(for: .claude, in: nil), builtIn.id)
     }
 
-    /// The user removed it, so its home is theirs to re-use. Leaving it "taken" would refuse
-    /// the obvious recovery from an accidental removal.
-    func testATombstonedAccountReleasesItsHome() {
+    /// A tombstone still holds its home, and this assertion used to read the other way round —
+    /// "the user removed it, so its home is theirs to re-use". Re-adding the same directory
+    /// while the tombstone is standing files a SECOND record, with a new id, for one home:
+    /// the tombstone keys the tabs still running as the removed account, the new record keys
+    /// every new tab, and both name the same `session_index.jsonl`. That is the two-accounts-
+    /// one-home collision `AddAccountSheet` refuses for. The launch purge is what releases it.
+    func testATombstonedAccountStillHoldsItsHome() {
         let (store, _, work) = makeStore()
         XCTAssertTrue(store.homeIsTaken(work.home, excluding: nil))
         store.markAccountRemoved(id: work.id)
-        XCTAssertFalse(store.homeIsTaken(work.home, excluding: nil))
+        XCTAssertTrue(store.homeIsTaken(work.home, excluding: nil))
+        XCTAssertEqual(
+            AccountDraft.validate(home: work.home.path, agent: .claude, editing: nil, in: store),
+            .homeAlreadyUsed,
+            "and the sheet refuses it, rather than filing a second record for one home"
+        )
+        // Its own relocate still is not a collision with itself, tombstoned or not.
+        XCTAssertFalse(store.homeIsTaken(work.home, excluding: work.id))
+    }
+
+    /// The wording the user actually reads has to hold for the case they will actually hit:
+    /// they removed the account seconds ago, so "another account already uses this location"
+    /// would be a flat falsehood. It says what is true instead — the location comes back on
+    /// the next start.
+    func testTheHomeInUseMessageAdmitsARemovedAccountIsHoldingIt() throws {
+        let message = try XCTUnwrap(AccountDraft.Validation.homeAlreadyUsed.message(for: .claude))
+        XCTAssertTrue(message.contains("removed"), message)
+        XCTAssertTrue(message.contains("starts"), message)
     }
 
     /// Unchanged from hard delete: nothing may be left pointing at an account the user removed.

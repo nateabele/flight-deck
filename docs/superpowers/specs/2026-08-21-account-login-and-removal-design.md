@@ -145,9 +145,26 @@ column, and a reader in the wrong one is a bug:
 |---|---|
 | `PreferencesStore.account(id:)` (`:107`) | `Preferences.accounts(for:)` (`Preferences.swift:189`) |
 | `resolvedAccountID` — the stored-id branch (`:122`) | `account(for:project:)` topmost fallback (`:115`) |
-| `SessionStore.accountIsMissing` (`:461`) | `resolvedAccountID` built-in fallback for nil (`:123`) |
-| `sessionEnvironment(for:)` (`:236`) | `homeIsTaken` (`:168`) — so a removed home can be re-added |
-| | `SessionCommands.swift:106` and `SessionSidebar.swift:459` |
+| `resolvedAccountID` — built-in fallback for nil (`:123`) | `SessionCommands.swift:106` and `SessionSidebar.swift:459` |
+| `SessionStore.accountIsMissing` (`:461`) | |
+| `sessionEnvironment(for:)` (`:236`) | |
+| `homeIsTaken` (`:168`) | |
+
+**Corrected after the whole-branch review — two rows moved left.** Both were originally filed
+under "must skip", and both were wrong:
+
+- **`resolvedAccountID`'s built-in fallback for nil.** It resolves an *existing tab's identity*,
+  not a default: nil is what every tab persisted before accounts existed carries. Skipping
+  tombstones there flips such a tab's `instance(for:)` key from `builtIn.id` to nil the moment
+  the built-in account is removed — while `home(ofAccount: nil, agent:)` still names the very
+  directory that tombstone does. One home under two keys is the §5.1 failure verbatim, and it
+  became reachable when `canRemove` dropped its `isBuiltIn` refusal. New-tab account selection
+  is `account(for:project:)`, which stays filtered.
+- **`homeIsTaken`.** "So a removed home can be re-added" ignores that the tombstone still keys a
+  live tab at the old id: re-adding the same directory files a second record with a *new* id for
+  one home, and the first new tab on it builds a second `CodexStack` on that
+  `session_index.jsonl` — the collision the check exists to refuse. The home is released by the
+  launch purge instead, and the Add sheet's message says so.
 
 `Preferences.accounts` stays the raw stored array: every write path (`addAccount`,
 `renameAccount`, `relocateAccount`, `AccountsSection.refreshIdentity`) indexes into it by id, and
@@ -237,8 +254,12 @@ remains a thin shell, per `AccountsSection`'s existing convention.
 
 **Removal**
 - A tombstoned account still resolves by id: `resolvedAccountID` and the `instance` key are
-  unchanged, and `accountIsMissing` stays false.
-- It is absent from `accounts(for:)`, from the topmost fallback, and from `homeIsTaken`.
+  unchanged, and `accountIsMissing` stays false. Driven through `SessionStore` as well as
+  through `PreferencesStore`: removing an account with a live tab must add no status watcher
+  and no codex stack, for a tab with a stored `accountID` **and** for a legacy tab carrying
+  nil whose account is the built-in one.
+- It is absent from `accounts(for:)` and from the topmost fallback. Its home stays taken (§5.3)
+  until the launch purge releases it.
 - Both New Session menus exclude it; an agent dropping to one live account un-nests its submenu
   and keeps its chord.
 - `canRemove` is false only for an agent's last live account — true for the built-in row and true

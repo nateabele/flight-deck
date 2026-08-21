@@ -370,6 +370,130 @@ final class AccountLaunchTests: XCTestCase {
         XCTAssertEqual(CodexNameWatcher.indexURL(forHome: spawned), store.codexIndexURL(for: work.id))
     }
 
+    // MARK: - Removing an account out from under a live tab
+
+    /// The invariant the tombstone exists for, driven through `SessionStore` rather than
+    /// asserted on `PreferencesStore` alone. Everything else about removal is pinned at the
+    /// preferences layer, where a moved key is invisible: it takes a store with a real tab,
+    /// a real watcher and a real teardown to see it.
+    ///
+    /// Two things are asserted, and the second is the one a key-count cannot fake. A later
+    /// lookup must find the SAME watcher rather than register a second one beside it on the
+    /// shared `WatchClock`; and `closeSession` — which re-derives `instance(for:)` to decide
+    /// what to tear down — must still be able to reach it. A key that moved leaves the
+    /// original entry unmatchable for the rest of the run.
+    func testRemovingAnAccountUnderALiveTabLeavesItsWatcherWhereItIs() throws {
+        let (preferences, work) = configured(.claude)
+        let spare = AgentAccount(agent: .claude, displayName: "Spare", home: home("spare"))
+        preferences.preferences.storedAccounts = [work, spare]
+        let tab = UUID()
+        let persistence = StubPersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(id: tab, title: "t", workingDirectory: projectURL.path,
+                             pinnedConversationID: UUID(), accountID: work.id)],
+            sessionCounter: 1
+        )
+        let store = makeStore(preferences, persistence: persistence)
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        store.startStatusWatching()
+        let watcher = try XCTUnwrap(store.statusWatcherForTesting(account: work.id))
+
+        preferences.markAccountRemoved(id: work.id)
+        store.startStatusWatching()   // a later sweep re-derives every live tab's key
+
+        XCTAssertEqual(store.statusWatcherAccountsForTesting, [work.id],
+                       "the running tab keeps the identity it was launched with")
+        XCTAssertTrue(store.statusWatcherForTesting(account: work.id) === watcher,
+                      "the very watcher, not a second one polling beside it")
+
+        store.closeSession(tab)
+        XCTAssertTrue(store.statusWatcherAccountsForTesting.isEmpty,
+                      "teardown has to reach the entry the tab actually keyed")
+    }
+
+    /// The same fact for a tab that stores NO account — every tab persisted before accounts
+    /// existed — whose identity is the built-in one, and the direct regression test for the
+    /// hole in the tombstone.
+    ///
+    /// `resolvedAccountID`'s nil branch used to filter tombstones, on the theory that it was a
+    /// default. Removing the built-in account (which `canRemove` now allows) therefore answered
+    /// nil for this tab and flipped its key off `builtIn.id` mid-run — while
+    /// `home(ofAccount: nil, agent:)` names the very directory the tombstoned account does. The
+    /// second sweep below then built a second `SessionStatusWatcher` on one home, and the close
+    /// could no longer reach the first.
+    func testRemovingTheBuiltInAccountUnderALegacyTabLeavesItsWatcherWhereItIs() throws {
+        let builtIn = AgentAccount(
+            agent: .claude, displayName: "Default", home: AgentID.claude.builtInHome
+        )
+        let other = AgentAccount(agent: .claude, displayName: "Other", home: home("other"))
+        let preferences = PreferencesStore(persistence: nil)
+        preferences.preferences.storedAccounts = [builtIn, other]
+        let tab = UUID()
+        let persistence = StubPersistence()
+        persistence.stored = SessionSnapshot(
+            // No `accountID` at all: a tab filed before the accounts feature shipped.
+            sessions: [.init(id: tab, title: "legacy", workingDirectory: projectURL.path,
+                             pinnedConversationID: UUID())],
+            sessionCounter: 1
+        )
+        let store = makeStore(preferences, persistence: persistence)
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        store.startStatusWatching()
+        XCTAssertEqual(store.statusWatcherAccountsForTesting, [builtIn.id],
+                       "a tab storing no account is the built-in account's tab")
+
+        preferences.markAccountRemoved(id: builtIn.id)
+        store.startStatusWatching()
+
+        XCTAssertEqual(store.statusWatcherAccountsForTesting, [builtIn.id],
+                       "one home, one key — a nil key here would scan `~/.claude` twice")
+
+        store.closeSession(tab)
+        XCTAssertTrue(store.statusWatcherAccountsForTesting.isEmpty,
+                      "and the entry the tab keyed is still the entry the close tears down")
+    }
+
+    /// Codex's half, and the sharper failure: two keys on one home are two `codex app-server`s
+    /// on one `session_index.jsonl`, each seeing half the renames. `closeSession` re-derives
+    /// the tab's instance to decide whose stack to stop, so a key that moved when the account
+    /// was tombstoned leaks the app-server for the rest of the run.
+    func testRemovingTheBuiltInAccountUnderALegacyCodexTabLeavesItsStackWhereItIs() async throws {
+        let builtIn = AgentAccount(
+            agent: .codex, displayName: "Default", home: AgentID.codex.builtInHome
+        )
+        let other = AgentAccount(agent: .codex, displayName: "Other", home: home("other-codex"))
+        let preferences = PreferencesStore(persistence: nil)
+        preferences.preferences.storedAccounts = [builtIn, other]
+        let tab = UUID()
+        let persistence = StubPersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(id: tab, title: "legacy", workingDirectory: projectURL.path,
+                             pinnedConversationID: UUID(), agent: .codex)],
+            sessionCounter: 1
+        )
+        let store = makeStore(preferences, persistence: persistence)
+        // Both hermetic guards are needed because this tab's account is the *built-in* one:
+        // without the override `resumeRestoredCodex` would spawn a real `codex app-server`,
+        // and without the index override its stack would tail the developer's own
+        // `~/.codex/session_index.jsonl`.
+        store.codexIndexURLOverride = temporaryRoot("codex-index.jsonl")
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: ThreadStartingTransport())),
+            for: .codex, account: builtIn.id
+        )
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        await store.codexRestoreTask?.value
+        XCTAssertEqual(store.codexStackCountForTesting, 1)
+
+        preferences.markAccountRemoved(id: builtIn.id)
+        XCTAssertEqual(store.codexStackCountForTesting, 1,
+                       "removing an account builds nothing; it must not build a second stack")
+
+        store.closeSession(tab)
+        XCTAssertEqual(store.codexStackCountForTesting, 0,
+                       "the app-server the tab was actually using is the one that stops")
+    }
+
     /// And the binding is by variable, not by hope: the spawn environment names `CODEX_HOME`
     /// over whatever Flight Deck itself was launched with.
     func testTheTransportsSpawnEnvironmentOverridesTheInheritedHome() throws {
