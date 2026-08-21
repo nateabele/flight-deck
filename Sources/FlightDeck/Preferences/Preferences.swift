@@ -208,6 +208,14 @@ struct Preferences: Codable, Equatable {
     /// account the user removed, but it is not scoped per agent — if this purge empties one
     /// agent's accounts entirely, that agent stays empty; nothing here (or afterward) restores it.
     mutating func purgeRemovedAccounts() {
+        // `accounts` is a computed view over `storedAccounts` whose setter writes back, so on
+        // preferences that have never been migrated this get-modify-set would turn a nil
+        // `storedAccounts` into `[]` — permanently defeating `migrateAccountsIfNeeded`'s
+        // seed-once `guard storedAccounts == nil` and leaving the user with no accounts at
+        // all, forever. Today's call site runs after that migration so it cannot happen; this
+        // guard means it still cannot if the order ever changes, and it is honest besides:
+        // there is nothing to purge.
+        guard storedAccounts != nil else { return }
         accounts.removeAll { $0.isRemoved }
     }
 

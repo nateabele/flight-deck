@@ -108,7 +108,7 @@ struct AccountsSection: View {
     ///
     /// Live sessions no longer refuse this. That is deliberate and is the accepted cost of "the
     /// button is never disabled": the second dialog names the sessions instead. See the spec's
-    /// §3g.
+    /// §5.7, where that risk is stated rather than designed around.
     @MainActor
     @discardableResult
     static func deleteFiles(

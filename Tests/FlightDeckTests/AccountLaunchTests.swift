@@ -53,6 +53,34 @@ final class AccountLaunchTests: XCTestCase {
                       "a tab under the wrong login is worse than no tab")
     }
 
+    /// The tombstoned half of the same refusal, which the test above cannot reach: it names a
+    /// wholly unknown id, and a tombstone is not unknown — `account(id:)` still answers it.
+    ///
+    /// Two readers look at an assignment, and they used to disagree about this one:
+    /// `launchAccount`'s guard asked `account(id:) == nil` (false for a tombstone, so it let
+    /// the launch through) while `account(for:project:)` answered nil (so the launch found "no
+    /// account to name", set no home variable, and started the agent in its built-in home).
+    /// A project that names a login must never quietly launch as a different one.
+    func testAnAssignmentNamingARemovedAccountIsReportedRatherThanSubstituted() async {
+        let (preferences, work) = configured(.claude)
+        let spare = AgentAccount(agent: .claude, displayName: "Spare", home: home("spare"))
+        preferences.preferences.storedAccounts = [work, spare]
+        preferences.preferences.storedProjectSettings = [
+            projectURL.path: ProjectSettings(accounts: [.claude: work.id])
+        ]
+        // Directly, not through `markAccountRemoved`: that clears the assignment as it goes,
+        // and the assignment is the thing under test. Both states are reachable — a snapshot
+        // written by an older build, or any future write path that forgets the clearing.
+        preferences.preferences.accounts[0].removedAt = Date()
+
+        let result = await makeStore(preferences).createSession(agent: .claude, in: projectURL.path)
+
+        guard case .failure(let error) = result else {
+            return XCTFail("expected a failure, not a launch under `spare`")
+        }
+        XCTAssertEqual(error, .accountMissing("Claude"))
+    }
+
     /// The codex half, and the ordering that matters: the account is resolved before anything
     /// is negotiated, so a broken login never reaches `prepare` and never spawns an
     /// app-server to prepare against.

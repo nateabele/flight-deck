@@ -504,8 +504,17 @@ final class SessionStore: ObservableObject {
             }
             account = named
         } else {
+            // A tombstoned assignment counts as missing. This asked `account(id:) == nil`,
+            // which a tombstone answers non-nil — so the guard passed and the very next line
+            // called `account(for:project:)`, which answers nil for exactly that case. The
+            // `guard let account` below then read that nil as "no account to name", set no
+            // home variable, and launched the agent in its built-in home: the silent
+            // wrong-login substitution this whole method exists to refuse. Both readers of an
+            // assignment have to agree about a tombstone, and the answer that is safe is
+            // `.accountMissing`. (`markAccountRemoved` clears these assignments, so this is
+            // defence in depth, matching `account(for:project:)`'s own comment.)
             if let assigned = preferences.projectSettings(project).accounts[agent],
-               preferences.account(id: assigned) == nil {
+               preferences.account(id: assigned)?.isRemoved ?? true {
                 return .failure(.accountMissing(agent.displayName))
             }
             account = preferences.account(for: agent, project: project)
