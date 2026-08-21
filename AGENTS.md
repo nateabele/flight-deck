@@ -40,6 +40,7 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 
 ```bash
 ./scripts/build-libghostty.sh   # once, ~10 min — builds GhosttyKit.xcframework
+./scripts/build-boringssl.sh    # once — builds BoringSSL.xcframework (SPAKE2, for pairing)
 ./scripts/build.sh              # xcodegen generate + xcodebuild → Debug "Flight Deck.app"
 ./scripts/test-unit.sh          # headless unit suite — your normal TDD loop
 ./scripts/smoke.sh              # GUI UITest, ends "SMOKE PASS" (see rule 4)
@@ -69,6 +70,7 @@ Releases go through `scripts/swap-release.sh`, run detached — see
 | `Tests/FlightDeckTests/` | Headless unit tests. `UITests/` drives the real app. |
 | `project.yml` | Source of truth for the build; `.xcodeproj` is **generated** and git-ignored. |
 | `vendor/ghostty` | Submodule pinned to v1.3.1. Pristine — never modify. |
+| `vendor/boringssl` | Submodule pinned to tag `0.20250114.0`, for SPAKE2 (pairing). Pristine — never modify. `vendor/boringssl-artifacts/` is its git-ignored build output, not rebuilt by `build.sh` — run `build-boringssl.sh` yourself first, same as libghostty. |
 | `docs/` | See below. |
 
 Spine: `FlightDeckApp → RootWindow → RootView → TerminalPane → Ghostty.SurfaceView`.

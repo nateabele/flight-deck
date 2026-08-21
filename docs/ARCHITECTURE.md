@@ -105,6 +105,10 @@ rejected, so a `claude` release that adds a flag does not make the field lossy.
 - `vendor/ghostty-artifacts/GhosttyKit.xcframework` — build output of `scripts/build-libghostty.sh`.
 - `vendor/.zig-toolchain/` — Zig 0.15.2 (auto-downloaded by the build script).
 - `vendor/.build-shim/` — the `xcrun` SDK shim (recreated by the build script).
+- `vendor/boringssl` — submodule, pinned to tag **0.20250114.0**, pristine (never modified).
+- `vendor/boringssl-artifacts/BoringSSL.xcframework` — build output of
+  `scripts/build-boringssl.sh`; same shape as `ghostty-artifacts`, built from the submodule
+  rather than committed after an earlier attempt (54 MB) was reverted — see docs/FOLLOWUPS.md.
 
 ## Sidebar structure
 
@@ -401,6 +405,40 @@ Keychain item (`KeychainPairedMacStore`), updated in place rather than deleted-a
 there is never a window with no pairing on disk (`PairedMacStore.swift` has the reasoning
 comment on why that shape was tried first and rejected). The Mac's copy is not Keychain-grade;
 see docs/FOLLOWUPS.md.
+
+**A short, typed pairing code is the crypto foundation for a second path, not yet wired to a
+socket.** `FleetKit` now links a vendored BoringSSL, for exactly one function: SPAKE2, a
+password-authenticated key exchange CryptoKit does not have. Hand-rolling one is not on the
+table — the ways a PAKE goes wrong (point validation, transcript binding, non-constant-time
+comparison) do not announce themselves in tests, and BoringSSL's implementation is the one
+Chrome and Android ship. `vendor/boringssl` is a submodule, built by
+`scripts/build-boringssl.sh` into the git-ignored `vendor/boringssl-artifacts/` — the same
+arrangement `vendor/ghostty` already uses; see "Vendored layout" below.
+`Sources/FleetKit/SPAKE2/BoringSSLShim.h` and its `module.modulemap` expose only SPAKE2 to
+Swift, because importing `curve25519.h` directly would drop the whole of BoringSSL's namespace
+into `FleetKit`, none of it reviewed for use here.
+
+SPAKE2 itself produces keying material and **nothing else** — BoringSSL performs no key
+confirmation, and a wrong password does not fail: it silently derives a different key.
+`PairingSecrets` (`Sources/FleetKit/SPAKE2/PairingSecrets.swift`) exists to close exactly that
+gap — an HKDF-derived confirmation value and sealing key, both bound to the transcript so a
+proof or a sealed device key captured from one pairing window cannot be replayed into another —
+and until both sides' confirmations match, nothing derived from the exchange may be trusted or
+acted on. That is also what gives a three-attempt budget something to count: without an
+explicit confirmation step, the Mac has no way to tell a typo from a correct pairing.
+
+The code itself (`PairingCode`, `Sources/FleetKit/PairingCode.swift`) carries 55 bits of
+entropy, and **that is not the security boundary — the attempt limit is.** Three online
+guesses against 55 bits is roughly 1 in 10¹⁶ per window; SPAKE2 is what makes that the *only*
+path available, by denying an offline one. Without it, a code this short used directly as a
+transport credential would be recoverable offline by anyone who captured the handshake, with
+unlimited time and no attempt limit to bound the search. `PairingCode` is deliberately not
+derived from or mixed into any other secret on the wire — see the reasoning comment on its
+`secret` property — so shortening it costs nothing else.
+
+None of this is reachable yet from an actual pairing attempt: there is no pairing listener for
+it, no PAKE frames on the wire, and the QR path is unchanged. That is deliberately a separate
+plan, written against these interfaces now that they exist.
 
 ## Not yet built (design, not code)
 

@@ -751,3 +751,37 @@ the account a session runs as. Three things this deliberately did not build:
 
   Revisit if either upstream BoringSSL lands fixed vectors, or the vendored submodule moves to
   a version carrying SPAKE2+ (RFC 9383).
+
+- **The spec's test-vector requirement is now amended, not silently dropped.**
+  `docs/superpowers/specs/2026-08-21-short-pairing-code-design.md` §5 originally required
+  validation "against published test vectors, not round-trips," on the sound reasoning that a
+  round-trip only proves the two ends agree with each other, not with the specification. The
+  finding above is that the requirement was never satisfiable for the reason just given — there
+  is no specification this variant conforms to — so §5 now carries the finding inline as an
+  amendment rather than having the sentence quietly disappear for a later reader to wonder
+  about.
+
+- **BoringSSL is pinned to a tag and updated by hand; nothing watches upstream for security
+  fixes.** `BORINGSSL_TAG` in `scripts/build-boringssl.sh` names `0.20250114.0`, and the script
+  refuses to build if the submodule has drifted off it — but moving the pin forward, including
+  for a CVE, is a human noticing and doing it deliberately. This is the same standing
+  obligation `vendor/ghostty`'s pin already carries; it is worth saying plainly here rather than
+  leaving it to be rediscovered the day a BoringSSL advisory lands.
+
+- **The vendoring is a submodule, not a committed artifact — a committed `BoringSSL.xcframework`
+  was tried first, at 54 MB, and reverted the same day** (fda5c22, then 8f36b33). The tradeoff
+  a committed artifact bought was one less local build step; what it cost was 54 MB of binary in
+  every clone and a second vendoring pattern next to `vendor/ghostty`'s submodule-plus-build-
+  script one, for no reason other than that BoringSSL's build happened to be written second.
+  `vendor/boringssl` is now a submodule pinned to the tag above, and
+  `scripts/build-boringssl.sh` builds it into the git-ignored `vendor/boringssl-artifacts/` —
+  the same shape `scripts/build-libghostty.sh` already uses, so there is one build pattern to
+  know instead of two, and upstream stays a live submodule rather than a snapshot nobody
+  re-pulls.
+
+- **A fresh clone now needs a second submodule-and-build pair before anything builds.** Same
+  shape as libghostty, one more of them: `git submodule update --init vendor/boringssl` then
+  `./scripts/build-boringssl.sh`, in addition to the existing `vendor/ghostty` /
+  `build-libghostty.sh` pair. `docs/BUILD.md`'s "From a fresh clone" section and its
+  "Worktrees" section (a new worktree has neither artifacts directory populated, for the same
+  git-ignored reason) both now say so.

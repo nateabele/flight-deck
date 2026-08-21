@@ -95,6 +95,33 @@ Foundation/Network/Security-only boundary is enforced by the `FleetKitiOS` targe
 itself proves nothing; the wrapper must agree with the specification. A round-trip-only test
 would pass over an implementation that is deterministically wrong in the same way on both ends.
 
+**Amendment (from execution, 2026-08-21): this requirement is not satisfiable, and not for the
+mundane reason.** It is not that upstream never got around to writing vectors — it is that
+**BoringSSL's SPAKE2 implements no published specification for a vector to conform to.**
+Verified in `vendor/boringssl/crypto/curve25519/spake25519.cc`: its `M` and `N` are BoringSSL's
+own generated points (line 47, "These points and their precomputation tables are generated
+with..."), not RFC 9382's published constants; `password_scalar_hack` (checked at line 400) is
+a unilateral fix for a BoringSSL bug that is baked permanently into the wire format —
+`disable_password_scalar_hack` exists only to test compatibility with older, buggy BoringSSL,
+not as an interop switch; and the transcript hashes `password_hash` (SHA-512 of the password,
+line 374), not RFC 9382's derived scalar `w`, with the ephemeral's cofactor multiplied in —
+see `update_with_length_prefix` and the final `SHA512_Final` around lines 451-518. SPAKE2+
+(RFC 9383, which does ship test vectors) is not in this vendored tag. And even setting the
+math aside, there is nothing to drive a vector through:
+`vendor/boringssl/crypto/curve25519/spake25519_test.cc` line 29 carries an open
+`// TODO(agl): add tests with fixed vectors once SPAKE2 is nailed down`, and
+`SPAKE2_generate_msg`'s public API gives no way to fix the ephemeral scalar from outside.
+
+So a conforming vector would not validate this implementation, and a conforming
+implementation would not interoperate with it — there is no specification for this variant to
+be checked against, in either direction. **The property that replaces conformance is
+agreement:** both ends of a pairing exchange run this same BoringSSL, so what needs proving is
+that this wrapper's two ends agree with each other, not that either agrees with a standard that
+does not describe them. `SPAKE2SessionTests` is what checks that, and does. The residual risk
+this leaves — narrower than "is the algorithm right," and about this wrapper's marshalling,
+not BoringSSL's math — is recorded where it will be acted on, in
+docs/FOLLOWUPS.md's "Pairing crypto foundation" entry.
+
 ## 6. The pairing channel
 
 A **separate `NWListener`, alive only while armed**, carrying a **public bootstrap PSK**.
@@ -190,7 +217,9 @@ exists for reconnects, not for pairing).
 
 ## 10. Testing
 
-- **SPAKE2 against published test vectors.** Not round-trip-only — see [§5](#5-the-pake).
+- **SPAKE2 agreement between two independent sessions.** Not a published test vector — see the
+  amendment in [§5](#5-the-pake): this vendored variant has no specification for a vector to
+  conform to, so agreement between the two ends is the property that is checked instead.
 - **Loopback pairing, end to end**: a real pairing listener, a real SPAKE2 exchange, a real
   sealed key, and a subsequent fleet connection authenticated with the delivered key. The same
   shape as the existing pairing-flow tests, which open real sockets and assert refusal at the
