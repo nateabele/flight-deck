@@ -33,7 +33,7 @@ Two paths to the same result, sharing nothing but their outcome:
 | Path | Carries | Secured by | Works |
 |---|---|---|---|
 | **QR** | The 32-byte device key itself, packed | The screen it is displayed on | Anywhere, including off-LAN |
-| **Typed code** | 12 characters of entropy, no key | SPAKE2 + a 3-guess limit | LAN only, via Bonjour |
+| **Typed code** | 55 bits of entropy, no key | SPAKE2 + a 3-guess limit | LAN only, via Bonjour |
 
 The QR path is what ships today, with a smaller payload. The typed path is new.
 
