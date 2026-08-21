@@ -14,14 +14,21 @@ public enum PairingSealError: Error, Equatable {
 /// confirmation step the Mac has no way to distinguish a typo from a correct pairing — and the
 /// three-attempt budget would have nothing to count.
 ///
-/// Every value is bound to the transcript (both SPAKE2 messages, in a fixed order) so a proof
-/// captured from one window cannot be replayed into another.
-public struct PairingSecrets {
-    private let confirmationKey: SymmetricKey
-    private let sealingKey: SymmetricKey
+/// Every value — both confirmations and the sealing key — is bound to the transcript (both
+/// SPAKE2 messages, in a fixed order) so a proof or a sealed blob captured from one pairing
+/// window cannot be replayed into another.
+public struct PairingSecrets: Sendable {
+    // Not `private`: `PairingSecretsMutationTests` asserts these two are actually distinct
+    // keys via `@testable import`, which no black-box test can pin — with the keys collapsed,
+    // an attacker holding the published confirmation still cannot derive the (identical)
+    // sealing key, so nothing externally observable would change.
+    let confirmationKey: SymmetricKey
+    let sealingKey: SymmetricKey
     private let transcript: Data
 
     public init(keyMaterial: Data, transcript: Data) {
+        precondition(!keyMaterial.isEmpty, "keyMaterial must not be empty")
+        precondition(!transcript.isEmpty, "transcript must not be empty")
         let base = SymmetricKey(data: keyMaterial)
         self.transcript = transcript
         // Separate subkeys for separate jobs. Reusing one key for both confirmation and
@@ -49,9 +56,16 @@ public struct PairingSecrets {
         ))
     }
 
-    public func seal(_ key: FleetDeviceKey, slot: UUID, macName: String) throws -> Data {
+    /// Seals `key`'s secret for the peer, under `key.slot` — never a slot passed separately.
+    /// `seal` and `open` are not a general encode/decode pair: `open` already reconstructs a
+    /// whole `FleetDeviceKey`, so the only way to disagree with it is to take the slot and
+    /// secret apart here and hand back a slot that does not match. That failure is silent and
+    /// severe — the seal still decrypts and authenticates cleanly, the phone stores the wrong
+    /// slot as its PSK identity, and pairing "succeeds" only to fail at the next connection
+    /// with nothing reported where the mistake was made.
+    public func seal(_ key: FleetDeviceKey, macName: String) throws -> Data {
         var payload = Data()
-        payload.append(contentsOf: withUnsafeBytes(of: slot.uuid) { Data($0) })
+        payload.append(contentsOf: withUnsafeBytes(of: key.slot.uuid) { Data($0) })
         payload.append(key.secret)
         payload.append(Data(macName.utf8))
         guard let sealed = try? AES.GCM.seal(payload, using: sealingKey).combined else {
@@ -74,6 +88,10 @@ public struct PairingSecrets {
             slotBytes[8], slotBytes[9], slotBytes[10], slotBytes[11],
             slotBytes[12], slotBytes[13], slotBytes[14], slotBytes[15]
         ))
-        return (FleetDeviceKey(slot: slot, secret: payload[16..<48]), macName)
+        // `Data(...)`, not the bare slice: `AES.GCM.open` returns a fresh `Data` indexed from
+        // zero, but slicing it still yields a `Data` whose `startIndex` is 16, not 0. Nothing
+        // indexes `secret` absolutely today, so a bare slice is not a live bug — but it is a
+        // trap for the next caller who does.
+        return (FleetDeviceKey(slot: slot, secret: Data(payload[16..<48])), macName)
     }
 }

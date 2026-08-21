@@ -1,5 +1,5 @@
 import XCTest
-import FleetKit
+@testable import FleetKit
 
 final class PairingSecretsTests: XCTestCase {
     private func agreeing() throws -> (PairingSecrets, PairingSecrets) {
@@ -57,15 +57,30 @@ final class PairingSecretsTests: XCTestCase {
         XCTAssertNotEqual(first.initiatorConfirmation, second.initiatorConfirmation)
     }
 
+    /// The headline property, and one no black-box test can pin: with the two keys collapsed
+    /// into one, an attacker holding the published confirmation still cannot derive the
+    /// (identical) sealing key, so nothing externally observable would change. Only a look at
+    /// the keys themselves catches that.
+    func testConfirmationAndSealingKeysAreDistinct() throws {
+        let (phone, _) = try agreeing()
+        XCTAssertNotEqual(phone.confirmationKey, phone.sealingKey)
+    }
+
+    /// Same shape as `testConfirmationsAreBoundToTheTranscript`, but for the sealing key: a
+    /// blob sealed under one transcript must not open under another, or a sealed key captured
+    /// from one pairing window could be replayed into a later one.
+    func testTheSealingKeyIsBoundToTheTranscript() throws {
+        let material = Data(repeating: 0xAB, count: 64)
+        let first = PairingSecrets(keyMaterial: material, transcript: Data([0x01]))
+        let second = PairingSecrets(keyMaterial: material, transcript: Data([0x02]))
+        let sealed = try first.seal(FleetDeviceKey.mint(), macName: "m")
+        XCTAssertThrowsError(try second.open(sealed))
+    }
+
     func testTheDeviceKeyRoundTripsThroughSealing() throws {
         let (phone, mac) = try agreeing()
         let key = FleetDeviceKey.mint()
-        // `seal`'s `slot` is a caller-supplied identity, not derived from `key` — but every
-        // real caller (`PairingArmer`, `PairingPayload`) passes `key.slot` here, since that is
-        // what the phone must store and what later selects the TLS PSK. An unrelated slot
-        // would round-trip fine but would not be *this* key round-tripping.
-        let slot = key.slot
-        let sealed = try mac.seal(key, slot: slot, macName: "Nate's MacBook Pro")
+        let sealed = try mac.seal(key, macName: "Nate's MacBook Pro")
         let opened = try phone.open(sealed)
         XCTAssertEqual(opened.key, key)
         XCTAssertEqual(opened.macName, "Nate's MacBook Pro")
@@ -77,13 +92,18 @@ final class PairingSecretsTests: XCTestCase {
     func testSealedMaterialIsUselessWithoutTheSharedKey() throws {
         let (_, mac) = try agreeing()
         let (stranger, _) = try agreeing()
-        let sealed = try mac.seal(FleetDeviceKey.mint(), slot: UUID(), macName: "m")
+        let sealed = try mac.seal(FleetDeviceKey.mint(), macName: "m")
         XCTAssertThrowsError(try stranger.open(sealed))
     }
 
     func testATamperedSealIsRejected() throws {
         let (phone, mac) = try agreeing()
-        var sealed = try mac.seal(FleetDeviceKey.mint(), slot: UUID(), macName: "m")
+        var sealed = try mac.seal(FleetDeviceKey.mint(), macName: "m")
+        // A flip inside the ciphertext body, not just the trailing tag byte — a tag-only flip
+        // is caught by CryptoKit's AEAD regardless of anything this file does, so it earns
+        // nothing about our code. Byte 12 is the first byte of the ciphertext, right after the
+        // 12-byte nonce in `AES.GCM.SealedBox.combined`.
+        sealed[12] ^= 0xFF
         sealed[sealed.count - 1] ^= 0xFF
         XCTAssertThrowsError(try phone.open(sealed))
     }
