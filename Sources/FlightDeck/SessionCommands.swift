@@ -101,23 +101,28 @@ struct SessionCommands: Commands {
             let slotByAgent = NewSessionAffordance.slots(for: agents).reduce(into: [AgentID: NewSessionAffordance.Slot]()) {
                 $0[$1.agent] = $1
             }
-            let entryByAgent: [AgentID: NewSessionAffordance.MenuEntry] = currentProject.path.map { project in
+            let entries: [NewSessionAffordance.MenuEntry] = currentProject.path.map { project in
                 NewSessionAffordance.menu(
-                    agents: agents, accounts: preferences.preferences.accounts,
+                    agents: agents, preferences: preferences.preferences,
                     resolved: preferences.resolvedAccounts(for: agents, project: project)
-                ).reduce(into: [AgentID: NewSessionAffordance.MenuEntry]()) { $0[$1.agent] = $1 }
-            } ?? [:]
+                )
+            } ?? []
+            let entryByAgent = entries.reduce(into: [AgentID: NewSessionAffordance.MenuEntry]()) {
+                $0[$1.agent] = $1
+            }
+            // Which account row wears which chord — shared with the sidebar's dropdown so both
+            // menus place shortcuts by one rule instead of each re-deriving it.
+            let chords = NewSessionAffordance.chords(for: entries, agents: agents)
 
             ForEach(Array(agents.enumerated()), id: \.offset) { _, settings in
                 let slot = slotByAgent[settings.id]
                 if let entry = entryByAgent[settings.id], case .submenu(let agent, let rows) = entry {
-                    let shortcutAccount = slot != nil ? NewSessionAffordance.shortcutLeaf(in: rows) : nil
                     Menu("New \(agent.displayName) Session") {
                         ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                             if case .agent(let rowAgent, let account, let isResolved) = row {
                                 accountMenuRow(
                                     agent: rowAgent, account: account, isResolved: isResolved,
-                                    shortcutModifiers: account == shortcutAccount ? slot?.modifiers : nil
+                                    shortcutModifiers: chords[account]
                                 )
                             }
                         }
@@ -145,6 +150,41 @@ struct SessionCommands: Commands {
                 store.renameRequest = id
             }
             .keyboardShortcut("r", modifiers: .command)
+
+            // Stays enabled and guards internally, for the same reason as Rename Session
+            // above: `store` is a plain `let`, so a `.disabled(...)` condition would be
+            // evaluated once at menu build time and freeze there — and a disabled
+            // `NSMenuItem` does not fire its key equivalent at all.
+            // `reopenLastClosed` no-ops on an empty history, which is the whole guard.
+            //
+            // ⌘⇧T reaches this item only because `GhosttyDefaults.conf` unbinds it. Ghostty
+            // binds it to `undo` on macOS and marks it `performable`, and the
+            // `MenuKeyEquivalents` hand-off that saves ⌘⇧[ and ⌘⇧] deliberately does NOT
+            // cover performable bindings — so while libghostty claimed this chord,
+            // `Ghostty.SurfaceView.performKeyEquivalent` swallowed it and this item never
+            // fired with a terminal focused. See that file's entry for the full reasoning;
+            // moving the shortcut here without it is what breaks it.
+            Button("Reopen Closed Session") { store.reopenLastClosed() }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
+
+            // ⌘W is bound here, to the store, rather than left to AppKit's `performClose:`.
+            //
+            // The responder-chain route only ever worked with focus inside the terminal:
+            // `TerminalHostView` implements `performClose:` and sits below the terminal pane,
+            // so a focused surface reaches it — but from a focused sidebar there is nothing
+            // between the sidebar and the window, `NSWindow` implements `performClose:`
+            // itself, and the window claimed the key. Since closing this app's only window
+            // quits it, ⌘W in the sidebar was ⌘Q.
+            //
+            // This item sits in the File menu ahead of the Close item SwiftUI adds for the
+            // `Window` scene, and `NSMenu.performKeyEquivalent` takes the first matching
+            // enabled item it walks, so this one answers ⌘W from every focus state.
+            // `closeSelectedSession` reporting false is the empty state — nothing to close —
+            // where the key falls through to closing the window as it always did.
+            Button("Close Session") {
+                if !store.closeSelectedSession() { NSApp.keyWindow?.performClose(nil) }
+            }
+            .keyboardShortcut("w", modifiers: .command)
         }
     }
 }

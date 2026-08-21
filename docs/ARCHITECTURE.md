@@ -258,6 +258,22 @@ commands when observed state changes, and `SessionCommands` observes preferences
 a tool can prune the menu again — killing the shortcuts at the exact moment the user
 configures them.
 
+**"Configure Tools…" opens Settings by driving SwiftUI's own menu item**, via
+`SettingsMenuItem.locate(in:)`, rather than by sending `showSettingsWindow:`. That selector is
+the widely-repeated recipe and here it is worse than broken: it **returns true** while opening
+nothing, because something in the responder chain accepts it — so any fallback guarded on its
+return value is unreachable. `sendAction` can only answer "did a responder accept this?", never
+"did Settings open?". SwiftUI's item is wired to a private `menuAction:` on a private
+`MenuItemCallback`, so the item itself is the only dependable handle; it is matched on the ⌘,
+chord rather than its title, which is localized and was renamed in macOS 13.
+
+Landing on the right pane is a second, separate mechanism: `PreferencesView`'s `TabView` is
+bound to `PreferencesStore.selectedTab` with every pane tagged, and the menu sets `.tools`
+*before* opening so the first build of the view already has it. `selectedTab` sits beside
+`preferences` rather than inside it — that struct persists on every mutation, so a pane stored
+there would rewrite `preferences.v1` on every tab click and reopen Settings weeks later
+wherever the user last was.
+
 **The overlay's fade is a clock-free state machine.** `ToolOverlayVisibility` owns no clock
 of its own — every method takes "now" from its caller, `ToolOverlayModel` — so "fades after
 five idle seconds" is a test that runs instantly rather than one that sleeps. It is driven

@@ -49,18 +49,36 @@ struct AgentAccount: Codable, Equatable, Identifiable, Sendable {
     var home: URL
     var cachedIdentity: AccountIdentity?
 
+    /// When the user removed this account, or nil while it is live.
+    ///
+    /// Removal is a soft delete because a hard one moves a running tab's identity. A tab keys
+    /// its status watcher and its codex stack on `resolvedAccountID`, which answers nil for an
+    /// id that no longer exists — so dropping the record mid-run strands those watchers under
+    /// a key nothing can match again, and the next lookup builds a SECOND codex app-server at
+    /// the nil key, tailing the built-in home's `session_index.jsonl` instead of this one's.
+    /// A tombstone still resolves by id, so the key never moves.
+    ///
+    /// Purged at launch (`Preferences.purgeRemovedAccounts`), where there are no live tabs
+    /// left to protect.
+    var removedAt: Date?
+
+    /// Reads better than `removedAt != nil` at the call sites that only ask the question.
+    var isRemoved: Bool { removedAt != nil }
+
     init(
         id: UUID = UUID(),
         agent: AgentID,
         displayName: String,
         home: URL,
-        cachedIdentity: AccountIdentity? = nil
+        cachedIdentity: AccountIdentity? = nil,
+        removedAt: Date? = nil
     ) {
         self.id = id
         self.agent = agent
         self.displayName = displayName
         self.home = home
         self.cachedIdentity = cachedIdentity
+        self.removedAt = removedAt
     }
 
     /// Computed, never stored. A stored flag would go stale the moment a relocate moved the

@@ -289,8 +289,13 @@ final class SessionStore: ObservableObject {
     /// Test seam. The restore path's codex work is asynchronous by necessity — it starts an
     /// app-server and asks it whether a thread still exists — but `restore` itself must stay
     /// synchronous for `SessionStore.init`. Exposing the task is what lets a test await that
-    /// work instead of polling for it.
+    /// work instead of polling for it. `reopenLastClosed` reuses it for the same reason.
     private(set) var codexRestoreTask: Task<Void, Never>?
+
+    /// What ⌘⇧T walks back through. Not `@Published` and never persisted: nothing renders it,
+    /// and a relaunch already restores the deck you left — a stack that survived one would
+    /// offer to reopen tabs from a run you have since replaced. See `ClosedSessionHistory`.
+    private var closedSessions = ClosedSessionHistory()
 
     /// Test seam. Drives the exact path a crashed `codex app-server` takes, which can
     /// otherwise only be produced by killing a real process the committed suite may not spawn.
@@ -437,11 +442,13 @@ final class SessionStore: ObservableObject {
     /// Whether this tab names a login that no longer exists.
     ///
     /// The restore-time twin of `launchAccount`'s `.accountMissing` branch, and it exists
-    /// because deleting an account does not rewrite the tabs that ran as it: `removeAccount`
-    /// clears every *project assignment* naming the id, but `Session.accountID` is history —
-    /// it records where this tab's conversation was actually written, and rewriting it would
-    /// be a lie. So a restored tab can name an id nothing resolves, and the only safe reading
-    /// of that is BROKEN. Relaunching it in the built-in home would resume a conversation
+    /// because removing an account does not rewrite the tabs that ran as it: `markAccountRemoved`
+    /// tombstones the record and clears every *project assignment* naming the id, but
+    /// `Session.accountID` is history — it records where this tab's conversation was actually
+    /// written, and rewriting it would be a lie. A tombstone still resolves by id, which is the
+    /// point of it, so a restored tab only names an id nothing resolves once that tombstone has
+    /// been purged at launch, or the id never existed at all — and the only safe reading of
+    /// that is BROKEN. Relaunching it in the built-in home would resume a conversation
     /// that lives in the deleted account's directory, find nothing there, and quietly start a
     /// fresh one — the silent wrong-login failure this whole feature exists to remove.
     ///
@@ -497,8 +504,17 @@ final class SessionStore: ObservableObject {
             }
             account = named
         } else {
+            // A tombstoned assignment counts as missing. This asked `account(id:) == nil`,
+            // which a tombstone answers non-nil — so the guard passed and the very next line
+            // called `account(for:project:)`, which answers nil for exactly that case. The
+            // `guard let account` below then read that nil as "no account to name", set no
+            // home variable, and launched the agent in its built-in home: the silent
+            // wrong-login substitution this whole method exists to refuse. Both readers of an
+            // assignment have to agree about a tombstone, and the answer that is safe is
+            // `.accountMissing`. (`markAccountRemoved` clears these assignments, so this is
+            // defence in depth, matching `account(for:project:)`'s own comment.)
             if let assigned = preferences.projectSettings(project).accounts[agent],
-               preferences.account(id: assigned) == nil {
+               preferences.account(id: assigned)?.isRemoved ?? true {
                 return .failure(.accountMissing(agent.displayName))
             }
             account = preferences.account(for: agent, project: project)
@@ -820,14 +836,26 @@ final class SessionStore: ObservableObject {
     /// See `flushPendingRename` for why an injection waits.
     private var pendingRenames: [UUID: String] = [:]
 
-    /// Sessions restored from a snapshot that recorded them working, each mapped to the
-    /// instant its prompt stops being worth sending. Drained by `flushPendingResumePrompts`
-    /// on the registry tick, because a resumed `claude` takes seconds to boot and there is
-    /// nothing to type into until it does.
+    /// Read-only view of the rename queue, so `AccountSignInTests` can assert that signing in
+    /// puts nothing in it. Sign-in used to queue `/login` *as a rename*, and the only way to
+    /// pin that regression is to look at this from outside.
+    var pendingRenamesForTesting: [UUID: String] { pendingRenames }
+
+    /// One queued injection per tab: what to type, and when it stops being worth typing.
     ///
-    /// Internal rather than private so the tests can observe the queue without scripting a
-    /// whole surface; nothing outside this type writes it.
-    private(set) var pendingResumePrompts: [UUID: Date] = [:]
+    /// Carries its text rather than assuming one, because two callers now share this queue —
+    /// `restore` queues "Keep going" for a resumed session, and `openSignInSession` queues an
+    /// agent's `LoginInvocation.inject` (`/login`). Before it carried text, sign-in had
+    /// nowhere correct to go and was routed through the *rename* channel instead, which typed
+    /// `/rename /login` at the tab.
+    struct DeferredPrompt: Equatable {
+        let text: String
+        let deadline: Date
+    }
+
+    /// Internal rather than private so tests can observe the queue without scripting a whole
+    /// surface; nothing outside this type writes it.
+    private(set) var pendingPrompts: [UUID: DeferredPrompt] = [:]
 
     /// Tabs with a `sendKillLine()` already out and a settle still pending. Guarding here,
     /// inside `inject` itself, rather than in each caller is load-bearing: `rename()` calls
@@ -1230,18 +1258,50 @@ final class SessionStore: ObservableObject {
     /// through it with an override: a login has no conversation to resume and no title to
     /// give codex, so the ordinary `--session-id … --name …` shape is wrong for it, and
     /// negotiating a codex thread before the account has even authenticated would be actively
-    /// harmful — `thread/start` is not what `codex login` is. `typing` is `LoginInvocation`'s
-    /// own `command` (`"claude"`, `"codex login"`), sent verbatim rather than built from
-    /// `AgentAdapter.launchCommand`.
+    /// harmful — `thread/start` is not what `codex login` is.
+    ///
+    /// `invocation` is the agent's own `LoginInvocation`: its `command` (`"claude"`,
+    /// `"codex login"`) is newline-terminated and typed at the shell, and its `inject`
+    /// (`/login`, or nil) is queued for the agent once it is up. The store owns both halves so
+    /// no caller has to know which agent it is holding.
     @discardableResult
-    func openSignInSession(for account: AgentAccount, in directory: String, typing: String) -> Session {
+    func openSignInSession(
+        for account: AgentAccount, in directory: String, using invocation: LoginInvocation
+    ) -> Session {
         let session = Session(
             title: nextSessionTitle(), workingDirectory: directory, agent: account.agent,
             accountID: account.id
         )
-        return addSession(
-            session, in: URL(fileURLWithPath: directory, isDirectory: true), initialInput: typing
+        let created = addSession(
+            session, in: URL(fileURLWithPath: directory, isDirectory: true),
+            initialInput: Self.terminated(invocation.command)
         )
+        // Queued rather than sent: `inject` needs an idle status and a readable one-row
+        // InputBar, and this tab is a bare shell that has not even started the agent yet. The
+        // registry scan retries it until the agent is up, or the deadline passes.
+        //
+        // Deliberately NOT routed through `ClaudeAdapter.injectRename`, which is what this
+        // used to do: that is the *rename* channel, and it typed `/rename /login` at the tab.
+        if let inject = invocation.inject {
+            pendingPrompts[created.id] = DeferredPrompt(
+                text: inject, deadline: now().addingTimeInterval(Self.resumePromptWindow)
+            )
+        }
+        return created
+    }
+
+    /// Terminates a command so the shell actually runs it.
+    ///
+    /// `initial_input` reaches the pty as typed characters and nothing downstream presses
+    /// Return — which is why every other producer ends its own string with a newline
+    /// (`ClaudeSession.launchCommand`, `resumeCommand`). `LoginInvocation` does not, and the
+    /// symptom was a sign-in tab sitting at a prompt with `claude` typed into it forever.
+    ///
+    /// Normalized here rather than in each adapter's `LoginInvocation` deliberately: an
+    /// adapter is asked *what to run*, and a future agent's author has no reason to know the
+    /// answer is fed to a pty rather than to `Process`. One consumer cannot forget.
+    static func terminated(_ command: String) -> String {
+        command.hasSuffix("\n") ? command : command + "\n"
     }
 
     /// The tail every creation shares: file the tab, reveal it, select it, save.
@@ -1709,7 +1769,9 @@ final class SessionStore: ObservableObject {
             if autoResume, !orphaned,
                let activity = entry.activity.flatMap(SessionActivity.init(rawValue:)),
                Self.resumableActivities.contains(activity) {
-                pendingResumePrompts[entry.id] = promptDeadline
+                pendingPrompts[entry.id] = DeferredPrompt(
+                    text: Self.resumePrompt, deadline: promptDeadline
+                )
             }
         }
 
@@ -1990,11 +2052,25 @@ final class SessionStore: ObservableObject {
         selectedSessionID = ordered[destination].id
     }
 
-    func closeSession(_ id: UUID) {
+    /// - Parameter recordingHistory: whether this close is offered to ⌘⇧T. Only
+    ///   `closeProject` passes false, because it records one grouped entry of its own rather
+    ///   than one per child — see `closeProject`.
+    func closeSession(_ id: UUID, recordingHistory: Bool = true) {
         guard let (repoIndex, sessionIndex) = locate(id) else { return }
         // Read before the removal below: codex teardown is per account, and once the row is
         // gone there is nothing left to ask which account this tab was running as.
         let closed = instance(for: repos[repoIndex].sessions[sessionIndex])
+        // Recorded before the removal, for the same reason and from the same row. The whole
+        // `Session` value goes in, not a copy of its fields: reopening reuses its `id` and
+        // `pinnedConversationID`, which is what makes the rebuilt tab resume this
+        // conversation rather than start a new one.
+        if recordingHistory {
+            closedSessions.record(.session(ClosedSessionHistory.ClosedSession(
+                session: repos[repoIndex].sessions[sessionIndex],
+                projectPath: repos[repoIndex].url.path,
+                indexInProject: sessionIndex
+            )))
+        }
         repos[repoIndex].sessions.remove(at: sessionIndex)
         emit(.sessionRemoved(id: id))
 
@@ -2254,12 +2330,168 @@ final class SessionStore: ObservableObject {
     /// teardown: that method is where surface release, watcher shutdown, status and
     /// subagent-count removal, anchor removal, and notification withdrawal all live, and a
     /// second copy of that list would rot.
+    /// ⌘⇧T. Brings back the most recently closed tab — or, if a whole project was closed, the
+    /// project and everything that was in it — and walks further back on each press until the
+    /// history runs out.
+    ///
+    /// A reopened tab is rebuilt exactly the way `restore` rebuilds a persisted one, through
+    /// `reinsertClosed`: same resume command, same missing-login refusal, same codex
+    /// deferral. The two are the same operation on different inputs, and anything that
+    /// diverges here is a bug in one of them.
+    ///
+    /// No-ops on an empty history, which is also what the menu item relies on: it stays
+    /// enabled in every state (a disabled `NSMenuItem` does not fire its key equivalent) and
+    /// guards here instead.
+    /// ⌘W. Closes the selected session, reporting whether there was one.
+    ///
+    /// The menu item binds here rather than to AppKit's `performClose:` because that route
+    /// only works while focus is inside the terminal. `TerminalHostView` implements
+    /// `performClose:` and sits below the terminal pane, so the responder chain reaches it
+    /// from a focused surface — but from a focused *sidebar* there is nothing between the
+    /// sidebar and the window, `NSWindow` implements `performClose:` itself, and the window
+    /// claims the key. In a single-window app whose window closing quits
+    /// (`applicationShouldTerminateAfterLastWindowClosed`), that turned ⌘W into ⌘Q.
+    ///
+    /// The `Bool` is what keeps the empty state honest: with no session there is nothing to
+    /// close, and the caller falls back to closing the window rather than swallowing the key.
+    @discardableResult
+    func closeSelectedSession() -> Bool {
+        guard let id = selectedSessionID else { return false }
+        closeSession(id)
+        return true
+    }
+    func reopenLastClosed(
+        directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) {
+        guard let entry = closedSessions.takeLast() else { return }
+
+        // Same collection-then-launch shape as `restore`: settling a codex thread is `async`
+        // and this is not.
+        var deferredCodexResumes: [UUID] = []
+
+        switch entry {
+        case .session(let closed):
+            if reinsertClosed(closed, directoryExists: directoryExists) {
+                deferredCodexResumes.append(closed.session.id)
+            }
+            // Matching `addSession` rather than `insertSession`: a tab reopened into a
+            // collapsed project would otherwise come back invisible, since `SidebarRow.rows`
+            // renders only the header for a collapsed repo. The `.project` case below
+            // deliberately does not do this — a project that was collapsed when it was closed
+            // is restored collapsed, because that is the state being undone.
+            let url = URL(fileURLWithPath: closed.projectPath, isDirectory: true)
+            if let target = indexOfRepo(for: url), repos[target].isCollapsed {
+                repos[target].isCollapsed = false
+                emit(.projectCollapsed(id: repos[target].id, isCollapsed: false))
+            }
+            selectedSessionID = closed.session.id
+
+        case .project(let closed):
+            let url = URL(fileURLWithPath: closed.path, isDirectory: true)
+            // Seeded at its recorded sidebar position before the sessions go in, so they land
+            // in it rather than making `insertSession` append a fresh repo at the end. Skipped
+            // when the project is already back — a session closed before the project was, then
+            // reopened first, recreates it.
+            if indexOfRepo(for: url) == nil {
+                let repo = Repo(url: url, isCollapsed: closed.isCollapsed)
+                // Clamped: sessions may have been closed or projects added since, so the
+                // recorded index can be past the end of a shorter sidebar.
+                let at = min(max(closed.indexInSidebar, 0), repos.count)
+                repos.insert(repo, at: at)
+                emit(.projectAdded(
+                    FleetProjection.project(repo, statuses: statuses, unread: unreadIdle), at: at
+                ))
+            }
+            for child in closed.sessions {
+                if reinsertClosed(child, directoryExists: directoryExists) {
+                    deferredCodexResumes.append(child.session.id)
+                }
+            }
+            // The top row of what just came back, which is where the eye goes. A project
+            // records no "active tab" of its own to return to.
+            if let first = closed.sessions.first { selectedSessionID = first.session.id }
+        }
+
+        persist()
+        // Reuses `restore`'s task handle rather than adding a second one: the two never run
+        // concurrently in production — `restore` happens once at launch, before any tab can
+        // be closed — and sharing it keeps one place to await a settling codex tab.
+        if !deferredCodexResumes.isEmpty {
+            codexRestoreTask = Task { [weak self] in
+                await self?.resumeRestoredCodex(deferredCodexResumes)
+            }
+        }
+    }
+
+    /// Rebuilds one recorded tab. Returns true when it is a codex tab whose resume text still
+    /// has to be settled against the app-server and typed afterwards.
+    ///
+    /// Every rule here is `restore`'s, and the doc comments there are the explanation:
+    /// a transcript directory that has since gone (a deleted worktree, usually) falls back to
+    /// the project directory so `--resume` runs where claude actually wrote; a tab whose login
+    /// has been deleted is rebuilt but never launched; and codex is typed at only after
+    /// `resumeRestoredCodex` has confirmed its thread still exists.
+    @discardableResult
+    private func reinsertClosed(
+        _ closed: ClosedSessionHistory.ClosedSession,
+        directoryExists: (String) -> Bool
+    ) -> Bool {
+        var session = closed.session
+        if !directoryExists(session.transcriptDirectory) {
+            session.transcriptDirectory = session.workingDirectory
+        }
+
+        let orphaned = accountIsMissing(for: session)
+        let deferred = session.agent == .codex
+        let initialInput: String
+        if orphaned || deferred {
+            initialInput = ""
+        } else {
+            // Built inside the else, as in `restore`, so an orphaned tab does not memoize an
+            // adapter — and a status watcher behind it — for the built-in account its
+            // dangling id would otherwise collapse to.
+            let adapter = adapter(for: instance(for: session))
+            initialInput = adapter.resumeCommand(
+                adapter.binding(for: session),
+                session,
+                // From the tab's *project*, not from wherever it was last writing, so a tab
+                // reopened inside a worktree still gets its project's overrides.
+                options(for: session.agent, project: session.workingDirectory)
+            )
+        }
+
+        insertSession(
+            session,
+            in: URL(fileURLWithPath: closed.projectPath, isDirectory: true),
+            initialInput: initialInput,
+            at: closed.indexInProject
+        )
+        return deferred && !orphaned
+    }
     func closeProject(_ id: Repo.ID) {
         guard let index = repos.firstIndex(where: { $0.id == id }) else { return }
+        // One history entry for the whole project, and the children below are closed with
+        // `recordingHistory: false` so they do not each push one as well. That is what makes
+        // a closed project cost a single ⌘⇧T rather than one per tab — the same way a browser
+        // reopens a closed window rather than making you undo its tabs one at a time.
+        //
+        // Recorded before the closes, from the live repo: `closeSession` rewrites `repos`,
+        // and by the end of the loop there is nothing left here to read.
+        let repo = repos[index]
+        closedSessions.record(.project(ClosedSessionHistory.ClosedProject(
+            path: repo.url.path,
+            isCollapsed: repo.isCollapsed,
+            indexInSidebar: index,
+            sessions: repo.sessions.enumerated().map { offset, session in
+                ClosedSessionHistory.ClosedSession(
+                    session: session, projectPath: repo.url.path, indexInProject: offset
+                )
+            }
+        )))
         // Snapshot the ids first: `closeSession` mutates `repos`, so iterating the live
         // array would walk off the end.
         for sessionID in repos[index].sessions.map(\.id) {
-            closeSession(sessionID)
+            closeSession(sessionID, recordingHistory: false)
         }
         // Re-found rather than reusing `index`: every `closeSession` above rewrote `repos`.
         repos.removeAll { $0.id == id }
@@ -2342,7 +2574,7 @@ final class SessionStore: ObservableObject {
 
     /// Test seams. Production drives both from `applyRegistry`; a test that only cares about
     /// the prompt queue should not have to fabricate registry rows.
-    func flushPendingResumePromptsForTesting() { flushPendingResumePrompts() }
+    func flushPendingResumePromptsForTesting() { flushPendingPrompts() }
     func cancelSupersededPromptsForTesting(_ transitions: [StatusTransition]) {
         cancelSupersededPrompts(transitions)
     }
@@ -2542,29 +2774,29 @@ final class SessionStore: ObservableObject {
         for id in pendingRenames.keys { flushPendingRename(id) }
     }
 
-    /// Types "Keep going" into every restored session that is finally ready for it.
+    /// Types every queued prompt that is finally ready for it.
     ///
-    /// Driven by the registry scan for the same reason the rename retry is: a resumed
-    /// `claude` needs seconds to boot, and until it registers there is nothing to type into.
-    /// A tab that is not ready stays queued and is tried again on the next tick.
-    private func flushPendingResumePrompts() {
+    /// Driven by the registry scan because a queued prompt usually waits on an agent that has
+    /// not finished booting — which is not a status change, so gating the retry on one would
+    /// strand it.
+    private func flushPendingPrompts() {
         let currentTime = now()
-        for (id, deadline) in pendingResumePrompts {
-            guard currentTime < deadline else {
+        for (id, prompt) in pendingPrompts {
+            guard currentTime < prompt.deadline else {
                 // Dropped unsent. See `resumePromptWindow`.
-                pendingResumePrompts.removeValue(forKey: id)
+                pendingPrompts.removeValue(forKey: id)
                 continue
             }
             // A rename is a direct user action and wants the same input box. It will clear
             // itself within a tick or two, and this is queued anyway.
             guard pendingRenames[id] == nil else { continue }
             inject(
-                Self.resumePrompt,
+                prompt.text,
                 into: id,
                 // Cancelled during the settle window — the session started working on its
                 // own, or the deadline passed on another path.
-                stillWanted: { [weak self] in self?.pendingResumePrompts[id] != nil },
-                onSent: { [weak self] in self?.pendingResumePrompts.removeValue(forKey: id) }
+                stillWanted: { [weak self] in self?.pendingPrompts[id] != nil },
+                onSent: { [weak self] in self?.pendingPrompts.removeValue(forKey: id) }
             )
         }
     }
@@ -2577,11 +2809,11 @@ final class SessionStore: ObservableObject {
     /// `busy` while booting loses its prompt, which is a silent no-op rather than a stray
     /// message typed into someone's work.
     private func cancelSupersededPrompts(_ transitions: [StatusTransition]) {
-        guard !pendingResumePrompts.isEmpty else { return }
+        guard !pendingPrompts.isEmpty else { return }
         for transition in transitions {
             switch transition.new?.activity {
             case .busy, .waiting:
-                pendingResumePrompts.removeValue(forKey: transition.id)
+                pendingPrompts.removeValue(forKey: transition.id)
             case .idle, .shell, nil:
                 continue
             }
@@ -2722,7 +2954,7 @@ final class SessionStore: ObservableObject {
             // Same reason as the line above: this is the retry tick, and a prompt usually
             // waits on a `claude` that has not finished booting — which is not a status
             // change, so gating the retry on one would strand it.
-            flushPendingResumePrompts()
+            flushPendingPrompts()
         }
 
         // Resolve against a snapshot of the list before touching anything. Later tasks

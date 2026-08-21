@@ -44,7 +44,16 @@ struct AccountDraft: Equatable {
             case .locationEmpty:
                 return "Enter a location for this account's files."
             case .homeAlreadyUsed:
-                return "Another account already uses this location."
+                // Deliberately not "another account already uses this location": the occupant
+                // may be an account the user removed a moment ago, and telling them something
+                // they can no longer see is using it reads as a lie. A removed account holds
+                // its location until the next launch because its tombstone still keys the
+                // tabs running as it — see `PreferencesStore.homeIsTaken`.
+                return """
+                    This location is already in use by another account, or by one that was \
+                    removed — a removed account keeps its location until Flight Deck next \
+                    starts.
+                    """
             case .notAnAgentHome:
                 return """
                     That folder already holds files, and they are not a \(agent.displayName) \
@@ -78,10 +87,12 @@ struct AccountDraft: Equatable {
     /// Three refusals, in the order that names the most specific problem first:
     ///
     /// 1. An empty Location. Taken from the text, because the URL cannot say — see `homePath`.
-    /// 2. A home another account already occupies. Two accounts on one home would put two
-    ///    `CodexStack`s on one `session_index.jsonl`. `editing` is the account already sitting
-    ///    there, if any — nil for the Add sheet, the account's own id for Relocate, so
-    ///    relocating a home back onto itself is not mistaken for a collision.
+    /// 2. A home another account already occupies, a removed one included. Two accounts on one
+    ///    home would put two `CodexStack`s on one `session_index.jsonl` — and a tombstone is
+    ///    still an occupant, because it keys the tabs still running as it (see
+    ///    `PreferencesStore.homeIsTaken`). `editing` is the account already sitting there, if
+    ///    any — nil for the Add sheet, the account's own id for Relocate, so relocating a home
+    ///    back onto itself is not mistaken for a collision.
     /// 3. A path that is neither one of this agent's homes nor vacant. Nothing else checked
     ///    plausibility, so any typed path was accepted and filed — and "Also Delete Files…"
     ///    would later offer to move that tree to the Trash. Both halves of the rule are needed:

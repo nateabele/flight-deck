@@ -16,18 +16,27 @@ import Foundation
 /// `~/.claude`, or a migration run against a root that is not `$HOME`.
 ///
 /// It never means "the built-in account", and the invariant holds in every one of those states
-/// for one reason: **with no isBuiltIn account registered there is no id-keyed instance for
-/// that home either, so a nil key and an id key can never name the same home.** Register one
-/// and every tab that stores no account resolves to its id instead, so the nil key stops being
-/// produced at all. That is the invariant this type exists to keep — two keys on `~/.codex`
-/// would put two `codex app-server`s on one `session_index.jsonl`, and each would only see
-/// half the renames.
+/// for one reason: **`resolvedAccountID` answers nil only while preferences hold no isBuiltIn
+/// record for the agent at all — and then there is no id-keyed instance for that home either,
+/// so a nil key and an id key can never name the same home.** Register one and every tab that
+/// stores no account resolves to its id instead, so the nil key stops being produced at all.
+/// That is the invariant this type exists to keep — two keys on `~/.codex` would put two
+/// `codex app-server`s on one `session_index.jsonl`, and each would only see half the renames.
+///
+/// "Hold no record" is the whole test, deliberately: a *tombstoned* built-in account still
+/// counts. Removal used to be refused for the built-in row, which is what used to make
+/// "registered" and "live" the same question; `AccountsSection.canRemove` dropped that refusal,
+/// so the two came apart. `resolvedAccountID` therefore filters tombstones on NEITHER branch —
+/// filtering the nil branch would move a legacy tab's key from `builtIn.id` to nil the instant
+/// the user removed that account, while both keys still name `~/.claude`, which is precisely
+/// the two-keys-one-home state above. Lists and defaults filter; identity resolution does not.
 ///
 /// One further state is deliberately **not** a nil key, even though `resolvedAccountID`
-/// currently reports nil for it: a `Session.accountID` naming an account the user has since
-/// deleted. That session is broken, not homeless: running it under the built-in home would
-/// silently sign the tab in as somebody else. It is refused before an instance is ever asked for; see
-/// the accounts plan's gating task.
+/// currently reports nil for it: a `Session.accountID` naming an account that is genuinely
+/// gone — tombstoned and then purged at a later launch, or an id that never existed. That
+/// session is broken, not homeless: running it under the built-in home would silently sign the
+/// tab in as somebody else. It is refused before an instance is ever asked for; see the
+/// accounts plan's gating task.
 struct AgentInstance: Hashable, Sendable {
     let agent: AgentID
     let account: UUID?

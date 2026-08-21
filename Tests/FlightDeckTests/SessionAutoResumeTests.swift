@@ -66,8 +66,8 @@ final class SessionAutoResumeTests: XCTestCase {
 
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
 
-        XCTAssertNotNil(store.pendingResumePrompts[ids[0]])
-        XCTAssertNotNil(store.pendingResumePrompts[ids[1]])
+        XCTAssertNotNil(store.pendingPrompts[ids[0]])
+        XCTAssertNotNil(store.pendingPrompts[ids[1]])
     }
 
     /// `waiting` is excluded deliberately: whatever the session was blocked on does not
@@ -78,7 +78,7 @@ final class SessionAutoResumeTests: XCTestCase {
 
         store.restore(directoryExists: allDirsExist)
 
-        for id in ids { XCTAssertNil(store.pendingResumePrompts[id]) }
+        for id in ids { XCTAssertNil(store.pendingPrompts[id]) }
     }
 
     func testNothingIsPendingWhenThePreferenceIsOff() {
@@ -87,7 +87,7 @@ final class SessionAutoResumeTests: XCTestCase {
 
         store.restore(directoryExists: allDirsExist)
 
-        for id in ids { XCTAssertNil(store.pendingResumePrompts[id]) }
+        for id in ids { XCTAssertNil(store.pendingPrompts[id]) }
     }
 
     func testASessionWhoseDirectoryIsGoneIsNotPending() {
@@ -96,7 +96,7 @@ final class SessionAutoResumeTests: XCTestCase {
 
         store.restore(directoryExists: { _ in false })
 
-        XCTAssertNil(store.pendingResumePrompts[ids[0]])
+        XCTAssertNil(store.pendingPrompts[ids[0]])
     }
 
     func testTheDeadlineIsOneWindowFromRestore() {
@@ -108,7 +108,7 @@ final class SessionAutoResumeTests: XCTestCase {
         store.restore(directoryExists: allDirsExist)
 
         XCTAssertEqual(
-            store.pendingResumePrompts[ids[0]],
+            store.pendingPrompts[ids[0]]?.deadline,
             start.addingTimeInterval(SessionStore.resumePromptWindow)
         )
     }
@@ -130,8 +130,9 @@ final class SessionAutoResumeTests: XCTestCase {
         store.restore(directoryExists: allDirsExist)
 
         let expected = start.addingTimeInterval(SessionStore.resumePromptWindow)
-        XCTAssertEqual(store.pendingResumePrompts[ids[0]], expected)
-        XCTAssertEqual(store.pendingResumePrompts[ids[1]], expected)
+        XCTAssertEqual(store.pendingPrompts[ids[0]]?.deadline, expected)
+        XCTAssertEqual(store.pendingPrompts[ids[1]]?.deadline, expected)
+        XCTAssertEqual(store.pendingPrompts[ids[0]]?.text, SessionStore.resumePrompt)
     }
 
     // MARK: Delivery
@@ -158,7 +159,7 @@ final class SessionAutoResumeTests: XCTestCase {
 
         XCTAssertEqual(spy.sent, ["Keep going"])
         XCTAssertEqual(spy.events.last, .ret, "Return must arrive after the paste closes")
-        XCTAssertNil(store.pendingResumePrompts[id], "one-shot")
+        XCTAssertNil(store.pendingPrompts[id], "one-shot")
     }
 
     func testNothingIsSentWhileTheSessionIsStillBooting() {
@@ -168,7 +169,7 @@ final class SessionAutoResumeTests: XCTestCase {
         store.flushPendingResumePromptsForTesting()
 
         XCTAssertTrue(spy.sent.isEmpty)
-        XCTAssertNotNil(store.pendingResumePrompts[id], "still pending, not dropped")
+        XCTAssertNotNil(store.pendingPrompts[id], "still pending, not dropped")
     }
 
     func testThePromptIsSentOnlyOnce() {
@@ -192,7 +193,7 @@ final class SessionAutoResumeTests: XCTestCase {
         store.flushPendingResumePromptsForTesting()
 
         XCTAssertTrue(spy.sent.isEmpty)
-        XCTAssertNil(store.pendingResumePrompts[id])
+        XCTAssertNil(store.pendingPrompts[id])
     }
 
     func testReachingWaitingBeforeTheFlushCancelsThePrompt() {
@@ -205,7 +206,7 @@ final class SessionAutoResumeTests: XCTestCase {
         store.flushPendingResumePromptsForTesting()
 
         XCTAssertTrue(spy.sent.isEmpty)
-        XCTAssertNil(store.pendingResumePrompts[id])
+        XCTAssertNil(store.pendingPrompts[id])
     }
 
     /// The staleness guard: a prompt that never met its gates must not fire an hour later
@@ -225,7 +226,7 @@ final class SessionAutoResumeTests: XCTestCase {
         store.flushPendingResumePromptsForTesting()
 
         XCTAssertTrue(spy.sent.isEmpty)
-        XCTAssertNil(store.pendingResumePrompts[ids[0]])
+        XCTAssertNil(store.pendingPrompts[ids[0]])
     }
 
     /// Both want the same input box, and a rename is a direct user action.
@@ -250,7 +251,7 @@ final class SessionAutoResumeTests: XCTestCase {
         XCTAssertEqual(
             spy.sent, ["/rename renamed"], "a second injection must not be allowed to start"
         )
-        XCTAssertNotNil(store.pendingResumePrompts[id], "deferred, not dropped")
+        XCTAssertNotNil(store.pendingPrompts[id], "deferred, not dropped")
     }
 
     /// The other direction from the precedence test above: the prompt starts first and
