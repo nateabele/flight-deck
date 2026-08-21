@@ -825,14 +825,19 @@ final class SessionStore: ObservableObject {
     /// See `flushPendingRename` for why an injection waits.
     private var pendingRenames: [UUID: String] = [:]
 
-    /// Sessions restored from a snapshot that recorded them working, each mapped to the
-    /// instant its prompt stops being worth sending. Drained by `flushPendingResumePrompts`
-    /// on the registry tick, because a resumed `claude` takes seconds to boot and there is
-    /// nothing to type into until it does.
+    /// One queued injection per tab: what to type, and when it stops being worth typing.
     ///
-    /// Internal rather than private so the tests can observe the queue without scripting a
-    /// whole surface; nothing outside this type writes it.
-    private(set) var pendingResumePrompts: [UUID: Date] = [:]
+    /// Carries its text rather than assuming one, because two callers now share this queue —
+    /// `restore` queues "Keep going" for a resumed session, and `openSignInSession` queues an
+    /// agent's `LoginInvocation.inject` (`/login`). Before it carried text, sign-in had
+    /// nowhere correct to go and was routed through the *rename* channel instead, which typed
+    /// `/rename /login` at the tab.
+    struct DeferredPrompt: Equatable {
+        let text: String
+        let deadline: Date
+    }
+
+    private(set) var pendingPrompts: [UUID: DeferredPrompt] = [:]
 
     /// Tabs with a `sendKillLine()` already out and a settle still pending. Guarding here,
     /// inside `inject` itself, rather than in each caller is load-bearing: `rename()` calls
@@ -1729,7 +1734,9 @@ final class SessionStore: ObservableObject {
             if autoResume, !orphaned,
                let activity = entry.activity.flatMap(SessionActivity.init(rawValue:)),
                Self.resumableActivities.contains(activity) {
-                pendingResumePrompts[entry.id] = promptDeadline
+                pendingPrompts[entry.id] = DeferredPrompt(
+                    text: Self.resumePrompt, deadline: promptDeadline
+                )
             }
         }
 
@@ -2532,7 +2539,7 @@ final class SessionStore: ObservableObject {
 
     /// Test seams. Production drives both from `applyRegistry`; a test that only cares about
     /// the prompt queue should not have to fabricate registry rows.
-    func flushPendingResumePromptsForTesting() { flushPendingResumePrompts() }
+    func flushPendingResumePromptsForTesting() { flushPendingPrompts() }
     func cancelSupersededPromptsForTesting(_ transitions: [StatusTransition]) {
         cancelSupersededPrompts(transitions)
     }
@@ -2732,29 +2739,29 @@ final class SessionStore: ObservableObject {
         for id in pendingRenames.keys { flushPendingRename(id) }
     }
 
-    /// Types "Keep going" into every restored session that is finally ready for it.
+    /// Types every queued prompt that is finally ready for it.
     ///
-    /// Driven by the registry scan for the same reason the rename retry is: a resumed
-    /// `claude` needs seconds to boot, and until it registers there is nothing to type into.
-    /// A tab that is not ready stays queued and is tried again on the next tick.
-    private func flushPendingResumePrompts() {
+    /// Driven by the registry scan because a queued prompt usually waits on an agent that has
+    /// not finished booting — which is not a status change, so gating the retry on one would
+    /// strand it.
+    private func flushPendingPrompts() {
         let currentTime = now()
-        for (id, deadline) in pendingResumePrompts {
-            guard currentTime < deadline else {
+        for (id, prompt) in pendingPrompts {
+            guard currentTime < prompt.deadline else {
                 // Dropped unsent. See `resumePromptWindow`.
-                pendingResumePrompts.removeValue(forKey: id)
+                pendingPrompts.removeValue(forKey: id)
                 continue
             }
             // A rename is a direct user action and wants the same input box. It will clear
             // itself within a tick or two, and this is queued anyway.
             guard pendingRenames[id] == nil else { continue }
             inject(
-                Self.resumePrompt,
+                prompt.text,
                 into: id,
                 // Cancelled during the settle window — the session started working on its
                 // own, or the deadline passed on another path.
-                stillWanted: { [weak self] in self?.pendingResumePrompts[id] != nil },
-                onSent: { [weak self] in self?.pendingResumePrompts.removeValue(forKey: id) }
+                stillWanted: { [weak self] in self?.pendingPrompts[id] != nil },
+                onSent: { [weak self] in self?.pendingPrompts.removeValue(forKey: id) }
             )
         }
     }
@@ -2767,11 +2774,11 @@ final class SessionStore: ObservableObject {
     /// `busy` while booting loses its prompt, which is a silent no-op rather than a stray
     /// message typed into someone's work.
     private func cancelSupersededPrompts(_ transitions: [StatusTransition]) {
-        guard !pendingResumePrompts.isEmpty else { return }
+        guard !pendingPrompts.isEmpty else { return }
         for transition in transitions {
             switch transition.new?.activity {
             case .busy, .waiting:
-                pendingResumePrompts.removeValue(forKey: transition.id)
+                pendingPrompts.removeValue(forKey: transition.id)
             case .idle, .shell, nil:
                 continue
             }
@@ -2912,7 +2919,7 @@ final class SessionStore: ObservableObject {
             // Same reason as the line above: this is the retry tick, and a prompt usually
             // waits on a `claude` that has not finished booting — which is not a status
             // change, so gating the retry on one would strand it.
-            flushPendingResumePrompts()
+            flushPendingPrompts()
         }
 
         // Resolve against a snapshot of the list before touching anything. Later tasks
