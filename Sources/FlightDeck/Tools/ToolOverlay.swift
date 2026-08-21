@@ -3,7 +3,9 @@ import SwiftUI
 /// Translucent tool buttons floating over the terminal's top-right corner.
 ///
 /// Chrome matches `TerminalSearchBar` deliberately: the two stack in the same corner, and two
-/// different treatments there would read as two unrelated pieces of UI.
+/// different treatments there would read as two unrelated pieces of UI. That shared treatment
+/// now lives in `FloatingChrome` rather than being hard-coded identically in both places, so
+/// it cannot drift — it is Liquid Glass where the system has it, the previous material below.
 struct ToolOverlay: View {
     @ObservedObject var store: SessionStore
     @ObservedObject var preferences: PreferencesStore
@@ -22,12 +24,40 @@ struct ToolOverlay: View {
 
     private var hasSelection: Bool { store.selectedSessionID != nil }
 
+    /// Watches ⌘ so the sprocket can appear mid-chord, the same mechanism the sidebar's
+    /// New Session button uses to relabel itself. Local monitor, so it costs nothing while
+    /// another app is frontmost and needs no accessibility permission.
+    @StateObject private var modifiers = ModifierWatcher()
+
+    private var commandHeld: Bool { modifiers.flags.contains(.command) }
+
     var body: some View {
         Group {
             if visibleTools.isEmpty {
                 EmptyView()
             } else {
                 HStack(spacing: 6) {
+                    // Revealed while ⌘ is held. Leading edge, and the tool buttons do NOT
+                    // shift under the pointer when it appears: the bar is pinned to the
+                    // terminal's top-RIGHT corner, so growing by one button extends it
+                    // leftward and every existing icon keeps its screen position.
+                    //
+                    // Not `.disabled(!hasSelection)` like the tools are: a tool with no
+                    // working directory cannot run, but configuring tools is exactly what you
+                    // want to reach when nothing is set up yet — matching
+                    // `ToolsMenuController.validateMenuItem`, which only gates `runTool`.
+                    if commandHeld {
+                        Button {
+                            ToolsPreferencesOpener.open(preferences)
+                        } label: {
+                            Image(systemName: "gearshape")
+                                .frame(width: 22, height: 22)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Configure Tools…")
+                        .accessibilityIdentifier("tool-button-configure")
+                        .transition(.opacity)
+                    }
                     ForEach(visibleTools) { tool in
                         Button {
                             ToolRunner.run(tool, store: store, launcher: launcher)
@@ -41,11 +71,13 @@ struct ToolOverlay: View {
                         .accessibilityIdentifier("tool-button-\(tool.name)")
                     }
                 }
+                // Quick, because it tracks a key being held rather than a deliberate reveal.
+                .animation(.easeOut(duration: 0.12), value: commandHeld)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
-                .shadow(radius: 4, y: 2)
+                // Shared with `TerminalSearchBar`: Liquid Glass on macOS 26+, the previous
+                // material/border/shadow below it. See `FloatingChrome`.
+                .floatingChrome()
                 .padding(8)
                 .opacity(model.isVisible ? 1 : 0)
                 // Asymmetric on purpose: appearing has to feel immediate when you reach for
@@ -64,8 +96,12 @@ struct ToolOverlay: View {
             monitor.onMouseMovedOverTerminal = { model.mouseMoved() }
             monitor.onKeyPressed = { model.keyPressed() }
             monitor.start()
+            modifiers.start()
         }
-        .onDisappear { monitor.stop() }
+        .onDisappear {
+            monitor.stop()
+            modifiers.stop()
+        }
     }
 
     private func helpText(for tool: ToolDefinition) -> String {

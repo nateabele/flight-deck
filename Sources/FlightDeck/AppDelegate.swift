@@ -82,24 +82,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let store else { return }
             ToolRunner.run(tool, store: store, launcher: ShellToolLauncher.configured(preferences))
         }
+        // Shared with the overlay's ⌘-revealed sprocket — see `ToolsPreferencesOpener`, which
+        // owns the pane-before-open sequencing this used to spell out inline.
         toolsMenu.openPreferences = { [weak preferences] in
-            // Choose the pane BEFORE the window opens: on a first open the view is built from
-            // this value, and on a later one the published change moves the live selection.
-            // Setting it afterwards would flash the previous pane.
-            preferences?.selectedTab = .tools
-
-            // Drive SwiftUI's own Settings item rather than guessing a selector. See
-            // `SettingsMenuItem`: `showSettingsWindow:` returns true on this macOS and opens
-            // nothing, so a fallback guarded on its return value can never fire.
-            if let appMenu = NSApp.mainMenu?.items.first?.submenu,
-               let item = SettingsMenuItem.locate(in: appMenu),
-               let action = item.action {
-                NSApp.sendAction(action, to: item.target, from: item)
-                return
-            }
-            // Only reached if SwiftUI's item is missing entirely — a shape this app has never
-            // been observed in, but a wrong-looking window beats a dead menu item.
-            _ = NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            ToolsPreferencesOpener.open(preferences)
         }
         toolsMenu.tools = preferences.tools
 
