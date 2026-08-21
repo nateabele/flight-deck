@@ -17,6 +17,16 @@ struct FleetListScreen: View {
                 if model.fleet.projects.isEmpty && isConnected {
                     emptyState
                 }
+                // Which Mac these came from — present, but subordinate to the sessions
+                // themselves. `navigationSubtitle` would be the natural home and is iOS 26+;
+                // the deployment target is 17.
+                if let mac = model.mac {
+                    Text(mac.macName)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
                 ForEach(model.fleet.projects) { project in
                     Section {
                         // Keyed on the session's tab id, never its conversation id — the
@@ -46,9 +56,20 @@ struct FleetListScreen: View {
             .font(.system(.body, design: .monospaced))
             .opacity(isStale ? 0.5 : 1)
             .refreshable { model.reconnect() }
-            .navigationTitle(model.macName)
+            // "Sessions" is what this screen shows; the Mac's name is which Mac they came
+            // from. Titling the screen with the Mac put the least variable thing on screen in
+            // the largest type — there is only ever one paired Mac — while the sessions it
+            // exists to show sat below in footnote grey.
+            .navigationTitle("Sessions")
             .toolbar {
-                Button("Unpair", role: .destructive) { confirmingUnpair = true }
+                // Behind a menu rather than sitting in the toolbar as a bare destructive
+                // button. Unpairing is rare and irreversible without the Mac in hand; it does
+                // not earn the one always-visible action slot on the screen.
+                Menu {
+                    Button("Unpair…", role: .destructive) { confirmingUnpair = true }
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
+                }
             }
             .confirmationDialog(
                 "Unpair from \(model.macName)? This phone will stop receiving your sessions.",
@@ -69,16 +90,6 @@ struct FleetListScreen: View {
                 }
             }
             Spacer()
-            if session.isUnread {
-                Circle().fill(.tint).frame(width: 8, height: 8)
-                    // Silent when the glyph already carries the unread meaning. The Mac folds
-                    // the two together for an idle session — `SessionStatus.tooltip(unread:)`
-                    // returns "Finished — not yet viewed" rather than "Idle" — so announcing
-                    // "Unread" as well would read the same fact twice. For every other
-                    // activity there is no such override, and this dot is the ONLY channel
-                    // VoiceOver has for unread-ness, so it keeps its label there.
-                    .accessibilityLabel(session.activity == "idle" ? "" : "Unread")
-            }
         }
     }
 
