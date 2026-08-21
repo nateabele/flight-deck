@@ -10,6 +10,14 @@ public struct FleetAttachment: Equatable, Sendable {
     /// could not be read back — the connection is still authenticated (it could not have
     /// completed a handshake otherwise), it just cannot be attributed to a named device.
     public let slot: UUID?
+    /// What the client called itself in its `hello`. `nil` means it claimed nothing.
+    ///
+    /// Not the same kind of fact as `slot`, and the difference matters to anyone reading a
+    /// consumer of this type: `slot` is *authenticated* — it comes out of the TLS-PSK
+    /// handshake, so it is what this peer provably is. `name` is merely *claimed* — the
+    /// client typed it onto the wire, and nothing checks it. Display it, never authorize on
+    /// it.
+    public let name: String?
 }
 
 /// The listener, and one attached-client registry. Knows nothing about what a fleet is —
@@ -87,6 +95,10 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// because the identity log is a handshake-time record that is consumed on read — see
     /// `slot(of:id:)`.
     private var slots: [UUID: UUID] = [:]
+    /// The name each connection claimed in its `hello`, by connection id. Kept for the life
+    /// of the connection so a later `cmd` on the same socket is attributed exactly as its
+    /// `hello` was — a client says who it is once, not on every frame.
+    private var names: [UUID: String] = [:]
     /// What each peer's handshake said it was. Written by the PSK selection block that
     /// `FleetTLS.listenerParameters(keys:identities:)` installs, on this same `queue`.
     private let identities: FleetPSKIdentities
@@ -399,9 +411,14 @@ public final class FleetSocketServer: @unchecked Sendable {
             // concurrent or background queue would turn those into silent races rather than a
             // compile error. Fail on the first connection instead.
             dispatchPrecondition(condition: .onQueue(self.queue))
-            let attachment = FleetAttachment(id: id, slot: self.slot(of: connection, id: id))
+            // Recorded before the attachment is built, so the `hello` that carries the claim
+            // is itself attributed with it rather than only the frames after it.
+            if case .hello(_, let device) = frame, let device { self.names[id] = device }
+            let attachment = FleetAttachment(
+                id: id, slot: self.slot(of: connection, id: id), name: self.names[id]
+            )
             switch frame {
-            case .hello(let lastSeq):
+            case .hello(let lastSeq, _):
                 if self.attached[id] == nil {
                     self.pending.removeValue(forKey: id)
                     self.attached[id] = connection
@@ -430,6 +447,7 @@ public final class FleetSocketServer: @unchecked Sendable {
             // Before the `attached` check, not after: a connection that never said `hello` is
             // not in `attached` and returns below, but it can still have had its slot resolved.
             self.slots.removeValue(forKey: id)
+            self.names.removeValue(forKey: id)
             guard self.attached.removeValue(forKey: id) != nil else { return }
             self.onAttachedSlotsChanged?(self.attachedSlots())
         }

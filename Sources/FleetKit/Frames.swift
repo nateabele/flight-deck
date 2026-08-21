@@ -53,19 +53,27 @@ public enum FleetCommand: Codable, Equatable, Sendable {
 public enum ClientFrame: Codable, Equatable, Sendable {
     /// The first frame on every socket. TLS-PSK has already established *who* this is, so
     /// this is a resume point rather than a credential. `0` means "I have nothing".
-    case hello(lastSeq: Int)
+    ///
+    /// `device` is what the client *calls itself* — the Mac has no other way to learn it, so
+    /// without this a paired phone can only ever be listed under a placeholder. It is a
+    /// claim, not a credential: identity is the slot the handshake proved, and a client is
+    /// free to send nothing at all, which is what `nil` means.
+    case hello(lastSeq: Int, device: String?)
     case cmd(cid: Int, FleetCommand)
 
-    enum CodingKeys: String, CodingKey { case t, lastSeq, cid }
+    enum CodingKeys: String, CodingKey { case t, lastSeq, device, cid }
 
     private enum Tag: String, Codable { case hello, cmd }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .hello(let lastSeq):
+        case .hello(let lastSeq, let device):
             try c.encode(Tag.hello, forKey: .t)
             try c.encode(lastSeq, forKey: .lastSeq)
+            // `encodeIfPresent`, so a client with no name to claim emits the same two-key
+            // frame it always did rather than an explicit `"device":null`.
+            try c.encodeIfPresent(device, forKey: .device)
         case .cmd(let cid, let command):
             try c.encode(Tag.cmd, forKey: .t)
             try c.encode(cid, forKey: .cid)
@@ -80,7 +88,11 @@ public enum ClientFrame: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(Tag.self, forKey: .t) {
         case .hello:
-            self = .hello(lastSeq: try c.decode(Int.self, forKey: .lastSeq))
+            // `decodeIfPresent`, not `decode`: a phone built before `device` existed sends a
+            // `hello` without it, and that frame must still attach rather than throw — the
+            // Mac would otherwise stop talking to every already-paired device on upgrade.
+            self = .hello(lastSeq: try c.decode(Int.self, forKey: .lastSeq),
+                          device: try c.decodeIfPresent(String.self, forKey: .device))
         case .cmd:
             self = .cmd(cid: try c.decode(Int.self, forKey: .cid),
                         try FleetCommand(from: decoder))

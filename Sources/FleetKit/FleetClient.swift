@@ -16,6 +16,11 @@ public final class FleetClient: @unchecked Sendable {
     public var onDisconnect: ((Error?) -> Void)?
 
     private let key: FleetDeviceKey
+    /// What this client calls itself in `hello`, so the Mac can list it as something other
+    /// than a placeholder. Injected rather than read here: FleetKit imports Foundation,
+    /// Network and Security only — `UIDevice` is not reachable from this module, and the
+    /// `FleetKitiOS` target exists to keep it that way.
+    private let deviceName: String?
     private let queue: DispatchQueue
     private var connection: NWConnection?
     private var nextCID = 1
@@ -36,8 +41,12 @@ public final class FleetClient: @unchecked Sendable {
     /// the thing we just chose to stop talking to.
     private var hasEnded = false
 
-    public init(key: FleetDeviceKey, queue: DispatchQueue = .main) {
+    /// `deviceName` defaults to `nil` — "claims nothing" — because that is a real wire state
+    /// the server has to handle anyway (every phone built before `hello` carried a name is
+    /// in it), not a convenience for callers.
+    public init(key: FleetDeviceKey, deviceName: String? = nil, queue: DispatchQueue = .main) {
         self.key = key
+        self.deviceName = deviceName
         self.queue = queue
     }
 
@@ -57,7 +66,10 @@ public final class FleetClient: @unchecked Sendable {
             case .ready:
                 // `hello` goes out the instant the socket is usable. TLS-PSK has already
                 // established who we are, so this is a resume point, not a credential.
-                FleetSocket.send(ClientFrame.hello(lastSeq: lastSeq), over: connection)
+                FleetSocket.send(
+                    ClientFrame.hello(lastSeq: lastSeq, device: self.deviceName),
+                    over: connection
+                )
                 self.onReady?()
             case .failed(let error):
                 self.end(error)

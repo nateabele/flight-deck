@@ -53,6 +53,10 @@ public final class FleetConnector: @unchecked Sendable {
 
     private var mac: PairedMac
     private let store: any PairedMacStoring
+    /// Handed to every client this connector dials, so whichever candidate wins the race
+    /// tells the Mac what this device calls itself. Injected for the reason `FleetClient`'s
+    /// own property documents: `UIDevice` is not reachable from FleetKit.
+    private let deviceName: String?
     private let browse: Bool
     private let queue: DispatchQueue
 
@@ -77,11 +81,12 @@ public final class FleetConnector: @unchecked Sendable {
     }
 
     public init(
-        mac: PairedMac, store: any PairedMacStoring,
+        mac: PairedMac, store: any PairedMacStoring, deviceName: String? = nil,
         browse: Bool = true, queue: DispatchQueue = .main
     ) {
         self.mac = mac
         self.store = store
+        self.deviceName = deviceName
         self.browse = browse
         self.queue = queue
     }
@@ -159,7 +164,7 @@ public final class FleetConnector: @unchecked Sendable {
 
     private func dial(_ candidate: Candidate) {
         guard running, winner == nil, racers[candidate.description] == nil else { return }
-        let client = FleetClient(key: mac.key, queue: queue)
+        let client = FleetClient(key: mac.key, deviceName: deviceName, queue: queue)
         racers[candidate.description] = client
         client.onFrame = { [weak self] frame in
             self?.accept(frame, from: candidate, client: client)
