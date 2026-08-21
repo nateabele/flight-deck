@@ -714,3 +714,21 @@ the account a session runs as. Three things this deliberately did not build:
   `applyRegistry(_:)` that `applyRegistryForTesting` does, which *is* covered, so the emission
   itself is pinned; what is not pinned is the merge deciding *which* rows reach it. A seam for
   the per-account entry point would close that.
+
+## Pairing crypto foundation (2026-08-21)
+
+- **`SPAKE2SessionTests` has no BoringSSL-sourced fixed test vector, and cannot get one from
+  the vendored source.** `vendor/boringssl/crypto/curve25519/spake25519_test.cc` line 29 says
+  outright: "TODO(agl): add tests with fixed vectors once SPAKE2 is nailed down" — that TODO
+  is still open upstream, so there is no documented input/output pair to assert against, and
+  every test in that file (including the canonical round trip, `TEST(SPAKE25519Test, SPAKE2)`
+  at line 109) is a randomized round trip for the same reason. Separately, even if BoringSSL
+  had one, `SPAKE2_generate_msg` draws its own ephemeral scalar and the public API gives no
+  way to fix it from outside, so a vector that pinned the ephemeral values would not be
+  drivable through `SPAKE2Session` regardless. `SPAKE2SessionTests
+  .testASecondIndependentSessionPairAlsoInteroperates` is the fallback: BoringSSL's own
+  default fixed names ("alice"/"bob") through a second, independently constructed session
+  pair. It proves the wrapper is consistent with itself, not with the specification — an
+  implementation deterministically wrong in the same way on both sides would still pass it.
+  Revisit if BoringSSL ever lands fixed vectors, or if another implementation (e.g. a
+  spec-reference SPAKE2 in a different library) becomes available to cross-check against.

@@ -44,10 +44,16 @@ targets:
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: Flight Deck uses the local network to let your paired iPhone see your sessions.
         GENERATE_INFOPLIST_FILE: "YES"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/FlightDeck/BridgingHeader.h
-        HEADER_SEARCH_PATHS: $(SRCROOT)/Sources/FlightDeck/GhosttyEmbed
+        HEADER_SEARCH_PATHS: $(SRCROOT)/Sources/FlightDeck/GhosttyEmbed $(SRCROOT)/vendor/boringssl-artifacts/include
         # libghostty (GhosttyKit) statically bundles C++ (glslang); link the C++
         # stdlib so its std::* symbols resolve. Matches Ghostty's own project.
         OTHER_LDFLAGS: -lstdc++
+        # FleetKit's own sources now `import BoringSSLShim` (SPAKE2Session). Swift's explicit
+        # module build resolves a linked framework's full dependency graph, not just its
+        # public interface, so an app that only ever calls `import FleetKit` still has to be
+        # able to find that module — same reason FlightDeckTests needs this (project.yml,
+        # below), just one hop further downstream.
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
   FlightDeckTests:
     type: bundle.unit-test
     platform: macOS
@@ -188,6 +194,13 @@ targets:
         # Same reason as FleetKitiOS above: with no team and no profile, signing is the one
         # thing that would fail a simulator build, and the simulator does not need it.
         CODE_SIGNING_ALLOWED: "NO"
+        # Same reason as FlightDeck (macOS) above: FleetKitiOS's swiftmodule now depends on
+        # BoringSSLShim (SPAKE2Session), and resolving that dependency graph is required even
+        # though FlightDeckMobile itself never imports it directly. Both paths are needed:
+        # SWIFT_INCLUDE_PATHS to find the module.modulemap, HEADER_SEARCH_PATHS so the module
+        # it declares (which #includes openssl/curve25519.h) actually compiles.
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
     info:
       path: Sources/FlightDeckMobile/Info.plist
       properties:
