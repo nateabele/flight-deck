@@ -347,58 +347,90 @@ struct SessionSidebar: View {
         }
         .safeAreaInset(edge: .bottom) {
             Group {
-                // A native split button when there's a menu to offer: the label runs the
-                // default action, the trailing chevron segment opens the account/agent
-                // picker — one real AppKit control instead of a button glued to a
-                // borderless menu, so the divider, hover, and pressed states come free.
-                // Absent while empty, since "Add Project" has no agent or account to
-                // choose between, and absent with no project to resolve against yet.
+                // A split button when there's a menu to offer: the full-width label runs the
+                // default action, and the chevron sits INSIDE the same pill behind a divider,
+                // so it reads as one control rather than the stray floating glyph the older
+                // two-control pairing drew. Absent while empty, since "Add Project" has no
+                // agent or account to choose between, and absent with no project to resolve
+                // against yet.
+                //
+                // Deliberately NOT `.menuStyle(.button)`. That bridges to an AppKit segmented
+                // control which sizes itself to its label's intrinsic content and then centres
+                // itself in whatever frame it is given — measured at 180.5pt, x=30, inside a
+                // 224pt sidebar, and unmoved by `.frame(maxWidth:)`, `.frame(width:)`,
+                // `.fixedSize`, `Spacer(minLength:)`, `.buttonStyle(...)` or `.controlSize(...)`.
+                // Only longer label *text* grows it. It also flattens the composite label, so
+                // the trailing shortcut hint never drew at all. A plain `Button` fills the
+                // sidebar and renders the whole label.
+                //
+                // Neither branch carries a `.keyboardShortcut`. `SessionCommands` owns every
+                // one of these chords in the File menu, statically; a view-level copy here was
+                // both redundant and unreachable while the terminal has focus, because
+                // `MenuKeyEquivalents.perform` only re-offers Ghostty-swallowed keys to
+                // `NSApp.mainMenu`. Worse, SwiftUI propagates a shortcut set on a `Menu` to
+                // every `Button` in its content, which is what stamped ⌘N onto every row of
+                // the dropdown — including account leaves that were never bound to anything.
                 if !isEmpty, let preferences, let project = store.currentProjectPath {
-                    Menu {
-                        newSessionMenuEntries(preferences: preferences, project: project)
-                    } label: {
-                        newSessionLabel
-                    } primaryAction: {
+                    Button {
                         let agent = affordance?.agent ?? Preferences.defaultAgents[0].id
                         Task { await store.createFromMenu(agent: agent) }
+                    } label: {
+                        // Inset so the label's trailing shortcut hint clears the chevron
+                        // overlaid on top of it.
+                        newSessionLabel(trailingInset: Self.chevronWidth)
                     }
-                    .menuStyle(.button)
-                    // `newSessionLabel`'s own `.frame(maxWidth: .infinity)` sizes its
-                    // content but does not stretch the `Menu` control itself — measured:
-                    // the split button shrank to fit its label while the plain `Button`
-                    // branch below did not. The frame has to sit on the control, not just
-                    // inside its label, for the two branches to match widths.
                     .frame(maxWidth: .infinity)
                     .accessibilityIdentifier("new-session")
-                    .keyboardShortcut(isEmpty ? .init("a", modifiers: [.command, .shift])
-                                             : .init("n", modifiers: NewSessionAffordance.eventModifiers(
-                                                 affordance?.modifiers ?? [.command]
-                                             )))
+                    .overlay(alignment: .trailing) {
+                        HStack(spacing: 0) {
+                            Divider().frame(height: 14)
+                            Menu {
+                                newSessionMenuEntries(preferences: preferences, project: project)
+                            } label: {
+                                EmptyView()
+                            }
+                            .menuStyle(.borderlessButton)
+                            .frame(width: Self.chevronWidth - 2)
+                            .accessibilityIdentifier("new-session-menu")
+                        }
+                        .padding(.trailing, 3)
+                    }
                 } else {
                     Button {
                         let agent = affordance?.agent ?? Preferences.defaultAgents[0].id
                         Task { await store.createFromMenu(agent: agent) }
                     } label: {
-                        newSessionLabel
+                        newSessionLabel(trailingInset: 0)
                     }
                     .frame(maxWidth: .infinity)
                     .accessibilityIdentifier("new-session")
-                    .keyboardShortcut(isEmpty ? .init("a", modifiers: [.command, .shift])
-                                             : .init("n", modifiers: NewSessionAffordance.eventModifiers(
-                                                 affordance?.modifiers ?? [.command]
-                                             )))
                 }
             }
             .padding(8)
+            // Opaque, deliberately not a material. Sidebar rows scroll UNDERNEATH this inset,
+            // and `.regularMaterial` (what the floating overlays elsewhere use) blurs sibling
+            // content rather than hiding it — session titles read straight through the
+            // button's own translucent `.bordered` chrome. `windowBackgroundColor` is the
+            // standard opaque chrome colour and tracks light/dark on its own, so the strip
+            // stays a solid floor under the control in both appearances.
+            .background(Color(nsColor: .windowBackgroundColor))
+            // Reads as a bar rather than a button floating on a blank patch, and gives the
+            // scrolled content a hard edge to disappear behind.
+            .overlay(alignment: .top) { Divider() }
             .onAppear { modifiers.start() }
             .onDisappear { modifiers.stop() }
         }
     }
 
+    /// Width reserved at the button's trailing edge for the chevron overlay, so the label's
+    /// shortcut hint never slides underneath it.
+    private static let chevronWidth: CGFloat = 20
+
     /// Shared label for both the split-button and plain-button forms of the new-session
     /// control: the dynamic affordance text plus the shortcut hint. Kept flush against
-    /// `body` so it's obviously not intended for reuse outside it.
-    private var newSessionLabel: some View {
+    /// `body` so it's obviously not intended for reuse outside it. `trailingInset` is the
+    /// room the chevron needs; the plain-button branch has no chevron and passes 0.
+    private func newSessionLabel(trailingInset: CGFloat) -> some View {
         HStack {
             // The agent name is dynamic — "New Claude Session" by default, changing
             // live to "New Codex Session" the instant ⇧ is held on the way to ⌘⇧N.
@@ -414,6 +446,7 @@ struct SessionSidebar: View {
                 .accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity)
+        .padding(.trailing, trailingInset)
     }
 
     /// Renders `NewSessionAffordance.menu(agents:accounts:resolved:)` as SwiftUI menu content:
@@ -426,15 +459,21 @@ struct SessionSidebar: View {
             agents: agents, accounts: preferences.preferences.accounts,
             resolved: preferences.resolvedAccounts(for: agents, project: project)
         )
+        // Same chord placement the File menu renders, from the same rule: `SessionCommands`
+        // and this dropdown both read `NewSessionAffordance.chords`, so the two can't drift
+        // into disagreeing about what ⌘N does.
+        let chords = NewSessionAffordance.chords(for: entries, agents: agents)
         ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
             switch entry {
             case .agent(let agent, let account, let isResolved):
-                newSessionMenuRow(agent: agent, account: account, isResolved: isResolved, flat: true)
+                newSessionMenuRow(agent: agent, account: account, isResolved: isResolved,
+                                  flat: true, modifiers: chords[account])
             case .submenu(let agent, let rows):
                 Menu("New \(agent.displayName) Session") {
                     ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                         if case .agent(let agent, let account, let isResolved) = row {
-                            newSessionMenuRow(agent: agent, account: account, isResolved: isResolved, flat: false)
+                            newSessionMenuRow(agent: agent, account: account, isResolved: isResolved,
+                                              flat: false, modifiers: chords[account])
                         }
                     }
                 }
@@ -444,16 +483,32 @@ struct SessionSidebar: View {
 
     /// One clickable row: "New <Agent> Session" for the common flat case (unchanged from
     /// before nested accounts existed), or the account's own name once nested beneath its
-    /// agent. The checkmark is `isResolved` — whichever account ⌘N would actually use.
+    /// agent.
+    ///
+    /// The checkmark marks `isResolved` — whichever account ⌘N would actually use — but only
+    /// inside a submenu. A flat row is an agent's *only* account, so a tick there marks a
+    /// choice that was never offered and reads as if the row were toggled on. This also puts
+    /// the sidebar back in step with the File menu, whose `flatAgentRow` never drew one.
+    ///
+    /// `modifiers` is nil on every row that carries no chord — a leaf that is not its agent's
+    /// shortcut leaf, or any agent past the third — so the shortcut is stated once per agent
+    /// instead of being inherited by every row, which is what the enclosing `Menu` used to do.
+    @ViewBuilder
     private func newSessionMenuRow(
-        agent: AgentID, account: UUID, isResolved: Bool, flat: Bool
+        agent: AgentID, account: UUID, isResolved: Bool, flat: Bool,
+        modifiers: NSEvent.ModifierFlags?
     ) -> some View {
         let name = flat ? "New \(agent.displayName) Session"
                          : (preferences?.account(id: account)?.displayName ?? agent.displayName)
-        return Button {
+        let row = Button {
             Task { await store.createFromMenu(agent: agent, account: account) }
         } label: {
-            if isResolved { Label(name, systemImage: "checkmark") } else { Text(name) }
+            if isResolved && !flat { Label(name, systemImage: "checkmark") } else { Text(name) }
+        }
+        if let modifiers {
+            row.keyboardShortcut("n", modifiers: NewSessionAffordance.eventModifiers(modifiers))
+        } else {
+            row
         }
     }
 

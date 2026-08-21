@@ -119,4 +119,33 @@ enum NewSessionAffordance {
         }
         return nil
     }
+
+    /// The chord each account row should display, keyed by account.
+    ///
+    /// Placement is not re-derived here: `slots(for:)` already decides which agents carry a
+    /// chord at all (list position, capped at three), and `shortcutLeaf(in:)` already decides
+    /// which leaf of a multi-account agent wears it. This pairs the two so the sidebar's
+    /// dropdown and the File menu render the same chords from one rule instead of each
+    /// keeping its own copy of the placement logic and drifting apart.
+    ///
+    /// An account absent from the result carries no chord: a leaf that is not the shortcut
+    /// leaf, or any agent past the third. Built with `reduce` for the same reason
+    /// `SessionCommands` does — nothing enforces one row per `AgentID`, and a duplicate must
+    /// not crash the menu, so last position wins.
+    static func chords(
+        for entries: [MenuEntry], agents: [AgentSettings]
+    ) -> [UUID: NSEvent.ModifierFlags] {
+        let byAgent = slots(for: agents).reduce(into: [AgentID: NSEvent.ModifierFlags]()) {
+            $0[$1.agent] = $1.modifiers
+        }
+        return entries.reduce(into: [UUID: NSEvent.ModifierFlags]()) { result, entry in
+            guard let modifiers = byAgent[entry.agent] else { return }
+            switch entry {
+            case .agent(_, let account, _):
+                result[account] = modifiers
+            case .submenu(_, let rows):
+                if let leaf = shortcutLeaf(in: rows) { result[leaf] = modifiers }
+            }
+        }
+    }
 }

@@ -101,23 +101,28 @@ struct SessionCommands: Commands {
             let slotByAgent = NewSessionAffordance.slots(for: agents).reduce(into: [AgentID: NewSessionAffordance.Slot]()) {
                 $0[$1.agent] = $1
             }
-            let entryByAgent: [AgentID: NewSessionAffordance.MenuEntry] = currentProject.path.map { project in
+            let entries: [NewSessionAffordance.MenuEntry] = currentProject.path.map { project in
                 NewSessionAffordance.menu(
                     agents: agents, accounts: preferences.preferences.accounts,
                     resolved: preferences.resolvedAccounts(for: agents, project: project)
-                ).reduce(into: [AgentID: NewSessionAffordance.MenuEntry]()) { $0[$1.agent] = $1 }
-            } ?? [:]
+                )
+            } ?? []
+            let entryByAgent = entries.reduce(into: [AgentID: NewSessionAffordance.MenuEntry]()) {
+                $0[$1.agent] = $1
+            }
+            // Which account row wears which chord — shared with the sidebar's dropdown so both
+            // menus place shortcuts by one rule instead of each re-deriving it.
+            let chords = NewSessionAffordance.chords(for: entries, agents: agents)
 
             ForEach(Array(agents.enumerated()), id: \.offset) { _, settings in
                 let slot = slotByAgent[settings.id]
                 if let entry = entryByAgent[settings.id], case .submenu(let agent, let rows) = entry {
-                    let shortcutAccount = slot != nil ? NewSessionAffordance.shortcutLeaf(in: rows) : nil
                     Menu("New \(agent.displayName) Session") {
                         ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                             if case .agent(let rowAgent, let account, let isResolved) = row {
                                 accountMenuRow(
                                     agent: rowAgent, account: account, isResolved: isResolved,
-                                    shortcutModifiers: account == shortcutAccount ? slot?.modifiers : nil
+                                    shortcutModifiers: chords[account]
                                 )
                             }
                         }

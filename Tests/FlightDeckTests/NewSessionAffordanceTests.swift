@@ -108,4 +108,75 @@ final class NewSessionAffordanceTests: XCTestCase {
     func testShortcutLeafOfEmptyRowsIsNil() {
         XCTAssertNil(NewSessionAffordance.shortcutLeaf(in: []))
     }
+
+    // MARK: - chords
+
+    /// A flat row wears its agent's list-position chord. This is what the sidebar dropdown
+    /// renders, and it has to agree with the File menu, which reads the same function.
+    func testChordsFollowAgentListPosition() {
+        let claude = AgentAccount(agent: .claude, displayName: "Personal", home: URL(fileURLWithPath: "/a"))
+        let codex = AgentAccount(agent: .codex, displayName: "Personal", home: URL(fileURLWithPath: "/b"))
+        let entries = NewSessionAffordance.menu(
+            agents: two, accounts: [claude, codex],
+            resolved: [.claude: claude.id, .codex: codex.id]
+        )
+        let chords = NewSessionAffordance.chords(for: entries, agents: two)
+        XCTAssertEqual(chords[claude.id], [.command])
+        XCTAssertEqual(chords[codex.id], [.command, .shift])
+    }
+
+    /// Inside a submenu only the resolved leaf carries the chord — the sibling accounts stay
+    /// bare, which is the bug the sidebar had when every row inherited ⌘N from its container.
+    func testChordsLandOnOneLeafPerSubmenu() {
+        let personal = AgentAccount(agent: .claude, displayName: "Personal", home: URL(fileURLWithPath: "/a"))
+        let work = AgentAccount(agent: .claude, displayName: "Work", home: URL(fileURLWithPath: "/b"))
+        let agents = [AgentSettings(id: .claude, options: .claude(FlagSet()))]
+        let entries = NewSessionAffordance.menu(
+            agents: agents, accounts: [personal, work], resolved: [.claude: work.id]
+        )
+        let chords = NewSessionAffordance.chords(for: entries, agents: agents)
+        XCTAssertEqual(chords[work.id], [.command], "the resolved leaf answers the agent's chord")
+        XCTAssertNil(chords[personal.id], "a sibling account is a mouse-only pick, not a rebind")
+        XCTAssertEqual(chords.count, 1)
+    }
+
+    /// Reordering the agent list moves the chord with it, exactly as `slots(for:)` does —
+    /// the dropdown must not keep showing ⌘N next to an agent that no longer answers it.
+    func testChordsMoveWhenAgentsAreReordered() {
+        let claude = AgentAccount(agent: .claude, displayName: "Personal", home: URL(fileURLWithPath: "/a"))
+        let codex = AgentAccount(agent: .codex, displayName: "Personal", home: URL(fileURLWithPath: "/b"))
+        let reversed = Array(two.reversed())
+        let entries = NewSessionAffordance.menu(
+            agents: reversed, accounts: [claude, codex],
+            resolved: [.claude: claude.id, .codex: codex.id]
+        )
+        let chords = NewSessionAffordance.chords(for: entries, agents: reversed)
+        XCTAssertEqual(chords[codex.id], [.command])
+        XCTAssertEqual(chords[claude.id], [.command, .shift])
+    }
+
+    /// `slots(for:)` binds only three agents, so a fourth row shows no chord rather than
+    /// inventing one.
+    func testAFourthAgentGetsNoChord() {
+        var agents = two
+        agents.append(AgentSettings(id: .codex, options: .codex(CodexThreadOptions())))
+        agents.append(AgentSettings(id: .claude, options: .claude(FlagSet())))
+        let accounts = [
+            AgentAccount(agent: .claude, displayName: "Personal", home: URL(fileURLWithPath: "/a")),
+            AgentAccount(agent: .codex, displayName: "Personal", home: URL(fileURLWithPath: "/b")),
+        ]
+        let entries = NewSessionAffordance.menu(
+            agents: agents, accounts: accounts,
+            resolved: [.claude: accounts[0].id, .codex: accounts[1].id]
+        )
+        let chords = NewSessionAffordance.chords(for: entries, agents: agents)
+        // Two distinct agent ids across four rows, so at most two accounts can be chorded.
+        XCTAssertLessThanOrEqual(chords.count, 2)
+        XCTAssertTrue(chords.values.allSatisfy { NewSessionAffordance.slots(for: agents).map(\.modifiers).contains($0) })
+    }
+
+    /// An agent with no account contributes no row, so it contributes no chord either.
+    func testChordsAreEmptyWithoutAccounts() {
+        XCTAssertTrue(NewSessionAffordance.chords(for: [], agents: two).isEmpty)
+    }
 }
