@@ -1,6 +1,7 @@
 import FleetKit
 import Foundation
 import Observation
+import UIKit
 
 /// Everything both screens talk to, and nothing more.
 ///
@@ -64,7 +65,7 @@ final class FleetModel {
         // the orphan keeps running against its own, now-stale `mac`, calling `store.save(mac)`
         // on every event and silently overwriting the pairing this call just wrote.
         connector?.stop()
-        let connector = FleetConnector(mac: mac, store: store)
+        let connector = FleetConnector(mac: mac, store: store, deviceName: Self.deviceName)
         // `MainActor.assumeIsolated`, not `Task { @MainActor in }`. FlightDeckMobile builds in
         // Swift 6, and these callbacks are plain non-isolated closures, so assigning
         // main-actor state from one is an error the compiler cannot see past on its own. But
@@ -89,4 +90,15 @@ final class FleetModel {
     }
 
     var macName: String { mac?.macName ?? "your Mac" }
+
+    /// What this phone tells the Mac to call it, sent in `hello`.
+    ///
+    /// Read here rather than in FleetKit because FleetKit cannot import UIKit — see
+    /// `FleetConnector.deviceName`. And know what this actually returns before trusting it:
+    /// since iOS 16 `UIDevice.current.name` yields the *model* name ("iPhone", "iPad") for
+    /// any app without the user-assigned-device-name entitlement, which this app does not
+    /// have. Only on the simulator does it give the device's own name. So expect every
+    /// paired handset to arrive claiming "iPhone" — better than a placeholder, and precisely
+    /// why the Mac lets the user rename a device in Settings > Devices.
+    private static var deviceName: String { UIDevice.current.name }
 }

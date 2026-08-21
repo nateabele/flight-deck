@@ -94,6 +94,33 @@ final class FleetFrameCodingTests: XCTestCase {
         XCTAssertEqual(encoded["id"] as? String, id.uuidString)
     }
 
+    /// The Mac cannot name a paired phone from anything the handshake tells it, so `hello`
+    /// is the only place a device can say what it is. Asserted on the bytes for the same
+    /// reason the rest of this file is: this field is read by a Mac, not by a `Decodable`.
+    func testHelloCarriesTheNameTheDeviceCallsItself() throws {
+        let encoded = try fields(of: ClientFrame.hello(lastSeq: 4, device: "Nate's iPhone"))
+        XCTAssertEqual(encoded["t"] as? String, "hello")
+        XCTAssertEqual(encoded["lastSeq"] as? Int, 4)
+        XCTAssertEqual(encoded["device"] as? String, "Nate's iPhone")
+    }
+
+    /// The compatibility guarantee, stated as bytes an older phone actually sends: a `hello`
+    /// with no `device` key must decode, not throw. Getting this wrong would not degrade the
+    /// device list — it would drop every already-paired phone off the Mac on upgrade, since
+    /// a frame that fails to decode is a connection that never attaches.
+    func testAHelloWithoutADeviceNameStillDecodes() throws {
+        let json = Data(#"{"t":"hello","lastSeq":812}"#.utf8)
+        let frame = try JSONDecoder().decode(ClientFrame.self, from: json)
+        XCTAssertEqual(frame, .hello(lastSeq: 812, device: nil))
+    }
+
+    /// And the other half of that: a client claiming nothing must not put `"device":null` on
+    /// the wire, so the frame an upgraded phone sends is byte-identical to the old one.
+    func testAHelloThatClaimsNoNameOmitsTheKeyEntirely() throws {
+        let encoded = try fields(of: ClientFrame.hello(lastSeq: 0, device: nil))
+        XCTAssertEqual(Set(encoded.keys), ["t", "lastSeq"])
+    }
+
     func testEveryFrameRoundTrips() throws {
         let server: [ServerFrame] = [
             .snapshot(seq: 1, fleet: .empty, reason: .initial),
@@ -106,7 +133,7 @@ final class FleetFrameCodingTests: XCTestCase {
             XCTAssertEqual(try JSONDecoder().decode(ServerFrame.self, from: data), frame)
         }
         let client: [ClientFrame] = [
-            .hello(lastSeq: 0), .hello(lastSeq: 812),
+            .hello(lastSeq: 0, device: nil), .hello(lastSeq: 812, device: "iPhone"),
             .cmd(cid: 1, .markRead(id: UUID())), .cmd(cid: 2, .markUnread(id: UUID()))
         ]
         for frame in client {
