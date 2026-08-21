@@ -69,6 +69,21 @@ final class SPAKE2SessionTests: XCTestCase {
         XCTAssertThrowsError(try session.message(for: .mint()))
     }
 
+    /// The other half of the single-use contract: `hasProcessed` should refuse a second call
+    /// just as `hasGenerated` refuses a second `message(for:)`, not merely accept it and hand
+    /// back stale or re-derived material.
+    func testKeyMaterialRefusesToBeCalledTwice() throws {
+        let code = PairingCode.mint()
+        let initiator = SPAKE2Session(role: .initiator, myName: alice, theirName: bob)
+        let responder = SPAKE2Session(role: .responder, myName: bob, theirName: alice)
+
+        _ = try initiator.message(for: code)
+        let fromResponder = try responder.message(for: code)
+
+        _ = try initiator.keyMaterial(from: fromResponder)
+        XCTAssertThrowsError(try initiator.keyMaterial(from: fromResponder))
+    }
+
     func testKeyMaterialBeforeAMessageIsRefused() {
         let session = SPAKE2Session(role: .initiator, myName: alice, theirName: bob)
         XCTAssertThrowsError(try session.keyMaterial(from: Data(repeating: 0, count: 32)))
@@ -80,14 +95,18 @@ final class SPAKE2SessionTests: XCTestCase {
         XCTAssertThrowsError(try session.keyMaterial(from: Data([0x00])))
     }
 
-    /// There is no fixed vector to drive here — `vendor/boringssl/crypto/curve25519/
-    /// spake25519_test.cc` says so itself, at line 29: "TODO(agl): add tests with fixed
-    /// vectors once SPAKE2 is nailed down." That TODO was never picked up upstream, and every
-    /// test in that file, including the canonical round trip at `TEST(SPAKE25519Test, SPAKE2)`
-    /// (line 109), exercises the exchange with a freshly drawn ephemeral scalar rather than a
-    /// documented one — `SPAKE2_generate_msg` has no parameter to fix it, so nothing pinned to
-    /// specific input/output bytes is reachable through the public API this wrapper calls.
-    /// (Recorded as a gap in `docs/FOLLOWUPS.md`.)
+    /// There is no fixed vector to drive here, and not merely because BoringSSL never wrote
+    /// one (`vendor/boringssl/crypto/curve25519/spake25519_test.cc` line 29 — "TODO(agl): add
+    /// tests with fixed vectors once SPAKE2 is nailed down" — still open upstream). This
+    /// vendored SPAKE2 is not CFRG SPAKE2 at all: its `M`/`N` are BoringSSL-generated points,
+    /// not RFC 9382's; `password_scalar_hack` is a unilateral bug fix baked into the wire
+    /// format; and the transcript hashes `password_hash` (SHA-512 of the password) rather than
+    /// the derived scalar. There is no specification this could conform to, so a vector would
+    /// not be validation even if one existed — the property that matters is that both ends,
+    /// which run this same BoringSSL, agree with *each other*. `SPAKE2_generate_msg` also has
+    /// no parameter to fix the ephemeral scalar, so nothing pinned to specific input/output
+    /// bytes is reachable through the public API this wrapper calls regardless. Full reasoning
+    /// and the real residual risk (marshalling, not the algorithm) in `docs/FOLLOWUPS.md`.
     ///
     /// What *is* available, and what this test drives, is BoringSSL's own default scenario —
     /// the "alice"/"bob" names `SPAKE2Run` uses when nothing overrides them — through a second,

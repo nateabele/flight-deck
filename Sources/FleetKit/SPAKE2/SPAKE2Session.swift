@@ -34,6 +34,10 @@ public final class SPAKE2Session {
 
     public init(role: SPAKE2Role, myName: Data, theirName: Data) {
         let cRole = role == .initiator ? spake2_role_alice : spake2_role_bob
+        // The returned context escapes both `withUnsafeBytes` closures — safe only because
+        // `SPAKE2_CTX_new` (spake25519.cc) copies both names via `CBS_stow` before it returns,
+        // rather than retaining these pointers. If a future BoringSSL version stopped doing
+        // that, this would need to move inside the closures.
         context = myName.withUnsafeBytes { mine in
             theirName.withUnsafeBytes { theirs in
                 SPAKE2_CTX_new(
