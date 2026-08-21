@@ -65,9 +65,22 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
             v: version, slot: key.slot, psk: key.secret.base64URLEncodedString(),
             name: macName, svc: serviceName, eps: endpoints
         )
+        // `.sortedKeys` is load-bearing, not tidiness. `JSONEncoder` builds a keyed container
+        // as a dictionary and serialises in iteration order, which Swift randomises per
+        // process — so two calls could emit the same fields in a different order and produce
+        // a different string for the same payload. Both the QR and the typed code are drawn
+        // from this, and the first person to run the app watched the code churn in front of
+        // them once a second. Decoding never cared about order, which is exactly why this
+        // survived every test that round-tripped a payload instead of comparing two encodings.
+        //
+        // The accompanying test compares fifty encodings. Note that it passes by luck without
+        // this line, because within a single process the seed is fixed and the order happens
+        // to be stable — which is how it passed once and then failed 48 runs out of 50.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
         // `try!` is honest here: `Body` is all `Codable` primitives with no custom encoding,
         // so a throw would be a compiler bug rather than a runtime condition to handle.
-        let json = try! JSONEncoder().encode(body)
+        let json = try! encoder.encode(body)
         return "\(Self.scheme)\(version):" + json.base64URLEncodedString()
     }
 
