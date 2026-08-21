@@ -186,8 +186,27 @@ struct Preferences: Codable, Equatable {
         set { storedAccounts = newValue }
     }
 
+    /// One agent's LIVE accounts. Tombstones are filtered here rather than at each caller
+    /// because every consumer of this — the Accounts list, the Projects tab's picker,
+    /// reordering — is a list the user picks from, and a removed account must appear in none
+    /// of them. Lookups BY ID go through `PreferencesStore.account(id:)` instead and must
+    /// keep seeing tombstones; see `AgentAccount.removedAt`.
     func accounts(for agent: AgentID) -> [AgentAccount] {
-        accounts.filter { $0.agent == agent }
+        accounts.filter { $0.agent == agent && !$0.isRemoved }
+    }
+
+    /// Every live account, flat. What the "New … Session" menus render — the raw `accounts`
+    /// array would offer a login the user has removed.
+    var liveAccounts: [AgentAccount] { accounts.filter { !$0.isRemoved } }
+
+    /// Drops every tombstone. Called once at launch, from `PreferencesStore.init`'s migration
+    /// chain: tombstones exist only to keep a *running* tab's identity stable, and at launch
+    /// there are none left to protect. Nothing else prunes them — one mechanism, not two.
+    ///
+    /// Cannot resurrect what the user removed: this never sets `storedAccounts` back to nil,
+    /// so `migrateAccountsIfNeeded`'s seed-once guard still holds on the next launch.
+    mutating func purgeRemovedAccounts() {
+        accounts.removeAll { $0.isRemoved }
     }
 
     var projectSettings: [String: ProjectSettings] {
@@ -200,11 +219,17 @@ struct Preferences: Codable, Equatable {
     /// `accounts` is one flat array, so offsets from a per-agent list cannot be applied to it
     /// directly. This maps them back: pull out this agent's entries, reorder them, then write
     /// them into the positions the flat array already reserved for that agent.
+    ///
+    /// The write-back filter must match `accounts(for:)`'s exactly, tombstones included. Read
+    /// live entries but write into every slot for the agent and the iterator runs dry early:
+    /// a tombstone mid-list swallows one entry and shifts every account after it.
     mutating func moveAccounts(forAgent agent: AgentID, fromOffsets source: IndexSet, toOffset destination: Int) {
         var mine = accounts(for: agent)
         mine.move(fromOffsets: source, toOffset: destination)
         var reordered = mine.makeIterator()
-        accounts = accounts.map { $0.agent == agent ? (reordered.next() ?? $0) : $0 }
+        accounts = accounts.map {
+            $0.agent == agent && !$0.isRemoved ? (reordered.next() ?? $0) : $0
+        }
     }
 
     /// Seeds the built-in account per agent, then discovers siblings ONCE.

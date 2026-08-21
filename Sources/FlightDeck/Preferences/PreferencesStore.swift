@@ -49,6 +49,15 @@ final class PreferencesStore: ObservableObject {
     /// whatever pane was last touched. This is view state and resets every launch.
     @Published var selectedTab: PreferencesTab = .agents
 
+    /// Which project the Projects pane has selected, when something outside the pane picked
+    /// it — the project row's "Configure…" sets this alongside `selectedTab` so the pane opens
+    /// on the project you right-clicked rather than on "No Project Selected".
+    ///
+    /// A *standardized* path, because that is what `ProjectsSettingsTab` tags its rows with; a
+    /// path spelled any other way selects nothing. Transient for the same reasons `selectedTab`
+    /// is, and nil whenever nobody has pointed the pane anywhere in particular.
+    @Published var selectedProjectPath: String?
+
     private let persistence: PreferencesPersisting?
 
     init(persistence: PreferencesPersisting?) {
@@ -60,6 +69,11 @@ final class PreferencesStore: ObservableObject {
         // the global-flags fold has a claude row to land on either side of, so this order is
         // load-bearing, not incidental.
         migrated.migrateAccountsIfNeeded()
+        // After seeding, so "at least one account per agent" already holds, and before
+        // anything resolves against the list. In this chain so it participates in the
+        // `migrated != loaded` comparison below and reaches disk on the launch that performs
+        // it, rather than waiting for the user's next preference edit.
+        migrated.purgeRemovedAccounts()
         migrated.migrateProjectSettingsIfNeeded()
         migrated.migrateGlobalFlagsIfNeeded()
         // Probes for an installed terminal, so it is done here rather than in the `tools`
@@ -101,17 +115,25 @@ final class PreferencesStore: ObservableObject {
     /// explicit assignment that no longer resolves must never silently become another login.
     func account(for agent: AgentID, project: String) -> AgentAccount? {
         if let assigned = preferences.projectSettings[Self.key(project)]?.accounts[agent] {
-            return account(id: assigned)
+            // A tombstone here is answered as nil — i.e. BROKEN — rather than by silently
+            // falling through to the topmost account, which is the wrong-login bug this
+            // method's nil exists to prevent. `markAccountRemoved` clears these assignments,
+            // so this is defence in depth rather than a reachable state.
+            return account(id: assigned).flatMap { $0.isRemoved ? nil : $0 }
         }
-        return preferences.accounts.first { $0.agent == agent }
+        return preferences.accounts.first { $0.agent == agent && !$0.isRemoved }
     }
 
     /// Normalises a stored `Session.accountID`. nil means the agent's built-in home — not "the
     /// current default" — so a legacy tab and a tab created today on that home share one
     /// identity, and one home can never carry two instance keys.
     func resolvedAccountID(for agent: AgentID, in stored: UUID?) -> UUID? {
+        // Unfiltered on purpose: a tombstoned account MUST still resolve here, or a live tab
+        // running as it re-keys mid-run. See `AgentAccount.removedAt`.
         if let stored { return account(id: stored)?.id }
-        return preferences.accounts.first { $0.agent == agent && $0.isBuiltIn }?.id
+        // The nil branch is a default, not a lookup, so it skips tombstones like every other
+        // default does.
+        return preferences.accounts.first { $0.agent == agent && $0.isBuiltIn && !$0.isRemoved }?.id
     }
 
     /// Global agent options merged with the project's. Applies whenever that agent launches
@@ -156,7 +178,9 @@ final class PreferencesStore: ObservableObject {
     }
 
     func homeIsTaken(_ home: URL, excluding id: UUID?) -> Bool {
-        preferences.accounts.contains { $0.id != id && AgentAccount.key($0.home) == AgentAccount.key(home) }
+        preferences.accounts.contains {
+            $0.id != id && !$0.isRemoved && AgentAccount.key($0.home) == AgentAccount.key(home)
+        }
     }
 
     func addAccount(_ account: AgentAccount) { preferences.accounts.append(account) }
@@ -173,11 +197,15 @@ final class PreferencesStore: ObservableObject {
             AccountDirectory.identity(atHome: home, agent: preferences.accounts[index].agent)
     }
 
-    /// Drops the account AND every project assignment naming it, so nothing is left pointing at
-    /// an id that no longer resolves. A record emptied by that clearing is removed, matching how
-    /// an emptied flag override already drops a project from the list.
-    func removeAccount(id: UUID) {
-        preferences.accounts.removeAll { $0.id == id }
+    /// Tombstones the account AND drops every project assignment naming it, so nothing is left
+    /// pointing at a login the user removed. A record emptied by that clearing is removed,
+    /// matching how an emptied flag override already drops a project from the list.
+    ///
+    /// Stamps rather than deletes: see `AgentAccount.removedAt` for the running-tab identity
+    /// this protects.
+    func markAccountRemoved(id: UUID) {
+        guard let index = preferences.accounts.firstIndex(where: { $0.id == id }) else { return }
+        preferences.accounts[index].removedAt = Date()
         for (path, var settings) in preferences.projectSettings {
             let before = settings.accounts
             settings.accounts = settings.accounts.filter { $0.value != id }

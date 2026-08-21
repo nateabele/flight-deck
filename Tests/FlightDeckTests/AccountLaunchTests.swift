@@ -284,12 +284,15 @@ final class AccountLaunchTests: XCTestCase {
         XCTAssertEqual(provider.configs.last?.environmentVariables["CLAUDE_CONFIG_DIR"], work.home.path)
     }
 
-    /// Deleting an account does not rewrite the tabs that ran as it — `removeAccount` clears
-    /// project *assignments*, while `Session.accountID` is history and must stay what it was.
-    /// So a restored tab can name a login that is gone, and relaunching it in the built-in home
-    /// would resume a conversation living in the deleted account's directory, find nothing, and
-    /// quietly start a fresh one. That is the same silent substitution creation already
-    /// refuses, arriving through the one door creation does not guard.
+    /// Removing an account does not rewrite the tabs that ran as it — `markAccountRemoved`
+    /// tombstones the record and clears project *assignments*, while `Session.accountID` is
+    /// history and must stay what it was. The tombstone itself is purged at launch, before
+    /// restore runs, so by the time a tab like this one restores its login is genuinely gone,
+    /// not merely tombstoned. So a restored tab can name a login that is gone, and relaunching
+    /// it in the built-in home would resume a conversation living in the deleted account's
+    /// directory, find nothing, and quietly start a fresh one. That is the same silent
+    /// substitution creation already refuses, arriving through the one door creation does not
+    /// guard.
     ///
     /// Both tabs come back in one restore, deliberately: the healthy one is the control that
     /// proves the refusal is aimed rather than a blanket "restore stopped resuming things".

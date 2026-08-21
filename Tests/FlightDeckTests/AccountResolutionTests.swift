@@ -75,9 +75,10 @@ final class AccountResolutionTests: XCTestCase {
     func testRemovingAnAccountClearsProjectsThatReferencedIt() {
         let doomed = account(.claude, "doomed"), keep = account(.claude, "keep")
         let store = store([keep, doomed], projects: ["/p": ProjectSettings(accounts: [.claude: doomed.id])])
-        store.removeAccount(id: doomed.id)
+        store.markAccountRemoved(id: doomed.id)
         XCTAssertNil(store.preferences.projectSettings["/p"], "the record became empty and was dropped")
-        XCTAssertEqual(store.preferences.accounts.map(\.id), [keep.id])
+        XCTAssertEqual(store.preferences.accounts(for: .claude).map(\.id), [keep.id],
+                       "a tombstone still stores; it is the LIST that must drop it")
     }
 
     /// Feeds `NewSessionAffordance.menu`'s checkmark: one entry per agent that has a

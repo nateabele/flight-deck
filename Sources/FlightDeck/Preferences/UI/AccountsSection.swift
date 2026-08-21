@@ -74,7 +74,7 @@ struct AccountsSection: View {
         guard let account = store.account(id: accountID), !account.isBuiltIn,
               !boundAccountIDs.contains(accountID)
         else { return false }
-        store.removeAccount(id: accountID)
+        store.markAccountRemoved(id: accountID)
         return true
     }
 
@@ -187,7 +187,7 @@ struct AccountsSection: View {
         ) { account in
             Button("Delete", role: .destructive) {
                 if AccountsSection.deleteFiles(accountID: account.id, boundAccountIDs: boundAccountIDs, in: preferences) {
-                    preferences.removeAccount(id: account.id)
+                    preferences.markAccountRemoved(id: account.id)
                 }
                 pendingFileDelete = nil
             }
