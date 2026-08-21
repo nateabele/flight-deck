@@ -69,8 +69,24 @@ targets:
       # one that loads at runtime. See the DYLD_FRAMEWORK_PATH note in scripts/test-unit.sh.
       - target: FleetKit
         embed: false
+      # Linked here as well as in FleetKit, and it has to be: libcrypto is a STATIC archive,
+      # so the linker pulls in only the objects something references. FleetKit's own Swift
+      # sources do not call SPAKE2 yet, so FleetKit.framework contains none of it, and a test
+      # that reached the symbols "through" FleetKit would fail to link rather than prove
+      # anything. Once FleetKit wraps SPAKE2 both binaries carry their own copy of those few
+      # objects — harmless duplication, and the price of the link test being a real link test.
+      - framework: vendor/boringssl-artifacts/BoringSSL.xcframework
+        embed: false
     settings:
-      base: { GENERATE_INFOPLIST_FILE: "YES" }
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+        # The test bundle reaches the vendored SPAKE2 symbols directly, so it needs the same
+        # module search path FleetKit has. BoringSSLLinkTests is the one place that proves
+        # the xcframework is linked and callable at all, and a "no such module" here is the
+        # cheapest possible version of that failure.
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
+        OTHER_LDFLAGS: -lc++
   FlightDeckUITests:
     type: bundle.ui-testing
     platform: macOS
@@ -82,17 +98,48 @@ targets:
   FleetKit:
     type: framework
     platform: macOS
-    sources: [Sources/FleetKit]
+    sources: &fleetKitSources
+      # SPAKE2/ holds Swift sources like any other folder here, so it is NOT excluded
+      # wholesale — only its two C-interop files are. `module.modulemap` is a build input,
+      # not framework content, and xcodegen makes a stray `.h` a PUBLIC header: BoringSSLShim.h
+      # would be copied into FleetKit.framework/Headers while still `#include`-ing
+      # <openssl/curve25519.h>, which is not shipped inside the framework. That is a public
+      # header that cannot be parsed by anyone who imports FleetKit. Both files are reached
+      # through SWIFT_INCLUDE_PATHS below, which needs no target membership at all.
+      - path: Sources/FleetKit
+        excludes:
+          - "SPAKE2/BoringSSLShim.h"
+          - "SPAKE2/module.modulemap"
+    dependencies:
+      # SPAKE2, for the short pairing code. Not embedded, same as Ghostty: it is a static
+      # library, so there is nothing to embed. Built by scripts/build-boringssl.sh, and
+      # unlike Ghostty's the artifact is committed — there is no BoringSSL submodule.
+      - framework: vendor/boringssl-artifacts/BoringSSL.xcframework
+        embed: false
     settings:
       base:
         # Swift 6 here, Swift 5 project-wide. The project-wide floor exists for vendored
-        # Ghostty (not Swift-6 clean); FleetKit vendors nothing and carries the wire types
-        # that cross a thread boundary on every frame, which is exactly the code that wants
-        # `Sendable` checked rather than assumed. A Swift 6 module imports cleanly into a
-        # Swift 5 target, so nothing else has to move.
+        # Ghostty (not Swift-6 clean); FleetKit carries the wire types that cross a thread
+        # boundary on every frame, which is exactly the code that wants `Sendable` checked
+        # rather than assumed. A Swift 6 module imports cleanly into a Swift 5 target, so
+        # nothing else has to move.
         SWIFT_VERSION: "6.0"
         PRODUCT_MODULE_NAME: FleetKit
         GENERATE_INFOPLIST_FILE: "YES"
+        # Where `import BoringSSLShim` resolves: the directory holding the module.modulemap
+        # that names that module. A path alone would only let clang FIND the header — Swift
+        # cannot import a bare header, so the modulemap beside it is what makes this work.
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
+        # And where the shim's `#include <openssl/curve25519.h>` resolves. These headers are
+        # deliberately NOT inside the xcframework: Xcode resolves a library xcframework's
+        # headers by copying them into BUILT_PRODUCTS_DIR/include, which is libghostty's
+        # directory, and GhosttyKit's umbrella header claims everything in it. See the long
+        # note in scripts/build-boringssl.sh — this is the setting that keeps them apart.
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
+        # libcrypto is C++ as of BoringSSL 0.2025xxxx (its sources are .cc), so linking it
+        # into an otherwise pure-Swift framework leaves std::* and __cxa_* undefined. The
+        # FlightDeck target carries the same flag for Ghostty's bundled C++.
+        OTHER_LDFLAGS: -lc++
 
   # Same sources, iOS slice. This target ships nothing on its own — it is the enforcement
   # mechanism for "FleetKit imports Foundation and Network only". An `import AppKit` that
@@ -101,10 +148,16 @@ targets:
   FleetKitiOS:
     type: framework
     platform: iOS
-    sources: [Sources/FleetKit]
+    sources: *fleetKitSources
+    dependencies:
+      - framework: vendor/boringssl-artifacts/BoringSSL.xcframework
+        embed: false
     settings:
       base:
         SWIFT_VERSION: "6.0"
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
+        OTHER_LDFLAGS: -lc++
         # Both names, and they have to agree. PRODUCT_MODULE_NAME alone gave a
         # `FleetKitiOS.framework` whose module was `FleetKit`, and `-F` search resolves
         # imports by *framework* name — so `import FleetKit` from FlightDeckMobile failed
