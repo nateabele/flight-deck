@@ -117,10 +117,25 @@ implementation would not interoperate with it — there is no specification for 
 be checked against, in either direction. **The property that replaces conformance is
 agreement:** both ends of a pairing exchange run this same BoringSSL, so what needs proving is
 that this wrapper's two ends agree with each other, not that either agrees with a standard that
-does not describe them. `SPAKE2SessionTests` is what checks that, and does. The residual risk
-this leaves — narrower than "is the algorithm right," and about this wrapper's marshalling,
-not BoringSSL's math — is recorded where it will be acted on, in
-docs/FOLLOWUPS.md's "Pairing crypto foundation" entry.
+does not describe them. `SPAKE2SessionTests` is what checks that, and does.
+
+The residual risk that leaves is narrower than "is the algorithm right": it is about this
+wrapper's marshalling, not BoringSSL's math — a wrapper that swapped `.initiator`/`.responder`,
+or the two name arguments, would be wrong identically on both ends and pass every round-trip
+test. This amendment first said a cross-process macOS-against-iOS exchange was what would catch
+that; **that was wrong, and is corrected here.** Both ends compile the same `FleetKit`, so a
+consistent swap crosses the wire intact. What catches it is a second implementation of the
+*caller*: `testTheWrapperAgreesWithTheRawCAPIAboutRoleAndNameOrder` drives one side through
+BoringSSL's raw C API with a literal `spake2_role_alice` and the argument order the header
+declares, the other through `SPAKE2Session`, and requires the derived keys to agree. That is
+in place, in process, and both mutants fail it.
+
+Note also that a *consistent* swap would have been unconventional rather than insecure — both
+names still reach the transcript, in a fixed order, still distinguishing devices — so the gap
+was smaller than the original wording suggested. A cross-process exchange still belongs in [§10](#10-testing)'s
+bar for the plan that wires this to a socket, but for **caller-side asymmetry**
+(the two ends disagreeing about roles, names, or transcript order), which is what that plan can
+actually get wrong. See docs/FOLLOWUPS.md's "Pairing crypto foundation" entry.
 
 ## 6. The pairing channel
 
@@ -220,6 +235,14 @@ exists for reconnects, not for pairing).
 - **SPAKE2 agreement between two independent sessions.** Not a published test vector — see the
   amendment in [§5](#5-the-pake): this vendored variant has no specification for a vector to
   conform to, so agreement between the two ends is the property that is checked instead.
+- **The wrapper's role and name marshalling, against BoringSSL's raw C API.** Agreement between
+  two `SPAKE2Session`s cannot catch a consistent role or name swap, and neither can a
+  cross-process exchange — both ends run the same code. One side driven through the C API with
+  a literal `spake2_role_alice` can; see §5's amendment.
+- **Cross-process macOS-against-iOS pairing**, for **caller-side asymmetry**: the two ends
+  disagreeing about which is the initiator, about the names they pass, or about the order in
+  which they assemble the transcript. That last one is why `SPAKE2Session.transcript` exists —
+  it is initiator-first on both sides so a caller cannot pick — but the check still belongs here.
 - **Loopback pairing, end to end**: a real pairing listener, a real SPAKE2 exchange, a real
   sealed key, and a subsequent fleet connection authenticated with the delivered key. The same
   shape as the existing pairing-flow tests, which open real sockets and assert refusal at the
