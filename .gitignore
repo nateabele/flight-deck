@@ -4,6 +4,7 @@ target/
 build/
 .build/
 vendor/ghostty-artifacts
+vendor/boringssl-artifacts
 DerivedData/
 *.xcodeproj
 # Written to disk by `xcodegen generate` from project.yml's FlightDeckMobile `info:` block

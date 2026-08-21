@@ -2,3 +2,6 @@
 	path = vendor/ghostty
 	url = https://github.com/ghostty-org/ghostty
 	branch = main
+[submodule "vendor/boringssl"]
+	path = vendor/boringssl
+	url = https://boringssl.googlesource.com/boringssl

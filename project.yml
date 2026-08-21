@@ -86,7 +86,6 @@ targets:
         # cheapest possible version of that failure.
         SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
-        OTHER_LDFLAGS: -lc++
   FlightDeckUITests:
     type: bundle.ui-testing
     platform: macOS
@@ -112,8 +111,9 @@ targets:
           - "SPAKE2/module.modulemap"
     dependencies:
       # SPAKE2, for the short pairing code. Not embedded, same as Ghostty: it is a static
-      # library, so there is nothing to embed. Built by scripts/build-boringssl.sh, and
-      # unlike Ghostty's the artifact is committed — there is no BoringSSL submodule.
+      # library, so there is nothing to embed. And handled the same way end to end — upstream
+      # is the `vendor/boringssl` submodule, scripts/build-boringssl.sh builds this artifact
+      # out of it, and the artifact itself is git-ignored. Run that script after a fresh clone.
       - framework: vendor/boringssl-artifacts/BoringSSL.xcframework
         embed: false
     settings:
@@ -136,10 +136,6 @@ targets:
         # directory, and GhosttyKit's umbrella header claims everything in it. See the long
         # note in scripts/build-boringssl.sh — this is the setting that keeps them apart.
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
-        # libcrypto is C++ as of BoringSSL 0.2025xxxx (its sources are .cc), so linking it
-        # into an otherwise pure-Swift framework leaves std::* and __cxa_* undefined. The
-        # FlightDeck target carries the same flag for Ghostty's bundled C++.
-        OTHER_LDFLAGS: -lc++
 
   # Same sources, iOS slice. This target ships nothing on its own — it is the enforcement
   # mechanism for "FleetKit imports Foundation and Network only". An `import AppKit` that
@@ -157,7 +153,6 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
-        OTHER_LDFLAGS: -lc++
         # Both names, and they have to agree. PRODUCT_MODULE_NAME alone gave a
         # `FleetKitiOS.framework` whose module was `FleetKit`, and `-F` search resolves
         # imports by *framework* name — so `import FleetKit` from FlightDeckMobile failed
