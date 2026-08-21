@@ -106,15 +106,24 @@ final class SPAKE2SessionTests: XCTestCase {
     /// BoringSSL documents one `generate_msg` per context and a context that is finished after
     /// `process_msg`. Enforce both in Swift rather than letting a misuse reach C, where the
     /// documented behaviour is an error return that is easy to drop.
+    ///
+    /// *Which* error is the entire point, so these three name the case rather than asserting
+    /// some throw happened. Remove the Swift guards and all of them still throw — BoringSSL's
+    /// own state machine returns 0 and the wrapper raises `.generateFailed`/`.processFailed`
+    /// instead — so a bare `XCTAssertThrowsError` would pass against precisely the behaviour
+    /// the guards exist to prevent. `.wrongOrder` is the one that means the misuse was stopped
+    /// in Swift and never reached C.
     func testAContextRefusesToBeReused() throws {
         let session = SPAKE2Session(role: .initiator, myName: alice, theirName: bob)
         _ = try session.message(for: .mint())
-        XCTAssertThrowsError(try session.message(for: .mint()))
+        XCTAssertThrowsError(try session.message(for: .mint())) {
+            XCTAssertEqual($0 as? SPAKE2Error, .wrongOrder)
+        }
     }
 
-    /// The other half of the single-use contract: `hasProcessed` should refuse a second call
-    /// just as `hasGenerated` refuses a second `message(for:)`, not merely accept it and hand
-    /// back stale or re-derived material.
+    /// The other half of the single-use contract: a second `keyMaterial(from:)` is refused just
+    /// as a second `message(for:)` is, rather than accepted and handed back stale or re-derived
+    /// material.
     func testKeyMaterialRefusesToBeCalledTwice() throws {
         let code = PairingCode.mint()
         let initiator = SPAKE2Session(role: .initiator, myName: alice, theirName: bob)
@@ -124,12 +133,16 @@ final class SPAKE2SessionTests: XCTestCase {
         let fromResponder = try responder.message(for: code)
 
         _ = try initiator.keyMaterial(from: fromResponder)
-        XCTAssertThrowsError(try initiator.keyMaterial(from: fromResponder))
+        XCTAssertThrowsError(try initiator.keyMaterial(from: fromResponder)) {
+            XCTAssertEqual($0 as? SPAKE2Error, .wrongOrder)
+        }
     }
 
     func testKeyMaterialBeforeAMessageIsRefused() {
         let session = SPAKE2Session(role: .initiator, myName: alice, theirName: bob)
-        XCTAssertThrowsError(try session.keyMaterial(from: Data(repeating: 0, count: 32)))
+        XCTAssertThrowsError(try session.keyMaterial(from: Data(repeating: 0, count: 32))) {
+            XCTAssertEqual($0 as? SPAKE2Error, .wrongOrder)
+        }
     }
 
     /// The one thing an in-process test genuinely cannot reach by construction — and it is
@@ -199,10 +212,28 @@ final class SPAKE2SessionTests: XCTestCase {
         )
     }
 
+    /// `processFailed` covers two distinct rejections inside `SPAKE2_process_msg`, and only one
+    /// of them is the one a test reaches for. A message that is not 32 bytes fails a length
+    /// check; a message that *is* 32 bytes but does not decode to a curve point fails
+    /// `x25519_ge_frombytes_vartime` (spake25519.cc:474). The second is the one that matters on
+    /// the wire, because a hostile peer sends well-formed lengths.
     func testAMalformedPeerMessageIsAnErrorNotACrash() throws {
-        let session = SPAKE2Session(role: .initiator, myName: alice, theirName: bob)
-        _ = try session.message(for: .mint())
-        XCTAssertThrowsError(try session.keyMaterial(from: Data([0x00])))
+        let wrongLength = SPAKE2Session(role: .initiator, myName: alice, theirName: bob)
+        _ = try wrongLength.message(for: .mint())
+        XCTAssertThrowsError(try wrongLength.keyMaterial(from: Data([0x00]))) {
+            XCTAssertEqual($0 as? SPAKE2Error, .processFailed)
+        }
+
+        // Right length, wrong curve: little-endian `y = 2`, for which `x² = (y²-1)/(dy²+1)` is
+        // a non-square mod 2²⁵⁵-19, so decompression has no `x` to return. A fixed vector
+        // rather than random bytes because roughly half of all 32-byte values *do* decode to a
+        // point, and a test that passes half the time is not a test.
+        let offCurve = SPAKE2Session(role: .initiator, myName: alice, theirName: bob)
+        _ = try offCurve.message(for: .mint())
+        let notAPoint = Data([0x02] + [UInt8](repeating: 0, count: 31))
+        XCTAssertThrowsError(try offCurve.keyMaterial(from: notAPoint)) {
+            XCTAssertEqual($0 as? SPAKE2Error, .processFailed)
+        }
     }
 
     /// There is no fixed vector to drive here, and not merely because BoringSSL never wrote

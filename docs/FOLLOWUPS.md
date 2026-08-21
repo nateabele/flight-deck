@@ -779,6 +779,18 @@ the account a session runs as. Three things this deliberately did not build:
   amendment rather than having the sentence quietly disappear for a later reader to wonder
   about.
 
+- **Swift-side key buffers are not scrubbed.** `SPAKE2Session` reads key material into a Swift
+  `[UInt8]` and returns it as `Data`; `PairingSecrets` holds two `SymmetricKey`s and a
+  transcript. None of that is zeroed on the way out — Swift has no reliable way to, since the
+  compiler is free to copy a value anywhere and eliding a final write to memory that is about to
+  be freed is a legal optimisation. BoringSSL's own side is clean (`SPAKE2_CTX_free` cleanses
+  before `OPENSSL_free`), so this is the Swift half only. It matters if the process is core-
+  dumped or swapped between a pairing exchange and its next collection, which for a foreground
+  Mac app during a 2-minute window is a narrow target. Revisit if pairing material ever
+  outlives a window, or if key handling moves anywhere long-lived; `CryptoKit`'s
+  `SymmetricKey` already zeroes its own backing store, so the exposure is the intermediate
+  `Data`/`[UInt8]` buffers rather than the keys themselves.
+
 - **BoringSSL is pinned to a tag and updated by hand; nothing watches upstream for security
   fixes.** `BORINGSSL_TAG` in `scripts/build-boringssl.sh` names `0.20250114.0`, and the script
   refuses to build if the submodule has drifted off it — but moving the pin forward, including

@@ -74,6 +74,17 @@ final class PairingCodeTests: XCTestCase {
         XCTAssertEqual(codes.count, 500)
     }
 
+    /// `mint()` masks byte 0's top bit off, and that mask is not cosmetic: `pack()` never sets
+    /// it for any input, so a minted secret carrying it would be a value no formatted code can
+    /// round-trip back to. Deleting the mask still passes most of this file — only three tests
+    /// mint and round-trip, each catching it with p≈0.5, which measured out at 7 failures in 40
+    /// runs. This one catches it every time.
+    func testAMintedSecretNeverSetsTheBitAboveItsFiftyFive() {
+        for _ in 0..<200 {
+            XCTAssertEqual(PairingCode.mint().secret[0] & 0x80, 0)
+        }
+    }
+
     /// The password handed to SPAKE2 is the 55 bits, not the display string — so hyphenation
     /// and case cannot change what the two sides prove knowledge of.
     func testTheSecretIsIndependentOfPresentation() {
