@@ -90,11 +90,25 @@ struct PairingCodeSheet: View {
                     .accessibilityIdentifier("pairing-code-image")
             }
 
+            // `.fixedSize(horizontal: false, vertical: true)` is load-bearing, and this is
+            // the one sentence on the sheet where losing the tail is a security problem
+            // rather than a cosmetic one: it is what tells the user that anyone who can see
+            // the code can drive this Mac.
+            //
+            // A sheet is sized once, from its content's ideal height, and this `Text`'s ideal
+            // height is one line — so the sheet came out 509pt where the wrapped text needs
+            // 525, and SwiftUI resolved the 16pt shortfall the way it always does, by
+            // truncating to "…can control this Mac's sessions unt…". Neither
+            // `multilineTextAlignment` nor the `maxWidth` frame has any say in that; both
+            // describe the width, and the height was already decided. Fixing the vertical
+            // axis makes the ideal height the *wrapped* height, so the sheet asks for the
+            // 525pt it needs. Same reason as the variable reference in `ToolsSettingsTab`.
             Text("Scan this in Flight Deck on your iPhone. Anyone who can see this code can control this Mac's sessions until you revoke the device. It expires in 2 minutes.")
                 .font(.callout)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: 320)
+                .fixedSize(horizontal: false, vertical: true)
 
             Text(countdownText)
                 .font(.caption.monospacedDigit())
