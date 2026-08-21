@@ -2,6 +2,21 @@ import XCTest
 import FleetKit
 
 final class PairingPayloadTests: XCTestCase {
+    /// The sheet re-renders every second (a countdown ticks), and both the QR image and the
+    /// typed-code text are built from `encoded()` on every one of those renders. If the
+    /// encoding is not byte-stable the user watches the code change under them — which is
+    /// exactly what was reported the first time anyone ran this. Pin it.
+    func testEncodingTheSamePayloadTwiceGivesTheSameString() {
+        let payload = PairingPayload(
+            key: .mint(), macName: "Nate's MacBook Pro", serviceName: "flightdeck-a1b2",
+            endpoints: ["192.168.1.20:53211", "127.0.0.1:53211"]
+        )
+        let first = payload.encoded()
+        for _ in 0..<50 {
+            XCTAssertEqual(payload.encoded(), first, "the pairing code must not change between renders")
+        }
+    }
+
     private func payload() -> PairingPayload {
         PairingPayload(
             key: FleetDeviceKey.mint(),
