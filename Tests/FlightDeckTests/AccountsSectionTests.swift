@@ -106,9 +106,10 @@ final class AccountsSectionTests: XCTestCase {
 
     /// An agent's last account must never reach the trash closure, no matter what disables the
     /// menu item — `deleteFiles` re-checks this itself immediately before the call.
-    func testDeleteFilesRefusesAnAgentsLastAccount() {
+    func testDeleteFilesRefusesAnAgentsLastAccount() throws {
         let store = PreferencesStore(persistence: nil)
-        let only = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
+        let home = try makeDirectory("only")
+        let only = AgentAccount(agent: .claude, displayName: "D", home: home)
         store.preferences.storedAccounts = [only]
 
         var trashed: [URL] = []
@@ -249,6 +250,25 @@ final class AccountsSectionTests: XCTestCase {
         XCTAssertFalse(AccountsSection.remove(accountID: UUID(), in: store))
     }
 
+    /// Pressing remove twice must not re-tombstone an account that is already gone — a
+    /// different branch of the same guard than an unknown id, since this one *does* resolve.
+    func testRemoveRefusesAnAccountThatIsAlreadyTombstoned() {
+        let store = PreferencesStore(persistence: nil)
+        let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
+        let other = AgentAccount(agent: .claude, displayName: "O", home: temporary("o"))
+        store.preferences.storedAccounts = [work, other]
+
+        XCTAssertTrue(AccountsSection.remove(accountID: work.id, in: store))
+        XCTAssertFalse(AccountsSection.remove(accountID: work.id, in: store))
+
+        var trashed: [URL] = []
+        let ok = AccountsSection.deleteFiles(accountID: work.id, in: store) {
+            trashed.append($0)
+        }
+        XCTAssertFalse(ok)
+        XCTAssertTrue(trashed.isEmpty)
+    }
+
     // MARK: Bound sessions, by resolved id
 
     /// Spec §9: a tab that stores no account is bound to the agent's **built-in** account, not
@@ -289,5 +309,50 @@ final class AccountsSectionTests: XCTestCase {
         let tab = Session(title: "t", workingDirectory: "/p", agent: .codex, accountID: nil)
 
         XCTAssertEqual(AccountsSection.boundAccountIDs(in: [tab], resolvedBy: store), [codex.id])
+    }
+
+    // MARK: Removal copy
+
+    /// Permanence is stated whether or not sessions are running; the sessions sentence is
+    /// added only when there are any, so the common case is not padded with "0 sessions".
+    func testTheRemovalWarningStatesPermanenceAndNamesLiveSessions() {
+        let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
+        let quiet = AccountsSection.removalWarning(for: work, boundSessions: 0)
+        XCTAssertTrue(quiet.contains("can't be undone"))
+        XCTAssertTrue(quiet.contains(work.home.path))
+        XCTAssertFalse(quiet.contains("session"))
+
+        let busy = AccountsSection.removalWarning(for: work, boundSessions: 2)
+        XCTAssertTrue(busy.contains("2 open sessions"))
+        XCTAssertTrue(busy.contains("keep running"))
+    }
+
+    /// One session is "1 open session", not "1 open sessions".
+    func testTheWarningPluralisesASingleSession() {
+        let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
+        XCTAssertTrue(AccountsSection.removalWarning(for: work, boundSessions: 1).contains("1 open session "))
+    }
+
+    /// The destructive dialog says what is actually lost, and repeats the live-session warning
+    /// — this is the one that trashes an OAuth token out from under a running agent.
+    func testTheFileDeleteWarningNamesCredentialsAndTranscripts() {
+        let work = AgentAccount(agent: .claude, displayName: "W", home: temporary("w"))
+        let text = AccountsSection.fileDeleteWarning(for: work, boundSessions: 1)
+        XCTAssertTrue(text.contains("credentials"))
+        XCTAssertTrue(text.contains("transcripts"))
+        XCTAssertTrue(text.contains("Trash"))
+        XCTAssertTrue(text.contains("1 open session"))
+    }
+
+    /// Counted through the same resolution the removal guards use, so a legacy tab storing no
+    /// account is counted against the built-in account it actually runs as.
+    func testBoundSessionsAreCountedThroughResolution() {
+        let store = PreferencesStore(persistence: nil)
+        let builtIn = AgentAccount(agent: .claude, displayName: "D", home: AgentID.claude.builtInHome)
+        store.preferences.storedAccounts = [builtIn]
+        let legacy = Session(title: "s", workingDirectory: "/tmp", agent: .claude, accountID: nil)
+        XCTAssertEqual(
+            AccountsSection.boundSessionCount(for: builtIn, in: [legacy], resolvedBy: store), 1
+        )
     }
 }

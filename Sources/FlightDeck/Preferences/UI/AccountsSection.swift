@@ -34,6 +34,13 @@ struct AccountsSection: View {
         Self.boundAccountIDs(in: sessions.repos.flatMap(\.sessions), resolvedBy: preferences)
     }
 
+    /// How many open tabs are running as this account, for the two removal dialogs' copy.
+    private func boundSessions(for account: AgentAccount) -> Int {
+        Self.boundSessionCount(
+            for: account, in: sessions.repos.flatMap(\.sessions), resolvedBy: preferences
+        )
+    }
+
     /// The *resolved* ids, per spec §9: a tab whose `Session.accountID` is nil is bound to the
     /// agent's built-in account, not to nothing. Reading the raw field would let the built-in
     /// account look unbound while a legacy tab is running inside it. What this still guards is
@@ -49,8 +56,9 @@ struct AccountsSection: View {
         Set(sessions.compactMap { store.resolvedAccountID(for: $0.agent, in: $0.accountID) })
     }
 
-    /// What the `−` button gates on: is there another live account for this agent to fall
-    /// back to.
+    /// What the removal flow gates on: is there another live account for this agent to fall
+    /// back to. Both the `−` button and `deleteFiles` read this — neither has a rule of its
+    /// own.
     ///
     /// The only refusal left. Removal used to also refuse the built-in account and any account
     /// with a live tab — the first because a nil `Session.accountID` resolves to it, the
@@ -116,6 +124,42 @@ struct AccountsSection: View {
             return false
         }
         return true
+    }
+
+    /// How many open tabs are running as this account, counted through the same resolution
+    /// `boundAccountIDs` uses — so a legacy tab storing no account is counted against the
+    /// built-in account it actually runs as, not against nothing.
+    @MainActor
+    static func boundSessionCount(
+        for account: AgentAccount, in sessions: [Session], resolvedBy store: PreferencesStore
+    ) -> Int {
+        sessions.filter { store.resolvedAccountID(for: $0.agent, in: $0.accountID) == account.id }.count
+    }
+
+    /// The live-sessions sentence, or nothing when there are none. Separate from the two
+    /// warnings below because both need it and neither should pad the common case with a
+    /// "0 sessions" clause.
+    private static func liveSessionsClause(_ count: Int) -> String {
+        guard count > 0 else { return "" }
+        let noun = count == 1 ? "1 open session " : "\(count) open sessions "
+        return "\n\n\(noun)signed in to this account will keep running, but Flight Deck will "
+            + "no longer offer this login."
+    }
+
+    /// The `−` button's confirmation. States permanence — removal is not re-seeded on the next
+    /// launch — and that the directory itself is untouched, which is what separates this from
+    /// the destructive button beside it.
+    static func removalWarning(for account: AgentAccount, boundSessions: Int) -> String {
+        "This can't be undone. The directory at \(account.home.path) is left in place."
+            + liveSessionsClause(boundSessions)
+    }
+
+    /// The separately-confirmed destructive action. Names what is actually in that directory,
+    /// because "delete files" undersells an OAuth credential and every transcript for a login.
+    static func fileDeleteWarning(for account: AgentAccount, boundSessions: Int) -> String {
+        "The credentials and transcripts at \(account.home.path) will be moved to the Trash. "
+            + "This can't be undone from Flight Deck."
+            + liveSessionsClause(boundSessions)
     }
 
     var body: some View {
@@ -184,15 +228,18 @@ struct AccountsSection: View {
             }
             Button("Cancel", role: .cancel) { pendingRemoval = nil }
         } message: { account in
-            Text("The directory at \(account.home.path) is left in place.")
+            Text(AccountsSection.removalWarning(for: account, boundSessions: boundSessions(for: account)))
         }
         // The second, separately-confirmed destructive action (spec §8.3): that directory holds
         // OAuth credentials and every transcript for a login, so it is never reached by the
         // default button. Moves the directory to the Trash (recoverable, what "Delete Files"
         // means on the Mac) rather than unlinking it outright, and only then drops the registry
-        // entry — `deleteFiles` re-checks the built-in/bound-session guards itself immediately
-        // before touching disk, so this button can never act on either even if `.disabled`
-        // above were ever wrong.
+        // entry — `deleteFiles` re-reads the account by id and re-checks the last-account rule
+        // immediately before touching disk, so this button can never act on that even if
+        // `.disabled` above were ever wrong. It no longer refuses on live sessions: this button
+        // is never disabled for them, so the dialog's copy (`fileDeleteWarning`) is the only
+        // thing standing between a running agent and an OAuth token trashed out from under it —
+        // an accepted risk, not an oversight.
         .confirmationDialog(
             "Delete “\(pendingFileDelete?.home.path ?? "")”?",
             isPresented: Binding(get: { pendingFileDelete != nil }, set: { if !$0 { pendingFileDelete = nil } }),
@@ -206,7 +253,7 @@ struct AccountsSection: View {
             }
             Button("Cancel", role: .cancel) { pendingFileDelete = nil }
         } message: { account in
-            Text("The directory at \(account.home.path) will be moved to the Trash.")
+            Text(AccountsSection.fileDeleteWarning(for: account, boundSessions: boundSessions(for: account)))
         }
         .alert(
             "Sign In to “\(justAdded?.displayName ?? "")”?",
