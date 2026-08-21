@@ -33,6 +33,26 @@ struct PairingCodeSheet: View {
     @ObservedObject var preferences: PreferencesStore
     let payload: PairingPayload
 
+    /// Encoded once, at init, rather than inside `body`.
+    ///
+    /// `body` re-runs every second — the countdown ticks — and both the QR and the typed-code
+    /// text are derived from the encoding. Deriving them in `body` rebuilt a 320px QR bitmap
+    /// on every tick and handed SwiftUI a fresh `CGImage` each time, which redraws the image
+    /// for a code that has not changed. (It genuinely has not: `encoded()` is byte-stable,
+    /// pinned by `testEncodingTheSamePayloadTwiceGivesTheSameString`.) The work is per-code,
+    /// so it belongs where the code is decided, not where it is drawn.
+    private let code: String
+    private let codeImage: CGImage?
+
+    init(service: FleetService, preferences: PreferencesStore, payload: PairingPayload) {
+        self.service = service
+        self.preferences = preferences
+        self.payload = payload
+        let code = payload.encoded()
+        self.code = code
+        self.codeImage = PairingCodeImage.cgImage(for: code, size: 320)
+    }
+
     /// Advanced only by the timer tick below, so the countdown text (and the expiry check
     /// that drives auto-dismiss) re-evaluates once a second without depending on
     /// `preferences` publishing on every tick.
@@ -62,8 +82,8 @@ struct PairingCodeSheet: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
-            if let cgImage = PairingCodeImage.cgImage(for: payload.encoded(), size: 320) {
-                Image(decorative: cgImage, scale: 1)
+            if let codeImage {
+                Image(decorative: codeImage, scale: 1)
                     .interpolation(.none)
                     .resizable()
                     .frame(width: 240, height: 240)
@@ -82,7 +102,7 @@ struct PairingCodeSheet: View {
                 .accessibilityIdentifier("pairing-code-countdown")
 
             DisclosureGroup("Can't scan? Type this code instead") {
-                Text(payload.encoded())
+                Text(code)
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
                     .frame(maxWidth: 320)

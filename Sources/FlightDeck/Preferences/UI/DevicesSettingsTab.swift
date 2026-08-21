@@ -15,8 +15,8 @@ struct DevicesSettingsTab: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var service: FleetService
 
+    /// Both the sheet's presentation and its content. See the `.sheet(item:)` below.
     @State private var pairingPayload: PairingPayload?
-    @State private var isPairingPresented = false
     @State private var armError: String?
     @State private var pendingRevocation: PairedDevice?
 
@@ -61,10 +61,13 @@ struct DevicesSettingsTab: View {
             }
         }
         .padding(20)
-        .sheet(isPresented: $isPairingPresented) {
-            if let pairingPayload {
-                PairingCodeSheet(service: service, preferences: preferences, payload: pairingPayload)
-            }
+        // `.sheet(item:)`, not `.sheet(isPresented:)` with a companion optional. The latter
+        // presents on the boolean and renders whatever the optional happens to be at that
+        // moment — which was `nil`, so the sheet opened as an empty 200pt box with no content
+        // and no way out. Keying on the value makes "there is a payload" and "the sheet is up"
+        // the same fact rather than two that can disagree.
+        .sheet(item: $pairingPayload) { payload in
+            PairingCodeSheet(service: service, preferences: preferences, payload: payload)
         }
         .alert(
             "Revoke \(pendingRevocation?.name ?? "")? It will stop receiving your sessions immediately and will have to be paired again.",
@@ -84,7 +87,6 @@ struct DevicesSettingsTab: View {
         Task {
             do {
                 pairingPayload = try await service.arm()
-                isPairingPresented = true
             } catch {
                 // `arm()` refuses rather than handing out a code with `host:0` endpoints —
                 // see `FleetService.arm`. Say so instead of the sheet silently not opening.

@@ -13,7 +13,13 @@ public enum PairingPayloadError: Error, Equatable {
 /// plan's Task 1. The digits in the prefix are the version, and they are checked before any
 /// base64 or JSON decoding happens, so a code from a newer Mac is refused *as* too-new rather
 /// than as damaged.
-public struct PairingPayload: Equatable, Sendable {
+public struct PairingPayload: Equatable, Sendable, Identifiable {
+    /// The slot this code was minted for. Present so a presenter can drive a sheet from the
+    /// payload itself rather than from a separate boolean — `.sheet(item:)` cannot render
+    /// before the value exists, where `.sheet(isPresented:)` plus a companion optional can,
+    /// and did: it showed an empty sheet.
+    public var id: UUID { key.slot }
+
     public static let currentVersion = 1
     /// The scheme half of the code. The version is spelled into the prefix — `flightdeck1:` —
     /// and that is load-bearing, not cosmetic: a payload from a newer Mac may rename or retype
