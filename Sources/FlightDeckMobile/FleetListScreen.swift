@@ -53,7 +53,6 @@ struct FleetListScreen: View {
                     }
                 }
             }
-            .font(.system(.body, design: .monospaced))
             .opacity(isStale ? 0.5 : 1)
             .refreshable { model.reconnect() }
             // "Sessions" is what this screen shows; the Mac's name is which Mac they came
@@ -80,11 +79,28 @@ struct FleetListScreen: View {
         }
     }
 
+    /// The font is set HERE, on the title itself, and not once on the enclosing `List`.
+    ///
+    /// `List { … }.font(…)` looks like it dresses every row, and it does not: a `List` hands
+    /// its rows to the platform's own cell machinery, which resolves each row's content in
+    /// an environment of its own rather than the one the modifier wrote. The result is not
+    /// even uniformly wrong — some rows inherited the monospaced font and their neighbours
+    /// rendered in the system font, in the same list, which is what sent this back from
+    /// testing. (Rendering the identical hierarchy offscreen on the Mac shows the stronger
+    /// form: *no* row content inherits it there, headers included, and only the `Text`s that
+    /// name their own font survive.)
+    ///
+    /// So every `Text` in this file names its own font — the section headers, the banners,
+    /// the empty state and the glyph's subagent count already did, and the title was the one
+    /// that did not. The terminal idiom is deliberate (see the headers' `.monospaced()`), so
+    /// it is stated where it has to hold rather than inherited from a container that cannot
+    /// be relied on to pass it down.
     private func row(_ session: WireSession) -> some View {
         HStack(spacing: 8) {
             SessionStatusGlyph(session: session)
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.title)
+                    .font(.system(.body, design: .monospaced))
                 if let waitingFor = session.waitingFor {
                     Text(waitingFor).font(.caption).foregroundStyle(.orange)
                 }
