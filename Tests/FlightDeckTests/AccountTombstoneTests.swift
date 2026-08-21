@@ -125,6 +125,40 @@ final class AccountTombstoneTests: XCTestCase {
         XCTAssertEqual(preferences.accounts.map(\.id), [live.id])
     }
 
+    /// The wiring, which the test above cannot see: it calls `purgeRemovedAccounts()` on a
+    /// value, so deleting the one line in `PreferencesStore.init` that calls it leaves the
+    /// whole suite green while tombstones accumulate on disk for the rest of the app's life.
+    /// This drives a real launch instead — construct a store over a persistence holding a
+    /// tombstone — and asserts both halves of that call site's claim: the tombstone is gone
+    /// from the loaded preferences, and the purge reached the persistence on the launch that
+    /// performed it rather than waiting for the user's next preference edit.
+    func testALaunchPurgesTombstonesAndWritesTheResultBack() {
+        let persistence = PreferencesStoreTests.MemoryPersistence()
+        let live = AgentAccount(agent: .claude, displayName: "Live", home: home("live"))
+        var dead = AgentAccount(agent: .claude, displayName: "Dead", home: home("dead"))
+        dead.removedAt = Date()
+        // Both agents seeded, so `migrateAccountsIfNeeded` has nothing to add and the only
+        // difference between what was loaded and what is saved is the purge.
+        let codex = AgentAccount(agent: .codex, displayName: "Codex", home: home("codex"))
+        persistence.stored = Preferences(storedAccounts: [live, dead, codex])
+
+        let store = PreferencesStore(persistence: persistence)
+
+        XCTAssertEqual(store.preferences.accounts.map(\.id), [live.id, codex.id])
+        XCTAssertEqual(persistence.stored?.accounts.map(\.id), [live.id, codex.id],
+                       "a purge that never reaches disk is repeated on every launch instead")
+    }
+
+    /// Purging preferences that were never migrated must not write `[]` into `storedAccounts`:
+    /// nil is what `migrateAccountsIfNeeded` reads as "never seeded", so an empty array there
+    /// would leave the user with no accounts at all, permanently.
+    func testPurgingUnmigratedPreferencesLeavesThemUnseeded() {
+        var preferences = Preferences()
+        XCTAssertNil(preferences.storedAccounts)
+        preferences.purgeRemovedAccounts()
+        XCTAssertNil(preferences.storedAccounts, "still unmigrated, so migration still seeds")
+    }
+
     /// Existing stored JSON has no `removedAt` key. Decoding must treat that as live, not fail.
     func testAccountsStoredBeforeTombstonesDecodeAsLive() throws {
         let json = Data("""

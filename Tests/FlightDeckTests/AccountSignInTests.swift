@@ -79,6 +79,34 @@ final class AccountSignInTests: XCTestCase {
         XCTAssertTrue(store.pendingRenamesForTesting.isEmpty, "a login is not a rename")
     }
 
+    /// Queuing it is only half the fix — this is the half a user can see: the queued `/login`
+    /// is actually typed at the agent, and typed as itself. Every other test of the prompt
+    /// queue drives `Self.resumePrompt`, so a delivery path that special-cased "Keep going",
+    /// or a `DeferredPrompt` that lost its own text on the way through, would leave this
+    /// suite and the auto-resume suite both green while sign-in silently did nothing.
+    func testTheQueuedLoginIsTypedOnceTheAgentIsUp() {
+        let (store, _) = makeStore()
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { work in work() }
+        let session = store.openSignInSession(
+            for: makeAccount(.claude), in: root.path,
+            using: LoginInvocation(command: "claude", inject: "/login")
+        )
+
+        // Nothing yet: the tab is a bare shell that has not even started `claude`.
+        store.flushPendingResumePromptsForTesting()
+        XCTAssertTrue(spy.sent.isEmpty, "typing at a shell prompt is how this bug looked")
+
+        // `claude` registers in the status registry and settles.
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .idle)])
+        store.flushPendingResumePromptsForTesting()
+
+        XCTAssertEqual(spy.sent, ["/login"])
+        XCTAssertEqual(spy.events.last, .ret, "an unsent Return is the defect this replaced")
+        XCTAssertNil(store.pendingPrompts[session.id], "one-shot")
+    }
+
     /// Codex signs in with a one-shot subcommand and has nothing to type afterwards, so it
     /// must not leave an entry sitting in the queue until its deadline.
     func testAnAgentWithNothingToInjectQueuesNothing() {
