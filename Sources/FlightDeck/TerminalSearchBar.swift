@@ -70,11 +70,9 @@ struct TerminalSearchBar: View {
         .buttonStyle(.borderless)
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8).strokeBorder(.separator)
-        )
-        .shadow(radius: 4, y: 2)
+        // Shared with `ToolOverlay` so the two panels that stack in this corner keep one
+        // treatment: Liquid Glass on macOS 26+, the previous material/border/shadow below it.
+        .floatingChrome()
         .padding(8)
         .onAppear { needleFocused = true }
         // ⌘F while the bar is already open re-focuses the field rather than opening a
