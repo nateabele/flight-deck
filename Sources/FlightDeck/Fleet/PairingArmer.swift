@@ -58,7 +58,16 @@ final class PairingArmer {
 
     /// Opens a window, replacing any window already open — two live codes at once would
     /// mean a code the user has forgotten about is still a key.
+    ///
+    /// Replacing goes through `clearPending()`, not a direct assignment, so a window this
+    /// call ends announces that the same way cancelling, claiming or expiring one does. Ending
+    /// a live window without firing `onWindowClosed` is exactly the shape of the QR path's
+    /// defect — this route just reaches it by opening a new window instead of failing to close
+    /// one. `FleetService.arm()` already calls `cancel()` immediately before this, so in
+    /// production this fires `onWindowClosed` a second, harmless time when a window was open;
+    /// `closePairingListener()` tolerates being called with nothing to close.
     func arm(macName: String, serviceName: String, endpoints: [String]) -> ArmedPairing {
+        clearPending()
         let key = FleetDeviceKey.mint()
         // Minted here, beside the device key, and from the same CSPRNG. The two are
         // independent secrets for independent jobs — the key is what the phone keeps, the code
@@ -109,7 +118,8 @@ final class PairingArmer {
 
     /// The single choke point. Every route that ends a window comes through here, so
     /// `onWindowClosed` cannot be missed by a route somebody adds later without touching this
-    /// file — which is the whole reason it is a function rather than three assignments.
+    /// file — which is the whole reason it is a function rather than an assignment repeated
+    /// at every call site.
     private func clearPending() {
         pending = nil
         onWindowClosed?()

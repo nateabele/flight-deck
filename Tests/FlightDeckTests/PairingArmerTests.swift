@@ -105,25 +105,36 @@ final class PairingArmerTests: XCTestCase {
 
     /// The rule `FleetService.closePairingListener()` states, at the level it is actually
     /// enforced: the listener's lifetime is `pending`'s lifetime, so *every* way `pending`
-    /// stops being a live window has to announce it. Asserted over all three clearing routes
+    /// stops being a live window has to announce it. Asserted over all four clearing routes
     /// at once rather than one test each, because the property is the exhaustiveness — a
-    /// fourth route added without firing this is exactly the defect the QR path shipped with,
-    /// and a per-route test would have said nothing about it either.
+    /// fifth route added without firing this is exactly the defect the QR path shipped with,
+    /// and a per-route test would have said nothing about it either. `arm` is in this list,
+    /// not just cancel/claim/expire, because it too ends a live window — "replacing any window
+    /// already open" — and re-arming over an open window is exactly the shape production hits
+    /// every time, via `FleetService.arm()`. Its row carries `leavesAWindowOpen: true` because
+    /// unlike the other three, ending the old window is not the end of the story — a new one
+    /// replaces it — so the announcement is the only signal this route's closure happened at
+    /// all.
     func testEveryWayAWindowEndsAnnouncesThatItEnded() {
-        for (name, end) in [
-            ("cancel", { (armer: PairingArmer) in armer.cancel() }),
-            ("claim", { armer in _ = armer.claim(slot: armer.pending!.slot) }),
+        for (name, end, leavesAWindowOpen) in [
+            ("cancel", { (armer: PairingArmer) in armer.cancel() }, false),
+            ("claim", { armer in _ = armer.claim(slot: armer.pending!.slot) }, false),
             ("expire", { armer in
                 self.now += PairingArmer.window + 1
                 armer.expire()
-            }),
+            }, false),
+            ("arm", { armer in _ = self.arm(armer) }, true),
         ] {
             let armer = armer()
             _ = arm(armer)
             var closures = 0
             armer.onWindowClosed = { closures += 1 }
             end(armer)
-            XCTAssertNil(armer.pending, "\(name) did not end the window")
+            if leavesAWindowOpen {
+                XCTAssertNotNil(armer.pending, "\(name) should have opened a replacement window")
+            } else {
+                XCTAssertNil(armer.pending, "\(name) did not end the window")
+            }
             XCTAssertEqual(closures, 1, "\(name) ended the window without announcing it")
         }
     }

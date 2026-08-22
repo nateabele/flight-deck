@@ -39,12 +39,17 @@ public final class PairingRunner: @unchecked Sendable {
     /// online guess per exchange and there is no offline path, so flooding buys an attacker
     /// nothing but the phone's time.
     ///
-    /// Eight, because eight attempts at the initiator's 8-second whole-exchange timeout is 64
-    /// seconds, and with the 5-second discovery window in front of it that still fits inside
-    /// the 120-second window a Mac's code is valid for (`PairingArmer.window`, in the app
-    /// target). A ninth candidate would be tried, at the earliest, against a window that had
-    /// already closed — so this is the point past which more walking cannot pair anything, not
-    /// a taste in patience.
+    /// Eight, chosen conservatively rather than pushed to the arithmetic limit. Eight attempts
+    /// at the initiator's 8-second whole-exchange timeout is 64 seconds, and with the
+    /// 5-second discovery window in front of it that is 69 seconds against the 120-second
+    /// window a Mac's code is valid for (`PairingArmer.window`, in the app target) — which
+    /// proves eight fits, not that a ninth would not: the same inequality allows as many as
+    /// 14 (5 + 14 × 8 = 117). What eight actually leaves room for is the time the walk's clock
+    /// does not run on at all — the user reading the code off the Mac's screen, walking to the
+    /// phone, and typing twelve characters before the phone starts dialing anything. That gap
+    /// is unmeasured here and easily tens of seconds, which is the reason to stay well clear
+    /// of 14 rather than the reason to land on 8 exactly; 8 is a conservative point inside the
+    /// range the timing supports, not a boundary the timing derives.
     ///
     /// It bounds *work*, not reachability: a flood can still push the real Mac out of the
     /// first eight, and no cap fixes that. What that user gets is the QR, which is why the
