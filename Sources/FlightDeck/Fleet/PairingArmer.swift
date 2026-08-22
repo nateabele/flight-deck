@@ -1,6 +1,21 @@
 import FleetKit
 import Foundation
 
+/// What one open window consists of: the QR's payload and the short code, minted together.
+///
+/// One value rather than two returns, because they are one fact — the same window, presented
+/// two ways — and a sheet that received them separately could draw a code from one window
+/// beside a QR from another.
+///
+/// `Identifiable` on the slot so `DevicesSettingsTab` can drive its `.sheet(item:)` from the
+/// window itself. See that call site for why `.sheet(item:)` and not `.sheet(isPresented:)`.
+struct ArmedPairing: Identifiable {
+    let payload: PairingPayload
+    let code: PairingCode
+
+    var id: UUID { payload.key.slot }
+}
+
 /// The pairing window: one provisional slot at a time, expiring on its own, claimable once.
 ///
 /// A pure state machine over an injected clock, so the three rules that constitute the
@@ -28,8 +43,13 @@ final class PairingArmer {
 
     /// Opens a window, replacing any window already open — two live codes at once would
     /// mean a code the user has forgotten about is still a key.
-    func arm(macName: String, serviceName: String, endpoints: [String]) -> PairingPayload {
+    func arm(macName: String, serviceName: String, endpoints: [String]) -> ArmedPairing {
         let key = FleetDeviceKey.mint()
+        // Minted here, beside the device key, and from the same CSPRNG. The two are
+        // independent secrets for independent jobs — the key is what the phone keeps, the code
+        // is only ever a password for one SPAKE2 exchange inside this window — and neither is
+        // derived from the other.
+        let code = PairingCode.mint()
         // A placeholder, and only ever briefly: the device names itself in its `hello`, and
         // `FleetService.noteAttached` adopts that the instant it attaches. It survives only
         // for a device that claims nothing — and a provisional row is never listed anyway.
@@ -37,8 +57,11 @@ final class PairingArmer {
             slot: key.slot, name: "New device", secret: key.secret,
             pairedAt: nil, lastSeenAt: nil, armedUntil: now().addingTimeInterval(Self.window)
         )
-        return PairingPayload(
-            key: key, macName: macName, serviceName: serviceName, endpoints: endpoints
+        return ArmedPairing(
+            payload: PairingPayload(
+                key: key, macName: macName, serviceName: serviceName, endpoints: endpoints
+            ),
+            code: code
         )
     }
 

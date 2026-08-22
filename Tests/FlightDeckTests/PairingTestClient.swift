@@ -71,3 +71,115 @@ final class PairingTestClient: @unchecked Sendable {
         onEnd?()
     }
 }
+
+/// A bootstrap connection that can say things the pairing protocol does not contain.
+///
+/// `PairingTestClient` sends `PairingClientFrame`s, which by construction have no `hello` in
+/// them — that is the point of the type. Proving invariant 3 needs the opposite: a peer that
+/// puts a *fleet* frame on the pairing socket, which is what a mis-wired client or a hostile
+/// one would do. So this encodes `ClientFrame.hello` itself and writes it as a raw WebSocket
+/// text message.
+final class PairingProbe: @unchecked Sendable {
+    /// Fired for any bytes that come back at all — not for any *parseable* frame. The
+    /// invariant-3 test fails on this being called; the liveness probe succeeds on it.
+    var onAnyReply: (() -> Void)?
+    var onEnd: (() -> Void)?
+
+    private let port: NWEndpoint.Port
+    /// Whether to open with an honest PAKE message the moment the socket is ready.
+    ///
+    /// Not a default, because getting it wrong is silent in exactly one direction: the
+    /// liveness probe NEEDS the `pake` — a reply is the only thing that tells a live pairing
+    /// listener apart from a closed port — while the invariant-3 probe must not send one,
+    /// since a `pake` draws an answer by design and the whole assertion there is that nothing
+    /// comes back. Written as a default, the second call site inherits the first's needs and
+    /// fails for a reason that has nothing to do with the invariant.
+    private let opensWithPake: Bool
+    private var connection: NWConnection?
+    private var ended = false
+
+    init(port: NWEndpoint.Port, opensWithPake: Bool) {
+        self.port = port
+        self.opensWithPake = opensWithPake
+    }
+
+    func start() {
+        let parameters = FleetSocket.webSocketParameters(FleetTLS.pairingClientParameters())
+        let connection = NWConnection(
+            to: FleetSocket.webSocketEndpoint(for: .hostPort(host: "127.0.0.1", port: port)),
+            using: parameters
+        )
+        self.connection = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                // An honest PAKE message under a code this probe invents. The responder
+                // answers with its own message either way — it cannot know the code is wrong
+                // until the confirmation that never comes — so this draws a reply out of a
+                // live listener without spending an attempt.
+                guard let self, self.opensWithPake else { return }
+                let session = SPAKE2Session(
+                    role: .initiator,
+                    myName: PairingChannel.initiatorName,
+                    theirName: PairingChannel.responderName
+                )
+                if let message = try? session.message(for: .mint()) {
+                    FleetSocket.send(PairingClientFrame.pake(msg: message), over: connection)
+                }
+            case .failed, .cancelled:
+                self?.finish()
+            default:
+                break
+            }
+        }
+        receive()
+        connection.start(queue: .main)
+    }
+
+    /// Raw, rather than `FleetSocket.receive(PairingServerFrame.self, …)`, and the difference
+    /// is the difference between this probe catching a mis-wired listener and quietly agreeing
+    /// with one. A listener that answered a fleet frame replies with a `ServerFrame`, which
+    /// does not decode as a `PairingServerFrame` — so the typed receive reports that decode
+    /// failure through `onEnd`, which is indistinguishable from the connection ending, which
+    /// is precisely what invariant 3 says should happen. Measured: with the typed receive, the
+    /// invariant-3 test PASSED against a listener mutated to decode `ClientFrame` and ack it.
+    /// Bytes coming back is the question here; whether they parse is not.
+    private func receive() {
+        connection?.receiveMessage { [weak self] data, context, _, error in
+            guard let self, !self.ended else { return }
+            if error != nil { return self.finish() }
+            let metadata = context?.protocolMetadata(
+                definition: NWProtocolWebSocket.definition
+            ) as? NWProtocolWebSocket.Metadata
+            if metadata?.opcode == .close { return self.finish() }
+            if let data, !data.isEmpty { self.onAnyReply?() }
+            self.receive()
+        }
+    }
+
+    /// The frame the pairing vocabulary cannot express, written straight onto the socket.
+    func sendRawFleetHello() {
+        guard let connection,
+              let data = try? JSONEncoder().encode(ClientFrame.hello(lastSeq: 0, device: "iPhone"))
+        else { return }
+        let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
+        let context = NWConnection.ContentContext(identifier: "frame", metadata: [metadata])
+        connection.send(
+            content: data, contentContext: context, isComplete: true,
+            completion: .contentProcessed { _ in }
+        )
+    }
+
+    func stop() {
+        ended = true
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        connection = nil
+    }
+
+    private func finish() {
+        guard !ended else { return }
+        ended = true
+        onEnd?()
+    }
+}
