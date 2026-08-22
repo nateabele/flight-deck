@@ -12,6 +12,9 @@ public enum PairingChannel {
     /// The pairing listener's own Bonjour service, distinct from the fleet's
     /// `_flightdeck._tcp`. It exists only while a window is armed, so its presence *is* the
     /// "this Mac is pairable right now" signal — see the plan's "Deviations from the spec".
+    ///
+    /// `flightdeck-pair` is exactly 15 characters, RFC 6763's maximum service label length.
+    /// Any future rename must stay at or under that or Bonjour registration fails silently.
     public static let bonjourType = "_flightdeck-pair._tcp"
 
     /// The TXT key carrying the Mac's display name, so a phone that discovers two armed Macs
