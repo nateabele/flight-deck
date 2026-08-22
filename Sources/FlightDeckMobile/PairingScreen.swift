@@ -63,10 +63,17 @@ struct PairingScreen: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let failure {
-                Text(failure)
+            if let progress = model.pairingProgress {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text(Self.message(for: progress))
+                        .foregroundStyle(.secondary)
+                }
+            } else if let message = failure ?? model.pairingFailure {
+                Text(message)
                     .foregroundStyle(.red)
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding()
@@ -95,6 +102,19 @@ struct PairingScreen: View {
         }
         failure = nil
         model.pair(code: code)
+    }
+
+    /// Progress copy. `searching` names the wait a Bonjour browse imposes, so a five-second
+    /// spinner reads as work rather than as a hang; `trying` names the Mac so a user with two
+    /// of them can see which one is being asked.
+    static func message(for progress: PairingRunner.Progress) -> String {
+        switch progress {
+        case .searching: return "Looking for your Mac…"
+        case .trying(let displayName): return "Trying \(displayName)…"
+        // Never shown: each of these clears `pairingProgress` in the same update that sets
+        // `pairingFailure`, so the view is on the other branch by the time it renders.
+        case .noMacsFound, .failed, .paired: return ""
+        }
     }
 
     /// Each failure says what to do next. "Invalid code" for all three would leave a user
