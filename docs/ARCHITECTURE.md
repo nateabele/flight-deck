@@ -305,15 +305,18 @@ The spine is live end to end and proven that way: a real client completes a TLS-
 against a real listener, takes a snapshot of a live `SessionStore`, follows its mutations,
 resumes after a drop and marks a session read — all inside `./scripts/test-unit.sh`.
 
-The phone is built on top of that and **has never been run**. It is designed to scan a QR off
-the Mac's screen, find the Mac over Bonjour or by racing remembered addresses, and show the
-running fleet in the terminal's own idiom — one project section per open project, one row per
-session, renamed and marked read from either side. Every part of that below the UI is covered by
-the macOS test suite, because it deliberately lives in `FleetKit`. The screens themselves, and
-the camera path in particular, have only ever been type-checked: this machine has no iOS
-platform installed, and a simulator has no camera even once it does. `docs/MOBILE.md` carries
-the checklist of what a device would have to confirm, and says plainly which parts are least
-proven. Plan 2 built the phone and the pairing UI on top of the spine Plan 1 built (Plan 1:
+The phone is built on top of that and **has never been run**. It is designed to take a code off
+the Mac's screen — scanned, or twelve characters typed — find the Mac over Bonjour or by racing
+remembered addresses, and show the running fleet in the terminal's own idiom: one project
+section per open project, one row per session, renamed and marked read from either side. Every
+part of that below the UI is covered by the macOS test suite, because it deliberately lives in
+`FleetKit`. The screens themselves have never executed a line. `scripts/build-ios.sh` now really
+*builds* the app target rather than type-checking it, which is what first put Swift 6's
+region-based isolation over these sources and immediately found an error `-typecheck` had been
+passing over for the life of the branch — but a build is not a run, and a simulator has no
+camera in any case. `docs/MOBILE.md` carries the checklist of what a device would have to
+confirm, and says plainly which parts are least proven. Plan 2 built the phone and the pairing
+UI on top of the spine Plan 1 built (Plan 1:
 `docs/superpowers/plans/2026-08-19-fleet-replication-spine.md`; Plan 2:
 `docs/superpowers/plans/2026-08-19-fleet-pairing-and-ios.md`). The manual checklist for what
 only a real device on a real network can prove is [docs/MOBILE.md](MOBILE.md). Three modules:
@@ -321,10 +324,12 @@ only a real device on a real network can prove is [docs/MOBILE.md](MOBILE.md). T
 - **`Sources/FleetKit/`** — the wire types (`FleetSnapshot`, `WireProject`, `WireSession`), the
   delta vocabulary (`FleetEvent`), snapshot application, the replay fold, a hand-written frame
   codec, the TLS pre-shared-key parameters, both socket halves (`FleetSocketServer`,
-  `FleetClient`), the pairing payload (`PairingPayload`) that the QR encodes, and the phone's
-  Keychain-backed pairing store (`KeychainPairedMacStore`) and network-discovery connector
-  (`FleetConnector`). It imports only `Foundation`, `Network`, and `Security` — never `AppKit`
-  — and that boundary is enforced mechanically, not by convention: the same source directory
+  `FleetClient`), the pairing payload (`PairingPayload`) that the QR encodes, the typed code
+  (`PairingCode`) and the pairing channel that carries it (`Pairing/`, over the SPAKE2 wrapper
+  in `SPAKE2/`), and the phone's Keychain-backed pairing store (`KeychainPairedMacStore`) and
+  network-discovery connector (`FleetConnector`). It imports only `Foundation`, `Network`, and
+  `Security` — never `AppKit` — and that boundary is enforced mechanically, not by convention:
+  the same source directory
   is also compiled as an iOS target (`FleetKitiOS` in `project.yml`, checked by
   `scripts/build-ios.sh`), so a stray `import AppKit` fails that build immediately rather than
   surfacing later as a phone-side compile error nobody is watching for.
@@ -397,15 +402,30 @@ several devices' keys at once and picks the right one per connection from the PS
 this was the plan's central open question, now verified, so revoking one device (delete its
 slot's key, restart the listener) does not disturb any other paired device.
 
-**Pairing is a QR, a 2-minute window, and nothing else.** `PairingArmer.arm` mints a fresh
-`FleetDeviceKey`, opens a 120-second window, and hands back a `PairingPayload` —
-`flightdeck1:` plus base64url JSON carrying the key, the Mac's name, its Bonjour instance name,
-and every address `LocalEndpoints.current` can see for it. The version digits are checked
-before any base64 or JSON decoding happens, so a code from a newer Mac is refused as *too-new*
-rather than as *damaged* — the two failures send the user in opposite directions. The window is
-enforced by the armer itself, not by the UI: `PairingArmer.claim(slot:)` re-checks `armedUntil`
-against its own clock, so a code that expires unscanned stays refused even if the sheet
-displaying it is still on screen. The Mac advertises `_flightdeck._tcp` over Bonjour
+**Pairing is two paths onto one 2-minute window.** `PairingArmer.arm` mints a fresh
+`FleetDeviceKey`, opens a 120-second window, and hands back a single `ArmedPairing` carrying
+both presentations of it — a `PairingPayload` for the QR and a `PairingCode` for typing — as one
+value, so a sheet cannot draw one window's code beside another window's QR. The QR is `FD2-`
+plus Crockford base32 of a packed byte record: version, slot, the 32-byte key, one IPv4
+endpoint, and the Bonjour instance name and display name length-prefixed. That is 98 bytes and
+161 characters where v1's `flightdeck1:` base64url JSON was ~270, which measures as 45 QR
+modules against 65 — the packing is what paid, not the alphabet. Both names stayed in it
+because the phone learns neither anywhere else: `FleetSnapshot` carries no Mac identity at all,
+and `FleetConnector` re-finds its Mac by matching Bonjour results against exactly that instance
+name. The version digits are checked before any byte is decoded, so a code from a newer Mac is
+refused as *too-new* rather than as *damaged* — the two failures send the user in opposite
+directions. The window is enforced by the armer itself, not by the UI:
+`PairingArmer.claim(slot:)` re-checks `armedUntil` against its own clock, so a code that expires
+unscanned stays refused even if the sheet displaying it is still on screen.
+
+**The window closes in exactly one place, and that is a rule with a scar behind it.**
+`PairingArmer.clearPending()` is the only writer that nils `pending`, and it fires
+`onWindowClosed`; `FleetService` hangs the pairing listener's teardown off that, which makes
+"the listener's lifetime is the window's" mechanical rather than a convention. The enumerated
+version — a teardown call beside every route that ends a window — shipped first and missed the
+QR path, because that route clears `pending` inside an `if` whose second condition can fail
+independently. A completed QR pairing left its listener up, and its code a live key, for the
+rest of the window. The Mac advertises `_flightdeck._tcp` over Bonjour
 (`NSBonjourServices`, `NSCameraUsageDescription`, and `NSLocalNetworkUsageDescription` are all
 declared in `project.yml` — macOS 15+ and iOS both gate their respective access behind a user
 prompt, and an app with no usage description never gets to show it, so the failure is silent
@@ -422,9 +442,9 @@ there is never a window with no pairing on disk (`PairedMacStore.swift` has the 
 comment on why that shape was tried first and rejected). The Mac's copy is not Keychain-grade;
 see docs/FOLLOWUPS.md.
 
-**A short, typed pairing code is the crypto foundation for a second path, not yet wired to a
-socket.** `FleetKit` now links a vendored BoringSSL, for exactly one function: SPAKE2, a
-password-authenticated key exchange CryptoKit does not have. Hand-rolling one is not on the
+**The typed code is that second path, and it has its own socket.** `FleetKit` links a vendored
+BoringSSL, for exactly one function: SPAKE2, a password-authenticated key exchange CryptoKit
+does not have. Hand-rolling one is not on the
 table — the ways a PAKE goes wrong (point validation, transcript binding, non-constant-time
 comparison) do not announce themselves in tests, and BoringSSL's implementation is the one
 Chrome and Android ship. `vendor/boringssl` is a submodule, built by
@@ -452,9 +472,28 @@ unlimited time and no attempt limit to bound the search. `PairingCode` is delibe
 derived from or mixed into any other secret on the wire — see the reasoning comment on its
 `secret` property — so shortening it costs nothing else.
 
-None of this is reachable yet from an actual pairing attempt: there is no pairing listener for
-it, no PAKE frames on the wire, and the QR path is unchanged. That is deliberately a separate
-plan, written against these interfaces now that they exist.
+**The socket it runs on is deliberately not the fleet listener.** A PAKE runs *before* any
+shared secret exists, so carrying it on the fleet listener would mean accepting unauthenticated
+handshakes there — letting anyone on the LAN consume that listener's pending pool during every
+window, and turning "a bootstrap connection must never send `hello`" into a check somebody has
+to remember to write. `PairingListener` (`Sources/FleetKit/Pairing/`) exists only while a window
+is armed, advertises `_flightdeck-pair._tcp` so its presence *is* the announcement that a Mac is
+pairable, and speaks a vocabulary with no `hello` and no `cmd` in it: application code is not
+reachable from it because it is not there. Its TLS-PSK is a **public bootstrap key compiled into
+both binaries**, which buys no confidentiality and is not meant to — the device key crossing it
+is sealed under the SPAKE2-derived key and would be equally safe in the clear. What the PSK buys
+is that no unauthenticated frame parser sits on the wire in plaintext. Deriving that PSK from
+the typed code is the obvious-looking improvement and would destroy the design: it would hand a
+passive observer an offline attack on the 55 bits SPAKE2 is there to protect.
+
+The budget that makes 55 bits safe is **three guesses, per Mac, per window**
+(`PairingListener.maxAttempts`), and only a mismatched confirmation spends one: a frame that is
+not a curve point at all, a confirmation with no exchange behind it, and a code that fails its
+checksum on the phone all cost nothing. Per-Mac rather than global is load-bearing —
+`PairingRunner` walks discovered Macs one at a time, so a user with two on the LAN must not
+exhaust the budget on the right one by trying the wrong one first. The phone's half is
+`PairingBrowser`, `PairingRunner` and `PairingInitiator`; the whole exchange is covered against
+real sockets on macOS, and has never run on iOS — see [docs/MOBILE.md](MOBILE.md).
 
 ## Not yet built (design, not code)
 

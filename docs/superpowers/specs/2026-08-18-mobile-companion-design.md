@@ -92,13 +92,31 @@ Mac, so:
 - The phone scans it and stores the secret in the Keychain; the Mac keeps its copy per slot.
   From then on **every connection is TLS with that pre-shared key** — a device slot the Mac has
   no secret for cannot complete a handshake, so an unpaired peer never reaches application code.
+
+  There is exactly one exception, and it is scoped and named: the **pairing listener**, which
+  exists only while a window is armed, carries a **public bootstrap PSK** compiled into both
+  binaries, and can reach no application code at all — it speaks a frame vocabulary with no
+  `hello` and no `cmd` in it. It provides no confidentiality and nothing depends on it for
+  any: the device key crossing it is sealed under a SPAKE2-derived key. See
+  [`2026-08-21-short-pairing-code-design.md`](2026-08-21-short-pairing-code-design.md) §6.
 - Preferences grows a paired-devices list; revoking is deleting that slot's secret. The Mac
   shows when a phone is attached.
 
 This is **trust-on-first-use over the user's own screen**, and worth stating plainly rather than
 dressing up: its strength is exactly that a QR displayed on an unlocked Mac, during a window the
-user opened, is seen only by someone who could already use the Mac. It is not a PAKE and does
-not defend against someone photographing the screen while it is up.
+user opened, is seen only by someone who could already use the Mac.
+
+**Amendment (from execution, 2026-08-22).** This paragraph used to end "It is not a PAKE and
+does not defend against someone photographing the screen while it is up." A PAKE now exists on
+one of the two paths, so the first half stopped being true; the second half is unchanged, and it
+is the half that describes the boundary. There are now two paths onto that screen, and they
+differ in one respect only. The **QR path** is trust-on-first-use exactly as described: the
+code carries the device key itself, and the screen it is displayed on is what secures it.
+The **typed path** carries no key — twelve characters, 55 bits — and uses SPAKE2 plus a
+three-guess limit to make those 55 bits safe to put on a wire. That PAKE is a prerequisite for
+shortening the code, **not a strengthening of this trust boundary**: photographing a code
+during the window still pairs the photographer, on either path. See
+[`2026-08-21-short-pairing-code-design.md`](2026-08-21-short-pairing-code-design.md) §3.
 
 Pre-shared keys rather than exchanged public keys is a deliberate simplification: Network
 .framework supports TLS-PSK directly on both `NWListener` and `NWConnection`, whereas a
