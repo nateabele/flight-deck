@@ -105,6 +105,30 @@ final class PairingPayloadTests: XCTestCase {
         }
     }
 
+    /// The mirror of truncation, and the one the decoder used not to make: a record with
+    /// bytes appended past the mac name decoded *successfully*, because nothing checked that
+    /// the cursor had reached the end. It cannot produce a wrong key — every field is already
+    /// read by then — so this is robustness rather than safety, but a decoder whose accepted
+    /// set is wider than its encoder's output set is one where "this code scans" stops
+    /// meaning "this code is intact".
+    ///
+    /// Four bytes rather than one: base32 drops a partial trailing group, so a single
+    /// appended symbol is invisible by construction and only whole appended *bytes* are a
+    /// thing the decoder could ever see.
+    func testACodeWithBytesAppendedPastTheEndIsMalformed() throws {
+        let code = payload().encoded()
+        var bytes = try XCTUnwrap(Data(crockfordBase32: String(code.dropFirst(4))))
+        XCTAssertEqual(bytes.count, 98, "the record whose end this test is about")
+        bytes.append(contentsOf: [0xFF, 0xFF, 0xFF, 0xFF])
+        let extended = "FD2-" + bytes.crockfordBase32EncodedString()
+        XCTAssertThrowsError(try PairingPayload(decoding: extended)) { error in
+            XCTAssertEqual(error as? PairingPayloadError, .malformed)
+        }
+        // And the clean record it was built from still decodes, so the guard above rejects
+        // the appended bytes rather than every code of this shape.
+        XCTAssertNoThrow(try PairingPayload(decoding: code))
+    }
+
     /// v1's `testTheCodeIsNotAURL`, kept: a scanner that treated this as a link would hand it
     /// to Safari instead of to the app.
     func testTheCodeIsNotAURL() {
