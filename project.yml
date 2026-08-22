@@ -219,6 +219,7 @@ targets:
         # browser simply never returns a result, which reads as "my Mac isn't on the network".
         NSBonjourServices:
           - _flightdeck._tcp
+          - _flightdeck-pair._tcp
 
 # FleetKitiOS and FlightDeckMobile both need a persisted shared scheme, not xcodebuild's
 # own implicit synthesis for a buildable target — that synthesis is unpersisted,
