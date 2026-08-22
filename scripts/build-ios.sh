@@ -3,11 +3,12 @@ set -euo pipefail
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 cd "$(dirname "$0")/.."
 
-# Compile-only check of everything that targets iOS.
+# Compile-only check of everything that targets iOS, including the phone app's test bundle.
 #
-# Nothing here is RUN — that needs a booted simulator, and docs/MOBILE.md has the sequence —
-# but building is the whole point: this is what fails when FleetKit's shared sources acquire
-# a macOS-only import, which is the boundary the two-platform split exists to enforce.
+# Nothing here is RUN — that needs a booted simulator; ./scripts/test-ios.sh does that, and
+# docs/MOBILE.md has the manual sequence — but building is the whole point: this is what
+# fails when FleetKit's shared sources acquire a macOS-only import, which is the boundary the
+# two-platform split exists to enforce.
 #
 # `-scheme` rather than `-target`: Xcode 26.6 rejects `-derivedDataPath` on a plain `-target`
 # build ("The flag -scheme, -testProductsPath, or -xctestrun is required when specifying
@@ -54,11 +55,19 @@ xcodebuild -project FlightDeck.xcodeproj -scheme FleetKitiOS \
 #
 # To turn a skip into a real check: Xcode > Settings > Components, or
 # `xcodebuild -downloadPlatform iOS`. Then this script covers the app target too.
+#
+# `build-for-testing` rather than `build`, so FlightDeckMobileTests is COMPILED here too.
+# It is one invocation rather than two because the alternative was a second guarded block
+# with its own copy of the skip logic below. Nothing is RUN — running needs a booted
+# simulator, and that is scripts/test-ios.sh's job — but compiling the suite in the gate that
+# every change to Sources/FlightDeckMobile goes through is what stops it rotting the moment
+# a production signature changes underneath it.
 IOS_LOG=$(mktemp)
 if xcodebuild -project FlightDeck.xcodeproj -scheme FlightDeckMobile \
      -configuration Debug -sdk iphonesimulator \
-     -derivedDataPath DerivedData build > "$IOS_LOG" 2>&1; then
-  echo "** FlightDeckMobile BUILD SUCCEEDED **"
+     -derivedDataPath DerivedData build-for-testing > "$IOS_LOG" 2>&1; then
+  echo "** FlightDeckMobile + FlightDeckMobileTests BUILD SUCCEEDED **"
+  echo "   (compiled, not run — ./scripts/test-ios.sh runs them on a simulator)"
   rm -f "$IOS_LOG"
 else
   # Matching xcodebuild's own destination-resolution wording, which is the fragile part
@@ -95,6 +104,8 @@ else
     echo "== SKIPPED: FlightDeckMobile build ==========================================="
     echo "   The iOS platform is not installed, so an app target has no destination to"
     echo "   build for. Falling back to a type-check of its sources."
+    echo "   FlightDeckMobileTests is skipped entirely here — a test bundle cannot be"
+    echo "   type-checked without its host module, which was not built."
     echo "   Install with: xcodebuild -downloadPlatform iOS"
     echo "==============================================================================="
     xcrun --sdk iphonesimulator swiftc -typecheck -parse-as-library \
