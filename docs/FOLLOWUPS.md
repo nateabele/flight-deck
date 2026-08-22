@@ -869,7 +869,8 @@ What they left behind, deliberately unfixed:
 - **A peer that speaks holds one of four pairing slots for 30 seconds, and no deadline value
   eliminates that.** `PairingListener.maxPending` is 4; `exchangeDeadline` is 30s. The *silent*
   peer is already handled — `firstFrameDeadline` evicts a connection that has said nothing in 5
-  seconds, which is what makes the long deadline reachable only by a peer that spoke. What
+  seconds *after its socket became usable*, and `handshakeDeadline` gives it 10 to get that far,
+  which is what makes the long deadline reachable only by a peer that spoke. What
   remains is the peer that speaks: one valid `pake` frame is a curve25519 point, which anyone
   can generate against any password, and it earns the full 30 seconds. Four of those, renewed,
   keep the legitimate phone refused at `accept`'s cap guard for the length of a window.

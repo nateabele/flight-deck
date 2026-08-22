@@ -8,6 +8,7 @@ final class PairingListenerTests: XCTestCase {
     private var listener: PairingListener?
     private var clients: [PairingTestClient] = []
     private var fleet: FleetSocketServer?
+    private var relay: SlowHandshakeRelay?
 
     override func tearDown() async throws {
         for client in clients { client.stop() }
@@ -16,6 +17,8 @@ final class PairingListenerTests: XCTestCase {
         listener = nil
         fleet?.stop()
         fleet = nil
+        relay?.stop()
+        relay = nil
     }
 
     private func arm(
@@ -318,14 +321,16 @@ final class PairingListenerTests: XCTestCase {
     /// Invariant 4, second half: its own deadline. A peer that completes the bootstrap
     /// handshake and then says nothing is dropped, so a window cannot be held open by silence.
     ///
-    /// `exchangeDeadline` is set long on purpose, so the long deadline cannot be what closes
-    /// this connection: what is being asserted is that *silence* is bounded by the short one,
-    /// and a single deadline of any length would pass a version of this test that did not say
-    /// so. Four slots emptied only every 30 seconds is what made the pool cheap to hold.
+    /// **Both** long deadlines are set long on purpose, so neither can be what closes this
+    /// connection: what is being asserted is that silence *after `.ready`* is bounded by the
+    /// short one, and a single deadline of any length — or one still armed at `accept` —
+    /// would pass a version of this test that did not say so. Four slots emptied only every 30
+    /// seconds is what made the pool cheap to hold.
     func testASilentPairingConnectionIsDroppedOnItsOwnDeadline() async throws {
         let listener = PairingListener()
         self.listener = listener
         listener.firstFrameDeadline = 0.5
+        listener.handshakeDeadline = 60
         listener.exchangeDeadline = 60
         let port = try await listener.start(
             code: .mint(), key: .mint(), macName: "Test Mac",
@@ -336,6 +341,124 @@ final class PairingListenerTests: XCTestCase {
         let silent = client(.hostPort(host: "127.0.0.1", port: port))
         silent.onEnd = { dropped.fulfill() }
         silent.start()
+        await fulfillment(of: [dropped], timeout: 10)
+    }
+
+    /// The regression this whole split exists for, and it was the Mac's fault rather than the
+    /// phone's: `accept` fires when TCP connects, so a first-frame deadline armed there is
+    /// spent on a TLS-PSK handshake and a WebSocket upgrade that the peer cannot hurry and
+    /// during which it has no socket to speak on. Measured against a booted simulator, the
+    /// phone's flow reported `flow:failed_connect @5.273s` — five seconds of handshake against
+    /// the five-second deadline — and the user saw "Couldn't reach that Mac".
+    ///
+    /// The handshake is made slow by `SlowHandshakeRelay` rather than by the client, because
+    /// no client can do it: `NWConnection` starts its handshake the instant its transport is
+    /// up. The relay's TCP connection reaches the Mac at t=0 and its first TLS byte four
+    /// `firstFrameDeadline`s later, which is exactly the shape of the field failure and is
+    /// deterministic to the millisecond rather than dependent on a slow link.
+    ///
+    /// It finishes the exchange for real rather than asserting "was not dropped": the phone
+    /// speaks the moment the socket is usable, which is what the short deadline is entitled to
+    /// expect of it and what makes five seconds *after* `.ready` generous rather than tight.
+    func testAPeerWhoseHandshakeOutlastsTheSilentDeadlineStillPairs() async throws {
+        let code = PairingCode.mint()
+        let key = FleetDeviceKey.mint()
+        let listener = PairingListener()
+        self.listener = listener
+        listener.firstFrameDeadline = 0.5
+        let port = try await listener.start(
+            code: code, key: key, macName: "Test Mac",
+            serviceName: "flightdeck-test-\(UUID().uuidString.prefix(8))", port: nil
+        )
+        let relay = SlowHandshakeRelay(upstream: port, holdingTheFirstBytesFor: 2)
+        self.relay = relay
+        let relayPort = try await relay.start()
+
+        let session = SPAKE2Session(
+            role: .initiator,
+            myName: PairingChannel.initiatorName, theirName: PairingChannel.responderName
+        )
+        let sealed = expectation(description: "sealed key")
+        nonisolated(unsafe) var secrets: PairingSecrets?
+        nonisolated(unsafe) var delivered: FleetDeviceKey?
+        nonisolated(unsafe) var handshakeTook: TimeInterval = 0
+        let dialled = Date()
+
+        let client = client(.hostPort(host: "127.0.0.1", port: relayPort))
+        client.onEnd = { XCTFail("the Mac hung up on a peer that was still handshaking") }
+        // The phone's own shape: the first frame goes from `.ready`, with nothing between the
+        // socket becoming usable and the `pake` — see `PairingInitiator.start`.
+        client.onReady = {
+            MainActor.assumeIsolated {
+                handshakeTook = Date().timeIntervalSince(dialled)
+                do {
+                    client.send(.pake(msg: try session.message(for: code)))
+                } catch { XCTFail("our own pake did not generate: \(error)") }
+            }
+        }
+        client.onFrame = { frame in
+            MainActor.assumeIsolated {
+                switch frame {
+                case .pake(let peer):
+                    do {
+                        let derived = PairingSecrets(
+                            keyMaterial: try session.keyMaterial(from: peer),
+                            transcript: try session.transcript
+                        )
+                        secrets = derived
+                        client.send(.confirm(mac: derived.initiatorConfirmation))
+                    } catch { XCTFail("the Mac's pake did not process: \(error)") }
+                case .sealed(_, let box):
+                    delivered = try? secrets?.open(box).key
+                    sealed.fulfill()
+                case .reject(let reason):
+                    XCTFail("the Mac rejected a correct exchange: \(reason)")
+                }
+            }
+        }
+        client.start()
+        await fulfillment(of: [sealed], timeout: 15)
+        XCTAssertEqual(delivered, key, "the slow handshake cost the exchange its key")
+        // Without this the test could pass having proved nothing: a relay that failed to hold
+        // the bytes would produce an ordinary fast handshake, which the unfixed listener pairs
+        // perfectly well.
+        XCTAssertGreaterThan(
+            handshakeTook, listener.firstFrameDeadline,
+            "the handshake was not actually held past the deadline it has to outlast"
+        )
+    }
+
+    /// The hole the split would otherwise open. If the short deadline only starts at `.ready`,
+    /// a peer that opens a TCP connection and never sends a byte of TLS reaches `.ready`
+    /// never — so nothing but the 30-second ceiling would bound it, and squatting the pool of
+    /// four would get six times cheaper rather than twice.
+    ///
+    /// Both later deadlines are set long, so the only thing that can close this connection is
+    /// the accept-time one. Plain TCP with no TLS options at all, because that is the peer
+    /// shape in question: it completes a connection the Mac accepts and then does nothing a
+    /// handshake could ever finish.
+    func testAPeerThatOpensASocketAndNeverHandshakesIsDropped() async throws {
+        let listener = PairingListener()
+        self.listener = listener
+        listener.handshakeDeadline = 0.5
+        listener.firstFrameDeadline = 60
+        listener.exchangeDeadline = 60
+        let port = try await listener.start(
+            code: .mint(), key: .mint(), macName: "Test Mac",
+            serviceName: "flightdeck-test-\(UUID().uuidString.prefix(8))", port: nil
+        )
+
+        let dropped = expectation(description: "the un-handshaken socket was dropped")
+        // A close arrives as EOF or as a reset depending on how far the stack got, and either
+        // one can also surface on the state handler; over-fulfilment is not a failure here.
+        dropped.assertForOverFulfill = false
+        let squatter = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+        squatter.start(queue: .main)
+        squatter.receive(minimumIncompleteLength: 1, maximumLength: 1) { _, _, isComplete, error in
+            if isComplete || error != nil { dropped.fulfill() }
+        }
+        defer { squatter.cancel() }
+
         await fulfillment(of: [dropped], timeout: 10)
     }
 
