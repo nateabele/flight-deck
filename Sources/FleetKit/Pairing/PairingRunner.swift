@@ -31,6 +31,26 @@ public final class PairingRunner: @unchecked Sendable {
         case paired
     }
 
+    /// The most Macs one run will try, and the reason the walk is bounded at all: the
+    /// candidate list comes from a Bonjour browse, so its length is chosen by the network. A
+    /// peer publishing N `_flightdeck-pair._tcp` advertisements makes the phone spend
+    /// N × `PairingInitiator.exchangeTimeout` behind a spinner, which is unbounded work driven
+    /// by untrusted input even though it is not a cryptographic problem — SPAKE2 gives one
+    /// online guess per exchange and there is no offline path, so flooding buys an attacker
+    /// nothing but the phone's time.
+    ///
+    /// Eight, because eight attempts at the initiator's 8-second whole-exchange timeout is 64
+    /// seconds, and with the 5-second discovery window in front of it that still fits inside
+    /// the 120-second window a Mac's code is valid for (`PairingArmer.window`, in the app
+    /// target). A ninth candidate would be tried, at the earliest, against a window that had
+    /// already closed — so this is the point past which more walking cannot pair anything, not
+    /// a taste in patience.
+    ///
+    /// It bounds *work*, not reachability: a flood can still push the real Mac out of the
+    /// first eight, and no cap fixes that. What that user gets is the QR, which is why the
+    /// typed path is documented as the fallback and not the primary.
+    public static let maxCandidates = 8
+
     public var onProgress: ((Progress) -> Void)?
     /// `serviceName` is the Bonjour instance name of the Mac that accepted — what a phone
     /// stores so `FleetConnector` can find the same Mac again. `macName` comes out of the
@@ -86,7 +106,7 @@ public final class PairingRunner: @unchecked Sendable {
             // reorder a list the user is already being shown progress against, and a Mac
             // discovered after its own window closed is not a candidate anyway.
             self.browser.stop()
-            self.remaining = self.discovered
+            self.remaining = Array(self.discovered.prefix(Self.maxCandidates))
             self.tryNext()
         }
     }
@@ -100,7 +120,9 @@ public final class PairingRunner: @unchecked Sendable {
         self.code = code
         generation += 1
         report(.searching)
-        remaining = candidates
+        // Capped here too, not only on the browse path: this entry point is public and its
+        // caller is a screen holding a list it got from the same network.
+        remaining = Array(candidates.prefix(Self.maxCandidates))
         tryNext()
     }
 

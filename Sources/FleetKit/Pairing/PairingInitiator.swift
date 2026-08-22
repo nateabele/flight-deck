@@ -12,8 +12,12 @@ import Network
 /// prove nothing about the one that ships.
 ///
 /// `@unchecked Sendable` with every mutation confined to `queue` — the same discipline as
-/// `FleetClient`. `start()` and `cancel()` assert `dispatchPrecondition(condition:
-/// .onQueue(queue))` as their first line.
+/// `FleetClient`. **Every** method and every Network.framework callback asserts
+/// `dispatchPrecondition(condition: .onQueue(queue))` as its first line, the way
+/// `PairingListener` does: they were all already on `queue`, but only some of them said so, and
+/// a confinement discipline that is asserted at three sites out of seven is one a later change
+/// can leave silently — the assertions are how "confined to `queue`" stays a fact rather than
+/// becoming a comment.
 public final class PairingInitiator: @unchecked Sendable {
     public enum Failure: Error, Equatable, Sendable {
         /// The Mac rejected our confirmation, or its own did not verify, or the sealed blob
@@ -130,7 +134,9 @@ public final class PairingInitiator: @unchecked Sendable {
             dispatchPrecondition(condition: .onQueue(self.queue))
             self.handle(frame)
         } onEnd: { [weak self] _ in
-            self?.fail(.connectionFailed)
+            guard let self else { return }
+            dispatchPrecondition(condition: .onQueue(self.queue))
+            self.fail(.connectionFailed)
         }
 
         connection.start(queue: queue)
@@ -151,6 +157,7 @@ public final class PairingInitiator: @unchecked Sendable {
     }
 
     private func handle(_ frame: PairingServerFrame) {
+        dispatchPrecondition(condition: .onQueue(queue))
         guard let session, let connection else { return }
         switch frame {
         case .pake(let peerMessage):
@@ -191,6 +198,7 @@ public final class PairingInitiator: @unchecked Sendable {
     }
 
     private func finish(key: FleetDeviceKey, macName: String) {
+        dispatchPrecondition(condition: .onQueue(queue))
         guard !settled else { return }
         settled = true
         connection?.stateUpdateHandler = nil
@@ -200,6 +208,7 @@ public final class PairingInitiator: @unchecked Sendable {
     }
 
     private func fail(_ failure: Failure) {
+        dispatchPrecondition(condition: .onQueue(queue))
         guard !settled else { return }
         settled = true
         connection?.stateUpdateHandler = nil
