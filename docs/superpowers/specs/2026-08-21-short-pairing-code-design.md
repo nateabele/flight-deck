@@ -26,6 +26,10 @@ Most of that payload does not need to be in the code at all. The phone learns th
 from the first snapshot; the service name is derivable; JSON plus base64url inflates the whole
 thing by roughly a third before it reaches the QR.
 
+**Two of those three claims are false** — the phone learns neither name from anywhere — and the
+third is what actually paid. See [§8](#8-the-qr-payload-packed)'s amendment; the shortening
+happened, on the encoding alone.
+
 ## 2. What this builds
 
 Two paths to the same result, sharing nothing but their outcome:
@@ -219,6 +223,45 @@ arrives with the first snapshot), the Bonjour service name (derivable from the s
 endpoint list beyond the first (Bonjour supplies the rest, and the remembered-endpoint race
 exists for reconnects, not for pairing).
 
+**Amendment (from execution, 2026-08-22): both names stayed, because both reasons for dropping
+them are false.** Kept here rather than deleted, because the claim is the reason the ~55-byte
+target was written down and a reader who remembers it needs to find out where it went.
+
+- **The display name does not arrive with the first snapshot.** `FleetSnapshot`
+  (`Sources/FleetKit/Wire.swift`) is one field, `projects`, and carries no Mac identity at all.
+  Nothing else on the wire ever tells the phone what to call the machine it paired with, so
+  dropping the name from the code would leave the phone's own UI with no name to show.
+- **The service name is not derivable from the slot.** `FleetService.derivedServiceName` is a
+  sanitised local host name, capped at 24 characters, plus the per-install suffix — stable per
+  Mac and unrelated to any slot UUID. `FleetConnector.startBrowsing` matches Bonjour results
+  against exactly that string (`name == self.mac.serviceName`), so a phone that did not receive
+  it browses `_flightdeck._tcp` and matches nothing. Dropping it to save bytes would cost
+  reconnection, which is the thing pairing exists to set up.
+- **The endpoint list beyond the first was genuinely dropped**, for the reason given. That part
+  of the paragraph above stands.
+
+**What carrying them costs, and what the packing still bought.** Both names are length-prefixed,
+one byte each. For the payload the density test uses — `Nate's MacBook Pro` and
+`flightdeck-macbook-a1b2` — the record is **98 bytes**, of which the two names are 43; the
+~55-byte figure above was never reachable while they are in it. The QR prediction misses in the
+same direction and the shipped code still wins comfortably: measured through
+`CIQRCodeGenerator` at correction level `M`, the packed code is **45 modules** against v1's
+**65**, not the ~33 predicted here. Drawn at 240pt that is 5.1pt per module against 3.6 — 1.4×
+the module size and 2.0× the area, where this section promised 2× and 4×.
+
+Read those numbers out of
+`PairingCodeImageTests.testThePackedPayloadProducesAMateriallySmallerQR`'s failure message
+rather than from this paragraph, and read `modules(of:)`'s doc comment before scaling anything:
+three different module counts were reported while this was being built, and the first two were
+CoreImage *extents* — module count plus the one-module quiet zone per side — mistaken for module
+counts. The test compares extents deliberately, which makes its threshold stricter than the
+shrink it is measuring, not looser.
+
+**The cheaper route, if the density ever matters more than it does now:** add `macName` and
+`serviceName` to `FleetSnapshot`, decoded with `decodeIfPresent` so already-paired phones are
+unaffected, then drop both from the payload and make this section's claim true. That is a wire
+change and wants its own slice; it is recorded in `docs/FOLLOWUPS.md`.
+
 ## 9. What this changes in the original spec
 
 §3 of `2026-08-18-mobile-companion-design.md` needs two amendments:
@@ -229,6 +272,11 @@ exists for reconnects, not for pairing).
   neither defends against someone photographing the screen.
 - The claim that every connection is TLS with the device key gains one exception, scoped and
   named: the pairing listener, during the window, with a public PSK.
+
+**Both were applied on 2026-08-22**, in place and marked, in §3 of that spec: the first as an
+amendment under the trust-on-first-use paragraph, quoting the sentence it replaces; the second
+appended to the TLS-with-the-device-key bullet itself, where the reader who needs the exception
+is already standing.
 
 ## 10. Testing
 

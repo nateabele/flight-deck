@@ -67,6 +67,28 @@ carried forward on trust.
   code is later isolated into a Swift-6 module separate from the adapted Ghostty sources.
 - **Non-sandboxed entitlements** (no `app-sandbox`, `disable-library-validation` on) — required
   for a terminal linking a non-notarized static `libghostty`.
+- **The packed QR keeps the Mac's display name and Bonjour service name, where the
+  short-pairing-code spec's §8 said it could drop both.** §8's reasoning does not hold against
+  the shipped code: `FleetSnapshot` (`Sources/FleetKit/Wire.swift`) carries no Mac identity at
+  all, so the display name does *not* "arrive with the first snapshot"; and
+  `FleetService.serviceName` is `<sanitised host>-<install suffix>`, stable per Mac and not
+  derivable from a slot — `FleetConnector.startBrowsing` matches Bonjour results against
+  exactly that string, so a phone without it cannot rediscover its Mac after either moved.
+  Carrying both, length-prefixed, costs 43 bytes of a 98-byte payload. The measured QR
+  improvement is in `PairingCodeImageTests.testThePackedPayloadProducesAMateriallySmallerQR`;
+  read the numbers in its failure message rather than trusting §8's predicted QR version,
+  which assumed a ~55-byte payload. **The cheaper route, if the density ever matters more:**
+  add `macName` and `serviceName` to `FleetSnapshot` (decoded with `decodeIfPresent`, so
+  already-paired phones are unaffected), then drop both from the payload and make §8's claim
+  true. That is a wire change and wants its own slice.
+- **A typed pairing stores no remembered endpoints.**
+  `FleetModel.adopt(key:serviceName:macName:)` writes `PairedMac(endpoints: [])` on purpose: the
+  seal carries the key and the Mac's name and nothing else, and off-LAN typed pairing is
+  explicitly out of scope (spec §11). The phone finds its Mac by browsing `_flightdeck._tcp` for
+  the service name it paired under, which is what `FleetConnector` does anyway. A phone paired
+  by *QR* still gets one endpoint, from the code. If typed pairing ever needs to survive leaving
+  the LAN, the fix is the phone recording the address it actually connected on — not widening
+  the seal.
 
 ## Minor cleanups (safe to defer; optional wrap-up commit)
 
@@ -815,3 +837,80 @@ the account a session runs as. Three things this deliberately did not build:
   `build-libghostty.sh` pair. `docs/BUILD.md`'s "From a fresh clone" section and its
   "Worktrees" section (a new worktree has neither artifacts directory populated, for the same
   git-ignored reason) both now say so.
+
+## From the typed pairing code (2026-08-22)
+
+Two plans — `docs/superpowers/plans/2026-08-21-pairing-channel.md` and
+`docs/superpowers/plans/2026-08-21-pairing-ui.md` — turned the SPAKE2 foundation above into a
+twelve-character code a user can type, over a listener that exists only while a window is open.
+What they left behind, deliberately unfixed:
+
+- **The QR payload has no integrity check, so a corrupted one decodes to a *wrong key* rather
+  than being refused.** `PairingPayload.init(decoding:)` validates the record's shape — the
+  `FD2-` prefix, digits-only version, the version byte repeated inside the body, both name
+  lengths, and `cursor == bytes.count` — and none of that reaches the 32 bytes of secret in the
+  middle. A single flipped bit in those 32 decodes cleanly into a different, well-formed key.
+  The phone stores it, dials the fleet listener, and the handshake is refused *by silence*
+  (Apple drops a mismatched PSK identity rather than sending an alert), so the phone reports
+  something that looks like a network problem and the Mac logs nothing at all. Diagnosable from
+  neither end.
+
+  This is not new — v1's base64url'd JSON had exactly the same property — and it is not what a
+  QR actually fails at: correction level `M` either reconstructs a camera misread or refuses to
+  decode, so landing a corrupted-but-well-formed record on the phone takes deliberate
+  corruption or a generator/scanner bug, not glare. That is why it has never bitten, and why
+  this is recorded rather than fixed. **A one-byte checksum over the record is the only thing
+  that closes it** — computed across every preceding byte, checked before any field is read,
+  reported as `.malformed`, which the phone already renders as "That code is damaged. Show a
+  new one on your Mac." It costs two base32 symbols and a version bump, and a version bump is
+  cheap here because codes live 120 seconds: there is no installed base of QRs to migrate.
+  Nothing weaker closes it, because shape validation cannot see into a secret by definition.
+
+- **A peer that speaks holds one of four pairing slots for 30 seconds, and no deadline value
+  eliminates that.** `PairingListener.maxPending` is 4; `exchangeDeadline` is 30s. The *silent*
+  peer is already handled — `firstFrameDeadline` evicts a connection that has said nothing in 5
+  seconds, which is what makes the long deadline reachable only by a peer that spoke. What
+  remains is the peer that speaks: one valid `pake` frame is a curve25519 point, which anyone
+  can generate against any password, and it earns the full 30 seconds. Four of those, renewed,
+  keep the legitimate phone refused at `accept`'s cap guard for the length of a window.
+
+  It is worth being exact about how little that buys. It costs the attacker no attempts (only a
+  mismatched `confirm` charges the three-guess budget) and yields no information (SPAKE2 gives
+  one online guess per exchange and no offline path). So this is **availability only, LAN-local,
+  and it denies only the typed path** — a phone pairing by QR never touches this socket at all;
+  it dials the fleet listener with the key the code carried, out of that listener's own 16-slot
+  pool. The user's way out is the QR, which is one of the reasons the typed path is documented
+  as the fallback rather than the primary. Lowering `exchangeDeadline` narrows each slot but
+  cannot remove a slot reachable by legitimate-looking work, and dropping it below
+  `PairingInitiator.exchangeTimeout` (8s) would make the Mac the side that gives up first on a
+  slow-but-live phone. What would actually close it is per-source accounting — a cap per peer
+  address rather than per listener — and that is a different mechanism, worth its own slice only
+  if anyone ever sees this happen.
+
+- **Two code comments are now known to be wrong, both found by mutating the thing they
+  describe.** Recorded so nobody re-derives them; neither is corrected in the source yet, and
+  each is a one-line fix.
+  - `FleetModel.connect()` says that assigning main-actor state from a `FleetConnector` (or
+    `PairingRunner`) callback "is an error the compiler cannot see past on its own". It is not:
+    removing `MainActor.assumeIsolated` from `pair(code:)`'s `onProgress` still **builds** under
+    Swift 6, with the build log confirming `FleetModel.swift` was recompiled under
+    `-swift-version 6`. A non-`@Sendable` closure literal formed in a `@MainActor` context
+    inherits that isolation, so the compiler never needed the assumption. The annotation is a
+    **runtime tripwire, not a compile-time necessity** — it traps loudly rather than corrupting
+    state if either type is ever handed a queue other than `.main` — which is a good reason to
+    keep it and not the reason the comment gives.
+  - `PairingCodeView`'s typed-code comment says uppercase "buys nothing in the QR, where `FD`
+    and `fd` measure the same 39 modules". Both numbers are stale: 39 was a CoreImage *extent*
+    read as a module count, and re-measured on the same payload `FD2-<body>` is **45** modules
+    against **53** for the same body lowercased behind `fd2-`. The case is worth 8 modules after
+    all. The conclusion the sentence supports — uppercase is kept for the *reader*, because
+    Crockford base32 is only unambiguous in one case — is unaffected, which is why no code
+    changed; `PairingPayload.prefix`'s doc comment carries the corrected measurements.
+
+- **The Mac's pairing sheet says the same thing three times.** The warning paragraph ends "It
+  expires in 2 minutes.", the countdown under it reads "Expires in 1:47", and the typed-code
+  block ends "Only works on this Wi-Fi network." Every line shipped for its own reason and none
+  of them is wrong; together they read as a sheet that does not trust the user to have read the
+  line above. An editing pass, not a defect — and the right time to do it is alongside the
+  596pt-sheet-on-a-560pt-window question in [docs/MOBILE.md](MOBILE.md), since cutting a line is
+  also the cheapest way to lose the 36pt overhang.
