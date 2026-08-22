@@ -2,11 +2,16 @@
 
 `FlightDeckMobile` is the iOS client for the fleet the Mac replicates over `FleetKit` (see the
 "Fleet replication" section of [ARCHITECTURE.md](ARCHITECTURE.md)). This doc is what only a
-device on a network can prove, plus how to get a build onto one. **Nothing here has been run.**
-The app builds — really builds, for the simulator, on this machine — but no line of it has ever
-executed: installing on hardware needs a development team and a provisioning profile this build
-machine does not have, and setting that up is the user's decision, not this branch's. One item
-below is meant to stop being unrun; see "The cross-process check".
+device on a network can prove, plus how to get a build onto one.
+
+**Some of it now runs.** `FlightDeckMobileTests` is an app-hosted unit suite on the simulator —
+`./scripts/test-ios.sh` — and it covers the phone's decision-making: the typed-code field, the
+two orderings `FleetModel` imposes on the keychain, and the status vocabulary the phone shares
+with the Mac. What it cannot reach is everything below. A unit test in the app process has no
+window, no camera and no second device, so SwiftUI layout, the caret, AVFoundation and the wire
+itself are exactly as unrun as they were, and installing on hardware still needs a development
+team and a provisioning profile this build machine does not have. Read each checklist item as
+"still nobody has seen this", because that is what it means.
 
 ## Running it at all
 
@@ -25,14 +30,53 @@ Neither is configured in this repo, deliberately:
   merge conflict waiting to happen the moment a second person's Apple ID touches it.
 
 `./scripts/build-ios.sh` does neither of these. It builds `FleetKitiOS` for the simulator and
-for a real device, and then builds `FlightDeckMobile` itself — **a real build, on this machine,
+for a real device, and then builds `FlightDeckMobile` and its test bundle — **a real build, on this machine,
 not the type-check fallback**: the script only falls back when no iOS platform is installed to
 resolve a destination against, and it says which one it took (`** FlightDeckMobile BUILD
-SUCCEEDED **` versus `TYPE-CHECK PASSED`). The difference is not cosmetic. A type-check runs no
-SIL passes, so Swift 6's region-based isolation checking never fires — the first real build of
-this target found an error `swiftc -typecheck` had been passing over for the life of the branch
+SUCCEEDED **` versus `TYPE-CHECK PASSED`; on the fallback the test bundle is skipped
+entirely, because a test bundle cannot be type-checked without the host module it imports).
+The difference is not cosmetic. A type-check runs no SIL passes, so Swift 6's region-based
+isolation checking never fires — the first real build of this target found an error
+`swiftc -typecheck` had been passing over for the life of the branch
 (see `QRScannerController.metadataOutput`'s comment). Read the line the script prints rather
 than assuming. See its own comments for the rest, and the note in `AGENTS.md`.
+
+## Running the unit suite
+
+```bash
+./scripts/test-ios.sh    # 16 tests, ~25s including creating and booting the simulator
+```
+
+It creates a throwaway simulator, runs `FlightDeckMobileTests` inside `FlightDeckMobile`, and
+deletes the device however it exits. It never uses a simulator you already have booted, and
+that is deliberate: `xcodebuild test` INSTALLS the app onto its destination, so a run pointed
+at a device someone is testing on would overwrite the build under their hands.
+
+**What it covers**, and each of these guards a defect the phone actually shipped:
+
+- `TypedCodeField` — that the field rewrites what is typed through `PairingCode.grouped`
+  (uppercase, `XXXX-XXXX-XXXX`, `O`→`0` and `I`/`L`→`1`), that a failed checksum produces a
+  verdict instead of a `PairingCode`, and that the Pair button enables on twelve symbols
+  whether or not the checksum passes.
+- `FleetModel` — that a keychain refusal aborts the adoption on both paths rather than leaving
+  a pairing that exists only in memory, and that the four `PairingInitiator.Failure` cases map
+  to four distinct messages with `.wrongCode` and `.attemptsExhausted` not swapped.
+- `SessionStatusGlyph.label(for:)` — the accessibility vocabulary, string for string against
+  what `SessionStatus.tooltip` produces on the Mac for the same state.
+
+**What it structurally cannot cover.** Every one of these is on a checklist below instead, and
+none of them should ever grow an assertion here that merely re-reads the source:
+
+- Anything SwiftUI renders or measures — layout, wrapping, the disabled button's *appearance*,
+  where the caret lands when `text` is reassigned mid-string. There is no window in a unit-test
+  process and no UI-test target on this side.
+- Whether a modifier does anything at runtime. `.textInputAutocapitalization(.characters)` is
+  a hint to the software keyboard; a unit test can only observe that the source contains it,
+  which is not a test.
+- The camera. A simulator has none, so `QRScannerController` — the least-proven code on this
+  branch — is unreachable from here in full.
+- The wire. Pairing and replication need a second process on a real network; see "The
+  cross-process check" at the end.
 
 ## The manual checklist
 
@@ -124,40 +168,48 @@ found.
 9. **Background and foreground the pairing screen.** AVFoundation's interruption handling is
    untested here and interacts with the teardown path above.
 
-Items 10-15 are the typed path, and they are unproven for a different reason than the camera:
-that code was written across two tasks that could *build* the phone but never run it.
+Items 10-15 are the typed path, and what is unproven there has narrowed since they were
+written: `FlightDeckMobileTests` now runs the field's own rewriting and the failure-message
+mapping (see "Running the unit suite"). What remains is everything a test process cannot see.
 `UIHostingController` renders blank without a window, so the offscreen `layer.render(in:)`
-technique that proved the Mac's sheet does not transfer; `screencapture` is denied on this
-machine; and there is no iOS test host, so no XCTest process can exist on that side. Everything
-below compiles under Swift 6's isolation checks, and compiling is the whole of what is known
-about it.
+technique that proved the Mac's sheet does not transfer, and `screencapture` is denied on this
+machine — so no assertion on this side has ever looked at a pixel, at a keyboard, or at a
+network.
 
 10. **Type with a hardware keyboard, and paste a lowercase code.** Both come out
-    `XXXX-XXXX-XXXX` in uppercase, with `O` read as `0` and `I`/`L` as `1`.
-    `.textInputAutocapitalization(.characters)` is only a hint to the *software* keyboard —
-    `PairingCode.grouped(partial:)`, run from `.onChange`, is what actually guarantees the case,
-    and nothing on this machine has ever run it. `.autocorrectionDisabled()` is the other half:
+    `XXXX-XXXX-XXXX` in uppercase, with `O` read as `0` and `I`/`L` as `1`. The rewrite itself
+    is now covered — `TypedCodeFieldTests.testTypingIsUppercasedGroupedAndDisambiguatedAsItGoes`
+    runs exactly that string — so what this item still tests is the wiring around it: that
+    `.onChange` fires for a paste and for a hardware keyboard at all.
+    `.textInputAutocapitalization(.characters)` is only a hint to the *software* keyboard and
+    unobservable from a test either way, and `.autocorrectionDisabled()` is the other half:
     twelve arbitrary symbols are exactly the shape autocorrect turns into a word, and a field
     that quietly "corrects" one produces a checksum failure whose cause is invisible.
 11. **Insert a character into the middle of a complete code and watch the caret.** The
-    `.onChange` handler reassigns `typed` on almost every keystroke, and SwiftUI moves the
+    `.onChange` handler reassigns `field.text` on almost every keystroke, and SwiftUI moves the
     insertion point to the end of the string when `text` is reassigned — so a mid-string
     correction may strand the caret at the end and scatter the rest of the fix. The re-entrancy
-    guard is the other half of that line: `if formatted != latest` is what stops the rewrite
-    re-firing itself, and a loop shows up as a field that freezes or eats every second
-    keystroke, not as a crash.
+    guard is the other half of that line: `TypedCodeField.reformat()`'s `if formatted != text`
+    is what stops the rewrite re-firing itself, and a loop shows up as a field that freezes or
+    eats every second keystroke, not as a crash. That guard is *unfalsifiable* by a unit test —
+    removing it produces the identical string, and it only loops once SwiftUI re-fires
+    `.onChange` — which is why a test for it was written and then cut.
 12. **Look at the pairing screen on the smallest phone you have.** Three outcomes, none
     observed: the typed-code section sits below the square QR without the screen scrolling or
     the QR being squeezed; the Pair button reads as *disabled* until a full-length code is in
-    (it enables on twelve symbols even when the checksum fails — deliberate, so the user gets a
-    verdict instead of a dead button); and a failure message renders in the red slot and
+    (the *rule* is covered by
+    `TypedCodeFieldTests.testThePairButtonEnablesOnTwelveSymbolsEvenWhenTheChecksumFails`; what
+    is unseen is whether the disabled state reads as disabled); and a failure message renders
+    in the red slot and
     **wraps** rather than truncating, which is what
     `.fixedSize(horizontal: false, vertical: true)` is there for.
 13. **Burn a Mac's three attempts, then type its code once more and read the message.**
     `.wrongCode` says check what you typed; `.attemptsExhausted` says show a new code on the
     Mac. Those send the user in opposite directions, and swapping them spends one of three
-    tries teaching them nothing. `FleetModel.message(for:)`'s mapping is asserted by reading,
-    not by running — nothing here can tell the two strings apart on their way to a screen.
+    tries teaching them nothing. `FleetModel.message(for:)`'s mapping is now asserted by
+    running (`FleetModelTests`), so what this item adds is the half a test cannot reach: that
+    the Mac really reports `.attemptsExhausted` at the third failure and that the right string
+    arrives on the right screen.
 14. **Double-tap Pair, and unpair while a search is running.** `pair(code:)` opens with
     `runner?.cancel()` and `unpair()` cancels and drops the runner. Without both, an orphaned
     `PairingRunner` keeps walking its candidate list and can complete a pairing the user has
@@ -187,8 +239,9 @@ also the 40pt the QR work was spent making scannable, so shrink it knowingly.
 
 **Run a pairing from a real `FlightDeckMobile` (simulator or device) against a real Flight
 Deck on the Mac, using the typed code.** Both apps built from this tree, two processes, a real
-network. It is an acceptance criterion for the pairing work, not a unit test, because nothing
-on this machine can run an iOS process under XCTest.
+network. It is an acceptance criterion for the pairing work, not a unit test — and it stays one
+now that `FlightDeckMobileTests` exists, because what it checks is two *processes* agreeing, and
+a unit test is one process with no wire in it.
 
 **What it catches: caller-side asymmetry.** The two ends disagreeing about which of them is
 the SPAKE2 initiator, about the two names they pass to `SPAKE2Session`, or about the order in
@@ -214,9 +267,10 @@ for the wrapper. `docs/FOLLOWUPS.md`'s "Pairing crypto foundation" entry previou
 the cross-process run was what closed this gap; that was wrong and is corrected there. Do not
 reintroduce the stronger claim here.
 
-**Status: not run.** Nothing on the phone side has been executed at all — the whole of this
-page is documented-and-unrun by design, and this one item is the exception that is meant to
-stop being one.
+**Status: not run.** The phone's own logic is executed now (see "Running the unit suite"), but
+nothing on this page is: every checklist item above, and this one, needs a screen, a camera, a
+keyboard or a network, and none of those exist in a test process. This item is the one meant to
+stop being unrun first.
 
 ## The trust model, restated
 

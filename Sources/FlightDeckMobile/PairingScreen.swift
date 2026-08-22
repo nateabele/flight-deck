@@ -6,7 +6,9 @@ import UIKit
 struct PairingScreen: View {
     let model: FleetModel
 
-    @State private var typed = ""
+    /// The typed-code field's text and its two decisions — see `TypedCodeField`, which is
+    /// where they live so they can be run by a test rather than only read.
+    @State private var field = TypedCodeField()
     @State private var failure: String?
 
     var body: some View {
@@ -29,23 +31,19 @@ struct PairingScreen: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                TextField("XXXX-XXXX-XXXX", text: $typed)
+                TextField("XXXX-XXXX-XXXX", text: $field.text)
                     // `.characters`, not `.never`: the code is uppercase Crockford base32, and
                     // a lowercase keyboard makes the user shift twelve times. The modifier is
-                    // a hint the software keyboard may honour — `PairingCode.grouped` is what
-                    // actually guarantees the case, for a paste or a hardware keyboard.
+                    // a hint the software keyboard may honour — `TypedCodeField.reformat()` is
+                    // what actually guarantees the case, for a paste or a hardware keyboard.
                     .textInputAutocapitalization(.characters)
                     // A twelve-symbol code is exactly the shape autocorrect turns into a word.
                     .autocorrectionDisabled()
                     .font(.system(.title2, design: .monospaced))
                     .multilineTextAlignment(.center)
                     .textFieldStyle(.roundedBorder)
-                    .onChange(of: typed) { _, latest in
-                        // Rewritten on every keystroke, so the field always looks like the
-                        // Mac's screen. Guarded against re-entrancy: assigning an unchanged
-                        // value would re-fire this on some SwiftUI versions.
-                        let formatted = PairingCode.grouped(partial: latest)
-                        if formatted != latest { typed = formatted }
+                    .onChange(of: field.text) { _, _ in
+                        field.reformat()
                         // Typing again clears a stale verdict; leaving it up next to a
                         // half-corrected code says the correction failed.
                         failure = nil
@@ -56,7 +54,7 @@ struct PairingScreen: View {
                     .frame(maxWidth: .infinity)
                     // Enabled only on a complete code, so the button cannot be pressed into a
                     // "that doesn't look right" the user has no way to act on yet.
-                    .disabled(PairingCode(normalizing: typed) == nil && typed.count < 14)
+                    .disabled(!field.canSubmit)
 
                 Text("Both devices need to be on the same Wi-Fi network.")
                     .font(.caption)
@@ -92,16 +90,17 @@ struct PairingScreen: View {
         }
     }
 
-    /// The typed path. The checksum is checked **here**, before anything opens a socket — a
-    /// mistyped code must cost no attempt against the Mac's three (spec §7), and "that code
-    /// doesn't look right" and "pairing failed" send the user to different places.
+    /// The typed path. The checksum decision is `TypedCodeField.submit()`'s — see there for
+    /// why it is made before anything opens a socket — and this is the only thing that turns
+    /// its verdict into either a pairing run or a line of red copy.
     private func pairByTyping() {
-        guard let code = PairingCode(normalizing: typed) else {
-            failure = "That code doesn't look right. Check it against your Mac."
-            return
+        switch field.submit() {
+        case .pair(let code):
+            failure = nil
+            model.pair(code: code)
+        case .rejected(let message):
+            failure = message
         }
-        failure = nil
-        model.pair(code: code)
     }
 
     /// Progress copy. `searching` names the wait a Bonjour browse imposes, so a five-second

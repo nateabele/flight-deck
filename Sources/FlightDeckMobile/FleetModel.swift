@@ -6,9 +6,13 @@ import UIKit
 /// Everything both screens talk to, and nothing more.
 ///
 /// Deliberately thin: it owns a store and a connector, both of which are already tested in
-/// `FleetKit` against real sockets on macOS. The iOS target has no test host on this
-/// machine, so anything here that would be worth testing belongs in `FleetKit` instead —
-/// keeping this file glue is what keeps that true.
+/// `FleetKit` against real sockets on macOS, so anything here that would be worth testing on
+/// its own belongs in `FleetKit` instead — keeping this file glue is what keeps that true.
+///
+/// What does NOT belong in `FleetKit` is the ordering this file imposes on the store: a save
+/// that fails must abort the adoption rather than leave a pairing that exists only in memory.
+/// That is asserted by `FleetModelTests` in `FlightDeckMobileTests`, which runs on the
+/// simulator — see `scripts/test-ios.sh`.
 @MainActor
 @Observable
 final class FleetModel {
@@ -106,7 +110,12 @@ final class FleetModel {
     /// `_flightdeck._tcp` for `serviceName` — which is why `serviceName` here is the Bonjour
     /// instance name the runner actually dialled, not anything derived. `macName` comes out of
     /// the seal, so it is authenticated; the browse result's display name was not.
-    private func adopt(key: FleetDeviceKey, serviceName: String, macName: String) {
+    ///
+    /// Internal rather than private, for the same reason `KeychainPairedMacStore.attributes`
+    /// is: this is the only entry to the typed path's keychain write, and `pair(code:)`
+    /// cannot reach it from a test without a real Bonjour browse and a real armed Mac. See
+    /// `FleetModelTests.testTypedPairingReportsAKeychainFailureInsteadOfLookingPaired`.
+    func adopt(key: FleetDeviceKey, serviceName: String, macName: String) {
         let mac = PairedMac(key: key, macName: macName, serviceName: serviceName, endpoints: [])
         // Saved BEFORE it is adopted, and a failure aborts — the same order and the same
         // reason as `adopt(code:)` above: a pairing that only exists in memory looks like a
@@ -129,7 +138,12 @@ final class FleetModel {
 
     /// Each failure says what to do next. One message for all of them would leave a user
     /// retyping a code whose window is already burned.
-    private static func message(for failure: PairingInitiator.Failure) -> String {
+    ///
+    /// Internal rather than private so the four mappings can be asserted directly — reaching
+    /// them through `pair(code:)` needs a Mac that refuses a code, which no unit test has.
+    /// `.wrongCode` and `.attemptsExhausted` in particular send the user in opposite
+    /// directions, and swapping them spends one of three tries teaching them nothing.
+    static func message(for failure: PairingInitiator.Failure) -> String {
         switch failure {
         case .wrongCode:
             return "No Mac on this network accepted that code. Check it against your Mac's screen."

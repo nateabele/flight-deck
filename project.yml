@@ -221,6 +221,53 @@ targets:
           - _flightdeck._tcp
           - _flightdeck-pair._tcp
 
+  # The phone app's unit suite, and the first thing on this side that RUNS rather than merely
+  # compiling. Hosted by `FlightDeckMobile` because the properties worth guarding live in the
+  # app module (`TypedCodeField`, `FleetModel`, `SessionStatusGlyph.label`), and `@testable
+  # import FlightDeckMobile` needs a host to import. Run it with scripts/test-ios.sh — that
+  # script owns its own simulator device on purpose, so a run never installs over whatever is
+  # on the one you are using.
+  FlightDeckMobileTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests/FlightDeckMobileTests]
+    dependencies:
+      - target: FlightDeckMobile
+      # Linked, not embedded: the copy inside "Flight Deck.app/Frameworks" is the one that
+      # loads at runtime, same arrangement as FlightDeckTests and FleetKit on macOS.
+      - target: FleetKitiOS
+        embed: false
+    settings:
+      base:
+        # Matches the target under test. A Swift 5 test bundle would import a Swift 6 module
+        # fine, but it would also let a test express a concurrency shape the app itself
+        # cannot — and these tests drive a `@MainActor` model.
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: "YES"
+        # Named explicitly, and it has to be. `FlightDeckMobile` declares
+        # `productName: Flight Deck`, which renames the product *reference* only — the bundle
+        # the build system actually writes is named from PRODUCT_NAME, which that target
+        # leaves at its own name. xcodegen derives TEST_HOST from the reference, so it lands
+        # on `Flight Deck.app/Flight Deck`: a path nothing builds. The failure is a linker
+        # error ("library ... not found") plus "Unable to find a target which creates the host
+        # product", neither of which names the real cause. The macOS FlightDeck target settles
+        # the same disagreement by pinning PRODUCT_NAME (see its comment there); doing that
+        # here would rename the phone's bundle on disk, which nothing asked for. If
+        # FlightDeckMobile ever does gain a PRODUCT_NAME, these two lines move with it.
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/FlightDeckMobile.app/FlightDeckMobile
+        BUNDLE_LOADER: $(TEST_HOST)
+        # Ad-hoc signed for the same reason the host is, and it has to match: the bundle is
+        # copied into the host's PlugIns and signed as part of it, so an unsigned test bundle
+        # invalidates the host's signature — and the host's signature is what gives it the
+        # keychain access group that made pairing work at all. See FlightDeckMobile above.
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: "YES"
+        CODE_SIGNING_ALLOWED: "YES"
+        # Same reason as every other target that links FleetKit: resolving FleetKit's module
+        # dependency graph reaches BoringSSLShim, which #includes <openssl/curve25519.h>.
+        # SWIFT_INCLUDE_PATHS (the module search path itself) is set project-wide, at the top.
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
+
 # FleetKitiOS and FlightDeckMobile both need a persisted shared scheme, not xcodebuild's
 # own implicit synthesis for a buildable target — that synthesis is unpersisted,
 # undocumented, and exactly what scripts/build-ios.sh's `-scheme` (over `-target`) is
@@ -235,3 +282,9 @@ schemes:
     build:
       targets:
         FlightDeckMobile: [run]
+        # `[test]` rather than `[run]`: the bundle is built for the test action (and so by
+        # `build-for-testing`, which is what scripts/build-ios.sh runs) but not by a plain
+        # `build`, which stays the app-only check it has always been.
+        FlightDeckMobileTests: [test]
+    test:
+      targets: [FlightDeckMobileTests]

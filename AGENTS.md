@@ -49,8 +49,14 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 # The TEST_RUNNER_ prefix is mandatory; without it the case is silently SKIPPED.
 TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.sh
 
-./scripts/build-ios.sh          # builds FleetKitiOS, type-checks FlightDeckMobile — run after touching Sources/FleetKit or Sources/FlightDeckMobile
+./scripts/build-ios.sh          # builds FleetKitiOS + FlightDeckMobile + its test bundle — run after touching Sources/FleetKit or Sources/FlightDeckMobile
+./scripts/test-ios.sh           # runs FlightDeckMobileTests on a simulator this script creates and deletes
 ```
+
+`test-ios.sh` is `xcodebuild test` rather than `test-unit.sh`'s hand-rolled loader, because the
+thing that script routes around (an AppKit host cannot be launched without a GUI login session)
+is macOS-only. It builds and boots its **own throwaway simulator** every run: the suite installs
+the app onto its destination, so pointing it at a device you have a build on would overwrite it.
 
 Every `xcodebuild` needs `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` and
 `-derivedDataPath DerivedData` (the scripts handle both). Never `sudo xcode-select`.
@@ -66,8 +72,9 @@ Releases go through `scripts/swap-release.sh`, run detached — see
 | `Sources/FlightDeck/Preferences/` | Pure flag catalog/parser/serializer/merge + SwiftUI shell. |
 | `Sources/FleetKit/` | Wire types, event fold, pairing payload, and both socket halves — plus both platforms' pairing stores. Swift 6, `Foundation`, `Network`, and `Security` only — compiled for iOS too, which is what enforces that. |
 | `Sources/FlightDeck/Fleet/` | The desktop side: projection, replicator, arming window, and the service that binds the store to the socket. |
-| `Sources/FlightDeckMobile/` | The iOS companion app: pairing screen (QR scan or typed code), fleet list. See `docs/MOBILE.md`. |
+| `Sources/FlightDeckMobile/` | The iOS companion app: pairing screen (QR scan or typed code), fleet list. **Keep it flat** — `build-ios.sh`'s type-check fallback globs `*.swift` only, so a subdirectory goes silently unchecked on a machine with no iOS platform. See `docs/MOBILE.md`. |
 | `Tests/FlightDeckTests/` | Headless unit tests. `UITests/` drives the real app. |
+| `Tests/FlightDeckMobileTests/` | The phone app's unit suite, hosted by `FlightDeckMobile` on the simulator. Logic only — SwiftUI layout, the caret and the camera are not reachable; those stay on `docs/MOBILE.md`'s checklists. |
 | `project.yml` | Source of truth for the build; `.xcodeproj` is **generated** and git-ignored. |
 | `vendor/ghostty` | Submodule pinned to v1.3.1. Pristine — never modify. |
 | `vendor/boringssl` | Submodule pinned to tag `0.20250114.0`, for SPAKE2 (pairing). Pristine — never modify. `vendor/boringssl-artifacts/` is its git-ignored build output, not rebuilt by `build.sh` — run `build-boringssl.sh` yourself first, same as libghostty. |

@@ -50,7 +50,7 @@ struct SessionStatusGlyph: View {
                                            : AnyShapeStyle(HierarchicalShapeStyle.secondary))
                     .opacity(session.isUnread ? 1 : 0.8)
                     .frame(width: 8, height: 8),
-                label: idleLabel
+                label: label
             )
         case "busy":
             glyph(
@@ -60,48 +60,70 @@ struct SessionStatusGlyph: View {
                         Text("\(session.subagentCount)").font(.caption2.monospacedDigit())
                     }
                 },
-                label: busyLabel
+                label: label
             )
         case "shell":
             glyph(
                 Image(systemName: "terminal.fill").font(.caption).foregroundStyle(.green),
-                label: "Background command running"
+                label: label
             )
         case "waiting":
             glyph(
                 Image(systemName: "questionmark.circle.fill").font(.caption)
                     .foregroundStyle(.orange),
-                label: waitingLabel
+                label: label
             )
         default:
             // An activity this build does not know about still renders as *something*,
             // for the same reason `WireSession.agent` is a String: the Mac may be newer.
             glyph(
                 Image(systemName: "circle.dotted").font(.caption).foregroundStyle(.secondary),
-                label: "Unrecognized status"
+                label: label
             )
         }
     }
 
-    /// `SessionStatus.tooltip(unread:)`'s one override: an idle session that hasn't been
-    /// opened yet reads as finished-but-unseen, not merely idle.
-    private var idleLabel: String {
-        session.isUnread ? "Finished — not yet viewed" : "Idle"
-    }
+    /// What VoiceOver announces for this row, coalesced from `label(for:)`'s `nil` — which
+    /// only ever means "no agent process", the one branch below that renders no accessibility
+    /// element at all and so never reads this.
+    private var label: String { Self.label(for: session) ?? "" }
 
-    /// `SessionStatus.tooltip`'s `.busy` branch, singularization included.
-    private var busyLabel: String {
-        guard session.subagentCount > 0 else { return "Working" }
-        let noun = session.subagentCount == 1 ? "subagent" : "subagents"
-        return "Working — \(session.subagentCount) \(noun)"
-    }
-
-    /// `SessionStatus.tooltip`'s `.waiting` branch: the reason, when `claude` gave one.
-    private var waitingLabel: String {
-        guard let waitingFor = session.waitingFor, !waitingFor.isEmpty else {
-            return "Waiting for you"
+    /// The whole accessibility vocabulary, in one place and reachable without SwiftUI.
+    ///
+    /// `nil` means *no accessibility element*, which is not the same as an empty label: a tab
+    /// with no agent process registered has nothing to announce, and giving it a label would
+    /// make VoiceOver stop on every dead row in the list.
+    ///
+    /// Every string here must equal what `SessionStatus.tooltip`/`tooltip(unread:)` produces
+    /// for the identical state on the Mac (`Sources/FlightDeck/SessionStatus.swift`). That
+    /// invariant is checked from both ends: `SessionStatusGlyphTests` on iOS pins these
+    /// strings, and `SessionStatusTests`/`SessionReadPolicyTests` on macOS pin the same
+    /// literals against `tooltip`. Either side drifting fails its own suite.
+    static func label(for session: WireSession) -> String? {
+        switch session.activity {
+        case nil:
+            return nil
+        case "idle":
+            // `SessionStatus.tooltip(unread:)`'s one override: an idle session that hasn't
+            // been opened yet reads as finished-but-unseen, not merely idle.
+            return session.isUnread ? "Finished — not yet viewed" : "Idle"
+        case "busy":
+            // `SessionStatus.tooltip`'s `.busy` branch, singularization included.
+            guard session.subagentCount > 0 else { return "Working" }
+            let noun = session.subagentCount == 1 ? "subagent" : "subagents"
+            return "Working — \(session.subagentCount) \(noun)"
+        case "shell":
+            return "Background command running"
+        case "waiting":
+            // `SessionStatus.tooltip`'s `.waiting` branch: the reason, when `claude` gave one.
+            guard let waitingFor = session.waitingFor, !waitingFor.isEmpty else {
+                return "Waiting for you"
+            }
+            return "Waiting for you — \(waitingFor)"
+        default:
+            // An activity this build does not know about, matching `body`'s own fallback.
+            return "Unrecognized status"
         }
-        return "Waiting for you — \(waitingFor)"
     }
 
     /// Fixes every glyph's column at the same width — `Color.clear`, a 6pt dot, an SF Symbol
