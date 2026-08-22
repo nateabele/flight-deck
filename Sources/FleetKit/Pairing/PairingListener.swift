@@ -43,9 +43,10 @@ public final class PairingListener: @unchecked Sendable {
     /// easier to saturate, on the one socket in the app whose peers are unauthenticated — so
     /// anyone on the LAN, holding only the PSK that ships in every binary, could take all four
     /// silently, renew them, and the legitimate phone would be refused at `accept`'s cap guard
-    /// with nothing to show for it. That is why the deadline below is split: the number that
-    /// bounds a *silent* peer is `firstFrameDeadline`, and it is 5 seconds, the same as the
-    /// fleet listener's. The long one is reachable only by a peer that has spoken.
+    /// with nothing to show for it. That is why the deadlines below are split by what the peer
+    /// has *reached*: `handshakeDeadline` bounds a socket that never becomes usable,
+    /// `firstFrameDeadline` bounds a usable one that says nothing, and the long
+    /// `exchangeDeadline` is reachable only by a peer that has spoken.
     public static let maxPending = 4
 
     /// The largest frame this socket will receive, and the reason it is not
@@ -57,24 +58,55 @@ public final class PairingListener: @unchecked Sendable {
     /// default costs.
     public static let maxFrameBytes = 16 * 1024
 
-    /// How long a peer may hold one of the four pending slots **without saying anything**.
+    /// How long a peer may hold one of the four pending slots **before its socket is even
+    /// usable** — from `accept`, which fires when TCP connects, to `.ready`, which is when the
+    /// TLS-PSK handshake and the WebSocket upgrade have both completed.
+    ///
+    /// This exists because `firstFrameDeadline` used to be armed here, and that shipped a Mac
+    /// that hung up on real phones. Measured against a booted simulator: the phone's flow
+    /// reported `flow:failed_connect @5.273s, error server closed session with no
+    /// notification` — five seconds of handshake against a five-second deadline, with the Mac
+    /// cutting a live pairing off mid-upgrade and the phone reporting "Couldn't reach that
+    /// Mac". The reasoning behind arming it at `accept` was simply false: "a peer that has not
+    /// sent its `pake` within five seconds is not a phone" describes a peer that *could* have
+    /// sent it, and a peer still completing its handshake has no socket to send on.
+    ///
+    /// Ten seconds, and the number is picked the same way `exchangeDeadline`'s is: the Mac
+    /// must never be the side that gives up first on a slow-but-live phone. The initiator
+    /// gives TLS, the upgrade and all four frames together 8 seconds
+    /// (`PairingInitiator.exchangeTimeout`), so a peer that has not reached `.ready` by ten has
+    /// already abandoned its own attempt, and anything the Mac drops here it would have lost
+    /// anyway.
+    ///
+    /// It is not free: a peer that opens a socket and never sends a byte of TLS now costs ten
+    /// seconds of a slot instead of five, so saturating the pool of four got twice as cheap.
+    /// That is the price of not hanging up on real phones, and it is paid on the phase where
+    /// no better signal exists — nothing about a TCP connection distinguishes a phone on a bad
+    /// link from a squatter. The phase where a signal *does* exist, `.ready` onwards, keeps the
+    /// short deadline below.
+    ///
+    /// Settable so a test need not wait the production value.
+    public var handshakeDeadline: TimeInterval = 10
+
+    /// How long a peer may hold one of the four pending slots **without saying anything**,
+    /// measured from `.ready` — the first moment it *could* speak — rather than from `accept`.
+    /// See `handshakeDeadline` for what arming it at `accept` cost.
     ///
     /// Not named `authDeadline`, and not one deadline any more, for the same reason
     /// `PairingInitiator.exchangeTimeout` was renamed: nothing authenticates on this socket —
     /// the PSK is public and the PAKE is the whole point — so a name borrowed from the fleet
     /// listener described a thing that does not happen here, and it hid that the generous
-    /// number was being handed to peers that had not earned it. A peer that has not sent its
-    /// `pake` within five seconds is not a phone: the phone sends that frame from
-    /// `stateUpdateHandler`'s `.ready`, so this bounds a TLS-PSK handshake, a WebSocket upgrade
-    /// and one immediate send — the same work `FleetSocketServer.authDeadline` gives 5 seconds
-    /// to, which is why it is the same number.
+    /// number was being handed to peers that had not earned it. A peer whose socket is usable
+    /// and that has not sent its `pake` within five seconds is not a phone: the phone sends
+    /// that frame from `stateUpdateHandler`'s `.ready`, with no work left between the two, so
+    /// five seconds is already three orders of magnitude of slack on one queued send.
     ///
     /// Settable so a test need not wait the production value.
     public var firstFrameDeadline: TimeInterval = 5
 
-    /// How long a peer that *has* spoken may take to finish, measured from `accept` like the
-    /// deadline above, so the two are a floor and a ceiling on the same connection rather than
-    /// a budget that renews.
+    /// How long a peer that *has* spoken may take to finish, measured from `accept` — so it is
+    /// a ceiling over the whole connection rather than a budget that renews, and the two short
+    /// deadlines above partition the time before the first frame underneath it.
     ///
     /// Thirty seconds, and **not because a human is typing inside it** — the earlier comment
     /// said that and it was simply wrong. `PairingRunner` takes a `PairingCode`, so the code is
@@ -115,6 +147,13 @@ public final class PairingListener: @unchecked Sendable {
     /// fresh nonce and fire `onPaired` again, which is not what "fired once" can mean to a
     /// consumer that hangs window teardown and key promotion off it.
     private var paired: Set<UUID> = []
+    /// Connections whose socket has become usable — TLS-PSK done, WebSocket upgrade done — and
+    /// which are therefore out from under `handshakeDeadline` and into `firstFrameDeadline`.
+    /// Same `Set`-rather-than-a-cancelled-timer reasoning as `spoken` below, and the same
+    /// reason it is a set rather than a read of `NWConnection.state`: what the deadline has to
+    /// know is whether *this* connection reached `.ready`, and after a `drop` there is no
+    /// connection left to ask.
+    private var ready: Set<UUID> = []
     /// Connections that have delivered at least one frame, and therefore hold the long
     /// `exchangeDeadline` rather than the short `firstFrameDeadline`. A `Set` rather than a
     /// cancelled timer because `DispatchQueue.asyncAfter` cannot be cancelled — the deadline
@@ -253,6 +292,7 @@ public final class PairingListener: @unchecked Sendable {
         sessions.removeAll()
         secrets.removeAll()
         paired.removeAll()
+        ready.removeAll()
         spoken.removeAll()
         code = nil
         key = nil
@@ -268,28 +308,60 @@ public final class PairingListener: @unchecked Sendable {
         }
         let id = UUID()
         connections[id] = connection
-        connection.start(queue: queue)
 
-        // Two deadlines on one connection, and the split is the point: a peer that completes
-        // the bootstrap handshake and then says nothing holds a slot in a pool of four, and it
-        // must not get the window a real exchange gets for doing nothing to earn it. Silence
-        // is evicted in five seconds; the long one is reachable only after a frame arrives.
-        // Both are this listener's own, not the fleet listener's (invariant 4).
+        // Three deadlines on one connection, and the split is the point: a peer that holds a
+        // slot in a pool of four must not get the window a real exchange gets for doing
+        // nothing to earn it, and *what it has managed to reach* is the only signal available
+        // for telling those apart. So each phase is bounded by the deadline that fits it —
+        // ten seconds to make the socket usable, five more to say something on it, and the
+        // long one reachable only after a frame actually arrives. All three are this
+        // listener's own, not the fleet listener's (invariant 4).
         //
-        // `asyncAfter` cannot be cancelled, so both fire whatever happens — including into a
-        // *later* window, if the user closes one and arms another inside `exchangeDeadline`.
-        // That is harmless because they are keyed by `id`: a fresh UUID per connection, never
-        // reused, so a stale deadline's `drop` finds nothing and removes nothing. That is what
-        // stands in for `FleetConnector`'s generation counter here — the key already carries
-        // the generation. It is also why the first-frame deadline tests `spoken` rather than
-        // being cancelled when a frame arrives.
-        queue.asyncAfter(deadline: .now() + firstFrameDeadline) { [weak self] in
-            guard let self, !self.spoken.contains(id) else { return }
+        // `asyncAfter` cannot be cancelled, so all of them fire whatever happens — including
+        // into a *later* window, if the user closes one and arms another inside
+        // `exchangeDeadline`. That is harmless because they are keyed by `id`: a fresh UUID
+        // per connection, never reused, so a stale deadline's `drop` finds nothing and removes
+        // nothing. That is what stands in for `FleetConnector`'s generation counter here — the
+        // key already carries the generation. It is also why each deadline tests a set rather
+        // than being cancelled when the connection outgrows it, and why the one armed from
+        // `.ready` below is as safe as these two: it is keyed the same way.
+        queue.asyncAfter(deadline: .now() + handshakeDeadline) { [weak self] in
+            guard let self, !self.ready.contains(id) else { return }
             self.drop(id)
         }
         queue.asyncAfter(deadline: .now() + exchangeDeadline) { [weak self] in
             self?.drop(id)
         }
+
+        // The state handler exists for the deadline above's other half. `accept` fires when
+        // TCP connects — before TLS-PSK and before the WebSocket upgrade — so this is where
+        // the connection stops being a socket and starts being a peer that can speak, and it
+        // is the earliest honest moment to start asking why it has not.
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            dispatchPrecondition(condition: .onQueue(self.queue))
+            switch state {
+            case .ready:
+                // `insert().inserted`, and the `connections` check, because neither is
+                // guaranteed by the caller: a handshake that completes in the same instant its
+                // deadline drops the connection would otherwise arm a first-frame deadline for
+                // a connection that is already gone, and re-file a dropped `id` in `ready`
+                // where the ceiling deadline's `drop` would then have to clean it up again.
+                guard self.connections[id] != nil, self.ready.insert(id).inserted else { return }
+                self.queue.asyncAfter(deadline: .now() + self.firstFrameDeadline) { [weak self] in
+                    guard let self, !self.spoken.contains(id) else { return }
+                    self.drop(id)
+                }
+            case .failed, .cancelled:
+                // A socket that died on its own frees its slot now rather than at whichever
+                // deadline gets there first. `drop` is idempotent, so the `.cancelled` this
+                // sees after our own `drop` or `stop()` cancelled the connection is a no-op.
+                self.drop(id)
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
 
         FleetSocket.receive(PairingClientFrame.self, from: connection) { [weak self] frame in
             guard let self else { return }
@@ -427,6 +499,7 @@ public final class PairingListener: @unchecked Sendable {
         sessions.removeValue(forKey: id)
         secrets.removeValue(forKey: id)
         paired.remove(id)
+        ready.remove(id)
         spoken.remove(id)
     }
 }
