@@ -67,10 +67,24 @@ final class PairingCodeImageTests: XCTestCase {
         )
     }
 
-    /// The generator's output is one point per module, plus the standard four-module quiet
-    /// zone on each side — so the extent is the module count + 8. The constant is on both
-    /// sides of the comparison above, which only makes the ratio it measures more
-    /// conservative, so it is left in rather than subtracted out. Read before scaling.
+    /// The generator's output is one point per module plus a quiet zone, so this returns the
+    /// module count **+ 2**, not the module count — the name is a half-truth kept because the
+    /// comparison above only needs the two values to be commensurable.
+    ///
+    /// Two, measured, not the four-per-side the QR spec asks of a printer:
+    /// `CIQRCodeGenerator` emits **one** module of quiet zone per side. Checked by rasterising
+    /// the output at one pixel per point and finding the bounding box of the black pixels —
+    /// one clear pixel on every edge, at every payload size from 21 modules to 57. The
+    /// arithmetic corroborates it: a QR is always 21 + 4k modules square, and the extents this
+    /// returns for the two codes above are 47 and 67, which are 45 and 65 — both valid — plus
+    /// two. Subtract eight instead, as this comment used to say, and you get 39 and 59, which
+    /// are not QR sizes at all.
+    ///
+    /// The constant is on both sides of the comparison, and leaving it in makes that
+    /// comparison *stricter* rather than looser: 47/67 is 0.701 where the true module ratio
+    /// 45/65 is 0.692, so the assertion clears its 0.75 threshold by less than the underlying
+    /// shrink actually earns. That is why it is left in rather than subtracted out — the
+    /// margin is real either way. Read before scaling.
     private func modules(of code: String) -> Int? {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(code.utf8)
