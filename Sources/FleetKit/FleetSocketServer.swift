@@ -53,8 +53,51 @@ public final class FleetSocketServer: @unchecked Sendable {
     public static let bonjourType = "_flightdeck._tcp"
 
     /// How long a peer may hold a completed handshake without sending `hello` before it is
-    /// dropped. Settable so the test does not have to wait the production value.
+    /// dropped — measured from `.ready`, the moment the TLS-PSK handshake and the WebSocket
+    /// upgrade have both finished and the socket can actually carry a frame.
+    ///
+    /// "Measured from `.ready`" is the whole of a bug this used to have. The sentence above
+    /// described the intent correctly and `accept` implemented something else: `accept` fires
+    /// when TCP connects, so arming this there spent the five seconds on a handshake the peer
+    /// cannot hurry and during which it has no socket to say `hello` on. The identical shape on
+    /// `PairingListener` was measured against a booted simulator — the phone's flow reported
+    /// `flow:failed_connect @5.273s, error server closed session with no notification`, a live
+    /// pairing cut off mid-upgrade — and this is the listener a *paired* phone reconnects
+    /// through, where the same slow first handshake presents as a phone that pairs and then
+    /// cannot attach, with no error at either end because the Mac simply hangs up.
+    /// `handshakeDeadline` now covers the phase before `.ready`.
+    ///
+    /// Five seconds is generous for what it actually bounds: `FleetClient` sends `hello` from
+    /// `stateUpdateHandler`'s `.ready` with nothing in between, so this is one queued send.
+    ///
+    /// Settable so the test does not have to wait the production value.
     public var authDeadline: TimeInterval = 5
+
+    /// How long a peer may hold one of the `maxPending` slots **before its socket is even
+    /// usable** — from `accept`, which fires at TCP connect, to `.ready`.
+    ///
+    /// Ten seconds, and the number is picked so the Mac is never the side that gives up first
+    /// on a slow-but-live phone. `FleetConnector.raceTimeout` gives the phone's whole reconnect
+    /// race — every candidate's TCP connect, TLS-PSK, WebSocket upgrade, `hello` and the
+    /// snapshot that answers it — 8 seconds, after which it tears the racers down and backs
+    /// off. A peer that has not reached `.ready` here by ten has therefore already abandoned
+    /// its own attempt, and anything this drops was lost anyway. (`PairingListener`'s
+    /// `handshakeDeadline` is also 10, but justified against its own client's 8-second
+    /// `PairingInitiator.exchangeTimeout`: same number, separate reason, and invariant 4 keeps
+    /// the two listeners' deadlines independent.)
+    ///
+    /// It is a separate number rather than a longer `authDeadline` because it is the one that
+    /// bounds the *unauthenticated* phase. Everything past `.ready` held a paired key to get
+    /// there; everything before it has proved nothing beyond completing a TCP handshake. So
+    /// this is what a stranger on the LAN can occupy — see `maxPending` — and lengthening the
+    /// deadline that peers *have* earned would not have fixed the hang-up anyway.
+    ///
+    /// Ten is the price of not cutting off real phones, and it is paid on the one phase where
+    /// no better signal exists: nothing about a TCP connection distinguishes a phone on a bad
+    /// link from a squatter.
+    ///
+    /// Settable so the test does not have to wait the production value.
+    public var handshakeDeadline: TimeInterval = 10
 
     /// Answers a client's first frame. Returns the frames to send back — a snapshot, or a
     /// folded replay.
@@ -72,9 +115,14 @@ public final class FleetSocketServer: @unchecked Sendable {
     public var onAttachedSlotsChanged: ((Set<UUID>) -> Void)?
 
     /// How many accepted-but-not-yet-`hello`'d connections may be outstanding at once.
-    /// Each has completed a TLS-PSK handshake — it cannot be a stranger — so this bounds a
-    /// paired-but-misbehaving device opening connections faster than `authDeadline` reaps
-    /// them, not an unauthenticated one.
+    ///
+    /// This used to say every entry has completed a TLS-PSK handshake and so cannot be a
+    /// stranger. That is true of the entries past `.ready` and false of the rest: `pending` is
+    /// filed in `accept`, which fires when TCP connects, before any handshake has happened. So
+    /// the pool holds two populations — authenticated peers that have not said `hello` yet,
+    /// reaped by `authDeadline`, and anonymous sockets that have not handshaken at all, reaped
+    /// by `handshakeDeadline` — and it is the second that decides what sixteen slots are worth
+    /// to someone holding no key.
     private let maxPending = 16
 
     private let queue: DispatchQueue
@@ -90,6 +138,15 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// server's deadline firing does nothing, and the receive loop's strong capture of
     /// `connection` keeps the socket alive with nothing left able to cancel it.
     private var pending: [UUID: NWConnection] = [:]
+    /// Connections whose socket has become usable — TLS-PSK done, WebSocket upgrade done — and
+    /// which are therefore out from under `handshakeDeadline` and into `authDeadline`.
+    ///
+    /// A `Set` rather than a cancelled timer because `DispatchQueue.asyncAfter` cannot be
+    /// cancelled: the deadline has to recognise on its own that the connection outgrew it. A
+    /// set rather than a read of `NWConnection.state` because what the deadline must know is
+    /// whether *this* connection reached `.ready`, and after a `drop` there is no connection
+    /// left to ask.
+    private var ready: Set<UUID> = []
     /// The paired slot each connection turned out to belong to, by connection id. Resolved
     /// once, from `identities`, the first time a connection's slot is asked for, and kept
     /// because the identity log is a handshake-time record that is consumed on read — see
@@ -278,11 +335,14 @@ public final class FleetSocketServer: @unchecked Sendable {
         attached.removeAll()
         for connection in pending.values { connection.cancel() }
         pending.removeAll()
-        // Both tables are keyed to connections that no longer exist: `slots` to the ones just
-        // cancelled, `identities` to handshakes against the listener being torn down. Leaving
-        // either would be a slow leak across the arm/expiry/revoke cycle, which restarts the
-        // listener every time.
+        // Every one of these is keyed to a connection that no longer exists: `slots` and
+        // `names` to the ones just cancelled, `ready` to which of them had a usable socket,
+        // `identities` to handshakes against the listener being torn down. Leaving any of them
+        // would be a slow leak across the arm/expiry/revoke cycle, which restarts the listener
+        // every time.
         slots.removeAll()
+        names.removeAll()
+        ready.removeAll()
         identities.removeAll()
         if hadAttachments { onAttachedSlotsChanged?([]) }
     }
@@ -381,27 +441,68 @@ public final class FleetSocketServer: @unchecked Sendable {
     }
 
     private func accept(_ connection: NWConnection) {
-        // Each entry here has, at most, completed a TLS-PSK handshake — it cannot be a
-        // stranger, since that handshake requires holding a paired key. So this bounds a
-        // paired-but-misbehaving device opening connections faster than `authDeadline`
-        // reaps them, not an unauthenticated one: `authDeadline` already bounds how long
-        // any one of them lingers, but nothing previously bounded how many could pile up
-        // in that window at once.
+        // What this caps is two populations at once, not one. An entry that has reached
+        // `.ready` completed a TLS-PSK handshake and cannot be a stranger, so for those this
+        // bounds a paired-but-misbehaving device opening connections faster than `authDeadline`
+        // reaps them. An entry that has not is anonymous — `accept` fires at TCP connect — and
+        // for those this is the only cap on how many sockets one squatter can hold, each for a
+        // `handshakeDeadline`. Both deadlines bound how long any one entry lingers; nothing but
+        // this bounds how many pile up inside that window.
         guard pending.count < maxPending else {
             connection.cancel()
             return
         }
         let id = UUID()
         pending[id] = connection
-        connection.start(queue: queue)
 
-        // Drop a peer that completed a handshake and then said nothing. Without this a
-        // silent connection holds a slot for as long as the app runs.
-        queue.asyncAfter(deadline: .now() + authDeadline) { [weak self, weak connection] in
-            guard let self, let connection else { return }
-            guard self.attached[id] == nil else { return }
-            connection.cancel()
+        // Two deadlines on one connection, and which phase each covers is the point. `accept`
+        // fires when TCP connects, before TLS-PSK and before the WebSocket upgrade, so a peer
+        // here has no socket to say `hello` on yet: `handshakeDeadline` bounds getting one and
+        // `authDeadline` — armed from `.ready` below — bounds saying nothing once it has.
+        // Arming `authDeadline` here instead is what this used to do, and it is why the Mac
+        // hung up on phones that were still handshaking; see that property's doc comment.
+        //
+        // `asyncAfter` cannot be cancelled, so both fire whatever happens, including into a
+        // window the connection is long gone from. That is harmless because they are keyed by
+        // `id`: a fresh UUID per connection, never reused, so a stale deadline's `drop` finds
+        // nothing and removes nothing. It is also why each tests a set or a table rather than
+        // being cancelled when the connection outgrows it, and why the one armed from `.ready`
+        // below is as safe as this one — it is keyed the same way.
+        queue.asyncAfter(deadline: .now() + handshakeDeadline) { [weak self] in
+            guard let self, !self.ready.contains(id) else { return }
+            self.drop(id)
         }
+
+        // The state handler is the other half of that split: `.ready` is the first moment this
+        // peer could have spoken, and therefore the earliest honest moment to start asking why
+        // it has not. It earns its keep twice — a socket that dies on its own now frees its
+        // `maxPending` slot immediately rather than at whichever deadline gets there first.
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            dispatchPrecondition(condition: .onQueue(self.queue))
+            switch state {
+            case .ready:
+                // Both guards, and neither is guaranteed by the caller: a handshake that
+                // completes in the same instant `handshakeDeadline` drops the connection would
+                // otherwise arm an `authDeadline` for a connection already gone, and re-file a
+                // dropped `id` in `ready` with nothing left that would clean it up.
+                guard self.pending[id] != nil, self.ready.insert(id).inserted else { return }
+                // Drop a peer that completed a handshake and then said nothing. Without this a
+                // silent connection holds a slot for as long as the app runs.
+                self.queue.asyncAfter(deadline: .now() + self.authDeadline) { [weak self] in
+                    guard let self, self.attached[id] == nil else { return }
+                    self.drop(id)
+                }
+            case .failed, .cancelled:
+                // `drop` is idempotent, so the `.cancelled` this sees after our own `drop`,
+                // `stop()` or `cancelConnections()` already cancelled the connection is a
+                // no-op rather than a second teardown.
+                self.drop(id)
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
 
         FleetSocket.receive(ClientFrame.self, from: connection) { [weak self] frame in
             guard let self else { return }
@@ -443,14 +544,26 @@ public final class FleetSocketServer: @unchecked Sendable {
             // compile error. Fail on the first connection instead.
             dispatchPrecondition(condition: .onQueue(self.queue))
             connection.cancel()
-            self.pending.removeValue(forKey: id)
-            // Before the `attached` check, not after: a connection that never said `hello` is
-            // not in `attached` and returns below, but it can still have had its slot resolved.
-            self.slots.removeValue(forKey: id)
-            self.names.removeValue(forKey: id)
-            guard self.attached.removeValue(forKey: id) != nil else { return }
-            self.onAttachedSlotsChanged?(self.attachedSlots())
+            self.drop(id)
         }
+    }
+
+    /// Ends one connection and forgets everything filed under its id, from whichever of the
+    /// three places notices first: a deadline, the state handler, or the receive loop's
+    /// `onEnd`. One dropped socket routinely trips at least two of them — our own `cancel()`
+    /// produces a `.cancelled` and an errored receive — so this is idempotent by construction:
+    /// a second call finds the id in neither table, removes nothing, and fires nothing.
+    private func drop(_ id: UUID) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        pending.removeValue(forKey: id)?.cancel()
+        ready.remove(id)
+        // Before the `attached` check, not after: a connection that never said `hello` is not
+        // in `attached` and returns below, but it can still have had its slot resolved.
+        slots.removeValue(forKey: id)
+        names.removeValue(forKey: id)
+        guard let connection = attached.removeValue(forKey: id) else { return }
+        connection.cancel()
+        onAttachedSlotsChanged?(attachedSlots())
     }
 }
 

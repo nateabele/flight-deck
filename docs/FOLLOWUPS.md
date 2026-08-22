@@ -908,6 +908,24 @@ What they left behind, deliberately unfixed:
     Crockford base32 is only unambiguous in one case — is unaffected, which is why no code
     changed; `PairingPayload.prefix`'s doc comment carries the corrected measurements.
 
+- **`FleetSocketServer`'s sixteen pending slots are not all authenticated, and the comment
+  claiming they were is now corrected rather than made true.** `maxPending` read "each has
+  completed a TLS-PSK handshake — it cannot be a stranger". That holds for the entries past
+  `.ready` and not for the rest: `pending` is filed in `accept`, which fires when TCP connects,
+  so anyone who can open a socket to the Mac takes a slot for `handshakeDeadline` — 10 seconds
+  since the deadline split, up from the 5 `authDeadline` used to give them. Sixteen sockets at
+  1.6 connections a second is what it takes to keep a real phone refused at `accept`'s cap
+  guard.
+
+  Same shape as the pairing pool above and the same verdict: **availability only, LAN-local**,
+  it costs the attacker nothing and yields nothing, and the deadline cannot be shortened past
+  `FleetConnector.raceTimeout` (8s) without making the Mac the side that hangs up on a
+  slow-but-live phone — which is the bug the split exists to fix. It is also milder here than
+  there: the pairing pool is 4 and closes a window the user is watching, this one is 16 and only
+  delays a reconnect that retries on its own backoff. What closes it is the same thing —
+  per-source accounting, a cap per peer address rather than per listener — and it is worth
+  building once, for both listeners, if either is ever seen to happen.
+
 - **The Mac's pairing sheet says the same thing three times.** The warning paragraph ends "It
   expires in 2 minutes.", the countdown under it reads "Expires in 1:47", and the typed-code
   block ends "Only works on this Wi-Fi network." Every line shipped for its own reason and none
