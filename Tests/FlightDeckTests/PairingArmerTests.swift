@@ -103,6 +103,31 @@ final class PairingArmerTests: XCTestCase {
         XCTAssertNil(armer.pending)
     }
 
+    /// The rule `FleetService.closePairingListener()` states, at the level it is actually
+    /// enforced: the listener's lifetime is `pending`'s lifetime, so *every* way `pending`
+    /// stops being a live window has to announce it. Asserted over all three clearing routes
+    /// at once rather than one test each, because the property is the exhaustiveness — a
+    /// fourth route added without firing this is exactly the defect the QR path shipped with,
+    /// and a per-route test would have said nothing about it either.
+    func testEveryWayAWindowEndsAnnouncesThatItEnded() {
+        for (name, end) in [
+            ("cancel", { (armer: PairingArmer) in armer.cancel() }),
+            ("claim", { armer in _ = armer.claim(slot: armer.pending!.slot) }),
+            ("expire", { armer in
+                self.now += PairingArmer.window + 1
+                armer.expire()
+            }),
+        ] {
+            let armer = armer()
+            _ = arm(armer)
+            var closures = 0
+            armer.onWindowClosed = { closures += 1 }
+            end(armer)
+            XCTAssertNil(armer.pending, "\(name) did not end the window")
+            XCTAssertEqual(closures, 1, "\(name) ended the window without announcing it")
+        }
+    }
+
     func testTheProvisionalRecordCarriesTheSameKeyAsTheQR() {
         let armer = armer()
         let armed = arm(armer)
