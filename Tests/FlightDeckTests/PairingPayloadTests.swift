@@ -2,129 +2,151 @@ import XCTest
 import FleetKit
 
 final class PairingPayloadTests: XCTestCase {
-    /// The sheet re-renders every second (a countdown ticks), and both the QR image and the
-    /// typed-code text are built from `encoded()` on every one of those renders. If the
-    /// encoding is not byte-stable the user watches the code change under them — which is
-    /// exactly what was reported the first time anyone ran this. Pin it.
-    func testEncodingTheSamePayloadTwiceGivesTheSameString() {
-        let payload = PairingPayload(
-            key: .mint(), macName: "Nate's MacBook Pro", serviceName: "flightdeck-a1b2",
-            endpoints: ["192.168.1.20:53211", "127.0.0.1:53211"]
-        )
-        let first = payload.encoded()
-        for _ in 0..<50 {
-            XCTAssertEqual(payload.encoded(), first, "the pairing code must not change between renders")
-        }
-    }
-
-    private func payload() -> PairingPayload {
+    private func payload(
+        macName: String = "Nate's MacBook Pro",
+        serviceName: String = "flightdeck-macbook-a1b2",
+        endpoints: [String] = ["192.168.1.20:53211"]
+    ) -> PairingPayload {
         PairingPayload(
-            key: FleetDeviceKey.mint(),
-            macName: "Nate's MacBook Pro",
-            serviceName: "flight-deck-a1b2",
-            endpoints: ["192.168.1.20:53211", "10.8.0.3:53211"]
+            key: .mint(), macName: macName, serviceName: serviceName, endpoints: endpoints
         )
     }
 
-    /// The base64url transform, duplicated locally on purpose. `FleetKit`'s own helper is
-    /// `internal`, and widening it to `public` just so one negative assertion could reach it
-    /// would put a `Data` extension into every consumer's namespace — a permanent collision
-    /// risk bought for a single test. The transform is three lines of RFC 4648 §5, and this
-    /// assertion only needs a string to look for rather than production's exact code path;
-    /// the round-trip test above already exercises the real implementation.
-    private func base64URL(_ data: Data) -> String {
-        data.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
+    /// Byte-stability, kept from v1 and still load-bearing for the same reason: the sheet
+    /// encodes once at init and redraws the QR only when the code changes. An encoding that
+    /// varied would churn the image in front of the user once a second.
+    func testEncodingTheSamePayloadTwiceGivesTheSameString() {
+        let subject = payload()
+        let encodings = Set((0..<50).map { _ in subject.encoded() })
+        XCTAssertEqual(encodings.count, 1)
     }
 
     func testAPayloadRoundTrips() throws {
         let original = payload()
-        XCTAssertEqual(try PairingPayload(decoding: original.encoded()), original)
+        let decoded = try PairingPayload(decoding: original.encoded())
+        XCTAssertEqual(decoded.version, 2)
+        XCTAssertEqual(decoded.key.slot, original.key.slot)
+        XCTAssertEqual(decoded.key.secret, original.key.secret)
+        XCTAssertEqual(decoded.macName, original.macName)
+        XCTAssertEqual(decoded.serviceName, original.serviceName)
+        XCTAssertEqual(decoded.endpoints, original.endpoints)
     }
 
-    /// The code is deliberately not a URL: nothing in the system should offer to "open" it,
-    /// because opening it means the secret has travelled through a URL handler and,
-    /// eventually, a log. Note `URL(string:)` does return non-nil for an opaque `scheme:body`
-    /// URI like this one — the protection here is the absent authority (`//`) and query (`?`)
-    /// components, not the absence of a `URL` value.
-    func testTheCodeIsNotAURL() {
-        let encoded = payload().encoded()
-        XCTAssertTrue(encoded.hasPrefix("flightdeck1:"))
-        XCTAssertFalse(encoded.contains("//"))
-        XCTAssertFalse(encoded.contains("?"))
-        XCTAssertNil(URL(string: encoded)?.host)
+    /// The whole point of the repack. Not asserted as a QR version — CoreImage does not
+    /// document which encoding mode it picks — but as a length, against the v1 shape measured
+    /// on the same payload.
+    func testThePackedCodeIsFarShorterThanTheJSONOneItReplaces() {
+        let subject = payload()
+        let packed = subject.encoded()
+        // The v1 encoding, reconstructed here rather than kept alive in the source: JSON with
+        // the same six fields, base64url'd, prefixed.
+        let v1Body = #"{"eps":["192.168.1.20:53211"],"name":"Nate's MacBook Pro","psk":"\#(subject.key.secret.base64EncodedString())","slot":"\#(subject.key.slot.uuidString)","svc":"flightdeck-macbook-a1b2","v":1}"#
+        let v1 = "flightdeck1:" + Data(v1Body.utf8).base64EncodedString()
+        XCTAssertLessThan(
+            Double(packed.count), Double(v1.count) * 0.75,
+            "the packed payload is \(packed.count) characters against v1's \(v1.count)"
+        )
     }
 
-    func testTheSecretIsNotReadableFromTheCodeAsText() {
-        let key = FleetDeviceKey.mint()
-        let encoded = PairingPayload(
-            key: key, macName: "m", serviceName: "s", endpoints: []
-        ).encoded()
-        XCTAssertFalse(encoded.contains(key.secret.base64EncodedString()),
-                       "the body is base64url of JSON; a raw base64 secret would mean it is not")
-        XCTAssertFalse(encoded.contains(base64URL(key.secret)),
-                       "the secret is embedded inside JSON that is itself base64url-encoded, " +
-                       "so even the base64url form of the raw secret should not appear verbatim")
+    /// Uppercase and alphanumeric throughout, which is what lets a QR encoder use its
+    /// alphanumeric mode and what keeps the string readable if it is ever shown as text.
+    func testTheCodeUsesOnlyTheCrockfordAlphabetAndItsPrefix() {
+        let allowed = Set("0123456789ABCDEFGHJKMNPQRSTVWXYZFD-")
+        XCTAssertTrue(payload().encoded().allSatisfy { allowed.contains($0) })
+        XCTAssertTrue(payload().encoded().hasPrefix("FD2-"))
+    }
+
+    /// Kept from v1, and still the reason the version lives in the prefix: a payload from a
+    /// newer Mac may pack fields this version cannot parse, and reporting it as "damaged"
+    /// sends the user to show a fresh code when what they need is to update the app.
+    func testAFutureVersionIsRejectedByVersionNotByShape() {
+        let code = payload().encoded().replacingOccurrences(of: "FD2-", with: "FD9-")
+        XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
+            XCTAssertEqual(error as? PairingPayloadError, .unsupportedVersion(9))
+        }
+    }
+
+    /// The version is checked twice — once in the prefix, before a byte is decoded, and once
+    /// in the packed body — so a hand-edited prefix cannot walk a mismatched body past the
+    /// gate. This is v1's `testAPrefixVersionDisagreeingWithTheBodyIsMalformed`, re-expressed.
+    func testAPrefixVersionDisagreeingWithThePackedVersionIsMalformed() throws {
+        var bytes = try XCTUnwrap(Data(crockfordBase32: String(payload().encoded().dropFirst(4))))
+        bytes[0] = 3
+        let code = "FD2-" + bytes.crockfordBase32EncodedString()
+        XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
+            XCTAssertEqual(error as? PairingPayloadError, .malformed)
+        }
     }
 
     func testAnArbitraryStringIsRejectedRatherThanPartlyParsed() {
-        XCTAssertThrowsError(try PairingPayload(decoding: "https://example.com")) { error in
-            XCTAssertEqual(error as? PairingPayloadError, .notAPairingCode)
-        }
-        XCTAssertThrowsError(try PairingPayload(decoding: "flightdeck1:not-base64!!")) { error in
-            XCTAssertEqual(error as? PairingPayloadError, .malformed)
-        }
-    }
-
-    /// A phone older than the Mac must say so rather than mis-parsing a newer payload into
-    /// a plausible-looking wrong key.
-    func testAFutureVersionIsRejectedByVersionNotByShape() throws {
-        var original = payload()
-        original.version = 99
-        XCTAssertThrowsError(try PairingPayload(decoding: original.encoded())) { error in
-            XCTAssertEqual(error as? PairingPayloadError, .unsupportedVersion(99))
-        }
-    }
-
-    /// The case the previous test cannot reach, and the one that actually matters: a future
-    /// payload whose *shape* differs. Decoding it under this version's schema fails, so a
-    /// version check that ran after the decode would report it as damaged — sending the user
-    /// to show a fresh code when the app is what needs updating. The version therefore has to
-    /// be read from the prefix, before any decoding.
-    func testAFutureShapeIsRejectedAsTooNewNotAsDamaged() throws {
-        let alienBody = Data(#"{"v":2,"slotId":"nope","secret":"nope"}"#.utf8)
-        let code = "flightdeck2:" + base64URL(alienBody)
-        XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
-            XCTAssertEqual(error as? PairingPayloadError, .unsupportedVersion(2))
-        }
-    }
-
-    /// A prefix version that disagrees with the body's is a hand-edited code, not a newer one.
-    func testAPrefixVersionDisagreeingWithTheBodyIsMalformed() throws {
-        let body = Data(#"{"v":7,"slot":"00000000-0000-0000-0000-000000000000","psk":"AAAA","name":"m","svc":"s","eps":[]}"#.utf8)
-        let code = "flightdeck1:" + base64URL(body)
-        XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
-            XCTAssertEqual(error as? PairingPayloadError, .malformed)
-        }
-    }
-
-    /// A signed version is malformed input, not a version. `Int` would accept both, which
-    /// would let `flightdeck+1:` pass the gate as though it said `flightdeck1:`.
-    func testASignedVersionIsNotAVersion() {
-        for code in ["flightdeck+1:AAAA", "flightdeck-1:AAAA"] {
-            XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
-                XCTAssertEqual(error as? PairingPayloadError, .notAPairingCode, code)
+        for text in ["", "hello", "FD", "FD2", "FD2-", "flightdeck1:abc", "https://example.com"] {
+            XCTAssertThrowsError(try PairingPayload(decoding: text), "accepted \(text)") { error in
+                XCTAssertNotNil(error as? PairingPayloadError)
             }
         }
     }
 
-    func testEndpointsSurviveInTheOrderTheMacListedThem() throws {
-        let original = payload()
-        XCTAssertEqual(
-            try PairingPayload(decoding: original.encoded()).endpoints,
-            ["192.168.1.20:53211", "10.8.0.3:53211"]
+    /// A symbol outside the alphabet — `I`, `L`, `O`, `U` are the ones a person substitutes —
+    /// is damaged, not a different version.
+    func testAnOutOfAlphabetSymbolIsMalformed() {
+        let code = payload().encoded()
+        let broken = String(code.dropLast()) + "U"
+        XCTAssertThrowsError(try PairingPayload(decoding: broken)) { error in
+            XCTAssertEqual(error as? PairingPayloadError, .malformed)
+        }
+    }
+
+    /// Truncation must fail rather than yield a short secret that would authenticate against
+    /// nothing — the same ruling `PairedMac`'s decoder already makes for a corrupt secret.
+    func testATruncatedCodeIsMalformedRatherThanAShortKey() {
+        let code = payload().encoded()
+        XCTAssertThrowsError(try PairingPayload(decoding: String(code.dropLast(20)))) { error in
+            XCTAssertEqual(error as? PairingPayloadError, .malformed)
+        }
+    }
+
+    /// v1's `testTheCodeIsNotAURL`, kept: a scanner that treated this as a link would hand it
+    /// to Safari instead of to the app.
+    func testTheCodeIsNotAURL() {
+        XCTAssertNil(URL(string: payload().encoded())?.scheme)
+    }
+
+    /// The QR carries one endpoint. The rest are Bonjour's job, and the remembered-endpoint
+    /// race exists for reconnects rather than for pairing (§8).
+    func testOnlyTheFirstUsableEndpointSurvives() throws {
+        let subject = payload(endpoints: ["10.0.0.5:5000", "192.168.1.20:53211", "127.0.0.1:9"])
+        let decoded = try PairingPayload(decoding: subject.encoded())
+        XCTAssertEqual(decoded.endpoints, ["10.0.0.5:5000"])
+    }
+
+    /// A Mac with no routable address still produces a scannable code — the phone will find it
+    /// over Bonjour. An encoder that refused here would fail pairing on a machine that is
+    /// perfectly pairable.
+    func testAPayloadWithNoUsableEndpointStillRoundTrips() throws {
+        let subject = payload(endpoints: [])
+        let decoded = try PairingPayload(decoding: subject.encoded())
+        XCTAssertEqual(decoded.endpoints, [])
+        XCTAssertEqual(decoded.key.secret, subject.key.secret)
+    }
+
+    /// Names are length-prefixed, so a long one must be bounded rather than overflowing a
+    /// single length byte and silently corrupting everything after it.
+    func testAnOverlongNameIsTruncatedRatherThanCorruptingThePayload() throws {
+        let subject = payload(
+            macName: String(repeating: "M", count: 200),
+            serviceName: String(repeating: "s", count: 200)
         )
+        let decoded = try PairingPayload(decoding: subject.encoded())
+        XCTAssertEqual(decoded.macName.count, 64)
+        XCTAssertEqual(decoded.serviceName.count, 64)
+        XCTAssertEqual(decoded.key.secret, subject.key.secret)
+    }
+
+    /// Non-ASCII names are routine — a Mac is named by its owner — and truncating UTF-8 by
+    /// bytes can split a scalar. It must not produce a payload that fails to decode.
+    func testANonASCIINameSurvives() throws {
+        let subject = payload(macName: "Mac de Renée 🇫🇷")
+        let decoded = try PairingPayload(decoding: subject.encoded())
+        XCTAssertEqual(decoded.macName, "Mac de Renée 🇫🇷")
     }
 }

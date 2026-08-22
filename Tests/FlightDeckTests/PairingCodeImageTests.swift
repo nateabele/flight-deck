@@ -1,9 +1,12 @@
 import CoreImage
+import CoreImage.CIFilterBuiltins
 import XCTest
 import FleetKit
 @testable import FlightDeck
 
 final class PairingCodeImageTests: XCTestCase {
+    /// A v2 payload — packed bytes in Crockford base32 behind an `FD2-` prefix, which is
+    /// what `PairingCodeImage` is actually handed now.
     private func code() -> String {
         PairingPayload(
             key: .mint(), macName: "Nate's MacBook Pro",
@@ -42,5 +45,36 @@ final class PairingCodeImageTests: XCTestCase {
             ($0 as? CIQRCodeFeature)?.messageString
         }
         XCTAssertEqual(features.first, original)
+    }
+
+    /// The measurement §8 is actually about. The QR's extent is its module count, so this
+    /// compares the generated code against the same content in v1's shape — rather than
+    /// asserting a QR version, which depends on an encoding-mode choice CoreImage does not
+    /// document.
+    func testThePackedPayloadProducesAMateriallySmallerQR() throws {
+        let subject = PairingPayload(
+            key: .mint(), macName: "Nate's MacBook Pro",
+            serviceName: "flightdeck-macbook-a1b2", endpoints: ["192.168.1.20:53211"]
+        )
+        let v1Body = #"{"eps":["192.168.1.20:53211"],"name":"Nate's MacBook Pro","psk":"\#(subject.key.secret.base64EncodedString())","slot":"\#(subject.key.slot.uuidString)","svc":"flightdeck-macbook-a1b2","v":1}"#
+        let v1 = "flightdeck1:" + Data(v1Body.utf8).base64EncodedString()
+
+        let packedModules = try XCTUnwrap(modules(of: subject.encoded()))
+        let legacyModules = try XCTUnwrap(modules(of: v1))
+        XCTAssertLessThan(
+            packedModules, Int(Double(legacyModules) * 0.75),
+            "packed QR is \(packedModules) modules against v1's \(legacyModules)"
+        )
+    }
+
+    /// The generator's output is one point per module, plus the standard four-module quiet
+    /// zone on each side — so the extent is the module count + 8. The constant is on both
+    /// sides of the comparison above, which only makes the ratio it measures more
+    /// conservative, so it is left in rather than subtracted out. Read before scaling.
+    private func modules(of code: String) -> Int? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(code.utf8)
+        filter.correctionLevel = "M"
+        return filter.outputImage.map { Int($0.extent.width) }
     }
 }
