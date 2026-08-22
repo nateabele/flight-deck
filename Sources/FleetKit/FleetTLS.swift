@@ -141,6 +141,47 @@ public enum FleetTLS {
         parameters(keys: [key], identities: nil)
     }
 
+    /// The pairing listener's parameters: exactly one PSK, the public bootstrap one.
+    ///
+    /// A separate function rather than `listenerParameters(keys:)` with the bootstrap key
+    /// folded into the array, and that is invariant 1 made structural: there is no argument
+    /// anyone can pass to the fleet listener that puts the bootstrap PSK on it.
+    public static func pairingListenerParameters() -> NWParameters {
+        let parameters = bootstrapParameters()
+        // Same narrow purpose as on the fleet listener: a socket the OS is still draining
+        // from a previous run of this process. The pairing listener always takes a fresh
+        // OS-assigned port, so it never rebinds one of its own.
+        parameters.allowLocalEndpointReuse = true
+        return parameters
+    }
+
+    /// The phone's side of the same channel.
+    public static func pairingClientParameters() -> NWParameters {
+        bootstrapParameters()
+    }
+
+    private static func bootstrapParameters() -> NWParameters {
+        let tls = NWProtocolTLS.Options()
+        let sec = tls.securityProtocolOptions
+        sec_protocol_options_add_pre_shared_key(
+            sec,
+            PairingChannel.bootstrapSecret.dispatch,
+            PairingChannel.bootstrapIdentity.dispatch
+        )
+        // Required, for the same trap documented in `parameters(keys:identities:)`:
+        // Network.framework's PSK support is the TLS **1.2** PSK ciphersuite family. Without
+        // this append the handshake offers nothing the peer can agree to and simply hangs,
+        // and pinning a 1.3 minimum breaks it identically. Do not add that pin.
+        sec_protocol_options_append_tls_ciphersuite(
+            sec, tls_ciphersuite_t(rawValue: numericCast(TLS_PSK_WITH_AES_128_GCM_SHA256))!
+        )
+        // No `multipathServiceType` and no PSK-selection block, unlike the fleet parameters.
+        // A pairing exchange is four frames on one LAN inside a two-minute window — it has no
+        // roaming to survive — and with exactly one registered PSK there is no identity to
+        // attribute a connection to.
+        return NWParameters(tls: tls)
+    }
+
     private static func parameters(
         keys: [FleetDeviceKey], identities: FleetPSKIdentities?
     ) -> NWParameters {
