@@ -58,7 +58,7 @@ public final class FleetClient: @unchecked Sendable {
         let parameters = FleetSocket.webSocketParameters(
             FleetTLS.clientParameters(key: key)
         )
-        let connection = NWConnection(to: Self.webSocketEndpoint(for: endpoint), using: parameters)
+        let connection = NWConnection(to: FleetSocket.webSocketEndpoint(for: endpoint), using: parameters)
         self.connection = connection
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
@@ -94,29 +94,6 @@ public final class FleetClient: @unchecked Sendable {
             self?.end(error)
         }
         connection.start(queue: queue)
-    }
-
-    /// `NWProtocolWebSocket`'s automatic HTTP-upgrade handshake needs a URL to build its
-    /// Upgrade request from. Handed a bare `.hostPort` endpoint instead — what every caller
-    /// here passes — it aborts the connection (`ECONNABORTED`, silently, before `.ready`)
-    /// rather than falling back to something host/port alone could satisfy; a plain TLS-PSK
-    /// connection built from the identical parameters, minus the WebSocket layer, completes
-    /// in single-digit milliseconds, which is what isolates this to the WebSocket handshake
-    /// rather than to TLS-PSK or to loopback itself. So `.hostPort` is translated to a `wss`
-    /// URL here rather than pushing the workaround onto every call site.
-    private static func webSocketEndpoint(for endpoint: NWEndpoint) -> NWEndpoint {
-        guard case .hostPort(let host, let port) = endpoint else { return endpoint }
-        // IPv6 literals need bracketing to be valid inside a URL authority; every other
-        // host form's description is already URL-safe as-is.
-        let hostText: String
-        switch host {
-        case .ipv6:
-            hostText = "[\(host)]"
-        default:
-            hostText = "\(host)"
-        }
-        guard let url = URL(string: "wss://\(hostText):\(port.rawValue)/") else { return endpoint }
-        return .url(url)
     }
 
     /// Reports the connection ending, exactly once. See `hasEnded`.
