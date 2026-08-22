@@ -21,13 +21,46 @@ struct PairingScreen: View {
                 .aspectRatio(1, contentMode: .fit)
                 .clipShape(RoundedRectangle(cornerRadius: 16))
 
-            DisclosureGroup("Can't scan? Type the code instead") {
-                TextField("flightdeck1:…", text: $typed, axis: .vertical)
-                    .textInputAutocapitalization(.never)
+            // Not behind a `DisclosureGroup` any more. It was hidden because it asked for 300
+            // characters of base64; twelve symbols are a peer of the QR, and on a simulator —
+            // which has no camera — this is the only route that works at all.
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Or type the code from your Mac")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                TextField("XXXX-XXXX-XXXX", text: $typed)
+                    // `.characters`, not `.never`: the code is uppercase Crockford base32, and
+                    // a lowercase keyboard makes the user shift twelve times. The modifier is
+                    // a hint the software keyboard may honour — `PairingCode.grouped` is what
+                    // actually guarantees the case, for a paste or a hardware keyboard.
+                    .textInputAutocapitalization(.characters)
+                    // A twelve-symbol code is exactly the shape autocorrect turns into a word.
                     .autocorrectionDisabled()
-                    .font(.system(.footnote, design: .monospaced))
-                Button("Pair") { adopt(typed) }
-                    .disabled(typed.isEmpty)
+                    .font(.system(.title2, design: .monospaced))
+                    .multilineTextAlignment(.center)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: typed) { _, latest in
+                        // Rewritten on every keystroke, so the field always looks like the
+                        // Mac's screen. Guarded against re-entrancy: assigning an unchanged
+                        // value would re-fire this on some SwiftUI versions.
+                        let formatted = PairingCode.grouped(partial: latest)
+                        if formatted != latest { typed = formatted }
+                        // Typing again clears a stale verdict; leaving it up next to a
+                        // half-corrected code says the correction failed.
+                        failure = nil
+                    }
+
+                Button("Pair") { pairByTyping() }
+                    .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity)
+                    // Enabled only on a complete code, so the button cannot be pressed into a
+                    // "that doesn't look right" the user has no way to act on yet.
+                    .disabled(PairingCode(normalizing: typed) == nil && typed.count < 14)
+
+                Text("Both devices need to be on the same Wi-Fi network.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             if let failure {
@@ -50,6 +83,18 @@ struct PairingScreen: View {
         } catch {
             failure = "That code could not be used."
         }
+    }
+
+    /// The typed path. The checksum is checked **here**, before anything opens a socket — a
+    /// mistyped code must cost no attempt against the Mac's three (spec §7), and "that code
+    /// doesn't look right" and "pairing failed" send the user to different places.
+    private func pairByTyping() {
+        guard let code = PairingCode(normalizing: typed) else {
+            failure = "That code doesn't look right. Check it against your Mac."
+            return
+        }
+        failure = nil
+        model.pair(code: code)
     }
 
     /// Each failure says what to do next. "Invalid code" for all three would leave a user
