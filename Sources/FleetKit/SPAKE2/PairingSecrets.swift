@@ -51,6 +51,26 @@ public struct PairingSecrets: Sendable {
         )
     }
 
+    /// Constant-time equality for confirmation values.
+    ///
+    /// `==` on `Data` short-circuits at the first differing byte. That leaks how many leading
+    /// bytes of a confirmation an attacker got right — and against a three-attempt budget,
+    /// "how far did I get" is precisely the feedback the budget exists to deny. The loop below
+    /// always walks the whole length.
+    ///
+    /// Length is compared up front and non-constant-time on purpose: the length of a
+    /// confirmation is fixed by the protocol and public, so it is not a secret being leaked.
+    ///
+    /// `zip` over two `Data` values rather than any index arithmetic, so a slice whose
+    /// `startIndex` is not zero — what every `AES.GCM.open` result and every subscript in this
+    /// module produces — compares by content rather than by position.
+    public static func matches(_ lhs: Data, _ rhs: Data) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        var difference: UInt8 = 0
+        for (left, right) in zip(lhs, rhs) { difference |= left ^ right }
+        return difference == 0
+    }
+
     /// The phone proves itself with this; the Mac checks it before spending an attempt.
     public var initiatorConfirmation: Data { confirmation(for: "initiator") }
     /// The Mac proves itself with this, so a phone cannot be walked through a pairing by
