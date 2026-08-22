@@ -280,8 +280,16 @@ final class PairingListenerTests: XCTestCase {
     }
 
     /// Invariant 4, first half: the pairing listener's pending pool is its own. Filling it
-    /// must not consume anything the fleet listener needs, and the proof of that is a real
-    /// paired device attaching to a real fleet listener while the pairing pool is full.
+    /// must not consume anything the fleet listener needs, and this drives a real paired
+    /// device onto a real fleet listener while the pairing pool is full.
+    ///
+    /// **It is close to true by construction, and should not be cited as evidence of much.**
+    /// The two listeners are separate objects with separate pools; there is no plausible
+    /// mutation of the shipping code that makes this fail without first merging the two, which
+    /// is the design decision spec §6 makes, not a property this can check. It is kept as a
+    /// regression tripwire for exactly that merge. The cap itself is pinned by
+    /// `testThePendingPoolAdmitsItsCapAndRefusesTheNextConnection`, and the deadlines by the
+    /// two below it; those are the tests with something to prove.
     func testFillingThePairingListenersPendingPoolLeavesTheFleetListenerServing() async throws {
         let (_, endpoint) = try await arm()
 
