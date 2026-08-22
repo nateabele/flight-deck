@@ -8,12 +8,24 @@ import SwiftUI
 /// that a paired phone is fully privileged, and these two controls are the only place the
 /// user can see or undo that.
 ///
-/// Shaped like `AccountsSection` and the Tools tab's list, because it is the same thing they
-/// are: a listbox of records you add to and remove from, its two affordances in a `+`/`−` bar
-/// directly under the list, and a caption beneath explaining the rule the list obeys — all of
-/// it inside the one grouped `Form` a macOS settings pane is supposed to be. What it used to
-/// be was a bare push button floating above a bare `List`, with the empty-state sentence
-/// centred in the middle of an otherwise blank pane, which is a shape no other tab here uses.
+/// Shaped like the rest of this window: a grouped `Form`, a section header, the list carrying
+/// its own rows, and a caption beneath explaining what the list means. What it used to be was
+/// a bare push button floating above a bare `List`, with the empty-state sentence centred in
+/// the middle of an otherwise blank pane, which is a shape no other tab here uses.
+///
+/// Revoking is a per-row button and NOT a `−` under the list operating on `List` selection,
+/// which is what it was for one revision and which shipped inert. The `−` was enabled, its
+/// action ran, and `selectedDevice` was `nil` — the row highlighted, but `List(selection:)`
+/// never delivered that to the binding, so the button assigned `nil` to `pendingRevocation`
+/// and a dialog keyed on it being non-`nil` correctly presented nothing. Nothing about the
+/// presentation was wrong; it was never asked to present.
+///
+/// The lesson taken is not "wire the selection up more carefully". It is that the most
+/// security-relevant control in the app should not depend on a binding that can fail silently
+/// while still looking right. A row's own button closes over its own `device`, so it cannot be
+/// nil, and the failure mode is structurally unavailable rather than merely fixed. That is
+/// also the shape `ShellSettingsTab` and `CodexOptionsForm` already use for removing a row
+/// from a `Form` — a borderless `minus.circle` on the row — so it is the house pattern too.
 struct DevicesSettingsTab: View {
     private static let logger = Logger(
         subsystem: "dev.flightdeck.FlightDeck", category: "fleet"
@@ -26,7 +38,6 @@ struct DevicesSettingsTab: View {
     @State private var pairingPayload: PairingPayload?
     @State private var armError: String?
     @State private var pendingRevocation: PairedDevice?
-    @State private var selection: UUID?
     @State private var editingSlot: UUID?
     @State private var editingName = ""
 
@@ -36,18 +47,11 @@ struct DevicesSettingsTab: View {
         preferences.pairedDevices.filter { !$0.isProvisional }
     }
 
-    /// What `−` acts on. Read fresh from `devices` rather than held alongside the selection,
-    /// so a slot revoked from under it — or one that went provisional — can never be the
-    /// thing the button reports on.
-    private var selectedDevice: PairedDevice? {
-        devices.first { $0.slot == selection }
-    }
-
     var body: some View {
         Form {
             Section("Paired Devices") {
                 VStack(alignment: .leading, spacing: 4) {
-                    List(selection: $selection) {
+                    List {
                         if devices.isEmpty {
                             // In the list rather than centred in the pane: the box is the
                             // thing that is empty, and this is the sentence that says so.
@@ -58,7 +62,6 @@ struct DevicesSettingsTab: View {
                         } else {
                             ForEach(devices) { device in
                                 row(for: device)
-                                    .tag(device.slot)
                             }
                         }
                     }
@@ -73,21 +76,6 @@ struct DevicesSettingsTab: View {
                         }
                         .help("Pair a Device…")
                         .accessibilityIdentifier("devices-pair-button")
-
-                        // Revoking lives HERE, under the list, and not on the row. It is the
-                        // destructive half of the same pair the `+` opens, which is where
-                        // `AccountsSection` and the Tools tab both put it — and a red
-                        // `Revoke` repeated down every row made the pane read as a list of
-                        // things to delete rather than a list of who can reach this Mac. It
-                        // also put a destructive control one stray click from a rename field.
-                        Button {
-                            pendingRevocation = selectedDevice
-                        } label: {
-                            Image(systemName: "minus")
-                        }
-                        .disabled(selectedDevice == nil)
-                        .help("Revoke the selected device")
-                        .accessibilityIdentifier("devices-revoke")
 
                         Spacer()
                     }
@@ -148,10 +136,15 @@ struct DevicesSettingsTab: View {
         return CGFloat(rows) * Self.rowHeight + 8
     }
 
-    /// Double-click to rename, the way an account renames. The name used to be a live
-    /// `TextField` filling the row, which meant the row could not be *selected* by clicking
-    /// the only part of it worth clicking — a problem it did not have while every row carried
-    /// its own Revoke button, and one the `−` button would have inherited.
+    /// Double-click to rename, the way an account renames — and it can be that now, because
+    /// nothing on this row competes with a click any more. While revoking read `List`
+    /// selection, this gesture and the selection it needed were after the same click.
+    ///
+    /// The revoke button closes over `device`. That is the whole point of it being here: there
+    /// is no intermediate binding to be out of date, empty, or quietly not wired, so the
+    /// button either runs with this row's device or does not run at all. `minus.circle` rather
+    /// than a red `Revoke`, matching `ShellSettingsTab` and `CodexOptionsForm`, so the pane
+    /// still reads as a list of who can reach this Mac rather than a column of delete buttons.
     @ViewBuilder
     private func row(for device: PairedDevice) -> some View {
         HStack(spacing: 6) {
@@ -175,6 +168,15 @@ struct DevicesSettingsTab: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Button {
+                pendingRevocation = device
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("Revoke \(device.name)")
+            .accessibilityIdentifier("device-revoke-\(device.slot.uuidString)")
         }
     }
 
@@ -212,7 +214,6 @@ struct DevicesSettingsTab: View {
     private func revoke(_ device: PairedDevice) {
         preferences.revokeDevice(slot: device.slot)
         pendingRevocation = nil
-        if selection == device.slot { selection = nil }
         if editingSlot == device.slot { editingSlot = nil }
         armError = nil
         Task {
