@@ -10,7 +10,7 @@ final class PairingArmerTests: XCTestCase {
         PairingArmer(now: { self.now })
     }
 
-    private func arm(_ armer: PairingArmer) -> PairingPayload {
+    private func arm(_ armer: PairingArmer) -> ArmedPairing {
         armer.arm(macName: "mac", serviceName: "svc", endpoints: ["127.0.0.1:1"])
     }
 
@@ -26,17 +26,21 @@ final class PairingArmerTests: XCTestCase {
         let armer = armer()
         let first = arm(armer)
         let second = arm(armer)
-        XCTAssertNotEqual(first.key.secret, second.key.secret)
-        XCTAssertNotEqual(first.key.slot, second.key.slot)
-        XCTAssertEqual(armer.pending?.slot, second.key.slot,
+        XCTAssertNotEqual(first.payload.key.secret, second.payload.key.secret)
+        XCTAssertNotEqual(first.payload.key.slot, second.payload.key.slot)
+        XCTAssertNotEqual(
+            first.code.secret, second.code.secret,
+            "two windows must not share a code"
+        )
+        XCTAssertEqual(armer.pending?.slot, second.payload.key.slot,
                        "re-arming replaces the window; two codes must never be live at once")
     }
 
     func testAClaimInsideTheWindowPairsTheDevice() {
         let armer = armer()
-        let payload = arm(armer)
+        let armed = arm(armer)
         now += 30
-        XCTAssertTrue(armer.claim(slot: payload.key.slot))
+        XCTAssertTrue(armer.claim(slot: armed.payload.key.slot))
         XCTAssertNil(armer.pending, "a claimed window is closed")
     }
 
@@ -44,16 +48,16 @@ final class PairingArmerTests: XCTestCase {
     /// second device.
     func testACodeCannotBeClaimedTwice() {
         let armer = armer()
-        let payload = arm(armer)
-        XCTAssertTrue(armer.claim(slot: payload.key.slot))
-        XCTAssertFalse(armer.claim(slot: payload.key.slot))
+        let armed = arm(armer)
+        XCTAssertTrue(armer.claim(slot: armed.payload.key.slot))
+        XCTAssertFalse(armer.claim(slot: armed.payload.key.slot))
     }
 
     func testAClaimAfterTheWindowIsRefused() {
         let armer = armer()
-        let payload = arm(armer)
+        let armed = arm(armer)
         now += PairingArmer.window + 1
-        XCTAssertFalse(armer.claim(slot: payload.key.slot))
+        XCTAssertFalse(armer.claim(slot: armed.payload.key.slot))
     }
 
     /// The exact edge, which the tests either side of it do not touch. `claim` accepts at
@@ -63,11 +67,11 @@ final class PairingArmerTests: XCTestCase {
     /// edit tightening `<=` to `<` would otherwise pass every test here.
     func testAClaimAtTheExactExpiryInstantIsStillHonoured() {
         let armer = armer()
-        let payload = arm(armer)
+        let armed = arm(armer)
         now += PairingArmer.window
         armer.expire()
         XCTAssertNotNil(armer.pending, "expire must not drop a window at the instant it ends")
-        XCTAssertTrue(armer.claim(slot: payload.key.slot))
+        XCTAssertTrue(armer.claim(slot: armed.payload.key.slot))
     }
 
     func testAClaimForADifferentSlotIsRefused() {
@@ -101,9 +105,9 @@ final class PairingArmerTests: XCTestCase {
 
     func testTheProvisionalRecordCarriesTheSameKeyAsTheQR() {
         let armer = armer()
-        let payload = arm(armer)
+        let armed = arm(armer)
         let pending = armer.pending
-        XCTAssertEqual(pending?.key(), payload.key)
+        XCTAssertEqual(pending?.key(), armed.payload.key)
         XCTAssertEqual(pending?.isProvisional, true)
     }
 }

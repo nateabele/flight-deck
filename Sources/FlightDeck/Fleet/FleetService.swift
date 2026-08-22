@@ -28,6 +28,10 @@ final class FleetService: ObservableObject {
     private let server: FleetSocketServer
     private let replicator: FleetReplicator
     private(set) var boundPort: NWEndpoint.Port?
+    /// The window's own listener, and the port it is on. Both are `nil` whenever no window is
+    /// open, which is invariant 2 stated as a field rather than as a comment.
+    private let pairing = PairingListener()
+    private(set) var pairingPort: NWEndpoint.Port?
     /// Cancelled and replaced by every `scheduleExpiry`, so re-arming or an early cancel
     /// never leaves a stale timer racing the current window.
     private var expiryTask: Task<Void, Never>?
@@ -198,6 +202,7 @@ final class FleetService: ObservableObject {
     }
 
     func stop() {
+        closePairingListener()
         // `server.stop()` drops every attachment synchronously through `cancelConnections()`,
         // which fires `onAttachedSlotsChanged` itself — see `wireHandlers()` — so
         // `attachedSlots` is already empty by the time this returns; nothing to clear here.
@@ -207,15 +212,22 @@ final class FleetService: ObservableObject {
     /// Restarts the listener so a changed key set takes effect. Every arm, expiry and
     /// revocation calls this, so it runs far more often than "revocation is rare" suggests —
     /// see the note on `FleetSocketServer.stop()` in Task 4.
+    ///
+    /// It restarts the fleet listener only — the pairing listener's lifetime is the window's,
+    /// not the key set's, and rebinding it here would move a port a phone is mid-exchange on.
     func reloadKeys() async throws { try await start() }
 
-    /// Opens a pairing window and returns the code to display.
+    /// Opens a pairing window: mints the code, publishes the provisional key, and brings up
+    /// the pairing listener the phone will type that code at.
     ///
     /// The provisional slot is written to Preferences *before* the listener restarts,
     /// because the phone cannot complete a handshake against a key the listener does not
     /// hold — "armed" and "the key is live" are the same instant by construction.
-    func arm() async throws -> PairingPayload {
+    func arm() async throws -> ArmedPairing {
         armer.cancel()
+        // Before anything else: a second `arm()` must not leave the previous window's listener
+        // answering on its old port with its old code.
+        closePairingListener()
         preferences.pairedDevices
             .filter(\.isProvisional)
             .forEach { preferences.revokeDevice(slot: $0.slot) }
@@ -225,8 +237,9 @@ final class FleetService: ObservableObject {
         // network problem rather than a Mac that was not listening yet. Refuse instead.
         guard let boundPort else { throw FleetSocketError.didNotBind }
         let port = boundPort.rawValue
-        let payload = armer.arm(
-            macName: Host.current().localizedName ?? "Mac",
+        let macName = Host.current().localizedName ?? "Mac"
+        let armed = armer.arm(
+            macName: macName,
             serviceName: serviceName,
             endpoints: LocalEndpoints.current(port: port)
         )
@@ -235,11 +248,45 @@ final class FleetService: ObservableObject {
             if let armedUntil = pending.armedUntil { scheduleExpiry(at: armedUntil) }
         }
         try await reloadKeys()
-        return payload
+
+        pairing.onPaired = { [weak self] in
+            // Deferred by one main-actor turn on purpose. `PairingListener` fires this from
+            // the sealed frame's own send completion — so the frame is already in the stack
+            // and a graceful `cancel()` orders its FIN behind it — but this still runs inside
+            // the listener's own connection callback, and `closePairingListener()` cancels
+            // the very connection that callback is holding. The hop takes teardown out from
+            // under the handler reacting to it. It is not redundant: `cancel()` does NOT
+            // flush a send the stack has not yet taken (see `PairingListener.stop()` for the
+            // `POSIXErrorCode 89` measurement), so the ordering here is load-bearing, not
+            // stylistic.
+            Task { @MainActor [weak self] in self?.closePairingListener() }
+        }
+        pairing.onAttemptsExhausted = { [weak self] in
+            // Three failures burn the window (§7): the provisional key is revoked and the
+            // user re-arms. `cancelArming` is the same path the Cancel button takes, and the
+            // same one-turn hop, for the same reason — this fires from the send completion of
+            // the `.attemptsExhausted` reject.
+            Task { @MainActor [weak self] in try? await self?.cancelArming() }
+        }
+        pairingPort = try await pairing.start(
+            code: armed.code, key: armed.payload.key, macName: macName,
+            serviceName: serviceName, port: nil
+        )
+        return armed
+    }
+
+    /// The one place the pairing listener is torn down, so every route that closes a window
+    /// closes it identically (invariant 2). `pairingPort` is cleared with it because the two
+    /// are one fact: a port with no listener behind it is exactly the state that made
+    /// "is a window open?" answerable two ways.
+    private func closePairingListener() {
+        pairing.stop()
+        pairingPort = nil
     }
 
     func cancelArming() async throws {
         expiryTask?.cancel()
+        closePairingListener()
         if let pending = armer.pending { preferences.revokeDevice(slot: pending.slot) }
         armer.cancel()
         try await reloadKeys()
@@ -275,6 +322,7 @@ final class FleetService: ObservableObject {
         guard let pending = armer.pending else { return }
         armer.expire()
         guard armer.pending == nil else { return }
+        closePairingListener()
         preferences.revokeDevice(slot: pending.slot)
         try await reloadKeys()
     }

@@ -35,7 +35,7 @@ struct DevicesSettingsTab: View {
     @ObservedObject var service: FleetService
 
     /// Both the sheet's presentation and its content. See the `.sheet(item:)` below.
-    @State private var pairingPayload: PairingPayload?
+    @State private var pairingWindow: ArmedPairing?
     @State private var armError: String?
     @State private var pendingRevocation: PairedDevice?
     @State private var editingSlot: UUID?
@@ -101,10 +101,12 @@ struct DevicesSettingsTab: View {
         // `.sheet(item:)`, not `.sheet(isPresented:)` with a companion optional. The latter
         // presents on the boolean and renders whatever the optional happens to be at that
         // moment — which was `nil`, so the sheet opened as an empty 200pt box with no content
-        // and no way out. Keying on the value makes "there is a payload" and "the sheet is up"
+        // and no way out. Keying on the value makes "there is a window" and "the sheet is up"
         // the same fact rather than two that can disagree.
-        .sheet(item: $pairingPayload) { payload in
-            PairingCodeSheet(service: service, preferences: preferences, payload: payload)
+        .sheet(item: $pairingWindow) { window in
+            PairingCodeSheet(
+                service: service, preferences: preferences, payload: window.payload
+            )
         }
         // Title, then message — the shape every other confirmation in this window uses. The
         // whole consequence used to be crammed into the title, where macOS renders it as a
@@ -202,7 +204,7 @@ struct DevicesSettingsTab: View {
         armError = nil
         Task {
             do {
-                pairingPayload = try await service.arm()
+                pairingWindow = try await service.arm()
             } catch {
                 // `arm()` refuses rather than handing out a code with `host:0` endpoints —
                 // see `FleetService.arm`. Say so instead of the sheet silently not opening.

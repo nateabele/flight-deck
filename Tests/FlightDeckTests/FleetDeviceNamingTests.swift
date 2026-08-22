@@ -65,9 +65,9 @@ final class FleetDeviceNamingTests: XCTestCase {
     /// the very first attach — which is the same instant pairing completes.
     func testADeviceThatNamesItselfIsListedUnderThatName() async throws {
         let (preferences, service) = try await standUp()
-        let payload = try await service.arm()
+        let armed = try await service.arm()
 
-        try await attach(payload.key, claiming: "Nate's iPhone", to: service)
+        try await attach(armed.payload.key, claiming: "Nate's iPhone", to: service)
 
         let device = try XCTUnwrap(preferences.pairedDevices.first)
         XCTAssertEqual(
@@ -81,9 +81,9 @@ final class FleetDeviceNamingTests: XCTestCase {
     /// rather than something the adoption path assumes away.
     func testADeviceThatClaimsNoNameKeepsThePlaceholder() async throws {
         let (preferences, service) = try await standUp()
-        let payload = try await service.arm()
+        let armed = try await service.arm()
 
-        try await attach(payload.key, claiming: nil, to: service)
+        try await attach(armed.payload.key, claiming: nil, to: service)
 
         XCTAssertEqual(preferences.pairedDevices.first?.name, "New device")
     }
@@ -92,13 +92,13 @@ final class FleetDeviceNamingTests: XCTestCase {
     /// up here, which means every attach re-adopts rather than only the first.
     func testRenamingThePhoneItselfShowsUpOnTheNextAttach() async throws {
         let (preferences, service) = try await standUp()
-        let payload = try await service.arm()
+        let armed = try await service.arm()
 
-        let first = try await attach(payload.key, claiming: "iPhone", to: service)
+        let first = try await attach(armed.payload.key, claiming: "iPhone", to: service)
         XCTAssertEqual(preferences.pairedDevices.first?.name, "iPhone")
         first.disconnect()
 
-        try await attach(payload.key, claiming: "Nate's iPhone", to: service)
+        try await attach(armed.payload.key, claiming: "Nate's iPhone", to: service)
         XCTAssertEqual(preferences.pairedDevices.first?.name, "Nate's iPhone")
     }
 
@@ -108,13 +108,13 @@ final class FleetDeviceNamingTests: XCTestCase {
     /// not a rename.
     func testANameTheUserChoseSurvivesALaterAttach() async throws {
         let (preferences, service) = try await standUp()
-        let payload = try await service.arm()
+        let armed = try await service.arm()
 
-        let first = try await attach(payload.key, claiming: "iPhone", to: service)
-        preferences.renameDevice(slot: payload.key.slot, to: "Work phone")
+        let first = try await attach(armed.payload.key, claiming: "iPhone", to: service)
+        preferences.renameDevice(slot: armed.payload.key.slot, to: "Work phone")
         first.disconnect()
 
-        try await attach(payload.key, claiming: "iPhone", to: service)
+        try await attach(armed.payload.key, claiming: "iPhone", to: service)
 
         let device = try XCTUnwrap(preferences.pairedDevices.first)
         XCTAssertEqual(

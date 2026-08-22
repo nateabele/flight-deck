@@ -38,18 +38,18 @@ final class FleetPairingFlowTests: XCTestCase {
     /// successful handshake followed by a `hello` *is* the announcement.
     func testTheFirstHelloOnAnArmedSlotPairsTheDevice() async throws {
         let (_, preferences, service) = try await standUp()
-        let payload = try await service.arm()
+        let armed = try await service.arm()
         XCTAssertEqual(preferences.pairedDevices.first?.isProvisional, true)
 
         let attached = expectation(description: "paired")
-        let client = FleetClient(key: payload.key)
+        let client = FleetClient(key: armed.payload.key)
         self.client = client
         client.onFrame = { if case .snapshot = $0 { attached.fulfill() } }
         client.connect(to: try service.loopbackEndpoint(), lastSeq: 0)
         await fulfillment(of: [attached], timeout: 10)
 
         let device = try XCTUnwrap(preferences.pairedDevices.first)
-        XCTAssertEqual(device.slot, payload.key.slot)
+        XCTAssertEqual(device.slot, armed.payload.key.slot)
         XCTAssertFalse(device.isProvisional, "a connected device is no longer provisional")
         XCTAssertNotNil(device.pairedAt)
         XCTAssertNil(device.armedUntil)
@@ -57,13 +57,13 @@ final class FleetPairingFlowTests: XCTestCase {
 
     func testTheServerLearnsWhichSlotConnected() async throws {
         let (_, _, service) = try await standUp()
-        let payload = try await service.arm()
+        let armed = try await service.arm()
         let seen = expectation(description: "slot observed")
-        let client = FleetClient(key: payload.key)
+        let client = FleetClient(key: armed.payload.key)
         self.client = client
         client.onFrame = { _ in
             MainActor.assumeIsolated {
-                if service.attachedSlots.contains(payload.key.slot) { seen.fulfill() }
+                if service.attachedSlots.contains(armed.payload.key.slot) { seen.fulfill() }
             }
         }
         client.connect(to: try service.loopbackEndpoint(), lastSeq: 0)
@@ -73,11 +73,11 @@ final class FleetPairingFlowTests: XCTestCase {
     /// A code that was never claimed must stop being a key, not just stop being displayed.
     func testAnUnclaimedWindowExpiresOutOfTheAcceptedKeys() async throws {
         let (_, preferences, service) = try await standUp()
-        let payload = try await service.arm()
+        let armed = try await service.arm()
         now += PairingArmer.window + 1
         try await service.expireArming()
         XCTAssertTrue(preferences.pairedDevices.isEmpty)
-        XCTAssertFalse(preferences.deviceKeys().contains { $0.slot == payload.key.slot })
+        XCTAssertFalse(preferences.deviceKeys().contains { $0.slot == armed.payload.key.slot })
     }
 
     /// The data-layer half of expiry, and only that half: an expired provisional row must
@@ -90,12 +90,12 @@ final class FleetPairingFlowTests: XCTestCase {
     /// for the one that does.
     func testAnExpiredProvisionalKeyIsRefusedEvenIfNothingPrunedIt() async throws {
         let (_, preferences, service) = try await standUp()
-        let payload = try await service.arm()
+        let armed = try await service.arm()
 
         let afterExpiry = Date().addingTimeInterval(PairingArmer.window + 1)
         XCTAssertFalse(preferences.pairedDevices.isEmpty)
         XCTAssertFalse(
-            preferences.deviceKeys(at: afterExpiry).contains { $0.slot == payload.key.slot },
+            preferences.deviceKeys(at: afterExpiry).contains { $0.slot == armed.payload.key.slot },
             "an expired window must not still be a key"
         )
     }
@@ -104,12 +104,12 @@ final class FleetPairingFlowTests: XCTestCase {
     /// stop listing it.
     func testARevokedDeviceCanNoLongerConnect() async throws {
         let (_, preferences, service) = try await standUp()
-        let payload = try await service.arm()
-        preferences.revokeDevice(slot: payload.key.slot)
+        let armed = try await service.arm()
+        preferences.revokeDevice(slot: armed.payload.key.slot)
         try await service.reloadKeys()
 
         let refused = expectation(description: "refused")
-        let client = FleetClient(key: payload.key)
+        let client = FleetClient(key: armed.payload.key)
         self.client = client
         client.onFrame = { _ in XCTFail("a revoked device reached the application layer") }
         client.onDisconnect = { _ in refused.fulfill() }
@@ -142,7 +142,7 @@ final class FleetPairingFlowTests: XCTestCase {
             armer: PairingArmer(now: { self.now })
         )
         _ = try await firstService.start(port: nil)
-        let payload = try await firstService.arm()
+        let armed = try await firstService.arm()
         XCTAssertEqual(firstPreferences.pairedDevices.first?.isProvisional, true)
 
         // The process dies here: no `cancelArming`, no `expireArming`, nothing that would
@@ -163,7 +163,7 @@ final class FleetPairingFlowTests: XCTestCase {
         _ = try await secondService.start(port: nil)
 
         let refused = expectation(description: "refused")
-        let client = FleetClient(key: payload.key)
+        let client = FleetClient(key: armed.payload.key)
         self.client = client
         client.onFrame = { _ in
             XCTFail("a provisional device orphaned by a quit reached the application layer")
@@ -185,8 +185,8 @@ final class FleetPairingFlowTests: XCTestCase {
         let (_, preferences, service) = try await standUp()
         let first = try await service.arm()
         let second = try await service.arm()
-        XCTAssertEqual(preferences.pairedDevices.map(\.slot), [second.key.slot])
-        XCTAssertFalse(preferences.deviceKeys().contains { $0.slot == first.key.slot })
+        XCTAssertEqual(preferences.pairedDevices.map(\.slot), [second.payload.key.slot])
+        XCTAssertFalse(preferences.deviceKeys().contains { $0.slot == first.payload.key.slot })
     }
 
     /// Cancelling must take the provisional key out of the accepted set, not merely stop
@@ -194,14 +194,14 @@ final class FleetPairingFlowTests: XCTestCase {
     /// still live is the same hole as one that never expired.
     func testCancellingArmingRevokesTheProvisionalKey() async throws {
         let (_, preferences, service) = try await standUp()
-        let payload = try await service.arm()
+        let armed = try await service.arm()
         try await service.cancelArming()
 
         XCTAssertTrue(preferences.pairedDevices.isEmpty)
-        XCTAssertFalse(preferences.deviceKeys().contains { $0.slot == payload.key.slot })
+        XCTAssertFalse(preferences.deviceKeys().contains { $0.slot == armed.payload.key.slot })
 
         let refused = expectation(description: "refused")
-        let client = FleetClient(key: payload.key)
+        let client = FleetClient(key: armed.payload.key)
         self.client = client
         client.onFrame = { _ in XCTFail("a cancelled code must not reach application code") }
         client.onDisconnect = { _ in refused.fulfill() }
@@ -214,9 +214,9 @@ final class FleetPairingFlowTests: XCTestCase {
 
     func testThePairingCodeAdvertisesTheListenersRealPort() async throws {
         let (_, _, service) = try await standUp()
-        let payload = try await service.arm()
+        let armed = try await service.arm()
         let port = try XCTUnwrap(service.boundPort)
-        XCTAssertFalse(payload.endpoints.isEmpty, "a code with no candidates cannot be raced")
-        XCTAssertTrue(payload.endpoints.allSatisfy { $0.hasSuffix(":\(port.rawValue)") })
+        XCTAssertFalse(armed.payload.endpoints.isEmpty, "a code with no candidates cannot be raced")
+        XCTAssertTrue(armed.payload.endpoints.allSatisfy { $0.hasSuffix(":\(port.rawValue)") })
     }
 }
