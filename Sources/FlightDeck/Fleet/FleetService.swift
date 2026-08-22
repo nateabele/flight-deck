@@ -151,14 +151,50 @@ final class FleetService: ObservableObject {
                 .filter(\.isProvisional)
                 .forEach { preferences.revokeDevice(slot: $0.slot) }
         }
-        let bound = try await server.start(
-            keys: preferences.deviceKeys(at: armer.currentTime),
-            port: port ?? boundPort,
-            serviceName: serviceName
-        )
+        // `boundPort` first, so a `reloadKeys()` mid-run rebinds exactly the port this process
+        // is already advertising; the remembered port is only ever consulted by the first bind
+        // of a launch, which is the whole point — a phone's `PairedMac.endpoints` are
+        // `host:port` strings that die the instant this Mac comes back on a different port.
+        let remembered = preferences.fleetPort.flatMap(NWEndpoint.Port.init(rawValue:))
+        let requested = port ?? boundPort ?? remembered
+        // Nothing holds the remembered port while Flight Deck is not running, so it is a
+        // preference and not a claim: if it is taken, the listener still has to come up. A
+        // phone that has to rediscover is a nuisance; a Mac with no listener is a dead feature.
+        //
+        // Deliberately NOT extended to the reload path (`boundPort != nil`) or to an explicit
+        // `port:`. Every arm, expiry and revocation calls `start()` to rotate keys, and that
+        // rebind of the same port has a documented `EADDRINUSE` race with the listener it just
+        // released — see `FleetSocketServer.start`. Falling back there would let a routine key
+        // reload quietly move the listener out from under the endpoints in the pairing code
+        // `arm()` built moments earlier and under every paired phone at once, which is the very
+        // failure this whole change exists to remove. A failed reload throws, exactly as before.
+        let mayFallBack = port == nil && boundPort == nil && requested != nil
+        let bound: NWEndpoint.Port
+        do {
+            bound = try await bind(port: requested)
+        } catch {
+            guard mayFallBack else { throw error }
+            Self.logger.error(
+                "fleet listener could not rebind remembered port \(requested?.rawValue ?? 0, privacy: .public), asking the OS for another: \(String(describing: error), privacy: .public)"
+            )
+            bound = try await bind(port: nil)
+        }
         boundPort = bound
+        // The port the OS chose after a fallback is remembered too, or the next launch keeps
+        // asking for one that is never coming back.
+        preferences.rememberFleetPort(bound.rawValue)
         Self.logger.info("fleet listener bound to port \(bound.rawValue, privacy: .public)")
         return bound
+    }
+
+    /// The keys are read per attempt rather than hoisted, so the fallback bind cannot install a
+    /// key set that a window expiring between the two attempts has already invalidated.
+    private func bind(port: NWEndpoint.Port?) async throws -> NWEndpoint.Port {
+        try await server.start(
+            keys: preferences.deviceKeys(at: armer.currentTime),
+            port: port,
+            serviceName: serviceName
+        )
     }
 
     func stop() {

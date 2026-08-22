@@ -411,4 +411,24 @@ final class PreferencesStore: ObservableObject {
         body(&devices[at])
         preferences.pairedDevices = devices
     }
+
+    // MARK: Fleet listener
+
+    /// The port to ask for at launch — what the listener bound to last time, or nil if it has
+    /// never bound. See `Preferences.fleetPort` for why a paired phone depends on this.
+    var fleetPort: UInt16? { preferences.fleetPort }
+
+    /// Records the port the listener actually bound to, including one the OS chose after the
+    /// remembered port turned out to be taken — the fallback has to be remembered too, or the
+    /// next launch keeps asking for a port that is not coming back.
+    ///
+    /// Guarded on a real change so the steady state touches no defaults key: `reloadKeys()`
+    /// runs on every arm, expiry and revocation, and each of those rebinds the same port and
+    /// lands here. Unlike `installID` this is minted well after `init`, from
+    /// `FleetService.start`, so the `didSet` on `preferences` does fire and no explicit
+    /// `persistence.save` is needed to get it to disk.
+    func rememberFleetPort(_ port: UInt16) {
+        guard preferences.fleetPort != port else { return }
+        preferences.fleetPort = port
+    }
 }
