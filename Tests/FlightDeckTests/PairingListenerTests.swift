@@ -309,10 +309,16 @@ final class PairingListenerTests: XCTestCase {
 
     /// Invariant 4, second half: its own deadline. A peer that completes the bootstrap
     /// handshake and then says nothing is dropped, so a window cannot be held open by silence.
+    ///
+    /// `exchangeDeadline` is set long on purpose, so the long deadline cannot be what closes
+    /// this connection: what is being asserted is that *silence* is bounded by the short one,
+    /// and a single deadline of any length would pass a version of this test that did not say
+    /// so. Four slots emptied only every 30 seconds is what made the pool cheap to hold.
     func testASilentPairingConnectionIsDroppedOnItsOwnDeadline() async throws {
         let listener = PairingListener()
         self.listener = listener
-        listener.authDeadline = 0.5
+        listener.firstFrameDeadline = 0.5
+        listener.exchangeDeadline = 60
         let port = try await listener.start(
             code: .mint(), key: .mint(), macName: "Test Mac",
             serviceName: "flightdeck-test-\(UUID().uuidString.prefix(8))", port: nil
@@ -323,6 +329,67 @@ final class PairingListenerTests: XCTestCase {
         silent.onEnd = { dropped.fulfill() }
         silent.start()
         await fulfillment(of: [dropped], timeout: 10)
+    }
+
+    /// The other half of that split, and the half that makes it safe: the short deadline is
+    /// for *silence*, not for slowness. A peer that sends its `pake` and then thinks — a phone
+    /// on a bad link, a screen the user tabbed away from — keeps the whole exchange window, or
+    /// the deadline that exists to evict squatters becomes one that refuses real pairings.
+    ///
+    /// It pauses for four times the short deadline and then finishes the exchange for real,
+    /// because "was not dropped" and "was still usable" are different claims and only the
+    /// second one is worth having.
+    func testAPeerThatSpeaksAndThenPausesKeepsTheWholeExchangeWindow() async throws {
+        let code = PairingCode.mint()
+        let key = FleetDeviceKey.mint()
+        let listener = PairingListener()
+        self.listener = listener
+        listener.firstFrameDeadline = 0.5
+        let port = try await listener.start(
+            code: code, key: key, macName: "Test Mac",
+            serviceName: "flightdeck-test-\(UUID().uuidString.prefix(8))", port: nil
+        )
+
+        let session = SPAKE2Session(
+            role: .initiator,
+            myName: PairingChannel.initiatorName, theirName: PairingChannel.responderName
+        )
+        let answered = expectation(description: "the Mac answered our pake")
+        let sealed = expectation(description: "sealed key")
+        nonisolated(unsafe) var secrets: PairingSecrets?
+        nonisolated(unsafe) var delivered: FleetDeviceKey?
+
+        let client = client(.hostPort(host: "127.0.0.1", port: port))
+        client.onEnd = { XCTFail("a peer that had spoken was dropped on the silent deadline") }
+        client.onFrame = { frame in
+            MainActor.assumeIsolated {
+                switch frame {
+                case .pake(let peer):
+                    do {
+                        secrets = PairingSecrets(
+                            keyMaterial: try session.keyMaterial(from: peer),
+                            transcript: try session.transcript
+                        )
+                        answered.fulfill()
+                    } catch { XCTFail("the Mac's pake did not process: \(error)") }
+                case .sealed(_, let box):
+                    delivered = try? secrets?.open(box).key
+                    sealed.fulfill()
+                case .reject(let reason):
+                    XCTFail("the Mac rejected a correct exchange: \(reason)")
+                }
+            }
+        }
+        client.start()
+        try await Task.sleep(for: .milliseconds(300))
+        client.send(.pake(msg: try session.message(for: code)))
+        await fulfillment(of: [answered], timeout: 10)
+
+        // Four times the silent deadline, spent holding a pending slot and saying nothing.
+        try await Task.sleep(for: .seconds(2))
+        client.send(.confirm(mac: try XCTUnwrap(secrets).initiatorConfirmation))
+        await fulfillment(of: [sealed], timeout: 10)
+        XCTAssertEqual(delivered, key, "the pause cost the exchange its key")
     }
 
     /// A message that is not a curve point is a protocol error, not a code guess: it must be
