@@ -168,10 +168,15 @@ public enum FleetTLS {
             PairingChannel.bootstrapSecret.dispatch,
             PairingChannel.bootstrapIdentity.dispatch
         )
-        // Required, for the same trap documented in `parameters(keys:identities:)`:
-        // Network.framework's PSK support is the TLS **1.2** PSK ciphersuite family. Without
-        // this append the handshake offers nothing the peer can agree to and simply hangs,
-        // and pinning a 1.3 minimum breaks it identically. Do not add that pin.
+        // Belt-and-braces, not verified-necessary here: deleting this append from this exact
+        // function still negotiated 0x00A8 (`TLS_PSK_WITH_AES_128_GCM_SHA256`) over TLS 1.2 in
+        // 6ms on Darwin 25.5 — `add_pre_shared_key` appears to enable the suite on its own.
+        // Kept because it is harmless, it matches `parameters(keys:identities:)`'s pattern,
+        // and it is plausibly load-bearing on the iOS deployment target, where its absence is
+        // untested. What *is* verified, by mutation, is the other half of this trap: pinning
+        // a TLS 1.3 minimum — which looks like obvious hardening — silently breaks PSK
+        // identically, presenting as the handshake silence `PairingChannelTests` documents.
+        // Do not add that pin.
         sec_protocol_options_append_tls_ciphersuite(
             sec, tls_ciphersuite_t(rawValue: numericCast(TLS_PSK_WITH_AES_128_GCM_SHA256))!
         )
@@ -218,12 +223,17 @@ public enum FleetTLS {
             )
         }
 
-        // Required, and the reason is a trap worth naming: Network.framework's PSK support
-        // is the **TLS 1.2** PSK ciphersuite family (`TLS_PSK_WITH_AES_128_GCM_SHA256`,
-        // 0x00A8 — Security/CipherSuite.h:197), not TLS 1.3 external PSK. Without this
-        // append the handshake offers no suite the peer can agree to and simply hangs; and
-        // pinning `sec_protocol_options_set_min_tls_protocol_version(sec, .TLSv13)` — which
-        // looks like obvious hardening — breaks it for the same reason. Do not add that pin.
+        // Belt-and-braces: Network.framework's PSK support is the **TLS 1.2** PSK ciphersuite
+        // family (`TLS_PSK_WITH_AES_128_GCM_SHA256`, 0x00A8 — Security/CipherSuite.h:197), not
+        // TLS 1.3 external PSK, and this append is meant to guarantee it is offered. Measured
+        // on Darwin 25.5, deleting this exact append from `bootstrapParameters()` still
+        // negotiated 0x00A8 over TLS 1.2 in 6ms — `add_pre_shared_key` appears to enable the
+        // suite on its own here, so the append is not verified-necessary on this OS. Kept
+        // anyway: harmless, and untested in its absence on the iOS deployment target. What
+        // *is* verified, by mutation, is the other half of this trap: pinning
+        // `sec_protocol_options_set_min_tls_protocol_version(sec, .TLSv13)` — which looks
+        // like obvious hardening — silently breaks PSK, presenting as handshake silence
+        // rather than `.failed`. Do not add that pin.
         sec_protocol_options_append_tls_ciphersuite(
             sec, tls_ciphersuite_t(rawValue: numericCast(TLS_PSK_WITH_AES_128_GCM_SHA256))!
         )

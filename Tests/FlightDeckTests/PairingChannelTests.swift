@@ -12,6 +12,15 @@ import XCTest
 /// exercises the identical client parameters against a listener that does accept them and
 /// reaches `.ready` in milliseconds. It is the control. Deleting it leaves the refusal test
 /// passing while proving nothing.
+///
+/// The surface `testTheBootstrapPSKIsRefusedByTheFleetListener` actually watches is the
+/// shared private `FleetTLS.parameters(keys:identities:)`: folding the bootstrap PSK into
+/// that function is the plausible refactor that reaches this test and fails it (in ~0.15s).
+/// Registering `PairingChannel.bootstrapSecret` under a `FleetDeviceKey` does not — a
+/// `FleetDeviceKey`'s identity is always UUID-shaped and can never collide with
+/// `PairingChannel.bootstrapIdentity`, and Apple's PSK path (no selection block) requires an
+/// identity match before it will even try a secret. That is a dead end, not a gap: do not
+/// re-derive it to "prove" this test can fail.
 final class PairingChannelTests: XCTestCase {
     private var listener: NWListener?
 
@@ -81,14 +90,36 @@ final class PairingChannelTests: XCTestCase {
         XCTAssertNil(UUID(uuidString: text))
     }
 
-    /// The spec's §6, stated as a test because it is the "improvement" someone will propose:
-    /// deriving the channel's key from the code gives a passive observer an offline attack on
-    /// 55 bits, which is precisely what SPAKE2 is here to prevent.
+    /// The spec's §6, pinned to a golden vector rather than compared against
+    /// `PairingCode.mint().secret`: a `PairingCode`'s secret is 7 bytes, so `Data` inequality
+    /// against it is structural for *any* 32-byte value — no bug this test claims to catch
+    /// could ever fail these lines. And the hazard itself (deriving the PSK from the code)
+    /// would change `bootstrapSecret`'s construction, not produce a value comparable to a
+    /// `PairingCode`'s secret — it would be a compile error in this test, not a red one.
+    /// A golden vector is falsifiable, and it pins the wire constant so a silent edit cannot
+    /// break pairing between an updated Mac and an un-updated phone.
     func testTheBootstrapSecretIsIndependentOfAnyPairingCode() {
-        let first = PairingCode.mint()
-        let second = PairingCode.mint()
-        XCTAssertNotEqual(PairingChannel.bootstrapSecret, first.secret)
-        XCTAssertNotEqual(PairingChannel.bootstrapSecret, second.secret)
-        XCTAssertEqual(PairingChannel.bootstrapSecret.count, 32)
+        XCTAssertEqual(
+            PairingChannel.bootstrapSecret.map { String(format: "%02x", $0) }.joined(),
+            "52de10393fa90d84120a741cbd84ba12355072cb322d94434b01ef1fc4c3437c"
+        )
+    }
+
+    /// The file header's own claim: a divergence in any of these constants "produces a
+    /// failure that looks like a wrong code." Golden values so that divergence is caught
+    /// here, not as a support report about a code that "doesn't work."
+    func testTheWireConstantsAreGolden() {
+        XCTAssertEqual(PairingChannel.bonjourType, "_flightdeck-pair._tcp")
+        XCTAssertEqual(PairingChannel.txtNameKey, "name")
+        XCTAssertEqual(PairingChannel.initiatorName, Data("flightdeck-phone".utf8))
+        XCTAssertEqual(PairingChannel.responderName, Data("flightdeck-mac".utf8))
+    }
+
+    /// SPAKE2 binds both role names into its transcript specifically so each role gets a
+    /// distinct context. Nothing else enforces that distinctness — if these were ever made
+    /// equal, the binding becomes role-symmetric, silently, and Task 2 consumes both names
+    /// as given.
+    func testTheSPAKE2RoleNamesAreDistinct() {
+        XCTAssertNotEqual(PairingChannel.initiatorName, PairingChannel.responderName)
     }
 }
