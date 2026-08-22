@@ -61,6 +61,45 @@ public struct PairingCode: Equatable, Sendable {
         self.init(secret: secret)
     }
 
+    /// What a partially-typed code should look like on screen right now.
+    ///
+    /// Three jobs, and each of them exists because the field cannot get it for free:
+    ///
+    /// - **Uppercase.** `.textInputAutocapitalization(.characters)` is a hint to the software
+    ///   keyboard. A hardware keyboard, a paste and dictation all ignore it, so the rewrite is
+    ///   what actually guarantees the case.
+    /// - **Group into `XXXX-XXXX-XXXX`.** The Mac shows hyphens; a field that did not would
+    ///   have the user comparing two differently-shaped strings across a room.
+    /// - **Map the letters the alphabet omits.** `O` → `0`, `I`/`L` → `1`, per Crockford. The
+    ///   alphabet omits them *because* a person reading a code aloud produces them, so
+    ///   rejecting them would punish exactly the mistake the alphabet was chosen to absorb.
+    ///   `U` is dropped instead: Crockford excludes it to avoid accidental obscenity and it
+    ///   stands for no digit.
+    ///
+    /// Capped at twelve symbols so a stray keystroke past the end cannot invalidate a code
+    /// that was already right.
+    ///
+    /// This is presentation only. `init(normalizing:)` is what decides whether a code is
+    /// valid, and it is deliberately not called from here — a field that refused input until
+    /// it was complete would reject every prefix of a correct code.
+    public static func grouped(partial input: String) -> String {
+        var symbols = ""
+        for character in input.uppercased() {
+            let mapped: Character?
+            switch character {
+            case "O": mapped = "0"
+            case "I", "L": mapped = "1"
+            default: mapped = alphabet.contains(character) ? character : nil
+            }
+            guard let mapped else { continue }
+            symbols.append(mapped)
+            if symbols.count == symbolCount { break }
+        }
+        return stride(from: 0, to: symbols.count, by: 4).map {
+            String(symbols[symbols.index(symbols.startIndex, offsetBy: $0)...].prefix(4))
+        }.joined(separator: "-")
+    }
+
     public var formatted: String {
         let entropy = Self.unpack(secret)
         let symbols = (entropy + [Self.checkSymbol(for: secret)])

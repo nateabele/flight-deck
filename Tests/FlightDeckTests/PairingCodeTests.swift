@@ -93,4 +93,60 @@ final class PairingCodeTests: XCTestCase {
         XCTAssertEqual(PairingCode(normalizing: bare)?.secret, code.secret)
         XCTAssertEqual(code.secret.count, 7)
     }
+
+    /// The field rewrites what the user types as they type it, so the string on screen always
+    /// looks like the string on the Mac. Without this the two are compared by eye across a
+    /// room while one of them has hyphens and the other does not.
+    func testGroupingInsertsTheHyphensAsYouType() {
+        XCTAssertEqual(PairingCode.grouped(partial: ""), "")
+        XCTAssertEqual(PairingCode.grouped(partial: "AB"), "AB")
+        XCTAssertEqual(PairingCode.grouped(partial: "ABCD"), "ABCD")
+        XCTAssertEqual(PairingCode.grouped(partial: "ABCDE"), "ABCD-E")
+        XCTAssertEqual(PairingCode.grouped(partial: "ABCDEFGH"), "ABCD-EFGH")
+        XCTAssertEqual(PairingCode.grouped(partial: "ABCDEFGHJKMN"), "ABCD-EFGH-JKMN")
+    }
+
+    /// `.textInputAutocapitalization(.characters)` asks the keyboard to send uppercase; a
+    /// hardware keyboard, a paste, and dictation all ignore it. The rewrite is what actually
+    /// guarantees it, which is why the field cannot rely on the modifier alone.
+    func testGroupingUppercasesWhateverArrives() {
+        XCTAssertEqual(PairingCode.grouped(partial: "abcdefgh"), "ABCD-EFGH")
+    }
+
+    /// Crockford's own substitutions, applied on input rather than rejected. The alphabet
+    /// omits `I`, `L` and `O` precisely because a person reading a code aloud produces them —
+    /// so typing one is the expected mistake, and the expected mistake should work.
+    func testGroupingMapsTheAmbiguousLettersRatherThanRejectingThem() {
+        XCTAssertEqual(PairingCode.grouped(partial: "OIL"), "011")
+        XCTAssertEqual(PairingCode.grouped(partial: "oil"), "011")
+    }
+
+    /// `U` is dropped rather than mapped: Crockford excludes it to avoid accidental
+    /// obscenity, and it has no digit to stand for. Everything else outside the alphabet —
+    /// spaces, the hyphens the user retypes, punctuation — is dropped for the same reason
+    /// `init(normalizing:)` strips them: they are presentation, not content.
+    func testGroupingDropsWhatItCannotMap() {
+        XCTAssertEqual(PairingCode.grouped(partial: "AB CD-EF!GH"), "ABCD-EFGH")
+        XCTAssertEqual(PairingCode.grouped(partial: "ABUCD"), "ABCD")
+    }
+
+    /// Twelve symbols and no more. Without the cap the field grows past the code's length and
+    /// the user's own extra keystroke silently invalidates something that was already correct.
+    func testGroupingStopsAtTwelveSymbols() {
+        let long = PairingCode.grouped(partial: "ABCDEFGHJKMNPQRSTV")
+        XCTAssertEqual(long, "ABCD-EFGH-JKMN")
+        XCTAssertEqual(long.filter { $0 != "-" }.count, 12)
+    }
+
+    /// The formatter and the parser have to agree, or the field shows a string the phone then
+    /// refuses. Re-running the formatter over its own output must change nothing, and its
+    /// output must parse back to the code it came from.
+    func testAFormattedCodeIsAFixedPointOfTheFormatterAndStillParses() throws {
+        for _ in 0..<50 {
+            let code = PairingCode.mint()
+            let grouped = PairingCode.grouped(partial: code.formatted)
+            XCTAssertEqual(grouped, code.formatted)
+            XCTAssertEqual(PairingCode(normalizing: grouped), code)
+        }
+    }
 }
