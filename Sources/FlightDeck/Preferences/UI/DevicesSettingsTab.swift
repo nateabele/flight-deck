@@ -104,9 +104,7 @@ struct DevicesSettingsTab: View {
         // and no way out. Keying on the value makes "there is a window" and "the sheet is up"
         // the same fact rather than two that can disagree.
         .sheet(item: $pairingWindow) { window in
-            PairingCodeSheet(
-                service: service, preferences: preferences, payload: window.payload
-            )
+            PairingCodeSheet(service: service, preferences: preferences, window: window)
         }
         // Title, then message — the shape every other confirmation in this window uses. The
         // whole consequence used to be crammed into the title, where macOS renders it as a

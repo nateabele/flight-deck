@@ -22,10 +22,14 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
     public static let currentVersion = 2
     /// The scheme half of the code, with the version spelled into it — `FD2-`.
     ///
-    /// Two letters and a digit rather than `flightdeck2:`, and that is not brevity for its own
-    /// sake: `F`, `D`, the digits and `-` are all in QR's *alphanumeric* charset, where
-    /// lowercase letters and `:` are not. A single lowercase character forces the whole code
-    /// into byte mode, which is roughly a third more modules for the same content.
+    /// Two letters and a digit rather than `flightdeck2:`, but *not* for the QR's benefit. The
+    /// general rule is real — `F`, `D`, the digits and `-` are in QR's alphanumeric charset
+    /// where lowercase and `:` are not — but it is not what shrank this code, and the measured
+    /// result says so: `FD2-<body>` and `fd2-<body>` both come out at 39 modules, because
+    /// `CIQRCodeGenerator` segments the encoding rather than demoting the whole string to byte
+    /// mode. The 98-byte packed record is the entire win. Uppercase stays because the body is
+    /// Crockford base32, which is only unambiguous in one case, and because the short code
+    /// beside this QR is read aloud across a room and typed by hand.
     ///
     /// The version stays in the prefix, and that is load-bearing exactly as it was in v1: a
     /// payload from a newer Mac may pack fields this version cannot parse, so decoding it
