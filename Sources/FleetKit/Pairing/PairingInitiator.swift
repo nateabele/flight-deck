@@ -15,7 +15,7 @@ import Network
 /// `FleetClient`. **Every** method and every Network.framework callback asserts
 /// `dispatchPrecondition(condition: .onQueue(queue))` as its first line, the way
 /// `PairingListener` does: they were all already on `queue`, but only some of them said so, and
-/// a confinement discipline that is asserted at three sites out of seven is one a later change
+/// a confinement discipline that is asserted at four sites out of eight is one a later change
 /// can leave silently — the assertions are how "confined to `queue`" stays a fact rather than
 /// becoming a comment.
 public final class PairingInitiator: @unchecked Sendable {
