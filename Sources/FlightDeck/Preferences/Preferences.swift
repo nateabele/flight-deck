@@ -101,6 +101,18 @@ struct Preferences: Codable, Equatable {
     /// Minted once per install, and used only to make this Mac's Bonjour instance name
     /// unique. Optional for the same reason as everything else here — see `confirmations`.
     var installID: UUID?
+    /// The port the fleet listener last successfully bound to, so the next launch can ask for
+    /// it again. Optional for the same reason as everything else here — see `confirmations` —
+    /// and `nil` means "never bound", which asks the OS for any free port.
+    ///
+    /// Persisted for the reason `installID` is: a phone remembers this Mac as `host:port`
+    /// strings (`PairedMac.endpoints`, seeded from the pairing payload), so a port re-drawn
+    /// from the ephemeral range on every launch invalidates every endpoint every paired device
+    /// holds the moment the Mac restarts — leaving Bonjour as the only way back, and anything
+    /// that breaks Bonjour as a permanent stranding. A hint, never a guarantee: nothing
+    /// reserves this port while Flight Deck is not running, so `FleetService.start` treats a
+    /// port it cannot rebind as a preference to abandon, not a reason to have no listener.
+    var fleetPort: UInt16?
 
     init(
         globalFlags: FlagSet = FlagSet(),
@@ -113,7 +125,8 @@ struct Preferences: Codable, Equatable {
         storedAccounts: [AgentAccount]? = nil,
         storedProjectSettings: [String: ProjectSettings]? = nil,
         pairedDevices: [PairedDevice]? = nil,
-        installID: UUID? = nil
+        installID: UUID? = nil,
+        fleetPort: UInt16? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
@@ -126,6 +139,7 @@ struct Preferences: Codable, Equatable {
         self.storedProjectSettings = storedProjectSettings
         self.pairedDevices = pairedDevices
         self.installID = installID
+        self.fleetPort = fleetPort
     }
 
     /// Falls back to claude-then-codex so a `Preferences` that has never been migrated
