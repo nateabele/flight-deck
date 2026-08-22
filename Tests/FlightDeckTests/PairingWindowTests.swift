@@ -75,9 +75,15 @@ final class PairingWindowTests: XCTestCase {
         XCTAssertTrue(answers, "an armed Mac did not answer on its pairing port")
     }
 
-    /// Invariant 2, all four closing routes. Each is asserted against the *same* port the
+    /// Invariant 2, every closing route. Each is asserted against the *same* port the
     /// window was opened on, because "the listener is gone" and "the port moved" are different
     /// facts and only the first one is the invariant.
+    ///
+    /// The list is here for readability, not as the specification: what closes the listener is
+    /// the rule on `FleetService.closePairingListener()` — the listener's lifetime is
+    /// `armer.pending`'s lifetime — and route 5 is here because the earlier enumeration of
+    /// "success, expiry, cancel, termination" read *success* as the typed path's `onPaired`
+    /// and silently omitted the QR, which is the other success.
     func testEveryRouteThatClosesTheWindowClosesThePairingListener() async throws {
         // Route 1: explicit cancel.
         let (_, cancelService) = try await standUp()
@@ -106,8 +112,36 @@ final class PairingWindowTests: XCTestCase {
         answers = await pairingListenerAnswers(on: stopPort)
         XCTAssertFalse(answers, "stopping the service left the pairing listener up")
 
-        // Route 4: success. Covered by the acceptance test below, which asserts the same
-        // property after a real pairing rather than re-deriving one here.
+        // Route 4: success on the typed path. Covered by the acceptance test below, which
+        // asserts the same property after a real pairing rather than re-deriving one here.
+
+        // Route 5: success on the QR path. Nothing on the pairing socket witnesses this one —
+        // the phone dials the *fleet* listener with the key the QR carried, so no pairing
+        // connection, no `onPaired`, and the code the window is still handing out is by now
+        // the phone's permanent key. `armer.claim` is the only witness there is.
+        //
+        // `expireArming()` afterwards is exactly what the sheet does on its way out, and it is
+        // deliberately *not* what closes the listener: the claim already cleared `pending`, so
+        // that call returns at its first guard. If this passes only because of that line, the
+        // route is not covered.
+        let (qrPreferences, qrService) = try await standUp()
+        let qrArmed = try await qrService.arm()
+        let qrPort = try armedPort(qrService)
+        let snapshot = expectation(description: "snapshot")
+        let qrClient = FleetClient(key: qrArmed.payload.key, deviceName: "Scanning Phone")
+        self.client = qrClient
+        qrClient.onFrame = { if case .snapshot = $0 { snapshot.fulfill() } }
+        qrClient.connect(to: try qrService.loopbackEndpoint(), lastSeq: 0)
+        await fulfillment(of: [snapshot], timeout: 15)
+        XCTAssertEqual(
+            qrPreferences.pairedDevices.first?.isProvisional, false,
+            "the QR path did not finish pairing, so what follows would prove nothing"
+        )
+        try await qrService.expireArming()
+        answers = await pairingListenerAnswers(on: qrPort)
+        XCTAssertFalse(answers, "pairing by QR left the pairing listener up")
+        qrClient.disconnect()
+        qrService.stop()
     }
 
     /// Invariant 3. A `hello` is not in the pairing vocabulary, so it cannot be parsed, so the

@@ -28,7 +28,22 @@ final class PairingArmer {
     static let window: TimeInterval = 120
 
     private let now: () -> Date
+    /// Assigned in exactly two places: `arm()` opens a window, `clearPending()` closes one.
+    /// Nothing else may write it, which is what makes `onWindowClosed` a guarantee rather
+    /// than a convention — see that property.
     private(set) var pending: PairedDevice?
+
+    /// Fired whenever `pending` stops being a live window, by any route — cancelled, claimed
+    /// or expired — and from the single place that clears it, so a route added later gets
+    /// this without anybody remembering to give it to them.
+    ///
+    /// It exists because the window's *listener* is not this type's to own but its lifetime
+    /// is: `FleetService` hangs `closePairingListener()` off this, which is the rule
+    /// "the pairing listener's lifetime is `armer.pending`'s lifetime" made mechanical. The
+    /// enumerated alternative — a `closePairingListener()` beside every clear — is what shipped
+    /// first, and it missed the QR path, because that route clears `pending` from inside an
+    /// `if` whose *second* condition can fail independently.
+    var onWindowClosed: (() -> Void)?
 
     init(now: @escaping () -> Date = Date.init) {
         self.now = now
@@ -65,14 +80,22 @@ final class PairingArmer {
         )
     }
 
-    func cancel() { pending = nil }
+    /// Unconditionally, including when no window was open: "cancelled" means there is no
+    /// window now, and the listener's lifetime tracks that statement rather than the
+    /// transition. It is what lets `FleetService.arm()` open a window without first proving
+    /// the previous one left nothing behind.
+    func cancel() { clearPending() }
 
     /// A device completed a handshake on `slot`. Returns whether that closes the window —
     /// i.e. whether this is the device the user just armed for.
+    ///
+    /// This is the QR path's *only* signal that pairing finished. A phone that scanned the
+    /// code never touches the pairing listener at all — it dials the fleet listener with the
+    /// key the QR carried — so if the window does not close here it does not close at all.
     func claim(slot: UUID) -> Bool {
         guard let pending, pending.slot == slot else { return false }
         guard let armedUntil = pending.armedUntil, now() <= armedUntil else { return false }
-        self.pending = nil
+        clearPending()
         return true
     }
 
@@ -81,6 +104,14 @@ final class PairingArmer {
     /// stopping being displayed.
     func expire() {
         guard let armedUntil = pending?.armedUntil, now() > armedUntil else { return }
+        clearPending()
+    }
+
+    /// The single choke point. Every route that ends a window comes through here, so
+    /// `onWindowClosed` cannot be missed by a route somebody adds later without touching this
+    /// file — which is the whole reason it is a function rather than three assignments.
+    private func clearPending() {
         pending = nil
+        onWindowClosed?()
     }
 }

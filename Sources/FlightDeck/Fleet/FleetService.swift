@@ -78,6 +78,12 @@ final class FleetService: ObservableObject {
     /// Everything the socket calls back into. One method so the initializer reads as
     /// "own these three things, then connect them", rather than as forty lines of closures.
     private func wireHandlers() {
+        // The rule on `closePairingListener()`, wired: the armer fires this from the one place
+        // it clears `pending`, so cancel, expiry and a claimed slot all close the listener
+        // without any of them naming it. This is the only thing that closes the window on the
+        // QR path — a phone that scanned the code never touches the pairing listener, so
+        // `armer.claim` is the sole witness that pairing finished.
+        armer.onWindowClosed = { [weak self] in self?.closePairingListener() }
         replicator.onEvents = { [weak self] batch in
             for entry in batch {
                 self?.server.broadcast(.event(seq: entry.seq, entry.event))
@@ -202,6 +208,9 @@ final class FleetService: ObservableObject {
     }
 
     func stop() {
+        // Directly, because this is not a `pending` clear: the process is going away and the
+        // window's key goes with it. See `closePairingListener()` for the rule that makes
+        // these two the only direct calls left.
         closePairingListener()
         // `server.stop()` drops every attachment synchronously through `cancelConnections()`,
         // which fires `onAttachedSlotsChanged` itself — see `wireHandlers()` — so
@@ -224,10 +233,10 @@ final class FleetService: ObservableObject {
     /// because the phone cannot complete a handshake against a key the listener does not
     /// hold — "armed" and "the key is live" are the same instant by construction.
     func arm() async throws -> ArmedPairing {
-        armer.cancel()
         // Before anything else: a second `arm()` must not leave the previous window's listener
-        // answering on its old port with its old code.
-        closePairingListener()
+        // answering on its old port with its old code. `cancel()` is what closes it — it
+        // clears `pending` unconditionally, and the listener follows `pending`.
+        armer.cancel()
         preferences.pairedDevices
             .filter(\.isProvisional)
             .forEach { preferences.revokeDevice(slot: $0.slot) }
@@ -279,6 +288,24 @@ final class FleetService: ObservableObject {
     /// closes it identically (invariant 2). `pairingPort` is cleared with it because the two
     /// are one fact: a port with no listener behind it is exactly the state that made
     /// "is a window open?" answerable two ways.
+    ///
+    /// **The rule, which is what to check at a call site — not a list of routes:
+    /// the pairing listener's lifetime is `armer.pending`'s lifetime.** Every route that
+    /// clears `pending` closes the listener, and it is `PairingArmer.onWindowClosed` that
+    /// makes that true rather than any enumeration here: the armer clears `pending` in exactly
+    /// one place and fires from it, so cancel, expiry, a claimed slot and anything added later
+    /// are all covered without naming them.
+    ///
+    /// The two direct calls that remain are the two that are *not* a `pending` clear, and each
+    /// closes the listener strictly inside `pending`'s life, which the rule permits:
+    /// `stop()`, where the process is going away and the window's key dies with it; and the
+    /// success path's `onPaired`, which closes the moment the sealed key is out — a turn
+    /// before the phone attaches and `claim` clears `pending`.
+    ///
+    /// The enumerated version of this shipped first and was wrong. It read "success" as
+    /// `PairingListener.onPaired` and missed the QR, which is the other success and touches
+    /// this socket not at all; the window stayed open, and its code stayed a live key, for as
+    /// long as the app ran.
     private func closePairingListener() {
         pairing.stop()
         pairingPort = nil
@@ -286,8 +313,9 @@ final class FleetService: ObservableObject {
 
     func cancelArming() async throws {
         expiryTask?.cancel()
-        closePairingListener()
         if let pending = armer.pending { preferences.revokeDevice(slot: pending.slot) }
+        // Closes the pairing listener too — see `closePairingListener()` for why that is the
+        // armer's job and not a line here.
         armer.cancel()
         try await reloadKeys()
     }
@@ -320,9 +348,10 @@ final class FleetService: ObservableObject {
     /// being drawn.
     func expireArming() async throws {
         guard let pending = armer.pending else { return }
+        // Closes the pairing listener when — and only when — it actually clears the window;
+        // `expire()` declines at the instant the window ends, and the guard below is that.
         armer.expire()
         guard armer.pending == nil else { return }
-        closePairingListener()
         preferences.revokeDevice(slot: pending.slot)
         try await reloadKeys()
     }
@@ -343,6 +372,11 @@ final class FleetService: ObservableObject {
         // already reflects this attachment by the time `onHello` — and therefore this
         // method — runs; see `FleetSocketServer.accept()`'s ordering.
         let now = Date()
+        // `claim` closing the pairing window closes the pairing listener with it, through
+        // `PairingArmer.onWindowClosed`. Deliberately not a `closePairingListener()` in the
+        // branch body: `claim` clears `pending` from inside the *first* condition of this
+        // `if`, and the second one can fail on its own, so a line in here would be a route
+        // that closes the window and leaves the listener up.
         if armer.claim(slot: slot), var device = preferences.pairedDevices.first(where: { $0.slot == slot }) {
             expiryTask?.cancel()
             device.pairedAt = now
