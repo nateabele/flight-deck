@@ -149,6 +149,36 @@ final class PairingRunnerTests: XCTestCase {
         XCTAssertEqual(outcome.progress.last, .failed(.wrongCode))
     }
 
+    /// The walk is bounded, because the list it walks is not. Candidates come from a Bonjour
+    /// browse, so their number is chosen by whoever is on the network, and every one of them
+    /// costs the phone an `exchangeTimeout` behind a spinner. Not a cryptographic problem —
+    /// SPAKE2 gives one online guess per exchange and there is no offline path — but unbounded
+    /// work driven by untrusted input, which is worth refusing on its own terms.
+    ///
+    /// Real armed Macs on wrong codes rather than dead addresses, because a dead address only
+    /// fails at the initiator's 8-second deadline and twelve of those would be a 96-second
+    /// test. A wrong code is refused in milliseconds and walks on identically.
+    func testTheWalkStopsAtTheCandidateCapHoweverManyAreOffered() async throws {
+        var candidates: [PairingBrowser.DiscoveredMac] = []
+        for index in 0..<(PairingRunner.maxCandidates + 4) {
+            let (_, mac) = try await arm(code: .mint(), macName: "Mac \(index)")
+            candidates.append(mac)
+        }
+        let outcome = await run(code: .mint(), candidates: candidates)
+
+        let tried = outcome.progress.filter {
+            if case .trying = $0 { return true } else { return false }
+        }
+        XCTAssertEqual(
+            tried.count, PairingRunner.maxCandidates,
+            "the walk did not stop at the cap: \(tried.count) of \(candidates.count) tried"
+        )
+        XCTAssertNil(outcome.key)
+        // Still a verdict, not a silence: a run that stops at the cap has to tell the user
+        // something, and the last Mac it actually reached is what it has to report.
+        XCTAssertEqual(outcome.progress.last, .failed(.wrongCode))
+    }
+
     func testNoCandidatesReportsNoMacsFoundRatherThanAFailure() async throws {
         let outcome = await run(code: .mint(), candidates: [])
         XCTAssertNil(outcome.key)
