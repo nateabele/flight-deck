@@ -4,9 +4,11 @@ import FleetKit
 import SwiftUI
 
 enum PairingCodeImage {
-    /// `.medium` error correction, not `.high`: the payload is near a QR version boundary
-    /// and higher correction pushes it over, producing a denser code that scans *worse* on
-    /// a phone held at arm's length. Scaled with nearest-neighbour so the modules stay
+    /// `.medium` error correction, not `.high`: higher correction spends the extra capacity
+    /// on redundancy rather than on the payload, pushing the code up a version or two and
+    /// producing a denser grid that scans *worse* on a phone held at arm's length. That
+    /// mattered acutely when the payload was v1's ~270 characters of base64url'd JSON and it
+    /// still holds at v2's 161 packed ones. Scaled with nearest-neighbour so the modules stay
     /// crisp — an interpolated QR is a QR that takes three tries to read.
     static func cgImage(for code: String, size: CGFloat) -> CGImage? {
         let filter = CIFilter.qrCodeGenerator()
