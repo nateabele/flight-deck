@@ -25,17 +25,25 @@ public final class PairingInitiator: @unchecked Sendable {
         /// Never reached the Mac at all. Distinct from `wrongCode` because it sends the user
         /// to the network, not to the keyboard.
         case connectionFailed
-        /// The Mac spoke, and what it said was not this protocol.
+        /// The Mac spoke, and what it said was not this protocol. It also carries one local
+        /// failure that is not the Mac's fault at all, knowingly — see `start()`'s `catch`.
         case malformedResponse
     }
 
     public var onPaired: ((_ key: FleetDeviceKey, _ macName: String) -> Void)?
     public var onFailure: ((Failure) -> Void)?
 
-    /// How long to wait for a socket that never becomes usable. `NWConnection` will retry a
-    /// dead address well past any patience a pairing screen has, and a runner walking three
-    /// discovered Macs cannot spend a TCP timeout on each.
-    public var connectTimeout: TimeInterval = 8
+    /// The deadline for the **whole exchange**, not just for reaching the Mac: it is armed
+    /// once in `start()` and never re-armed, so it bounds TLS, the WebSocket upgrade and all
+    /// four frames together. A Mac that completes TLS and then stalls before the sealed frame
+    /// reports `.connectionFailed` at this deadline, which is what a pairing screen needs — a
+    /// peer that answered and went quiet is exactly as unpairable as a dead address, and
+    /// `NWConnection` will wait out either one well past any patience the screen has.
+    ///
+    /// Named for what it bounds rather than for the connect it starts with, because the other
+    /// name invites lengthening it "for slow networks" without noticing that it also caps the
+    /// crypto round-trips — and a runner walking three discovered Macs pays it once per Mac.
+    public var exchangeTimeout: TimeInterval = 8
 
     private let queue: DispatchQueue
     private var connection: NWConnection?
@@ -100,6 +108,14 @@ public final class PairingInitiator: @unchecked Sendable {
                         over: connection
                     )
                 } catch {
+                    // Mislabelled, and deliberately so: nothing has been received at this
+                    // point, so what failed is our own `session.message(for:)`, not the Mac's
+                    // half of the protocol. It keeps `.malformedResponse` rather than earning
+                    // a case of its own because that call throws only if BoringSSL fails
+                    // inside this process — unreachable short of a broken build — and a
+                    // public case no peer can provoke is an arm every consumer has to write
+                    // user-facing copy for. The verdict the copy would give is the one
+                    // `.malformedResponse` already gives: this Mac did not pair, try again.
                     self.fail(.malformedResponse)
                 }
             case .failed, .cancelled:
@@ -118,7 +134,7 @@ public final class PairingInitiator: @unchecked Sendable {
         }
 
         connection.start(queue: queue)
-        queue.asyncAfter(deadline: .now() + connectTimeout) { [weak self] in
+        queue.asyncAfter(deadline: .now() + exchangeTimeout) { [weak self] in
             guard let self, generation == self.generation else { return }
             self.fail(.connectionFailed)
         }

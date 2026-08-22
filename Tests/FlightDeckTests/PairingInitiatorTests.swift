@@ -110,7 +110,7 @@ final class PairingInitiatorTests: XCTestCase {
 
         let initiator = PairingInitiator()
         self.initiator = initiator
-        initiator.connectTimeout = 1
+        initiator.exchangeTimeout = 1
         let settled = expectation(description: "settled")
         nonisolated(unsafe) var failure: PairingInitiator.Failure?
         initiator.onPaired = { _, _ in XCTFail("paired with nothing") }
@@ -122,6 +122,37 @@ final class PairingInitiatorTests: XCTestCase {
         }
         initiator.start(code: .mint(), endpoint: .hostPort(host: "127.0.0.1", port: port))
         await fulfillment(of: [settled], timeout: 15)
+        XCTAssertEqual(failure, .connectionFailed)
+    }
+
+    /// The other half of what `exchangeTimeout` bounds, and the half the unreachable-endpoint
+    /// test cannot reach: a Mac that accepts the connection, completes TLS and the WebSocket
+    /// upgrade, takes our first frame — and then says nothing. Nothing ever fails at the
+    /// socket level here, so only the deadline can produce a verdict. Without it the pairing
+    /// screen spins forever against a peer that is, from the stack's point of view, perfectly
+    /// healthy.
+    func testAMacThatAnswersAndThenGoesQuietStillFailsAtTheDeadline() async throws {
+        let silent = try SilentMac()
+        defer { silent.stop() }
+        let heard = expectation(description: "the silent Mac received our first frame")
+        silent.onFrame = { MainActor.assumeIsolated { heard.fulfill() } }
+
+        let initiator = PairingInitiator()
+        self.initiator = initiator
+        initiator.exchangeTimeout = 1
+        let settled = expectation(description: "settled")
+        nonisolated(unsafe) var failure: PairingInitiator.Failure?
+        initiator.onPaired = { _, _ in XCTFail("paired with a Mac that said nothing") }
+        initiator.onFailure = { value in
+            MainActor.assumeIsolated {
+                failure = value
+                settled.fulfill()
+            }
+        }
+        initiator.start(code: .mint(), endpoint: await silent.endpoint())
+        // Ordered: the frame proves the exchange got past `.ready`, so the failure that
+        // follows is a stall being cut off rather than a connect that never happened.
+        await fulfillment(of: [heard, settled], timeout: 15, enforceOrder: true)
         XCTAssertEqual(failure, .connectionFailed)
     }
 
@@ -187,28 +218,74 @@ final class PairingInitiatorTests: XCTestCase {
             connection?.cancel()
             listener.cancel()
         }
+    }
 
-        /// A one-shot continuation, because `XCTestExpectation` cannot carry a value out.
-        private final class Expectation: @unchecked Sendable {
-            private var continuation: CheckedContinuation<NWEndpoint.Port, Never>?
-            private var pending: NWEndpoint.Port?
-            var value: NWEndpoint.Port {
-                get async {
-                    await withCheckedContinuation { continuation in
-                        if let pending {
-                            continuation.resume(returning: pending)
-                        } else {
-                            self.continuation = continuation
-                        }
+    /// A responder that completes the channel and then stops: it accepts, lets TLS and the
+    /// WebSocket upgrade finish, reads whatever arrives and answers none of it. A peer the
+    /// stack is perfectly happy with, which is the only way to exercise a stall *after*
+    /// `.ready`.
+    private final class SilentMac: @unchecked Sendable {
+        private let listener: NWListener
+        private var connection: NWConnection?
+        /// Fired on the main queue for each frame received, so a test can prove the exchange
+        /// got past `.ready` before the deadline it is really measuring.
+        var onFrame: (@Sendable () -> Void)?
+
+        init() throws {
+            listener = try NWListener(
+                using: FleetSocket.webSocketParameters(FleetTLS.pairingListenerParameters())
+            )
+        }
+
+        func endpoint() async -> NWEndpoint {
+            let ready = Expectation()
+            listener.newConnectionHandler = { [weak self] connection in
+                self?.serve(connection)
+            }
+            listener.stateUpdateHandler = { [weak listener] state in
+                if case .ready = state, let port = listener?.port, port != .any {
+                    ready.resume(port)
+                }
+            }
+            listener.start(queue: .main)
+            return .hostPort(host: "127.0.0.1", port: await ready.value)
+        }
+
+        private func serve(_ connection: NWConnection) {
+            self.connection = connection
+            connection.start(queue: .main)
+            FleetSocket.receive(PairingClientFrame.self, from: connection) { [weak self] _ in
+                self?.onFrame?()
+            } onEnd: { _ in }
+        }
+
+        func stop() {
+            connection?.cancel()
+            listener.cancel()
+        }
+    }
+
+    /// A one-shot continuation, because `XCTestExpectation` cannot carry a value out. Shared
+    /// by both fakes above.
+    private final class Expectation: @unchecked Sendable {
+        private var continuation: CheckedContinuation<NWEndpoint.Port, Never>?
+        private var pending: NWEndpoint.Port?
+        var value: NWEndpoint.Port {
+            get async {
+                await withCheckedContinuation { continuation in
+                    if let pending {
+                        continuation.resume(returning: pending)
+                    } else {
+                        self.continuation = continuation
                     }
                 }
             }
-            func resume(_ port: NWEndpoint.Port) {
-                guard pending == nil else { return }
-                pending = port
-                continuation?.resume(returning: port)
-                continuation = nil
-            }
+        }
+        func resume(_ port: NWEndpoint.Port) {
+            guard pending == nil else { return }
+            pending = port
+            continuation?.resume(returning: port)
+            continuation = nil
         }
     }
 }
