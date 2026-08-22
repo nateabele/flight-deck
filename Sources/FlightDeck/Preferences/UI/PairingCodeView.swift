@@ -21,8 +21,9 @@ enum PairingCodeImage {
     }
 }
 
-/// The sheet "Pair a Device…" opens: the QR plus its manual-entry fallback, live for
-/// `PairingArmer.window` and no longer.
+/// The sheet "Pair a Device…" opens: one armed window presented two ways — the QR for a phone
+/// with a camera, the twelve typed symbols for one without — live for `PairingArmer.window`
+/// and no longer.
 ///
 /// The countdown reads the provisional device's `armedUntil` back out of `preferences`
 /// rather than tracking a locally-computed deadline, because that timestamp — minted by
@@ -33,26 +34,36 @@ struct PairingCodeSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var service: FleetService
     @ObservedObject var preferences: PreferencesStore
-    let payload: PairingPayload
+    /// The whole window, not its payload. The QR and the typed code are two presentations of
+    /// one armed pairing, and taking them as one value is what makes it structurally
+    /// impossible for this sheet to draw one window's code beside another window's QR.
+    let window: ArmedPairing
 
-    /// Encoded once, at init, rather than inside `body`.
+    /// Both halves of what is on screen, derived from one value.
     ///
-    /// `body` re-runs every second — the countdown ticks — and both the QR and the typed-code
-    /// text are derived from the encoding. Deriving them in `body` rebuilt a 320px QR bitmap
-    /// on every tick and handed SwiftUI a fresh `CGImage` each time, which redraws the image
-    /// for a code that has not changed. (It genuinely has not: `encoded()` is byte-stable,
-    /// pinned by `testEncodingTheSamePayloadTwiceGivesTheSameString`.) The work is per-code,
-    /// so it belongs where the code is decided, not where it is drawn.
-    private let code: String
+    /// Static, and exposed, because this is the part worth testing: a sheet that drew a code
+    /// from one window beside a QR from another would look completely normal, and the user
+    /// would find out by typing a code that does not work.
+    static func displayedCode(for window: ArmedPairing) -> String { window.code.formatted }
+    static func qrCode(for window: ArmedPairing) -> String { window.payload.encoded() }
+
+    /// Derived once, at init, rather than inside `body`.
+    ///
+    /// `body` re-runs every second — the countdown ticks — and both the QR and the typed code
+    /// are derived from the window. Deriving them in `body` rebuilt a 320px QR bitmap on every
+    /// tick and handed SwiftUI a fresh `CGImage` each time, which redraws the image for a code
+    /// that has not changed. (It genuinely has not: `encoded()` is byte-stable, pinned by
+    /// `testEncodingTheSamePayloadTwiceGivesTheSameString`.) The work is per-window, so it
+    /// belongs where the window is decided, not where it is drawn.
+    private let typedCode: String
     private let codeImage: CGImage?
 
-    init(service: FleetService, preferences: PreferencesStore, payload: PairingPayload) {
+    init(service: FleetService, preferences: PreferencesStore, window: ArmedPairing) {
         self.service = service
         self.preferences = preferences
-        self.payload = payload
-        let code = payload.encoded()
-        self.code = code
-        self.codeImage = PairingCodeImage.cgImage(for: code, size: 320)
+        self.window = window
+        self.typedCode = Self.displayedCode(for: window)
+        self.codeImage = PairingCodeImage.cgImage(for: Self.qrCode(for: window), size: 320)
     }
 
     /// Advanced only by the timer tick below, so the countdown text (and the expiry check
@@ -63,7 +74,7 @@ struct PairingCodeSheet: View {
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var armedUntil: Date? {
-        preferences.pairedDevices.first { $0.slot == payload.key.slot }?.armedUntil
+        preferences.pairedDevices.first { $0.slot == window.payload.key.slot }?.armedUntil
     }
 
     private var remainingSeconds: Int {
@@ -80,7 +91,7 @@ struct PairingCodeSheet: View {
             Text("Pair a device")
                 .font(.title2.bold())
 
-            Text(payload.macName)
+            Text(window.payload.macName)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
@@ -117,13 +128,50 @@ struct PairingCodeSheet: View {
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("pairing-code-countdown")
 
-            DisclosureGroup("Can't scan? Type this code instead") {
-                Text(code)
-                    .font(.caption.monospaced())
+            Divider()
+                .frame(maxWidth: 320)
+
+            // Promoted out of a `DisclosureGroup`. The QR's payload was hidden because it was
+            // 300 characters of base64 that nobody would type; twelve grouped symbols are a
+            // peer of the QR, and burying the only route that works without a camera behind a
+            // disclosure triangle is how a simulator user concludes the app cannot pair at all.
+            VStack(spacing: 6) {
+                Text("Or type this code")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+
+                // Sized and spaced to be read off this screen and typed into another, often
+                // from across a room: `.title` rather than body text, fixed-width so the three
+                // groups line up under each other, and tracked apart so `8` and `B` are told
+                // apart at a glance. The alphabet has already done the other half of that job
+                // by omitting `I`, `L`, `O` and `U` — see `PairingCode`.
+                //
+                // Uppercase is not decoration either: Crockford base32 is only unambiguous in
+                // one case, and lowercase `l` against `1` is precisely the substitution the
+                // alphabet omits `L` to prevent. That is a reason about the *reader* — it buys
+                // nothing in the QR, where `FD` and `fd` measure the same 39 modules.
+                Text(typedCode)
+                    .font(.system(.title, design: .monospaced).weight(.semibold))
+                    .tracking(2)
                     .textSelection(.enabled)
-                    .frame(maxWidth: 320)
-                    .accessibilityIdentifier("pairing-code-text")
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(nsColor: .quaternarySystemFill))
+                    )
+                    .accessibilityIdentifier("pairing-typed-code")
+
+                Text("Only works on this Wi-Fi network.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: 320)
+            // Same load-bearing fix as the paragraph above, for the same reason: a sheet is
+            // sized once from its content's ideal height, and a wrapping label's ideal height
+            // is one line, so without it the sheet comes out short and truncates.
+            .fixedSize(horizontal: false, vertical: true)
 
             Button("Cancel") {
                 // Explicit user cancel revokes right away — `cancelArming()` is
