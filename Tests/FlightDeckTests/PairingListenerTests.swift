@@ -36,16 +36,16 @@ final class PairingListenerTests: XCTestCase {
         return client
     }
 
-    /// The exchange, driven from the protocol rather than from `PairingInitiator` — see
-    /// `PairingTestClient`'s doc comment for why that distinction is the whole value of this
-    /// test. The initiator role, the two names, and the transcript all come from
-    /// `PairingChannel` and `SPAKE2Session`, so a listener that disagreed about any of them
-    /// produces a confirmation that does not verify and this fails.
-    func testAnHonestExchangeDeliversTheSealedDeviceKey() async throws {
-        let code = PairingCode.mint()
-        let key = FleetDeviceKey.mint()
-        let (_, endpoint) = try await arm(code: code, key: key, macName: "Nate's MacBook")
-
+    /// Drives the phone's half of one real exchange and returns what the Mac sealed, from the
+    /// protocol rather than from `PairingInitiator` — see `PairingTestClient`'s doc comment
+    /// for why that distinction is the whole value of these tests. The initiator role, the two
+    /// names and the transcript all come from `PairingChannel` and `SPAKE2Session`, so a
+    /// listener that disagreed about any of them produces a confirmation that does not verify
+    /// and every caller of this fails. The Mac's own confirmation is checked here so no caller
+    /// has to remember to.
+    private func exchange(
+        code: PairingCode, over endpoint: NWEndpoint, timeout: TimeInterval = 15
+    ) async throws -> (key: FleetDeviceKey, macName: String) {
         let session = SPAKE2Session(
             role: .initiator,
             myName: PairingChannel.initiatorName, theirName: PairingChannel.responderName
@@ -92,11 +92,191 @@ final class PairingListenerTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(300))
         client.send(.pake(msg: try session.message(for: code)))
 
-        await fulfillment(of: [opened], timeout: 15)
-        let result = try XCTUnwrap(delivered)
+        await fulfillment(of: [opened], timeout: timeout)
+        return try XCTUnwrap(delivered)
+    }
+
+    /// A whole honest exchange: the phone gets the Mac's real device key and its real name,
+    /// and neither side had anything but the code to start from.
+    func testAnHonestExchangeDeliversTheSealedDeviceKey() async throws {
+        let code = PairingCode.mint()
+        let key = FleetDeviceKey.mint()
+        let (_, endpoint) = try await arm(code: code, key: key, macName: "Nate's MacBook")
+
+        let result = try await exchange(code: code, over: endpoint)
         XCTAssertEqual(result.key.slot, key.slot)
         XCTAssertEqual(result.key.secret, key.secret)
         XCTAssertEqual(result.macName, "Nate's MacBook")
+    }
+
+    /// The frame the whole exchange exists to deliver must survive the consumer closing the
+    /// window from inside `onPaired` — which is what every consumer will do, because "the
+    /// window is open" is the consumer's fact, not the listener's.
+    ///
+    /// Two exchanges, not the five a probabilistic guard would need: against the unfixed shape
+    /// (`onPaired` on the line after the send) this fails on the *first* one, 3 runs out of 3,
+    /// with the aborted send reporting `ECANCELED` — so one exchange already pins it and the
+    /// second is nearly free. The second earns its place differently anyway: the first window
+    /// closes itself from inside `onPaired`, so this is also the only test that arms a second
+    /// window after a first has been torn down.
+    ///
+    /// Deliberately at shipping size. Inflating the frame to 2 MB would make it fail against
+    /// *correct* code too, pinning a property this design does not have — see `stop()`.
+    func testTheSealedFrameSurvivesAStopFromInsideOnPaired() async throws {
+        for _ in 0..<2 {
+            let code = PairingCode.mint()
+            let key = FleetDeviceKey.mint()
+            let (listener, endpoint) = try await arm(code: code, key: key, macName: "Test Mac")
+            listener.onPaired = { [weak listener] in listener?.stop() }
+
+            let result = try await exchange(code: code, over: endpoint)
+            XCTAssertEqual(result.key.slot, key.slot)
+        }
+    }
+
+    /// The same fix, on the sibling path: the third attempt's `.attemptsExhausted` is what
+    /// sends the user back to the Mac for a new code instead of leaving the phone reporting a
+    /// network failure, and closing the window from inside `onAttemptsExhausted` is the only
+    /// sensible thing to do there.
+    ///
+    /// This one detects the unfixed shape only under load — 2 failures in 2 full-suite runs,
+    /// 0 in 3 runs on its own — so it is the weaker of the pair, and worth knowing about
+    /// before trusting a green run of it in isolation. What makes that acceptable rather than
+    /// a hole: both paths now go through the same `reply(_:over:thenDrop:then:)`/`onSent`
+    /// mechanism, and `testTheSealedFrameSurvivesAStopFromInsideOnPaired` pins that mechanism
+    /// deterministically. This test's job is that the exhaustion path is *wired* to it.
+    func testTheExhaustedRejectSurvivesAStopFromInsideOnAttemptsExhausted() async throws {
+        let (listener, endpoint) = try await arm()
+        listener.onAttemptsExhausted = { [weak listener] in listener?.stop() }
+
+        for attempt in 1...PairingListener.maxAttempts {
+            let answered = expectation(description: "attempt \(attempt) answered")
+            nonisolated(unsafe) var reason: PairingRejection?
+            let session = SPAKE2Session(
+                role: .initiator,
+                myName: PairingChannel.initiatorName, theirName: PairingChannel.responderName
+            )
+            let client = client(endpoint)
+            client.onFrame = { frame in
+                MainActor.assumeIsolated {
+                    switch frame {
+                    // A well-formed curve point, then a confirmation that cannot verify: a
+                    // typo, which is what the budget counts — not a malformed frame, which
+                    // costs nothing.
+                    case .pake:
+                        client.send(.confirm(mac: Data(repeating: 0xAB, count: 32)))
+                    case .reject(let rejected):
+                        reason = rejected
+                        answered.fulfill()
+                    case .sealed:
+                        XCTFail("sealed on a confirmation that could not verify")
+                    }
+                }
+            }
+            client.start()
+            try await Task.sleep(for: .milliseconds(300))
+            client.send(.pake(msg: try session.message(for: .mint())))
+            await fulfillment(of: [answered], timeout: 10)
+            XCTAssertEqual(
+                reason,
+                attempt == PairingListener.maxAttempts ? .attemptsExhausted : .badCode
+            )
+        }
+        XCTAssertEqual(listener.attemptsSpent, PairingListener.maxAttempts)
+    }
+
+    /// `onPaired` says "fired once", and a consumer hangs window teardown and key promotion
+    /// off it. The connection is deliberately left open after the seal, so the phone can
+    /// replay the confirmation the Mac just accepted — which must not seal a second key.
+    func testAReplayedConfirmationDoesNotPairTwice() async throws {
+        let code = PairingCode.mint()
+        let (listener, endpoint) = try await arm(code: code)
+        nonisolated(unsafe) var pairings = 0
+        listener.onPaired = { pairings += 1 }
+
+        let session = SPAKE2Session(
+            role: .initiator,
+            myName: PairingChannel.initiatorName, theirName: PairingChannel.responderName
+        )
+        let sealed = expectation(description: "sealed")
+        sealed.assertForOverFulfill = false
+        nonisolated(unsafe) var confirmation: Data?
+        nonisolated(unsafe) var replayed = false
+
+        let client = client(endpoint)
+        client.onFrame = { frame in
+            MainActor.assumeIsolated {
+                switch frame {
+                case .pake(let peer):
+                    do {
+                        let derived = try PairingSecrets(
+                            keyMaterial: session.keyMaterial(from: peer),
+                            transcript: session.transcript
+                        )
+                        confirmation = derived.initiatorConfirmation
+                        client.send(.confirm(mac: derived.initiatorConfirmation))
+                    } catch {
+                        XCTFail("initiator half failed: \(error)")
+                    }
+                case .sealed:
+                    sealed.fulfill()
+                    // Once, or the unfixed listener answers the replay with another seal and
+                    // this drives itself round forever.
+                    guard !replayed, let confirmation else { return }
+                    replayed = true
+                    client.send(.confirm(mac: confirmation))
+                case .reject(let reason):
+                    XCTFail("rejected: \(reason)")
+                }
+            }
+        }
+        client.start()
+        try await Task.sleep(for: .milliseconds(300))
+        client.send(.pake(msg: try session.message(for: code)))
+        await fulfillment(of: [sealed], timeout: 15)
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(pairings, 1, "a replayed confirmation paired the same window twice")
+    }
+
+    /// The cap itself, which the isolation test below deliberately does not pin: it proves the
+    /// two listeners' pools are independent, and passes with this cap raised or deleted. On a
+    /// socket whose entire job is bounding *unauthenticated* peers, the number needs its own
+    /// test — four are admitted and kept, the fifth is refused.
+    func testThePendingPoolAdmitsItsCapAndRefusesTheNextConnection() async throws {
+        let (_, endpoint) = try await arm()
+        nonisolated(unsafe) var endedEarly = 0
+        for _ in 0..<PairingListener.maxPending {
+            let filler = client(endpoint)
+            filler.onEnd = { endedEarly += 1 }
+            filler.start()
+        }
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(endedEarly, 0, "a connection inside the cap was dropped")
+
+        let overflow = client(endpoint)
+        let refused = expectation(description: "the connection past the cap was refused")
+        overflow.onEnd = { refused.fulfill() }
+        overflow.start()
+        await fulfillment(of: [refused], timeout: 5)
+        XCTAssertEqual(endedEarly, 0, "the refused connection cost an admitted one its slot")
+    }
+
+    /// The bytes an unauthenticated peer may make the Mac buffer are bounded, and the bound is
+    /// in the *stack* rather than after the parse. Without it the frame is buffered whole,
+    /// JSON-decoded and base64-decoded before anything refuses it — which is why the
+    /// assertion is that no answer comes back at all: a listener that parsed this would reply
+    /// `.malformed`, and one that never received it cannot.
+    func testAnOversizedFrameIsRefusedBeforeItIsParsed() async throws {
+        let (listener, endpoint) = try await arm()
+        let ended = expectation(description: "connection ended")
+        let client = client(endpoint)
+        client.onFrame = { XCTFail("an oversized frame was parsed and answered: \($0)") }
+        client.onEnd = { ended.fulfill() }
+        client.start()
+        try await Task.sleep(for: .milliseconds(300))
+        client.send(.pake(msg: Data(repeating: 0x41, count: 4 * PairingListener.maxFrameBytes)))
+        await fulfillment(of: [ended], timeout: 10)
+        XCTAssertEqual(listener.attemptsSpent, 0)
     }
 
     /// Invariant 4, first half: the pairing listener's pending pool is its own. Filling it

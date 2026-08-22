@@ -8,11 +8,32 @@ import Network
 /// idle timeout, and a relay (§3, out of scope but designed for) speaks WebSocket
 /// everywhere and a bespoke framing nowhere.
 enum FleetSocket {
-    static func webSocketParameters(_ base: NWParameters) -> NWParameters {
+    /// The receive bound for a peer that had to hold a paired key to get here. Generous —
+    /// a snapshot of a large fleet is the biggest thing on this wire — because the peer is
+    /// already authenticated and the bound is a backstop, not a policy.
+    static let maximumMessageSize = 1 << 20
+
+    /// `maximumMessageSize` is not optional here, and its default is not
+    /// `NWProtocolWebSocket.Options`': that one is **0, meaning no receive limit at all**
+    /// (`ws_options.h:313-314`), so a peer can make the stack buffer an arbitrarily large
+    /// message before any of our code — let alone any crypto — gets a say. Measured on the
+    /// pairing socket: an 8 MB `.pake` frame from a peer holding only the *public* bootstrap
+    /// PSK was buffered whole, JSON-decoded, base64-decoded and only then rejected, in 0.38s,
+    /// spending no attempt. Four unauthenticated slots times a thirty-second deadline times
+    /// unbounded allocation is a remote memory-exhaustion DoS reachable by anyone on the LAN
+    /// holding a copy of the binary.
+    ///
+    /// The two sockets pass different bounds because their peers are different populations:
+    /// the fleet listener's have completed a TLS-PSK handshake against a paired key, the
+    /// pairing listener's have proved nothing (`PairingListener.maxFrameBytes`).
+    static func webSocketParameters(
+        _ base: NWParameters, maximumMessageSize: Int = maximumMessageSize
+    ) -> NWParameters {
         let options = NWProtocolWebSocket.Options()
         // Answer the peer's pings in the stack rather than in application code: a keepalive
         // that depends on the app being responsive is not a keepalive.
         options.autoReplyPing = true
+        options.maximumMessageSize = maximumMessageSize
         base.defaultProtocolStack.applicationProtocols.insert(options, at: 0)
         return base
     }
@@ -54,8 +75,20 @@ enum FleetSocket {
     /// notwithstanding. Measured: `PairingListener` rejecting a malformed frame with
     /// `send(...)` on one line and `cancel()` on the next delivered the reject 0 times in 2
     /// runs — inserting a single log line between the two made it arrive every time, which is
-    /// what identifies this as a race rather than a frame that was never sent. Cancelling from
-    /// here instead is deterministic.
+    /// what identifies this as a race rather than a frame that was never sent.
+    ///
+    /// What goes wrong without it is not subtle once measured: the aborted send completes with
+    /// `POSIXErrorCode(rawValue: 89): Operation canceled` and the bytes never reach the socket.
+    /// Cancelling from here instead leaves the stack holding bytes it has already taken, and a
+    /// graceful close orders its FIN behind them.
+    ///
+    /// **That is a bound, not an unconditional guarantee.** `.contentProcessed` says the stack
+    /// took the message, not that all of it is resident: a 2 MB frame cancelled from `onSent`
+    /// was still lost 8 times out of 8, while the same frame with no cancel behind it arrived
+    /// every time. Frames that fit comfortably in a socket buffer — everything on both of
+    /// these wires — survive; a frame that grew by orders of magnitude would need a real
+    /// drain. `onSent` also fires on the encode-failure path above, where the stack took
+    /// nothing at all.
     static func send<Frame: Encodable>(
         _ frame: Frame, over connection: NWConnection, onError: ((Error) -> Void)? = nil,
         onSent: (@Sendable () -> Void)? = nil
