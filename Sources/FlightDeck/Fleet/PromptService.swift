@@ -1,0 +1,94 @@
+import FleetKit
+import Foundation
+
+/// Carries out a phone's answer to the dialog a session is blocked on.
+///
+/// The only type that knows a `SessionStore` and a transcript on this path — the role
+/// `TimelineService` plays for history, split from it for the same reason it is split from the
+/// store: each stays testable without the other, and the thing needing both is here.
+///
+/// **There is no cache and there must not be one.** The open call is re-derived from the
+/// transcript on every answer. A `served` table would be faster and would fail the case this
+/// service exists for: the user approves a dialog in the terminal, claude raises the next one
+/// immediately, and the session **never leaves `waiting`** — so no event is emitted, the
+/// phone's card still shows the old dialog, and a cached entry still matches it. The
+/// re-derivation does not match, because the new dialog is a different call.
+///
+/// The read is a tail — `TimelineLimits.window` at most, `tailRecords` records — done once per
+/// human tap, on the main queue, inside `FleetSocketServer`'s synchronous `onCommand`. That is
+/// a deliberate trade against a cache and it is the cheaper of the two: `TimelineService` takes
+/// its read off the main actor because a *page* is parsed on every activity change, which is
+/// two orders of magnitude more often and larger.
+///
+/// Changes no fleet state and emits no `FleetEvent`, exactly as `TimelineService` does not:
+/// what the phone answered becomes visible through the status the agent writes and the
+/// transcript it appends.
+@MainActor
+final class PromptService {
+    private let store: SessionStore
+
+    /// Test seam, in the shape and for the reason `TimelineService.reader` is one: the file
+    /// read is the thing tests must substitute, and `@Sendable` and free of `self` so what
+    /// crosses is a function value and two values, never the service or the store.
+    var tail: @Sendable (URL, Int) -> [SourceLine] = { url, limit in
+        TranscriptPager.page(url: url, anchor: .latest, limit: limit)?.lines ?? []
+    }
+
+    /// How many records back to look.
+    ///
+    /// **Small on purpose.** An open call is always among the last records — claude cannot
+    /// proceed past a dialog — so one would nearly always do. A handful is read so that a
+    /// `tool_result` for an *earlier* call is inside the window and cannot make an
+    /// already-answered call look open, which is the only way this can be wrong in the
+    /// dangerous direction.
+    static let tailRecords = 8
+
+    init(store: SessionStore) {
+        self.store = store
+    }
+
+    /// Answer the dialog `session` is blocked on, if `call` still names it.
+    ///
+    /// Two refusals before anything is typed. `not_waiting` — nothing is blocked, so there is
+    /// nothing to answer and a keystroke would land in the input bar. `prompt_changed` — the
+    /// newest unanswered call is not the one named, which covers both the user answering in
+    /// the terminal and the agent having moved to its next dialog.
+    ///
+    /// Everything below this — the agent, the screen, the shape of the answer — is
+    /// `SessionStore.answerPrompt`'s to refuse, and its code is forwarded verbatim. Splitting
+    /// a check across two files is how the two drift.
+    func answer(
+        session: UUID, call: String, answer: PromptAnswer, token: UUID
+    ) -> Result<Void, TimelineErrorCode> {
+        // Resolved once, up front. A tab closed between the tap and here is the ordinary case,
+        // not an edge one — the same ruling `TimelineService.page` makes.
+        let source = store.timelineSource(of: session)
+        if case .unknownSession = source { return .failure("unknown_session") }
+        // Checked before any read, because it is the answer most of the time and costs
+        // nothing. `OpenPrompt.find` gates on it too and `SessionStore.answerPrompt` gates on
+        // it again — a client is not trusted, and neither is a caller — but refusing here is
+        // what keeps `not_waiting` distinguishable from `prompt_changed`, which are different
+        // sentences on the phone.
+        let activity = store.status(for: session)?.activity
+        guard activity == .waiting else { return .failure("not_waiting") }
+
+        guard case .file(.claude, let url) = source else { return .failure("prompt_changed") }
+        let lines = tail(url, Self.tailRecords)
+        // **The comparison this whole service exists for.** `find` says what the terminal is
+        // blocked on now; `call` says what the phone was showing when a thumb came down. They
+        // are only the same dialog if they are the same call.
+        guard let open = ClaudeOpenCall.find(in: lines, activity: activity), open.callID == call
+        else { return .failure("prompt_changed") }
+
+        let outcome = store.answerPrompt(open, with: answer, in: session, token: token)
+        if let code = outcome.errorCode { return .failure(TimelineErrorCode(code)) }
+        return .success(())
+    }
+}
+
+extension TimelineErrorCode {
+    /// A code built at runtime rather than written as a literal. `ExpressibleByStringLiteral`
+    /// covers every call site in `TimelineService`; this covers the one place a code arrives
+    /// from `SessionStore.AnswerDispatch` as a `String`.
+    init(_ code: String) { self.init(stringLiteral: code) }
+}
