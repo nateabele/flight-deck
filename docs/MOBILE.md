@@ -44,7 +44,7 @@ than assuming. See its own comments for the rest, and the note in `AGENTS.md`.
 ## Running the unit suite
 
 ```bash
-./scripts/test-ios.sh    # 116 tests, ~45s including creating and booting the simulator
+./scripts/test-ios.sh    # 155 tests, ~40s including creating and booting the simulator
 ```
 
 It creates a throwaway simulator, runs `FlightDeckMobileTests` inside `FlightDeckMobile`, and
@@ -115,6 +115,18 @@ at a device someone is testing on would overwrite the build under their hands.
   rule: refused for whitespace, refused for text the Mac's own `PromptText` would refuse, and
   refused while an earlier message is still in flight, which is the double-tap guard that stops
   one tap becoming two messages in an agent's queue.
+- `PromptCard` and `SessionTimelineModel.blocked` — **which question the phone thinks is open,
+  and which controls it draws for it.** What a session is blocked on is *derived* from the feed
+  by the same rule the Mac runs — the newest tool call with no result, while `waiting` — never
+  fetched and never cached, so the suite can pin it as a pure function: the call the card names
+  changes on its own when the Mac raises the next dialog, which is the stale-tap race in
+  checklist item 47 asserted from the phone's side. It also pins what the card refuses to
+  offer: a multi-select question gets a sentence and no buttons at all, a refusal is shown in
+  the Mac's **own** words rather than as a generic failure, and an answer nobody confirms
+  becomes a failure on its own deadline whose copy does not invite a retry — the same discipline
+  as the composer's, and for the same reason, since a blind retry here presses Return twice on a
+  permission dialog. What it cannot reach is whether a tap moves a real terminal — that is items
+  42-47.
 
 **What it structurally cannot cover.** Every one of these is on a checklist below instead, and
 none of them should ever grow an assertion here that merely re-reads the source:
@@ -275,12 +287,98 @@ something a person passes or fails by *watching the Mac*, not by watching the ph
     whole thing. A cut with no line under it, or a line under a message that was *not* cut, are
     the two ways this can be wrong.
 
+Items 42-50 are **answering a question from the phone** — the phone tapping Allow, Deny or an
+option on a dialog the agent is blocked on. Three things there are covered by no automated test
+and cannot be, and these items are the only cover any of them has. **A key event reaching
+`Ghostty.SurfaceView` never runs under XCTest**: a one-off in-process probe drove a real claude
+terminal and watched the marker move under `sendArrowDown`/`sendArrowUp`/`sendEscape`, and
+nothing re-proves it since. **`.allow` landing on the dialog's first row is a convention read
+off captures**, not a guarantee — six screens of claude 2.1.241 taken on one day, and the two
+people who wrote the arm and the card each flagged it as unverifiable from their side. **And
+the status-file/transcript write race is timing no fake reproduces.** Run these in order: 42 is
+one Escape with no screen inference behind it, which makes it the fastest diagnosis on this
+page.
+
+42. **Deny first, on a permission prompt.** Get a claude tab to a Bash permission dialog
+    (`--permission-mode manual` is required — 2.1.241 defaults to `auto` and a classifier
+    approves an `ls` with no dialog at all). From the phone, tap **Deny**. The terminal must
+    dismiss the dialog, and the transcript must close the call `is_error=True "The user doesn't
+    want to proceed with this tool use"` — Escape is a real denial, not merely a dismissal, and
+    that is what makes Deny the safe half. This item is first because it is one `sendEscape()`
+    with no screen read, no arrow and no confirmation behind it: **if anything in this feature
+    works it is this, and if it does not, `sendEscape` is not reaching the pty and nothing
+    below will work either.** Do not go on to 43 until this passes.
+43. **Allow, and watch which row the selection lands on.** Same dialog, and — this matters —
+    **first press ↓ at the Mac's own keyboard so the cursor is NOT on row 0**, then tap
+    **Allow** on the phone. The marker must move back UP to the first option ("Yes") and
+    submit; it must never land on a "Yes, and don't ask again…" row. **This is where the
+    automated suite is thinnest, and it is thin in a specific way.**
+    `AnswerPromptTests.testNoAnswerCanReachTheDontAskAgainRow` — the assertion whose name says
+    "security" — does **not** catch a driver that presses Return blind, because its fixture
+    already starts on row 0, so a blind Return happens to be right. The test that catches a
+    blind Return is a different one, `testAllowMovesToTheFirstRowAndReturns`, whose fixture
+    starts on row 2 — and neither of them stands on a real surface. So a real dialog whose
+    cursor is not already on row 0 is what this item adds and nothing else has: moving the
+    cursor by hand first is the whole point of the item, not a flourish. If the selection lands
+    anywhere but the first row, **stop**:
+    `SessionStore.answerPrompt`'s `.allow` arm and the captured dialogs disagree about the
+    dialog's ordering, and the fix is a fresh capture and a rewritten arm, never an edited
+    fixture.
+44. **The card appears and goes away on its own.** Open a session on the phone. On the Mac, get
+    it to a permission prompt: the card must appear above the composer within a second or two
+    **without touching the phone**. Now answer it *in the terminal*: the card must go away,
+    again untouched. Both directions ride the `activityChanged` event and the fetch it
+    triggers; if either fails, the `.onChange(of: session?.activity)` in
+    `SessionTimelineScreen` is the first place to look, and nothing under `test-ios.sh` covers
+    it — deleting that modifier fails no test.
+45. **An `AskUserQuestion`, answered from the phone.** Ask claude to ask you something with
+    three options. The card must show the question, its header, and each option with its
+    description. Tap the **third**. The terminal's selection must move down twice and submit,
+    and the transcript must record the third option's own label — not the first, and not a row
+    the Mac has no label for.
+46. **The simple race.** Get a dialog up, let the phone draw it, answer it *in the terminal*,
+    then tap on the phone before it refreshes. The phone must say **"Your Mac has moved on from
+    this."** and the terminal must not move a row.
+47. **The hard race, and it is the most important item on this list.** Answer a permission
+    prompt at the Mac's keyboard and let claude raise the next one **immediately**, so the
+    session never leaves `waiting`. Nothing changes activity, so no event fires, no fetch runs,
+    and nothing tears the phone's card down — it is still drawing prompt 1 while prompt 2 is on
+    screen. Now tap that stale card. It must be refused ("Your Mac has moved on from this."),
+    and **the second dialog must not be answered**: watch the terminal, not the phone. This is
+    the case a cache of "what I last served" would have got wrong — the served entry would
+    still be prompt 1 and would still match — and re-derivation from the transcript gets right,
+    because prompt 2 has a different `tool_use_id`. If it ever fails, the answer is not a
+    fresher cache; it is that something started caching.
+48. **The write race, and how to tell a retry from a loop.** Watch the moment a session goes
+    `waiting`. claude writes the status file and the transcript by independent paths, so a
+    fetch can beat the record to disk. If the card appears blank or shows the *previous* call
+    for a beat and then corrects itself, that is the single deferred retry in
+    `SessionTimelineScreen` (900ms) doing its job — it has been reasoned about and **never
+    observed against a real race**, so this item is the first time anyone sees it. If it stays
+    wrong, add a **second** retry at a longer delay. Do not turn it into a loop: a `waiting`
+    session can sit for an hour, and the distinction is that a retry stops whether or not it
+    succeeded, while a loop spends a battery re-reading a file that changes when a human moves.
+49. **A multi-select question.** Ask claude something with `multiSelect: true`. The card must
+    show the question and its options with **no buttons at all**, plus the sentence "This
+    question takes more than one answer. Answer it on your Mac." A control the card cannot
+    honour is worse than no control, so it draws none. Note while you are there that a question
+    card never has a Deny button either, answerable or not — an option is the only thing the
+    phone can say to a question, and dismissing one is done at the Mac.
+50. **A historical question reads as one, and it reads twice.** Scroll back to an answered
+    `AskUserQuestion`. It must render as the question and a bulleted list of its options, not
+    as a JSON tree. Then look at a *live* one: the same question is on screen **twice** — once
+    as the history row, once as the card above the composer. That is inherent to deriving the
+    card from the feed rather than transmitting it, and the row is what makes an answered
+    question readable at all. Nobody has decided whether it reads as duplication or as context;
+    this item is where that gets decided, by looking.
+
 ## A second checklist: the iOS plumbing
 
-The forty-one items above test the *feature* — that pairing, replication, resume, revocation
-and now typing into a live agent behave. These fifteen test the *app*, and they are separated because they have a different
-character: each one was identified during review or execution as something no amount of reading
-or type-checking on the build machine could settle, and each has a specific observable outcome.
+The fifty items above test the *feature* — that pairing, replication, resume, revocation, and
+now typing into and answering a live agent behave. These fifteen test the *app*, and they are
+separated because they have a different character: each one was identified during review or
+execution as something no amount of reading or type-checking on the build machine could settle,
+and each has a specific observable outcome.
 Everything reviewers *could* settle by reading has already been settled and is deliberately
 absent here — a checklist that lists the answerable alongside the unanswerable is one nobody
 finishes.
@@ -478,12 +576,31 @@ long answer into a grey wall, and a `.toolResult` rendered through the command s
   of the technique, not a bug in the screen: the same scroll captured through
   `xcrun simctl io <udid> screenshot` shows it working (that grab is
   `ui-renders/verify-opens-on-newest.png`).
+
+  **It bit a second time, on a whole screen that scrolls itself**, so treat it as the rule
+  rather than as one bad scene: the prompt card's in-conversation render came back blank
+  because `SessionTimelineScreen` scrolls to its newest row on the first page, and a longer
+  settle changed **nothing** — byte-identical PNG. The test for "is this the blank trap" is
+  cheap and worth doing before any debugging: render the scene twice at different content and
+  compare bytes. Identical files mean nothing was drawn. **If the screen scrolls itself,
+  reach for the framebuffer grab below first**; `layer.render(in:)` is for a subview you mount
+  yourself at a size that fits.
 - **For a framebuffer grab, the window must be attached to the app's `UIWindowScene`** and sit
   above the host's own window (`windowLevel = .alert + 100`). A `UIWindow(frame:)` in a
   scene-based app belongs to no scene and is never composited — the screenshot comes back
   showing `PairingScreen` instead, which is the host app underneath. The camera prompt in that
   grab is the host app's pairing screen behind the harness window; it is not part of the
   design.
+
+  **The grab is two processes, so it needs a handshake, and the window must be held up across
+  it.** The test process cannot take the screenshot — `xcrun simctl io <udid> screenshot` runs
+  on the host — so the in-app side puts the scene up, writes a file to say it is ready, and
+  then *waits* on a second file the host writes after the capture before it tears the window
+  down. Without the wait the window is gone by the time the shutter falls and the grab shows
+  the host app again, which reads exactly like the no-scene mistake above. The states drawn
+  this way are produced by **driving the real model** rather than by assigning a state — there
+  is nothing to tap in a render pass, which is what `PromptComposer`'s `draft:` and
+  `TimelineBodyBlock.showsRaw` exist for.
 
 10. **Type with a hardware keyboard, and paste a lowercase code.** Both come out
     `XXXX-XXXX-XXXX` in uppercase, with `O` read as `0` and `I`/`L` as `1`. The rewrite itself
