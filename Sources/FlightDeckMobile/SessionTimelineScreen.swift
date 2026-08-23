@@ -134,7 +134,17 @@ struct SessionTimelineScreen: View {
         // the person typing into it — and it would also scroll away from `bottomSentinel`,
         // which is how this screen knows whether the reader is at the live edge.
         .safeAreaInset(edge: .bottom) {
-            PromptComposer(session: session, model: model)
+            VStack(spacing: 0) {
+                // The card and the composer are one inset, in that order: the dialog the agent
+                // is blocked on sits directly above the field, so a reader whose keyboard is up
+                // can still see what they are answering.
+                PromptCard(
+                    open: model.blocked(activity: session?.activity),
+                    state: model.answerState,
+                    model: model
+                )
+                PromptComposer(session: session, model: model)
+            }
         }
         // The event trigger. `activity` and the title change live on the fleet socket, and a
         // change to either is the cheapest possible signal that this session has moved — most
@@ -157,6 +167,25 @@ struct SessionTimelineScreen: View {
                 guard !Task.isCancelled else { return }
                 model.loadNewer()
             }
+        }
+        // **A retry, not a poll**, and it exists for one race. The status file and the
+        // transcript are written by independent paths in claude, so a fetch fired the instant
+        // `waiting` arrives can beat the record to disk — leaving a session the phone knows is
+        // blocked with nothing in the feed to say on what. One deferred fetch closes it.
+        //
+        // Deliberately NOT a loop. A `waiting` session can sit for an hour, and a screen that
+        // polled through it would spend a battery to re-read a file that changes when the
+        // human moves. If the manual checklist finds this flaky, the fix is a SECOND retry at
+        // a longer delay, not a `while`.
+        //
+        // A separate `.task(id:)` from the busy poll above rather than a branch inside it: two
+        // modifiers with the same id both run, and merging them would tie two different
+        // cadences — a 1.5s follow and a one-shot catch-up — to one decision.
+        .task(id: session?.activity) {
+            guard session?.activity == "waiting" else { return }
+            try? await Task.sleep(for: .milliseconds(900))
+            guard !Task.isCancelled else { return }
+            model.loadNewer()
         }
     }
 

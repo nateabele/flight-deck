@@ -6,7 +6,7 @@ import XCTest
 /// Bonjour browse and a Mac to answer anything at all, so this is the only way a send that is
 /// never answered — the case the deadline exists for — can be produced.
 @MainActor
-private final class StubFleet: TimelinePaging, PromptSending {
+private final class StubFleet: TimelinePaging, PromptSending, PromptAnswering {
     private(set) var requests: [FleetRequest] = []
     private(set) var commands: [FleetCommand] = []
     private var pendingPages: [(Result<TimelinePage, FleetRequestError>) -> Void] = []
@@ -40,6 +40,17 @@ private final class StubFleet: TimelinePaging, PromptSending {
         commands.append(command)
         if let answer = answerCommandBeforeReturning { return completion(answer) }
         pendingAcks.append(completion)
+    }
+
+    /// This file sends messages rather than answers; `SessionTimelineBlockedTests` owns the
+    /// answering half. Recorded rather than ignored, so a stray answer shows up here.
+    var sent: FleetCommand?
+
+    func answerPrompt(
+        _ command: FleetCommand,
+        then completion: @escaping (Result<Void, FleetRequestError>) -> Void
+    ) {
+        sent = command
     }
 
     func answerPage(_ result: Result<TimelinePage, FleetRequestError>, line: UInt = #line) {
