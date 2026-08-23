@@ -32,6 +32,12 @@ enum ClaudeTimelineMapper {
         // note that accompanies a paste. Rendering these as user turns puts words in the
         // user's mouth.
         guard record["isMeta"] as? Bool != true else { return [] }
+        // A `/compact` writes its summary of the conversation so far as a `user` record
+        // marked `isCompactSummary`. It is several paragraphs of claude's own prose under the
+        // user's name — the same harm as `isMeta` on a record long enough to be believed.
+        // `ConversationTitle.resolve` already skips both keys together, and the resumed-
+        // conversation spec (§9) specifies them as one rule.
+        guard record["isCompactSummary"] as? Bool != true else { return [] }
         // Sub-agent records belong in `<conversationId>/subagents/agent-*.jsonl`, which
         // nothing reads. One in the main transcript means claude moved them, and mapping it
         // would interleave a sub-agent's conversation into its parent's.
@@ -93,6 +99,12 @@ enum ClaudeTimelineMapper {
                 at: at
             )
         default:
+            // Anything else, and one shape worth naming: a `document` block, which is what a
+            // Read of a PDF attaches — the whole file as base64 under `source.data`, exactly
+            // like an image. In the captured transcript claude also marks that record
+            // `isMeta`, so the guard above catches it first and this arm is the second line of
+            // defence. There is no row for a document in this vocabulary yet, so it is dropped
+            // rather than approximated.
             return nil
         }
     }
@@ -154,6 +166,17 @@ enum ToolInputSummary {
         "command", "file_path", "path", "pattern", "query", "url", "prompt", "description",
     ]
 
+    /// What a row can show. A list row is one line high and about sixty characters wide, so
+    /// this is generous rather than tight.
+    ///
+    /// **It is also the only bound `summary` gets anywhere.** `TimelineReader` caps an item by
+    /// rewriting `body.text` and budgets a page by summing `body.text`; neither reads
+    /// `summary`. An unbounded preview would therefore escape both `TimelineLimits.maxItemBytes`
+    /// and `maxPageBytes`, up to 200 items to a page — and `prompt` is in the table above, where
+    /// an `Agent` dispatch's first paragraph runs to kilobytes with no newline in it, so the
+    /// first-line rule alone bounds nothing.
+    static let maxSummaryBytes = 200
+
     /// A one-line row preview, or nil when nothing in the input makes one. Nil is fine: the
     /// row still has `Body.tool` to render.
     static func text(for input: [String: Any]) -> String? {
@@ -161,9 +184,24 @@ enum ToolInputSummary {
             guard let value = input[key] as? String else { continue }
             let line = value.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? value
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if !trimmed.isEmpty { return trimmed }
+            if !trimmed.isEmpty { return capped(trimmed) }
         }
         return nil
+    }
+
+    /// Cut on a `Character` boundary so a multi-byte scalar is never halved. No ellipsis is
+    /// added: the cap is a transport bound, and how a row elides is the client's business.
+    private static func capped(_ line: String) -> String {
+        guard line.utf8.count > maxSummaryBytes else { return line }
+        var kept = ""
+        var bytes = 0
+        for character in line {
+            let width = String(character).utf8.count
+            if bytes + width > maxSummaryBytes { break }
+            kept.append(character)
+            bytes += width
+        }
+        return kept
     }
 
     /// The whole input, for the detail screen. `sortedKeys` so the same call renders the same
