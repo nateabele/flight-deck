@@ -7,6 +7,10 @@ import FleetKit
 /// This is the test that says slice 1a's spine works.
 @MainActor
 final class FleetServiceTests: XCTestCase {
+    /// Held for the length of the test, not just for `standUp()`: it owns the preferences
+    /// store the service reads its keys back out of, and a harness released here would take
+    /// that with it.
+    private var harness: FleetTestHarness?
     private var service: FleetService?
     private var client: FleetClient?
 
@@ -15,27 +19,17 @@ final class FleetServiceTests: XCTestCase {
         service?.stop()
         client = nil
         service = nil
+        harness = nil
     }
 
-    private final class MemoryPersistence: PreferencesPersisting {
-        var stored: Preferences?
-        func load() -> Preferences? { stored }
-        func save(_ preferences: Preferences) { stored = preferences }
-    }
-
+    /// The stand-up itself lives in `FleetTestHarness` — the timeline's loopback test needs
+    /// exactly this fleet, and two ways to stand one up is how the two halves drift. The
+    /// tuple stays so none of the tests below change.
     private func standUp() async throws -> (SessionStore, FleetDeviceKey, NWEndpoint.Port) {
-        let store = SessionStore(provider: nil, persistence: nil)
-        let key = FleetDeviceKey.mint()
-        let preferences = PreferencesStore(persistence: MemoryPersistence())
-        preferences.upsert(
-            PairedDevice(
-                slot: key.slot, name: "test device", secret: key.secret,
-                pairedAt: Date(), lastSeenAt: nil, armedUntil: nil
-            )
-        )
-        let service = FleetService(store: store, preferences: preferences, armer: PairingArmer())
-        self.service = service
-        return (store, key, try await service.start(port: nil))
+        let harness = FleetTestHarness()
+        self.harness = harness
+        self.service = harness.service
+        return (harness.store, harness.key, try await harness.start())
     }
 
     func testAConnectingClientIsHandedTheLiveFleet() async throws {

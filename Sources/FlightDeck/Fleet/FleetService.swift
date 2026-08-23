@@ -27,6 +27,10 @@ final class FleetService: ObservableObject {
     private let armer: PairingArmer
     private let server: FleetSocketServer
     private let replicator: FleetReplicator
+    /// Answers history requests. Held here rather than built per request because it holds the
+    /// store, and because there is exactly one of it — a request carries its own session id,
+    /// so nothing about it is per-connection.
+    private let timeline: TimelineService
     private(set) var boundPort: NWEndpoint.Port?
     /// The window's own listener, and the port it is on. Both are `nil` whenever no window is
     /// open, which is invariant 2 stated as a field rather than as a comment.
@@ -61,6 +65,7 @@ final class FleetService: ObservableObject {
             guard let store else { return .empty }
             return FleetProjection.snapshot(of: store)
         }
+        self.timeline = TimelineService(store: store)
         self.serviceName = Self.derivedServiceName(preferences: preferences)
         store.replicator = replicator
         wireHandlers()
@@ -96,6 +101,31 @@ final class FleetService: ObservableObject {
         }
         server.onCommand = { [weak self] _, cid, command in
             self?.apply(command, cid: cid) ?? .err(cid: cid, code: "stopped")
+        }
+        server.onRequest = { [weak self] _, cid, request, reply in
+            guard let self else { return reply(.err(cid: cid, code: "stopped")) }
+            switch request {
+            case .timeline(let session, let anchor, let limit):
+                // A `Task` rather than a synchronous answer, because reading a page is file
+                // I/O: `TimelineService` hands the parse to a detached task and resumes here
+                // on the main actor, which is `queue`. `reply` is therefore called on
+                // `queue`, as `onRequest` requires — and after an await, which is exactly the
+                // case `FleetSocketServer`'s deferred-send guard is written for.
+                //
+                // Nothing here writes: the answer is composed from the transcript on disk and
+                // the store is only ever asked to resolve the tab. That is what keeps the
+                // history channel out of the fleet event log entirely — no `FleetEvent`, no
+                // broadcast, and nothing new for `FleetReplicator`'s drift check to guard.
+                Task { @MainActor in
+                    switch await self.timeline.page(
+                        session: session, anchor: anchor, limit: limit
+                    ) {
+                    case .success(let page): reply(.page(cid: cid, page))
+                    // `.code` is the wire spelling, verbatim — see `TimelineErrorCode`.
+                    case .failure(let code): reply(.err(cid: cid, code: code.code))
+                    }
+                }
+            }
         }
         server.onAttachedSlotsChanged = { [weak self] slots in
             // Safe only because `FleetSocketServer`'s `queue` defaults to `.main` and nothing

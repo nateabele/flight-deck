@@ -365,6 +365,30 @@ fresh, and assert the two agree. It is an interim measure, not the design, but i
 decorative either: it caught five real defects during this plan's own execution. It must not be
 removed before the encapsulation replaces it.
 
+**Conversation history is pulled, not pushed, and it does not ride the event log.** Fleet state
+is pushed because it is small and every client wants all of it; a transcript is bulk that only
+the one client looking at that session wants. So a phone *asks*: `ClientFrame.req` carries a
+`FleetRequest.timeline` with a `TimelineAnchor` (`latest` / `before(cursor)` / `after(cursor)`)
+and a record limit, and `ServerFrame.page` answers with the mapped items on the same `cid` —
+deliberately carrying no `seq`, because a history fetch must not move the resume point a client
+hands back on its next `hello`. Scrolling up through an hour of transcript therefore cannot
+change where a reconnect resumes. Cursors are byte offsets at line boundaries in the agent's own
+transcript, opaque to the client, which only ever echoes back a `start` or an `end` it was
+given. `TimelinePage.reset` is the file-level analogue of the wire's `seq_too_old`
+re-snapshot: the transcript that cursor came from was replaced, so every item id the client
+holds — ids *are* offsets — now names a different record, and it must discard and re-fetch.
+The path is `TranscriptPager` (which bytes), the per-agent mapper (`ClaudeTimelineMapper`,
+`CodexTimelineMapper`, turning lines into `TimelineItem`s), `TimelineReader` (composing them
+under a page byte budget), and `TimelineService`, which resolves a tab id through `SessionStore`
+and runs the read off the main actor — a page is file I/O, and parsing it on the main thread
+while an agent is producing output is a visible stall in the Mac's own UI. `FleetService` wires
+that to the socket in `wireHandlers()`, answering from a `Task` so the reply lands back on the
+socket's queue after the read. **Nothing in that path writes to the store**, which is why the
+timeline needed no `FleetEvent`, no broadcast, and left the drift check above with nothing new
+to guard. `TimelineLoopbackTests` is the end-to-end proof: a real service over a real socket
+answering a real client out of a real file on disk, including the second page fetched from the
+first page's cursor.
+
 **Accounts are deliberately not fleet state.** An account *is* a config directory —
 `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, where that login's credentials live — so `WireSession`
 carries no account field and `FleetProjection` never reads `Session.accountID`, not even as an
