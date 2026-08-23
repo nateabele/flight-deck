@@ -37,6 +37,9 @@ struct SessionTimelineScreen: View {
     /// appearing and disappearing, and the only thing that separates "following a live turn"
     /// from "yanking a reader out of the history they scrolled up to read".
     @State private var readerIsAtBottom = true
+    /// The long answers the reader has opened. **On the screen, not on the row** — see
+    /// `Expansion`, which is entirely about why.
+    @State private var expansion = Expansion()
 
     var body: some View {
         ScrollViewReader { scroll in
@@ -194,11 +197,22 @@ struct SessionTimelineScreen: View {
     /// `.superpowers/sdd/ui-renders/prose-full/` are what settled that.
     ///
     /// The rows that keep the link keep it because they really are showing less than they
-    /// have: a tool card's three-line command and six-line output, a clamped thinking block,
-    /// a JSON input worth a tree, and a prose body long enough to hit the ceiling.
+    /// have AND have no way to show it here: a tool card's three-line command and six-line
+    /// output, a clamped thinking block, a JSON input worth a tree. **A prose body past the
+    /// ceiling is no longer among them** — it opens where it stopped instead, which is also
+    /// what makes its More button tappable: a `NavigationLink` swallows the tap on any control
+    /// inside it, so a row cannot be a link and carry a button at once.
     @ViewBuilder
     private func entryRow(_ entry: Entry) -> some View {
-        let row = TimelineRow(item: entry.item, result: entry.result, agent: session?.agent)
+        let row = TimelineRow(
+            item: entry.item, result: entry.result, agent: session?.agent,
+            isExpanded: expansion.isExpanded(entry.id),
+            // Not animated, and that is the same judgement the opening jump above is made on:
+            // a row growing by two thousand points is not a transition anything can follow,
+            // and `List` animating a height change that large under the finger reads as the
+            // screen having lost its place. The rest of the message is simply there.
+            toggleExpanded: { expansion.toggle(entry.id) }
+        )
         if TimelineStyle.opensDetail(entry.item) {
             NavigationLink(value: entry.item) { row }
         } else {
@@ -248,6 +262,46 @@ struct SessionTimelineScreen: View {
         let item: TimelineItem
         let result: TimelineItem?
         var id: String { item.id }
+    }
+
+    // MARK: Which long answers are open
+
+    /// The set of rows the reader has opened past the ceiling, by entry id.
+    ///
+    /// **It lives on the SCREEN rather than on the row, and the usual argument for that is not
+    /// the reason.** The usual argument is that a lazy `List` tears a row out of the view tree
+    /// and rebuilds it, so a row-owned `@State` would be lost on a scroll. That was measured
+    /// here and it is **not true on this SwiftUI**: `ProseExpansionRecyclingTests` scrolls a row
+    /// six thousand points away and back at 30, 200 and 600 rows, and a probe row's own `@State`
+    /// survives every time — the cell is recycled, the state box is kept — and survives the row
+    /// leaving the feed outright as well.
+    ///
+    /// What the placement buys is two things that do not depend on that behaviour. A row is a
+    /// pure function of the flag it is handed, so no `List` behaviour — this one or a future
+    /// one — can reach the reader's answer to the ceiling; this screen is one view on a
+    /// navigation stack and outlives every row that reads it. And a decision reachable without
+    /// SwiftUI is a decision a test can run, which is the same rule `TimelineStyle` is written
+    /// under: `TimelineProseExpansionTests` drives every transition below with no window at all.
+    ///
+    /// Keyed by `Entry.id`, which is `TimelineItem.id`: the record's byte offset in the file
+    /// the agent wrote, so it is stable across every refetch and re-page. An id that leaves the
+    /// feed leaves a `String` in a set behind it, which costs nothing and is what makes paging
+    /// away from an open row and back the same case as scrolling.
+    ///
+    /// A value type rather than an observable object, so a change to it invalidates the screen
+    /// the ordinary way and a test can drive it with no view at all.
+    struct Expansion: Equatable {
+        private var open: Set<String> = []
+
+        /// Collapsed until the reader says otherwise: a row that opened itself would put the
+        /// ceiling back where it was.
+        func isExpanded(_ id: String) -> Bool { open.contains(id) }
+
+        /// One control, both directions — More opens and Less shuts, so a reader who has
+        /// finished with an answer can put four screenfuls of it away again.
+        mutating func toggle(_ id: String) {
+            if open.contains(id) { open.remove(id) } else { open.insert(id) }
+        }
     }
 
     /// Folds every tool result into the call it answers, so a command and its output are one

@@ -47,6 +47,24 @@ struct TimelineRow: View {
     /// The agent that wrote this, so its prose is headed with its name. Nil where the fleet
     /// no longer lists the session.
     var agent: String?
+    /// Whether this row is currently drawing the whole of a message the ceiling cut.
+    ///
+    /// **Passed in, never `@State` here.** The set of open rows lives on the screen
+    /// (`SessionTimelineScreen.Expansion`), and this row is a pure function of the flag it is
+    /// handed — so nothing a `List` does to its cells can reach it, and the whole decision is
+    /// drivable by a test with no window.
+    ///
+    /// The obvious alternative was a `@State` here, on the argument that a lazy `List` throws
+    /// rows away and rebuilds them. That argument turns out to be **false on this SwiftUI**, and
+    /// it was measured rather than assumed: `ProseExpansionRecyclingTests` scrolls a row six
+    /// thousand points off screen and back at 30, 200 and 600 rows, and a probe row's own
+    /// `@State` comes back intact every time — the cell is recycled, the state box is not. So
+    /// this is not a rescue; it is a row that cannot be wrong about something it does not own.
+    var isExpanded: Bool = false
+    /// What More and Less do. `SessionTimelineScreen` is the only caller on the screen and it
+    /// always passes one; it is optional so a row can be built with no screen behind it at all,
+    /// which is what the offscreen harnesses and the filler rows in the tests do.
+    var toggleExpanded: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -66,8 +84,18 @@ struct TimelineRow: View {
         // off the one element this row combines into rather than off a child it ignores.
         // Only on such a row: everywhere else the screen one tap away has a Copy button per
         // block, and two ways to copy one body a gesture apart is how a reader ends up unsure
-        // which of them took.
-        .modifier(CopyAction(text: TimelineStyle.opensDetail(item) ? nil : item.body.text))
+        // which of them took. `rowCopyText(for:)` is that boundary.
+        .modifier(CopyAction(text: TimelineStyle.rowCopyText(for: item)))
+        // And the same for More: the row combines its children away, so the button below is
+        // not reachable by touch exploration at all and the only way to offer it is an action
+        // on the combined element. Named for what the next tap DOES, like the button is.
+        .modifier(ExpandAction(name: expandActionName, action: toggleExpanded))
+    }
+
+    /// `nil` on every row with nothing cut, which is the same question the link asks.
+    private var expandActionName: String? {
+        guard TimelineStyle.expandsInPlace(item) else { return nil }
+        return isExpanded ? "Show less" : "Show more"
     }
 
     // MARK: Header
@@ -152,51 +180,37 @@ struct TimelineRow: View {
     ///
     /// An answer is read here now, in the conversation it belongs to, rather than one tap away
     /// from it. What still clamps, and why, is that function's own comment; what matters on
-    /// this side is that the *same* `nil` also takes the chevron off the row
-    /// (`TimelineStyle.opensDetail`), so a cut body always has somewhere to lead and an
-    /// uncut one never pretends to.
+    /// this side is that the *same* `nil` also decides the More link
+    /// (`TimelineStyle.expandsInPlace`), so a cut body always has a way to the rest of itself
+    /// and an uncut one never offers one. `isExpanded` is the reader's answer to that link, and
+    /// it reaches the clamp and nothing else — the row is otherwise identical in both states.
     ///
-    /// The two clamps are the same clamp said twice, and they have to be: `.lineLimit` does not
-    /// reach a `Markdown` view usefully. It is a `VStack` of blocks, so a limit lands on each
-    /// paragraph *separately* — fourteen lines per paragraph is not a bound at all — and a
-    /// heading or a table has no line count to limit. So the Markdown side is bounded by
-    /// height, derived from the very same line count the plain side passes to `.lineLimit`,
-    /// and never written down twice.
+    /// The two sides are bounded differently, and they have to be: `.lineLimit` does not reach a
+    /// `Markdown` view usefully. It is a `VStack` of blocks, so a limit lands on each paragraph
+    /// *separately* — fourteen lines per paragraph is not a bound at all — and a heading or a
+    /// table has no line count to limit. So the Markdown side is handed a shorter **document**
+    /// (`TimelineStyle.proseText`), counted in the very same lines the plain side passes to
+    /// `.lineLimit`.
+    ///
+    /// It used to be bounded by height instead — `maxHeight: 23 × 120`, clipped — and that is
+    /// the defect the renders for this change found: a height and a line count are two different
+    /// measurements of the same number, they disagree by about a tenth, and a real answer that
+    /// measured 2,770.67pt in *both* states drew a More link that did nothing. That story is on
+    /// `TimelineStyle.proseText`.
     @ViewBuilder
     private var proseBody: some View {
         if TimelineStyle.rendersMarkdown(item) {
-            let markdown = Markdown(item.body.text)
+            Markdown(TimelineStyle.proseText(for: item, expanded: isExpanded))
                 .markdownTheme(TimelineMarkdown.theme)
                 .font(proseFont)
                 .foregroundStyle(proseColor)
-            if let proseClamp {
-                markdown
-                    .frame(maxHeight: proseClamp, alignment: .top)
-                    // The cut is what the chevron already promises, and it lands mid-line on
-                    // purpose: a row that ends on a whole line looks finished, and a row that
-                    // ends in the middle of one cannot be mistaken for the end of the message.
-                    .clipped()
-            } else {
-                markdown
-            }
         } else {
             Text(item.body.text)
                 .font(proseFont)
                 .italic(item.kind == .thinking)
                 .foregroundStyle(proseColor)
-                .lineLimit(TimelineStyle.proseLineLimit(for: item))
+                .lineLimit(TimelineStyle.proseLineLimit(for: item, expanded: isExpanded))
         }
-    }
-
-    /// One body line, at whatever size the reader set — `@ScaledMetric` is what makes the
-    /// height clamp above track Dynamic Type instead of pinning a row to fourteen lines of
-    /// 17pt text and four lines of 53pt text. 23pt is `.body`'s line height plus the 0.12em
-    /// `TimelineMarkdown.theme` adds between lines.
-    @ScaledMetric(relativeTo: .body) private var proseLineHeight: CGFloat = 23
-
-    /// `nil` for a body drawn whole, which is now every prose body under the ceiling.
-    private var proseClamp: CGFloat? {
-        TimelineStyle.proseLineLimit(for: item).map { proseLineHeight * CGFloat($0) }
     }
 
     private var proseFont: Font {
@@ -290,42 +304,82 @@ struct TimelineRow: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
-        if hitsProseCeiling {
-            Label("Read the whole message", systemImage: "chevron.forward")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+        if TimelineStyle.expandsInPlace(item) {
+            moreLink
         }
     }
 
-    /// Whether this row is prose that ran past `TimelineStyle.proseCeilingLines`.
+    /// The way out of the ceiling, **at the cut, because that is where the reader is.**
     ///
-    /// **Said at the cut, because that is where the reader is.** The disclosure chevron a
-    /// `List` draws is floated at the row's vertical centre, and a row that hit the ceiling is
-    /// four screenfuls tall — so its chevron sits two screenfuls above the point where the
-    /// message stops, which the render (`ui-renders/prose-full/after/very-long-*.png`) shows
-    /// is nowhere near where anyone is looking. The mid-line cut says there is more; this says
-    /// where the rest is.
+    /// It replaced "Read the whole message" and a push. The chevron a `List` floats at a row's
+    /// vertical centre is two screenfuls above the cut on a row this tall
+    /// (`ui-renders/prose-full/after/very-long-*.png` is that argument), and the screen it led
+    /// to drew the identical words a second time. This is one word where the message stops, and
+    /// the rest arrives under it without the conversation moving.
     ///
-    /// Prose only. A tool card's three-line command and six-line output are clamped too, and
-    /// have always said so with nothing but the cut — but those rows are a few hundred points
-    /// tall and their chevron is right there beside them.
-    private var hitsProseCeiling: Bool {
-        TimelineStyle.rendersMarkdown(item) && TimelineStyle.proseLineLimit(for: item) != nil
+    /// **Both directions, one control.** A row that can open is a row that can shut again —
+    /// four screenfuls of an answer a reader has finished with is four screenfuls between them
+    /// and the next message — so the link says Less once it is open. The chevron points the way
+    /// the content is about to move, which is the only thing that distinguishes the two states
+    /// at this size.
+    ///
+    /// Accent-coloured rather than `.secondary` like the scissors chip beside it: that chip is
+    /// a statement and this is a control, and the render is what settled it — in `.secondary`
+    /// at `.caption2` it reads as a third line of footnote and nothing says it can be tapped.
+    /// `.contentShape` keeps the touch target on the words: a `Button` whose label is a small
+    /// `Label` in a 2,700pt row must not claim the row.
+    private var moreLink: some View {
+        Button {
+            toggleExpanded?()
+        } label: {
+            Label(
+                isExpanded ? "Less" : "More",
+                systemImage: isExpanded ? "chevron.up" : "chevron.down"
+            )
+            .font(.caption2.weight(.semibold))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.accentColor)
+    }
+}
+
+/// More and Less, for a reader who cannot see the button.
+///
+/// The row combines its children away (`.accessibilityElement(children: .ignore)`), so the link
+/// in `chips` is not reachable by touch exploration at all — an action on the combined element
+/// is the only place it can go. Written as a modifier taking an optional name for exactly the
+/// reason `CopyAction` is: the two arms of "does this row expand" are different view types, and
+/// a `@ViewBuilder` around the whole row would erase every row in the list.
+private struct ExpandAction: ViewModifier {
+    /// `nil` for a row with nothing cut. Named for what the next activation does, so a listener
+    /// hears "Show less" on a row that is already open.
+    let name: String?
+    let action: (() -> Void)?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let name, let action {
+            content.accessibilityAction(named: Text(name), action)
+        } else {
+            content
+        }
     }
 }
 
 /// Copy, for the rows that have nowhere to send a reader for it.
 ///
 /// A modifier taking an optional string rather than a `.contextMenu` written inline, because
-/// the two branches of `if TimelineStyle.opensDetail(item)` are different view types and a
+/// the two branches of `TimelineStyle.rowCopyText(for:)` are different view types and a
 /// `@ViewBuilder` around the whole row would erase them on every row in the list. `nil` is
-/// "this row leads somewhere that has a Copy button already".
+/// "this row leads somewhere that has a Copy button already", or "there is nothing to copy" —
+/// that function decides both, so there is no second emptiness test here.
 private struct CopyAction: ViewModifier {
     let text: String?
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if let text, !text.isEmpty {
+        if let text {
             content.contextMenu {
                 Button {
                     // `UIPasteboard` directly, exactly as `TimelineBodyBlock.copyButton` does
