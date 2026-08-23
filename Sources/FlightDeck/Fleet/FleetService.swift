@@ -447,6 +447,12 @@ final class FleetService: ObservableObject {
             if let code = store.submitPrompt(text, token: token, to: id).errorCode {
                 return .err(cid: cid, code: code)
             }
+        case .answerPrompt:
+            // A placeholder, and it REFUSES rather than acks on purpose: an `ack` means
+            // dispatched, and no intermediate build may claim to have answered a dialog it
+            // never touched. Task 8 replaces this whole arm with the `PromptService` call —
+            // it does not extend it.
+            return .err(cid: cid, code: "unhandled")
         }
         // `ack` means dispatched, not done. For the two read marks the observable effect is
         // the northbound `session.unread` event the store call just recorded; for a prompt it
