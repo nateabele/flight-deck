@@ -23,6 +23,18 @@ final class TimelineFixtureTests: XCTestCase {
             .map(String.init)
     }
 
+    /// A captured fixture that is not JSONL — a terminal viewport, verbatim, blank trailing
+    /// rows and all. A viewport IS its blank rows, so nothing here trims.
+    static func text(_ name: String, in directory: String) throws -> String {
+        let url = try XCTUnwrap(
+            Bundle(for: TimelineFixtureTests.self).url(
+                forResource: name, withExtension: "txt", subdirectory: "Fixtures/\(directory)"
+            ),
+            "Fixtures/\(directory)/\(name).txt not found in the test bundle"
+        )
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
     /// The provenance file beside a capture, which is where its checksum lives.
     static func provenance(_ name: String, in directory: String) throws -> [String: Any] {
         let url = try XCTUnwrap(
@@ -202,6 +214,50 @@ final class TimelineFixtureTests: XCTestCase {
         XCTAssertEqual(digest.map { String(format: "%02x", $0) }.joined(), recorded,
                        "the capture no longer matches the digest in its provenance file — it "
                        + "was edited, or it was recaptured without updating the provenance")
+    }
+
+    /// The dialog captures, guarded the same way — and they need it more than the transcript
+    /// does. A `.txt` viewport is *plausible-looking text*: a moved `❯`, a renumbered row or a
+    /// softened label all leave something that still reads as a terminal screen, so nothing but
+    /// a digest catches a parser and its fixture being "fixed" together into agreement.
+    ///
+    /// Driven off the provenance's `files` list **and** off what is actually in the bundle, in
+    /// both directions. A digest with no file, a file with no digest, and a seventh capture
+    /// dropped into the directory all fail here rather than joining unguarded.
+    func testEveryCapturedDialogMatchesItsRecordedChecksum() throws {
+        let provenance = try Self.provenance("dialogs.captured", in: "Claude")
+        let files = try XCTUnwrap(provenance["files"] as? [String])
+        let recorded = try XCTUnwrap(provenance["sha256"] as? [String: String])
+        XCTAssertEqual(provenance["isVerbatimCapturedOutput"] as? Bool, true,
+                       "these are captured output; a provenance that stops saying so is "
+                       + "describing something authored")
+        XCTAssertEqual(Set(recorded.keys), Set(files),
+                       "the provenance must record a sha256 for every file it lists, and list "
+                       + "every file it records one for")
+
+        let bundle = Bundle(for: TimelineFixtureTests.self)
+        let present = Set(["txt", "jsonl"].flatMap {
+            bundle.urls(forResourcesWithExtension: $0, subdirectory: "Fixtures/Claude") ?? []
+        }.map(\.lastPathComponent))
+        let transcript = try XCTUnwrap(
+            Self.provenance("transcript.captured", in: "Claude")["files"] as? [String],
+            "the transcript's provenance must list the files it covers"
+        )
+        XCTAssertEqual(present.subtracting(transcript), Set(files),
+                       "every capture in Fixtures/Claude must be covered by one of the two "
+                       + "provenance files; a new one goes in dialogs.captured.provenance.json "
+                       + "with its digest, never in unguarded")
+
+        for file in files {
+            let url = try XCTUnwrap(bundle.url(
+                forResource: (file as NSString).deletingPathExtension,
+                withExtension: (file as NSString).pathExtension, subdirectory: "Fixtures/Claude"
+            ), "Fixtures/Claude/\(file) not found in the test bundle")
+            let digest = SHA256.hash(data: try Data(contentsOf: url))
+            XCTAssertEqual(digest.map { String(format: "%02x", $0) }.joined(), recorded[file],
+                           "\(file) no longer matches the digest in its provenance file — it "
+                           + "was edited, or it was recaptured without updating the provenance")
+        }
     }
 
     func testEveryCapturedLineIsStillOneJSONRecord() throws {
