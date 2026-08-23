@@ -315,12 +315,58 @@ final class TimelineFixtureTests: XCTestCase {
                        + "and a client would drop rows as duplicates")
     }
 
-    func testNoCapturedRolloutLineWasEdited() throws {
+    /// The whole point of the fixtures being captured rather than authored.
+    ///
+    /// Against each file's checksum, not against its parseability: every semantic edit worth
+    /// worrying about — a softened prompt, a changed `cwd`, a swapped `call_id` — leaves valid
+    /// JSON behind, so the parse test below catches only bytes appended past the end.
+    ///
+    /// Driven off the provenance's own `files` list rather than off one hard-coded name, so a
+    /// fifth capture added to this directory without a digest fails here instead of joining it
+    /// unguarded.
+    func testEveryCapturedRolloutMatchesItsRecordedChecksum() throws {
+        let provenance = try Self.provenance("rollout.captured", in: "Codex")
+        let files = try XCTUnwrap(provenance["files"] as? [String])
+        let recorded = try XCTUnwrap(provenance["sha256"] as? [String: String])
+        XCTAssertEqual(Set(recorded.keys), Set(files),
+                       "the provenance must record a sha256 for every file it lists, and list "
+                       + "every file it records one for")
+        for file in files {
+            let url = try XCTUnwrap(Bundle(for: TimelineFixtureTests.self).url(
+                forResource: (file as NSString).deletingPathExtension,
+                withExtension: "jsonl", subdirectory: "Fixtures/Codex"
+            ), "Fixtures/Codex/\(file) not found in the test bundle")
+            let digest = SHA256.hash(data: try Data(contentsOf: url))
+            XCTAssertEqual(digest.map { String(format: "%02x", $0) }.joined(), recorded[file],
+                           "\(file) no longer matches the digest in its provenance file — it "
+                           + "was edited, or it was recaptured without updating the provenance")
+        }
+    }
+
+    /// The cheap half of the same guard, kept because it names the failure differently: a
+    /// truncated append leaves a line that does not parse at all.
+    func testEveryCapturedRolloutLineIsStillOneJSONRecord() throws {
         for line in try codexRollout() {
             XCTAssertNoThrow(
                 try JSONSerialization.jsonObject(with: Data(line.utf8)),
                 "a line that no longer parses was edited: \(line.prefix(60))"
             )
+        }
+    }
+
+    /// The leak this capture shipped with, pinned so it cannot come back. Two of its records
+    /// carried this machine's home directory and an inventory of the operator's private
+    /// `~/.agents/skills`, and were dropped; codex reads that directory regardless of
+    /// `CODEX_HOME`, so the throwaway home the capture ran under did not isolate it.
+    func testNoCapturedRolloutNamesAHomeDirectoryOrAPrivateSkill() throws {
+        for file in ["rollout-content.captured", "rollout.captured", "turn-aborted.captured",
+                     "session-index.captured"] {
+            for line in try Self.lines(file, in: "Codex") {
+                XCTAssertFalse(line.contains("/Users/"),
+                               "\(file) names a home directory: \(line.prefix(60))")
+                XCTAssertFalse(line.contains(".agents/skills"),
+                               "\(file) lists the operator's skills: \(line.prefix(60))")
+            }
         }
     }
 }

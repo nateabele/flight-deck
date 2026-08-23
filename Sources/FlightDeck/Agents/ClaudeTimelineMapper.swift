@@ -182,11 +182,20 @@ enum ToolInputSummary {
     static func text(for input: [String: Any]) -> String? {
         for key in previewKeys {
             guard let value = input[key] as? String else { continue }
-            let line = value.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? value
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if !trimmed.isEmpty { return capped(trimmed) }
+            if let preview = preview(of: value) { return preview }
         }
         return nil
+    }
+
+    /// The same rule — first line, trimmed, capped — applied to a value that came from no
+    /// keyed input at all. Codex's `custom_tool_call` carries a bare patch or a bare program
+    /// in `input`, with no JSON object to draw a key from, and its preview still has to be
+    /// bounded: `maxSummaryBytes` is the ONLY bound `summary` gets on either agent's path, so
+    /// a second copy of this logic that forgot `capped` would quietly unbound half of them.
+    static func preview(of text: String) -> String? {
+        let line = text.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? text
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : capped(trimmed)
     }
 
     /// Cut on a `Character` boundary so a multi-byte scalar is never halved. No ellipsis is
