@@ -116,9 +116,17 @@ enum FleetSocket {
     /// Delivers whole messages, repeatedly, until the connection ends. `receiveMessage`
     /// rather than `receive(minimumIncompleteLength:)` because the WebSocket protocol has
     /// already done the framing — reassembling it by hand would be reimplementing it.
+    ///
+    /// `onUndecodable` is offered the raw bytes of a message this build cannot parse, and
+    /// answers whether it **claimed** them: `true` means the peer has been told, in a way it
+    /// can act on, that this frame is not going to be honoured, and the loop continues.
+    /// Anything else — `false`, or no hook at all — keeps the tear-down described at the
+    /// catch below. Defaulted to `nil` so the sockets that have no way to refuse one frame
+    /// in isolation (both pairing halves, and the client) are unchanged.
     static func receive<Frame: Decodable>(
         _ type: Frame.Type, from connection: NWConnection,
-        onFrame: @escaping (Frame) -> Void, onEnd: @escaping (Error?) -> Void
+        onFrame: @escaping (Frame) -> Void, onEnd: @escaping (Error?) -> Void,
+        onUndecodable: ((Data) -> Bool)? = nil
     ) {
         connection.receiveMessage { data, context, _, error in
             if let error {
@@ -139,11 +147,23 @@ enum FleetSocket {
                     // hiccup: continuing would leave the two sides silently disagreeing
                     // about state, which is the failure mode the whole resume design
                     // exists to make impossible.
-                    onEnd(error)
-                    return
+                    //
+                    // That reasoning is about **state** frames, and it survives intact. The
+                    // one exception `onUndecodable` may claim is a frame that carries no
+                    // state for the two ends to disagree about: a `cid`-correlated request,
+                    // which is self-describing enough to be refused on its own correlation
+                    // id while everything either side believes stays exactly as it was. See
+                    // `FleetSocketServer.accept`, the only caller that passes one.
+                    guard onUndecodable?(data) == true else {
+                        onEnd(error)
+                        return
+                    }
                 }
             }
-            receive(type, from: connection, onFrame: onFrame, onEnd: onEnd)
+            receive(
+                type, from: connection, onFrame: onFrame, onEnd: onEnd,
+                onUndecodable: onUndecodable
+            )
         }
     }
 }
