@@ -55,8 +55,50 @@ final class TimelineReaderTests: XCTestCase {
         return found + [offset]
     }
 
+    /// The same file built out of raw bytes rather than a `String`, so a fixture can put a
+    /// sequence that is not valid UTF-8 inside a record. Nothing that goes through
+    /// `Data(_.utf8)` can produce one.
+    private func writeBytes(_ lines: [Data]) throws -> URL {
+        var data = Data()
+        for line in lines {
+            data.append(line)
+            data.append(UInt8(ascii: "\n"))
+        }
+        let url = directory.appendingPathComponent("t.jsonl")
+        try data.write(to: url)
+        return url
+    }
+
+    private func offsets(_ lines: [Data]) -> [Int] {
+        var found: [Int] = []
+        var offset = 0
+        for line in lines {
+            found.append(offset)
+            offset += line.count + 1
+        }
+        return found + [offset]
+    }
+
+    private static let turnPrefix =
+        #"{"type":"user","isSidechain":false,"message":{"role":"user","content":""#
+    private static let turnSuffix = #""}}"#
+
     private func userTurn(_ text: String) -> String {
-        #"{"type":"user","isSidechain":false,"message":{"role":"user","content":"\#(text)"}}"#
+        Self.turnPrefix + text + Self.turnSuffix
+    }
+
+    /// A user turn whose text ends in bytes no UTF-8 sequence can begin with. `TranscriptPager`
+    /// decodes a line with `String(decoding:)`, which substitutes a **three-byte** U+FFFD for
+    /// each of them, so this record's `String` is two bytes longer than the record for every
+    /// one — which is the whole point of the fixture. JSON does not mind: a replacement
+    /// character is an ordinary character inside a string, so the record still parses and still
+    /// maps to an item.
+    private func userTurnBytes(_ mark: String, bytes: Int, invalid: Int) -> Data {
+        var data = Data(Self.turnPrefix.utf8)
+        data.append(Data(padded(mark, to: bytes - invalid).utf8))
+        data.append(Data(repeating: 0xFF, count: invalid))
+        data.append(Data(Self.turnSuffix.utf8))
+        return data
     }
 
     private func assistantText(_ texts: [String]) -> String {
@@ -215,6 +257,28 @@ final class TimelineReaderTests: XCTestCase {
         XCTAssertFalse(next.hasMore, "and above it is the top of the transcript")
     }
 
+    /// **`.before` is its own arm and needs its own fixture.** The `.latest` test above cannot
+    /// pin it: both anchors read `fromOldest` out of the same `switch`, so a test that flips
+    /// them together lets `.latest` do all the reddening while `.before` rides along untested.
+    ///
+    /// What would ship if this arm alone were wrong is the gap the reader's own comment
+    /// describes: a client scrolling up gets the OLDEST records of the window with `end` just
+    /// past them, so the records between that `end` and the cursor it asked from are returned
+    /// by nothing — `.before(start)` goes above them, and the client never asks below.
+    func testTheBudgetTrimsFromTheOldestEndWhenPagingBefore() throws {
+        let lines = [padded("oldest"), padded("middle"), padded("newest")].map(userTurn)
+        let at = offsets(lines)
+        let url = try write(lines)
+        let page = try read(url, .before(at[3]))
+        XCTAssertEqual(marks(page), ["middle", "newest"], "the records nearest the cursor it "
+                       + "asked from, not the ones furthest above it")
+        XCTAssertEqual(page.start, at[1])
+        XCTAssertEqual(page.end, at[3], "the cursor it asked from — nothing between the two "
+                       + "belongs to any other page")
+        XCTAssertTrue(page.hasMore)
+        XCTAssertEqual(marks(try read(url, .before(page.start))), ["oldest"])
+    }
+
     /// Paging forwards, it trims from the newest end instead, and `end` moves back with them.
     func testTheBudgetTrimsFromTheNewestEndWhenPagingForwards() throws {
         let lines = [padded("oldest"), padded("middle"), padded("newest")].map(userTurn)
@@ -229,6 +293,42 @@ final class TimelineReaderTests: XCTestCase {
 
         let next = try read(url, .after(page.end))
         XCTAssertEqual(marks(next), ["newest"])
+        XCTAssertEqual(next.start, at[2])
+        XCTAssertEqual(next.end, at[3])
+    }
+
+    /// **`end` is a boundary the pager handed over, not `offset + text.utf8.count + 1`.** The
+    /// middle record here holds a hundred bytes that no UTF-8 sequence can begin with, and
+    /// `SourceLine.text` has already been through `String(decoding:)`, which turns each of them
+    /// into a three-byte U+FFFD — so its `String` is 200 bytes longer than the record and that
+    /// sum overshoots the boundary by exactly that much.
+    ///
+    /// What the overshoot costs is not a wrong number on a screen: the client's next
+    /// `.after(end)` starts INSIDE the following record, the pager cuts at the next newline,
+    /// the mapper drops the fragment, and that record is gone while the cursor has moved past
+    /// it. `TranscriptPager.forwards` refuses the same arithmetic for the same reason.
+    func testTheForwardsEndIsAPagerBoundaryEvenWhenARecordIsNotValidUTF8() throws {
+        let bytes = TimelineLimits.maxPageBytes / 2 - 400
+        let lines = [
+            Data(userTurn(padded("oldest", to: bytes)).utf8),
+            userTurnBytes("middle", bytes: bytes, invalid: 100),
+            Data(userTurn(padded("newest", to: bytes)).utf8),
+        ]
+        let at = offsets(lines)
+        let url = try writeBytes(lines)
+        let page = try read(url, .after(0))
+        XCTAssertEqual(marks(page), ["oldest", "middle"])
+        XCTAssertEqual(page.items.last?.body.text.filter { $0 == "\u{FFFD}" }.count, 100,
+                       "the fixture is only a fixture if the invalid bytes survived as "
+                       + "replacement characters — 100 of them, worth 200 bytes of drift")
+        XCTAssertEqual(page.end, at[2], "the first dropped record's own offset, not 200 bytes "
+                       + "past it")
+        XCTAssertTrue(page.hasMore)
+
+        let next = try read(url, .after(page.end))
+        XCTAssertEqual(marks(next), ["newest"], "a cursor two hundred bytes into this record "
+                       + "loses it entirely: the pager cuts at the next newline and the mapper "
+                       + "has nothing to map")
         XCTAssertEqual(next.start, at[2])
         XCTAssertEqual(next.end, at[3])
     }
