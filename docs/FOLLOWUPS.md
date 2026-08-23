@@ -933,3 +933,38 @@ What they left behind, deliberately unfixed:
   line above. An editing pass, not a defect — and the right time to do it is alongside the
   596pt-sheet-on-a-560pt-window question in [docs/MOBILE.md](MOBILE.md), since cutting a line is
   also the cheapest way to lose the 36pt overhang.
+
+## From the session timeline screen (2026-08-23)
+
+- **A timeline item is capped at 64 KB and a page at 128 KB.** A file read larger than the item
+  cap is truncated, with the shortfall stated on the row (a `scissors` chip) and in full on the
+  detail screen ("Showing the first 584 bytes of 69 KB"). The alternative — a second round trip
+  fetching one item whole — needs an offset index the transcript readers do not build, and
+  64 KB covers essentially every command output. Revisit if "open it on your Mac" turns out to
+  be a common answer rather than a rare one.
+
+- **An open session screen polls at 1.5s while the session is busy.** History is pulled, not
+  pushed (spec §6), and the Mac emits activity events only on genuine transitions, so a long
+  busy turn signals nothing in the middle of it. A push channel would need per-connection
+  subscription state in `FleetSocketServer` and a northbound frame outside the `seq` space;
+  that is a real design, not a tweak, and the poll is cheap enough that it has not earned one
+  yet.
+
+- **"Is the reader at the live edge" is inferred from a 1pt sentinel row.** `follow` needs to
+  know whether the end of the conversation is on screen, and on iOS 17 there is no scroll
+  geometry to ask — `onScrollGeometryChange` and `defaultScrollAnchor` on a `List` are both 18+.
+  So a zero-height trailing row's `onAppear`/`onDisappear` carries it. It is a real signal and
+  it is coarse: a row taller than the screen between the reader and the sentinel reads as "not
+  at the bottom" even when the reader is following along. Worth replacing with scroll geometry
+  the moment the deployment target moves to 18.
+
+- **A tool card shows six lines of output and three of input, and the numbers are taste.** They
+  were chosen by rendering a real conversation and looking — enough to recognise a result,
+  little enough that one `Read` does not bury the turn around it — not measured against
+  anything. If a reader ends up tapping through on every row, they are too small.
+
+- **`layer.render(in:)` cannot see a programmatic scroll.** Recorded in
+  [docs/MOBILE.md](MOBILE.md) beside the technique itself, because the failure looks exactly
+  like the `drawHierarchy` trap it replaced: several different screens coming back as one
+  identical blank PNG. Anything that has to be verified *after* a scroll needs
+  `xcrun simctl io <udid> screenshot` and a window attached to the app's own `UIWindowScene`.
