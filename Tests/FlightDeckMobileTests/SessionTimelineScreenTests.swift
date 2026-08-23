@@ -170,6 +170,119 @@ final class SessionTimelineScreenTests: XCTestCase {
         XCTAssertNil(SessionTimelineScreen.activityFooter(for: nil))
     }
 
+    // MARK: One row per thing that happened
+
+    /// **A command and its output are one thing, and the feed carries them as two records.**
+    /// Rendered as sibling rows they read as two unrelated events — a marker glyph did not
+    /// join them across a row separator, which the renders showed plainly — so the result is
+    /// folded into the call's own row. On `callID`, never on position: the fixture below has
+    /// two tools in flight answered in the opposite order to the calls, so an implementation
+    /// that took the next result gets both of them wrong rather than one right by luck.
+    func testAToolResultIsFoldedIntoItsOwnCallAndNotTheOneBeforeIt() {
+        let entries = SessionTimelineScreen.entries(from: interleavedCalls())
+
+        XCTAssertEqual(entries.map(\.id), ["1000#0", "1200#0"], "two calls, two rows")
+        XCTAssertEqual(entries[0].result?.id, "1600#0", "toolu_a1's output, wherever it landed")
+        XCTAssertEqual(entries[1].result?.id, "1400#0")
+    }
+
+    /// **A page boundary is enough to separate a result from its call**, and a result folded
+    /// away when its call is not on screen is content deleted from the conversation — the one
+    /// thing worse than showing it twice. So the set of calls actually present is what decides,
+    /// not merely the result having an id.
+    func testAResultWhoseCallIsNotOnScreenKeepsARowOfItsOwn() {
+        let orphan = toolResult(id: "1400#0", callID: "toolu_a1")
+
+        let entries = SessionTimelineScreen.entries(from: [orphan])
+
+        XCTAssertEqual(entries.map(\.id), ["1400#0"], "nothing here answers a call nobody made")
+        XCTAssertNil(entries[0].result, "and it is not its own output")
+    }
+
+    /// Codex's `event_msg` records carry no call id at all. Two records that both have *none*
+    /// are not two halves of one call, and folding on that basis would swallow every anonymous
+    /// result into the first anonymous call in the conversation.
+    func testTwoRecordsThatBothLackAnIDAreNotFoldedTogether() {
+        let entries = SessionTimelineScreen.entries(from: [
+            toolCall(id: "1000#0", callID: nil),
+            toolResult(id: "1400#0", callID: nil),
+        ])
+
+        XCTAssertEqual(entries.map(\.id), ["1000#0", "1400#0"])
+        XCTAssertNil(entries[0].result)
+    }
+
+    /// Everything that is not a tool record passes through untouched, in order. Folding is the
+    /// one transformation this list does, and a prose row lost to it is a message that
+    /// vanished.
+    func testProseIsNeverFoldedAwayAndKeepsItsOrder() {
+        let items = [
+            TimelineFixtures.userTurn, TimelineFixtures.bashCall,
+            TimelineFixtures.bashResult, TimelineFixtures.assistantAnswer,
+            TimelineFixtures.thinking, TimelineFixtures.unknown,
+        ]
+
+        XCTAssertEqual(
+            SessionTimelineScreen.entries(from: items).map(\.id),
+            [
+                TimelineFixtures.userTurn.id, TimelineFixtures.bashCall.id,
+                TimelineFixtures.assistantAnswer.id, TimelineFixtures.thinking.id,
+                TimelineFixtures.unknown.id,
+            ]
+        )
+    }
+
+    // MARK: Following a live session
+
+    /// **A `List` draws oldest-first**, so the `.latest` page's newest record is off the bottom
+    /// of the screen when it arrives. Without this the screen opens on the OLDEST message of
+    /// the most recent page — which is what shipped, and is not "opens on the most recent
+    /// messages" by any reading.
+    ///
+    /// It holds whether or not the reader is at the bottom, because on the first page there is
+    /// no reader position to respect yet.
+    func testTheFirstPageIsFollowedBecauseAListDrawsTheNewestRowOffTheBottom() {
+        XCTAssertEqual(
+            SessionTimelineScreen.follow(
+                newest: "16410#0", lastFollowed: nil, readerIsAtBottom: false
+            ),
+            "16410#0"
+        )
+    }
+
+    /// **The 1.5s poll runs the whole time a turn does**, so this is the rule that decides
+    /// whether reading a finished turn is possible while the next one runs. A reader who has
+    /// scrolled up is left exactly where they are.
+    func testAReaderWhoScrolledUpIntoTheHistoryIsNotDraggedBackDownByAPoll() {
+        XCTAssertNil(
+            SessionTimelineScreen.follow(
+                newest: "16880#0", lastFollowed: "16410#0", readerIsAtBottom: false
+            )
+        )
+        XCTAssertEqual(
+            SessionTimelineScreen.follow(
+                newest: "16880#0", lastFollowed: "16410#0", readerIsAtBottom: true
+            ),
+            "16880#0",
+            "a reader at the live edge came to watch it move"
+        )
+    }
+
+    /// A poll that answers with nothing new must move nothing. `SessionTimelineModel` polls
+    /// every 1.5s while a session is busy, and most of those answers add no records at all —
+    /// a list that re-scrolled on each one would fight the reader's finger continuously.
+    func testAPageWithNothingNewInItScrollsNothing() {
+        XCTAssertNil(
+            SessionTimelineScreen.follow(
+                newest: "16410#0", lastFollowed: "16410#0", readerIsAtBottom: true
+            )
+        )
+        XCTAssertNil(
+            SessionTimelineScreen.follow(newest: nil, lastFollowed: nil, readerIsAtBottom: true),
+            "an empty feed has no newest row to go to"
+        )
+    }
+
     // MARK: Pairing a call with its output
 
     /// **A session running two tools at once interleaves their records**, so "the first
