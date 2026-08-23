@@ -335,6 +335,152 @@ final class ClaudeTimelineMapperTests: XCTestCase {
         XCTAssertFalse(items.isEmpty)
         XCTAssertTrue(items.allSatisfy { $0.status == .complete })
     }
+
+    // MARK: - A question in the conversation
+
+    /// The captured `AskUserQuestion` records — one line each, lifted whole from the
+    /// transcript of the very session whose screen is captured beside them. Written from a
+    /// real 2.1.241 session rather than from this mapper's idea of one, because the three
+    /// wire-format bugs this project has shipped were each a fixture and a parser agreeing
+    /// with the same wrong assumption.
+    private func questionLine(_ fixture: String) throws -> String {
+        try XCTUnwrap(TimelineFixtureTests.lines(fixture, in: "Claude").first,
+                      "\(fixture).jsonl is empty")
+    }
+
+    /// The `tool_use` block's `input` as claude wrote it, straight out of the fixture, so a
+    /// test can compare what travelled against what was recorded.
+    private func toolInput(inLine line: String) throws -> [String: Any] {
+        let record = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+        let blocks = (record?["message"] as? [String: Any])?["content"] as? [[String: Any]]
+        return try XCTUnwrap(blocks?.first?["input"] as? [String: Any])
+    }
+
+    /// **`.prompt`, the kind reserved for this since the timeline shipped and emitted by
+    /// nothing until now.** It was left alone deliberately: a message a person types is a
+    /// `.userTurn`, which both mappers already emit, so the case was free for the one row
+    /// that is genuinely a question put to the user. This is that row.
+    ///
+    /// Everything else about it is a tool call's, and each of those fields is load-bearing
+    /// somewhere: the `callID` is what `SessionTimelineScreen.entries(from:)` folds the
+    /// answering `tool_result` onto, and the tool name is what a detail screen titles it
+    /// with. Only the kind moves.
+    func testAnAskUserQuestionIsAPromptRatherThanAToolCall() throws {
+        let item = try XCTUnwrap(items(try questionLine("question-single.captured")).first)
+        XCTAssertEqual(item.kind, .prompt)
+        XCTAssertEqual(item.body.tool, "AskUserQuestion")
+        XCTAssertEqual(item.body.callID, "toolu_01AoVBuWGeEn98vozn3y2XH4")
+        XCTAssertEqual(item.id, "100#0")
+        XCTAssertEqual(item.status, .complete)
+        XCTAssertEqual(item.at, "2026-08-23T20:44:19.502Z")
+    }
+
+    /// The whole input travels in `text`, unchanged and unabridged, because that string is
+    /// the only copy of the question either end has: the phone rebuilds the question, its
+    /// header and every option — label and description both — by parsing this field. A
+    /// mapping that summarised it here would leave a card with nothing to draw.
+    func testAQuestionsWholeInputTravelsInTheRowsText() throws {
+        let line = try questionLine("question-single.captured")
+        let item = try XCTUnwrap(items(line).first)
+        let travelled = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(item.body.text.utf8)) as? [String: Any],
+            "the row's text must still parse as the input object it was made from"
+        )
+        XCTAssertEqual(travelled as NSDictionary, try toolInput(inLine: line) as NSDictionary,
+                       "the input claude wrote and the input that travelled must be the same "
+                       + "object, options and descriptions included")
+        // Named explicitly as well, because a dictionary comparison reports a failure as two
+        // walls of JSON and these are the strings a card is built out of.
+        XCTAssertTrue(item.body.text.contains(
+            "Which language would you rather use for a new command line tool?"))
+        for label in ["Rust", "Go", "Swift"] {
+            XCTAssertTrue(item.body.text.contains(#""label" : "\#(label)""#),
+                          "every option must travel, not just the first")
+        }
+    }
+
+    /// A one-line preview drawn from the question itself.
+    ///
+    /// The first assertion is what makes this test able to fail at all: an `AskUserQuestion`
+    /// input's only top-level key is `questions`, and `ToolInputSummary`'s table has no entry
+    /// that reaches two levels down into `questions[0]` — so the ordinary path finds nothing
+    /// and the row would say nothing at all. Both captures, single- and multi-select, because
+    /// the two shapes differ on screen and must not differ here.
+    func testAPromptRowPreviewsItsQuestion() throws {
+        for (fixture, question) in [
+            ("question-single.captured",
+             "Which language would you rather use for a new command line tool?"),
+            ("question-multi.captured", "Which snacks would you want on a long flight?"),
+        ] {
+            let line = try questionLine(fixture)
+            XCTAssertNil(ToolInputSummary.text(for: try toolInput(inLine: line)),
+                         "\(fixture) must carry no top-level preview key, or the ordinary "
+                         + "table finds one and this test proves nothing")
+            XCTAssertEqual(try XCTUnwrap(items(line).first).body.summary, question, fixture)
+        }
+    }
+
+    /// `summary` escapes every budget downstream — `TimelineReader.capped` rewrites
+    /// `body.text` and never touches it — so `ToolInputSummary.maxSummaryBytes` is the only
+    /// bound this field gets anywhere, and a preview added on a new path has to go through it
+    /// too. Synthetic rather than captured: no captured question is long enough to cut, and
+    /// the bound is about a question nobody has asked yet.
+    func testALongQuestionsPreviewIsStillBounded() throws {
+        let long = String(repeating: "why ", count: 200)
+        let item = try XCTUnwrap(items("""
+            {"type":"assistant","uuid":"a1","isSidechain":false,"message":{"role":"assistant",\
+            "content":[{"type":"tool_use","id":"toolu_A","name":"AskUserQuestion",\
+            "input":{"questions":[{"question":"\(long)","header":"H","multiSelect":false,\
+            "options":[{"label":"a"}]}]}}]}}
+            """).first)
+        XCTAssertEqual(item.kind, .prompt)
+        XCTAssertEqual(try XCTUnwrap(item.body.summary).utf8.count,
+                       ToolInputSummary.maxSummaryBytes)
+    }
+
+    /// A shape `AskUserQuestion` never wrote is still a question — the kind is decided by the
+    /// tool's name and nothing else — and it previews through the ordinary key table rather
+    /// than reaching into an empty array.
+    func testAQuestionWithNothingToPreviewIsStillAPrompt() throws {
+        let item = try XCTUnwrap(items("""
+            {"type":"assistant","uuid":"a1","isSidechain":false,"message":{"role":"assistant",\
+            "content":[{"type":"tool_use","id":"toolu_A","name":"AskUserQuestion",\
+            "input":{"questions":[]}}]}}
+            """).first)
+        XCTAssertEqual(item.kind, .prompt)
+        XCTAssertNil(item.body.summary)
+    }
+
+    /// Every other tool is untouched, because the rule is scoped by the tool's name and by
+    /// nothing else. `Bash` from the captured transcript, because a tool call awaiting
+    /// permission is read as a permission request rather than as a question, and that reading
+    /// is the kind.
+    func testEveryOtherToolIsStillAToolCall() throws {
+        let line = try XCTUnwrap(
+            TimelineFixtureTests.lines("transcript.captured", in: "Claude")
+                .first { $0.contains(#""name":"Bash""#) },
+            "the capture must still hold the Bash call"
+        )
+        let item = try XCTUnwrap(items(line).first { $0.body.tool == "Bash" })
+        XCTAssertEqual(item.kind, .toolCall)
+        XCTAssertEqual(item.body.summary, "echo hi")
+    }
+
+    /// The answer stays a `.toolResult`, so it still folds into the question on `callID`
+    /// rather than stranding itself as its own row below it. Hand-written, and it is the one
+    /// record here that has to be: the captured question lines are the last line of their
+    /// transcripts — claude writes the `tool_use` before the tool runs, which is why the
+    /// question is readable while it is still open — so no capture holds an answer to one.
+    func testTheAnswerToAQuestionIsStillAToolResult() throws {
+        let item = try XCTUnwrap(items("""
+            {"type":"user","uuid":"u1","isSidechain":false,"message":{"role":"user",\
+            "content":[{"type":"tool_result","tool_use_id":"toolu_01AoVBuWGeEn98vozn3y2XH4",\
+            "content":"Your questions have been answered."}]}}
+            """).first)
+        XCTAssertEqual(item.kind, .toolResult)
+        XCTAssertEqual(item.body.callID, "toolu_01AoVBuWGeEn98vozn3y2XH4")
+        XCTAssertNil(item.body.tool)
+    }
 }
 
 /// The preview and detail rendering of a tool's input, which Task 4 shares for codex. Tested

@@ -127,12 +127,32 @@ enum ClaudeTimelineMapper {
                                 body: TimelineItem.Body(text: text), at: at)
         case "tool_use":
             let input = block["input"] as? [String: Any]
+            let tool = block["name"] as? String
+            // **The one tool whose call is a question rather than a command**, and the only
+            // place `TimelineItem.Kind.prompt` is emitted anywhere. The case has been in the
+            // wire vocabulary since the timeline shipped and has been reached by nothing: it
+            // was reserved for this, not for a typed message, which is a `.userTurn` on both
+            // mappers.
+            //
+            // Everything else about the row stays a tool call's — same tool name, same
+            // `callID` so `SessionTimelineScreen.entries(from:)` still folds the answering
+            // `tool_result` into it, same whole input in `text` so both ends can rebuild the
+            // question from the row itself. Only the kind moves, and it does two jobs: it
+            // stops a question a person answered from rendering as a JSON tree of
+            // `{"questions":[…]}`, and it is what tells the phone this is a question rather
+            // than a permission request.
+            let isQuestion = tool == "AskUserQuestion"
             return TimelineItem(
-                id: id, kind: .toolCall, status: .complete,
+                id: id, kind: isQuestion ? .prompt : .toolCall, status: .complete,
                 body: TimelineItem.Body(
                     text: ToolInputSummary.pretty(input),
-                    summary: input.flatMap(ToolInputSummary.text(for:)),
-                    tool: block["name"] as? String,
+                    // `ToolInputSummary`'s key table reaches no question — an
+                    // `AskUserQuestion` input's only top-level key is `questions`, and the
+                    // text lives two levels down inside `questions[0]` — so without this a
+                    // prompt row previews as nothing at all.
+                    summary: (isQuestion ? questionPreview(input) : nil)
+                        ?? input.flatMap(ToolInputSummary.text(for:)),
+                    tool: tool,
                     callID: block["id"] as? String
                 ),
                 at: at
@@ -140,6 +160,21 @@ enum ClaudeTimelineMapper {
         default:
             return nil
         }
+    }
+
+    /// The first question's text, for a row preview. Nil for any shape that is not the one
+    /// `AskUserQuestion` writes, which falls back to the ordinary key table rather than to
+    /// nothing.
+    ///
+    /// Bounded by the same `ToolInputSummary.preview(of:)` as every other preview, because
+    /// that cap is the ONLY bound `summary` gets anywhere: `TimelineReader.capped` rewrites
+    /// `body.text` and never touches this field, so a question carried through raw would
+    /// escape `TimelineLimits.maxItemBytes` entirely.
+    private static func questionPreview(_ input: [String: Any]?) -> String? {
+        guard let questions = input?["questions"] as? [[String: Any]],
+              let text = questions.first?["question"] as? String
+        else { return nil }
+        return ToolInputSummary.preview(of: text)
     }
 
     /// A tool result's `content` is a String for most tools and a block array for some. Both
