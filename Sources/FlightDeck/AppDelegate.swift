@@ -82,10 +82,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let store else { return }
             ToolRunner.run(tool, store: store, launcher: ShellToolLauncher.configured(preferences))
         }
-        // Shared with the overlay's ⌘-revealed sprocket — see `ToolsPreferencesOpener`, which
+        // Shared with the overlay's ⌘-revealed sprocket — see `PreferencesOpener`, which
         // owns the pane-before-open sequencing this used to spell out inline.
         toolsMenu.openPreferences = { [weak preferences] in
-            ToolsPreferencesOpener.open(preferences)
+            PreferencesOpener.open(preferences, tab: .tools)
         }
         toolsMenu.tools = preferences.tools
 

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// A project's row in the sidebar: disclosure chevron, name, and — when collapsed — how
@@ -79,7 +80,31 @@ struct ProjectHeaderRow: View {
             Button("New Session") { store.newSession(in: repo.url) }
             Button(repo.isCollapsed ? "Expand" : "Collapse") { toggle() }
             Divider()
+            // A project is a folder, and its path is otherwise only visible in Settings. Both
+            // items act on the standardized URL, the same spelling everything else compares.
+            Button("Reveal in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([repo.url.standardizedFileURL])
+            }
+            Button("Copy Path") {
+                let pasteboard = NSPasteboard.general
+                // A pasteboard write without a clear first appends to whatever is already
+                // there under other types, which pastes as the previous contents in some apps.
+                pasteboard.clearContents()
+                pasteboard.setString(repo.url.standardizedFileURL.path, forType: .string)
+            }
+            Divider()
             Button("Close Project", role: .destructive, action: onClose)
+            Divider()
+            // Ellipsis because it opens a window, matching "Configure Tools…". Last rather
+            // than above Close Project by request.
+            Button("Configure…") {
+                PreferencesOpener.open(
+                    store.preferences,
+                    tab: .projects,
+                    project: repo.url.standardizedFileURL.path
+                )
+            }
+            .accessibilityIdentifier("project-configure")
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)

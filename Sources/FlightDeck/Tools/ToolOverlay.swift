@@ -48,7 +48,7 @@ struct ToolOverlay: View {
                     // `ToolsMenuController.validateMenuItem`, which only gates `runTool`.
                     if commandHeld {
                         Button {
-                            ToolsPreferencesOpener.open(preferences)
+                            PreferencesOpener.open(preferences, tab: .tools)
                         } label: {
                             Image(systemName: "gearshape")
                                 .frame(width: 22, height: 22)
