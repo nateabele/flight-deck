@@ -53,9 +53,11 @@ struct TranscriptPage: Equatable, Sendable {
 /// properties of the file rather than of the tail — never consume a trailing partial line,
 /// treat a shrinking file as a replacement, and decide where a read starts explicitly.
 enum TranscriptPager {
-    /// `nil` means the file could not be opened — which for a claude tab before its first
-    /// turn is the ordinary state, not an error, and must not be rendered as an empty
-    /// conversation. A file that opens and holds nothing is an empty page, not `nil`.
+    /// `nil` means the file could not be read as a transcript: it would not open — which for
+    /// a claude tab before its first turn is the ordinary state, not an error — or it opened
+    /// and holds no line boundary to page from. Neither may be rendered as an empty
+    /// conversation. A file that opens and holds *nothing* is an empty page, not `nil`; see
+    /// `lastBoundary`.
     ///
     /// `window` and `maxScan` are parameters so tests can use values small enough to write
     /// a fixture across; production takes both from `TimelineLimits`.
@@ -85,7 +87,11 @@ enum TranscriptPager {
 
         switch anchor {
         case .latest:
-            let boundary = lastBoundary(handle, size: size, window: window, maxScan: maxScan)
+            // `nil` rather than a boundary of 0: a file with no line boundary in it is not a
+            // transcript this can page, and the empty page is already spoken for. See
+            // `lastBoundary`.
+            guard let boundary = lastBoundary(handle, size: size, window: window, maxScan: maxScan)
+            else { return nil }
             return backwards(handle, from: boundary, limit: limit,
                              window: window, maxScan: maxScan)
         // `0...size`, so a cursor exactly at the end is a client that is up to date rather
@@ -128,26 +134,29 @@ enum TranscriptPager {
     /// at all is not a JSONL transcript this can page, and answering "nothing" beats reading
     /// backwards through a gigabyte to prove it.
     ///
-    /// **Returning 0 here makes an unpageable file byte-identical to an empty one** — no
-    /// lines, `start` and `end` 0, `hasMore` and `reset` false — so a client renders "empty
-    /// conversation" over history it simply could not reach, with nothing to retry. The
-    /// difference is known at this line and deliberately dropped rather than encoded in a
-    /// third state; `TimelineReader` owns the decision of whether it wants one (answering
-    /// `nil`, and so the `unreadable` code, would be the change), and this note exists so
-    /// that decision is made rather than inherited.
+    /// **`nil` when there is no boundary to find**, which is the answer `TimelineReader` maps
+    /// to `unreadable` — showable and retryable. Returning 0 instead would make an unpageable
+    /// file byte-identical to an empty one — no lines, `start` and `end` 0, `hasMore` and
+    /// `reset` false — so a client would render "this conversation is empty" over history it
+    /// simply could not reach, with nothing to retry and nothing to log. The cost of `nil` is
+    /// that it folds together with "there is no transcript file yet"; both render as "no
+    /// history", and neither states falsely and unretryably that the conversation is empty.
+    ///
+    /// A file of zero bytes is the one honest 0: it has no records, and offset 0 is the only
+    /// position it has.
     private static func lastBoundary(
         _ handle: FileHandle, size: Int, window: Int, maxScan: Int
-    ) -> Int {
+    ) -> Int? {
         var end = size
         while end > 0, size - end < maxScan {
             let start = max(0, end - window)
-            guard let data = read(handle, from: start, count: end - start) else { return 0 }
+            guard let data = read(handle, from: start, count: end - start) else { return nil }
             if let index = data.lastIndex(of: newline) {
                 return start + data.distance(from: data.startIndex, to: index) + 1
             }
             end = start
         }
-        return 0
+        return size == 0 ? 0 : nil
     }
 
     /// Reads backwards in window-sized chunks until it holds `limit + 1` line boundaries, or

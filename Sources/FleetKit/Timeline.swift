@@ -48,6 +48,13 @@ public struct TimelineItem: Identifiable, Codable, Equatable, Sendable {
     public struct Body: Codable, Equatable, Sendable {
         /// The full text, up to `TimelineLimits.maxItemBytes`. For a `.toolCall` this is the
         /// tool's input, pretty-printed; for a `.toolResult` it is the output.
+        ///
+        /// **Render it, never parse it.** A `.toolCall`'s text is pretty-printed JSON, and the
+        /// Mac cuts an oversized body at the byte cap wherever that lands — mid-object,
+        /// mid-string, mid-escape. So `truncatedBytes > 0` on a tool call means the JSON is
+        /// structurally incomplete *by design*, and a client that decodes it to draw a table
+        /// shows nothing for exactly the largest tool inputs, which are the ones worth
+        /// reading. Plain text, with `truncatedBytes` shown beside it.
         public var text: String
         /// A one-line preview for a list row. Set only where `text` is unfit for one — a
         /// tool call's input is JSON, and `{` is not a useful row. Nil means "use the first
