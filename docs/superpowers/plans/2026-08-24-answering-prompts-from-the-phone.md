@@ -1145,6 +1145,42 @@ git commit -m "feat: move a TUI's selection, and refuse a dialog, with real key 
 
 ---
 
+## AMENDMENT 2 — the keystroke path is proven, and it left Task 4 a trap
+
+Task 3 shipped and settled the one thing this feature had no evidence for. Against real claude
+2.1.241 on a real `Ghostty.SurfaceView`, read in-process through `TextInjecting.readViewport()`:
+
+```
+folder trust:    ' ❯ 1. Yes, I trust this folder' → sendArrowDown() → ' ❯ 2. No, exit'
+                                                  → sendArrowUp()   → back to row 1
+Bash permission: ' ❯ 1. Yes' / '   2. No' → down → ' ❯ 2. No' → up → ' ❯ 1. Yes'
+                                          → sendEscape() → no option rows; input bar restored
+```
+
+**Escape is a real denial, not merely a dismissal** — the session's transcript closes the call
+`is_error=True "The user doesn't want to proceed with this tool use. The tool use was
+rejected"`. Nothing in this plan had established that, and it is what makes Deny the safe half.
+
+**A trap for Task 4, from a real screen.** claude echoes the user's own prompt as
+`❯ Run this exact bash command …` — **a `❯` at column 1 with no number after it**. Any
+`locate` keying on `❯` alone reads that as a focused option and answers the wrong row. Combined
+with AMENDMENT 1's finding that options *are* numbered in both dialog kinds, the marker test
+must be `❯` **and** a number, never the marker alone.
+
+**Two smaller results, both measurements rather than assumptions.** A press-only key build moves
+the dialog identically — libghostty encodes on press under the legacy protocol — so the
+release half is for the Kitty protocol and is not load-bearing today; that is now recorded at
+`sendBareKey` as a measurement. And `--permission-mode manual` is required to get a dialog at
+all: 2.1.241 defaults to `auto` and draws none.
+
+**And a trap in the harness itself, worth more than any of the above.**
+`xctest -XCTest FlightDeckTests/SpyInjectorOptionsTests` — the xcodebuild spelling of a filter —
+**runs zero tests and reports success**. A mutation verified through that filter would produce
+no failures and be believed. Every mutation result in this plan must be reported with the
+executed test count beside it.
+
+---
+
 ## AMENDMENT — the captures landed, and they refute three of Task 4's premises
 
 Real dialogs were captured before this task was executed, from claude 2.1.241, and committed
