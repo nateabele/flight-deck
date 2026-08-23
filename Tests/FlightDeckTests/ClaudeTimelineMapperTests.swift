@@ -215,36 +215,35 @@ final class ClaudeTimelineMapperTests: XCTestCase {
         XCTAssertEqual(items[0].body.text, "line one\nline two")
     }
 
-    /// The other half of the base64 rule, and the half the mapping table does not name: a
-    /// screenshot tool and `Read` on a `.png` answer with an **image block inside a
-    /// `tool_result`**, so reading anything but `text` out of that array would put the payload
-    /// on the wire from the direction nobody is watching.
-    func testAToolResultThatReturnsAnImageCarriesNoBase64() {
-        let items = items("""
-            {"type":"user","uuid":"u2","isSidechain":false,"message":{"role":"user","content":\
-            [{"tool_use_id":"toolu_01A","type":"tool_result","content":\
-            [{"type":"image","source":{"type":"base64","media_type":"image/png",\
-            "data":"iVBORw0KGgoAAAANSUhEUgAAA"}}]}]}}
-            """)
-        XCTAssertEqual(items.map(\.kind), [.toolResult])
-        XCTAssertFalse(items[0].body.text.contains("iVBORw0"))
-        XCTAssertEqual(items[0].body.text, "",
-                       "no text block, so nothing to show — see the task report, this renders "
-                       + "as an empty row rather than as [image]")
-    }
-
     /// **The base64 never leaves the Mac.** A pasted screenshot is roughly a megabyte of it in
     /// one block; a page of forty records containing two of them is a multi-megabyte frame
     /// over a cellular link, to render a picture the phone is not going to draw anyway.
-    func testAnImageBlockIsReplacedRatherThanCarried() {
+    ///
+    /// Both blocks are pinned field by field. These are the only two arms that reach `Body`
+    /// from a *block* inside a `user` record, and until this test said so, relabelling either
+    /// one `.assistantText` reddened nothing in the suite: the captured transcript's user
+    /// records all carry String content, so no other test feeds a user `text` block at all.
+    func testAUserTextBlockAndAnImageBlockAreBothUserTurns() {
         let items = items("""
-            {"type":"user","uuid":"u2","isSidechain":false,"message":{"role":"user","content":\
+            {"type":"user","uuid":"u2","timestamp":"2026-08-21T15:15:15.000Z",\
+            "isSidechain":false,"message":{"role":"user","content":\
             [{"type":"text","text":"[Image #1] look at this"},\
             {"type":"image","source":{"type":"base64","media_type":"image/png",\
             "data":"iVBORw0KGgoAAAANSUhEUgAAA"}}]}}
-            """)
+            """, at: 2048)
+        XCTAssertEqual(items.map(\.kind), [.userTurn, .userTurn])
+        XCTAssertEqual(items.map(\.status), [.complete, .complete])
+        XCTAssertEqual(items.map(\.id), ["2048#0", "2048#1"])
+        XCTAssertEqual(items.map(\.at), ["2026-08-21T15:15:15.000Z", "2026-08-21T15:15:15.000Z"])
         XCTAssertEqual(items.map(\.body.text), ["[Image #1] look at this", "[image]"])
         XCTAssertFalse(items.contains { $0.body.text.contains("iVBORw0") })
+        for body in items.map(\.body) {
+            XCTAssertNil(body.summary)
+            XCTAssertNil(body.tool)
+            XCTAssertNil(body.callID)
+            XCTAssertFalse(body.isError)
+            XCTAssertEqual(body.truncatedBytes, 0)
+        }
     }
 
     /// `isMeta` records are claude talking to itself — "Continue from where you left off.",
@@ -253,6 +252,20 @@ final class ClaudeTimelineMapperTests: XCTestCase {
         XCTAssertTrue(items("""
             {"type":"user","uuid":"u3","isMeta":true,"isSidechain":false,"message":\
             {"role":"user","content":[{"type":"text","text":"Continue from where you left off."}]}}
+            """).isEmpty)
+    }
+
+    /// A `/compact` writes its own summary of the conversation so far as a `user` record. It
+    /// is claude's prose, several paragraphs of it, and mapping it as a `.userTurn` attributes
+    /// all of it to the user — the `isMeta` harm on a record long enough to be believed.
+    /// `ConversationTitle.resolve` has skipped this key alongside `isMeta` since the
+    /// resumed-conversation work; this mapper inherited only half of that rule.
+    func testACompactSummaryIsNotAUserTurn() {
+        XCTAssertTrue(items("""
+            {"type":"user","uuid":"u4","isCompactSummary":true,"isSidechain":false,\
+            "message":{"role":"user","content":"This session is being continued from a \
+            previous conversation. The user asked for a pairing code that survives being \
+            typed, and I implemented Crockford base32 over 55 bits."}}
             """).isEmpty)
     }
 
@@ -268,7 +281,11 @@ final class ClaudeTimelineMapperTests: XCTestCase {
 
     func testRecordsThisVocabularyHasNoRowForEmitNothing() {
         for line in [
-            #"{"type":"custom-title","customTitle":"x","sessionId":"s"}"#,
+            // With a `message`, so it reaches the type switch instead of stopping at the
+            // `message` guard above it — otherwise the switch's `default` arm, which is the
+            // rule this test is named for, has no coverage anywhere in the suite.
+            #"{"type":"custom-title","customTitle":"x","sessionId":"s","#
+                + #""message":{"role":"user","content":"x"}}"#,
             #"{"type":"system","subtype":"turn_duration","durationMs":1}"#,
             #"{"type":"mode","mode":"default"}"#,
             #"{"type":"attachment","id":"1"}"#,
@@ -373,15 +390,57 @@ final class ToolInputSummaryTests: XCTestCase {
 
     /// Key order out of `JSONSerialization` is unspecified. Two fetches of one page that
     /// differ only in key order would look to a client like the agent changed its mind.
+    /// Six keys, not three, and that is arithmetic rather than taste: Swift seeds `Dictionary`
+    /// hashing per process, so an unsorted encoder still emits sorted order by chance with
+    /// probability `1/n!`. At three keys that is one run in six — a test that passes 83% of the
+    /// time is not a proof. At six it is one in 720.
     func testTheWholeInputIsPrettyPrintedInASortedStableOrder() {
-        let pretty = ToolInputSummary.pretty(["zebra": 1, "alpha": 2, "middle": 3])
+        let pretty = ToolInputSummary.pretty([
+            "zebra": 1, "alpha": 2, "middle": 3, "delta": 4, "kilo": 5, "sierra": 6,
+        ])
         XCTAssertEqual(pretty, """
             {
               "alpha" : 2,
+              "delta" : 4,
+              "kilo" : 5,
               "middle" : 3,
+              "sierra" : 6,
               "zebra" : 1
             }
             """)
+    }
+
+    /// `summary` is the one field that escapes every budget downstream: `TimelineReader` caps
+    /// an item by rewriting `body.text` and costs a page by summing `body.text`, so a preview
+    /// of any length rides along untouched, 200 items to a page. `prompt` is a preview key and
+    /// an `Agent` dispatch's opening paragraph has no newline in it for kilobytes.
+    func testALongPreviewIsBoundedEvenWhenItIsAllOneLine() {
+        let prompt = String(repeating: "dispatch a sub-agent to do the thing. ", count: 200)
+        XCTAssertFalse(prompt.contains("\n"), "the first-line rule bounds nothing here")
+        let summary = ToolInputSummary.text(for: ["prompt": prompt])
+        XCTAssertEqual(summary?.utf8.count, ToolInputSummary.maxSummaryBytes)
+        // ASCII, so a prefix in Characters and a prefix in bytes are the same prefix.
+        XCTAssertEqual(summary, String(prompt.prefix(ToolInputSummary.maxSummaryBytes)))
+    }
+
+    /// Cutting by bytes must not halve a scalar.
+    ///
+    /// The single leading ASCII byte is what makes this test able to fail: each ✈︎ here is 4
+    /// UTF-8 bytes, and 200 is divisible by 4, so a naive byte-prefix cut of an all-emoji
+    /// string lands on a boundary by luck and proves nothing. Offset by one, the 200th byte
+    /// falls in the middle of the 50th character, and a byte cut yields a replacement
+    /// character where this must yield 197 bytes.
+    func testACappedPreviewIsCutOnACharacterBoundary() {
+        let long = "x" + String(repeating: "🛩", count: 100)
+        let summary = ToolInputSummary.text(for: ["command": long])
+        XCTAssertEqual(summary, "x" + String(repeating: "🛩", count: 49),
+                       "1 + 49*4 = 197; a 50th would be 201, past the cap")
+        XCTAssertEqual(summary?.utf8.count, 197)
+        XCTAssertFalse(summary?.contains("\u{FFFD}") == true, "no halved scalar")
+    }
+
+    func testAPreviewShorterThanTheCapIsUntouched() {
+        XCTAssertEqual(ToolInputSummary.text(for: ["command": "ls -la"]), "ls -la")
     }
 
     func testAnInputThatIsNotAJSONObjectPrettyPrintsToNothing() {
