@@ -346,22 +346,27 @@ final class TranscriptPagerTests: XCTestCase {
     /// budget has been spent. A tail with no newline in it is a record still being written;
     /// past the budget it is indistinguishable from a file that is not a transcript at all.
     ///
-    /// Note what this page is: byte-identical to the one an empty transcript produces. The
-    /// pager knows the difference and drops it, so a client renders "empty conversation" over
-    /// history it could not reach. Pinned here so that cost is visible to whoever changes it.
-    func testALatestWhoseTailHoldsNoBoundaryWithinTheBudgetIsAnEmptyPage() throws {
+    /// Note what the alternative page would be: byte-identical to the one an empty transcript
+    /// produces. `nil` is the answer instead — `TimelineReader` turns it into `unreadable`,
+    /// which is showable and retryable — because "no lines, cursors at 0, nothing more" would
+    /// have a client render "this conversation is empty" over history it could not reach,
+    /// with nothing to retry and nothing to log.
+    func testALatestWhoseTailHoldsNoBoundaryWithinTheBudgetIsUnreadableNotEmpty() throws {
         let url = try write("short\n" + String(repeating: "x", count: 5_000))
-        let page = try XCTUnwrap(TranscriptPager.page(
+        XCTAssertNil(TranscriptPager.page(
             url: url, anchor: .latest, limit: 10, window: 64, maxScan: 256
+        ), "the partial tail is never returned as a whole line, and 'I could not reach it' "
+           + "must not be spelled the same way as 'there is nothing here'")
+    }
+
+    /// The same answer by the other exit: this file is small enough that the scan reaches the
+    /// top of it and still finds no boundary, rather than spending its budget short of one.
+    /// It is also the ordinary shape of a transcript whose very first record is still being
+    /// written — one unfinished line, and nothing complete to hand over yet.
+    func testALatestOnAFileWithNoBoundaryAtAllIsUnreadable() throws {
+        XCTAssertNil(TranscriptPager.page(
+            url: try write("{\"partial\":\"no newline yet"), anchor: .latest, limit: 10
         ))
-        XCTAssertTrue(page.lines.isEmpty, "the partial tail is never returned as a whole line")
-        XCTAssertFalse(page.hasMore)
-        XCTAssertFalse(page.reset)
-        // Every offset this type hands out is a line boundary, including the ones it hands
-        // out when it is giving up: a `start`/`end` in the middle of a record would come back
-        // as an anchor, and become an item id, naming a position no record ever began at.
-        XCTAssertEqual(page.start, 0)
-        XCTAssertEqual(page.end, 0, "not 5006 — the file size is not a boundary")
     }
 
     /// A blank line carries no record, but its byte still moves every offset after it.
