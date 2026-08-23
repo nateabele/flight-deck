@@ -182,6 +182,12 @@ final class SessionTimelineScreenTests: XCTestCase {
         let entries = SessionTimelineScreen.entries(from: interleavedCalls())
 
         XCTAssertEqual(entries.map(\.id), ["1000#0", "1200#0"], "two calls, two rows")
+        // Subscripting `entries` is subscripting the OUTPUT of the code under test, so a
+        // count assertion has to gate it. Without this, a fold regression fails the line
+        // above and then TRAPS on the line below — which kills the whole xctest process
+        // and takes every later test with it, reported to the user as the app quitting.
+        // Seen for real: two mutation runs surfaced as "FlightDeckMobile quit unexpectedly".
+        guard entries.count == 2 else { return XCTFail("expected two rows, got \(entries.count)") }
         XCTAssertEqual(entries[0].result?.id, "1600#0", "toolu_a1's output, wherever it landed")
         XCTAssertEqual(entries[1].result?.id, "1400#0")
     }
@@ -196,6 +202,12 @@ final class SessionTimelineScreenTests: XCTestCase {
         let entries = SessionTimelineScreen.entries(from: [orphan])
 
         XCTAssertEqual(entries.map(\.id), ["1400#0"], "nothing here answers a call nobody made")
+        // Subscripting `entries` is subscripting the OUTPUT of the code under test, so a
+        // count assertion has to gate it. Without this, a fold regression fails the line
+        // above and then TRAPS on the line below — which kills the whole xctest process
+        // and takes every later test with it, reported to the user as the app quitting.
+        // Seen for real: two mutation runs surfaced as "FlightDeckMobile quit unexpectedly".
+        guard entries.count == 1 else { return XCTFail("expected one row, got \(entries.count)") }
         XCTAssertNil(entries[0].result, "and it is not its own output")
     }
 
@@ -209,6 +221,12 @@ final class SessionTimelineScreenTests: XCTestCase {
         ])
 
         XCTAssertEqual(entries.map(\.id), ["1000#0", "1400#0"])
+        // Subscripting `entries` is subscripting the OUTPUT of the code under test, so a
+        // count assertion has to gate it. Without this, a fold regression fails the line
+        // above and then TRAPS on the line below — which kills the whole xctest process
+        // and takes every later test with it, reported to the user as the app quitting.
+        // Seen for real: two mutation runs surfaced as "FlightDeckMobile quit unexpectedly".
+        guard entries.count == 2 else { return XCTFail("expected two rows, got \(entries.count)") }
         XCTAssertNil(entries[0].result)
     }
 
