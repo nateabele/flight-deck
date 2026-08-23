@@ -195,8 +195,10 @@ public enum FleetRequestError: Error, Equatable, Sendable {
     /// The Mac answered `err`. Codes this plan produces: `unknown_session` (no such tab),
     /// `no_transcript` (the tab's agent reports no transcript file — a codex thread whose
     /// `thread/start` never returned a path), `unreadable`, `stopped` (the service is gone).
-    /// Until the reader is wired the Mac answers every request `unhandled`, which is what is
-    /// actually on this wire today — a client must treat an unrecognised code as "no page".
+    /// Two more come from the socket rather than the reader and are not this plan's to
+    /// produce: `unhandled`, from a Mac whose `onRequest` is not wired at all, and
+    /// `unsupported`, from one that could not parse the request. A client must treat any
+    /// unrecognised code as "no page".
     ///
     /// **`unreadable` is showable and retryable, and it covers two states on purpose**: a path
     /// that is not there yet — the ordinary state of a claude tab before its first turn — and
