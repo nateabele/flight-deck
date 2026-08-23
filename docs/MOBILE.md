@@ -44,7 +44,7 @@ than assuming. See its own comments for the rest, and the note in `AGENTS.md`.
 ## Running the unit suite
 
 ```bash
-./scripts/test-ios.sh    # 47 tests, ~40s including creating and booting the simulator
+./scripts/test-ios.sh    # 67 tests, ~45s including creating and booting the simulator
 ```
 
 It creates a throwaway simulator, runs `FlightDeckMobileTests` inside `FlightDeckMobile`, and
@@ -66,12 +66,20 @@ at a device someone is testing on would overwrite the build under their hands.
 - `SessionTimelineModel` — which fetch is in flight, that a second one is refused while it is,
   that a fetch nobody answers fails on its own deadline instead of spinning forever, and that a
   late answer to a dead request changes nothing.
-- `SessionTimelineScreen` — the three decisions the session screen makes that are not layout:
+- `TimelineStyle` — everything the timeline decides about *what text appears at all*: that a
+  tool result arriving without its call supplies the output panel rather than a command line
+  (the defect the renders found), that a command line skips the bare delimiter a pretty-printed
+  input opens on, that both agents' ISO-8601 spellings parse and anything else renders as
+  nothing, that truncation is said with its size and only when something was cut, and that a
+  VoiceOver label is capped so one row is not a quarter hour of speech.
+- `SessionTimelineScreen` — the decisions the session screen makes that are not layout:
   *where* a failure is said (at the top, with the conversation still under it — the bottom of a
   list is where nobody is looking fifteen seconds after a "Load earlier" tap), that an empty
   state never appears while a fetch is running, that a codex session never claims a number of
-  sub-agents, and that a tool call is paired with its output by `callID` rather than by
-  position.
+  sub-agents, that a tool call is paired with its output by `callID` rather than by position,
+  that folding a result into its call never swallows a result whose call is off the page and
+  never swallows prose, and *when* an arriving page scrolls the list — always on the first one,
+  never over a reader who has scrolled up.
 
 **What it structurally cannot cover.** Every one of these is on a checklist below instead, and
 none of them should ever grow an assertion here that merely re-reads the source:
@@ -141,6 +149,32 @@ run by anything on this machine.
 21. **Rename a session on the Mac while its screen is open** — the title in the navigation bar
     changes. The session is read live out of the fleet rather than captured when the screen was
     pushed.
+22. **Open a session and check where it lands.** On the NEWEST message, not the oldest one of
+    the most recent page. A `List` draws oldest-first, so this is a programmatic scroll
+    (`SessionTimelineScreen.follow`) and the only part of it a test can reach is the rule about
+    *whether* to scroll — that the scroll itself happens is this item. It must not visibly
+    animate from the top.
+23. **Open a session, scroll up into the history, and let the agent keep working.** New rows
+    land below without moving what is being read. Then scroll back to the bottom: from there
+    on, arriving rows are followed. This is the one behaviour the 1.5s poll can ruin, and it
+    ruins it continuously rather than once.
+24. **Give an open session a multi-step task on the Mac** — new rows land on the phone
+    throughout the turn, not all at once at the end. Item 3 does not cover this: a rename fires
+    an event and a long busy turn fires none, which is exactly the case the poll exists for.
+25. **Leave the session screen** — the Mac's log shows the timeline requests stop. An idle
+    session's screen never issues one at all.
+26. **Tap a `Bash` row.** The full command and its full output, each with a working Copy button,
+    and the text is selectable as well. Then tap a row for a tool result whose call is NOT on
+    screen (page back until one is orphaned): it must show the OUTPUT, not the first line of it.
+27. **Open a **codex** session and a **claude** session side by side while both are working.**
+    Claude's footer may read "Working — 2 subagents"; codex's says only "Working", **never
+    "0 subagents"** — codex writes no sub-agent record of any kind, so its count of 0 means
+    unknown, not none.
+28. **Neither agent shows a cursor, a caret, or a typing animation, at any point.** Both are
+    read from files that carry whole records, so a live cursor would be a fiction.
+29. **Look at a long conversation at the largest accessibility text size.** Rows grow; the
+    symbol column, the timestamp and the tool cards do not collide or clip. Rendered offscreen
+    at `.accessibilityExtraExtraExtraLarge` and it holds, but a render is not a device.
 
 ## A second checklist: the iOS plumbing
 
@@ -215,6 +249,29 @@ drawing "Load earlier", three monospaced rows with their disclosure chevrons, an
 something rendered, and the assertion that would guard it is a count of collection-view cells,
 which is exactly the brittle shape this file warns against. Reach for it when a screen changes
 shape and you want to *look* at it, not to hold it in place.
+
+**It is also how the timeline's design was chosen**, rather than argued. Three whole screens —
+a dense monospaced transcript, a chat thread, and the structured feed that shipped — were built
+against one fixture conversation holding a real `Bash` call with multi-line output, a long
+assistant message, a thinking block, a 64 KB truncated file read, a failed command and an
+`.unknown` kind, and rendered in both themes at 402×874. The renders settled two things reading
+the code did not: monospaced prose fits about 38 characters to the line on a phone and turns a
+long answer into a grey wall, and a `.toolResult` rendered through the command slot showed the
+*first line* of that 64 KB read and dropped the rest. The PNGs are in
+`.superpowers/sdd/ui-renders/`. Two traps, both cost a round of confusion:
+
+- **A programmatic `scrollTo` renders BLANK offscreen.** Every target tried — a 1pt trailing
+  sentinel, an 8pt one, the last row's own id — produced the same empty PNG, with and without a
+  `CATransaction.flush()`. `layer.render(in:)` does not see a scrolled `List`. This is a limit
+  of the technique, not a bug in the screen: the same scroll captured through
+  `xcrun simctl io <udid> screenshot` shows it working (that grab is
+  `ui-renders/verify-opens-on-newest.png`).
+- **For a framebuffer grab, the window must be attached to the app's `UIWindowScene`** and sit
+  above the host's own window (`windowLevel = .alert + 100`). A `UIWindow(frame:)` in a
+  scene-based app belongs to no scene and is never composited — the screenshot comes back
+  showing `PairingScreen` instead, which is the host app underneath. The camera prompt in that
+  grab is the host app's pairing screen behind the harness window; it is not part of the
+  design.
 
 10. **Type with a hardware keyboard, and paste a lowercase code.** Both come out
     `XXXX-XXXX-XXXX` in uppercase, with `O` read as `0` and `I`/`L` as `1`. The rewrite itself

@@ -10,6 +10,12 @@ import SwiftUI
 /// is the truth it has: when the session's `activity` is `busy`, a footer says the agent is
 /// working. That is a claim about the SESSION, which is live, rather than about the last row,
 /// which is finished.
+///
+/// **It follows a live session and opens on the newest message**, which the first version did
+/// neither of. A `List` renders oldest-first, so a screen that simply drew the `.latest` page
+/// opened on the *oldest* message of the most recent page and then never moved again — two
+/// separate ways of showing a reader something that is not what they came for. `follow` below
+/// is the rule for both, and it will not take a reader who has scrolled up back down.
 struct SessionTimelineScreen: View {
     /// Read from the live fleet rather than captured at push time, so a title change, a
     /// status change or the session closing while this screen is open is visible here too.
@@ -24,51 +30,91 @@ struct SessionTimelineScreen: View {
     /// `FleetModel.timelineModel(for:)` caches one per tab id for exactly that reason.
     let model: SessionTimelineModel
 
+    /// The newest item the screen has already scrolled to, so arriving pages move it once each
+    /// rather than on every re-evaluation of the body.
+    @State private var lastFollowed: String?
+    /// Whether the end of the conversation is on screen. Driven by the sentinel row below
+    /// appearing and disappearing, and the only thing that separates "following a live turn"
+    /// from "yanking a reader out of the history they scrolled up to read".
+    @State private var readerIsAtBottom = true
+
     var body: some View {
-        List {
-            // Notices sit ABOVE the conversation whenever there is a conversation, because
-            // the only fetch a reader can trigger with content on screen is "Load earlier",
-            // and the bottom of a long list is somewhere they are not looking. See
-            // `topNotice`/`bottomNotice`: exactly one of the two ever answers.
-            if let notice = Self.topNotice(
-                phase: model.phase, hasItems: !model.feed.items.isEmpty,
-                isLoadingOlder: model.isLoadingOlder
-            ) {
-                noticeRow(notice)
-            }
-            // **Both conditions belong to the feed, and `hasOlder` is the one that decides.**
-            // `olderAnchor` is non-nil at the top of history too, so a row offered on the
-            // cursor alone would sit there forever re-requesting the first page.
-            if model.feed.hasOlder {
-                loadOlderRow
-            }
-            ForEach(model.feed.items) { item in
-                NavigationLink(value: item) {
-                    TimelineRow(item: item)
+        ScrollViewReader { scroll in
+            List {
+                // Notices sit ABOVE the conversation whenever there is a conversation, because
+                // the only fetch a reader can trigger with content on screen is "Load earlier",
+                // and the bottom of a long list is somewhere they are not looking. See
+                // `topNotice`/`bottomNotice`: exactly one of the two ever answers.
+                if let notice = Self.topNotice(
+                    phase: model.phase, hasItems: !model.feed.items.isEmpty,
+                    isLoadingOlder: model.isLoadingOlder
+                ) {
+                    noticeRow(notice)
                 }
-                .listRowInsets(Self.rowInsets)
+                // **Both conditions belong to the feed, and `hasOlder` is the one that decides.**
+                // `olderAnchor` is non-nil at the top of history too, so a row offered on the
+                // cursor alone would sit there forever re-requesting the first page.
+                if model.feed.hasOlder {
+                    loadOlderRow
+                }
+                ForEach(entries) { entry in
+                    NavigationLink(value: entry.item) {
+                        TimelineRow(
+                            item: entry.item, result: entry.result, agent: session?.agent
+                        )
+                    }
+                    .listRowInsets(Self.rowInsets)
+                    // The card and the tinted user turn are what separate one entry from the
+                    // next. A hairline through them as well draws a line across the middle of
+                    // a rounded panel, which is the same defect that keeps the fleet list
+                    // inset-grouped and this list plain.
+                    .listRowSeparator(.hidden)
+                }
+                if let notice = Self.bottomNotice(
+                    phase: model.phase, hasItems: !model.feed.items.isEmpty
+                ) {
+                    noticeRow(notice)
+                }
+                if !model.feed.items.isEmpty, let activity = Self.activityFooter(for: session) {
+                    activityRow(activity)
+                }
+                bottomSentinel
             }
-            if let notice = Self.bottomNotice(
-                phase: model.phase, hasItems: !model.feed.items.isEmpty
-            ) {
-                noticeRow(notice)
-            }
-            if !model.feed.items.isEmpty, let activity = Self.activityFooter(for: session) {
-                activityRow(activity)
+            // `.plain` HERE, unlike the fleet list, and the reason is the content rather than
+            // taste: this list holds full-width cards of command output, and inset-grouped's
+            // own card edges cut every one of them short and put a second rounded corner
+            // inside the first. The fleet list's own comment explains why IT keeps
+            // inset-grouped; the two screens differ because what they hold differs.
+            .listStyle(.plain)
+            // `initial: true` so the first page a screen ever draws is followed too. Without
+            // it the jump only happens on the SECOND page, and opening a session lands on the
+            // oldest row of the newest page — which is what shipped.
+            .onChange(of: model.feed.items.last?.id, initial: true) { _, newest in
+                guard let target = Self.follow(
+                    newest: newest, lastFollowed: lastFollowed,
+                    readerIsAtBottom: readerIsAtBottom
+                ) else { return }
+                let isFirst = lastFollowed == nil
+                lastFollowed = target
+                // Next run-loop turn, because the row being scrolled to is inserted by this
+                // same change and a `List` has not laid it out yet when `onChange` runs.
+                DispatchQueue.main.async {
+                    // The opening jump is not animated: a screen that visibly scrolls itself
+                    // from the top on every open reads as a bug. Following a live turn is,
+                    // because there the movement is the information.
+                    withAnimation(isFirst ? nil : .easeOut(duration: 0.2)) {
+                        scroll.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                    }
+                }
             }
         }
-        // `.plain` HERE, unlike the fleet list, and the reason is the content rather than
-        // taste: this list is prose and command output in a monospaced face, and
-        // inset-grouped's card edges cut every line short and put a rounded corner through
-        // the middle of a diff. The fleet list's own comment explains why IT keeps
-        // inset-grouped; the two screens differ because what they hold differs.
-        .listStyle(.plain)
         .navigationTitle(session?.title ?? "Session")
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(for: TimelineItem.self) { item in
             TimelineItemDetailScreen(
                 item: item,
-                result: Self.pairedResult(for: item, in: model.feed.items)
+                result: Self.pairedResult(for: item, in: model.feed.items),
+                agent: session?.agent
             )
         }
         // Keyed on the session, not on nothing: a `.task` re-firing over the SAME model is
@@ -83,11 +129,55 @@ struct SessionTimelineScreen: View {
         // send the mark from a gesture racing its own link, which is what stopped rows
         // opening at all. See `TimelinePaging`.
         .task(id: model.sessionID) { model.open() }
+        // The event trigger. `activity` and the title change live on the fleet socket, and a
+        // change to either is the cheapest possible signal that this session has moved — most
+        // importantly the busy → idle transition, which is the moment the last records of a
+        // turn have landed.
+        .onChange(of: session?.activity) { _, _ in model.loadNewer() }
+        // The timer, and it is not redundant with the event above: `emitActivity` on the Mac
+        // filters to genuine transitions, so a turn that runs busy for four minutes emits
+        // NOTHING in the middle of it. Without this, an open screen would sit unchanged
+        // through the whole turn and then fill in at the end.
+        //
+        // Only while busy, and only while the screen is on top: `.task` cancels on disappear,
+        // so an idle session and a backgrounded screen both cost nothing. The interval is a
+        // compromise a reader will accept — 1.5s is a beat behind a terminal and cheap enough
+        // that a page of nothing new is a handful of bytes.
+        .task(id: session?.activity) {
+            guard session?.activity == "busy" else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(1_500))
+                guard !Task.isCancelled else { return }
+                model.loadNewer()
+            }
+        }
     }
 
-    /// Matches the fleet list's row insets, so the two screens' left edges line up when one
-    /// pushes the other.
-    private static let rowInsets = EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16)
+    /// Matches the fleet list's leading inset, so the two screens' left edges line up when one
+    /// pushes the other. Taller than that list's, because these rows are cards rather than
+    /// single lines and a card needs air around it to read as one object.
+    private static let rowInsets = EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16)
+
+    /// The id of the row that marks the end of the conversation.
+    private static let bottomAnchor = "timeline.bottom"
+
+    /// A zero-height row at the very end, and it does two jobs that both need something to
+    /// exist down there: it is what `scrollTo` aims at — the last *entry* is the wrong target,
+    /// since a tall card scrolled to its own bottom still leaves the footer off screen — and
+    /// its appearing and disappearing is how the screen knows whether the reader is at the
+    /// live edge or up in the history.
+    private var bottomSentinel: some View {
+        Color.clear
+            .frame(height: 1)
+            .id(Self.bottomAnchor)
+            .listRowInsets(EdgeInsets())
+            .listRowSeparator(.hidden)
+            .accessibilityHidden(true)
+            .onAppear { readerIsAtBottom = true }
+            .onDisappear { readerIsAtBottom = false }
+    }
+
+    private var entries: [Entry] { Self.entries(from: model.feed.items) }
 
     /// A button, not an `onAppear` trigger. An automatic fetch on the top row appearing fires
     /// again on every bounce of an over-scroll and, worse, fires while the list is still
@@ -98,15 +188,20 @@ struct SessionTimelineScreen: View {
         Button {
             model.loadOlder()
         } label: {
-            HStack {
+            HStack(spacing: 6) {
                 Spacer()
                 if model.isLoadingOlder {
                     ProgressView().controlSize(.small)
                 } else {
-                    Text("Load earlier").font(.footnote)
+                    Image(systemName: "arrow.up").font(.caption2)
+                    Text("Load earlier").font(.footnote.weight(.medium))
                 }
                 Spacer()
             }
+            .padding(.vertical, 8)
+            .background(
+                Capsule().fill(Color(.secondarySystemBackground))
+            )
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
@@ -115,6 +210,73 @@ struct SessionTimelineScreen: View {
         // would lose the only way up through the conversation for as long as a fetch runs.
         .accessibilityLabel("Load earlier")
         .listRowInsets(Self.rowInsets)
+        .listRowSeparator(.hidden)
+    }
+
+    // MARK: One entry per thing that happened
+
+    /// A row's worth of conversation: an item, plus the result that answers it when the item
+    /// is a call and the feed holds one.
+    struct Entry: Identifiable, Hashable {
+        let item: TimelineItem
+        let result: TimelineItem?
+        var id: String { item.id }
+    }
+
+    /// Folds every tool result into the call it answers, so a command and its output are one
+    /// card rather than two rows that read as two unrelated events.
+    ///
+    /// **Paired on `callID` — the agent's own id — and never on position.** A session running
+    /// two tools at once interleaves their records, so "the next result" is a different call's
+    /// output about half the time, and a command captioned with another command's output is
+    /// worse than a command with no output shown at all.
+    ///
+    /// **A result is only folded away when its call is actually here.** A page boundary can
+    /// land between the two, and dropping a result whose call is on the previous page would
+    /// delete content from the screen — the one thing worse than showing it twice. So the set
+    /// of calls present is what decides, not merely the result having an id.
+    static func entries(from items: [TimelineItem]) -> [Entry] {
+        var resultsByCall: [String: TimelineItem] = [:]
+        var callsPresent: Set<String> = []
+        for item in items {
+            guard let callID = item.body.callID else { continue }
+            switch item.kind {
+            case .toolResult: if resultsByCall[callID] == nil { resultsByCall[callID] = item }
+            case .toolCall: callsPresent.insert(callID)
+            default: break
+            }
+        }
+        return items.compactMap { item in
+            guard let callID = item.body.callID else { return Entry(item: item, result: nil) }
+            switch item.kind {
+            case .toolCall:
+                return Entry(item: item, result: resultsByCall[callID])
+            case .toolResult:
+                return callsPresent.contains(callID) ? nil : Entry(item: item, result: nil)
+            default:
+                return Entry(item: item, result: nil)
+            }
+        }
+    }
+
+    // MARK: Following the live edge
+
+    /// The row to scroll to when the conversation changes, or `nil` to leave the reader alone.
+    ///
+    /// Three rules, and the third is the one with a defect behind it. The first page is always
+    /// followed, because a `List` draws oldest-first and the `.latest` page's newest record is
+    /// off the bottom of the screen — "opens on the most recent messages" is otherwise simply
+    /// false. Later pages are followed only while the end of the conversation is already on
+    /// screen. A reader who has scrolled up into the history is left exactly where they are:
+    /// a 1.5s poll that scrolled the list under them would make reading a finished turn
+    /// impossible for as long as the next one runs.
+    ///
+    /// `lastFollowed` is what stops a re-evaluated body from re-scrolling to a row it already
+    /// moved to, which reads as a list that fights the reader's finger.
+    static func follow(newest: String?, lastFollowed: String?, readerIsAtBottom: Bool) -> String? {
+        guard let newest, newest != lastFollowed else { return nil }
+        guard lastFollowed != nil else { return newest }
+        return readerIsAtBottom ? newest : nil
     }
 
     /// What the screen says about a fetch. Three phases, but the same phase means different
@@ -166,27 +328,60 @@ struct SessionTimelineScreen: View {
         }
     }
 
+    /// The three empty screens, drawn as screens rather than as a grey line of footnote text.
+    /// Each one is the *only* thing a reader sees when it appears, and a sentence flush against
+    /// the navigation bar with nothing else on the page reads as a rendering failure.
     @ViewBuilder
     private func noticeRow(_ notice: Notice) -> some View {
         switch notice {
         case .loading:
-            HStack {
-                Spacer()
+            VStack(spacing: 10) {
                 ProgressView()
-                Spacer()
+                Text("Loading conversation…").font(.footnote).foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, minHeight: 220)
             .listRowInsets(Self.rowInsets)
+            .listRowSeparator(.hidden)
         case .empty:
-            Text("No messages yet.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .listRowInsets(Self.rowInsets)
+            ContentUnavailableView(
+                "No messages yet",
+                systemImage: "bubble.left.and.bubble.right",
+                description: Text("This session hasn't said anything your Mac can read yet.")
+            )
+            .listRowInsets(Self.rowInsets)
+            .listRowSeparator(.hidden)
         case .failed(let message):
-            Text(message)
+            failureNotice(message)
+        }
+    }
+
+    /// The reason, and — when the whole screen is the failure — a way to try again.
+    ///
+    /// With a conversation on screen there is deliberately **no** button here: the failure is
+    /// almost always the "Load earlier" tap, and that button is the row directly below this
+    /// one. A second control doing the same job one row apart is how a reader ends up
+    /// re-issuing a fetch they cannot see the state of.
+    private func failureNotice(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(message, systemImage: "exclamationmark.triangle.fill")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-                .listRowInsets(Self.rowInsets)
+                .fixedSize(horizontal: false, vertical: true)
+            if model.feed.items.isEmpty {
+                Button("Try again") { model.loadLatest() }
+                    .font(.footnote.weight(.medium))
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(.secondarySystemBackground))
+        )
+        .listRowInsets(Self.rowInsets)
+        .listRowSeparator(.hidden)
     }
 
     /// The only live claim on the screen, and it is about the session rather than about the
@@ -232,18 +427,23 @@ struct SessionTimelineScreen: View {
     private func activityRow(_ activity: Activity) -> some View {
         switch activity {
         case .working(let text):
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 ProgressView().controlSize(.mini)
-                Text(text)
+                Text(text).font(.footnote)
+                Spacer(minLength: 0)
             }
-            .font(.footnote)
             .foregroundStyle(.secondary)
+            .padding(.vertical, 8)
             .listRowInsets(Self.rowInsets)
+            .listRowSeparator(.hidden)
         case .waiting(let text):
             Label(text, systemImage: "questionmark.circle.fill")
                 .font(.footnote)
                 .foregroundStyle(.orange)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .listRowInsets(Self.rowInsets)
+                .listRowSeparator(.hidden)
         }
     }
 
