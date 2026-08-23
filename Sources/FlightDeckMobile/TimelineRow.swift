@@ -1,4 +1,5 @@
 import FleetKit
+import MarkdownUI
 import SwiftUI
 
 /// One entry in a conversation, as a row.
@@ -22,10 +23,15 @@ import SwiftUI
 ///   are. `SessionTimelineScreen.entries(from:)` does the folding, on `callID` and never on
 ///   position.
 ///
-/// **The text is rendered, never parsed** — here and on the detail screen. A body is cut at the
-/// per-item byte cap wherever that lands (mid-object, mid-string, mid-escape), so a truncated
-/// tool input is not parseable JSON by design, and a row that tried to decode one would show
-/// nothing for exactly the largest inputs.
+/// **A MACHINE body is rendered, never parsed** — here and on the detail screen. A body is cut
+/// at the per-item byte cap wherever that lands (mid-object, mid-string, mid-escape), so a
+/// truncated tool input is not parseable JSON by design, and a row that tried to decode one
+/// would show nothing for exactly the largest inputs. Prose is the exception and only prose:
+/// `.assistantText` and `.userTurn` are drawn as the Markdown they were written in, because
+/// half of every real assistant message is inline code and one in seven carries a heading, a
+/// list or a fence that reads as literal syntax without a parser. `TimelineStyle
+/// .rendersMarkdown` is the whole of that boundary, and its `false` arm is why it is a
+/// function and not an `if`.
 struct TimelineRow: View {
     let item: TimelineItem
     /// The `.toolResult` that answers `item`, folded into this row. Nil for a prose kind, for
@@ -118,20 +124,53 @@ struct TimelineRow: View {
     @ViewBuilder
     private var prose: some View {
         if !item.body.text.isEmpty {
-            Text(item.body.text)
-                .font(proseFont)
-                .italic(item.kind == .thinking)
-                .foregroundStyle(proseColor)
+            proseBody
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .multilineTextAlignment(.leading)
-                // Clamped, and the row taps through for the rest. Unclamped, one long
-                // assistant message fills the screen and the conversation around it is
-                // invisible — which the renders showed and the code did not.
-                .lineLimit(proseLineLimit)
                 .padding(item.kind == .userTurn ? 10 : 0)
                 .background(userTurnBackground)
         }
     }
+
+    /// Markdown for the two kinds a human wrote (`TimelineStyle.rendersMarkdown`), plain text
+    /// for the rest — and **clamped either way**, because unclamped one long assistant message
+    /// fills the screen and the conversation around it is invisible, which the renders showed
+    /// and the code did not.
+    ///
+    /// The two clamps are the same clamp said twice, and they have to be: `.lineLimit` does not
+    /// reach a `Markdown` view usefully. It is a `VStack` of blocks, so a limit lands on each
+    /// paragraph *separately* — fourteen lines per paragraph is not a bound at all — and a
+    /// heading or a table has no line count to limit. So the Markdown side is bounded by
+    /// height, derived from the very same `proseLineLimit` the plain side passes to
+    /// `.lineLimit`, and never written down twice.
+    @ViewBuilder
+    private var proseBody: some View {
+        if TimelineStyle.rendersMarkdown(item) {
+            Markdown(item.body.text)
+                .markdownTheme(TimelineMarkdown.theme)
+                .font(proseFont)
+                .foregroundStyle(proseColor)
+                .frame(maxHeight: proseClamp, alignment: .top)
+                // The cut is what the chevron already promises, and it lands mid-line on
+                // purpose: a row that ends on a whole line looks finished, and a row that ends
+                // in the middle of one cannot be mistaken for the end of the message.
+                .clipped()
+        } else {
+            Text(item.body.text)
+                .font(proseFont)
+                .italic(item.kind == .thinking)
+                .foregroundStyle(proseColor)
+                .lineLimit(proseLineLimit)
+        }
+    }
+
+    /// One body line, at whatever size the reader set — `@ScaledMetric` is what makes the
+    /// height clamp above track Dynamic Type instead of pinning a row to fourteen lines of
+    /// 17pt text and four lines of 53pt text. 23pt is `.body`'s line height plus the 0.12em
+    /// `TimelineMarkdown.theme` adds between lines.
+    @ScaledMetric(relativeTo: .body) private var proseLineHeight: CGFloat = 23
+
+    private var proseClamp: CGFloat { proseLineHeight * CGFloat(proseLineLimit) }
 
     private var proseFont: Font {
         switch item.kind {

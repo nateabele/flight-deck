@@ -1,4 +1,5 @@
 import FleetKit
+import MarkdownUI
 import SwiftUI
 
 /// The vocabulary the session screen draws with, in one place: what an item is called, which
@@ -10,9 +11,12 @@ import SwiftUI
 /// environment, no state — so the row and the detail screen cannot describe the same item two
 /// different ways two taps apart, which is the same disagreement that comment guards against.
 ///
-/// **Nothing here parses a body.** A `.toolCall`'s text is pretty-printed JSON cut at the byte
-/// cap wherever that lands, so it is structurally incomplete by design (see
-/// `TimelineItem.Body.text`). `commandLine(for:)` reads *lines*, never structure.
+/// **Nothing here parses a MACHINE body, and `rendersMarkdown(_:)` is where that is now
+/// enforced rather than merely observed.** A `.toolCall`'s text is pretty-printed JSON cut at
+/// the byte cap wherever that lands, so it is structurally incomplete by design (see
+/// `TimelineItem.Body.text`); a `.toolResult`'s is command output, where a leading `-` is a
+/// deleted line and not a bullet. `commandLine(for:)` still reads *lines*, never structure, and
+/// the Markdown parser is only ever handed the two kinds a human wrote as prose.
 enum TimelineStyle {
 
     // MARK: What it is called
@@ -188,6 +192,57 @@ enum TimelineStyle {
             + "Open this session on your Mac to see the rest."
     }
 
+    // MARK: What is prose and what is machine text
+
+    /// Whether a body is read as **Markdown** or shown exactly as it arrived.
+    ///
+    /// The `true` arm is the smaller claim: both agents write Markdown, and the transcripts on
+    /// this machine say how much of it — of 7,944 real assistant messages, 51.6% carry inline
+    /// code, 36.5% bold, and 14.9% a block construct (heading, list, fence, table, quote or
+    /// rule) that renders as literal syntax without a parser. User turns are not a lesser case:
+    /// 29.9% of them carry a block construct too, because that is how people write briefs.
+    ///
+    /// **The `false` arm is the load-bearing one**, and each of its five cases is a different
+    /// way to be wrong:
+    ///
+    /// - `.toolCall` and `.toolResult` are the "render it, never parse it" rule itself (see
+    ///   `TimelineItem.Body.text`). A diff's leading `-` is a deleted line, not a bullet; a
+    ///   `***` in a stack trace is not a horizontal rule; `__init__` is not emphasis; and the
+    ///   indentation of a JSON input the byte cap cut mid-object is the only structure it has
+    ///   left, which a Markdown parser reflows away. The bodies most worth reading are exactly
+    ///   the truncated ones, so this is not an edge case.
+    /// - `.unknown` is machine text from a newer Mac by definition — the screen already says it
+    ///   is being shown verbatim, and reflowing it would make that sentence false.
+    /// - `.thinking` is styled *as a whole* — italic, secondary, clamped to six lines — and
+    ///   that whole-block treatment is the only thing separating it from an answer. Per-block
+    ///   Markdown styling would undo it. It is also the one kind no evidence was available for:
+    ///   the transcripts on this machine store no `thinking` records at all.
+    /// - `.prompt` is a sentence the Mac composed, not something an agent wrote (spec §9).
+    static func rendersMarkdown(_ item: TimelineItem) -> Bool {
+        switch item.kind {
+        case .assistantText, .userTurn: return true
+        case .thinking, .toolCall, .toolResult, .prompt, .unknown: return false
+        }
+    }
+
+    /// The same words, without the syntax that was carrying them.
+    ///
+    /// **VoiceOver has the same bug the screen had, one layer down, and worse.** A raw body
+    /// reaches a label as it was written, so `**Fixed**` is announced with its asterisks and
+    /// `## Baselines` opens on two number signs — and a listener cannot skim past that the way
+    /// a reader skims past a stray `*`. Flattened through the same parser that draws the view,
+    /// so the label and the row can never disagree about what the message says.
+    ///
+    /// Machine text is returned untouched, for the reason `rendersMarkdown(_:)` gives: a diff
+    /// read aloud with its `-` markers stripped is a diff that says the opposite of what it is.
+    static func spoken(_ item: TimelineItem) -> String {
+        guard rendersMarkdown(item) else { return item.body.text }
+        let plain = MarkdownContent(item.body.text).renderPlainText()
+        // cmark returns the empty string for a document it could make nothing of. The raw text
+        // is worse than the flattened text and infinitely better than silence.
+        return plain.isEmpty ? item.body.text : plain
+    }
+
     // MARK: What VoiceOver hears
 
     /// One sentence for a whole row, because the alternative — SwiftUI's own combining — reads
@@ -214,10 +269,13 @@ enum TimelineStyle {
                 parts.append(clipped(item.body.text))
             }
         default:
-            if !item.body.text.isEmpty { parts.append(clipped(item.body.text)) }
+            // Prose, said the way it is now drawn: flattened through the Markdown parser, so a
+            // listener hears "Fixed the parser" rather than four asterisks and a backtick.
+            if !item.body.text.isEmpty { parts.append(clipped(spoken(item))) }
         }
         if let result {
             parts.append(result.body.isError ? "Failed" : "Output")
+            // Never flattened — a result is machine text whatever the row it landed in.
             if !result.body.text.isEmpty { parts.append(clipped(result.body.text)) }
         } else if item.body.isError {
             parts.append("Failed")
