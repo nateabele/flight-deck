@@ -534,6 +534,12 @@ public final class FleetSocketServer: @unchecked Sendable {
                 guard self.attached[id] != nil else { return connection.cancel() }
                 let reply = self.onCommand?(attachment, cid, command) ?? .err(cid: cid, code: "unhandled")
                 FleetSocket.send(reply, over: connection)
+            case .req(let cid, _):
+                // Nothing serves requests yet. Answered rather than ignored, and with the
+                // same `unhandled` code an unwired command gets: a client whose fetch is
+                // dropped in silence waits for a reply that is never coming.
+                guard self.attached[id] != nil else { return connection.cancel() }
+                FleetSocket.send(ServerFrame.err(cid: cid, code: "unhandled"), over: connection)
             }
         } onEnd: { [weak self] _ in
             guard let self else { return }

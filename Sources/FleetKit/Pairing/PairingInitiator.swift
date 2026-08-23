@@ -84,8 +84,9 @@ public final class PairingInitiator: @unchecked Sendable {
         // anyone on the LAN holding a copy of the binary can publish, so its peer here is
         // exactly as unauthenticated as the listener's. The whole server vocabulary is a
         // 32-byte curve point, a 32-byte MAC and a sealed key of a few hundred bytes; the
-        // 1 MiB fleet default would let a spoofed advertisement make the stack buffer a
-        // megabyte before any of this code sees a frame.
+        // fleet default (`TimelineLimits.maximumMessageSize`, sized for a page rather than
+        // for this) would let a spoofed advertisement make the stack buffer megabytes before
+        // any of this code sees a frame.
         let parameters = FleetSocket.webSocketParameters(
             FleetTLS.pairingClientParameters(),
             maximumMessageSize: PairingListener.maxFrameBytes

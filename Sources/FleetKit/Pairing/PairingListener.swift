@@ -50,8 +50,8 @@ public final class PairingListener: @unchecked Sendable {
     public static let maxPending = 4
 
     /// The largest frame this socket will receive, and the reason it is not
-    /// `FleetSocket.maximumMessageSize`: every peer here is *unauthenticated*, so this is the
-    /// one socket in the app where a stranger can make the stack allocate. The whole
+    /// `TimelineLimits.maximumMessageSize`: every peer here is *unauthenticated*, so this
+    /// is the one socket in the app where a stranger can make the stack allocate. The whole
     /// vocabulary is four small frames — a 32-byte curve point, a 32-byte MAC, a sealed key of
     /// a few hundred bytes — so 16 KiB is three orders of magnitude of headroom and still
     /// nothing a peer can use. See `FleetSocket.webSocketParameters` for what the absent

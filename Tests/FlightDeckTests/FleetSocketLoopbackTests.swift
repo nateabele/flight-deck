@@ -472,4 +472,85 @@ final class FleetSocketLoopbackTests: XCTestCase {
 
         client.disconnect()
     }
+
+    // MARK: The receive cap
+
+    /// Builds a `page` frame whose JSON is `bytes` long, near enough. One item's `text` is the
+    /// only field big enough to steer, and JSON escaping does not touch `a`.
+    private func page(ofRoughly bytes: Int) -> ServerFrame {
+        .page(cid: 1, TimelinePage(
+            session: sessionID,
+            items: [TimelineItem(id: "0#0", kind: .assistantText, status: .complete,
+                                 body: .init(text: String(repeating: "a", count: bytes)))],
+            start: 0, end: bytes, hasMore: false, reset: false
+        ))
+    }
+
+    /// The receive cap, tested through the socket rather than by reading the option back.
+    ///
+    /// **Reading it back does not work and cannot be made to:**
+    /// `NWParameters.defaultProtocolStack.applicationProtocols` hands out a fresh *copy* of
+    /// each options object on every access — `first === first` is false — and the copy carries
+    /// none of what was set on the original. Measured on this SDK: after setting
+    /// `autoReplyPing = true` and `maximumMessageSize = 4_194_304`, the object read back from
+    /// the stack reports `false` and `0`. An assertion on that value fails against correct
+    /// code and passes against nothing, so the only honest check is what the socket does.
+    ///
+    /// What it does, measured: the oversize message is never delivered and the connection
+    /// ends. Without the cap the same frame arrives whole, which is the unbounded allocation
+    /// on a phone that setting it exists to prevent (`ws_options.h`: "A maximum message size
+    /// of 0 means there is no receive limit").
+    func testAFrameAboveTheReceiveCapIsRefusedRatherThanBuffered() async throws {
+        let key = FleetDeviceKey.mint()
+        let port = try await startServer(key: key, hello: { _, _ in
+            [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)]
+        })
+
+        let arrived = expectation(description: "the oversize page reached application code")
+        arrived.isInverted = true
+        let ended = expectation(description: "the connection ended")
+        let client = connect(key: key, port: port)
+        client.onFrame = { if case .page = $0 { arrived.fulfill() } }
+        client.onDisconnect = { _ in ended.fulfill() }
+
+        let attached = expectation(description: "attached")
+        server?.onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
+        wait(for: [attached], timeout: 10)
+        if let server {
+            let frame = page(ofRoughly: TimelineLimits.maximumMessageSize + 65_536)
+            try await onMain { server.broadcast(frame) }
+        }
+        // The inverted expectation is waited on separately and briefly: once the connection
+        // has ended there is nothing left to deliver the frame, and an inverted expectation
+        // always burns its whole timeout.
+        wait(for: [ended], timeout: 10)
+        wait(for: [arrived], timeout: 1)
+    }
+
+    /// The other side of the same number, because a cap that refuses a legitimate page would
+    /// pass the test above perfectly. A worst-case page — `maxPageBytes` of body, before JSON
+    /// escaping has had its way with it — has to cross this socket intact.
+    func testAWorstCasePageIsUnderTheReceiveCap() async throws {
+        let key = FleetDeviceKey.mint()
+        let port = try await startServer(key: key, hello: { _, _ in
+            [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)]
+        })
+
+        let arrived = expectation(description: "the page reached application code")
+        let client = connect(key: key, port: port)
+        client.onFrame = { frame in
+            guard case .page(1, let page) = frame else { return }
+            XCTAssertEqual(page.items.first?.body.text.count, TimelineLimits.maxPageBytes)
+            arrived.fulfill()
+        }
+
+        let attached = expectation(description: "attached")
+        server?.onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
+        wait(for: [attached], timeout: 10)
+        if let server {
+            let frame = page(ofRoughly: TimelineLimits.maxPageBytes)
+            try await onMain { server.broadcast(frame) }
+        }
+        wait(for: [arrived], timeout: 10)
+    }
 }

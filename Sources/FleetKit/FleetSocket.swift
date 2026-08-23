@@ -8,11 +8,6 @@ import Network
 /// idle timeout, and a relay (§3, out of scope but designed for) speaks WebSocket
 /// everywhere and a bespoke framing nowhere.
 enum FleetSocket {
-    /// The receive bound for a peer that had to hold a paired key to get here. Generous —
-    /// a snapshot of a large fleet is the biggest thing on this wire — because the peer is
-    /// already authenticated and the bound is a backstop, not a policy.
-    static let maximumMessageSize = 1 << 20
-
     /// `maximumMessageSize` is not optional here, and its default is not
     /// `NWProtocolWebSocket.Options`': that one is **0, meaning no receive limit at all**
     /// (`ws_options.h:313-314`), so a peer can make the stack buffer an arbitrarily large
@@ -26,8 +21,14 @@ enum FleetSocket {
     /// The two sockets pass different bounds because their peers are different populations:
     /// the fleet listener's have completed a TLS-PSK handshake against a paired key, the
     /// pairing listener's have proved nothing (`PairingListener.maxFrameBytes`).
+    ///
+    /// The fleet bound itself lives in `TimelineLimits` with the rest of this feature's
+    /// budget rather than here, because it is sized by what a page costs. There is one
+    /// receive cap in the tree and one place to read it from — two constants of the same
+    /// name disagreeing about the same job is how a socket ends up bounded by whichever one
+    /// the reader happened to find.
     static func webSocketParameters(
-        _ base: NWParameters, maximumMessageSize: Int = maximumMessageSize
+        _ base: NWParameters, maximumMessageSize: Int = TimelineLimits.maximumMessageSize
     ) -> NWParameters {
         let options = NWProtocolWebSocket.Options()
         // Answer the peer's pings in the stack rather than in application code: a keepalive
