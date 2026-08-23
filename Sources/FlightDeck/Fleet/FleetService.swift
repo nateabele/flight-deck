@@ -435,13 +435,23 @@ final class FleetService: ObservableObject {
         case .markUnread(let id):
             guard store.sessionExists(id) else { return .err(cid: cid, code: "unknown_session") }
             store.markUnread(id)
-        case .prompt:
-            // Wired for real in Task 6. Refused rather than acked in the meantime, so an
-            // intermediate build cannot silently claim to have typed something.
-            return .err(cid: cid, code: "unhandled")
+        case .prompt(let id, let token, let text):
+            // Every refusal, "no such tab" included, is the store's to make: it is the only
+            // thing that knows the tab's agent, its status and whether it has a surface, and
+            // splitting the checks across two files is how they drift. `sessionExists` above
+            // stays where it is for the two commands that have nothing else to check.
+            //
+            // No validation is repeated here and none should be added. §5's rule is that a
+            // command with no existing store method gets one added to the store rather than a
+            // special case in the replicator; this is that method.
+            if let code = store.submitPrompt(text, token: token, to: id).errorCode {
+                return .err(cid: cid, code: code)
+            }
         }
-        // `ack` means dispatched, not done. The observable effect arrives separately as the
-        // northbound `session.unread` event this command's store call just recorded.
+        // `ack` means dispatched, not done. For the two read marks the observable effect is
+        // the northbound `session.unread` event the store call just recorded; for a prompt it
+        // is the `.userTurn` the agent writes into its own transcript, which the phone reads
+        // back over the history channel. One rule for both, which is why they share a frame.
         return .ack(cid: cid)
     }
 }
