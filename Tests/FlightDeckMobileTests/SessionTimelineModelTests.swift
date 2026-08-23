@@ -11,6 +11,8 @@ import XCTest
 @MainActor
 private final class StubPager: TimelinePaging {
     private(set) var requests: [FleetRequest] = []
+    /// Every session this pager was told had been looked at, in order.
+    private(set) var marksRead: [UUID] = []
     private var pending: [(Result<TimelinePage, FleetRequestError>) -> Void] = []
 
     /// When set, every request is answered **before `timelinePage` returns** — the
@@ -34,6 +36,8 @@ private final class StubPager: TimelinePaging {
         if let answer = answerBeforeReturning { return completion(answer) }
         pending.append(completion)
     }
+
+    func markRead(_ id: UUID) { marksRead.append(id) }
 
     /// Answers the oldest outstanding request, the way the socket resolves a `cid`.
     func answer(_ result: Result<TimelinePage, FleetRequestError>, line: UInt = #line) {
@@ -102,6 +106,45 @@ final class SessionTimelineModelTests: XCTestCase {
     }
 
     // MARK: Opening a session
+
+    /// **Where the read mark comes from, and why it moved here.**
+    ///
+    /// The fleet list used to send it from a `.simultaneousGesture(TapGesture())` hung off
+    /// each row's `NavigationLink` — a second recogniser competing for the tap that opens the
+    /// session, which swallowed enough of them that rows stopped opening at all. Opening the
+    /// conversation is the "I have looked at this" spec §8's unread means, so the mark
+    /// belongs on the screen that opens rather than on a gesture that might not have opened
+    /// anything.
+    ///
+    /// Both halves asserted together, not two tests: `open()` exists precisely because they
+    /// are one event, and a version that marked read without fetching (or fetched without
+    /// marking) would pass a test that only looked at its own half.
+    func testOpeningASessionTellsTheMacItHasBeenLookedAtAndAsksForTheLatest() {
+        let pager = StubPager()
+        let model = model(pager)
+
+        model.open()
+
+        XCTAssertEqual(pager.marksRead, [session], "opening a session is what marks it read")
+        XCTAssertEqual(pager.anchors, [.latest], "and it still asks for the conversation")
+    }
+
+    /// Coming back to a screen marks it again, and that is deliberate: a session that
+    /// finished while the reader was elsewhere is unread again by then, and looking at it a
+    /// second time is as much a look as the first. The Mac collapses a mark for a session
+    /// that is already read — `setUnread` returns early on an unchanged flag — so the cost of
+    /// being wrong in this direction is one frame, against a row that stays bold forever if
+    /// this only ever fired once.
+    func testComingBackToASessionMarksItReadAgainRatherThanOnlyTheFirstTime() {
+        let pager = StubPager()
+        let model = model(pager)
+
+        model.open()
+        pager.answer(tail())
+        model.open()
+
+        XCTAssertEqual(pager.marksRead, [session, session])
+    }
 
     func testOpeningASessionAsksForTheLatestAndSpinsUntilThePageLands() {
         let pager = StubPager()

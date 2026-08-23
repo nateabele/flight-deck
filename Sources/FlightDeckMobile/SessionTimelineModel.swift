@@ -2,20 +2,35 @@ import FleetKit
 import Foundation
 import Observation
 
-/// The one thing a session screen needs from the fleet: a page, or a reason there is not one.
+/// What a session screen needs from the fleet: a page, or a reason there is not one — and a
+/// way to say the reader is looking at this session.
 ///
-/// A protocol over `FleetModel`'s single method rather than `FleetModel` itself, for exactly
-/// one reason: `FleetModel`'s connector is private and answers nothing without a real socket,
-/// a real pairing and a real Mac, so a screen model that took the concrete type could not
-/// have a single phase transition asserted — and the phases below are where a spinner gets
-/// stuck and where an error gets swallowed. One method wide and `AnyObject`-bound, so it adds
-/// no seam the app can drift into using for anything else.
+/// A protocol over `FleetModel`'s methods rather than `FleetModel` itself, for exactly one
+/// reason: `FleetModel`'s connector is private and answers nothing without a real socket, a
+/// real pairing and a real Mac, so a screen model that took the concrete type could not have
+/// a single phase transition asserted — and the phases below are where a spinner gets stuck
+/// and where an error gets swallowed.
+///
+/// **`markRead` is here rather than on the list screen, and that placement is the fix to a
+/// real bug.** The fleet list used to send it from a `.simultaneousGesture(TapGesture())`
+/// hung off each row's `NavigationLink`, which is a second recogniser competing for the tap
+/// that opens the session — and it swallowed enough of them that rows stopped opening at
+/// all. Opening the conversation is the "I have looked at this" the mark means, so the mark
+/// belongs where the conversation opens. See `FleetListScreen.sessionRow`.
+///
+/// Deliberately no wider than these two. Anything else a screen wants from the fleet is a
+/// seam this app can drift into using for something that is not a session screen.
 @MainActor
 protocol TimelinePaging: AnyObject {
     func timelinePage(
         _ request: FleetRequest,
         then completion: @escaping (Result<TimelinePage, FleetRequestError>) -> Void
     )
+
+    /// Tells the Mac this session has been looked at. Fire and forget in both directions:
+    /// the command is a no-op while disconnected, and the row does not change until the Mac
+    /// echoes the fact back as an event.
+    func markRead(_ id: UUID)
 }
 
 /// One open session screen.
@@ -67,6 +82,24 @@ final class SessionTimelineModel {
         self.sessionID = sessionID
         self.fleet = fleet
         self.timeout = timeout
+    }
+
+    /// The screen came on: the reader is looking at this session, and the feed has to be
+    /// current.
+    ///
+    /// Both halves, in that order, because they are one event. Marking read first costs
+    /// nothing if the fetch fails — the reader is still looking at the session either way,
+    /// and spec §8's unread is about attention rather than about content having arrived.
+    ///
+    /// Called from `SessionTimelineScreen`'s `.task(id:)`, so it runs again whenever the
+    /// screen comes back, which is correct for both halves: a session that went unread again
+    /// while the reader was elsewhere is being looked at again now, and `loadLatest` asks for
+    /// what is new rather than for the end of the file (see below). An unread mark for a
+    /// session that is already read costs one frame and changes nothing — the Mac's
+    /// `setUnread` returns early on an unchanged flag and emits no event.
+    func open() {
+        fleet.markRead(sessionID)
+        loadLatest()
     }
 
     /// Make the screen current: the opening fetch, the fetch on coming back to a screen whose
