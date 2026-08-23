@@ -476,7 +476,9 @@ final class FleetSocketLoopbackTests: XCTestCase {
     // MARK: The receive cap
 
     /// Builds a `page` frame whose JSON is `bytes` long, near enough. One item's `text` is the
-    /// only field big enough to steer, and JSON escaping does not touch `a`.
+    /// only field big enough to steer, and JSON escaping does not touch `a` — which is the
+    /// point for steering the size and the reason this cannot speak to escaping inflation.
+    /// `testAWorstCasePageClearsTheCapEvenAfterEscaping` covers that separately.
     private func page(ofRoughly bytes: Int) -> ServerFrame {
         .page(cid: 1, TimelinePage(
             session: sessionID,
@@ -525,6 +527,19 @@ final class FleetSocketLoopbackTests: XCTestCase {
         // always burns its whole timeout.
         wait(for: [ended], timeout: 10)
         wait(for: [arrived], timeout: 1)
+    }
+
+    /// The headroom, which is arithmetic over two constants and never needed the accessor
+    /// that made the rest of this untestable in-process. `maxPageBytes` is a budget of *source*
+    /// bytes; what crosses the wire is that text JSON-escaped, and a body of control characters
+    /// inflates roughly six-fold (`\u0000`). The socket tests below cannot see this — they
+    /// steer the frame size with `a`, which escapes to itself — so a cap of 200_000 would pass
+    /// both of them while refusing a legitimate worst-case page.
+    func testAWorstCasePageClearsTheCapEvenAfterEscaping() {
+        XCTAssertGreaterThan(
+            TimelineLimits.maximumMessageSize, TimelineLimits.maxPageBytes * 2,
+            "the cap must clear a worst-case page after JSON escaping"
+        )
     }
 
     /// The other side of the same number, because a cap that refuses a legitimate page would

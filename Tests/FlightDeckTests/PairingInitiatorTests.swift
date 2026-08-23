@@ -164,8 +164,13 @@ final class PairingInitiatorTests: XCTestCase {
         private var connection: NWConnection?
 
         init() throws {
+            // `PairingListener`'s own cap, explicitly: the default is the fleet number and
+            // this stands in for the pairing listener, not for a fleet one.
             listener = try NWListener(
-                using: FleetSocket.webSocketParameters(FleetTLS.pairingListenerParameters())
+                using: FleetSocket.webSocketParameters(
+                    FleetTLS.pairingListenerParameters(),
+                    maximumMessageSize: PairingListener.maxFrameBytes
+                )
             )
         }
 
@@ -232,8 +237,13 @@ final class PairingInitiatorTests: XCTestCase {
         var onFrame: (@Sendable () -> Void)?
 
         init() throws {
+            // `PairingListener`'s own cap, explicitly: the default is the fleet number and
+            // this stands in for the pairing listener, not for a fleet one.
             listener = try NWListener(
-                using: FleetSocket.webSocketParameters(FleetTLS.pairingListenerParameters())
+                using: FleetSocket.webSocketParameters(
+                    FleetTLS.pairingListenerParameters(),
+                    maximumMessageSize: PairingListener.maxFrameBytes
+                )
             )
         }
 

@@ -32,7 +32,14 @@ final class PairingTestClient: @unchecked Sendable {
     }
 
     func start() {
-        let parameters = FleetSocket.webSocketParameters(FleetTLS.pairingClientParameters())
+        // The cap production dials with (`PairingInitiator`), passed explicitly rather than
+        // defaulted: the default is the FLEET number, sized for a page, and a harness that
+        // silently sat 256x above the code it stands in for would make the next test that
+        // reasons about this socket's bound reason about the wrong one.
+        let parameters = FleetSocket.webSocketParameters(
+            FleetTLS.pairingClientParameters(),
+            maximumMessageSize: PairingListener.maxFrameBytes
+        )
         let connection = NWConnection(
             to: FleetSocket.webSocketEndpoint(for: endpoint), using: parameters
         )
@@ -104,7 +111,14 @@ final class PairingProbe: @unchecked Sendable {
     }
 
     func start() {
-        let parameters = FleetSocket.webSocketParameters(FleetTLS.pairingClientParameters())
+        // The cap production dials with (`PairingInitiator`), passed explicitly rather than
+        // defaulted: the default is the FLEET number, sized for a page, and a harness that
+        // silently sat 256x above the code it stands in for would make the next test that
+        // reasons about this socket's bound reason about the wrong one.
+        let parameters = FleetSocket.webSocketParameters(
+            FleetTLS.pairingClientParameters(),
+            maximumMessageSize: PairingListener.maxFrameBytes
+        )
         let connection = NWConnection(
             to: FleetSocket.webSocketEndpoint(for: .hostPort(host: "127.0.0.1", port: port)),
             using: parameters
