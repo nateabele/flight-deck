@@ -409,6 +409,88 @@ enum TimelineFixtures {
         at: "2026-08-20T03:05:05.173Z"
     )
 
+    /// A real four-sentence answer — bold, inline code, one paragraph — off
+    /// `~/.claude/projects/-Users-me/ed0a7d6a-…jsonl`. **The median case, and the one the
+    /// clamp was hurting most**: 4 wrapped lines against a 14-line clamp, so nothing was ever
+    /// cut, and the row still carried a chevron into a screen with the identical text on it.
+    static let assistantShortReply = TimelineItem(
+        id: "11980#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                **Found the leak**: `indexd` has opened **152,318** "Too many open files ... errno 24" handles in 6 hours (~7/sec), and the sync daemon + Spotlight are each burning ~45% CPU. Let me find when this started and what triggered it.
+                """#),
+        at: "2026-08-06T15:44:07.934Z"
+    )
+
+    /// A real 6,775-character answer with four `##` headings, three horizontal rules, nested
+    /// `###` sections and eleven bold runs — **201 lines** in the row's 42-character column,
+    /// past the 99th percentile of the 7,987 assistant messages on this machine, and 4,067pt
+    /// tall when nothing bounds it: six screenfuls of phone.
+    ///
+    /// **This is the body the ceiling is argued from.** Verbatim from
+    /// `~/.claude/projects/-Users-me/8261151b-…jsonl`, because a ceiling chosen against
+    /// invented text is a number somebody picked.
+    static let assistantVeryLongAnswer = TimelineItem(
+        id: "12240#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                All four agents are in. Here's the consolidated picture.
+
+                ## What Tidewell is
+
+                **Tidewell Labs** — a made-up harbor-logistics company used here as a worked example. Two founders, ~12 people, a seed round closed last winter, public launch this spring. Product is **Ferrylog**: a desktop and tablet app that tracks small-craft departures, berth bookings and tide windows in real time for marina operators, without any hardware installed on the docks. Notably, **a regional ferry cooperative is one of their named launch customers** — flagging in case that's the angle here.
+
+                ---
+
+                ## Architecture estimate
+
+                ### Client tier
+                **Tauri** (Rust shell, not Electron), shipping v0.48.2 — still pre-1.0. Universal macOS `.pkg` and Windows x64 installer from `downloads.tidewell.example`. Inside it, a **React + Vite + TypeScript SPA** that appears to be shared across desktop, web, and iOS/Android webviews. Stack from the chunk manifest and bundle: TanStack Query, Radix UI, Tailwind, Zustand, React Router, a map canvas, date-fns, lucide.
+
+                Offline support is the interesting part: **an embedded SQLite store** syncs through a small change-log protocol, so a harbor office with a bad uplink keeps working and reconciles later. The sync core ships **Swift and Kotlin** bindings — so they built one Rust core and are targeting native tablets with it, not just webviews. Auth is a hosted identity service plus a custom passwordless email-code flow layered on top.
+
+                ### Backend tier
+                A **Go monolith, internal codename `quay`**, almost certainly built on a common HTTP router — `api.tidewell.example` returns a terse fixed-length `404 page not found` body that matches the router's default handler. This is corroborated independently by package paths in the OpenAPI schema keys (`quay_api_handlers_public_v1_berths.*`), which also reveal the internal layout as `handlers/public/v1` and `handlers/partner` and confirm specs are generated from code annotations.
+
+                The User API and Partner API are **one deployment with two routing surfaces**, not separate services — they share error types and generic `ListResponse` shapes on the same host. Data layer is **Postgres with read replicas**: the health endpoint returns distinct `writer_pool` and `reader_pool` status. The webhook relay is the one non-Go piece — `hooks.tidewell.example` reports a Node runtime in its response headers.
+
+                They run their **own OAuth2/OIDC provider** (JWKS, authorize, token, introspect, revoke, userinfo, dynamic client registration), which is a meaningful build-vs-buy choice at this size.
+
+                ### Data / forecasting tier
+                **Tide and weather feeds come from public agencies**, normalized by a scheduled ingest job — this is hard evidence, not inference, since the job names appear in the status page. The forecasting tier is deliberately split onto a second cloud: `forecast.tidewell.example` sits behind a separate load balancer, while everything else lives in the primary region. The status page lists **Forecast A and B** as separate services, suggesting redundancy or two model versions run side by side.
+
+                Model hosting per the privacy policy: **a managed inference service** running a small set of commercial and open-weight models for berth-demand prediction and plain-language summaries.
+
+                ### Infrastructure
+                **A single primary region carries the main plane.** Load balancer + CDN + object storage with encryption at rest. **Four full environment tiers** — dev/beta/stage/prod — each with its own dedicated balancer. **Terraform** for IaC, including a hand-rolled custom provider for the third-party broker that manages partner OAuth. A managed DNS provider (mostly DNS-only, not proxied). A site builder for marketing, a static generator for docs, a self-hosted status page.
+
+                SaaS layer, essentially a complete inventory from the app's content security policy: **product analytics** (events, feature flags, *and* error capture — no separate crash reporter), a support-chat widget, an onboarding-tour tool, the OAuth broker, a transactional email service, plus a tag manager and a small retargeting suite. **No payment processor anywhere**, which fits sales-led billing rather than self-serve.
+
+                ---
+
+                ## Assessment
+
+                **The engineering maturity is well ahead of the company's size and age.** Four environment tiers, IaC with a custom provider, their own OIDC provider with dynamic registration, idempotency keys, per-principal rate limiting, a published security attestation, a partner API with proper scoping, and no exposed source maps — from ~12 people, ~6 months post-launch. That's a small senior team making deliberate infrastructure choices rather than accepting defaults, and it shows in how few rough edges the public surface has.
+
+                **The Partner API is roughly twice the User API** — 118 operations vs 61 — and contains an entire layer the marketing site never mentions: fleet integrations with versioning and installs, dispatch runs and steps, automations, crew sessions, partner single sign-on. Read plainly, the marina product is the wedge and the actual bet is an embeddable scheduling platform for anything that docks.
+
+                **Rough edges worth knowing**: specs are **Swagger 2.0** (no `oneOf`/`anyOf`; 170 partner schemas will be painful to evolve), pagination is **offset-based** over a mutating corpus — their own docs warn items shift between pages under concurrent writes. Internal hostnames are enumerable from certificate transparency, and one error body echoes an internal service name. None of these are vulnerabilities, just more surface than intended.
+
+                ---
+
+                ## Confidence
+
+                **Hard evidence** (fetched directly): Go backend, `quay` codename and internal package layout, Postgres with read replicas, the two-cloud split, four env tiers, Tauri + React/Vite client, the SQLite sync core, public tide feeds, Terraform with a custom provider, the full SaaS list, all API design details.
+
+                **Inferred but strong**: the Partner-API-as-real-product reading; Forecast A/B as redundancy.
+
+                **Genuinely unresolved**: `harbor.tidewell.example` and `pilot.tidewell.example` are named production services behind the balancer that return 403 — purpose unknown. I specifically checked the bundle for references to either name and found only false positives, so I'm *not* claiming what they do. And the **model mix is contradictory**: a launch interview mentioned self-hosted open-weight models, while the privacy policy names only a managed inference provider. These reconcile if open-weight models do ingest and summarization on the forecast tier and the managed provider handles the rest, but that's a guess — Tidewell has never published an architecture write-up.
+
+                One notable absence given the security attestation: **no subprocessor list exists anywhere** — no trust center, no `/subprocessors`, no `/security.txt`. The privacy policy is the only vendor disclosure they've published.
+
+                Want me to turn this into a diagram of the service topology, or dig deeper into any one tier — the Partner API surface being the most substantive remaining target?
+                """#),
+        at: "2026-08-07T22:40:29.136Z"
+    )
+
     static func session(
         title: String = "screen-s5 — session timeline", agent: String = "claude",
         activity: String? = "busy", waitingFor: String? = nil, subagentCount: Int = 2
