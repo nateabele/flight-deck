@@ -2717,6 +2717,193 @@ final class SessionStore: ObservableObject {
         flushPendingRename(id)
     }
 
+    // MARK: - A prompt from a paired phone
+
+    /// What a client's prompt did.
+    ///
+    /// Three cases ack and four refuse. The refusals are distinguished on the wire because
+    /// each sends the reader somewhere different: `unsupportedAgent` means never on this tab,
+    /// `notRunning` means not until something starts, and a `rejected` means edit the text.
+    /// One code for all four would leave someone retyping a message the Mac will never take.
+    enum PromptDispatch: Equatable {
+        /// Accepted, and the injection has started. `ack`.
+        case sent
+        /// Accepted and queued — the bar was busy, or claude has not finished booting. `ack`.
+        case queued
+        /// This token has already been accepted for this tab; nothing was queued a second
+        /// time. `ack`, because from the client's side a retry that lands is a send that
+        /// landed. See `acceptedPromptTokens`.
+        case duplicate
+        case rejected(PromptText.Rejection)
+        /// No such tab.
+        case unknownSession
+        /// This tab's agent has no route for a prompt. See `submitPrompt`.
+        case unsupportedAgent
+        /// Nothing to type into: no surface, no status, or a bare shell.
+        case notRunning
+
+        /// The wire spelling — `err`'s `code` — or `nil` for the three that ack. Computed
+        /// here rather than in `FleetService` so the mapping lives beside the decision.
+        var errorCode: String? {
+            switch self {
+            case .sent, .queued, .duplicate: return nil
+            case .rejected(let reason): return reason.rawValue
+            case .unknownSession: return "unknown_session"
+            case .unsupportedAgent: return "unsupported_agent"
+            case .notRunning: return "not_running"
+            }
+        }
+    }
+
+    /// One phone-sent prompt waiting for a moment when it can be typed.
+    ///
+    /// **Deliberately NOT `DeferredPrompt`/`pendingPrompts`**, which is one-per-tab with
+    /// REPLACE semantics and is cancelled the instant a session goes busy or waiting. Both
+    /// are right for what that queue holds — a restore's "Keep going" and a sign-in's
+    /// `/login`, where a second request supersedes the first and an agent that started
+    /// working on its own has already done the thing — and both are wrong here. Two messages
+    /// typed on a phone are two messages, in order. And a prompt arriving mid-turn is the
+    /// ORDINARY case rather than the edge one: mid-turn is when a person reaches for their
+    /// phone. Reusing that queue would have silently dropped the first of two prompts and
+    /// then cancelled the survivor at the next status change.
+    struct QueuedPrompt: Equatable {
+        let text: String
+        /// The client's idempotency key, kept so a flush can identify the entry it retires
+        /// without comparing text — two identical messages are two messages.
+        let token: UUID
+        /// When it stops being worth typing. See `phonePromptWindow`.
+        let deadline: Date
+    }
+
+    /// FIFO per tab. Internal rather than private so tests can watch a deferral stay
+    /// deferred, in the same style as `pendingPrompts`; nothing outside this type writes it.
+    private(set) var promptQueue: [UUID: [QueuedPrompt]] = [:]
+
+    /// How long a phone-sent prompt stays worth typing.
+    ///
+    /// Fifteen minutes against `resumePromptWindow`'s two, and the gap is the whole point.
+    /// That one is a restore's "Keep going", which stops making sense within a couple of
+    /// minutes of the restore. This one waits out a claude turn, and a turn running a test
+    /// suite is routinely longer than two minutes. Bounded at all for the reason that window
+    /// is bounded, and the reason is stronger here: this text is the user's own words rather
+    /// than two fixed ones, so a prompt surfacing hours later in a conversation that has
+    /// moved on is a stranger thing to read.
+    static let phonePromptWindow: TimeInterval = 900
+
+    /// Tokens this store has already accepted, oldest first, per tab.
+    ///
+    /// **This is the whole answer to "what if the phone retries".** The socket can drop
+    /// between a prompt being queued and its `ack` being read, and nothing below the phone's
+    /// screen model runs a liveness timer — a half-open socket reports nothing until the TCP
+    /// retransmit horizon, which is minutes. So the phone genuinely cannot tell "the Mac
+    /// never got it" from "the Mac got it and I never heard". Without a key the only safe
+    /// client behaviour is never to retry, which makes a lost prompt lost silently; with one,
+    /// a retry is free — the same token acks and queues nothing.
+    ///
+    /// Bounded, and per-tab, because the window in which a retry happens is one screen's
+    /// session rather than a day, and an unbounded list keyed on a tab left open for a week
+    /// is a leak with a client on the other end of it. Cleared with the tab in
+    /// `closeSession`.
+    private var acceptedPromptTokens: [UUID: [UUID]] = [:]
+    static let maxRememberedPromptTokens = 16
+
+    /// A client asked for text to be typed into a live agent and submitted.
+    ///
+    /// **claude only, and the refusal for codex is a finding rather than a gap.** Claude's
+    /// route is the one `rename` already takes: type into the pty through `inject`, the
+    /// single funnel where an idle status, a readable one-row `InputBar` and the
+    /// kill-and-yank draft dance are all decided. Codex has neither half of it. Its tab is a
+    /// `codex resume <id>` TUI holding the thread's writer lock, so the app-server route that
+    /// carries its rename cannot start a turn — `CodexAdapter.prepare` documents the exact
+    /// refusal, `thread <id> already has an active writer (code -32600)`. And the pty route
+    /// has no input box to read: `InputBar.read` locks onto the last line starting `❯`, a
+    /// glyph a plain shell prompt also draws, which is precisely how a queued `/rename` for a
+    /// codex tab would have pasted itself into a live session — see `rename`, which is the
+    /// reason that dispatch exists at all. Guessing at a second TUI's input box with the
+    /// user's own words is a worse version of a bug this codebase has already paid for.
+    ///
+    /// **The order of the checks is load-bearing twice.** The agent test comes before the
+    /// status test, so a codex tab is told `unsupportedAgent` — never on this tab — rather
+    /// than `notRunning`, which would invite a retry that can never succeed. And the token
+    /// test comes before the text is validated, so a retry of something already accepted is
+    /// idempotent even if the two sends disagreed about the text; they cannot, since a token
+    /// is minted per composed message, and if they ever did the first send is the one the
+    /// user watched land.
+    ///
+    /// Changes no fleet state and emits no `FleetEvent`, deliberately: what a phone typed
+    /// becomes visible through the transcript the agent writes, not through a mirrored field,
+    /// so this feature adds no mutation site for `FleetReplicator`'s drift check to police.
+    @discardableResult
+    func submitPrompt(_ raw: String, token: UUID, to id: UUID) -> PromptDispatch {
+        guard let at = locate(id) else { return .unknownSession }
+        guard repos[at.repo].sessions[at.session].agent == .claude else {
+            return .unsupportedAgent
+        }
+        if acceptedPromptTokens[id, default: []].contains(token) { return .duplicate }
+        guard let text = PromptText(raw) else {
+            // `rejection(for:)` and `init?` are the same predicate; this call is only to
+            // recover the reason. `.empty` is unreachable and is a safe default rather
+            // than a force-unwrap.
+            return .rejected(PromptText.rejection(for: raw) ?? .empty)
+        }
+        // A tab with no status and no surface has nothing to type into, and a `.shell` one is
+        // at a bare prompt where the text would be RUN rather than read. Refused rather than
+        // queued, because neither state resolves itself: a closed tab never gets a surface
+        // again, and a shell does not become claude by waiting.
+        guard let activity = status(for: id)?.activity, activity != .shell,
+              injector(for: id) != nil
+        else { return .notRunning }
+
+        remember(token, for: id)
+        // `text.value`, never `raw`: `PromptText` normalises before it measures, so the
+        // stripped string is the one the length and control-character guarantees actually
+        // cover — and a trailing newline typed into the box would insert a blank line rather
+        // than submit anything. It is also what the phone's outbox looks for verbatim in a
+        // transcript page before it calls the send confirmed.
+        promptQueue[id, default: []].append(
+            QueuedPrompt(
+                text: text.value, token: token,
+                deadline: now().addingTimeInterval(Self.phonePromptWindow)
+            )
+        )
+        // Tried at once rather than left for the next registry tick, so an idle tab feels
+        // immediate. `flushPromptQueue(_:)` is exactly what the tick runs; this is only
+        // earlier, the same relationship `injectPendingRename` has with `flushPendingRenames`.
+        flushPromptQueue(id)
+        // Still queued means the injection was deferred. `inject` decides *now* whether the
+        // bar is busy, and its `onSent` runs inside the settle — synchronous under a test's
+        // substituted `injectionSettle`, one turn later in production — so by the time this
+        // line runs the entry is either gone or genuinely waiting.
+        return promptQueue[id]?.contains { $0.token == token } == true ? .queued : .sent
+    }
+
+    /// Files a token against a tab, oldest evicted first. See `acceptedPromptTokens`.
+    private func remember(_ token: UUID, for id: UUID) {
+        var tokens = acceptedPromptTokens[id, default: []]
+        tokens.append(token)
+        if tokens.count > Self.maxRememberedPromptTokens {
+            tokens.removeFirst(tokens.count - Self.maxRememberedPromptTokens)
+        }
+        acceptedPromptTokens[id] = tokens
+    }
+
+    /// One tab's turn at the input box. Task 5 gives this its expiry sweep and its tick.
+    private func flushPromptQueue(_ id: UUID) {
+        guard let head = promptQueue[id]?.first else { return }
+        inject(
+            head.text,
+            into: id,
+            stillWanted: { [weak self] in self?.promptQueue[id]?.first?.token == head.token },
+            onSent: { [weak self] in
+                guard let self, self.promptQueue[id]?.first?.token == head.token else { return }
+                self.promptQueue[id]?.removeFirst()
+                if self.promptQueue[id]?.isEmpty == true {
+                    self.promptQueue.removeValue(forKey: id)
+                }
+            }
+        )
+    }
+
     /// Types `text` into a session's input box and submits it, preserving whatever draft was
     /// there. Returns false when this is a bad moment — nothing was sent, and the caller
     /// should leave its request pending and try again on a later tick.
