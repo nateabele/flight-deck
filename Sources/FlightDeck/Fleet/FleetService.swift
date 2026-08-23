@@ -435,6 +435,10 @@ final class FleetService: ObservableObject {
         case .markUnread(let id):
             guard store.sessionExists(id) else { return .err(cid: cid, code: "unknown_session") }
             store.markUnread(id)
+        case .prompt:
+            // Wired for real in Task 6. Refused rather than acked in the meantime, so an
+            // intermediate build cannot silently claim to have typed something.
+            return .err(cid: cid, code: "unhandled")
         }
         // `ack` means dispatched, not done. The observable effect arrives separately as the
         // northbound `session.unread` event this command's store call just recorded.
