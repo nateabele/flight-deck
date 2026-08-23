@@ -1145,6 +1145,47 @@ git commit -m "feat: move a TUI's selection, and refuse a dialog, with real key 
 
 ---
 
+## AMENDMENT — the captures landed, and they refute three of Task 4's premises
+
+Real dialogs were captured before this task was executed, from claude 2.1.241, and committed
+under `Tests/FlightDeckTests/Fixtures/Claude/` with `dialogs.captured.provenance.json`. The
+capture route is recorded there: `Ghostty.SurfaceView.accessibilityValue()` and
+`TextInjecting.readViewport()` return the **same** `CachedValue<String>`, so an out-of-process
+accessibility read is byte-for-byte what an in-app parser sees.
+
+**Task 4 must be rewritten against those fixtures, not executed as written.** What the captures
+settled:
+
+- **`❯` marks the focused row — CONFIRMED.** But its column varies by dialog kind (column 2 for
+  a permission, column 1 for a question); claude positions with absolute column moves
+  (`ESC[2G❯ESC[4G1.ESC[7GYes`). A parser pinned to one indent reads only one kind.
+- **Options are numbered — CONFIRMED, and further than assumed: `AskUserQuestion` options are
+  numbered too.** `locate` as specified does not strip a leading `N. `, so **it returns
+  `.noDialog` for every real question**. This alone is the silent-never-works outcome this
+  capture existed to catch, and it was found before a line of the parser was written.
+- **A description inline on a permission option — REFUTED.** A Bash permission in 2.1.241
+  offers **two** options, not three, and no "don't ask again for X in Y" row appeared at all.
+  Option labels *are* byte-identical to the transcript's, same session, in the committed
+  `.jsonl` — so the cross-check the answer path relies on holds.
+- **`Space to toggle, Enter to confirm, a to select all` — REFUTED, and instructively.** That
+  string occurs once in the claude binary, between `bun upgrade --stable` and
+  `missing package.json`: it is **Bun's** prompt, statically linked in. It describes no dialog
+  claude draws. The real footer is `Enter to select · ↑/↓ to navigate · Esc to cancel`. Reading
+  behaviour out of a binary's string table attributes other programs' strings to this one.
+- **Labels wrap at narrow widths; they do not elide.** No ellipsis appears anywhere in the
+  captures, so the `matchPrefix`/truncation premise has nothing behind it — and the
+  FOLLOWUPS entry about approving a grant off a truncated label does not apply as written.
+- The question sits directly above the options for permission and question dialogs, but **not**
+  for folder-trust, where the adjacent line is ` Security guide`.
+- Every permission frame ends `ESC ] 777 ; notify ; Claude Code ; Claude needs your permission
+  BEL`, which is worth considering as the detector.
+
+**Still uncaptured, so still unproven:** a moved cursor (needs a keystroke; the accessibility
+grant lapsed mid-capture, so `sendArrowDown` has *zero* evidence behind it), a durable
+"don't ask again" grant, a truncated label, and a multi-question `questions[]`.
+
+---
+
 ## Task 4: `ChoiceDialog.locate` — against a captured screen
 
 **Files:**
