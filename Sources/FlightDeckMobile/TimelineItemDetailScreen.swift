@@ -1,4 +1,5 @@
 import FleetKit
+import MarkdownUI
 import SwiftUI
 import UIKit
 
@@ -15,8 +16,11 @@ import UIKit
 /// usually to take something off it — a command to re-run, a path out of a stack trace. On a
 /// phone, selecting sixty lines of monospaced text by dragging is not a way to do that.
 ///
-/// A block whose body is whole JSON also carries a tree/raw toggle beside that button, and
-/// opens on the tree — see `TimelineBodyBlock`.
+/// A block whose body is prose — an agent's answer, or the reader's own turn — is drawn as
+/// the Markdown it was written in, and is the one block with no grey panel behind it. A block
+/// whose body is whole JSON carries a tree/raw toggle beside its copy button and opens on the
+/// tree. Both rules, and the plain text everything else falls back to, are in
+/// `TimelineBodyBlock`.
 struct TimelineItemDetailScreen: View {
     let item: TimelineItem
     /// The result that answers this call, when the feed holds it. Paired on the agent's own
@@ -107,6 +111,13 @@ struct TimelineItemDetailScreen: View {
 /// One titled panel: a body, a Copy button, and — when the body is whole JSON — a toggle
 /// between the tree and the text the Mac actually sent.
 ///
+/// **Three ways to draw a body, and they are mutually exclusive.** Prose the agent or the
+/// reader wrote is Markdown, set in the system font on the page itself; a tool body that is
+/// whole JSON is a tree, with the toggle; everything else is the text exactly as it arrived,
+/// monospaced when it is machine text. The three cannot overlap, because the two gates are
+/// gates on the *kind*: `TimelineStyle.rendersMarkdown(_:)` admits only `.assistantText` and
+/// `.userTurn`, and `TimelineStyle.jsonDocument(for:)` only `.toolCall` and `.toolResult`.
+///
 /// **A view rather than a function on the screen**, because the toggle needs state and the
 /// screen draws two of these. Its own `@State` per panel is also the only correct place for it:
 /// a tool call's input is frequently JSON while its output is a stack trace, so one shared mode
@@ -153,7 +164,10 @@ struct TimelineBodyBlock: View {
                 if document != nil { modeButton }
                 copyButton
             }
-            panel
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(panelled ? 12 : 0)
+                .background(panel(when: panelled))
             if item.body.truncatedBytes > 0 {
                 truncationNotice(
                     shown: item.body.text.utf8.count, dropped: item.body.truncatedBytes
@@ -162,28 +176,56 @@ struct TimelineBodyBlock: View {
         }
     }
 
-    /// The tree and the text share one surface, so switching modes changes the content of the
-    /// panel rather than swapping one card for a different-looking one.
+    /// The body itself, drawn one of the three ways. The tree and the text share one surface,
+    /// so switching modes changes the content of the panel rather than swapping one card for a
+    /// different-looking one.
+    ///
+    /// Unclamped, which is the point of the screen — the row cuts a long answer at fourteen
+    /// lines' worth of height and this is where the rest of it is.
     @ViewBuilder
-    private var panel: some View {
-        Group {
-            if let document, !showsRaw {
-                JSONTreeView(document: document)
-            } else {
-                Text(item.body.text.isEmpty ? "(empty)" : item.body.text)
-                    .font(monospaced ? .system(.footnote, design: .monospaced) : .body)
-                    .foregroundStyle(item.body.isError ? .red : .primary)
-                    // Selectable as well as copyable: the button takes the whole body, and a
-                    // reader who wants one path out of forty lines still needs to reach it.
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+    private var content: some View {
+        if let document, !showsRaw {
+            JSONTreeView(document: document)
+        } else if item.body.text.isEmpty {
+            Text("(empty)").font(.body).foregroundStyle(.secondary)
+        } else if TimelineStyle.rendersMarkdown(item) {
+            // Same rule, same function, as the row: a message cannot be an essay on one screen
+            // and a wall of asterisks on the other.
+            Markdown(item.body.text)
+                .markdownTheme(TimelineMarkdown.theme)
+                .font(.body)
+                .textSelection(.enabled)
+        } else {
+            Text(item.body.text)
+                .font(monospaced ? .system(.footnote, design: .monospaced) : .body)
+                .foregroundStyle(item.body.isError ? .red : .primary)
+                // Selectable as well as copyable: the button takes the whole body, and a
+                // reader who wants one path out of forty lines still needs to reach it.
+                .textSelection(.enabled)
         }
-        .padding(12)
-        .background(
+    }
+
+    /// **Prose gets no panel, and that is what makes a fenced block inside it visible.**
+    ///
+    /// The grey surface is how machine text says it is machine text — it is the same fill the
+    /// row's tool card uses, and `TimelineMarkdown.theme` gives a fenced code block that very
+    /// same fill so a block of code in an answer reads as the same kind of object. Two of them
+    /// nested is one rectangle: `secondarySystemBackground` on `secondarySystemBackground` has
+    /// no edge in either theme. So the outer one goes, for prose only, and an answer sits on
+    /// the page the way an answer does — with its code blocks standing off it.
+    ///
+    /// An empty prose body keeps its panel: what is drawn there is the "(empty)" placeholder,
+    /// not prose, and a lone grey word on the page reads as a rendering failure.
+    private var panelled: Bool {
+        !TimelineStyle.rendersMarkdown(item) || item.body.text.isEmpty
+    }
+
+    @ViewBuilder
+    private func panel(when on: Bool) -> some View {
+        if on {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Color(.secondarySystemBackground))
-        )
+        }
     }
 
     /// Named for what it switches TO, the way Copy is named for what it does. Built exactly as
