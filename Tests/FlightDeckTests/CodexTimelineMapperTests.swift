@@ -145,7 +145,10 @@ final class CodexTimelineMapperTests: XCTestCase {
         XCTAssertEqual(items[0].id, "512#0")
         XCTAssertEqual(items[0].at, "2026-06-09T14:48:08.898Z")
         XCTAssertEqual(items[0].status, .complete)
-        XCTAssertEqual(items[0].body.tool, "qartez_grep")
+        XCTAssertEqual(items[0].body.tool, "mcp__qartez__qartez_grep",
+                       "codex splits an MCP tool into name + namespace where claude writes "
+                       + "the two joined; rejoining is what lets a row say which server "
+                       + "answered, and what makes the two agents' rows comparable")
         XCTAssertEqual(items[0].body.callID, "call_AejD3fggPArahE3Bb78ykVbb")
         XCTAssertEqual(items[0].body.text, """
             {
@@ -161,10 +164,14 @@ final class CodexTimelineMapperTests: XCTestCase {
         XCTAssertEqual(items[0].body.truncatedBytes, 0)
     }
 
-    /// The `shell` call is what 957 of the corpus's `function_call` records are, and its
-    /// `command` is an array — so the preview key table finds no String under `command` and
-    /// falls through to the next key it does find. Pinned because "the preview is nil" is a
-    /// legitimate answer here rather than a failure: the row still renders from `tool`.
+    /// The `shell` call is what 794 of the corpus's 957 `function_call` records are (the rest
+    /// being 115 `exec_command`, 46 MCP calls and 2 `write_stdin`), and its `command` is an
+    /// array — so the preview key table finds no String under `command` and falls through to
+    /// the next key it does find. Pinned because "the preview is nil" is a legitimate answer
+    /// here rather than a failure: the row still renders from `tool`.
+    ///
+    /// It also has no `namespace`, which 911 of the 957 do not, so its `tool` is the bare
+    /// name.
     func testAShellFunctionCallPrettyPrintsAnArrayCommandAndHasNoPreview() {
         let items = items("""
             {"timestamp":"2025-10-12T21:05:02.157Z","type":"response_item","payload":\
@@ -189,6 +196,30 @@ final class CodexTimelineMapperTests: XCTestCase {
         XCTAssertEqual(items[0].body.summary, "echo hi")
         XCTAssertEqual(items[0].body.tool, "shell")
         XCTAssertEqual(items[0].body.callID, "call_1")
+    }
+
+    /// `arguments` as an object rather than as a JSON string is in none of the 957
+    /// `function_call` records surveyed — but it is the shape a future codex would most
+    /// plausibly switch to, and answering it with an empty body and no preview would be the
+    /// block-array `output` bug over again: silently wrong content, not a visible failure.
+    func testAFunctionCallWhoseArgumentsAreAlreadyAnObjectStillRenders() {
+        let items = items("""
+            {"type":"response_item","payload":{"type":"function_call","name":"qartez_read",\
+            "arguments":{"file_path":"/tmp/one.txt","max_bytes":22000},"call_id":"call_3"}}
+            """)
+        XCTAssertEqual(items.map(\.kind), [.toolCall])
+        XCTAssertEqual(items[0].body.summary, "/tmp/one.txt")
+        XCTAssertTrue(items[0].body.text.contains("\"max_bytes\" : 22000"),
+                      "an object is pretty-printed the same as a parsed string would be")
+    }
+
+    /// An empty `namespace` must not become a `__` prefix on the name. Cheap to get wrong,
+    /// and it would render every un-namespaced tool as `__shell`.
+    func testAnEmptyNamespaceIsNotAPrefix() {
+        XCTAssertEqual(items("""
+            {"type":"response_item","payload":{"type":"function_call","name":"shell",\
+            "namespace":"","arguments":"{}","call_id":"call_4"}}
+            """)[0].body.tool, "shell")
     }
 
     func testAFunctionCallOutputIsAToolResultThatNamesItsCallButNotItsTool() {
@@ -234,6 +265,26 @@ final class CodexTimelineMapperTests: XCTestCase {
                        "the first line is the preview when the input is not JSON")
         XCTAssertFalse(items[0].body.isError)
         XCTAssertEqual(items[0].body.truncatedBytes, 0)
+    }
+
+    /// **`summary` is the one field nothing downstream bounds.** `TimelineReader` caps an item
+    /// by rewriting `body.text` and costs a page by summing `body.text`, so
+    /// `ToolInputSummary.maxSummaryBytes` is the only limit a preview ever meets — and a
+    /// mapper with its own private first-line helper escapes it, 200 items to a page.
+    ///
+    /// Not hypothetical on this path: the captured rollout's `custom_tool_call` for a bare
+    /// `echo hi` already yields a 190-byte preview, because the unified `exec` tool inlines
+    /// the workdir path into line one. A longer path clears the cap on the first try.
+    func testACustomToolCallsPreviewIsCappedLikeEveryOtherPreview() {
+        let long = String(repeating: "x", count: 400)
+        let items = items("""
+            {"type":"response_item","payload":{"type":"custom_tool_call","name":"exec",\
+            "call_id":"call_long","input":"\(long)\\nsecond line"}}
+            """)
+        XCTAssertEqual(items[0].body.summary?.utf8.count, ToolInputSummary.maxSummaryBytes)
+        XCTAssertEqual(items[0].body.text.utf8.count, 412,
+                       "only the preview is capped; the detail screen still gets the whole "
+                       + "input, which TimelineReader bounds by body.text instead")
     }
 
     func testACustomToolCallOutputIsAToolResult() {
