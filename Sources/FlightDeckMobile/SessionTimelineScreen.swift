@@ -77,7 +77,12 @@ struct SessionTimelineScreen: View {
         // picks up what is new instead of merging a `.latest` page over the top and leaving
         // an invisible hole in the middle. What must NOT happen is this firing against a
         // model belonging to a different session, and the id is what rules that out.
-        .task(id: model.sessionID) { model.loadLatest() }
+        //
+        // `open()` rather than `loadLatest()`: this is also the moment the session counts as
+        // looked at, and it is the ONLY place that says so — the fleet list's row used to
+        // send the mark from a gesture racing its own link, which is what stopped rows
+        // opening at all. See `TimelinePaging`.
+        .task(id: model.sessionID) { model.open() }
     }
 
     /// Matches the fleet list's row insets, so the two screens' left edges line up when one

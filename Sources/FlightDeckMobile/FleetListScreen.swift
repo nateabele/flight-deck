@@ -4,9 +4,6 @@ import SwiftUI
 struct FleetListScreen: View {
     let model: FleetModel
     @State private var confirmingUnpair = false
-    /// Set to the session a tap just marked read, purely to drive `.sensoryFeedback` below.
-    /// Never read for display.
-    @State private var justMarkedRead: UUID?
 
     var body: some View {
         NavigationStack {
@@ -64,12 +61,6 @@ struct FleetListScreen: View {
                     model: model.timelineModel(for: id)
                 )
             }
-            // Marking a session read is a command sent to the Mac, and the row does not change
-            // until the Mac echoes the event back — a round trip. The haptic is what confirms
-            // the tap landed in the meantime. Triggered by `justMarkedRead`, which is only ever
-            // set on a tap that actually sent something, so it cannot fire for a tap that did
-            // nothing.
-            .sensoryFeedback(.selection, trigger: justMarkedRead)
             // Inline, not the default large title. A large title costs roughly 52pt of height
             // to render one unchanging word on the one screen in this app that has nothing but
             // a list to show.
@@ -134,29 +125,25 @@ struct FleetListScreen: View {
     /// now it exists; the rule that produced the narrower `Button` is the same rule that
     /// makes every row a link today.
     ///
-    /// `markRead` rides along on the same tap for an unread one. Spec §8 makes unread one
-    /// fleet-wide fact, and opening a session on the phone is exactly the "I have looked at
-    /// this" the mark means — so it is one gesture, not a row that must be tapped twice for
-    /// two different things.
+    /// **The link is the row's only gesture, and that is the whole point.** It used to carry
+    /// a `.simultaneousGesture(TapGesture())` alongside, to send `markRead` on the way past,
+    /// on the theory that a gesture *beside* a `NavigationLink` avoids the two competing
+    /// recognisers a `Button` *around* one would create. It does not — it creates the same
+    /// two — and that is how "tapping sessions does nothing" came back a third time. What it
+    /// looked like on a real phone: the first row tapped opened, and from the moment you came
+    /// back from it no row in the list would open again. Every one of those taps was
+    /// recognised — UIKit logged them — and no push ever followed, because the extra
+    /// recogniser had claimed the touch and the `List` row's own tap handling never saw it.
     ///
-    /// **`isConnected` still gates the mark, and only the mark.** `FleetConnector.send` is a
-    /// silent no-op while disconnected, so sending one then would do nothing while the dot
-    /// stayed put. Opening is not like that: the timeline holds what it last heard and says
-    /// so, which is more use than an inert row with no explanation.
-    ///
-    /// A `simultaneousGesture` rather than an action, because a `NavigationLink` handles its
-    /// own tap — wrapping one in a `Button` gives the row two competing gesture recognisers,
-    /// and the reliable way to hang a side effect off a link's tap is beside it.
+    /// So there is nothing left to race. The row is a link and the link pushes; the read mark
+    /// has moved to `SessionTimelineModel.open()`, which runs when the conversation is
+    /// actually on screen. That is also the truer reading of spec §8 — the mark means "I have
+    /// looked at this", and a tap that never opened anything is not a look.
     private func sessionRow(_ session: WireSession) -> some View {
         NavigationLink(value: session.id) {
             row(session)
         }
         .listRowInsets(Self.rowInsets)
-        .simultaneousGesture(TapGesture().onEnded {
-            guard isConnected, session.isUnread else { return }
-            model.markRead(session.id)
-            justMarkedRead = session.id
-        })
     }
 
     /// The font is set HERE, on the title itself, and not once on the enclosing `List`.
