@@ -62,6 +62,22 @@ public final class FleetConnector: @unchecked Sendable {
 
     private var racers: [String: FleetClient] = [:]
     private var winner: FleetClient?
+    /// Outstanding requests, by correlation id.
+    ///
+    /// Every entry MUST be resolved exactly once — with a page, with an error, or with
+    /// `.disconnected` when the socket goes away. A callback that never fires leaves the
+    /// screen that made the request showing a spinner forever, with nothing on screen to say
+    /// why. That is the same failure the stale-fleet banner exists to prevent, one layer
+    /// down, and it is why `teardown()` drains this table rather than clearing it.
+    ///
+    /// The `cid` space is a `FleetClient`'s, so it restarts at 1 on every new connection.
+    /// What keeps a reused number unambiguous is that this table is emptied by the same
+    /// `teardown()` that drops the connection, and `teardown()` is the only path by which
+    /// `winner` is replaced — so no entry from an earlier connection is ever still here to be
+    /// matched. A frame from an earlier connection cannot arrive to be matched either:
+    /// `FleetClient` gates `onFrame` on `hasEnded`, and `accept()` refuses a client that is
+    /// neither a live racer nor the current winner.
+    private var pending: [Int: (Result<TimelinePage, FleetRequestError>) -> Void] = [:]
     private var browser: NWBrowser?
     private var fleet = FleetSnapshot.empty
     private var attempt = 0
@@ -124,6 +140,36 @@ public final class FleetConnector: @unchecked Sendable {
     public func send(_ command: FleetCommand) {
         dispatchPrecondition(condition: .onQueue(queue))
         _ = winner?.send(command)
+    }
+
+    /// Ask the Mac for something and get exactly one answer.
+    ///
+    /// Answers **synchronously with `.disconnected`** when nothing is connected, rather than
+    /// dropping the request the way `send(_ command:)` does. That asymmetry is deliberate:
+    /// a command's effect arrives separately as a northbound event, so a dropped one is
+    /// merely ineffective, while a dropped request is a caller waiting forever.
+    public func request(
+        _ request: FleetRequest,
+        then completion: @escaping (Result<TimelinePage, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(request)
+        // `0` is `FleetClient`'s "there is no connection to write to" — the winner's socket
+        // died between the frame that installed it and now.
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pending[cid] = completion
+    }
+
+    /// Resolves one outstanding request, or does nothing if nothing is waiting on that `cid`.
+    ///
+    /// Removed before it is invoked, which is what makes it exactly once: a completion is
+    /// free to re-enter — `stop()` from inside one is the ordinary case — and whatever it
+    /// does next finds nothing left filed under this number.
+    private func resolve(_ cid: Int, with result: Result<TimelinePage, FleetRequestError>) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pending.removeValue(forKey: cid) else { return }
+        completion(result)
     }
 
     // MARK: The race
@@ -244,12 +290,29 @@ public final class FleetConnector: @unchecked Sendable {
         case .event(let seq, let event):
             fleet.apply(event)
             advance(to: seq)
-        case .ack, .err, .page:
-            // Neither a command reply nor a history page is fleet state: a command's effect
-            // arrives separately as its own event, and a page is correlated by `cid` to
-            // whoever asked for it. Note the second half of why `page` carries no `seq` —
-            // reaching `advance(to:)` from here would move this phone's resume point every
-            // time it scrolled up.
+        case .page(let cid, let page):
+            // Resolved and returned WITHOUT touching `lastSeq`. A page carries no sequence
+            // (see `ServerFrame.page`), and reaching `advance(to:)` from here would let a
+            // phone paging back through an hour of transcript rewrite how much fleet history
+            // it believes it has applied — and resume from the wrong place on its next
+            // launch.
+            resolve(cid, with: .success(page))
+            return
+        case .err(let cid, let code):
+            // A command's `err` changes no fleet state and is dropped here; a request's is
+            // the only answer that request will ever get. `code` is carried through
+            // verbatim rather than interpreted: `unhandled` (no reader wired) and
+            // `unsupported` (a request this Mac cannot parse) are both on this wire today,
+            // and a newer Mac may invent more.
+            resolve(cid, with: .failure(.server(code: code)))
+            return
+        case .ack(let cid):
+            // An `ack` correlated to a request is a server that answered the wrong verb —
+            // "dispatched, not done" is no answer to a question whose point is the data it
+            // carries back. Released as a server error rather than dropped, so the caller is
+            // freed either way. An `ack` for a command matches nothing here and is a no-op,
+            // which is what it has always been.
+            resolve(cid, with: .failure(.server(code: "unexpected_ack")))
             return
         }
         onFleet?(fleet)
@@ -328,6 +391,11 @@ public final class FleetConnector: @unchecked Sendable {
             return
         }
         winner = nil
+        // The pending table is drained by `scheduleRetry()`'s `teardown()`, not here. That
+        // is reachable whenever this branch is: `running` can only be false after `stop()`,
+        // which already ran `teardown()` — and `stop()`'s own `disconnect()` sets
+        // `FleetClient.hasEnded` before cancelling, so it cannot produce the callback that
+        // gets here in the first place.
         scheduleRetry()
     }
 
@@ -348,12 +416,35 @@ public final class FleetConnector: @unchecked Sendable {
     }
 
     private func teardown() {
+        dispatchPrecondition(condition: .onQueue(queue))
         for client in racers.values { client.disconnect() }
         racers.removeAll()
         winner?.disconnect()
         winner = nil
         browser?.cancel()
         browser = nil
+        drainPending()
+    }
+
+    /// Answers every outstanding request `.disconnected`. Drained, not cleared — see
+    /// `pending`.
+    ///
+    /// Called only once `winner` is already nil, and that ordering is load-bearing rather
+    /// than tidiness. A completion hearing `.disconnected` is exactly the caller most likely
+    /// to ask again, and it does so re-entrantly, from inside this loop. With `winner` still
+    /// installed the retry would be filed into a table this drain has already emptied — and
+    /// nothing would ever resolve it, since there is no connection left to lose and no reply
+    /// that can arrive. With `winner` nil it takes `request()`'s synchronous `.disconnected`
+    /// path instead.
+    ///
+    /// `removeAll()` before the loop, not after, for the mirror-image reason: a completion
+    /// that re-enters through `stop()` runs this whole drain again and must find nothing left
+    /// to answer a second time.
+    private func drainPending() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let outstanding = pending
+        pending.removeAll()
+        for completion in outstanding.values { completion(.failure(.disconnected)) }
     }
 
     private func report(_ state: State) { onState?(state) }
