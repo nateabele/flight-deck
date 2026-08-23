@@ -192,12 +192,19 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.flightdeck.FlightDeckMobile
         TARGETED_DEVICE_FAMILY: "1,2"
         # No DEVELOPMENT_TEAM: there is no provisioning profile on this machine, and pinning
-        # a team would break the simulator compile check that is this target's only
-        # automated verification. Set it when installing on hardware.
+        # a team would break the simulator build. Set it when installing on hardware.
         CODE_SIGN_STYLE: Automatic
-        # Same reason as FleetKitiOS above: with no team and no profile, signing is the one
-        # thing that would fail a simulator build, and the simulator does not need it.
-        CODE_SIGNING_ALLOWED: "NO"
+        # Ad-hoc signed rather than unsigned. "The simulator does not need signing" was true
+        # right up until the app touched the Keychain: an unsigned app has no keychain access
+        # group, so `SecItemUpdate`/`SecItemAdd` fail with `errSecMissingEntitlement`
+        # (-34018) the instant pairing tries to save. That is not a simulator quirk to work
+        # around — the pairing record IS a Keychain item, so an app that cannot reach the
+        # Keychain cannot pair at all, and the first person to run this found out by watching
+        # it die. Ad-hoc ("-") gives the simulator build an identity and an access group
+        # without needing a team or a profile.
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: "YES"
+        CODE_SIGNING_ALLOWED: "YES"
         # Same reason as FlightDeck (macOS) above: FleetKitiOS's swiftmodule now depends on
         # BoringSSLShim (SPAKE2Session), and resolving that dependency graph is required even
         # though FlightDeckMobile itself never imports it directly. SWIFT_INCLUDE_PATHS (the
