@@ -56,7 +56,10 @@ struct SessionStatusGlyph: View {
             glyph(
                 HStack(spacing: 2) {
                     ProgressView().controlSize(.mini)
-                    if session.subagentCount > 0 {
+                    // Through `subagentSummary` rather than off `subagentCount` directly, so
+                    // this column and the timeline header cannot disagree: a codex tab's 0
+                    // means "unknown", and neither screen may render it as "none".
+                    if session.subagentSummary != nil {
                         Text("\(session.subagentCount)").font(.caption2.monospacedDigit())
                     }
                 },
@@ -108,10 +111,10 @@ struct SessionStatusGlyph: View {
             // been opened yet reads as finished-but-unseen, not merely idle.
             return session.isUnread ? "Finished — not yet viewed" : "Idle"
         case "busy":
-            // `SessionStatus.tooltip`'s `.busy` branch, singularization included.
-            guard session.subagentCount > 0 else { return "Working" }
-            let noun = session.subagentCount == 1 ? "subagent" : "subagents"
-            return "Working — \(session.subagentCount) \(noun)"
+            // `SessionStatus.tooltip`'s `.busy` branch. The count comes from
+            // `subagentSummary`, which is nil for codex at any count — see that property.
+            guard let summary = session.subagentSummary else { return "Working" }
+            return "Working — \(summary)"
         case "shell":
             return "Background command running"
         case "waiting":
