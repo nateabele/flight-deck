@@ -50,6 +50,26 @@ protocol PromptSending: AnyObject {
     )
 }
 
+/// The third verb a session screen needs: here is an answer to the dialog this session is
+/// blocked on.
+///
+/// **There is no `pendingPrompt` verb beside it, and that absence is the design.** What the
+/// session is blocked on is *derived* from the feed this model already holds and the `activity`
+/// the fleet already pushes — see `blocked(activity:)`. Nothing about a question is fetched,
+/// so there is nothing here to fetch it with.
+///
+/// A third protocol rather than a third method on either existing one, for the reason there are
+/// two already: a stub must be able to leave one verb outstanding while answering another, and
+/// the transition worth asserting here — an answer nobody confirms — is one no real link
+/// produces on demand.
+@MainActor
+protocol PromptAnswering: AnyObject {
+    func answerPrompt(
+        _ command: FleetCommand,
+        then completion: @escaping (Result<Void, FleetRequestError>) -> Void
+    )
+}
+
 /// One open session screen.
 ///
 /// Thin on purpose, in the same spirit as `FleetModel`: it owns a `TimelineFeed` — which is
@@ -82,7 +102,33 @@ final class SessionTimelineModel {
     /// conversation, never inside it — see `PromptOutbox`, which is where the reasoning lives.
     private(set) var outbox = PromptOutbox()
 
-    @ObservationIgnored private let fleet: any TimelinePaging & PromptSending
+    /// Where the one answer this screen may have in flight has got to.
+    ///
+    /// **Keyed on the call, not a bare enum**, and that is what makes the harder race safe on
+    /// this side: the user approves in the terminal, claude raises the next dialog, and the
+    /// session never leaves `waiting` — so this state is never torn down by a screen
+    /// transition. Filed against `toolu_ONE`, it must not disable the buttons for `toolu_TWO`.
+    enum AnswerState: Equatable {
+        case idle
+        /// Dispatched. `ack` means *dispatched, not done* — the Mac's driver refuses to press
+        /// Return on a screen it cannot confirm — so what clears this card is the transcript:
+        /// the `tool_result` arrives, `blocked(activity:)` returns nil, and the card goes.
+        case sent(call: String)
+        /// The Mac refused, or nobody confirmed. The question stays visible with the reason
+        /// under it, because the reader has to see what they were being asked.
+        case failed(call: String, String)
+
+        var call: String? {
+            switch self {
+            case .idle: return nil
+            case .sent(let call), .failed(let call, _): return call
+            }
+        }
+    }
+
+    private(set) var answerState = AnswerState.idle
+
+    @ObservationIgnored private let fleet: any TimelinePaging & PromptSending & PromptAnswering
     @ObservationIgnored private let timeout: Duration
     /// The fetch whose answer is still allowed to change anything, or `nil` when none is.
     ///
@@ -101,12 +147,17 @@ final class SessionTimelineModel {
     /// twice before either answer lands and a shared slot would leave the first send with no
     /// deadline at all — the exact "waits forever" case this whole mechanism exists for.
     @ObservationIgnored private var promptDeadlines: [UUID: Task<Void, Never>] = [:]
+    /// The answer whose result is still allowed to change anything, or `nil` when none is.
+    /// A single slot rather than the table a send needs, because `answer(_:to:)` refuses a
+    /// second answer while one is outstanding — one dialog, one decision.
+    @ObservationIgnored private var answerInFlight: UUID?
+    @ObservationIgnored private var answerDeadline: Task<Void, Never>?
 
     /// `timeout` is injectable so `SessionTimelineModelTests` can watch a deadline expire in
     /// milliseconds rather than in fifteen seconds. Nothing in the app passes it.
     init(
         sessionID: UUID,
-        fleet: any TimelinePaging & PromptSending,
+        fleet: any TimelinePaging & PromptSending & PromptAnswering,
         timeout: Duration = .seconds(15)
     ) {
         self.sessionID = sessionID
@@ -242,6 +293,67 @@ final class SessionTimelineModel {
 
     /// The reader has read a failure and wants the row gone.
     func dismiss(_ id: UUID) { outbox.dismiss(id) }
+
+    /// What this session is blocked on, or nil.
+    ///
+    /// **Derived, never fetched.** `OpenPrompt.find` is the same function the Mac runs over the
+    /// same transcript — shared in `FleetKit` precisely so the two cannot drift — and it runs
+    /// here over `feed.items`, which the history channel has already delivered. That is why
+    /// this feature adds no request, no reply frame and no event: a question appearing is an
+    /// `activity` change (already pushed) plus records (already fetched on that change), and a
+    /// question being answered on the Mac is a `tool_result` arriving on the next fetch.
+    ///
+    /// A function of `activity` rather than a stored property, so it cannot go stale: the
+    /// screen passes the live `WireSession.activity` it is already reading.
+    func blocked(activity: String?) -> OpenPrompt? {
+        OpenPrompt.find(in: feed.items, activity: activity)
+    }
+
+    /// Answer the dialog `call` names.
+    ///
+    /// One in flight at a time, and on a permission dialog that guard is the difference between
+    /// one decision and two. A state left over from a different call does not block this one —
+    /// see `AnswerState`.
+    func answer(_ answer: PromptAnswer, to call: String) {
+        guard answerInFlight == nil else { return }
+        let token = UUID()
+        answerInFlight = token
+        answerState = .sent(call: call)
+
+        // Armed BEFORE the send, because the send can complete before it returns:
+        // `FleetConnector.send(_:then:)` answers `.disconnected` synchronously by design, the
+        // same asymmetry `fetch` and `send(_:)` both arm ahead of.
+        let timeout = self.timeout
+        answerDeadline = Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled, let self, self.claimAnswer(token) else { return }
+            self.answerState = .failed(call: call, Self.noAnswerConfirmation)
+        }
+
+        fleet.answerPrompt(
+            .answerPrompt(id: sessionID, token: token, call: call, answer: answer)
+        ) { [weak self] result in
+            guard let self, self.claimAnswer(token) else { return }
+            switch result {
+            case .success:
+                // Stays `.sent`. What retires the card is the transcript — so pull it, for the
+                // same reason `send(_:)` does: the Mac emits no frame when a Return lands.
+                self.loadNewer()
+            case .failure(let error):
+                self.answerState = .failed(call: call, Self.answerMessage(for: error))
+            }
+        }
+    }
+
+    /// Whichever of the ack and the deadline arrives first wins; the loser finds nothing filed
+    /// and does nothing. The same rule, and the same reason, as `claim(_:)`.
+    private func claimAnswer(_ token: UUID) -> Bool {
+        guard answerInFlight == token else { return false }
+        answerInFlight = nil
+        answerDeadline?.cancel()
+        answerDeadline = nil
+        return true
+    }
 
     private func fetch(anchor: TimelineAnchor, older: Bool, quiet: Bool = false) {
         // Guards every fetch. Two overlapping requests would both be computed from the same
@@ -396,6 +508,41 @@ final class SessionTimelineModel {
                 return "There was nothing to send."
             default:
                 return "Your Mac wouldn't send this (\(code))."
+            }
+        }
+    }
+
+    /// Deliberately not "try again": a retry after a timeout is the one action that can press
+    /// Return twice in a live terminal — and on a permission dialog, approve twice. Same
+    /// ruling, same wording discipline, as `noConfirmation`: the retry is conditioned on the
+    /// reader looking at the terminal first, and there is no control on the card that offers
+    /// one.
+    static let noAnswerConfirmation =
+        "Your Mac didn't confirm this. Check the terminal before answering again."
+
+    /// Copy for an answer that did not land. **Deliberately not `promptMessage(for:)`** — the
+    /// same wire code means a different thing on this channel, and `prompt_changed` has no
+    /// meaning on that one at all.
+    static func answerMessage(for error: FleetRequestError) -> String {
+        switch error {
+        case .disconnected:
+            return "Not connected to your Mac, so this wasn't sent."
+        case .server(let code):
+            switch code {
+            case "prompt_changed":
+                return "Your Mac has moved on from this."
+            case "not_waiting":
+                return "Your Mac isn't waiting on anything right now."
+            case "unreadable_screen":
+                return "Flight Deck couldn't read your Mac's screen. Try again in a moment."
+            case "unanswerable":
+                return "This one has to be answered on your Mac."
+            case "unsupported_agent":
+                return "Flight Deck can only answer a Claude session from here."
+            case "unknown_session":
+                return "This session is no longer open on your Mac."
+            default:
+                return "Your Mac wouldn't answer this (\(code))."
             }
         }
     }
