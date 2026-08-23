@@ -1,6 +1,7 @@
 import FleetKit
 import MarkdownUI
 import SwiftUI
+import UIKit
 
 /// One entry in a conversation, as a row.
 ///
@@ -60,6 +61,13 @@ struct TimelineRow: View {
         .accessibilityLabel(
             TimelineStyle.accessibilityLabel(for: item, result: result, agent: agent)
         )
+        // The one thing the detail screen still offered a row that shows everything, put where
+        // that row can reach it — and applied AFTER the label, so VoiceOver hangs the action
+        // off the one element this row combines into rather than off a child it ignores.
+        // Only on such a row: everywhere else the screen one tap away has a Copy button per
+        // block, and two ways to copy one body a gesture apart is how a reader ends up unsure
+        // which of them took.
+        .modifier(CopyAction(text: TimelineStyle.opensDetail(item) ? nil : item.body.text))
     }
 
     // MARK: Header
@@ -139,34 +147,44 @@ struct TimelineRow: View {
     }
 
     /// Markdown for the two kinds a human wrote (`TimelineStyle.rendersMarkdown`), plain text
-    /// for the rest — and **clamped either way**, because unclamped one long assistant message
-    /// fills the screen and the conversation around it is invisible, which the renders showed
-    /// and the code did not.
+    /// for the rest — and **whole or clamped on one decision**, `TimelineStyle.proseLineLimit`,
+    /// which answers `nil` for a body drawn in full.
+    ///
+    /// An answer is read here now, in the conversation it belongs to, rather than one tap away
+    /// from it. What still clamps, and why, is that function's own comment; what matters on
+    /// this side is that the *same* `nil` also takes the chevron off the row
+    /// (`TimelineStyle.opensDetail`), so a cut body always has somewhere to lead and an
+    /// uncut one never pretends to.
     ///
     /// The two clamps are the same clamp said twice, and they have to be: `.lineLimit` does not
     /// reach a `Markdown` view usefully. It is a `VStack` of blocks, so a limit lands on each
     /// paragraph *separately* — fourteen lines per paragraph is not a bound at all — and a
     /// heading or a table has no line count to limit. So the Markdown side is bounded by
-    /// height, derived from the very same `proseLineLimit` the plain side passes to
-    /// `.lineLimit`, and never written down twice.
+    /// height, derived from the very same line count the plain side passes to `.lineLimit`,
+    /// and never written down twice.
     @ViewBuilder
     private var proseBody: some View {
         if TimelineStyle.rendersMarkdown(item) {
-            Markdown(item.body.text)
+            let markdown = Markdown(item.body.text)
                 .markdownTheme(TimelineMarkdown.theme)
                 .font(proseFont)
                 .foregroundStyle(proseColor)
-                .frame(maxHeight: proseClamp, alignment: .top)
-                // The cut is what the chevron already promises, and it lands mid-line on
-                // purpose: a row that ends on a whole line looks finished, and a row that ends
-                // in the middle of one cannot be mistaken for the end of the message.
-                .clipped()
+            if let proseClamp {
+                markdown
+                    .frame(maxHeight: proseClamp, alignment: .top)
+                    // The cut is what the chevron already promises, and it lands mid-line on
+                    // purpose: a row that ends on a whole line looks finished, and a row that
+                    // ends in the middle of one cannot be mistaken for the end of the message.
+                    .clipped()
+            } else {
+                markdown
+            }
         } else {
             Text(item.body.text)
                 .font(proseFont)
                 .italic(item.kind == .thinking)
                 .foregroundStyle(proseColor)
-                .lineLimit(proseLineLimit)
+                .lineLimit(TimelineStyle.proseLineLimit(for: item))
         }
     }
 
@@ -176,7 +194,10 @@ struct TimelineRow: View {
     /// `TimelineMarkdown.theme` adds between lines.
     @ScaledMetric(relativeTo: .body) private var proseLineHeight: CGFloat = 23
 
-    private var proseClamp: CGFloat { proseLineHeight * CGFloat(proseLineLimit) }
+    /// `nil` for a body drawn whole, which is now every prose body under the ceiling.
+    private var proseClamp: CGFloat? {
+        TimelineStyle.proseLineLimit(for: item).map { proseLineHeight * CGFloat($0) }
+    }
 
     private var proseFont: Font {
         switch item.kind {
@@ -188,16 +209,6 @@ struct TimelineRow: View {
 
     private var proseColor: Color {
         item.kind == .thinking || item.kind == .unknown ? .secondary : .primary
-    }
-
-    private var proseLineLimit: Int {
-        switch item.kind {
-        // A reader's own prompt is short and is the thing they are looking for; clamping it
-        // hides the one row on the screen they already know the shape of.
-        case .userTurn: return 20
-        case .thinking: return 6
-        default: return 14
-        }
     }
 
     @ViewBuilder
@@ -264,12 +275,13 @@ struct TimelineRow: View {
 
     // MARK: Chips
 
-    /// What the Mac cut, said on the row.
+    /// What the Mac cut, and what this row cut — said on the row, in that order.
     ///
     /// A tool result truncated at the item cap looks exactly like a short one, and a reader who
     /// does not know the output was cut will act on a partial file read as though it were
     /// whole. Both halves of a folded card are counted, since either can be the one that was
-    /// cut.
+    /// cut. **They are two different shortfalls and both can be true at once**: the scissors
+    /// is bytes the Mac never sent, and the second chip is words this row had no room for.
     @ViewBuilder
     private var chips: some View {
         let dropped = item.body.truncatedBytes + (result?.body.truncatedBytes ?? 0)
@@ -277,6 +289,55 @@ struct TimelineRow: View {
             Label(chip, systemImage: "scissors")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        }
+        if hitsProseCeiling {
+            Label("Read the whole message", systemImage: "chevron.forward")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Whether this row is prose that ran past `TimelineStyle.proseCeilingLines`.
+    ///
+    /// **Said at the cut, because that is where the reader is.** The disclosure chevron a
+    /// `List` draws is floated at the row's vertical centre, and a row that hit the ceiling is
+    /// four screenfuls tall — so its chevron sits two screenfuls above the point where the
+    /// message stops, which the render (`ui-renders/prose-full/after/very-long-*.png`) shows
+    /// is nowhere near where anyone is looking. The mid-line cut says there is more; this says
+    /// where the rest is.
+    ///
+    /// Prose only. A tool card's three-line command and six-line output are clamped too, and
+    /// have always said so with nothing but the cut — but those rows are a few hundred points
+    /// tall and their chevron is right there beside them.
+    private var hitsProseCeiling: Bool {
+        TimelineStyle.rendersMarkdown(item) && TimelineStyle.proseLineLimit(for: item) != nil
+    }
+}
+
+/// Copy, for the rows that have nowhere to send a reader for it.
+///
+/// A modifier taking an optional string rather than a `.contextMenu` written inline, because
+/// the two branches of `if TimelineStyle.opensDetail(item)` are different view types and a
+/// `@ViewBuilder` around the whole row would erase them on every row in the list. `nil` is
+/// "this row leads somewhere that has a Copy button already".
+private struct CopyAction: ViewModifier {
+    let text: String?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let text, !text.isEmpty {
+            content.contextMenu {
+                Button {
+                    // `UIPasteboard` directly, exactly as `TimelineBodyBlock.copyButton` does
+                    // it: what is wanted is the message on the clipboard in one gesture, not a
+                    // share sheet to dismiss afterwards.
+                    UIPasteboard.general.string = text
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                }
+            }
+        } else {
+            content
         }
     }
 }
