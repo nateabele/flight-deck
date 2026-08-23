@@ -1,4 +1,5 @@
 import FleetKit
+import MarkdownUI
 import SwiftUI
 import UIKit
 
@@ -26,12 +27,9 @@ struct TimelineItemDetailScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
-                block(title: primaryTitle, item: item, monospaced: isMachineText(item))
+                block(title: primaryTitle, item: item)
                 if let result {
-                    block(
-                        title: result.body.isError ? "Error" : "Output",
-                        item: result, monospaced: true
-                    )
+                    block(title: result.body.isError ? "Error" : "Output", item: result)
                 }
                 if item.kind == .unknown { unrecognizedNote }
             }
@@ -83,7 +81,7 @@ struct TimelineItemDetailScreen: View {
         }
     }
 
-    private func block(title: String, item: TimelineItem, monospaced: Bool) -> some View {
+    private func block(title: String, item: TimelineItem) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(title.uppercased())
@@ -92,23 +90,59 @@ struct TimelineItemDetailScreen: View {
                 Spacer()
                 copyButton(item.body.text)
             }
-            Text(item.body.text.isEmpty ? "(empty)" : item.body.text)
-                .font(monospaced ? .system(.footnote, design: .monospaced) : .body)
-                .foregroundStyle(item.body.isError ? .red : .primary)
+            body(of: item)
                 // Selectable as well as copyable: the button takes the whole body, and a
                 // reader who wants one path out of forty lines still needs to reach it.
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color(.secondarySystemBackground))
-                )
+                .padding(panelled(item) ? 12 : 0)
+                .background(panel(when: panelled(item)))
             if item.body.truncatedBytes > 0 {
                 truncationNotice(
                     shown: item.body.text.utf8.count, dropped: item.body.truncatedBytes
                 )
             }
+        }
+    }
+
+    /// The whole body, as Markdown for the two kinds a human wrote it in and verbatim for
+    /// everything else. Same rule, same function, as the row: `TimelineStyle.rendersMarkdown`,
+    /// so a message cannot be an essay on one screen and a wall of asterisks on the other.
+    ///
+    /// Unclamped here, which is the point of the screen — the row cuts a long answer at
+    /// fourteen lines' worth of height and this is where the rest of it is.
+    @ViewBuilder
+    private func body(of item: TimelineItem) -> some View {
+        if item.body.text.isEmpty {
+            Text("(empty)").font(.body).foregroundStyle(.secondary)
+        } else if TimelineStyle.rendersMarkdown(item) {
+            Markdown(item.body.text)
+                .markdownTheme(TimelineMarkdown.theme)
+                .font(.body)
+        } else {
+            Text(item.body.text)
+                .font(isMachineText(item) ? .system(.footnote, design: .monospaced) : .body)
+                .foregroundStyle(item.body.isError ? .red : .primary)
+        }
+    }
+
+    /// **Prose gets no panel, and that is what makes a fenced block inside it visible.**
+    ///
+    /// The grey surface is how machine text says it is machine text — it is the same fill the
+    /// row's tool card uses, and `TimelineMarkdown.theme` gives a fenced code block that very
+    /// same fill so a block of code in an answer reads as the same kind of object. Two of them
+    /// nested is one rectangle: `secondarySystemBackground` on `secondarySystemBackground` has
+    /// no edge in either theme. So the outer one goes, for prose only, and an answer sits on
+    /// the page the way an answer does — with its code blocks standing off it.
+    private func panelled(_ item: TimelineItem) -> Bool {
+        !TimelineStyle.rendersMarkdown(item) || item.body.text.isEmpty
+    }
+
+    @ViewBuilder
+    private func panel(when on: Bool) -> some View {
+        if on {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(.secondarySystemBackground))
         }
     }
 

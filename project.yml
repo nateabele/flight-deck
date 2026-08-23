@@ -20,6 +20,26 @@ settings:
     # FlightDeck it appends to an existing GhosttyEmbed path rather than replacing it, and
     # that ordering is not safe to disturb by folding it into a single project-wide value.
     SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
+
+# The first Swift package in this repo — everything else vendored here is an xcframework built
+# out of a submodule, and this is not, because there is nothing to build: MarkdownUI is Swift
+# and SwiftUI all the way down.
+#
+# `exactVersion`, not `from`. `*.xcodeproj` is gitignored (see .gitignore), so the
+# `Package.resolved` xcodebuild writes inside it is gitignored too — there is no committed
+# lockfile anywhere in this tree. A range would therefore let two clones of the same commit
+# resolve two different versions of a UI library, which is exactly the class of difference the
+# offscreen renders are supposed to be sensitive to. The pin is the lockfile.
+#
+# Attached to FlightDeckMobile ALONE, deliberately. FleetKit's whole point is that it imports
+# Foundation, Network, Security and CryptoKit and nothing else — that is what FleetKitiOS
+# enforces by compiling the same sources for a second platform — and Markdown rendering is a
+# view concern that has no business crossing that line. See Sources/FlightDeckMobile/
+# TimelineMarkdown.swift for what it is used for and why the theme is the shape it is.
+packages:
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui
+    exactVersion: 2.4.1
 targets:
   FlightDeck:
     type: application
@@ -185,6 +205,10 @@ targets:
     dependencies:
       - target: FleetKitiOS
         embed: true
+      # Markdown rendering for the timeline's prose rows and the detail screen. Declared here
+      # and nowhere else: FleetKit must not gain a UI dependency (see the `packages:` block).
+      - package: MarkdownUI
+        product: MarkdownUI
     settings:
       base:
         SWIFT_VERSION: "6.0"
