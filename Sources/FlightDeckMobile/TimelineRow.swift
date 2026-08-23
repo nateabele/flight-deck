@@ -22,10 +22,14 @@ import SwiftUI
 ///   are. `SessionTimelineScreen.entries(from:)` does the folding, on `callID` and never on
 ///   position.
 ///
-/// **The text is rendered, never parsed** — here and on the detail screen. A body is cut at the
-/// per-item byte cap wherever that lands (mid-object, mid-string, mid-escape), so a truncated
-/// tool input is not parseable JSON by design, and a row that tried to decode one would show
-/// nothing for exactly the largest inputs.
+/// **The text is rendered, never parsed — in the ROW.** A body is cut at the per-item byte cap
+/// wherever that lands (mid-object, mid-string, mid-escape), so a truncated tool input is not
+/// parseable JSON by design, and a row that depended on decoding one would show nothing for
+/// exactly the largest inputs. `TimelineStyle.commandLine` reads *lines* for that reason.
+///
+/// The detail screen one tap away does parse, because there it can afford to fail: it draws a
+/// tree when the whole body decodes and the same plain text as this row when it does not. That
+/// is a screen with room for both; a three-line card is not.
 struct TimelineRow: View {
     let item: TimelineItem
     /// The `.toolResult` that answers `item`, folded into this row. Nil for a prose kind, for

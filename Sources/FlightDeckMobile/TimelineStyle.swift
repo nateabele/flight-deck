@@ -10,9 +10,12 @@ import SwiftUI
 /// environment, no state — so the row and the detail screen cannot describe the same item two
 /// different ways two taps apart, which is the same disagreement that comment guards against.
 ///
-/// **Nothing here parses a body.** A `.toolCall`'s text is pretty-printed JSON cut at the byte
-/// cap wherever that lands, so it is structurally incomplete by design (see
-/// `TimelineItem.Body.text`). `commandLine(for:)` reads *lines*, never structure.
+/// **Parsing a body is attempted, never relied on.** A `.toolCall`'s text is pretty-printed
+/// JSON cut at the byte cap wherever that lands, so it is structurally incomplete by design
+/// (see `TimelineItem.Body.text`), and a `.toolResult` is usually not JSON at all.
+/// `jsonDocument(for:)` is the one function here that looks at structure, it returns `nil` far
+/// more often than not, and `nil` means "draw the text" — which is what every other function
+/// here does. `commandLine(for:)` still reads *lines*, never structure.
 enum TimelineStyle {
 
     // MARK: What it is called
@@ -186,6 +189,103 @@ enum TimelineStyle {
     static func truncationNotice(shown: Int, dropped: Int) -> String {
         "Showing the first \(bytes(shown)) of \(bytes(shown + dropped)). "
             + "Open this session on your Mac to see the rest."
+    }
+
+    // MARK: What a body IS
+
+    /// The body as a JSON tree, when drawing it as one is better than drawing the text.
+    ///
+    /// Three gates, and each one is a real body this has to say no to:
+    ///
+    /// - **The kind.** Only a tool call or a tool result. An `.unknown` body may well be JSON —
+    ///   the fixture's is — but that block's whole promise is that it shows what arrived
+    ///   "exactly as it arrived", and a tree is an interpretation. Prose is not JSON and asking
+    ///   is a waste.
+    /// - **It parses.** Strictly, whole, or not at all. This is the gate a truncated body fails:
+    ///   the Mac cuts at `TimelineLimits.maxItemBytes` mid-object, mid-string, mid-escape, so
+    ///   `truncatedBytes > 0` almost always lands here — and lands here on its own, without a
+    ///   separate rule about truncation, which is why there is not one.
+    /// - **It has structure.** An object or an array. A result whose entire text is `42` or
+    ///   `"done"` is legal JSON and a one-node tree of it is worse than the text it replaces.
+    ///
+    /// Everything that fails renders exactly as it did before this existed.
+    static func jsonDocument(for item: TimelineItem) -> JSONValue? {
+        switch item.kind {
+        case .toolCall, .toolResult: return JSONValue.document(from: item.body.text)
+        default: return nil
+        }
+    }
+
+    /// What sits left of the colon: an object key, or an array position.
+    static func jsonLabel(for row: JSONTreeRow) -> String {
+        if let key = row.key { return key }
+        if let index = row.index { return String(index) }
+        return ""
+    }
+
+    /// What sits right of it.
+    ///
+    /// A container says how many children it has in BOTH states, not just collapsed. Chrome can
+    /// afford to drop the count when it opens a node because the closing brace is a line you
+    /// can see; here the panel is 360pt of wrapped prose and the count is the only thing
+    /// telling a reader whether they have seen all four options or scrolled past one.
+    ///
+    /// Strings keep their quotes. The tree tints by type, but a tint is not readable in
+    /// greyscale or by a reader who cannot distinguish it, and `"true"` and `true` are two
+    /// different answers to a tool's flag.
+    static func jsonValueText(for value: JSONValue) -> String {
+        switch value {
+        case .object(let members): return members.isEmpty ? "{}" : "{\(members.count)}"
+        case .array(let elements): return elements.isEmpty ? "[]" : "[\(elements.count)]"
+        case .string(let text): return "\"\(text)\""
+        case .number(let lexeme): return lexeme
+        case .bool(let flag): return flag ? "true" : "false"
+        case .null: return "null"
+        }
+    }
+
+    /// The tint for a leaf, borrowed from the colour family every JSON viewer already uses so a
+    /// reader arriving from a browser's network tab is not learning a second one. Semantic
+    /// colours only — the same rule, and the same reason, as `tint(for:)`: this screen ships in
+    /// both themes and an explicit RGB that reads on white disappears on black.
+    static func jsonTint(for value: JSONValue) -> Color {
+        switch value {
+        case .string: return .primary
+        case .number: return .blue
+        case .bool: return .purple
+        case .null: return .secondary
+        case .object, .array: return .secondary
+        }
+    }
+
+    /// One row of the tree, as one sentence.
+    ///
+    /// A container says its size and whether it is open, because the row is a button and a
+    /// VoiceOver user has no chevron to look at. **The value is capped** for the same reason a
+    /// whole row's label is: an `AskUserQuestion` option's `description` runs past three hundred
+    /// characters, and a tree of them is forty rows of that.
+    static func accessibilityLabel(forJSON row: JSONTreeRow) -> String {
+        // Spoken 1-based. "Item 0" is a programmer's index read aloud to someone counting.
+        let name = row.key ?? row.index.map { "Item \($0 + 1)" } ?? ""
+        var parts = name.isEmpty ? [] : [name]
+        switch row.value {
+        case .object(let members):
+            parts.append("Object, \(members.count) \(members.count == 1 ? "entry" : "entries")")
+        case .array(let elements):
+            parts.append("Array, \(elements.count) \(elements.count == 1 ? "item" : "items")")
+        case .string(let text):
+            parts.append(text.isEmpty ? "Empty text" : clipped(text))
+        case .number(let lexeme):
+            parts.append(lexeme)
+        case .bool(let flag):
+            parts.append(flag ? "true" : "false")
+        case .null:
+            parts.append("null")
+        }
+        if row.isContainer && row.childCount > 0 {
+            parts.append(row.isExpanded ? "Expanded" : "Collapsed")
+        }
+        return parts.joined(separator: ", ")
     }
 
     // MARK: What VoiceOver hears
