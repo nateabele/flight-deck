@@ -22,10 +22,20 @@ import UIKit
 /// tree. Both rules, and the plain text everything else falls back to, are in
 /// `TimelineBodyBlock`.
 ///
-/// **Prose reaches this screen far more rarely than it used to.** A row draws a whole message
-/// now, so the only answer that still has a way in is one past `TimelineStyle.proseCeilingLines`
-/// — around a fiftieth of the real ones. What a reader loses by not coming here is text
-/// selection, and what they keep is Copy, which moved onto the row itself.
+/// **No prose reaches this screen from the timeline at all any more, and that is deliberate.**
+/// A row draws a whole message now, and the one case that still had a way in — an answer past
+/// `TimelineStyle.proseCeilingLines` — opens where it stopped instead
+/// (`TimelineStyle.expandsInPlace`), so `opensDetail(_:)` answers `false` for every kind that
+/// renders as Markdown. What is left on this screen is what a row genuinely cannot hold: a tool
+/// call's input and output, a JSON tree, a clamped thinking block, a `.prompt`, an `.unknown`,
+/// and the truncation notice that says what the Mac never sent.
+///
+/// `TimelineBodyBlock`'s Markdown branch stays regardless, and is not dead code to delete: this
+/// screen draws whatever item it is handed, and the wrong answer for a `.userTurn` is a wall of
+/// monospaced asterisks. What a reader loses by never coming here for prose is **text
+/// selection** — Copy, the whole body in one gesture, moved onto the row itself
+/// (`TimelineStyle.rowCopyText`), and selecting a phrase out of an answer has no home on the
+/// phone now.
 struct TimelineItemDetailScreen: View {
     let item: TimelineItem
     /// The result that answers this call, when the feed holds it. Paired on the agent's own
@@ -186,12 +196,14 @@ struct TimelineBodyBlock: View {
     /// different-looking one.
     ///
     /// Unclamped, which is the point of the screen — it holds whatever the row could not, and
-    /// what the row cannot hold has narrowed to three things: a tool card's clamped command
-    /// and output, a six-line thinking block, and prose long enough to pass
-    /// `TimelineStyle.proseCeilingLines`. **Prose under the ceiling never reaches this screen
-    /// at all**, because its row draws the whole message and therefore carries no link
-    /// (`TimelineStyle.opensDetail`). The Markdown branch below is what the ceiling case
-    /// lands on, and it is still the only place a long answer is selectable.
+    /// what the row cannot hold has narrowed to a tool card's clamped command and output, a
+    /// six-line thinking block, a `.prompt` and an `.unknown`. **No prose reaches this screen
+    /// from the timeline any more**, at any length: a row draws a short message whole and opens
+    /// a long one in place, so neither carries a link (`TimelineStyle.opensDetail`). The
+    /// Markdown branch below is therefore reached by nothing on the current screen graph, and
+    /// it stays because this view's promise is to draw *any* item correctly — a prose item
+    /// falling through to the branch below it would be set in monospace with its syntax
+    /// showing, which is the failure the branch exists to prevent.
     @ViewBuilder
     private var content: some View {
         if let document, !showsRaw {
