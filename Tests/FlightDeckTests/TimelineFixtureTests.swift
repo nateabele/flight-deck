@@ -117,4 +117,115 @@ final class TimelineFixtureTests: XCTestCase {
             )
         }
     }
+
+    // MARK: - Codex
+
+    private func mappedCodex(_ lines: [String]) -> [TimelineItem] {
+        var offset = 0
+        var items: [TimelineItem] = []
+        for line in lines {
+            items += CodexTimelineMapper.items(inRolloutLine: line, at: offset)
+            offset += line.utf8.count + 1
+        }
+        return items
+    }
+
+    private func codexRollout() throws -> [String] {
+        try Self.lines("rollout-content.captured", in: "Codex")
+    }
+
+    func testTheCapturedRolloutExercisesEveryKindThisMapperEmits() throws {
+        let kinds = Set(mappedCodex(try codexRollout()).map(\.kind))
+        XCTAssertEqual(kinds, [.userTurn, .assistantText, .thinking, .toolCall, .toolResult],
+                       "the capture must contain a prompt, a reply, a thought, a tool call "
+                       + "and its result; recapture per the plan's Task 4 Step 1. "
+                       + "Got \(kinds)")
+    }
+
+    /// The whole mapping, in order, over bytes codex actually wrote — the check the
+    /// hand-written unit tests structurally cannot make, since they assert against lines
+    /// written by the same person who wrote the mapper.
+    func testTheCapturedRolloutMapsToTheConversationThatWasHeld() throws {
+        let items = mappedCodex(try codexRollout())
+        XCTAssertEqual(items.map(\.kind), [
+            .userTurn, .assistantText, .toolCall, .toolResult, .assistantText,
+            .userTurn, .thinking, .assistantText, .toolCall, .toolResult, .assistantText,
+            .userTurn, .assistantText, .toolCall, .toolResult, .toolCall, .toolResult,
+            .assistantText,
+        ], "three prompts, each of which ran a tool; the third needed two calls to reach an "
+        + "MCP tool it was then refused")
+        XCTAssertEqual(items.filter { $0.kind != .toolCall && $0.kind != .toolResult }
+            .map(\.body.text), [
+                "Run the shell command: echo hi. Then reply with exactly the word: done",
+                "I\u{2019}ll run the command now.",
+                "done",
+                "Use the update_plan tool to record a two-step plan for tidying a directory, "
+                    + "then reply with exactly the word: planned",
+                "**Planning commentary integration**",
+                "I\u{2019}ll record the two-step plan.",
+                "planned",
+                "Call the echo_upper tool with the text \"hello timeline\", then reply with "
+                    + "exactly the word: echoed",
+                "I\u{2019}ll call the requested tool.",
+                "echoed",
+            ])
+        XCTAssertEqual(items[2].body.tool, "exec")
+        XCTAssertEqual(items[2].body.callID, "call_x14xQdGXch1AgsA0dDpLoWWq")
+        XCTAssertTrue(items[2].body.text.hasPrefix("const r = await tools.exec_command("),
+                      "a custom_tool_call's input is a program, carried verbatim")
+        XCTAssertEqual(items[3].body.callID, items[2].body.callID,
+                       "the result must name the call it answers, which is what pairs them "
+                       + "on screen")
+        XCTAssertNil(items[3].body.tool, "no output record names its tool")
+        // The `output` of a 0.148.0 tool result is a block ARRAY, and this is the assertion
+        // that would have caught the mapper reading it as a String: it renders as "" and the
+        // whole tool half of the timeline goes silently blank.
+        XCTAssertEqual(items[3].body.text, "Script completed\nWall time 0.1 seconds\nOutput:\nhi\n")
+        XCTAssertTrue(items.allSatisfy { $0.status == .complete })
+        XCTAssertTrue(items.allSatisfy { $0.at?.hasPrefix("2026-08-23T02:2") == true },
+                      "every item is dated from its own record, verbatim")
+    }
+
+    /// The two rules whose violation is silent rather than noisy, checked against the real
+    /// records that carry them: `response_item`/`reasoning`'s ciphertext must never reach a
+    /// phone, and `response_item`/`message` is the assembled prompt — the skills and plugin
+    /// catalogues — not anything a user said.
+    func testTheCapturedRolloutsCiphertextAndPromptAssemblyAreNeverCarried() throws {
+        let lines = try codexRollout()
+        XCTAssertEqual(lines.filter { $0.contains("\"encrypted_content\"") }.count, 3,
+                       "the capture must still contain the encrypted reasoning records; "
+                       + "recapture per the plan's Task 4 Step 1 if it does not")
+        XCTAssertEqual(lines.filter { $0.contains("<recommended_plugins>") }.count, 1,
+                       "the capture must still contain the prompt-assembly message")
+        let items = mappedCodex(lines)
+        XCTAssertTrue(items.allSatisfy { !$0.body.text.contains("gAAAAA") },
+                      "encrypted_content is not thinking and never goes on the wire")
+        XCTAssertTrue(items.allSatisfy { !$0.body.text.contains("<recommended_plugins>") },
+                      "the assembled prompt is not a user turn")
+    }
+
+    /// The existing capture is filtered to `event_msg`, which is why a second one was needed:
+    /// it cannot exercise the tool half of the table at all. Asserted so nobody "consolidates"
+    /// the two fixtures and quietly loses that coverage.
+    func testTheOlderRolloutCaptureHasNoToolRecordsAndThatIsWhyThereAreTwo() throws {
+        let kinds = Set(mappedCodex(try Self.lines("rollout.captured", in: "Codex")).map(\.kind))
+        XCTAssertFalse(kinds.contains(.toolCall))
+        XCTAssertTrue(kinds.contains(.userTurn), "it is still a conversation, just a prose one")
+    }
+
+    func testEveryItemFromTheCapturedRolloutHasAUniqueId() throws {
+        let ids = mappedCodex(try codexRollout()).map(\.id)
+        XCTAssertEqual(Set(ids).count, ids.count,
+                       "ids are offset#index; a collision means the offset arithmetic is wrong "
+                       + "and a client would drop rows as duplicates")
+    }
+
+    func testNoCapturedRolloutLineWasEdited() throws {
+        for line in try codexRollout() {
+            XCTAssertNoThrow(
+                try JSONSerialization.jsonObject(with: Data(line.utf8)),
+                "a line that no longer parses was edited: \(line.prefix(60))"
+            )
+        }
+    }
 }
