@@ -15,7 +15,7 @@ import UIKit
 /// simulator — see `scripts/test-ios.sh`.
 @MainActor
 @Observable
-final class FleetModel {
+final class FleetModel: TimelinePaging {
     private(set) var mac: PairedMac?
     private(set) var fleet = FleetSnapshot.empty
     private(set) var state = FleetConnector.State.idle
@@ -175,6 +175,27 @@ final class FleetModel {
     }
 
     func markRead(_ id: UUID) { connector?.send(.markRead(id: id)) }
+
+    /// Ask the Mac for a page of a session's conversation.
+    ///
+    /// Forwarded rather than absorbed: the connector answers **exactly once**, including with
+    /// `.disconnected` when nothing is connected or the socket dies mid-fetch, and adding a
+    /// layer that could swallow that would put a spinner on screen forever with nothing to
+    /// explain it. This model's job is to hand the callback through unchanged.
+    ///
+    /// The `guard` completes **synchronously**, which is the same asymmetry
+    /// `FleetConnector.request(_:then:)` documents and for the same reason: a command's effect
+    /// comes back as a northbound event, so dropping one is merely ineffective, while dropping
+    /// a request is a caller waiting forever. A caller must therefore expect its completion to
+    /// run before this call returns — `SessionTimelineModel.fetch` arms its deadline first for
+    /// exactly that reason.
+    func timelinePage(
+        _ request: FleetRequest,
+        then completion: @escaping (Result<TimelinePage, FleetRequestError>) -> Void
+    ) {
+        guard let connector else { return completion(.failure(.disconnected)) }
+        connector.request(request, then: completion)
+    }
 
     func reconnect() {
         connect()
