@@ -244,8 +244,12 @@ public final class FleetConnector: @unchecked Sendable {
         case .event(let seq, let event):
             fleet.apply(event)
             advance(to: seq)
-        case .ack, .err:
-            // Command replies change no fleet state; the effect arrives as its own event.
+        case .ack, .err, .page:
+            // Neither a command reply nor a history page is fleet state: a command's effect
+            // arrives separately as its own event, and a page is correlated by `cid` to
+            // whoever asked for it. Note the second half of why `page` carries no `seq` —
+            // reaching `advance(to:)` from here would move this phone's resume point every
+            // time it scrolled up.
             return
         }
         onFleet?(fleet)

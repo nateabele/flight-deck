@@ -60,10 +60,12 @@ public enum ClientFrame: Codable, Equatable, Sendable {
     /// free to send nothing at all, which is what `nil` means.
     case hello(lastSeq: Int, device: String?)
     case cmd(cid: Int, FleetCommand)
+    /// Ask, rather than tell. See `FleetRequest` for why this is not a `cmd`.
+    case req(cid: Int, FleetRequest)
 
     enum CodingKeys: String, CodingKey { case t, lastSeq, device, cid }
 
-    private enum Tag: String, Codable { case hello, cmd }
+    private enum Tag: String, Codable { case hello, cmd, req }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -81,6 +83,13 @@ public enum ClientFrame: Codable, Equatable, Sendable {
             // command reads as one line in a dump. Two keyed containers over one encoder
             // merge into a single JSON object.
             try command.encode(to: encoder)
+        case .req(let cid, let request):
+            try c.encode(Tag.req, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            // Flattened into the same object, exactly as `cmd` flattens its command: two
+            // keyed containers over one encoder merge into a single JSON object, and one
+            // request reading as one line is what makes a packet dump usable.
+            try request.encode(to: encoder)
         }
     }
 
@@ -96,6 +105,9 @@ public enum ClientFrame: Codable, Equatable, Sendable {
         case .cmd:
             self = .cmd(cid: try c.decode(Int.self, forKey: .cid),
                         try FleetCommand(from: decoder))
+        case .req:
+            self = .req(cid: try c.decode(Int.self, forKey: .cid),
+                        try FleetRequest(from: decoder))
         }
     }
 }
@@ -106,10 +118,15 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     case event(seq: Int, FleetEvent)
     case ack(cid: Int)
     case err(cid: Int, code: String)
+    /// The reply to `ClientFrame.req`. Correlated by `cid` and deliberately **not**
+    /// sequenced: a history fetch is not fleet state, and giving it a `seq` would let a
+    /// client paging back through an hour of transcript move the resume point it hands the
+    /// Mac on its next `hello`.
+    case page(cid: Int, TimelinePage)
 
-    enum CodingKeys: String, CodingKey { case t, seq, fleet, reason, cid, code }
+    enum CodingKeys: String, CodingKey { case t, seq, fleet, reason, cid, code, page }
 
-    private enum Tag: String, Codable { case snapshot, ack, err }
+    private enum Tag: String, Codable { case snapshot, ack, err, page }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -131,6 +148,10 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.err, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(code, forKey: .code)
+        case .page(let cid, let page):
+            try c.encode(Tag.page, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(page, forKey: .page)
         }
     }
 
@@ -138,7 +159,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         // Try the frame's own tags first; anything else is an event's tag, which is why
         // the two namespaces must never collide. `FleetEventTag`'s values are all dotted
-        // and these three are not, which keeps that a property rather than a promise.
+        // and these four are not, which keeps that a property rather than a promise.
         if let tag = try? c.decode(Tag.self, forKey: .t) {
             switch tag {
             case .snapshot:
@@ -150,6 +171,9 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             case .err:
                 self = .err(cid: try c.decode(Int.self, forKey: .cid),
                             code: try c.decode(String.self, forKey: .code))
+            case .page:
+                self = .page(cid: try c.decode(Int.self, forKey: .cid),
+                             try c.decode(TimelinePage.self, forKey: .page))
             }
             return
         }
