@@ -327,6 +327,88 @@ enum TimelineFixtures {
         at: "2026-08-22T11:07:41.660Z"
     )
 
+    // MARK: Markdown, as the agents really write it
+
+    /// **Four real assistant messages, off this machine's own transcripts**, one per shape the
+    /// renderer has to survive. Not invented: a survey of 7,944 assistant text blocks across
+    /// 301 `.jsonl` files is what said which four shapes matter, and these are drawn from that
+    /// same corpus verbatim — `#"""…"""#` so not one backtick or asterisk is escaped away by
+    /// the fixture that is supposed to contain them.
+    ///
+    /// Shared by `TimelineMarkdownTests` and by the offscreen render harness, for the reason
+    /// `conversation` is: what is asserted and what is looked at must be the same text.
+    static var markdownConversation: [TimelineItem] {
+        [assistantHeadingAndList, assistantFencedCode,
+         assistantInlineCodeAndBold, assistantLongParagraph]
+    }
+
+    /// A heading, a bulleted list, bold, inline code and a link-free tail — the single most
+    /// common shape a real answer takes. Verbatim from a flight-deck transcript.
+    static let assistantHeadingAndList = TimelineItem(
+        id: "10930#1", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                Done — merged and verified.
+
+                ## Result
+
+                **`feat/session-status-indicators` is merged into `master`.**
+                - Merge commit `749b242` (`--no-ff`), no conflicts — `docs/BUILD.md` auto-merged, 25 files, +3563 lines.
+                - **All tests pass** against the new master base: `All tests passed` — **146 tests, 0 failures, 1 pre-existing skip**. So the two master commits it hadn't seen (the "Flight Deck" rename + app icon) didn't break anything.
+
+                I skipped the GUI smoke suite (it steals focus for ~40s and reads your keystrokes as failures) — the session had already reported smoke 9/9 on this exact tree, and the unit build+run confirms it still compiles and passes post-merge.
+
+                ## Two loose ends the session flagged, still open
+                - **Full-row hover shortfall** — the close-button reveal only triggers over the row's content, not the title→icon gap. Deliberately left that way (full-row hover broke rename 4/5 runs); logged in `docs/FOLLOWUPS.md`.
+                - **Repo hazard worth acting on:** `CLAUDE.md`'s qartez-mutator guidance is unsafe in worktrees — the mutators write to the *parent* checkout regardless of cwd, and it caused a subagent to edit another session's tree. Might be worth a note/guard in `CLAUDE.md` before the next worktree run.
+
+                Nothing to push unless you want it on the remote — want me to `git push`, or leave master local?
+                """#),
+        at: "2026-08-11T23:08:11.708Z"
+    )
+
+    /// A fenced block with no info string, between two paragraphs, followed by a bulleted list.
+    /// 4.1% of real assistant messages carry one of these, and every one of them renders as
+    /// three literal backticks without a parser.
+    static let assistantFencedCode = TimelineItem(
+        id: "11210#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                Merged. `master` is at `dfc54bc`, fast-forward, and 370 tests pass on it.
+
+                ```
+                master  dfc54bc  perf: cut main-thread file work and idle timer wakeups
+                        c6b9151  fix: submit a pending prompt draft before injecting /rename
+                ```
+
+                The checkout is back on `master`, so any other session sharing it is where it expects to be.
+
+                Two loose ends:
+
+                - **`perf/main-thread-and-wakeups` still exists**, now fully merged. `git branch -d perf/main-thread-and-wakeups` cleans it up — I left it since you have four other feature branches around and I don't know which you keep deliberately.
+                - **`.claude/` is still untracked**, as before. Offer stands to gitignore it.
+                """#),
+        at: "2026-08-13T08:58:53.520Z"
+    )
+
+    /// One paragraph, five code spans and one bold run — the 51.6%/36.5% case, and the only
+    /// shape `AttributedString(markdown:)` would have handled.
+    static let assistantInlineCodeAndBold = TimelineItem(
+        id: "11480#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                Confirmed — these are `NSAccessibility` overrides, and AX calls are **synchronous on the main thread**. Note `accessibilityNumberOfCharacters()` calls `content.count` (Swift `String.count` is O(n) grapheme walking, not O(1)), and `accessibilityLine(for:)` does `prefix(index)` + `components(separatedBy:)`. Let me measure these at realistic scrollback sizes.
+                """#),
+        at: "2026-08-12T18:52:16.846Z"
+    )
+
+    /// A single long paragraph with one bold run and one code span, and no block structure at
+    /// all. The row's height clamp has to look deliberate on this as well as on the ones above.
+    static let assistantLongParagraph = TimelineItem(
+        id: "11740#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                The fix wave is running. Worth stating plainly why the Critical is interesting: **every task's tests passed, and the bug is invisible to all of them.** Task 4 modelled the account migration on the two that came before it, and those are genuinely safe to re-run — their output carries no identity that another file references. Accounts are the first migration whose output is pointed at by `sessions.json`, and no single task's brief owned the question "does the migrated blob actually reach disk." Only a whole-branch view asks that.
+                """#),
+        at: "2026-08-20T03:05:05.173Z"
+    )
+
     static func session(
         title: String = "screen-s5 — session timeline", agent: String = "claude",
         activity: String? = "busy", waitingFor: String? = nil, subagentCount: Int = 2

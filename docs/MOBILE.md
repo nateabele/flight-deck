@@ -44,7 +44,7 @@ than assuming. See its own comments for the rest, and the note in `AGENTS.md`.
 ## Running the unit suite
 
 ```bash
-./scripts/test-ios.sh    # 80 tests, ~45s including creating and booting the simulator
+./scripts/test-ios.sh    # 86 tests, ~45s including creating and booting the simulator
 ```
 
 It creates a throwaway simulator, runs `FlightDeckMobileTests` inside `FlightDeckMobile`, and
@@ -79,6 +79,14 @@ at a device someone is testing on would overwrite the build under their hands.
   description capped rather than read out. The parser and the flattening are `FleetKit`'s and
   run in `FlightDeckTests/JSONValueTests` on macOS — key order, number lexemes, every prefix of
   a real body refused, and the two-levels-then-stop default expansion.
+- `TimelineStyle.rendersMarkdown` / `.spoken` — **which parser touches which body.** Prose
+  (`.assistantText`, `.userTurn`) is drawn as the Markdown it was written in; a tool call, a
+  tool result and an `.unknown` never are. That boundary has a sharp edge worth stating: cmark
+  reads a diff's leading `-` as a bullet, so `- removed line` comes back out of it indented and
+  folded into a list with the `+` line, and `***` in a stack trace becomes a horizontal rule.
+  The suite asserts a tool result is spoken **byte-identical** for that reason. It also asserts
+  the flattening the VoiceOver label now does — a raw body announced `**Fixed**` with its
+  asterisks, and a listener cannot skim past those.
 - `SessionTimelineScreen` — the decisions the session screen makes that are not layout:
   *where* a failure is said (at the top, with the conversation still under it — the bottom of a
   list is where nobody is looking fifteen seconds after a "Load earlier" tap), that an empty
@@ -271,6 +279,29 @@ drawing "Load earlier", three monospaced rows with their disclosure chevrons, an
 something rendered, and the assertion that would guard it is a count of collection-view cells,
 which is exactly the brittle shape this file warns against. Reach for it when a screen changes
 shape and you want to *look* at it, not to hold it in place.
+
+**And it is how the Markdown work was judged.** MarkdownUI's theme was chosen against four
+*real* assistant messages pulled out of this machine's own transcripts — a heading with a
+bulleted list, a fenced block, a paragraph of inline code and bold, and one long unbroken
+paragraph — rendered before and after in both themes at 402×874. The PNGs are in
+`.superpowers/sdd/ui-renders/markdown/`. Three things only the renders could settle: that a
+2em `heading1` is a banner on a phone column and had to come down to 1.28em; that the row's
+height clamp cutting **mid-line** is what makes it read as "there is more below" rather than as
+the end of the message; and — the one that matters most — that a screen of rendered prose sat
+directly above the tool cards leaves them untouched, `** TEST FAILED **` still literal in a
+result panel and a `Read`'s numbered lines still numbered lines rather than an ordered list.
+
+**And it is how the tree and the Markdown were merged into one detail screen.** The two landed
+independently and each rewrote the same block, so what had to be looked at was not either
+feature but the seam: that the three ways a body is drawn stay mutually exclusive and that the
+grey panel goes exactly where it belongs. Six screens in both themes at 402×874 —
+`.superpowers/sdd/ui-renders/merged/` — a heading-and-list answer and a fenced-code answer
+(Markdown, no outer panel, the fence's own fill standing off the page in BOTH themes), an
+`AskUserQuestion` input as a tree and the same body switched to Raw (`showsRaw:` exists for
+this: there is nothing to tap in a `layer.render(in:)` pass), a cut 64 KB `Read` with no toggle
+and its scissors notice intact, and a `Bash` call whose JSON input is a tree directly above a
+result that is not JSON and is therefore monospaced text. That last one is the whole merge in a
+single screen.
 
 **It is also how the timeline's design was chosen**, rather than argued. Three whole screens —
 a dense monospaced transcript, a chat thread, and the structured feed that shipped — were built
