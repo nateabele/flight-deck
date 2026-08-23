@@ -254,10 +254,15 @@ enum TimelineStyle {
     ///
     /// **Measured, not guessed** — `UIFont.preferredFont(forTextStyle: .body)` laid out against
     /// the row's real width in the offscreen harness — and it is only ever used to *estimate*.
-    /// Nothing is laid out from it. Dynamic Type moves the real number, and moving it can only
-    /// make a long body look shorter than it is here, which costs a tall row some extra height
-    /// and can never hide a word: the clamp and the way into the detail screen are the same
-    /// decision (`opensDetail(_:)`), so a body the estimate calls short is a body drawn whole.
+    /// It is a conservative one: real prose fits ten to fifteen per cent more than this, so the
+    /// count comes out high.
+    ///
+    /// **Nothing is laid out from it, and that is what makes its inaccuracy harmless.** Both
+    /// halves of the ceiling — whether a body is over it (`exceeds(_:_:)`) and where the
+    /// collapsed row stops (`firstLines(_:of:)`) — are the same count of the same characters, so
+    /// an estimate that runs high or low moves *where* the cut lands and can never produce a cut
+    /// with no More link on it, or a More link with nothing behind it. It was not always so:
+    /// `proseText(for:expanded:)` records what happened when the cut was a height instead.
     static let proseColumns = 42
 
     /// The most of one message a row will ever draw: 120 lines, about four screenfuls of
@@ -271,8 +276,9 @@ enum TimelineStyle {
     /// machine is 89 KB; cut to `TimelineLimits.maxItemBytes` it is still upwards of fifteen
     /// hundred lines, which is fifty screenfuls with the conversation nowhere near it.
     ///
-    /// A body that hits it is cut mid-line and keeps its chevron, exactly as every clamped row
-    /// always has, so the ceiling is the one case where a prose row still has more to show.
+    /// A body that hits it is cut mid-line and carries a **More** link at the cut, so the
+    /// ceiling is the one case where a prose row still has more to show — and the only clamp on
+    /// this screen the reader is handed a way out of.
     static let proseCeilingLines = 120
 
     /// Whether a body runs past `limit` lines in the prose column — hard breaks plus wraps.
@@ -322,15 +328,105 @@ enum TimelineStyle {
     ///
     /// A tool row never reaches this — its card has two clamps of its own, in
     /// `TimelineRow.toolCard` — and the answer it would get is the conservative one anyway.
-    static func proseLineLimit(for item: TimelineItem) -> Int? {
+    ///
+    /// **`expanded` moves the ceiling and nothing else.** It is the reader's own answer to the
+    /// one clamp they are offered a way out of: a row past `proseCeilingLines` draws a More
+    /// link at the cut and opens *in place* when it is tapped. The other three clamps ignore it
+    /// on purpose — a thinking block's six lines are a style rather than a shortfall, and a
+    /// `.prompt` or an `.unknown` is machine text with a screen of its own one tap away — so a
+    /// `true` arriving on one of those kinds must change nothing, which is what the `switch`
+    /// below says by not reading the flag in those arms.
+    static func proseLineLimit(for item: TimelineItem, expanded: Bool = false) -> Int? {
         switch item.kind {
         case .assistantText, .userTurn:
+            guard !expanded else { return nil }
             return exceeds(proseCeilingLines, item.body.text) ? proseCeilingLines : nil
         case .thinking:
             return 6
         case .prompt, .unknown, .toolCall, .toolResult:
             return 14
         }
+    }
+
+    /// The prose a row actually DRAWS: the whole body, or the first `proseCeilingLines` lines
+    /// of it.
+    ///
+    /// **The collapsed row is given a shorter document, rather than the whole one behind a
+    /// height clamp, and a render is why.** The clamp was `maxHeight: 23 × 120` with the
+    /// overflow clipped — two different measurements of "a hundred and twenty lines", and they
+    /// disagree: `exceeds(_:_:)` counts a wrap at 42 characters, and real prose at 370pt in the
+    /// system font fits more than that, so the estimate over-counts lines by ten to fifteen per
+    /// cent. A real message the estimate called 134 lines laid out at **2,770.67pt collapsed
+    /// and 2,770.67pt expanded** — the same number, because the clamp never bit — so the row
+    /// drew a More link and tapping it moved nothing at all. Four of the nine over-ceiling
+    /// messages in this machine's transcripts sit in that dead band, so it was not an edge
+    /// case. `ui-renders/expand/over-ceiling-*.png` is what showed it; with the text cut, the
+    /// same message is 2,527pt collapsed and 2,770.67pt expanded.
+    ///
+    /// Cutting the text instead makes the two agree by construction: if the estimate says the
+    /// body is over, the collapsed document is strictly shorter than the whole one, so More
+    /// always has something to add. It is also less work, not more — a collapsed row parses and
+    /// lays out a fraction of a 64 KB body instead of laying all of it out and throwing most of
+    /// it away.
+    ///
+    /// **Cutting a Markdown document mid-line is safe, which is not obvious.** The dangerous
+    /// case looks like an unterminated fence — but a fence opened before the cut and closed
+    /// after it renders its contents as code up to the end of the truncated document, which is
+    /// exactly what the whole document renders up to that same point. A cut table is a shorter
+    /// table, and a cut heading is a heading. Nothing changes meaning.
+    static func proseText(for item: TimelineItem, expanded: Bool = false) -> String {
+        guard rendersMarkdown(item),
+              let limit = proseLineLimit(for: item, expanded: expanded) else {
+            return item.body.text
+        }
+        return firstLines(limit, of: item.body.text)
+    }
+
+    /// The first `limit` lines of `text` in the prose column — hard breaks plus wraps, counted
+    /// exactly as `exceeds(_:_:)` counts them, because a disagreement between the two is a row
+    /// that offers More and has nothing to show.
+    ///
+    /// **It stops at the cut**, so a 64 KB paste costs the same as a six-line answer: the walk
+    /// cannot pass `(limit + 1) × columns` characters. The cut lands wherever the count runs
+    /// out, mid-line and mid-word on purpose — a row that ends on a whole line looks finished,
+    /// and one that stops in the middle of a sentence cannot be read as the end of a message.
+    static func firstLines(_ limit: Int, of text: String, columns: Int = proseColumns) -> String {
+        var lines = 1
+        var column = 0
+        for index in text.indices {
+            if text[index] == "\n" {
+                lines += 1
+                column = 0
+            } else {
+                column += 1
+                if column > columns {
+                    lines += 1
+                    column = 1
+                }
+            }
+            if lines > limit { return String(text[text.startIndex..<index]) }
+        }
+        return text
+    }
+
+    /// Whether this row carries a **More** link at the cut — that is, whether it is prose the
+    /// ceiling actually bit.
+    ///
+    /// **The one clamp with a way out, and the way out is here rather than a push.** It used to
+    /// be a chevron into the detail screen, which is the wrong shape twice over: the screen
+    /// repeated the words the row had already drawn a hundred and twenty lines of, and a `List`
+    /// floats a link's disclosure indicator at the row's *vertical centre* — two screenfuls
+    /// above the cut on a row this tall, pointing at nothing. So the rest of the message opens
+    /// where it stopped, and `opensDetail(_:)` now answers `false` for every prose kind that
+    /// renders as Markdown.
+    ///
+    /// Deliberately independent of the expansion state: a row that can expand is a row that can
+    /// collapse again, and the link is drawn in both states (More, then Less). What it must
+    /// never do is appear on a body that had nothing cut, which is what the `nil` from
+    /// `proseLineLimit(for:)` — asked **unexpanded**, since an expanded row's limit is `nil` by
+    /// construction — rules out.
+    static func expandsInPlace(_ item: TimelineItem) -> Bool {
+        rendersMarkdown(item) && proseLineLimit(for: item) != nil
     }
 
     /// Whether tapping this row leads anywhere — that is, whether the detail screen has
@@ -341,17 +437,45 @@ enum TimelineStyle {
     /// is not there; a row that opens one with no chevron is a hidden gesture, and this app has
     /// already paid for the mirror of that — "tapping a session does nothing" came back three
     /// times on the fleet list, and it was true. What the detail screen still offered such a
-    /// row was Copy, so Copy moved onto the row itself (`TimelineRow`'s `CopyAction`).
+    /// row was Copy, so Copy moved onto the row itself (`rowCopyText(for:)`).
     ///
-    /// A tool row always leads somewhere: its card is two clamped slots of machine text, its
-    /// input is frequently a JSON tree, and either half may have been cut at the byte cap.
+    /// **No prose row leads anywhere now, not even one past the ceiling**, and that is one
+    /// decision with two halves. A long answer opens where it stopped instead
+    /// (`expandsInPlace(_:)`), so the screen one tap away would once again be the same words —
+    /// and, mechanically, a `NavigationLink` eats the tap on any control inside it, so a row
+    /// that is a link cannot also carry a More button. The `.assistantText`/`.userTurn` arm is
+    /// therefore an unconditional `false`, not a clamp read.
+    ///
+    /// The three that stay are the three with no way out on the row: `.thinking` is six lines
+    /// of a block styled as a whole, and `.prompt` and `.unknown` are machine text the screen
+    /// says it is showing verbatim. A tool row always leads somewhere too: its card is two
+    /// clamped slots of machine text, its input is frequently a JSON tree, and either half may
+    /// have been cut at the byte cap.
     static func opensDetail(_ item: TimelineItem) -> Bool {
         switch item.kind {
         case .toolCall, .toolResult:
             return true
-        default:
+        case .assistantText, .userTurn:
+            return false
+        case .thinking, .prompt, .unknown:
             return proseLineLimit(for: item) != nil
         }
+    }
+
+    /// What a long press on the ROW puts on the clipboard, or `nil` for a row that leads to a
+    /// screen with a Copy button of its own.
+    ///
+    /// Two ways to copy one body a gesture apart is how a reader ends up unsure which of them
+    /// took, so this is the exact complement of `opensDetail(_:)` — which now means every prose
+    /// row has it, including the long ones that used to hand the job to the detail screen.
+    ///
+    /// **The whole body, never the visible part.** A collapsed row is drawing a hundred and
+    /// twenty lines of a message; what a reader wants on the clipboard is the message. An empty
+    /// body answers `nil` rather than putting a Copy item on a menu that would clear the
+    /// pasteboard.
+    static func rowCopyText(for item: TimelineItem) -> String? {
+        guard !opensDetail(item), !item.body.text.isEmpty else { return nil }
+        return item.body.text
     }
 
     // MARK: What a body IS

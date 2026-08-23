@@ -421,6 +421,138 @@ enum TimelineFixtures {
         at: "2026-08-06T15:44:07.934Z"
     )
 
+    /// **The ceiling's two sides, one line apart, both real.** These are the pair the More link
+    /// is argued from: `assistantJustUnderTheCeiling` measures 119 lines in the row's
+    /// 42-character column and `assistantJustOverTheCeiling` 134, against a ceiling of 120. The
+    /// first must draw whole with no link at all; the second must cut and offer one.
+    ///
+    /// Verbatim from `~/.claude/projects/-Users-nate/1a9f4e0b-…jsonl`, one conversation, half an
+    /// hour apart — a boundary chosen against invented text is a boundary nobody has seen.
+    static let assistantJustUnderTheCeiling = TimelineItem(
+        id: "12480#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                Everything is in **`~/Downloads/li-video/master/`**.
+
+                ## Corrections to what I told you earlier
+
+                Your source changed three of my conclusions, and I'd rather flag them than quietly move on:
+
+                1. **The source is 720×1280, not 1080p.** So "upload 1080×1920 to unlock a 1080p rung" doesn't apply — there's no 1080p detail to unlock.
+                2. **LinkedIn's video transcode was far less destructive than I claimed.** Measured against your actual source: **VMAF 86.7, SSIM 0.98, PSNR 40.6 dB.** I called it "bitrate-starved" off the 445 kbps number alone; that was the wrong read. Your footage is soft, and soft footage compresses efficiently.
+                3. **"Denoise before upload" was wrong for this file.** It's a clean HEVC original with the iPhone's NR already applied — room tone measured **−87 dB**. Denoising would only soften it. I've made that opt-in rather than default in the script.
+
+                ## What held up
+
+                The audio diagnosis, completely — and now proven rather than inferred. Your source measures **−37.35 LUFS**; LinkedIn delivered **−37.32**. They applied *zero* loudness normalization. That was a capture problem end to end, and it's the entire win here.
+
+                ## The files
+
+                | File | Video | Audio | Size |
+                |---|---|---|---|
+                | **01_faithful_hevc** | HEVC **stream-copied — bit-identical** | fixed | 12M |
+                | **02_upload_720p** | H.264 CRF 16, no grade — **VMAF 96.7** | fixed | 10M |
+                | **03_upload_720p_graded** | + backlight grade | fixed | 16M |
+                | **04_upload_1080p_graded** | upscaled 1080×1920 | fixed | 24M |
+
+                All four: **−14.59 LUFS / −1.50 dBTP / LRA 3.6.** `compare_grade.jpg` shows source vs graded.
+
+                Two notes on the numbers. **VMAF 85 on the graded version isn't a quality drop** — VMAF measures fidelity to the ungraded source, and the grade deliberately changes the image, so it scores itself down. Ignore it there. And **LRA 3.6 vs your source's 8.8** is intentional: reaching −14 LUFS from −37 needs 33 dB of gain, which requires real compression. LRA 3.6 is normal for spoken word (broadcast speech targets 4–6); most of that original 8.8 was pauses between phrases, not expressive dynamics.
+
+                ## What I'd do
+
+                **Use 03 for anything new.** The grade is subtle and it fixes the backlight, which is a genuine flaw in the original.
+
+                **File 04 is an experiment, not a recommendation.** The theory is that uploading 1080p lands you on a higher rung of LinkedIn's bitrate ladder, so their CRF 28 pass gets more bits even though no real detail was added. That's a known tactic on resolution-keyed ladders, but I can't verify it without a test upload — and I'm not going to publish anything to your account. Worth trying on a future post if you're curious.
+
+                **On reposting this one:** LinkedIn won't let you swap the video on an existing post, so re-uploading means a new post and losing the 48 reactions and 6 reposts. Given the video was already at VMAF 86.7, the only real gain is the audio. That's a big gain — but it's your call whether it beats the engagement.
+
+                ## Script
+
+                `~/bin/li-master`, rewritten with corrected defaults (native res, no denoise, no grade) and tested against your file:
+
+                ```bash
+                li-master input.mov                    # faithful
+                li-master --grade input.mov            # + backlight lift
+                li-master --grade --1080 input.mov     # + tier experiment
+                li-master --denoise input.mov          # only for genuinely grainy sources
+                ```
+
+                It prints source and output loudness both times so you can confirm before uploading.
+
+                One last thing, since it's the root cause: **your mic gain was ~20 dB too low at the shoot.** Everything above is recovery. A test recording checked at the top of the session costs thirty seconds and beats all of it.
+                """#),
+        at: "2026-08-20T17:58:53.016Z"
+    )
+
+    /// The other side of it — 134 lines, so a collapsed row shows 120 and the last fourteen
+    /// arrive when the reader taps More. See `assistantJustUnderTheCeiling`.
+    static let assistantJustOverTheCeiling = TimelineItem(
+        id: "12720#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                Everything is in **`~/Downloads/li-video/`**. I pulled the 720p progressive MP4 from LinkedIn's embed endpoint (not the AV1 HLS stream — the progressive rendition is the same quality and far easier to work with), then built four cleanup variants so you can A/B them.
+
+                ## Diagnosis
+
+                **The audio is the real problem, and it's not noise — it's level.**
+
+                | | Measured | Should be |
+                |---|---|---|
+                | Integrated loudness | **−37.3 LUFS** | −14 LUFS |
+                | True peak | −17.1 dBTP | −1.5 dBTP |
+                | Loudness range | 9.0 LU | ~7–11 LU |
+
+                That's **23 dB below** the social-media standard — people are cranking their phone to hear it. Meanwhile there's 17 dB of unused headroom, so the fix is nearly free.
+
+                Critically, I checked the noise floor before reaching for denoisers: energy above 8 kHz is −74 dB (no hiss) and below 300 Hz is −49 dB (no rumble). **The recording is clean.** `afftdn`/`arnndn` would only smear the speech here — I left them out deliberately.
+
+                **Video is bitrate-starved, and that's a hard ceiling.** 720×1280 @ 30fps at **445 kbps** (~0.016 bpp) — LinkedIn crushed it. No filter recovers detail that isn't there. The realistic wins are cosmetic: de-block, de-band the flat wall, and lift the shadows since you're backlit by the window. Anything more aggressive starts looking waxy.
+
+                ## The options
+
+                | File | What it does | Size |
+                |---|---|---|
+                | **A_audio-only** | Loudness fix + 80 Hz rumble filter. Video **stream-copied — bit-identical**, zero generational loss. | 2.0M |
+                | **B_audio-polished** | A + speech EQ (−2 dB mud at 250 Hz, +3 dB presence at 3 kHz), de-esser, gentle 3:1 compression. Video still untouched. | 2.0M |
+                | **C_full-720p** | B's audio + video cleanup, re-encoded at native res, CRF 19. | 5.3M |
+                | **D_full-1080p** | C, upscaled to 1080×1920 (lanczos). | 9.2M |
+                | **E_audio-loud** | Hits −14.8 LUFS for max phone-speaker punch. Video copied. | 2.0M |
+
+                Verified output: A–D land at **−15.8 LUFS / −1.45 dBTP**, E at **−14.8**.
+
+                Two honest caveats:
+
+                - **A–D land at −15.8, not the −14 I targeted.** Linear gain hit the true-peak ceiling first. That's still a perfectly good broadcast level and it preserves natural dynamics. E gets to −14.8, but only by squashing LRA from 9.0 → 3.8 — punchier on a phone speaker, noticeably flatter on headphones.
+                - **D's upscale adds no detail.** It's purely for platforms that bias toward higher-resolution uploads. If that's not a concern, C is the honest version.
+
+                `compare_face.jpg` is a side-by-side (original left, C right) — shadows lifted, shirt pattern and window frame slightly crisper. Real but modest, which is the most 445 kbps will give you.
+
+                ## My recommendation
+
+                **Ship B.** The audio fix is 95% of the perceived improvement, and it keeps your video stream bit-identical — no second-generation loss on an already-fragile encode. Reach for C only if the wall banding actually bothers you on a full-size screen.
+
+                The commands, if you want to rerun on other clips (note the two-pass `measured_*` values are specific to *this* file — re-measure with `-af loudnorm=print_format=json -f null -` for anything else):
+
+                ```bash
+                # B — audio polish, video untouched
+                LN="loudnorm=I=-14:TP=-1.5:LRA=11:measured_I=-37.32:measured_TP=-17.08:\
+                measured_LRA=9.00:measured_thresh=-49.09:linear=true"
+
+                ffmpeg -i original.mp4 -c:v copy \
+                  -af "highpass=f=85,equalizer=f=250:t=q:w=1.2:g=-2,equalizer=f=3000:t=q:w=1.4:g=3,\
+                deesser=i=0.3,acompressor=threshold=-20dB:ratio=3:attack=8:release=180:makeup=1,$LN" \
+                  -c:a aac -b:a 192k -ar 48000 out.mp4
+
+                # C — adds video cleanup
+                -vf "hqdn3d=1.5:1.2:6:6,gradfun=strength=0.9:radius=16,\
+                curves=master='0/0 0.25/0.31 0.75/0.78 1/1',eq=saturation=1.06,cas=0.4" \
+                -c:v libx264 -preset slow -crf 19 -pix_fmt yuv420p -movflags +faststart
+                ```
+
+                One thing worth flagging for next time: this was recovered from LinkedIn's re-encode, so we're cleaning up a copy. If you still have the camera original, running the same audio chain on that would beat any of these outright — and the 445 kbps video ceiling disappears entirely.
+                """#),
+        at: "2026-08-20T17:31:08.152Z"
+    )
+
     /// A real 6,775-character answer with four `##` headings, three horizontal rules, nested
     /// `###` sections and eleven bold runs — **201 lines** in the row's 42-character column,
     /// past the 99th percentile of the 7,987 assistant messages on this machine, and 4,067pt
