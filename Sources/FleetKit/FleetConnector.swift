@@ -70,13 +70,20 @@ public final class FleetConnector: @unchecked Sendable {
     /// why. That is the same failure the stale-fleet banner exists to prevent, one layer
     /// down, and it is why `teardown()` drains this table rather than clearing it.
     ///
-    /// The `cid` space is a `FleetClient`'s, so it restarts at 1 on every new connection.
-    /// What keeps a reused number unambiguous is that this table is emptied by the same
-    /// `teardown()` that drops the connection, and `teardown()` is the only path by which
-    /// `winner` is replaced — so no entry from an earlier connection is ever still here to be
-    /// matched. A frame from an earlier connection cannot arrive to be matched either:
-    /// `FleetClient` gates `onFrame` on `hasEnded`, and `accept()` refuses a client that is
-    /// neither a live racer nor the current winner.
+    /// The `cid` space is a `FleetClient`'s. `nextCID` is never reset — `connect()` does not
+    /// touch it — so the restart at 1 on every new connection is THIS class's doing: `dial()`
+    /// constructs a fresh client per candidate. The invariant therefore belongs here, not to
+    /// `FleetClient`, and `testACidReusedByTheNextConnectionAnswersTheNewRequestOnly` asserts
+    /// `cids == [1, 1]` so it cannot quietly stop being true.
+    ///
+    /// What keeps a reused number unambiguous is that no entry from an earlier connection is
+    /// ever still here to be matched. `winner` is dropped in exactly two places, and both
+    /// empty this table before anything can be filed against the next connection:
+    /// `teardown()` drains it in the same breath, and `noteDisconnect()` reaches `teardown()`
+    /// through `scheduleRetry()` — see the comment there for why that path is reachable
+    /// whenever this one is. A frame from an earlier connection cannot arrive to be matched
+    /// either: `FleetClient` gates `onFrame` on `hasEnded`, and `accept()` refuses a client
+    /// that is neither a live racer nor the current winner.
     private var pending: [Int: (Result<TimelinePage, FleetRequestError>) -> Void] = [:]
     private var browser: NWBrowser?
     private var fleet = FleetSnapshot.empty
@@ -155,8 +162,13 @@ public final class FleetConnector: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let winner else { return completion(.failure(.disconnected)) }
         let cid = winner.send(request)
-        // `0` is `FleetClient`'s "there is no connection to write to" — the winner's socket
-        // died between the frame that installed it and now.
+        // `0` is `FleetClient`'s "there is no connection to write to", and it is a seatbelt
+        // rather than a live case: `connection` is nilled only by `disconnect()`, and the one
+        // caller that disconnects the winner nils `winner` on the very next statement of the
+        // same serial queue, so no request can observe the gap. A socket that has merely
+        // FAILED does not produce it either — `connection` is still non-nil, `send` returns a
+        // real cid, and that request is resolved by the drain. Kept because the alternative
+        // to a redundant `guard` here is a completion that is silently never filed.
         guard cid != 0 else { return completion(.failure(.disconnected)) }
         pending[cid] = completion
     }
@@ -181,6 +193,12 @@ public final class FleetConnector: @unchecked Sendable {
     private func race() {
         guard running else { return }
         teardown()
+        // `teardown()` drains `pending`, and a completion is free to call `stop()` from
+        // inside that drain — see `scheduleRetry()`, where the same re-entry is reachable
+        // today. Kept in step here so the two post-`teardown()` sites cannot drift into
+        // disagreeing about whether the connector is still running; `startBrowsing()` guards
+        // the same hazard, for the same reason, a few lines down.
+        guard running else { return }
         report(.searching)
         let generation = invalidateDeferredWork()
         for candidate in remembered() { dial(candidate) }
@@ -391,17 +409,29 @@ public final class FleetConnector: @unchecked Sendable {
             return
         }
         winner = nil
-        // The pending table is drained by `scheduleRetry()`'s `teardown()`, not here. That
-        // is reachable whenever this branch is: `running` can only be false after `stop()`,
-        // which already ran `teardown()` — and `stop()`'s own `disconnect()` sets
-        // `FleetClient.hasEnded` before cancelling, so it cannot produce the callback that
-        // gets here in the first place.
+        // The pending table is drained by `scheduleRetry()`'s `teardown()`, not here, and
+        // that path is reachable whenever this branch is. `scheduleRetry()` does nothing once
+        // `running` is false — but `running` is false only after `stop()`, whose `teardown()`
+        // has already cleared `racers` and nilled `winner`, so this method's entry guard
+        // fails and this branch is not merely un-drained, it is unreachable. (`stop()`'s
+        // `disconnect()` also sets `FleetClient.hasEnded` before cancelling, so it cannot
+        // produce the callback that gets here at all.) That is why no path can leave
+        // `pending` non-empty with `winner` nil.
         scheduleRetry()
     }
 
     private func scheduleRetry() {
         guard running else { return }
         teardown()
+        // Re-checked AFTER `teardown()`, because `teardown()` now drains `pending` and a
+        // completion hearing `.disconnected` is free to call `stop()` — which
+        // `resolve(_:with:)` calls the ordinary case. Without this, control unwinds back
+        // into a method that goes on to report `.lost(retryingIn:)` on a connector that
+        // just went `.idle` and will never race again (`race()` guards on `running`). The
+        // consumer's last word would be "reconnecting in one second" with nothing
+        // reconnecting and nothing on screen to explain it — the same shape as the flap
+        // this channel already fixed once.
+        guard running else { return }
         // Bumping here is what makes a timeout that fires DURING the backoff window
         // harmless — at that moment no new race has started, so a generation bumped only by
         // `race()` would still match and the retry would double.

@@ -7,8 +7,18 @@ import XCTest
 /// transport here would prove nothing about the thing that ships.
 ///
 /// Two rules are load-bearing and neither is visible in normal operation: a `req` before
-/// `hello` must be refused exactly as a `cmd` is, and a reply that arrives after the phone
-/// has gone must be dropped rather than written to a dead connection.
+/// `hello` must be refused exactly as a `cmd` is, and a `req` this build cannot parse must be
+/// refused on its own `cid` without taking the socket with it.
+///
+/// A third rule is stated here and deliberately NOT tested: a reply that arrives after the
+/// phone has gone must be dropped rather than written to a dead connection
+/// (`FleetSocketServer`'s `attached[id]` check inside the reply closure). Nothing in-process
+/// can observe the difference — `FleetSocket.send` routes the write into `contentProcessed`
+/// with no error channel at that site, and the reply closure holds its connection weakly, so
+/// it cannot reach any other peer either. The test that claimed this coverage asserted
+/// `XCTAssertTrue(true)` and was removed rather than dressed up. That line is untestable
+/// without a production hook, and it should stay written down as untested rather than
+/// advertised as covered.
 @MainActor
 final class FleetRequestPlumbingTests: XCTestCase {
     private var server: FleetSocketServer!

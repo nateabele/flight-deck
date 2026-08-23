@@ -65,9 +65,10 @@ final class FleetConnectorRequestTests: XCTestCase {
         // `browse: false`, as every connector test does: Bonjour on the build machine finds
         // whatever else is running and makes the race nondeterministic.
         let connector = FleetConnector(mac: mac, store: store, browse: false)
-        // Short enough that a reconnect inside a test is a wait rather than a timeout. The
-        // backoff schedule itself is `FleetConnectorTests`' subject, not this file's.
-        connector.retryDelays = [0.05]
+        // `retryDelays` is left at its production value here. Only one test in this file
+        // waits out a backoff, and it shortens it itself: a 50ms schedule shared by all
+        // twelve means every test that ends with a dead server spends the rest of its run
+        // redialling a closed port a few dozen times a second, for nothing.
         self.connector = connector
         let connected = expectation(description: "connected")
         connector.onState = { if case .connected = $0 { connected.fulfill() } }
@@ -128,32 +129,55 @@ final class FleetConnectorRequestTests: XCTestCase {
         XCTAssertEqual(result, .failure(.server(code: "no_transcript")))
     }
 
-    /// `unsupported` is what a Mac older than this phone answers a request it cannot parse
-    /// with — the salvage path that keeps the socket alive instead of hanging up on it. The
-    /// code is carried through verbatim rather than collapsed into a generic failure, and the
-    /// connection is still usable afterwards, which is the half of the salvage that matters:
-    /// a refusal that killed the socket behind it would be the one-second flap all over
-    /// again.
-    func testAnUnsupportedRefusalResolvesItsRequestAndLeavesTheSocketUsable() async throws {
-        let expected = page("after the refusal")
-        var seen = 0
-        server.onRequest = { _, cid, _, reply in
-            seen += 1
-            reply(seen == 1 ? .err(cid: cid, code: "unsupported") : .page(cid: cid, expected))
+    /// One request's refusal must not disturb another's.
+    ///
+    /// That is the claim here, and nothing else in this file makes it: `err` is the answer to
+    /// exactly one `cid`, not a verdict on the channel. The tempting wrong reading is that a
+    /// server saying no means the conversation is over — `drainPending()` in the `err` arm is
+    /// a two-character mistake — and it would strand a perfectly good fetch on a perfectly
+    /// good socket, reported as `.disconnected` on a connector that is still connected.
+    ///
+    /// `unsupported` is the realistic code for it: a Mac older than this phone refusing a
+    /// request it cannot parse, on the salvage path that deliberately leaves the socket alive
+    /// (see `FleetRequestPlumbingTests`, which is where the code is actually produced). A
+    /// refusal that took the connection with it is the one-second flap all over again, which
+    /// is why the second request is answered over the *same* socket rather than a new one.
+    func testARefusalResolvesItsOwnRequestAndLeavesAnotherPending() async throws {
+        let expected = page("the survivor")
+        // Each held reply closes over the `cid` the server echoed it, so nothing here depends
+        // on guessing what the connector numbered its requests.
+        var refuse: (() -> Void)?
+        var answer: (() -> Void)?
+        let reached = expectation(description: "both requests reached the server")
+        reached.expectedFulfillmentCount = 2
+        server.onRequest = { _, cid, request, reply in
+            guard case .timeline(_, let anchor, _) = request else { return XCTFail("wrong verb") }
+            if anchor == .before(4_096) {
+                refuse = { reply(.err(cid: cid, code: "unsupported")) }
+            } else {
+                answer = { reply(.page(cid: cid, expected)) }
+            }
+            reached.fulfill()
         }
         let (connector, _) = try await startConnector()
 
-        let refused = expectation(description: "refused")
-        var first: Result<TimelinePage, FleetRequestError>?
-        connector.request(fetch(.before(4_096))) { first = $0; refused.fulfill() }
-        await fulfillment(of: [refused], timeout: 10)
-        XCTAssertEqual(first, .failure(.server(code: "unsupported")))
+        var results: [String: Result<TimelinePage, FleetRequestError>] = [:]
+        let refused = expectation(description: "the refused one")
+        let answered = expectation(description: "the other one")
+        connector.request(fetch(.before(4_096))) { results["refused"] = $0; refused.fulfill() }
+        connector.request(fetch(.after(20))) { results["survivor"] = $0; answered.fulfill() }
+        await fulfillment(of: [reached], timeout: 10)
 
-        let answered = expectation(description: "answered on the same socket")
-        var second: Result<TimelinePage, FleetRequestError>?
-        connector.request(fetch()) { second = $0; answered.fulfill() }
+        refuse?()
+        await fulfillment(of: [refused], timeout: 10)
+        // Answered only now, and over the socket the refusal just travelled: if the `err`
+        // had been read as "the channel is finished", this request would already hold
+        // `.disconnected` and no page could reach it.
+        answer?()
         await fulfillment(of: [answered], timeout: 10)
-        XCTAssertEqual(second, .success(expected))
+        XCTAssertEqual(results, [
+            "refused": .failure(.server(code: "unsupported")), "survivor": .success(expected)
+        ])
     }
 
     /// A reply correlated to a `cid` nothing is waiting on any more — the screen scrolled
@@ -304,6 +328,47 @@ final class FleetConnectorRequestTests: XCTestCase {
         ])
     }
 
+    /// The other half of the same re-entrancy, and the one the consumer sees.
+    ///
+    /// `stop()` from inside a completion is what `resolve(_:with:)` calls the ordinary case,
+    /// and the drain is where a completion first hears `.disconnected` — so the `stop()`
+    /// lands in the middle of `scheduleRetry()`'s `teardown()`. What follows that `teardown()`
+    /// on the way back out is `report(.lost(retryingIn:))`, which would make `.lost` the last
+    /// word the consumer hears about a connector that has gone `.idle` and will never race
+    /// again: `race()` guards on `running`, which this `stop()` just cleared.
+    ///
+    /// That is a "reconnecting in one second" banner with nothing reconnecting behind it and
+    /// nothing on screen to explain it — the same user-visible shape as the flap this whole
+    /// channel exists to have fixed. Asserted as the WHOLE sequence of reported states rather
+    /// than the last one, because a `.lost` announced before `.idle` would be just as wrong.
+    func testAStopFromInsideTheDrainLeavesTheConnectorIdleNotRetrying() async throws {
+        let held = expectation(description: "reached")
+        server.onRequest = { _, _, _, _ in held.fulfill() }
+        let (connector, _) = try await startConnector()
+
+        var states: [FleetConnector.State] = []
+        let idle = expectation(description: "idle")
+        connector.onState = { state in
+            states.append(state)
+            if case .idle = state { idle.fulfill() }
+        }
+        let answered = expectation(description: "answered")
+        var result: Result<TimelinePage, FleetRequestError>?
+        connector.request(fetch()) {
+            result = $0
+            connector.stop()
+            answered.fulfill()
+        }
+        await fulfillment(of: [held], timeout: 10)
+        server.stop()
+        await fulfillment(of: [answered, idle], timeout: 10)
+        // Detached before `tearDown()` stops the connector a second time, which would
+        // over-fulfil `idle` after the wait has completed.
+        connector.onState = nil
+        XCTAssertEqual(result, .failure(.disconnected))
+        XCTAssertEqual(states, [.idle], "a .lost around .idle is a banner nothing will clear")
+    }
+
     /// A request made while nothing is connected has to answer immediately. `send(_ command:)`
     /// is a silent no-op in that state, which is correct for a command whose effect arrives
     /// as an event and wrong for a request whose whole point is the reply.
@@ -334,6 +399,11 @@ final class FleetConnectorRequestTests: XCTestCase {
         let reached = expectation(description: "the first request reached the server")
         server.onRequest = { _, cid, _, _ in cids.append(cid); reached.fulfill() }
         let (connector, port) = try await startConnector()
+        // The only backoff this file waits out. A quarter second rather than the production
+        // one, and deliberately not shorter: the reconnect below is dominated by the listener
+        // rebinding the same port, and dialling into the middle of that at 50ms intervals
+        // buys nothing but a race with `releaseListenerOnQueue`. The expectation allows 20s.
+        connector.retryDelays = [0.25]
 
         let answered = expectation(description: "both answered")
         answered.expectedFulfillmentCount = 2
