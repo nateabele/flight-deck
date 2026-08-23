@@ -58,17 +58,13 @@ struct SessionTimelineScreen: View {
                     loadOlderRow
                 }
                 ForEach(entries) { entry in
-                    NavigationLink(value: entry.item) {
-                        TimelineRow(
-                            item: entry.item, result: entry.result, agent: session?.agent
-                        )
-                    }
-                    .listRowInsets(Self.rowInsets)
-                    // The card and the tinted user turn are what separate one entry from the
-                    // next. A hairline through them as well draws a line across the middle of
-                    // a rounded panel, which is the same defect that keeps the fleet list
-                    // inset-grouped and this list plain.
-                    .listRowSeparator(.hidden)
+                    entryRow(entry)
+                        .listRowInsets(Self.rowInsets)
+                        // The card and the tinted user turn are what separate one entry from
+                        // the next. A hairline through them as well draws a line across the
+                        // middle of a rounded panel, which is the same defect that keeps the
+                        // fleet list inset-grouped and this list plain.
+                        .listRowSeparator(.hidden)
                 }
                 if let notice = Self.bottomNotice(
                     phase: model.phase, hasItems: !model.feed.items.isEmpty
@@ -186,6 +182,29 @@ struct SessionTimelineScreen: View {
     }
 
     private var entries: [Entry] { Self.entries(from: model.feed.items) }
+
+    /// One entry, as a link into the detail screen or as a row that is simply itself.
+    ///
+    /// **A `NavigationLink` only where there is something to navigate to**, which is
+    /// `TimelineStyle.opensDetail(_:)` and nothing else. A prose row now draws its message
+    /// whole, so the screen one tap away would repeat it word for word — and a `List` puts a
+    /// disclosure chevron on every link it holds, floated at the row's vertical centre. On a
+    /// forty-line answer that chevron sits twenty lines down, pointing at nothing, promising
+    /// a screen that has nothing more on it. The renders in
+    /// `.superpowers/sdd/ui-renders/prose-full/` are what settled that.
+    ///
+    /// The rows that keep the link keep it because they really are showing less than they
+    /// have: a tool card's three-line command and six-line output, a clamped thinking block,
+    /// a JSON input worth a tree, and a prose body long enough to hit the ceiling.
+    @ViewBuilder
+    private func entryRow(_ entry: Entry) -> some View {
+        let row = TimelineRow(item: entry.item, result: entry.result, agent: session?.agent)
+        if TimelineStyle.opensDetail(entry.item) {
+            NavigationLink(value: entry.item) { row }
+        } else {
+            row
+        }
+    }
 
     /// A button, not an `onAppear` trigger. An automatic fetch on the top row appearing fires
     /// again on every bounce of an over-scroll and, worse, fires while the list is still

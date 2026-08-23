@@ -21,6 +21,11 @@ import UIKit
 /// whose body is whole JSON carries a tree/raw toggle beside its copy button and opens on the
 /// tree. Both rules, and the plain text everything else falls back to, are in
 /// `TimelineBodyBlock`.
+///
+/// **Prose reaches this screen far more rarely than it used to.** A row draws a whole message
+/// now, so the only answer that still has a way in is one past `TimelineStyle.proseCeilingLines`
+/// — around a fiftieth of the real ones. What a reader loses by not coming here is text
+/// selection, and what they keep is Copy, which moved onto the row itself.
 struct TimelineItemDetailScreen: View {
     let item: TimelineItem
     /// The result that answers this call, when the feed holds it. Paired on the agent's own
@@ -180,8 +185,13 @@ struct TimelineBodyBlock: View {
     /// so switching modes changes the content of the panel rather than swapping one card for a
     /// different-looking one.
     ///
-    /// Unclamped, which is the point of the screen — the row cuts a long answer at fourteen
-    /// lines' worth of height and this is where the rest of it is.
+    /// Unclamped, which is the point of the screen — it holds whatever the row could not, and
+    /// what the row cannot hold has narrowed to three things: a tool card's clamped command
+    /// and output, a six-line thinking block, and prose long enough to pass
+    /// `TimelineStyle.proseCeilingLines`. **Prose under the ceiling never reaches this screen
+    /// at all**, because its row draws the whole message and therefore carries no link
+    /// (`TimelineStyle.opensDetail`). The Markdown branch below is what the ceiling case
+    /// lands on, and it is still the only place a long answer is selectable.
     @ViewBuilder
     private var content: some View {
         if let document, !showsRaw {
