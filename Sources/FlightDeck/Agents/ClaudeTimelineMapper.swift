@@ -169,12 +169,16 @@ enum ToolInputSummary {
     /// What a row can show. A list row is one line high and about sixty characters wide, so
     /// this is generous rather than tight.
     ///
-    /// **It is also the only bound `summary` gets anywhere.** `TimelineReader` caps an item by
-    /// rewriting `body.text` and budgets a page by summing `body.text`; neither reads
-    /// `summary`. An unbounded preview would therefore escape both `TimelineLimits.maxItemBytes`
-    /// and `maxPageBytes`, up to 200 items to a page — and `prompt` is in the table above, where
-    /// an `Agent` dispatch's first paragraph runs to kilobytes with no newline in it, so the
+    /// **It is the only PER-ITEM bound `summary` gets anywhere.** `TimelineReader.capped`
+    /// truncates `body.text` and never touches `summary`, so an unbounded preview would escape
+    /// `TimelineLimits.maxItemBytes` entirely — and `prompt` is in the table above, where an
+    /// `Agent` dispatch's first paragraph runs to kilobytes with no newline in it, so the
     /// first-line rule alone bounds nothing.
+    ///
+    /// The page budget is the one thing that does see it: `TimelineReader.cost(of:)` sums
+    /// `text` AND `summary`, on the rule that every `Body` field whose length a source record
+    /// decides is counted. A preview added on a new path still needs this cap — 200 previews
+    /// to a page is 40 KB — but it will not slip past `maxPageBytes` unmeasured.
     static let maxSummaryBytes = 200
 
     /// A one-line row preview, or nil when nothing in the input makes one. Nil is fine: the
