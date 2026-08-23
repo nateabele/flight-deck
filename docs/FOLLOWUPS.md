@@ -968,3 +968,70 @@ What they left behind, deliberately unfixed:
   like the `drawHierarchy` trap it replaced: several different screens coming back as one
   identical blank PNG. Anything that has to be verified *after* a scroll needs
   `xcrun simctl io <udid> screenshot` and a window attached to the app's own `UIWindowScene`.
+
+## Answering prompts from the phone (2026-08-24) — three gaps, accepted on purpose
+
+From `docs/superpowers/plans/2026-08-24-answering-prompts-from-the-phone.md`. All three are
+scope decisions, recorded so that **disagreeing with one is a change to a decision rather than
+the discovery of a bug**. Each is argued rather than apologised for, because each was reached
+by ruling out the alternative and not by running out of time.
+
+- **A paired phone can approve a tool in a tab nobody is looking at.** The only Mac-side signal
+  that it happened is the terminal moving — the selection travelling to a row and a Return
+  landing on it. There is no per-tab opt-in ("this session may be answered remotely"), no
+  notification, and no allow-list of which tools may be approved from a pocket. That is
+  deliberate, and the reasoning is that a companion which must be confirmed on the Mac is not a
+  companion: the whole case for the feature is the person who is not at the desk. What
+  *changed* here is not the blast radius but **who decided** — a typed message is a request the
+  agent may refuse, and everything dangerous it leads to still stops at a permission prompt,
+  whereas a permission decision **is** the stopping point and there is no layer under it. The
+  control the spec names is the only one shipped, and it is the right shape for this: **pairing
+  is all-or-nothing and revocation is immediate**, with Settings → Devices showing which device
+  is attached while it does this. If per-tab consent is ever wanted, it is a new mechanism with
+  its own state, not a flag on this one.
+
+- **The permission card cannot show the dialog's own wording, and shows the tool call
+  instead.** Claude assembles a permission dialog's text in its TUI at display time, out of the
+  live permission rule set — it exists in no file, no transcript record and no hook payload, so
+  there is nothing for Flight Deck to read and nothing to put on the wire. The card is built
+  from the tool call itself, which the phone already has **whole** from the history channel:
+  the tool's name, and its entire input. So a Bash approval on the phone shows the full command
+  where the terminal shows a one-line summary — the card is arguably *more* legible than the
+  dialog it is standing in for, not less. What it costs is exactness: the card cannot promise
+  that the words on the phone are the words on the Mac. The two are derived from the same call
+  by different renderers, and if claude ever adds a warning to its own wording, the phone will
+  not carry it. That is the trade, and it is the reason Deny leads on the card.
+
+- **There is no case for "Yes, and don't ask again for X in Y", and that is a security
+  property rather than a missing feature.** Claude's dialogs can put a durable grant in their
+  middle rows — a rule that outlives the tap, written from a pocket, off a label a fixed-width
+  terminal has wrapped. **It is structurally unreachable from the phone, twice over.**
+  `PromptAnswer` has no case that names one, so there is no index a client could send and no
+  button the card could draw; and the Mac never offers one, because `SessionStore.answerPrompt`'s
+  `.allow` arm targets the dialog's first row and confirms it is there before pressing Return.
+  A phone cannot widen its own future authority — the property is that, stated once.
+
+  Worth recording honestly: **the captured Bash dialog in claude 2.1.241 has only two options
+  and no such row at all** (`Yes` / `No`; the three-option shape exists on `Write`, whose middle
+  row is accept-edits mode rather than a durable per-directory grant). So this property
+  currently guards a case that did not arise in the dialogs anyone has looked at. It is kept
+  because the ones that do arise are exactly the ones nobody will notice arriving: a claude
+  release that adds a grant row to Bash needs no change here to be safe, and a design that had
+  merely *avoided* the row by index would have silently started approving it.
+
+These three are what the feature deliberately does **not** do. What it does do, and what no
+automated test can watch it doing, is checked by hand: [docs/MOBILE.md](MOBILE.md) items 42-50,
+which are the only cover the three untestable parts have — a key event reaching a real surface,
+`.allow` finding the first row, and the status-file/transcript write race.
+
+**Two things this work discovered that outlive it**, both about verification rather than about
+the feature, and both written up where someone will hit them rather than here:
+
+- **`xctest -XCTest FlightDeckTests/SomeClass` runs zero tests and reports success**, so a
+  mutation "verified" through it is not verified at all. The working spelling and the measured
+  0-versus-21 are in [docs/AGENT-OPERATIONS.md](AGENT-OPERATIONS.md) §5.
+- **`layer.render(in:)` returns a blank image for a `List` that has scrolled** — hit a second
+  time here, by the whole-screen render of the prompt card, and a longer settle changed nothing.
+  The entry above this one records the rule; the working route (a window on the app's own
+  `UIWindowScene` held across an `xcrun simctl io … screenshot`, with the two-file handshake
+  that makes it possible) is in [docs/MOBILE.md](MOBILE.md) beside the technique.
