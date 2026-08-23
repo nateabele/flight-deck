@@ -43,6 +43,11 @@ final class SpyInjector: TextInjecting {
     /// every arrow.
     var ignoreArrowsAfter: Int?
     private var arrowsSeen = 0
+    /// Labels the list repaints into once it has been moved through — a dialog answered on the
+    /// Mac and replaced by the next one while the driver was counting arrows. The marker still
+    /// lands where it was sent; what it is sitting on is no longer what was asked for, which
+    /// is the half of the interlock an index check alone cannot see.
+    private var pendingRelabel: [String]?
 
     func sendText(_ text: String) { events.append(.text(text)) }
     func sendReturn() { events.append(.ret) }
@@ -65,6 +70,10 @@ final class SpyInjector: TextInjecting {
         arrowsSeen += 1
         guard !options.isEmpty, arrowsSeen <= (ignoreArrowsAfter ?? .max) else { return }
         selected = min(max(selected + step, 0), options.count - 1)
+        if let next = pendingRelabel {
+            options = next
+            pendingRelabel = nil
+        }
     }
 
     /// Puts a numbered option list on screen, in the shape claude draws and `ChoiceDialog`
@@ -73,6 +82,10 @@ final class SpyInjector: TextInjecting {
         options = labels
         self.selected = selected
     }
+
+    /// Repaints the list with different labels the first time it is moved. See
+    /// `pendingRelabel`.
+    func relabelAfterArrows(_ labels: [String]) { pendingRelabel = labels }
 
     /// Whichever is up: the dialog if `showOptions` put one there, the input bar otherwise.
     ///

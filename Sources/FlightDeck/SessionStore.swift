@@ -2112,6 +2112,7 @@ final class SessionStore: ObservableObject {
         // rather than inheriting one from a session that is over.
         promptQueue.removeValue(forKey: id)
         acceptedPromptTokens.removeValue(forKey: id)
+        answeredPromptTokens.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
         // `applyReadState` no longer clears a mark when a session's status disappears — a
         // mark now outlives its process. But closing a tab removes its id from `repos`
@@ -2585,6 +2586,10 @@ final class SessionStore: ObservableObject {
         cancelSupersededPrompts(transitions)
     }
 
+    /// Marks a tab as mid-injection so a test can assert the shared gate refuses a second
+    /// driver. There is no production caller and there must not be one.
+    func holdInjectionForTesting(_ id: UUID) { injecting.insert(id) }
+
     /// Test seam, in the style of `flushPendingResumePromptsForTesting`. The registry tick is
     /// the production driver, and a test that wants a second pass without fabricating another
     /// registry scan says so here.
@@ -2943,6 +2948,226 @@ final class SessionStore: ObservableObject {
         )
     }
 
+    // MARK: - Answering a dialog from a paired phone
+
+    /// What a client's answer did.
+    ///
+    /// **`dispatched` is the ceiling, and that is honest rather than lazy.** The option and
+    /// allow paths act across `injectionSettle` — move, wait for claude to repaint, re-read,
+    /// then Return — so whether the answer LANDED is not knowable when this returns. §4's rule
+    /// is the same one: `ack` means dispatched, and the observable effect arrives separately.
+    /// Here it arrives twice over — the session stops being `waiting`, which the phone is
+    /// pushed, and the transcript grows a `tool_result`, which the phone's next fetch reads.
+    ///
+    /// Everything knowable BEFORE the settle is a distinct refusal, because each sends the
+    /// reader somewhere different.
+    enum AnswerDispatch: Equatable {
+        /// Accepted, and the driver has started. `ack`.
+        case dispatched
+        /// This token has already been answered for this tab. `ack`, because from the client's
+        /// side a retry that lands is an answer that landed.
+        case duplicate
+        case unknownSession
+        /// This tab's agent has no dialog Flight Deck can drive. Codex, and anything newer.
+        case unsupportedAgent
+        /// Nothing is blocked on this tab right now.
+        case notWaiting
+        /// A shape this build will not drive — see `PromptQuestion.unanswerable`.
+        case unanswerable
+        /// The terminal could not be read, the dialog was not on it, the answer named a
+        /// different kind of dialog than the one derived, the index or the label named
+        /// nothing, or another injection is already resolving for this tab.
+        ///
+        /// **One code for six states deliberately.** Every one means "not right now, and the
+        /// phone should look again", and splitting them would invite a client to treat some as
+        /// permanent and stop asking. The distinctions are worth a log line, not a wire code.
+        case unreadableScreen
+
+        var errorCode: String? {
+            switch self {
+            case .dispatched, .duplicate: return nil
+            case .unknownSession: return "unknown_session"
+            case .unsupportedAgent: return "unsupported_agent"
+            case .notWaiting: return "not_waiting"
+            case .unanswerable: return "unanswerable"
+            case .unreadableScreen: return "unreadable_screen"
+            }
+        }
+    }
+
+    /// Tokens this store has already answered with, per tab. Same shape, same bound and same
+    /// reasoning as `acceptedPromptTokens` — see it for why a retry has to be free. A separate
+    /// list, because a typed prompt's token and an answer's token are minted by different taps
+    /// and a shared list would let one silence the other.
+    private var answeredPromptTokens: [UUID: [UUID]] = [:]
+
+    /// A client answered the dialog tab `id` is blocked on.
+    ///
+    /// `open` is the Mac's **own** derivation, from `PromptService`, never the client's claim.
+    /// The command from the phone contributes a tab, a call id (already checked against this
+    /// derivation by the caller), an intent, and a token. Nothing a phone sends becomes a label
+    /// matched on screen. That is the difference between a remote control and a remote keyboard.
+    ///
+    /// **The order of the checks is load-bearing twice**, as `submitPrompt`'s is. The agent
+    /// test precedes the status test, so a codex tab that happens to be `waiting` is told
+    /// `unsupportedAgent` — never on this tab — rather than being let through to a terminal
+    /// whose dialogs this build has never read. And the token test precedes anything being
+    /// typed, so a retry types nothing even if the screen has moved on.
+    ///
+    /// Changes no fleet state and emits no `FleetEvent`: what the phone answered becomes
+    /// visible through the status the agent writes and the transcript it appends.
+    @discardableResult
+    func answerPrompt(
+        _ open: OpenPrompt, with answer: PromptAnswer, in id: UUID, token: UUID
+    ) -> AnswerDispatch {
+        guard let at = locate(id) else { return .unknownSession }
+        guard repos[at.repo].sessions[at.session].agent == .claude else {
+            return .unsupportedAgent
+        }
+        if answeredPromptTokens[id, default: []].contains(token) { return .duplicate }
+        // `inject`'s gate, inverted. A session that is not `waiting` has no dialog up, and a
+        // Return there submits whatever is in the input bar — the exact failure `inject`'s own
+        // comment describes from the other side. Escape is gated too: a stray Escape into a
+        // live TUI is not free either.
+        guard statuses[id]?.activity == .waiting else { return .notWaiting }
+        guard let injector = injector(for: id) else { return .unreadableScreen }
+        // The same set the other two users of this terminal hold, so a rename or a queued
+        // phone prompt mid-settle cannot interleave with a dialog being driven.
+        guard !injecting.contains(id) else { return .unreadableScreen }
+
+        switch answer {
+        case .deny:
+            // **One key event, and nothing is read.** No viewport, no marker, no row
+            // arithmetic, no settle, no confirmation pass. This is the path a worried person
+            // reaches for, and it is deliberately the one that cannot be wrong about which row
+            // it is on. It is also therefore the only answer that works on a screen this build
+            // cannot parse at all. Escape is a real denial and not a dismissal: the transcript
+            // closes the call `is_error=True "The user doesn't want to proceed with this tool
+            // use. The tool use was rejected"`, measured against claude 2.1.241 in Task 3.
+            //
+            // Routing this through the interlock below for symmetry would be a regression, not
+            // a tidy-up: it would make the refusal depend on a parse, so a screen that could
+            // not be read would leave a person unable to say no from their phone.
+            remember(answered: token, for: id)
+            injector.sendEscape()
+            return .dispatched
+
+        case .allow:
+            // **The first row, and only ever the first row.** Claude's permission dialog is
+            // ordered "Yes" / (sometimes) "Yes, and don't ask again for …" / "No, and tell
+            // Claude …", so row 0 is the plain approval and any middle row is a DURABLE GRANT.
+            // There is no `PromptAnswer` case that names one and no arithmetic here that can
+            // reach one: the target is the literal 0. See `PromptAnswer`'s own comment.
+            //
+            // The ordering claim is checked against the six captures by
+            // `ChoiceDialogTests.testEveryRealDialogOpensWithTheCursorOnItsFirstRow` and by
+            // their provenance. If a future Claude Code reorders the dialog, those fixtures
+            // fail first — and this arm must be rewritten, not the fixtures.
+            //
+            // **This interlock is STRUCTURALLY WEAKER than `.option`'s, and saying so is the
+            // point.** A permission dialog's wording is assembled in the TUI at display time
+            // from the live permission rule set, so it exists nowhere Flight Deck can read: no
+            // transcript record carries it, and there is therefore no label to confirm row 0
+            // against. All that can be required after the move is that the marker is ON row 0.
+            // A screen that renumbered its rows would satisfy that. The two paths are not
+            // equally verified and must not be read as if they were.
+            guard case .permission = open else { return .unreadableScreen }
+            guard let viewport = injector.readViewport(),
+                  let current = ChoiceDialog.focusedRow(inViewport: viewport)
+            else { return .unreadableScreen }
+            return drive(
+                from: current, to: 0,
+                confirm: { ChoiceDialog.focusedRow(inViewport: $0) == 0 },
+                injector: injector, id: id, token: token
+            )
+
+        case .option(let index, let label):
+            // `option` indexes an `AskUserQuestion`'s own options, so a permission dialog —
+            // which has no options this build can enumerate — has no list for the index to
+            // mean anything in.
+            guard case .question(_, let question) = open else { return .unreadableScreen }
+            guard question.isAnswerable else { return .unanswerable }
+            // The client's label against the Mac's own copy, before any screen is consulted.
+            // A phone naming words this transcript never carried is a reader looking at
+            // something else, and its index is not to be trusted either.
+            guard question.options.indices.contains(index),
+                  question.options[index].label == label
+            else { return .unreadableScreen }
+            guard let viewport = injector.readViewport(),
+                  let current = ChoiceDialog.focusedRow(inViewport: viewport),
+                  // The pre-flight half of the interlock: before counting arrows across a
+                  // list, confirm the row the cursor is already on says what this question
+                  // says it should. Without it a dialog that has been answered and replaced
+                  // would be moved through — two keystrokes into someone else's cursor —
+                  // and only the re-read would catch it, too late to have sent nothing.
+                  //
+                  // A cursor outside the transcript's options is refused rather than counted
+                  // from: claude appends rows at display time (`Type something.`, `Chat about
+                  // this`) that appear in no transcript, so there is no label to confirm.
+                  question.options.indices.contains(current),
+                  ChoiceDialog.row(current, reads: question.options[current].label,
+                                   inViewport: viewport)
+            else { return .unreadableScreen }
+            return drive(
+                from: current, to: index,
+                confirm: {
+                    ChoiceDialog.focusedRow(inViewport: $0) == index
+                        && ChoiceDialog.row(index, reads: label, inViewport: $0)
+                },
+                injector: injector, id: id, token: token
+            )
+        }
+    }
+
+    /// Move the selection, wait for the repaint, re-read, and only then submit.
+    ///
+    /// **Measured, not assumed, and the re-read is the whole safety property.** Arrows are
+    /// relative: a miscounted, dropped or late-repainted keystroke leaves the marker somewhere
+    /// this code cannot know about without looking again. `inject` kills first and compares
+    /// because the screen cannot be trusted to say whether the buffer was empty; this moves
+    /// first and confirms because the screen cannot be trusted to say whether the keystroke
+    /// arrived. Same idiom, same reason, and the consequence of skipping it is a Return on a
+    /// row nobody chose.
+    ///
+    /// A failed confirmation sends nothing further and reports nothing: the answer is already
+    /// `dispatched` to the client, the cursor has moved, and a moved cursor is recoverable by
+    /// the person at the keyboard in a way a wrong Return is not.
+    private func drive(
+        from current: Int,
+        to target: Int,
+        confirm: @escaping (String) -> Bool,
+        injector: TextInjecting,
+        id: UUID,
+        token: UUID
+    ) -> AnswerDispatch {
+        remember(answered: token, for: id)
+        injecting.insert(id)
+
+        let steps = target - current
+        for _ in 0..<abs(steps) {
+            if steps > 0 { injector.sendArrowDown() } else { injector.sendArrowUp() }
+        }
+
+        // Claude Code repaints asynchronously — the same seam, and the same 120ms in
+        // production, that a kill waits out.
+        injectionSettle { [weak self] in
+            defer { self?.injecting.remove(id) }
+            guard let screen = injector.readViewport(), confirm(screen) else { return }
+            injector.sendReturn()
+        }
+        return .dispatched
+    }
+
+    /// Files an answered token against a tab, oldest evicted first. See `answeredPromptTokens`.
+    private func remember(answered token: UUID, for id: UUID) {
+        var tokens = answeredPromptTokens[id, default: []]
+        tokens.append(token)
+        if tokens.count > Self.maxRememberedPromptTokens {
+            tokens.removeFirst(tokens.count - Self.maxRememberedPromptTokens)
+        }
+        answeredPromptTokens[id] = tokens
+    }
+
     /// Types `text` into a session's input box and submits it, preserving whatever draft was
     /// there. Returns false when this is a bad moment — nothing was sent, and the caller
     /// should leave its request pending and try again on a later tick.
@@ -3127,6 +3352,12 @@ final class SessionStore: ObservableObject {
     }
 
     func status(for id: UUID) -> SessionStatus? { statuses[id] }
+
+    /// The tab's terminal screen, or nil when there is no surface or it cannot be read.
+    ///
+    /// A read and only a read: it changes no fleet state and adds no mutation site for
+    /// `FleetReplicator`'s DEBUG drift check.
+    func viewport(of id: UUID) -> String? { injector(for: id)?.readViewport() }
 
     func sessionExists(_ id: UUID) -> Bool { locate(id) != nil }
 
