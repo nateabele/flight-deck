@@ -183,6 +183,150 @@ enum TimelineFixtures {
         at: "2026-08-23T09:16:50.000Z"
     )
 
+    // MARK: JSON bodies — real records, for the tree
+
+    /// A real `AskUserQuestion` input, pretty-printed the way `ClaudeTimelineMapper.pretty`
+    /// sends it (`.sortedKeys`). Taken from
+    /// `~/.claude/projects/-Users-nate/8261151b-…jsonl`.
+    ///
+    /// **`summary` is nil, and that is not laziness in the fixture.** `ToolInputSummary`'s
+    /// preview table looks for `command`, `file_path`, `path`, `pattern`, `query`, `url`,
+    /// `prompt` or `description` at the TOP level, and this input has one key: `questions`. So
+    /// the Mac sends no preview, `TimelineStyle.commandLine` falls through to the first line of
+    /// the body that is not a bare delimiter — `"questions": [` — and the row reads as JSON
+    /// punctuation. This is the item that prompted the tree.
+    static let askUserQuestionCall = TimelineItem(
+        id: "31402#1", kind: .toolCall, status: .complete,
+        body: .init(
+            text: """
+                {
+                  "questions": [
+                    {
+                      "header": "Lifecycle",
+                      "multiSelect": false,
+                      "options": [
+                        {
+                          "description": "TranscriptReady fires → assemble context → run workflows → produce drafts/reminders/notes. Single trigger, single code path. Everything you described explicitly, nothing more. Fastest to something you actually use daily.",
+                          "label": "Post-meeting only (Recommended)"
+                        },
+                        {
+                          "description": "Adds a scheduler that watches the calendar and produces a pre-meeting brief (who they are, recent mail/Slack, last meeting's open action items) ahead of each meeting. Doubles the trigger surface — needs a scheduler, not just an event listener — but pre-brief is where Contio claims the real value is.",
+                          "label": "Pre + post lifecycle"
+                        },
+                        {
+                          "description": "Post-meeting workflows plus non-meeting triggers — inbound email, Slack mention, a reminder coming due. Makes it a general personal automation engine that happens to be meeting-aware, rather than a meeting system.",
+                          "label": "Post-meeting + ambient"
+                        }
+                      ],
+                      "question": "Which part of the meeting lifecycle should this cover?"
+                    }
+                  ]
+                }
+                """,
+            tool: "AskUserQuestion", callID: "toolu_01AskLifecycle"
+        ),
+        at: "2026-08-22T11:04:18.220Z"
+    )
+
+    /// The same input as it arrives when the Mac cut it: mid-`description`, mid-string,
+    /// mid-word. **This is the case the fallback exists for** — it is not parseable JSON and
+    /// never will be, so the block must show the text and say what was dropped.
+    static let askUserQuestionTruncated = TimelineItem(
+        id: "31402#2", kind: .toolCall, status: .complete,
+        body: .init(
+            text: """
+                {
+                  "questions": [
+                    {
+                      "header": "Lifecycle",
+                      "multiSelect": false,
+                      "options": [
+                        {
+                          "description": "TranscriptReady fires → assemble context → run workflows → produce drafts/reminders/notes. Single trigger, single code path. Everything you described explicitly, nothing more. Fastest to something you actually use daily.",
+                          "label": "Post-meeting only (Recommended)"
+                        },
+                        {
+                          "description": "Adds a scheduler that watches the calendar and produces a pre-meeting brief (who they are, recent mail/Slack, last meeting's open action items) ahead of each meeting. Doubles the trigger sur
+                """,
+            tool: "AskUserQuestion", callID: "toolu_02AskCut", truncatedBytes: 573
+        ),
+        at: "2026-08-22T11:06:02.910Z"
+    )
+
+    /// An array of objects, nested five deep, with real integers and an array of numbers in
+    /// it. A real `mcp__claude-in-chrome__browser_batch` call — an MCP tool, so its name
+    /// arrives namespaced and its input looks nothing like a `Bash` command line.
+    static let browserBatchCall = TimelineItem(
+        id: "33110#0", kind: .toolCall, status: .complete,
+        body: .init(
+            text: """
+                {
+                  "actions": [
+                    {
+                      "input": {
+                        "action": "left_click",
+                        "coordinate": [
+                          600,
+                          114
+                        ],
+                        "tabId": 576557143
+                      },
+                      "name": "computer"
+                    },
+                    {
+                      "input": {
+                        "action": "type",
+                        "tabId": 576557143,
+                        "text": "agreement"
+                      },
+                      "name": "computer"
+                    },
+                    {
+                      "input": {
+                        "action": "wait",
+                        "duration": 6,
+                        "tabId": 576557143
+                      },
+                      "name": "computer"
+                    },
+                    {
+                      "input": {
+                        "action": "screenshot",
+                        "tabId": 576557143
+                      },
+                      "name": "computer"
+                    }
+                  ]
+                }
+                """,
+            tool: "mcp__claude-in-chrome__browser_batch",
+            callID: "toolu_01F4eQkYZ79S4T6TRHuejgo5"
+        ),
+        at: "2026-08-22T11:07:41.030Z"
+    )
+
+    /// A tool RESULT that is JSON — the shape an async `Agent` dispatch answers with. Results
+    /// are usually `ls` output or a stack trace; this is the minority that is a document, and
+    /// it is the reason the tree is offered on the output panel too and not only on the input.
+    static let agentLaunchResult = TimelineItem(
+        id: "33940#0", kind: .toolResult, status: .complete,
+        body: .init(
+            text: """
+                {
+                  "agentId": "aacde7ffb946715f8",
+                  "canReadOutputFile": true,
+                  "description": "Contio.ai public web presence",
+                  "isAsync": true,
+                  "outputFile": "/private/tmp/claude-501/-Users-nate/8261151b-4ced-40a8-9082-5dc558ee55e2/tasks/aacde7ffb946715f8.output",
+                  "resolvedModel": "claude-opus-5[1m]",
+                  "status": "async_launched"
+                }
+                """,
+            tool: "Agent", callID: "toolu_014eALeS8w1k7jd7atJQnHJB"
+        ),
+        at: "2026-08-22T11:07:41.660Z"
+    )
+
     static func session(
         title: String = "screen-s5 — session timeline", agent: String = "claude",
         activity: String? = "busy", waitingFor: String? = nil, subagentCount: Int = 2
