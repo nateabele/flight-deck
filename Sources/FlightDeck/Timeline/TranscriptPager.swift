@@ -16,19 +16,26 @@ struct SourceLine: Equatable, Sendable {
 /// One look at a byte range of a transcript.
 struct TranscriptPage: Equatable, Sendable {
     var lines: [SourceLine] = []
-    /// The offset of the first line. `.before(start)` is the next page up.
+    /// The offset of the first line's boundary. `.before(start)` is the next page up.
+    ///
+    /// **Not necessarily `lines.first?.offset`.** A blank line is a boundary that carries no
+    /// record, so a page whose oldest boundary is one starts a byte before its first line.
+    /// Carry this value through verbatim — recomputing it from the first item drops those
+    /// bytes and reopens the gap the cursor exists to close.
     var start: Int
     /// The offset just past the last line. `.after(end)` picks up what has been appended.
     ///
     /// Always a line boundary — the byte after a `\n` — never the file size, because the
     /// writer appends while this reads and the file's last bytes are routinely half a record.
     var end: Int
-    /// Whether there is more **in the direction that was asked for**. Exact when paging
-    /// backwards (`start > 0`); upward-approximate when paging forwards, where a trailing
-    /// partial line makes it true and the next `.after(end)` simply comes back empty. That
-    /// asymmetry is deliberate: the cheap check is right for the direction where being wrong
-    /// costs one empty round trip, and the exact check is used where being wrong would hide
-    /// the top of a conversation.
+    /// Whether there is more **in the direction that was asked for**, and safe to page on:
+    /// false always means a request from this page's cursor would return nothing.
+    ///
+    /// Backwards that is `start > 0`. Forwards it is `end < size`, which is true only when
+    /// records were left behind — a page that hands back nothing (`end == cursor`, the
+    /// ordinary state of a file whose last record is still being written) reports false, so
+    /// a client that pages while `hasMore` cannot spin re-issuing the identical request on
+    /// every poll. Forwards progress comes from being told the file changed, not from this.
     var hasMore: Bool
     /// The file this cursor came from is gone. See `TimelinePage.reset`.
     var reset: Bool = false
@@ -52,6 +59,11 @@ enum TranscriptPager {
     ///
     /// `window` and `maxScan` are parameters so tests can use values small enough to write
     /// a fixture across; production takes both from `TimelineLimits`.
+    ///
+    /// **An anchor arrives from the phone and is executed, so both its bounds are checked
+    /// here.** `TimelineAnchor` decodes a cursor as a plain `Int` with no floor, and a
+    /// negative one reaches a `UInt64` conversion that *traps* — `try?` does not catch a
+    /// trap, so an unchecked cursor is a remote kill of the Mac app, not a wrong answer.
     static func page(
         url: URL,
         anchor: TimelineAnchor,
@@ -63,25 +75,36 @@ enum TranscriptPager {
         defer { try? handle.close() }
         let size = Int((try? handle.seekToEnd()) ?? 0)
 
+        // A limit of zero or less cannot make progress: no lines come back and the cursor
+        // does not move, so a client paging while `hasMore` would re-issue the identical
+        // request forever. Clamped up rather than refused, and clamped HERE rather than at
+        // the caller: `TimelineLimits.maxLimit` describes clamping a greedy client *down*,
+        // and the natural `min(limit, maxLimit)` leaves 0 and -1 exactly as they were. Same
+        // rule `maxPageBytes` states for pages — always emit at least one record.
+        let limit = max(1, limit)
+
         switch anchor {
         case .latest:
             let boundary = lastBoundary(handle, size: size, window: window, maxScan: maxScan)
             return backwards(handle, from: boundary, limit: limit,
                              window: window, maxScan: maxScan)
+        // `0...size`, so a cursor exactly at the end is a client that is up to date rather
+        // than one holding a stale cursor: there is a real page above it, and `.after` of it
+        // is legitimately empty.
         case .before(let cursor):
-            // `<=`, not `<`: a cursor exactly at the end is a client that is up to date, not
-            // one holding a stale one, and there is a real page above it.
-            guard cursor <= size else { return reset(at: size) }
+            guard (0...size).contains(cursor) else { return reset(at: size) }
             return backwards(handle, from: cursor, limit: limit, window: window, maxScan: maxScan)
         case .after(let cursor):
-            guard cursor <= size else { return reset(at: size) }
+            guard (0...size).contains(cursor) else { return reset(at: size) }
             return forwards(handle, from: cursor, size: size, limit: limit,
                             window: window, maxScan: maxScan)
         }
     }
 
-    /// A cursor past the end of the file: the transcript was truncated or replaced by a
-    /// shorter one, so every byte offset the client holds now names a different record.
+    /// A cursor that is not an offset into this file. Past the end means the transcript was
+    /// truncated or replaced by a shorter one, so every byte offset the client holds now
+    /// names a different record; below zero means a cursor no page ever handed out. Both get
+    /// the same answer, because both leave the client's offsets meaningless.
     ///
     /// A shrink is the only replacement this can see, and that gap is `TailReader`'s too: a
     /// same-size-or-larger file at the same path reads as an ordinary continuation. Closing
@@ -104,6 +127,14 @@ enum TranscriptPager {
     /// Bounded like every other scan here: a file whose last `maxScan` bytes hold no newline
     /// at all is not a JSONL transcript this can page, and answering "nothing" beats reading
     /// backwards through a gigabyte to prove it.
+    ///
+    /// **Returning 0 here makes an unpageable file byte-identical to an empty one** — no
+    /// lines, `start` and `end` 0, `hasMore` and `reset` false — so a client renders "empty
+    /// conversation" over history it simply could not reach, with nothing to retry. The
+    /// difference is known at this line and deliberately dropped rather than encoded in a
+    /// third state; `TimelineReader` owns the decision of whether it wants one (answering
+    /// `nil`, and so the `unreadable` code, would be the change), and this note exists so
+    /// that decision is made rather than inherited.
     private static func lastBoundary(
         _ handle: FileHandle, size: Int, window: Int, maxScan: Int
     ) -> Int {
@@ -127,10 +158,11 @@ enum TranscriptPager {
     private static func backwards(
         _ handle: FileHandle, from end: Int, limit: Int, window: Int, maxScan: Int
     ) -> TranscriptPage {
+        // The top of the file. `limit` is clamped to at least 1 by `page`, and `suffix(limit)`
+        // below is safe for any value it did not clamp, so no branch here can hand back a
+        // page that reports more while offering no way to reach it.
         guard end > 0, limit > 0 else {
-            // Either the top of the file, or a caller that asked for no records at all;
-            // only the second of those has something above it.
-            return TranscriptPage(start: end, end: end, hasMore: end > 0)
+            return TranscriptPage(start: end, end: end, hasMore: false)
         }
         var scanned = end
         var buffer = Data()
@@ -173,12 +205,14 @@ enum TranscriptPager {
     }
 
     /// Reads forward from a cursor, which is always a boundary a previous page handed out.
+    ///
+    /// No guard on `cursor == size` or on a degenerate `limit`: the loop below runs zero
+    /// times for the first and the cut is written to be safe for the second, so both fall out
+    /// as the same empty, `hasMore`-false page rather than as a branch that has to agree with
+    /// one thirty lines away.
     private static func forwards(
         _ handle: FileHandle, from cursor: Int, size: Int, limit: Int, window: Int, maxScan: Int
     ) -> TranscriptPage {
-        guard cursor < size, limit > 0 else {
-            return TranscriptPage(start: cursor, end: cursor, hasMore: false)
-        }
         var buffer = Data()
         var scanned = cursor
         var boundaries = 0
@@ -196,29 +230,45 @@ enum TranscriptPager {
 
         let breaks = newlines(in: buffer)
         guard !breaks.isEmpty else {
-            // Nothing whole yet. Either the writer is mid-record — not an error and not the
-            // end, the same cursor works in a moment — or the record is longer than the scan
-            // budget, in which case nothing further is reachable and a retry would only make
-            // the same journey.
-            return TranscriptPage(start: cursor, end: cursor, hasMore: buffer.count < maxScan)
+            // No complete record here: the cursor is at the end, or the writer is mid-record,
+            // or the record is longer than the scan budget. `hasMore` is false for all three
+            // because all three hand back nothing — and the middle one is the ORDINARY state
+            // of a file being written, so reporting more here would have a client re-issuing
+            // the identical request on every poll for as long as claude takes to finish a
+            // record. It also keeps this indistinguishable-to-the-client state from being
+            // answered two different ways.
+            return TranscriptPage(start: cursor, end: cursor, hasMore: false)
         }
         // Cut at the `limit`-th newline rather than trimming decoded lines: `end` is then
         // byte arithmetic all the way down, and cannot drift when a line's bytes and its
         // String's bytes disagree — which they do the moment a record is not valid UTF-8 and
         // decoding substitutes U+FFFD.
-        let end = cursor + breaks[min(limit, breaks.count) - 1] + 1
+        //
+        // `max(1, limit)` is the "at least one record" floor, held HERE rather than borrowed
+        // from `page`'s clamp, because this is the expression that would die: a negative
+        // limit traps `prefix` ("Can't take a prefix of negative length") and underflows a
+        // subscript, and neither is a thing to leave to a guard in another function. Clamped
+        // against `breaks.count` on the other side, so the index is always in range.
+        let end = cursor + breaks[min(max(1, limit), breaks.count) - 1] + 1
         return TranscriptPage(
             lines: split(buffer.prefix(end - cursor), from: cursor),
             start: cursor, end: end,
-            // True when records were dropped for the limit or the window stopped short, and
-            // also — harmlessly — when all that remains is a partial line. See `hasMore`.
+            // Exact when records were dropped for the limit or the window stopped short.
+            // Also true when all that remains is a partial line, which costs the client one
+            // empty round trip — once, not once per poll, because that empty page reports
+            // false. See `hasMore`.
             hasMore: end < size
         )
     }
 
     private static func read(_ handle: FileHandle, from offset: Int, count: Int) -> Data? {
         guard count > 0 else { return Data() }
-        try? handle.seek(toOffset: UInt64(offset))
+        // `UInt64(offset)` TRAPS on a negative offset, and `try?` does not catch a trap. The
+        // cursor that reaches here started as an `Int` on the wire, so the conversion is
+        // checked; `page`'s bounds guard means this can only fire if a future caller finds
+        // another way in.
+        guard let start = UInt64(exactly: offset) else { return nil }
+        try? handle.seek(toOffset: start)
         guard let data = try? handle.read(upToCount: count), !data.isEmpty else { return nil }
         return data
     }
