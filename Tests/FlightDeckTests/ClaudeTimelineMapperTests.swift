@@ -1,0 +1,393 @@
+import FleetKit
+import XCTest
+@testable import FlightDeck
+
+/// Claude's half of the one vocabulary (spec §6). Pure, per line, from records whose shapes
+/// were read off real transcripts on the build machine.
+///
+/// Three of these guard a rule whose violation is invisible rather than noisy — an image's
+/// base64 going on the wire, a redacted thinking block rendering as a blank row, and a
+/// sub-agent record interleaving into the main conversation. Each has a named mutation in
+/// Step 4.
+///
+/// The other standing rule here: **the unit under test is every field of every item emitted**,
+/// not the function. A test that checks `kind` and `text` passes with `tool` and `callID`
+/// crossed, so each record shape has one test that pins the fields it MUST populate and the
+/// fields it must leave alone, at values no two of which are interchangeable.
+final class ClaudeTimelineMapperTests: XCTestCase {
+    private func items(_ line: String, at offset: Int = 100) -> [TimelineItem] {
+        ClaudeTimelineMapper.items(inLine: line, at: offset)
+    }
+
+    func testAUserRecordWithStringContentIsOneUserTurn() {
+        let items = items("""
+            {"type":"user","uuid":"u1","timestamp":"2026-08-21T10:00:00.000Z",\
+            "isSidechain":false,"message":{"role":"user","content":"read project.yml"}}
+            """)
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].kind, .userTurn)
+        XCTAssertEqual(items[0].body.text, "read project.yml")
+        XCTAssertEqual(items[0].id, "100#0")
+        XCTAssertEqual(items[0].at, "2026-08-21T10:00:00.000Z")
+        XCTAssertEqual(items[0].status, .complete)
+    }
+
+    /// A user turn is prose, so every other `Body` field must stay at its default: a `summary`
+    /// means "the text is unfit for a row", a `tool`/`callID` means "this row is part of a
+    /// tool exchange", and both are lies about a typed prompt.
+    func testAUserTurnPopulatesNothingBeyondItsText() {
+        let body = items("""
+            {"type":"user","uuid":"u1","timestamp":"2026-08-21T10:00:00.000Z",\
+            "isSidechain":false,"message":{"role":"user","content":"read project.yml"}}
+            """)[0].body
+        XCTAssertNil(body.summary)
+        XCTAssertNil(body.tool)
+        XCTAssertNil(body.callID)
+        XCTAssertFalse(body.isError)
+        XCTAssertEqual(body.truncatedBytes, 0)
+    }
+
+    func testAnAssistantRecordSplitsIntoOneItemPerBlock() {
+        let items = items("""
+            {"type":"assistant","uuid":"a1","isSidechain":false,"message":{"role":"assistant",\
+            "content":[{"type":"thinking","thinking":"weighing it","signature":"CAIS7wYK"},\
+            {"type":"text","text":"I'll read the file."},\
+            {"type":"tool_use","id":"toolu_01A","name":"Bash",\
+            "input":{"command":"sed -n '1,60p' project.yml","description":"Read it"}}]}}
+            """)
+        XCTAssertEqual(items.map(\.kind), [.thinking, .assistantText, .toolCall])
+        XCTAssertEqual(items.map(\.id), ["100#0", "100#1", "100#2"],
+                       "the block index is what makes several items from one line addressable")
+        XCTAssertEqual(items[2].body.tool, "Bash")
+        XCTAssertEqual(items[2].body.callID, "toolu_01A")
+        XCTAssertEqual(items[2].body.summary, "sed -n '1,60p' project.yml",
+                       "a row cannot render pretty-printed JSON; the command is the preview")
+        XCTAssertTrue(items[2].body.text.contains("\"command\""),
+                      "the detail screen still gets the whole input")
+    }
+
+    /// Assistant prose, like user prose, is the whole of the row. Distinct from the thinking
+    /// case below only by `kind`, which is exactly why both are pinned: one `case` arm
+    /// returning the other's kind is otherwise a silent relabelling of the agent's reasoning
+    /// as its speech.
+    func testAnAssistantTextCarriesOnlyItsText() {
+        let item = items("""
+            {"type":"assistant","uuid":"a1","timestamp":"2026-08-21T11:11:11.000Z",\
+            "isSidechain":false,"message":{"role":"assistant",\
+            "content":[{"type":"text","text":"I'll read the file."}]}}
+            """, at: 4242)[0]
+        XCTAssertEqual(item.kind, .assistantText)
+        XCTAssertEqual(item.status, .complete)
+        XCTAssertEqual(item.id, "4242#0")
+        XCTAssertEqual(item.at, "2026-08-21T11:11:11.000Z")
+        XCTAssertEqual(item.body.text, "I'll read the file.")
+        XCTAssertNil(item.body.summary)
+        XCTAssertNil(item.body.tool)
+        XCTAssertNil(item.body.callID)
+        XCTAssertFalse(item.body.isError)
+        XCTAssertEqual(item.body.truncatedBytes, 0)
+    }
+
+    func testAThinkingItemCarriesOnlyItsThinking() {
+        let item = items("""
+            {"type":"assistant","uuid":"a1","timestamp":"2026-08-21T12:12:12.000Z",\
+            "isSidechain":false,"message":{"role":"assistant",\
+            "content":[{"type":"thinking","thinking":"weighing it","signature":"CAIS7wYK"}]}}
+            """, at: 909)[0]
+        XCTAssertEqual(item.kind, .thinking)
+        XCTAssertEqual(item.status, .complete)
+        XCTAssertEqual(item.id, "909#0")
+        XCTAssertEqual(item.at, "2026-08-21T12:12:12.000Z")
+        XCTAssertEqual(item.body.text, "weighing it")
+        XCTAssertNil(item.body.summary)
+        XCTAssertNil(item.body.tool)
+        XCTAssertNil(item.body.callID)
+        XCTAssertFalse(item.body.isError)
+        XCTAssertEqual(item.body.truncatedBytes, 0)
+    }
+
+    /// A `signature` is a several-hundred-byte opaque blob and is not thinking. It must never
+    /// reach a phone.
+    func testAThinkingBlocksSignatureIsNeverCarried() {
+        let items = items("""
+            {"type":"assistant","uuid":"a1","isSidechain":false,"message":{"role":"assistant",\
+            "content":[{"type":"thinking","thinking":"weighing it","signature":"CAIS7wYKowEIERgC"}]}}
+            """)
+        XCTAssertEqual(items[0].body.text, "weighing it")
+        XCTAssertFalse(items[0].body.text.contains("CAIS"))
+    }
+
+    /// A redacted thinking block is `{"thinking":"","signature":"…"}`, and there are hundreds
+    /// of them in a long conversation. Emitting them puts an empty row on screen for each.
+    func testARedactedThinkingBlockEmitsNothing() {
+        XCTAssertTrue(items("""
+            {"type":"assistant","uuid":"a1","isSidechain":false,"message":{"role":"assistant",\
+            "content":[{"type":"thinking","thinking":"","signature":"CAIS7wYKowEIERgC"}]}}
+            """).isEmpty)
+    }
+
+    /// A dropped block still spends its index. Renumbering the survivors would make an item's
+    /// id depend on which of its siblings happened to be droppable, so the same byte offset
+    /// would address different rows before and after a mapping rule changed.
+    func testADroppedBlockDoesNotRenumberTheOnesAfterIt() {
+        let items = items("""
+            {"type":"assistant","uuid":"a1","isSidechain":false,"message":{"role":"assistant",\
+            "content":[{"type":"thinking","thinking":"","signature":"CAIS7wYKowEIERgC"},\
+            {"type":"text","text":"straight to the point"}]}}
+            """)
+        XCTAssertEqual(items.map(\.id), ["100#1"])
+    }
+
+    func testAToolCallFillsEveryFieldItsRowNeedsAndNoOther() {
+        let item = items("""
+            {"type":"assistant","uuid":"a1","timestamp":"2026-08-21T13:13:13.000Z",\
+            "isSidechain":false,"message":{"role":"assistant",\
+            "content":[{"type":"tool_use","id":"toolu_019Z","name":"Read",\
+            "input":{"file_path":"/tmp/one.txt","limit":10}}]}}
+            """, at: 512)[0]
+        XCTAssertEqual(item.kind, .toolCall)
+        XCTAssertEqual(item.status, .complete)
+        XCTAssertEqual(item.id, "512#0")
+        XCTAssertEqual(item.at, "2026-08-21T13:13:13.000Z")
+        XCTAssertEqual(item.body.tool, "Read")
+        XCTAssertEqual(item.body.callID, "toolu_019Z")
+        XCTAssertEqual(item.body.summary, "/tmp/one.txt")
+        XCTAssertEqual(item.body.text, """
+            {
+              "file_path" : "\\/tmp\\/one.txt",
+              "limit" : 10
+            }
+            """, "the detail screen gets the whole input, pretty-printed and key-sorted")
+        XCTAssertFalse(item.body.isError, "a call has not failed; only a result can")
+        XCTAssertEqual(item.body.truncatedBytes, 0)
+    }
+
+    /// Nothing in a `tool_result` record names the tool it answers — `ClaudeSession.events`
+    /// documents the same gap — so `tool` must stay nil rather than be guessed at. `summary`
+    /// stays nil too: a result is prose, and its first line is the right row preview.
+    func testAToolResultNamesTheCallItAnswersButNotTheTool() {
+        let item = items("""
+            {"type":"user","uuid":"u2","timestamp":"2026-08-21T14:14:14.000Z",\
+            "isSidechain":false,"message":{"role":"user","content":\
+            [{"tool_use_id":"toolu_019Z","type":"tool_result","content":"hi\\n"}]}}
+            """, at: 1024)[0]
+        XCTAssertEqual(item.kind, .toolResult)
+        XCTAssertEqual(item.status, .complete)
+        XCTAssertEqual(item.id, "1024#0")
+        XCTAssertEqual(item.at, "2026-08-21T14:14:14.000Z")
+        XCTAssertEqual(item.body.text, "hi\n")
+        XCTAssertNil(item.body.tool)
+        XCTAssertNil(item.body.summary)
+        XCTAssertEqual(item.body.callID, "toolu_019Z")
+        XCTAssertFalse(item.body.isError, "a record with no is_error did not fail")
+        XCTAssertEqual(item.body.truncatedBytes, 0)
+    }
+
+    func testAToolResultCarriesTheCallItAnswers() {
+        let items = items("""
+            {"type":"user","uuid":"u2","isSidechain":false,"message":{"role":"user","content":\
+            [{"tool_use_id":"toolu_01A","type":"tool_result","content":"name: FlightDeck\\n",\
+            "is_error":false}]}}
+            """)
+        XCTAssertEqual(items.map(\.kind), [.toolResult])
+        XCTAssertEqual(items[0].body.callID, "toolu_01A")
+        XCTAssertEqual(items[0].body.text, "name: FlightDeck\n")
+        XCTAssertFalse(items[0].body.isError)
+    }
+
+    func testAFailedToolResultSaysSo() {
+        let items = items("""
+            {"type":"user","uuid":"u2","isSidechain":false,"message":{"role":"user","content":\
+            [{"tool_use_id":"toolu_01A","type":"tool_result","content":"No such file",\
+            "is_error":true}]}}
+            """)
+        XCTAssertTrue(items[0].body.isError)
+    }
+
+    /// A tool result's `content` is a String on most tools and a block array on some. Both are
+    /// real; a mapper that handles only the first silently drops the second's output.
+    func testAToolResultWithBlockContentIsFlattened() {
+        let items = items("""
+            {"type":"user","uuid":"u2","isSidechain":false,"message":{"role":"user","content":\
+            [{"tool_use_id":"toolu_01A","type":"tool_result",\
+            "content":[{"type":"text","text":"line one"},{"type":"text","text":"line two"}]}]}}
+            """)
+        XCTAssertEqual(items[0].body.text, "line one\nline two")
+    }
+
+    /// The other half of the base64 rule, and the half the mapping table does not name: a
+    /// screenshot tool and `Read` on a `.png` answer with an **image block inside a
+    /// `tool_result`**, so reading anything but `text` out of that array would put the payload
+    /// on the wire from the direction nobody is watching.
+    func testAToolResultThatReturnsAnImageCarriesNoBase64() {
+        let items = items("""
+            {"type":"user","uuid":"u2","isSidechain":false,"message":{"role":"user","content":\
+            [{"tool_use_id":"toolu_01A","type":"tool_result","content":\
+            [{"type":"image","source":{"type":"base64","media_type":"image/png",\
+            "data":"iVBORw0KGgoAAAANSUhEUgAAA"}}]}]}}
+            """)
+        XCTAssertEqual(items.map(\.kind), [.toolResult])
+        XCTAssertFalse(items[0].body.text.contains("iVBORw0"))
+        XCTAssertEqual(items[0].body.text, "",
+                       "no text block, so nothing to show — see the task report, this renders "
+                       + "as an empty row rather than as [image]")
+    }
+
+    /// **The base64 never leaves the Mac.** A pasted screenshot is roughly a megabyte of it in
+    /// one block; a page of forty records containing two of them is a multi-megabyte frame
+    /// over a cellular link, to render a picture the phone is not going to draw anyway.
+    func testAnImageBlockIsReplacedRatherThanCarried() {
+        let items = items("""
+            {"type":"user","uuid":"u2","isSidechain":false,"message":{"role":"user","content":\
+            [{"type":"text","text":"[Image #1] look at this"},\
+            {"type":"image","source":{"type":"base64","media_type":"image/png",\
+            "data":"iVBORw0KGgoAAAANSUhEUgAAA"}}]}}
+            """)
+        XCTAssertEqual(items.map(\.body.text), ["[Image #1] look at this", "[image]"])
+        XCTAssertFalse(items.contains { $0.body.text.contains("iVBORw0") })
+    }
+
+    /// `isMeta` records are claude talking to itself — "Continue from where you left off.",
+    /// the image-geometry note. Rendering them as user turns puts words in the user's mouth.
+    func testAMetaRecordIsNotAUserTurn() {
+        XCTAssertTrue(items("""
+            {"type":"user","uuid":"u3","isMeta":true,"isSidechain":false,"message":\
+            {"role":"user","content":[{"type":"text","text":"Continue from where you left off."}]}}
+            """).isEmpty)
+    }
+
+    /// Sub-agent records live in `<conversationId>/subagents/agent-*.jsonl`, which nothing
+    /// reads. One appearing in the main transcript means claude changed where it writes them,
+    /// and mapping it would interleave a sub-agent's conversation into its parent's.
+    func testASidechainRecordIsNotMapped() {
+        XCTAssertTrue(items("""
+            {"type":"assistant","uuid":"a9","isSidechain":true,"message":{"role":"assistant",\
+            "content":[{"type":"text","text":"sub-agent speaking"}]}}
+            """).isEmpty)
+    }
+
+    func testRecordsThisVocabularyHasNoRowForEmitNothing() {
+        for line in [
+            #"{"type":"custom-title","customTitle":"x","sessionId":"s"}"#,
+            #"{"type":"system","subtype":"turn_duration","durationMs":1}"#,
+            #"{"type":"mode","mode":"default"}"#,
+            #"{"type":"attachment","id":"1"}"#,
+            "not json at all",
+            "",
+        ] {
+            XCTAssertTrue(items(line).isEmpty, "\(line.prefix(30)) should map to nothing")
+        }
+    }
+
+    /// A `user` or `assistant` record whose `message` is missing or is not an object. Nothing
+    /// on this machine writes one, which is the point: a malformed line must map to nothing,
+    /// the same defensive posture `ClaudeSession.events(inLine:sessionID:)` takes.
+    func testAMalformedMessageRecordEmitsNothingRatherThanACrash() {
+        for line in [
+            #"{"type":"user","uuid":"u1","isSidechain":false}"#,
+            #"{"type":"assistant","uuid":"a1","isSidechain":false,"message":"not an object"}"#,
+            #"{"type":"assistant","uuid":"a1","isSidechain":false,"message":{"role":"assistant"}}"#,
+            #"{"type":"user","uuid":"u1","isSidechain":false,"message":{"content":[1,2,3]}}"#,
+            #"["not","an","object"]"#,
+            #"{"uuid":"no-type"}"#,
+        ] {
+            XCTAssertTrue(items(line).isEmpty, "\(line.prefix(40)) should map to nothing")
+        }
+    }
+
+    /// `at` is the record's own timestamp verbatim and nothing else. A record without one is
+    /// undated rather than dated now — this mapper never calls `Date()`, so a re-fetch of the
+    /// same page cannot come back with a different time on the same row.
+    func testARecordWithNoTimestampIsUndated() {
+        let items = items("""
+            {"type":"user","uuid":"u1","isSidechain":false,\
+            "message":{"role":"user","content":"undated"}}
+            """)
+        XCTAssertNil(items[0].at)
+    }
+
+    /// Nothing streams. Both agents are read from files they write, and neither writes token
+    /// deltas — see the plan's findings §2. `.streaming` exists in the vocabulary for a future
+    /// route; if something starts emitting it, this fails and the UI has to be built for it.
+    func testEveryMappedItemIsComplete() {
+        let items = items("""
+            {"type":"assistant","uuid":"a1","isSidechain":false,"message":{"role":"assistant",\
+            "content":[{"type":"text","text":"hi"},{"type":"tool_use","id":"t","name":"Bash",\
+            "input":{"command":"ls"}}]}}
+            """)
+        XCTAssertFalse(items.isEmpty)
+        XCTAssertTrue(items.allSatisfy { $0.status == .complete })
+    }
+}
+
+/// The preview and detail rendering of a tool's input, which Task 4 shares for codex. Tested
+/// directly rather than only through the mapper: the key table is an ordering, and an ordering
+/// is exactly the kind of thing a round trip through one example cannot see.
+final class ToolInputSummaryTests: XCTestCase {
+    func testThePreviewPrefersTheCommandOverTheDescriptionBesideIt() {
+        XCTAssertEqual(
+            ToolInputSummary.text(for: [
+                "description": "Read it", "command": "sed -n '1,60p' project.yml",
+            ]),
+            "sed -n '1,60p' project.yml",
+            "the table is an order of preference, not a search for any String"
+        )
+    }
+
+    func testThePreviewPrefersTheFilePathOverThePlainPath() {
+        XCTAssertEqual(
+            ToolInputSummary.text(for: ["path": "/tmp", "file_path": "/tmp/one.txt"]),
+            "/tmp/one.txt"
+        )
+    }
+
+    /// A row is one line high. A heredoc'd `Bash` command is fifty.
+    func testThePreviewIsTheFirstLineAlone() {
+        XCTAssertEqual(
+            ToolInputSummary.text(for: ["command": "  cd /tmp  \necho hi\nexit 0"]),
+            "cd /tmp"
+        )
+    }
+
+    func testAnInputWithNoPreviewableKeyHasNoPreview() {
+        XCTAssertNil(ToolInputSummary.text(for: ["todos": ["write it"], "count": 3]))
+        XCTAssertNil(ToolInputSummary.text(for: [:]))
+        XCTAssertNil(ToolInputSummary.text(for: ["command": "   "]),
+                     "whitespace is not a preview")
+        XCTAssertNil(ToolInputSummary.text(for: ["command": 7]),
+                     "a non-String under a preview key is not a preview")
+    }
+
+    /// A row still renders from `Body.tool` when there is no preview, which is why nil is a
+    /// legitimate answer rather than a fallback into the pretty-printed JSON.
+    func testAToolCallWithNoPreviewableInputStillNamesItsTool() {
+        let item = ClaudeTimelineMapper.items(inLine: """
+            {"type":"assistant","uuid":"a1","isSidechain":false,"message":{"role":"assistant",\
+            "content":[{"type":"tool_use","id":"toolu_01B","name":"TodoWrite",\
+            "input":{"todos":[{"content":"ship it","status":"pending"}]}}]}}
+            """, at: 0)[0]
+        XCTAssertNil(item.body.summary)
+        XCTAssertEqual(item.body.tool, "TodoWrite")
+        XCTAssertTrue(item.body.text.contains("\"todos\""))
+    }
+
+    /// Key order out of `JSONSerialization` is unspecified. Two fetches of one page that
+    /// differ only in key order would look to a client like the agent changed its mind.
+    func testTheWholeInputIsPrettyPrintedInASortedStableOrder() {
+        let pretty = ToolInputSummary.pretty(["zebra": 1, "alpha": 2, "middle": 3])
+        XCTAssertEqual(pretty, """
+            {
+              "alpha" : 2,
+              "middle" : 3,
+              "zebra" : 1
+            }
+            """)
+    }
+
+    func testAnInputThatIsNotAJSONObjectPrettyPrintsToNothing() {
+        XCTAssertEqual(ToolInputSummary.pretty(nil), "")
+        XCTAssertEqual(ToolInputSummary.pretty("a bare string"), "")
+        XCTAssertEqual(ToolInputSummary.pretty(Date()), "",
+                       "a value JSONSerialization would trap on must return empty, not crash")
+    }
+}
