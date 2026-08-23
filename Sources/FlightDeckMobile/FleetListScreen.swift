@@ -48,6 +48,22 @@ struct FleetListScreen: View {
             // the list, not the list's own metrics.
             .opacity(isStale ? 0.5 : 1)
             .refreshable { model.reconnect() }
+            .navigationDestination(for: UUID.self) { id in
+                // The session is looked up LIVE rather than captured at push time, so a
+                // rename or a status change on the Mac reaches a screen that is already
+                // open, and a session closed on the Mac leaves the screen able to say so
+                // instead of showing a title that no longer exists. Keyed on the tab id,
+                // never the conversation id — the same rule the `ForEach` above states.
+                //
+                // The model comes from `FleetModel` and is made once per session: built
+                // here it would be rebuilt, empty, on every re-evaluation of this closure.
+                SessionTimelineScreen(
+                    session: model.fleet.projects
+                        .flatMap(\.sessions)
+                        .first { $0.id == id },
+                    model: model.timelineModel(for: id)
+                )
+            }
             // Marking a session read is a command sent to the Mac, and the row does not change
             // until the Mac echoes the event back — a round trip. The haptic is what confirms
             // the tap landed in the meantime. Triggered by `justMarkedRead`, which is only ever
@@ -109,34 +125,38 @@ struct FleetListScreen: View {
     /// section header.
     private static let rowInsets = EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16)
 
-    /// A row is a `Button` only when tapping it does something.
+    /// Every row opens its session, and what looks tappable is tappable.
     ///
-    /// Every row used to be one, which meant every row highlighted under a finger and absorbed
-    /// the touch — and then did nothing, because `markRead` is the only action this screen has
-    /// and it only applies to an unread session. Opening a session is slice 1b and does not
-    /// exist. Twice the report came back as "tapping sessions does nothing", which is exactly
-    /// what a control that looks live and is not will always produce. After this, what looks
-    /// tappable is what is tappable.
+    /// This used to be a `Button` only for an unread row, and the reason was sound at the
+    /// time: `markRead` was the only action the screen had, so every other row highlighted
+    /// under a finger, absorbed the touch and did nothing — which came back from testing
+    /// twice as "tapping sessions does nothing". Opening a session is what was missing, and
+    /// now it exists; the rule that produced the narrower `Button` is the same rule that
+    /// makes every row a link today.
     ///
-    /// `isConnected` is part of that and not belt-and-braces: `FleetConnector.send` is a silent
-    /// no-op while disconnected, so an unread row on a stale fleet is a button whose action
-    /// cannot run. The list is already dimmed in that state; this stops it also being falsely
-    /// interactive.
-    @ViewBuilder
+    /// `markRead` rides along on the same tap for an unread one. Spec §8 makes unread one
+    /// fleet-wide fact, and opening a session on the phone is exactly the "I have looked at
+    /// this" the mark means — so it is one gesture, not a row that must be tapped twice for
+    /// two different things.
+    ///
+    /// **`isConnected` still gates the mark, and only the mark.** `FleetConnector.send` is a
+    /// silent no-op while disconnected, so sending one then would do nothing while the dot
+    /// stayed put. Opening is not like that: the timeline holds what it last heard and says
+    /// so, which is more use than an inert row with no explanation.
+    ///
+    /// A `simultaneousGesture` rather than an action, because a `NavigationLink` handles its
+    /// own tap — wrapping one in a `Button` gives the row two competing gesture recognisers,
+    /// and the reliable way to hang a side effect off a link's tap is beside it.
     private func sessionRow(_ session: WireSession) -> some View {
-        if isConnected && session.isUnread {
-            Button {
-                model.markRead(session.id)
-                justMarkedRead = session.id
-            } label: {
-                row(session)
-            }
-            .buttonStyle(.plain)
-            .listRowInsets(Self.rowInsets)
-        } else {
+        NavigationLink(value: session.id) {
             row(session)
-                .listRowInsets(Self.rowInsets)
         }
+        .listRowInsets(Self.rowInsets)
+        .simultaneousGesture(TapGesture().onEnded {
+            guard isConnected, session.isUnread else { return }
+            model.markRead(session.id)
+            justMarkedRead = session.id
+        })
     }
 
     /// The font is set HERE, on the title itself, and not once on the enclosing `List`.
