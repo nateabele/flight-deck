@@ -1,0 +1,34 @@
+
+
+❯ Use the AskUserQuestion tool to ask me which of three programming languages I would rather use for a new command line tool: Rust, Go,
+  or Swift. Give each option a one sentence description. Do nothing else, just ask.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Language
+
+Which language would you rather use for a new command line tool?
+
+❯ 1. Rust
+     Compiled, memory-safe systems language with no runtime, producing fast single-file binaries and a rich CLI ecosystem (clap,
+     anyhow).
+  2. Go
+     Simple, fast-compiling language with a large standard library and effortless cross-compilation to static binaries.
+  3. Swift
+     Modern, expressive language with strong type safety and first-class Apple platform integration, plus ArgumentParser for CLIs.
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+

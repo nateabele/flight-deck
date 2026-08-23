@@ -1,0 +1,34 @@
+
+
+❯ Use the AskUserQuestion tool, with multiSelect set to true on the question, to ask me which snacks I would want on a long flight.
+  Offer five options, each with a short description. Do nothing else, just ask.
+  ⎿  Invalid tool parameters
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Snacks  ✔ Submit  →
+
+Which snacks would you want on a long flight?
+
+❯ 1. [ ] Trail mix
+  Nuts, seeds, and dried fruit — filling, no mess, holds up in a bag.
+  2. [ ] Dark chocolate
+  Small squares for a sweet hit; won't melt as fast as milk chocolate.
+  3. [ ] Beef jerky
+  Salty protein that keeps you full, no refrigeration needed.
+  4. [ ] Fresh fruit
+  Apple slices or grapes — hydrating and a break from packaged food.
+  5. [ ] Type something
+     Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  6. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
