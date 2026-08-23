@@ -181,7 +181,19 @@ struct SessionCommands: Commands {
             // enabled item it walks, so this one answers ⌘W from every focus state.
             // `closeSelectedSession` reporting false is the empty state — nothing to close —
             // where the key falls through to closing the window as it always did.
+            //
+            // Answering ⌘W from every focus state is what this item is for, but "every focus
+            // state" used to include the *other* windows: a main-menu key equivalent is
+            // offered to the menu before the responder chain, so with Settings open and
+            // focused ⌘W closed the session behind it instead of the window in front of it.
+            // `SessionWindow.isKey` is the guard, and the fallback is the same one the empty
+            // state already used — close the focused window, which is what ⌘W means anywhere
+            // but here.
             Button("Close Session") {
+                guard SessionWindow.isKey else {
+                    NSApp.keyWindow?.performClose(nil)
+                    return
+                }
                 if !store.closeSelectedSession() { NSApp.keyWindow?.performClose(nil) }
             }
             .keyboardShortcut("w", modifiers: .command)
