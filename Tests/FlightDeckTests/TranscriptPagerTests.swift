@@ -133,13 +133,18 @@ final class TranscriptPagerTests: XCTestCase {
     /// **A window boundary lands mid-line far more often than not.** The record the window
     /// cut through starts before `start`, so it belongs to the next page up — returning it
     /// here would hand a client a fragment carrying an offset that says it is whole.
+    ///
+    /// `maxScan` stops the scan two bytes inside `ddddddddd`, and `limit` is deliberately
+    /// larger than the page: if the limit were doing the trimming, this would pass whether
+    /// the fragment rule existed or not, which is what an earlier version of this test did.
     func testAWindowThatCutsALineDoesNotReturnTheFragment() throws {
         let url = try write(varied)
-        let page = try XCTUnwrap(
-            TranscriptPager.page(url: url, anchor: .latest, limit: 2, window: 8)
-        )
-        XCTAssertEqual(page.lines, [variedLines[5], variedLines[6]])
-        XCTAssertEqual(page.start, 22, "the 8-byte window cut through 'ddddddddd'; it is not ours")
+        let page = try XCTUnwrap(TranscriptPager.page(
+            url: url, anchor: .before(33), limit: 10, window: 8, maxScan: 16
+        ))
+        XCTAssertEqual(page.lines, Array(variedLines.suffix(3)))
+        XCTAssertEqual(page.start, 20, "the scan stopped inside 'ddddddddd'; those bytes are "
+                                       + "the tail of a record, not a record")
         XCTAssertEqual(page.end, 33)
         XCTAssertTrue(page.hasMore)
     }
@@ -198,6 +203,8 @@ final class TranscriptPagerTests: XCTestCase {
         XCTAssertEqual(page.start, 32)
         XCTAssertEqual(page.end, 32)
         XCTAssertFalse(page.reset, "at the end is not the same as past the end")
+        XCTAssertFalse(page.hasMore, "nothing came back, so paging again would ask the same "
+                                     + "question and get the same answer")
     }
 
     /// The ordinary case, not the edge case: the writer appends between two requests, and the
@@ -338,6 +345,10 @@ final class TranscriptPagerTests: XCTestCase {
     /// And so is the search for the last boundary, which is the one scan that runs before any
     /// budget has been spent. A tail with no newline in it is a record still being written;
     /// past the budget it is indistinguishable from a file that is not a transcript at all.
+    ///
+    /// Note what this page is: byte-identical to the one an empty transcript produces. The
+    /// pager knows the difference and drops it, so a client renders "empty conversation" over
+    /// history it could not reach. Pinned here so that cost is visible to whoever changes it.
     func testALatestWhoseTailHoldsNoBoundaryWithinTheBudgetIsAnEmptyPage() throws {
         let url = try write("short\n" + String(repeating: "x", count: 5_000))
         let page = try XCTUnwrap(TranscriptPager.page(
@@ -389,5 +400,96 @@ final class TranscriptPagerTests: XCTestCase {
         XCTAssertTrue(page.lines.isEmpty)
         XCTAssertFalse(page.hasMore)
         XCTAssertFalse(page.reset)
+    }
+
+    /// **The ordinary state of a file claude is writing**, polled: the last record has no
+    /// newline yet, so nothing can be handed over — and saying "there is more" here would be
+    /// answered by re-issuing this identical request on the next poll, and the one after, for
+    /// as long as the record takes to finish. `hasMore` means "paging again will get you
+    /// something", and here it will not.
+    func testAForwardPollWhileTheWriterIsMidRecordDoesNotInviteARetry() throws {
+        let url = try write(varied + "{\"partial\":\"no newline yet")
+        let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .after(33), limit: 10))
+        XCTAssertTrue(page.lines.isEmpty)
+        XCTAssertEqual(page.start, 33)
+        XCTAssertEqual(page.end, 33, "the cursor does not move onto an unfinished record")
+        XCTAssertFalse(page.hasMore)
+        XCTAssertFalse(page.reset)
+    }
+
+    /// A negative cursor is not a wrong answer waiting to happen — it is a **trap**:
+    /// `UInt64(negative)` is a checked conversion Swift aborts the process on, and `try?`
+    /// does not catch it. `TimelineAnchor` decodes a cursor as a bare `Int` off the socket,
+    /// so this is one malformed frame away from taking the Mac app down.
+    func testANegativeAfterCursorIsRefusedRatherThanSeekedTo() throws {
+        let url = try write(varied)
+        let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .after(-1), limit: 10))
+        XCTAssertTrue(page.reset, "no page ever handed out this cursor, so it names nothing")
+        XCTAssertTrue(page.lines.isEmpty)
+        XCTAssertEqual(page.start, 33)
+        XCTAssertEqual(page.end, 33)
+        XCTAssertFalse(page.hasMore)
+    }
+
+    func testANegativeBeforeCursorIsRefusedRatherThanEchoedBack() throws {
+        let url = try write(varied)
+        let page = try XCTUnwrap(
+            TranscriptPager.page(url: url, anchor: .before(-9_999), limit: 10)
+        )
+        XCTAssertTrue(page.reset)
+        XCTAssertEqual(page.start, 33, "not -9999 — a cursor is only ever one this handed out")
+    }
+
+    /// A limit of zero would otherwise be the same infinite retry from the other side: no
+    /// lines, a cursor that does not move, and `hasMore` true. Clamped up, because the rule
+    /// `TimelineLimits.maxPageBytes` states for pages holds here too — always emit at least
+    /// one record — and because `min(limit, maxLimit)` upstream clamps only the greedy end.
+    func testALimitOfZeroStillReturnsARecordBackwards() throws {
+        let url = try write(varied)
+        let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .latest, limit: 0))
+        XCTAssertEqual(page.lines, [variedLines[6]], "asked for none, given the newest one")
+        XCTAssertEqual(page.start, 29)
+        XCTAssertEqual(page.end, 33)
+        XCTAssertTrue(page.hasMore)
+    }
+
+    /// And forwards, which must agree: the same degenerate request cannot mean "one record"
+    /// in one direction and "nothing, forever" in the other.
+    func testANegativeLimitStillReturnsARecordForwards() throws {
+        let url = try write(varied)
+        let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .after(0), limit: -3))
+        XCTAssertEqual(page.lines, [variedLines[0]])
+        XCTAssertEqual(page.start, 0)
+        XCTAssertEqual(page.end, 2)
+        XCTAssertTrue(page.hasMore)
+    }
+
+    /// A cursor a client invented rather than echoed lands mid-record. The page then ends at
+    /// the last boundary at or *before* it, so the bytes between are skipped — silently, and
+    /// there is no way for this type to know they were wanted. Nothing downstream should ever
+    /// produce such a cursor; this pins what happens if one does, so the behaviour is a
+    /// decision rather than an accident.
+    func testANonBoundaryBeforeCursorEndsAtTheBoundaryBeneathIt() throws {
+        let url = try write(varied)
+        let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .before(24), limit: 10))
+        XCTAssertEqual(page.lines, Array(variedLines.prefix(5)))
+        XCTAssertEqual(page.end, 22, "22, not the 24 that was asked for: 'ffffff' starts at 22 "
+                                     + "and byte 24 is inside it")
+        XCTAssertEqual(page.start, 0)
+        XCTAssertFalse(page.hasMore)
+    }
+
+    /// `start` is the boundary the page begins at, which is not always its first line's
+    /// offset: a blank line is a boundary carrying no record. Task 6 must pass this value
+    /// through untouched rather than recompute it from the first item, or the blank line's
+    /// byte falls into a gap between two pages.
+    func testStartIsTheBoundaryItBeginsAtNotItsFirstLinesOffset() throws {
+        let url = try write("aa\n\nbbb\n")
+        let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .latest, limit: 2))
+        XCTAssertEqual(page.lines, [SourceLine(offset: 4, text: "bbb")])
+        XCTAssertEqual(page.start, 3, "the blank line at offset 3 is one of the two records "
+                                      + "asked for, and it is where this page starts")
+        XCTAssertEqual(page.end, 8)
+        XCTAssertTrue(page.hasMore)
     }
 }
