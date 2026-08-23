@@ -12,9 +12,10 @@ import XCTest
 /// message" down to the cut.
 ///
 /// What is reachable is the decision itself, and it is one decision with three consequences:
-/// `proseLineLimit(for:)` answering `nil` is what draws a body whole, what takes the chevron
-/// off the row, and what puts Copy on it instead. A test that let those three drift apart
-/// would be describing a row that hides words with no way to reach them.
+/// `proseLineLimit(for:)` answering `nil` is what draws a body whole, what withholds the More
+/// link, and — with `opensDetail(_:)` now `false` for every prose kind — what leaves Copy on
+/// the row. A test that let those drift apart would be describing a row that hides words with
+/// no way to reach them. The expansion itself is `TimelineProseExpansionTests`.
 final class TimelineProseTests: XCTestCase {
 
     // MARK: What the row draws
@@ -71,24 +72,35 @@ final class TimelineProseTests: XCTestCase {
 
     // MARK: Where a tap leads
 
-    /// **A row that shows everything leads nowhere, and every row that hides something leads
-    /// somewhere.** The two halves are one rule: a chevron onto a screen carrying the identical
-    /// words promises more that is not there, and a body cut with nowhere to go loses words
-    /// with no way to reach them. The second is the worse failure, which is why the negative
-    /// controls below outnumber the positive one.
-    func testOnlyARowThatHidesSomethingOpensTheDetailScreen() {
+    /// **No prose row leads anywhere, at any length.** A short answer is drawn whole, so a
+    /// chevron on it would promise words that are not there; a long one opens where it stopped
+    /// (`TimelineProseExpansionTests`), so the screen one tap away would be the same words a
+    /// second time — and mechanically a `NavigationLink` swallows the tap on any control inside
+    /// it, so a row cannot be a link and carry a More button at once.
+    ///
+    /// The long answer is the case this test is really for: it used to be the one prose kind
+    /// that DID open the detail screen.
+    func testNoProseRowOpensTheDetailScreen() {
         for item in [TimelineFixtures.assistantShortReply, TimelineFixtures.userTurn,
                      TimelineFixtures.assistantHeadingAndList,
-                     TimelineFixtures.assistantFencedCode] {
+                     TimelineFixtures.assistantFencedCode,
+                     TimelineFixtures.assistantJustUnderTheCeiling,
+                     TimelineFixtures.assistantJustOverTheCeiling,
+                     TimelineFixtures.assistantVeryLongAnswer] {
             XCTAssertFalse(
                 TimelineStyle.opensDetail(item),
-                "\(item.id) is drawn whole — a chevron on it points at nothing new"
+                "\(item.id) is prose: it is read in the conversation, never one tap from it"
             )
         }
-        for item in [TimelineFixtures.assistantVeryLongAnswer, TimelineFixtures.thinking,
-                     TimelineFixtures.prompt, TimelineFixtures.unknown,
-                     TimelineFixtures.bashCall, TimelineFixtures.bashResult,
-                     TimelineFixtures.readResult] {
+    }
+
+    /// The other half, unchanged: a row with no way to show what it holds must still lead to a
+    /// screen that can. All four are machine text, which is exactly what this screen never
+    /// unrolls inline — a 64 KB tool result drawn whole would bury the conversation.
+    func testMachineTextStillOpensTheDetailScreen() {
+        for item in [TimelineFixtures.thinking, TimelineFixtures.prompt,
+                     TimelineFixtures.unknown, TimelineFixtures.bashCall,
+                     TimelineFixtures.bashResult, TimelineFixtures.readResult] {
             XCTAssertTrue(
                 TimelineStyle.opensDetail(item),
                 "\(item.id) shows less than it holds, so the row must lead to the rest"
@@ -96,17 +108,21 @@ final class TimelineProseTests: XCTestCase {
         }
     }
 
-    /// The invariant underneath both of those, stated once so it cannot drift: **clamped and
-    /// tappable are the same fact.** A prose body drawn whole must not open a screen, and one
-    /// that was cut must.
-    func testTheClampAndTheWayInAreOneDecision() {
+    /// The invariant underneath both of those, stated once so it cannot drift: **cut and
+    /// reachable are the same fact.** For prose the way to the rest is the More link rather
+    /// than a push, so a body the ceiling cut must offer one and a body drawn whole must not.
+    /// A version that drew a hundred and twenty lines of a message and offered nothing would
+    /// pass every other test in this file.
+    func testTheClampAndTheWayToTheRestAreOneDecision() {
         for item in TimelineFixtures.conversation + TimelineFixtures.markdownConversation
-            + [TimelineFixtures.assistantVeryLongAnswer, TimelineFixtures.assistantShortReply]
+            + [TimelineFixtures.assistantVeryLongAnswer, TimelineFixtures.assistantShortReply,
+               TimelineFixtures.assistantJustUnderTheCeiling,
+               TimelineFixtures.assistantJustOverTheCeiling]
         where TimelineStyle.rendersMarkdown(item) {
             XCTAssertEqual(
                 TimelineStyle.proseLineLimit(for: item) != nil,
-                TimelineStyle.opensDetail(item),
-                "\(item.id): a cut body with no way in, or a whole one with a chevron"
+                TimelineStyle.expandsInPlace(item),
+                "\(item.id): a cut body with no way to the rest, or a whole one offering More"
             )
         }
     }

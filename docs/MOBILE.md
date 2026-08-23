@@ -396,6 +396,43 @@ content, and the guard is a check that no two of the ten PNGs are byte-identical
 reported it. And the harness was deleted before the commit, as every harness on this page has
 been.
 
+**And it is how a long answer came to open in place — and how the first attempt at it was
+caught drawing a control that did nothing.** The row's ceiling used to end in "Read the whole
+message" and a push; it now ends in a **More** link that expands the row where it stopped, and
+says Less to put it away again. Four scenes in both themes at 402pt wide, drawn from real
+transcripts, in `.superpowers/sdd/ui-renders/expand/`: a real 119-line answer just under the
+ceiling with no link at all (2,341pt), a real 134-line one collapsed with the link at the cut
+(2,527pt), the same message expanded (2,771pt), and a conversation where a collapsed answer sits
+directly above a `Read` card so the link's weight is visible beside a tool heading. Two things
+only the renders could settle:
+
+- **The clamp and the link were two different measurements, and one of them missed.** The row
+  bounded Markdown by *height* — `23pt × 120 lines`, clipped — while the link was decided by a
+  line count estimated at 42 characters to the line. Real prose fits more than 42, so the
+  estimate runs ten to fifteen per cent high, and the 134-line answer laid out at **2,770.67pt
+  collapsed and 2,770.67pt expanded**: the clamp never bit, the row drew More, and tapping it
+  moved nothing. Four of the nine over-ceiling messages in this machine's transcripts sit in
+  that dead band. The fix is that a collapsed row is handed a shorter *document*
+  (`TimelineStyle.proseText`) rather than the whole one behind a height clamp, so the two are
+  the same count of the same characters by construction — and a collapsed row now parses a
+  fraction of a 64 KB body instead of laying all of it out and throwing most of it away.
+- **The link had to be a control, not a chip.** In `.secondary` at `.caption2` it reads as a
+  third line of footnote beside the scissors chip. Accent-coloured with a chevron pointing the
+  way the content is about to move, it reads as something to tap — legible in both themes, the
+  dark one checked, because this branch has already lost a control to vibrancy once.
+
+**And it is how the question "does an expanded row survive a scroll" was answered by measuring
+rather than by arguing.** That one did not need a picture — `ProseExpansionRecyclingTests` is
+committed, unusually for this page, because what it looks at is a *number*: it mounts real rows
+in a real key window, scrolls six thousand points away and back, and reads the row's height off
+the collection view's layout. The answer is yes. The finding worth recording is the control it
+carries: a probe row that keeps its own `@State` **does not lose it** — SwiftUI recycles the
+cell and keeps the state box, at 30, 200 and 600 rows, and keeps it even when the row leaves the
+feed outright. The received wisdom that a lazy `List` discards row state is not true here, so
+`SessionTimelineScreen.Expansion` sits on the screen for two other reasons: a row that is a pure
+function of a flag cannot be affected by any `List` behaviour, and a decision reachable without
+SwiftUI is a decision a test can run.
+
 **And it is how the tree and the Markdown were merged into one detail screen.** The two landed
 independently and each rewrote the same block, so what had to be looked at was not either
 feature but the seam: that the three ways a body is drawn stay mutually exclusive and that the
