@@ -281,6 +281,9 @@ final class CodexResumeTests: XCTestCase {
         func sendReturn() { returns += 1 }
         func sendKillLine() {}
         func sendYank() {}
+        func sendArrowDown() {}
+        func sendArrowUp() {}
+        func sendEscape() {}
         func readViewport() -> String? { nil }
     }
 
