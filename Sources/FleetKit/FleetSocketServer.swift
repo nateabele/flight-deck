@@ -106,6 +106,19 @@ public final class FleetSocketServer: @unchecked Sendable {
     public var onCommand: (
         (_ client: FleetAttachment, _ cid: Int, _ command: FleetCommand) -> ServerFrame
     )?
+    /// Answers a request. Unlike `onCommand`, the answer comes back through `reply` rather
+    /// than as a return value, and that difference is forced rather than stylistic: a command
+    /// is dispatched on the way out of the frame handler, while a page is a file read that
+    /// would otherwise block `queue` — which in production is the main queue.
+    ///
+    /// `reply` must be called on `queue`, and it asserts that. It answers at most once —
+    /// a second call is dropped rather than trusted — and calling it after the connection has
+    /// ended is safe and does nothing, because a phone can leave inside the moment a page
+    /// takes to read and that is the ordinary case, not an error.
+    public var onRequest: (
+        (_ client: FleetAttachment, _ cid: Int, _ request: FleetRequest,
+         _ reply: @escaping (ServerFrame) -> Void) -> Void
+    )?
     /// The paired slots currently attached — a set, not a count, because a count is the
     /// wrong signal for a UI that needs per-slot truth: with two phones attached, only one
     /// disconnecting must still update the survivor's own row. Fired wherever `attached`
@@ -534,12 +547,40 @@ public final class FleetSocketServer: @unchecked Sendable {
                 guard self.attached[id] != nil else { return connection.cancel() }
                 let reply = self.onCommand?(attachment, cid, command) ?? .err(cid: cid, code: "unhandled")
                 FleetSocket.send(reply, over: connection)
-            case .req(let cid, _):
-                // Nothing serves requests yet. Answered rather than ignored, and with the
-                // same `unhandled` code an unwired command gets: a client whose fetch is
-                // dropped in silence waits for a reply that is never coming.
+            case .req(let cid, let request):
+                // Same rule as `cmd`, for a stronger reason: answering an unattached peer's
+                // command lets it drive the Mac, and answering its request lets it READ one.
                 guard self.attached[id] != nil else { return connection.cancel() }
-                FleetSocket.send(ServerFrame.err(cid: cid, code: "unhandled"), over: connection)
+                guard let onRequest = self.onRequest else {
+                    // Answered rather than ignored, and with the same `unhandled` code an
+                    // unwired command gets: a client whose fetch is dropped in silence waits
+                    // for a reply that is never coming.
+                    FleetSocket.send(ServerFrame.err(cid: cid, code: "unhandled"), over: connection)
+                    return
+                }
+                // At most one frame per `cid`, enforced here rather than asked of every
+                // reader: a client correlates a reply by that number and closes the fetch out
+                // when it lands, so a second one is a page it is no longer expecting and has
+                // nowhere to put. One `Bool` on `queue` — where this closure has just
+                // asserted it is — makes it impossible instead of merely documented.
+                var answered = false
+                onRequest(attachment, cid, request) { [weak self, weak connection] frame in
+                    guard let self, let connection else { return }
+                    // The reply comes back from wherever the page was read, which is the
+                    // whole point of it being a closure rather than a return value. It still
+                    // has to land here, on `queue`, because `attached` is confined to it and
+                    // this is the code that reads it — a reader that hopped for itself would
+                    // be reading that table from its own thread.
+                    dispatchPrecondition(condition: .onQueue(self.queue))
+                    guard !answered else { return }
+                    answered = true
+                    // The connection may have ended while the page was being read — a phone
+                    // that put itself in a pocket mid-scroll. `attached` is keyed by a fresh
+                    // UUID per connection and `drop(id)` removes it, so this cannot match a
+                    // later peer that happens to reuse anything.
+                    guard self.attached[id] != nil else { return }
+                    FleetSocket.send(frame, over: connection)
+                }
             }
         } onEnd: { [weak self] _ in
             guard let self else { return }
@@ -551,7 +592,45 @@ public final class FleetSocketServer: @unchecked Sendable {
             dispatchPrecondition(condition: .onQueue(self.queue))
             connection.cancel()
             self.drop(id)
+        } onUndecodable: { [weak self] data in
+            guard let self else { return false }
+            dispatchPrecondition(condition: .onQueue(self.queue))
+            // A phone newer than this Mac can send a request this build cannot parse:
+            // `TimelineAnchor` and `FleetRequest.op` both throw on a value they have no case
+            // for, deliberately, because a request is executed rather than rendered and
+            // there is no default that is not a wrong answer. Without this the throw took
+            // the socket with it — no `err`, no close frame — and the phone read a bare
+            // hang-up as a disconnect, reconnected (resetting `FleetConnector`'s backoff on
+            // the first frame), and re-issued the fetch that killed it. A one-second flap,
+            // forever, over one unknown enum value.
+            //
+            // Only a `req` is salvaged, and that narrowness is the load-bearing part rather
+            // than caution: `FleetSocket.receive`'s tear-down exists so the two ends cannot
+            // silently disagree about state, and that reasoning is right about every frame
+            // that carries state. A request carries none — it is correlated by a `cid` and
+            // answered on it — so refusing this one and reading the next leaves both ends
+            // believing exactly what they believed before.
+            guard let salvaged = try? JSONDecoder().decode(SalvagedFrame.self, from: data),
+                  salvaged.t == "req",
+                  // The same gate the parseable `.req` arm applies: an unattached peer is
+                  // told nothing and hung up on, whether or not this build understood it.
+                  self.attached[id] != nil
+            else { return false }
+            FleetSocket.send(
+                ServerFrame.err(cid: salvaged.cid, code: "unsupported"), over: connection
+            )
+            return true
         }
+    }
+
+    /// The two fields every frame that can be refused in isolation must have: what kind of
+    /// frame it claimed to be, and the correlation id to refuse it on. Decoded from the raw
+    /// bytes of a message `ClientFrame` threw on, which is why it names its own keys rather
+    /// than reusing `ClientFrame.CodingKeys` — the point is to read the little that is
+    /// legible in a frame whose remainder is not.
+    private struct SalvagedFrame: Decodable {
+        let t: String
+        let cid: Int
     }
 
     /// Ends one connection and forgets everything filed under its id, from whichever of the

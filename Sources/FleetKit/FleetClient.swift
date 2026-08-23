@@ -124,4 +124,18 @@ public final class FleetClient: @unchecked Sendable {
         FleetSocket.send(ClientFrame.cmd(cid: cid, command), over: connection)
         return cid
     }
+
+    /// Returns the correlation id the `page` — or the `err` — will carry.
+    ///
+    /// Drawn from the same `nextCID` a command is, deliberately: the two travel one socket
+    /// and are answered on one `cid` space, so a request and a command sharing a number
+    /// would let a client match a page to a `markRead`.
+    @discardableResult
+    public func send(_ request: FleetRequest) -> Int {
+        guard let connection else { return 0 }
+        let cid = nextCID
+        nextCID += 1
+        FleetSocket.send(ClientFrame.req(cid: cid, request), over: connection)
+        return cid
+    }
 }
