@@ -15,7 +15,7 @@ import UIKit
 /// simulator — see `scripts/test-ios.sh`.
 @MainActor
 @Observable
-final class FleetModel: TimelinePaging, PromptSending {
+final class FleetModel: TimelinePaging, PromptSending, PromptAnswering {
     private(set) var mac: PairedMac?
     private(set) var fleet = FleetSnapshot.empty
     private(set) var state = FleetConnector.State.idle
@@ -246,6 +246,17 @@ final class FleetModel: TimelinePaging, PromptSending {
     /// before this call returns, which is why `SessionTimelineModel.send` arms its deadline
     /// first.
     func sendPrompt(
+        _ command: FleetCommand,
+        then completion: @escaping (Result<Void, FleetRequestError>) -> Void
+    ) {
+        guard let connector else { return completion(.failure(.disconnected)) }
+        connector.send(command, then: completion)
+    }
+
+    /// Answer a blocked dialog. Forwarded rather than absorbed, exactly as `sendPrompt` is:
+    /// the connector answers **exactly once**, including with `.disconnected`, and a layer here
+    /// that could swallow that would leave a person believing they told an agent to proceed.
+    func answerPrompt(
         _ command: FleetCommand,
         then completion: @escaping (Result<Void, FleetRequestError>) -> Void
     ) {

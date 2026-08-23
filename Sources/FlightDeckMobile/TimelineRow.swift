@@ -152,6 +152,12 @@ struct TimelineRow: View {
         switch item.kind {
         case .toolCall, .toolResult:
             toolCard
+        case .prompt:
+            // A question the agent asked, rebuilt from the input the mapper carried. The
+            // answer, when the feed holds one, is already folded in as `result` by
+            // `entries(from:)` on `callID` — unchanged, because the RESULT is still a
+            // `.toolResult`.
+            HistoricalPromptBody(item: item)
         default:
             prose
         }
