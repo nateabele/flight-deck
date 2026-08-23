@@ -90,6 +90,27 @@ final class FleetModelTests: XCTestCase {
         XCTAssertFalse(messages.contains(where: \.isEmpty))
     }
 
+    /// The history channel's one entry point from the phone, and the only thing it must never
+    /// do is nothing. A request has no second channel — a command's effect comes back as a
+    /// northbound event, so dropping one is merely ineffective, while dropping a request is a
+    /// screen spinning on a page that will never arrive. With no paired Mac there is no
+    /// connector to forward to, so the refusal has to be manufactured here, and it has to
+    /// arrive **before this call returns**: `SessionTimelineModel` arms its deadline ahead of
+    /// the request precisely because this completion can run inside the frame that started it.
+    func testAskingForAPageWithNothingConnectedIsRefusedBeforeTheCallReturns() {
+        let model = FleetModel(store: RefusingPairedMacStore())
+        var answer: Result<TimelinePage, FleetRequestError>?
+
+        model.timelinePage(.timeline(session: UUID(), anchor: .latest, limit: 40)) {
+            answer = $0
+        }
+
+        guard case .failure(let error)? = answer else {
+            return XCTFail("a request with no connector answered \(String(describing: answer))")
+        }
+        XCTAssertEqual(error, .disconnected)
+    }
+
     /// A real `FD2-` code, minted here rather than checked in: `PairingPayload.encoded()` is
     /// the Mac's own encoder, so this exercises the decode `adopt(code:)` actually performs.
     private static func scannableCode() -> String {
