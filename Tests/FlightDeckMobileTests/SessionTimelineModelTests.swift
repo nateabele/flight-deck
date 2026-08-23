@@ -9,7 +9,7 @@ import XCTest
 /// an answer that arrives after its deadline, and a refusal delivered *before* the request
 /// returns are all ordinary on a real link and none of them is reproducible on demand.
 @MainActor
-private final class StubPager: TimelinePaging {
+private final class StubPager: TimelinePaging, PromptSending {
     private(set) var requests: [FleetRequest] = []
     /// Every session this pager was told had been looked at, in order.
     private(set) var marksRead: [UUID] = []
@@ -38,6 +38,19 @@ private final class StubPager: TimelinePaging {
     }
 
     func markRead(_ id: UUID) { marksRead.append(id) }
+
+    /// This file's tests never send a prompt — `SessionTimelinePromptTests` owns that half —
+    /// but `SessionTimelineModel` now requires both verbs from one object, so the stub has to
+    /// answer this. Recorded rather than ignored, so a stray send from the paging path shows
+    /// up here rather than disappearing.
+    private(set) var commands: [FleetCommand] = []
+
+    func sendPrompt(
+        _ command: FleetCommand,
+        then completion: @escaping (Result<Void, FleetRequestError>) -> Void
+    ) {
+        commands.append(command)
+    }
 
     /// Answers the oldest outstanding request, the way the socket resolves a `cid`.
     func answer(_ result: Result<TimelinePage, FleetRequestError>, line: UInt = #line) {

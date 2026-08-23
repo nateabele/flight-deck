@@ -33,6 +33,23 @@ protocol TimelinePaging: AnyObject {
     func markRead(_ id: UUID)
 }
 
+/// The other half of `TimelinePaging`: asking the Mac to **do** something, and hearing that
+/// it heard.
+///
+/// A second protocol rather than a second method on that one, for the reason that one is a
+/// protocol at all: a screen model that took the concrete `FleetModel` could not be stood up
+/// without a socket, a pairing and a real Mac, and the transitions worth asserting here — a
+/// send that is never answered, a refusal delivered before the call returns — are exactly the
+/// ones no real link produces on demand. Two protocols, so a stub can answer one verb and
+/// leave the other outstanding.
+@MainActor
+protocol PromptSending: AnyObject {
+    func sendPrompt(
+        _ command: FleetCommand,
+        then completion: @escaping (Result<Void, FleetRequestError>) -> Void
+    )
+}
+
 /// One open session screen.
 ///
 /// Thin on purpose, in the same spirit as `FleetModel`: it owns a `TimelineFeed` — which is
@@ -61,8 +78,11 @@ final class SessionTimelineModel {
     /// Whether a page fetched upwards is in flight, so the scroll trigger cannot fire five
     /// times while the first one is still reading.
     private(set) var isLoadingOlder = false
+    /// Messages this screen has sent and not yet seen come back. Drawn beside the
+    /// conversation, never inside it — see `PromptOutbox`, which is where the reasoning lives.
+    private(set) var outbox = PromptOutbox()
 
-    @ObservationIgnored private let fleet: any TimelinePaging
+    @ObservationIgnored private let fleet: any TimelinePaging & PromptSending
     @ObservationIgnored private let timeout: Duration
     /// The fetch whose answer is still allowed to change anything, or `nil` when none is.
     ///
@@ -75,10 +95,20 @@ final class SessionTimelineModel {
     @ObservationIgnored private var inFlight: Int?
     @ObservationIgnored private var lastFetch = 0
     @ObservationIgnored private var deadline: Task<Void, Never>?
+    /// One deadline per send in flight, keyed by the send's own token.
+    ///
+    /// A table rather than the single `deadline` a fetch uses, because a person can tap Send
+    /// twice before either answer lands and a shared slot would leave the first send with no
+    /// deadline at all — the exact "waits forever" case this whole mechanism exists for.
+    @ObservationIgnored private var promptDeadlines: [UUID: Task<Void, Never>] = [:]
 
     /// `timeout` is injectable so `SessionTimelineModelTests` can watch a deadline expire in
     /// milliseconds rather than in fifteen seconds. Nothing in the app passes it.
-    init(sessionID: UUID, fleet: any TimelinePaging, timeout: Duration = .seconds(15)) {
+    init(
+        sessionID: UUID,
+        fleet: any TimelinePaging & PromptSending,
+        timeout: Duration = .seconds(15)
+    ) {
         self.sessionID = sessionID
         self.fleet = fleet
         self.timeout = timeout
@@ -143,6 +173,76 @@ final class SessionTimelineModel {
         fetch(anchor: feed.newerAnchor, older: false, quiet: true)
     }
 
+    /// Hand a composed message to the Mac.
+    ///
+    /// **Validated here as well as on the Mac, and the two are not redundant.** The Mac's
+    /// check is the guarantee — a client is not trusted to have checked anything — and this
+    /// one is the difference between a composer that will not send and a round trip that
+    /// comes back with an error for something the phone already knew.
+    ///
+    /// **The outbox is filed with `PromptText.value`, never the raw field text.**
+    /// `PromptOutbox.reconcile` matches on exact string equality and `PromptText` strips
+    /// trailing newlines before sending, so filing the raw string would file an entry no turn
+    /// could ever match: a row that sits there telling the reader their message never landed
+    /// when it did.
+    ///
+    /// **The deadline is the same fifteen seconds a fetch gets, and it matters more here.**
+    /// `FleetConnector` answers `.disconnected` synchronously when there is no socket and
+    /// drains its tables when one dies — but a HALF-open socket, a phone that lost its
+    /// network path without a FIN, reports nothing at all until the TCP retransmit horizon,
+    /// which is minutes. A fetch that vanishes leaves a spinner. A prompt that vanishes
+    /// leaves a person believing they told an agent something.
+    ///
+    /// **It does not retry, and the entry it leaves says so.** A timeout cannot distinguish
+    /// "the Mac never got it" from "the Mac got it and the ack was lost", and the second is
+    /// where a silent retry types the message twice into a live session. The token would make
+    /// a retry safe — `SessionStore.submitPrompt` dedupes on it — but only by resending the
+    /// SAME token, and a token whose first send may still be sitting in a queue on the Mac is
+    /// a resend nobody can reason about. So the row stays visible and the human decides.
+    func send(_ raw: String) {
+        guard let text = PromptText(raw) else { return }
+        let token = UUID()
+        outbox.add(id: token, text: text.value, alreadyShowing: feed.items)
+
+        // Armed BEFORE the send, because the send can complete before it returns:
+        // `FleetConnector.send(_:then:)` answers `.disconnected` synchronously by design, the
+        // same asymmetry `fetch` arms its own deadline ahead of. Armed afterwards, this task
+        // would outlive an entry that is already failed and fire over the top of the reason
+        // the reader is looking at.
+        let timeout = self.timeout
+        promptDeadlines[token] = Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled, let self,
+                  self.promptDeadlines.removeValue(forKey: token) != nil
+            else { return }
+            self.outbox.fail(token, Self.noConfirmation)
+        }
+
+        fleet.sendPrompt(.prompt(id: sessionID, token: token, text: text.value)) {
+            [weak self] result in
+            // The deadline is claimed here, exactly as `claim(_:)` claims a fetch's: whichever
+            // of the answer and the deadline gets here first wins, and the loser finds nothing
+            // filed and does nothing.
+            guard let self, let deadline = self.promptDeadlines.removeValue(forKey: token)
+            else { return }
+            deadline.cancel()
+            switch result {
+            case .success:
+                self.outbox.accept(token)
+                // The one fetch this send causes. `loadNewer` has no other caller in this app
+                // — see its own comment, which describes a poll that does not exist — so
+                // without this the transcript that would retire the entry is never re-read
+                // and the outbox row sits there until the reader leaves the screen.
+                self.loadNewer()
+            case .failure(let error):
+                self.outbox.fail(token, Self.promptMessage(for: error))
+            }
+        }
+    }
+
+    /// The reader has read a failure and wants the row gone.
+    func dismiss(_ id: UUID) { outbox.dismiss(id) }
+
     private func fetch(anchor: TimelineAnchor, older: Bool, quiet: Bool = false) {
         // Guards every fetch. Two overlapping requests would both be computed from the same
         // cursor, so the second would re-fetch what the first had already added.
@@ -182,6 +282,11 @@ final class SessionTimelineModel {
             switch result {
             case .success(let page):
                 self.feed.merge(page)
+                // The transcript is the only thing that confirms a sent message reached the
+                // agent — see `PromptOutbox`. Done here rather than in `send` because the page
+                // that holds it can arrive from any fetch: the `loadNewer` an ack triggers,
+                // a reader scrolling, or a return to a screen kept in `FleetModel`.
+                self.outbox.reconcile(with: self.feed.items)
                 self.phase = .idle
                 // A reset emptied the feed: the transcript these cursors came from is gone,
                 // so start again from the end rather than leaving a blank screen that will
@@ -255,6 +360,42 @@ final class SessionTimelineModel {
                 return "Nothing here yet — this session hasn't taken its first turn."
             default:
                 return "Your Mac couldn't read this session (\(code))."
+            }
+        }
+    }
+
+    /// Deliberately not "try again": a retry after a timeout is the one action that can type
+    /// the message twice. See `send(_:)`.
+    static let noConfirmation =
+        "Your Mac didn't confirm this. Check the conversation before sending it again."
+
+    /// Copy for a prompt that did not land.
+    ///
+    /// **Deliberately NOT `message(for:)`.** The same wire code means a different thing on
+    /// this channel: `unknown_session` on a fetch is "there is nothing to read", and on a
+    /// prompt it is "the thing you were talking to is gone and your words did not reach it".
+    /// Internal rather than private so the mapping can be asserted directly, the same way
+    /// `message(for:)` is: several of these need a Mac in a state no test here can produce.
+    static func promptMessage(for error: FleetRequestError) -> String {
+        switch error {
+        case .disconnected:
+            return "Not connected to your Mac, so this wasn't sent."
+        case .server(let code):
+            switch code {
+            case "unknown_session":
+                return "This session is no longer open on your Mac."
+            case "unsupported_agent":
+                return "Flight Deck can only type into a Claude session from here."
+            case "not_running":
+                return "There's no agent running in this tab right now."
+            case PromptText.Rejection.tooLong.rawValue:
+                return "That's longer than \(PromptText.maxCharacters) characters."
+            case PromptText.Rejection.controlCharacters.rawValue:
+                return "That text has characters Flight Deck won't type into a terminal."
+            case PromptText.Rejection.empty.rawValue:
+                return "There was nothing to send."
+            default:
+                return "Your Mac wouldn't send this (\(code))."
             }
         }
     }

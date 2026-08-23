@@ -15,7 +15,7 @@ import UIKit
 /// simulator — see `scripts/test-ios.sh`.
 @MainActor
 @Observable
-final class FleetModel: TimelinePaging {
+final class FleetModel: TimelinePaging, PromptSending {
     private(set) var mac: PairedMac?
     private(set) var fleet = FleetSnapshot.empty
     private(set) var state = FleetConnector.State.idle
@@ -232,6 +232,25 @@ final class FleetModel: TimelinePaging {
     ) {
         guard let connector else { return completion(.failure(.disconnected)) }
         connector.request(request, then: completion)
+    }
+
+    /// Ask the Mac to type something into a session's agent.
+    ///
+    /// Forwarded rather than absorbed, exactly as `timelinePage` is: the connector answers
+    /// **exactly once**, including with `.disconnected` when nothing is connected or the
+    /// socket dies mid-send, and a layer here that could swallow that would leave a person
+    /// believing they told an agent something.
+    ///
+    /// The `guard` completes **synchronously**, the same asymmetry
+    /// `FleetConnector.send(_:then:)` documents — a caller must expect its completion to run
+    /// before this call returns, which is why `SessionTimelineModel.send` arms its deadline
+    /// first.
+    func sendPrompt(
+        _ command: FleetCommand,
+        then completion: @escaping (Result<Void, FleetRequestError>) -> Void
+    ) {
+        guard let connector else { return completion(.failure(.disconnected)) }
+        connector.send(command, then: completion)
     }
 
     func reconnect() {
