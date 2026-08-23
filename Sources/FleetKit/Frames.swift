@@ -20,11 +20,33 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     case markRead(id: UUID)
     case markUnread(id: UUID)
 
-    enum CodingKeys: String, CodingKey { case op, id }
+    /// Type `text` into tab `id`'s live agent and submit it.
+    ///
+    /// **A `cmd` and not a `req`, and `FleetRequest`'s own doc comment draws the line.** A
+    /// request asks the Mac to *tell* the client something and its whole point is the data
+    /// carried back; a command asks the Mac to *do* something, and `ack` means dispatched,
+    /// not done — a rule §4 states because typing into a pty has no delivery confirmation.
+    /// This is the operation that rule was written for. Its observable effect arrives
+    /// separately, as the `.userTurn` the agent writes into its own transcript and the phone
+    /// reads back over the history channel.
+    ///
+    /// Making it a request would mean inventing a second reply payload beside `TimelinePage`,
+    /// widening `ServerFrame.page`, and retyping `FleetConnector.pending` — a change across a
+    /// shipped channel to carry a boolean the transcript settles anyway. What made a request
+    /// tempting is that a `cmd` told the caller nothing; that is closed instead by
+    /// `FleetConnector.send(_:then:)`, which correlates the `ack` on the same `cid`.
+    ///
+    /// `token` is the client's own idempotency key, minted once per composed message. It is
+    /// the entire answer to "what if the phone retries" — see `SessionStore.submitPrompt`,
+    /// which dedupes on it and acks a repeat without queueing anything.
+    case prompt(id: UUID, token: UUID, text: String)
+
+    enum CodingKeys: String, CodingKey { case op, id, token, text }
 
     private enum Op: String, Codable {
         case markRead = "session.markRead"
         case markUnread = "session.markUnread"
+        case prompt = "session.prompt"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -36,15 +58,40 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case .markUnread(let id):
             try c.encode(Op.markUnread, forKey: .op)
             try c.encode(id, forKey: .id)
+        case .prompt(let id, let token, let text):
+            try c.encode(Op.prompt, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(text, forKey: .text)
         }
     }
 
+    /// `op` is read BEFORE `id`, where the two-case version read `id` first. That mattered
+    /// not at all while every case had the same one field and matters now: a prompt missing
+    /// its `token` must be refused as the *prompt* it claimed to be.
+    ///
+    /// **`text` is decoded as an ordinary `String` and is never judged here.** An unknown
+    /// `op` throws — the phone → Mac direction rule `FleetRequest` states, because a command
+    /// that cannot be understood cannot be executed. But a *length* or *content* refusal must
+    /// not throw, and the reason is `FleetSocketServer.onUndecodable`: it salvages
+    /// `t == "req"` and nothing else, deliberately, so a `cmd` this build cannot parse ends
+    /// the socket. A phone that pasted a control character would lose its fleet connection,
+    /// reconnect, and — with the text still sitting in its composer — be one tap from doing it
+    /// again. So hostile text decodes cleanly and `SessionStore.submitPrompt` refuses it with
+    /// an `err` code the phone can render into a sentence.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        let id = try c.decode(UUID.self, forKey: .id)
         switch try c.decode(Op.self, forKey: .op) {
-        case .markRead: self = .markRead(id: id)
-        case .markUnread: self = .markUnread(id: id)
+        case .markRead:
+            self = .markRead(id: try c.decode(UUID.self, forKey: .id))
+        case .markUnread:
+            self = .markUnread(id: try c.decode(UUID.self, forKey: .id))
+        case .prompt:
+            self = .prompt(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                text: try c.decode(String.self, forKey: .text)
+            )
         }
     }
 }
