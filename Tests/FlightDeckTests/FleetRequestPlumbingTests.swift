@@ -115,36 +115,63 @@ final class FleetRequestPlumbingTests: XCTestCase {
     /// A `req` before `hello` is a peer that skipped the handshake step. `cmd` already
     /// refuses one — answering it would let an unattached peer drive the Mac — and a request
     /// that read a transcript would let it read one.
+    ///
+    /// Sent through `RawFleetClient` rather than `FleetClient`, which cannot express this:
+    /// it sends `hello` from `.ready` unconditionally, and a switch to skip that would be
+    /// production API on the shipping client whose only caller is this one line.
+    ///
+    /// `authDeadline` is pushed past this test's own timeout on purpose. Five seconds of
+    /// silence is the *other* reason this server hangs up on a peer, so at the production
+    /// value a build that happily answered the request would still see `ended` fulfil —
+    /// reaped by a clock rather than refused by the guard under test.
     func testARequestBeforeHelloIsRefused() async throws {
-        throw XCTSkip("needs FleetClient.connectWithoutHelloForTesting, Task 9")
-    }
-
-    /// A page can take a moment to read, and the phone can leave inside that moment. The
-    /// reply closure must find nothing to write to rather than writing to a cancelled socket.
-    func testAReplyAfterTheClientLeavesIsDropped() async throws {
         let endpoint = try await start()
-        let held = expectation(description: "request received")
-        var deferredReply: ((ServerFrame) -> Void)?
-        server.onRequest = { _, cid, _, reply in
-            deferredReply = { _ in reply(.page(cid: cid, self.page())) }
-            held.fulfill()
+        server.authDeadline = 60
+        server.onRequest = { _, _, _, _ in
+            XCTFail("an unattached peer's request must not reach the reader")
         }
 
+        let ended = expectation(description: "connection ended")
+        raw = RawFleetClient(key: key, endpoint: endpoint)
+        raw.onEnd = { _ in ended.fulfill() }
+        raw.onReady = { [weak self] in
+            guard let self else { return }
+            self.raw.send(ClientFrame.req(
+                cid: 1, .timeline(session: self.session, anchor: .latest, limit: 1)
+            ))
+        }
+        raw.onFrame = { frame in XCTFail("unexpected frame \(frame)") }
+        raw.connect()
+        await fulfillment(of: [ended], timeout: 10)
+    }
+
+    /// No reader wired is still an answer. The `.req` arm falls back to `err`/`unhandled`
+    /// rather than returning in silence, and that fallback is the whole reason the code
+    /// exists: a request dropped without a reply leaves the phone holding a `cid` nothing
+    /// will ever land on — a spinner that never stops, with nothing on screen to say why.
+    ///
+    /// `onRequest` is deliberately left nil. That is the state under test, and it is the
+    /// state every build of this Mac is in until the timeline reader is wired.
+    func testARequestWithNoReaderWiredIsRefusedRatherThanDropped() async throws {
+        let endpoint = try await start()
+
+        let refused = expectation(description: "a reply, not silence")
+        var frames: [ServerFrame] = []
+        var cid = 0
         client = FleetClient(key: key)
         client.onReady = { [weak self] in
             guard let self else { return }
-            _ = self.client.send(
+            cid = self.client.send(
                 FleetRequest.timeline(session: self.session, anchor: .latest, limit: 1)
             )
         }
+        client.onFrame = { frame in
+            frames.append(frame)
+            if frames.count == 1 { refused.fulfill() }
+        }
         client.connect(to: endpoint, lastSeq: 0)
-        await fulfillment(of: [held], timeout: 10)
-
-        client.disconnect()
-        // Let the server observe the end before the reply lands.
-        try await Task.sleep(for: .milliseconds(300))
-        deferredReply?(.ack(cid: 0))     // must not trap, must not write
-        XCTAssertTrue(true, "reaching here without a trap is the assertion")
+        await fulfillment(of: [refused], timeout: 10)
+        XCTAssertEqual(frames, [.err(cid: cid, code: "unhandled")])
     }
 
     /// One `cid`, one frame. A reader that answered twice — an error path that replies and
@@ -249,6 +276,10 @@ final class FleetRequestPlumbingTests: XCTestCase {
     /// handshake step was supposed to stop.
     func testAnUnparseableRequestBeforeHelloIsHungUpOn() async throws {
         let endpoint = try await start()
+        // Same reason as `testARequestBeforeHelloIsRefused`: at the production value the
+        // five-second silence reaper fulfils `ended` on its own, and the tear-down this test
+        // is named for would go unasserted.
+        server.authDeadline = 60
         let ended = expectation(description: "connection ended")
         raw = RawFleetClient(key: key, endpoint: endpoint)
         raw.onEnd = { _ in ended.fulfill() }
@@ -291,10 +322,10 @@ final class FleetRequestPlumbingTests: XCTestCase {
 private struct UnparseableRequest: Encodable {
     let t = "req"
     let cid: Int
-    var op = "timeline.page"
+    let op: String
     let session: UUID
-    var anchor = "latest"
-    var limit = 1
+    let anchor: String
+    let limit = 1
 
     init(cid: Int, session: UUID, op: String = "timeline.page", anchor: String = "latest") {
         self.cid = cid
