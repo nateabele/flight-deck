@@ -192,6 +192,8 @@ public enum FleetRequestError: Error, Equatable, Sendable {
     /// `no_transcript` (the tab's agent reports no transcript file — a codex thread whose
     /// `thread/start` never returned a path), `unreadable` (a path that is not there yet, the
     /// ordinary state of a claude tab before its first turn), `stopped` (the service is gone).
+    /// Until the reader is wired the Mac answers every request `unhandled`, which is what is
+    /// actually on this wire today — a client must treat an unrecognised code as "no page".
     ///
     /// A `String` rather than an enum, and that is the decode-unknown rule in this direction:
     /// `err` travels Mac → phone, so a newer Mac inventing a code must leave an older phone

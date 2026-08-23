@@ -127,6 +127,20 @@ final class TimelineFrameCodingTests: XCTestCase {
         )
     }
 
+    /// The other half of the same decision, and the half `TimelineAnchor`'s tests do not
+    /// reach: an `op` this build has never heard of is refused rather than read as the one
+    /// request it does know. A lenient `Op` would answer `timeline.tail` with a page from the
+    /// wrong end of the file and call it a reply.
+    func testAnUnknownOperationIsRefused() throws {
+        let json = """
+        {"t":"req","cid":1,"op":"timeline.tail","session":"\(session.uuidString)",\
+        "anchor":"latest","limit":40}
+        """
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(ClientFrame.self, from: Data(json.utf8))
+        )
+    }
+
     // MARK: The page
 
     func testAPageRoundTrips() throws {
@@ -223,14 +237,31 @@ final class TimelineFrameCodingTests: XCTestCase {
         )
         XCTAssertEqual(json["t"] as? String, "page")
         XCTAssertNil(json["seq"], "a page is not a fleet event and must not be sequenced")
+        // Unlike `cmd` and `req`, the page is NESTED rather than flattened — a page has an
+        // `items` array and `TimelinePage`'s keys are ordinary words, so merging it into the
+        // frame would put six unqualified names in the frame's own namespace. That makes the
+        // nesting key part of the wire contract, and nothing else in the tree reads it: a
+        // round trip goes through the same key in both directions and cannot see it renamed.
+        let nested = try XCTUnwrap(json["page"] as? [String: Any],
+                                   "the page must be nested under `page`")
+        XCTAssertEqual(nested["session"] as? String, session.uuidString)
     }
 
     /// `ServerFrame`'s decoder tries its own tags first and treats anything else as a
     /// `FleetEvent` tag, which is why the two namespaces must never collide. `FleetEventTag`'s
     /// values are all dotted and the frame tags are not; `page` keeps that property.
-    func testThePageTagDoesNotCollideWithAnEventTag() {
-        XCTAssertFalse("page".contains("."))
-        XCTAssertNil(FleetEventTag(rawValue: "page"))
+    ///
+    /// The tag is read **off an encoded frame** rather than written here as a literal.
+    /// `ServerFrame.Tag` is `private`, so a test that spells `"page"` itself asserts a property
+    /// of four characters rather than of the raw value that ships: renaming the tag to
+    /// `"timeline.page"` would break the invariant and leave the assertion passing.
+    func testThePageTagDoesNotCollideWithAnEventTag() throws {
+        let tag = try XCTUnwrap(try fields(of: ServerFrame.page(
+            cid: 1, TimelinePage(session: session, items: [], start: 0, end: 0,
+                                 hasMore: false, reset: false)
+        ))["t"] as? String)
+        XCTAssertFalse(tag.contains("."), "\(tag) is shaped like an event tag")
+        XCTAssertNil(FleetEventTag(rawValue: tag))
     }
 
     // MARK: The receive cap
