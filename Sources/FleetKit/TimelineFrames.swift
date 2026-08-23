@@ -44,10 +44,14 @@ public enum TimelineAnchor: Equatable, Sendable {
     /// same reason and in the same direction.
     ///
     /// The cost is real and is named here rather than hidden: `FleetSocket.receive` ends the
-    /// connection on a frame it cannot parse, so a future phone that invents an anchor loses
-    /// its whole fleet socket over a history fetch. Answering `err` instead would need a
-    /// `FleetRequest` case for "a request I do not understand", which is a decision for
-    /// whoever adds the second request rather than one to guess at now.
+    /// connection on a frame it cannot parse, so a future phone that invented an anchor once
+    /// lost its whole fleet socket over a history fetch — and, because a reconnect's first
+    /// frame resets `FleetConnector`'s backoff and an open screen re-issues the same fetch,
+    /// lost it again every second, forever. `FleetSocketServer`'s `onUndecodable` hook pays
+    /// that cost instead: a `req` this build cannot parse is refused `err`/`unsupported` on
+    /// its own `cid` and the loop reads on. It needs no `FleetRequest` case for "a request I
+    /// do not understand", which is the reason this was left open — the refusal is made from
+    /// the raw bytes, before there is a `FleetRequest` at all.
     init?(name: String, cursor: Int?) {
         switch (name, cursor) {
         case ("latest", _): self = .latest
