@@ -5,7 +5,13 @@ import Foundation
 /// On a channel separate from `AgentEvent` deliberately (spec §6): `AgentEvent` is four cases
 /// sized for a sidebar row, and widening it to carry conversation content would drag desktop
 /// code through a change it does not need.
-public struct TimelineItem: Identifiable, Codable, Equatable, Sendable {
+///
+/// `Hashable` rather than merely `Equatable`, on this and on every type it holds, because the
+/// phone pushes an item onto a `NavigationPath` — `NavigationLink(value:)` takes a `Hashable`
+/// value and `navigationDestination(for:)` matches on its type. Synthesized, and safe to
+/// synthesize: every stored property is a `String`, `Int`, `Bool` or an enum over `String`, so
+/// the hash is the value's own content and two items that compare equal cannot hash apart.
+public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
     /// What this row is. `unknown` is not a case any mapper emits — it is what a build
     /// decodes when a newer Mac sends a kind it has not heard of.
     ///
@@ -14,7 +20,7 @@ public struct TimelineItem: Identifiable, Codable, Equatable, Sendable {
     /// enum here would mean a Mac shipping one new kind silently and permanently
     /// disconnecting every phone built before it. Same rule, same reason, as
     /// `WireSession.agent` being a `String`.
-    public enum Kind: String, Codable, Equatable, Sendable {
+    public enum Kind: String, Codable, Hashable, Sendable {
         case userTurn, assistantText, thinking, toolCall, toolResult, prompt
         case unknown
 
@@ -32,7 +38,7 @@ public struct TimelineItem: Identifiable, Codable, Equatable, Sendable {
     /// `*delta*` records, and claude's transcript lands one whole record at a time. The case
     /// ships anyway because a `Status` added after phones shipped is a protocol break, and
     /// slice 2's prompt bridging (spec §9) may want it.
-    public enum Status: String, Codable, Equatable, Sendable {
+    public enum Status: String, Codable, Hashable, Sendable {
         case streaming, complete
         case unknown
 
@@ -45,7 +51,7 @@ public struct TimelineItem: Identifiable, Codable, Equatable, Sendable {
     /// The renderable content. One shape for six kinds, because the alternative — an
     /// associated-value enum — would need a hand-written codec per case and gives a client
     /// nothing it does not get from optional fields being absent.
-    public struct Body: Codable, Equatable, Sendable {
+    public struct Body: Codable, Hashable, Sendable {
         /// The full text, up to `TimelineLimits.maxItemBytes`. For a `.toolCall` this is the
         /// tool's input, pretty-printed; for a `.toolResult` it is the output.
         ///

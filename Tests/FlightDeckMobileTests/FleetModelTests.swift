@@ -111,6 +111,44 @@ final class FleetModelTests: XCTestCase {
         XCTAssertEqual(error, .disconnected)
     }
 
+    /// **The model behind a session screen is made once and kept**, and the reason is not
+    /// bandwidth. A `navigationDestination` closure re-runs on any change to what it reads —
+    /// a fleet event, a rename, the connection state — so a model constructed inside it would
+    /// be a *new* model with an empty feed each time, and the conversation would empty itself
+    /// under the reader while a poll or a status change ran in the background.
+    func testOpeningASessionTwiceKeepsTheConversationThePhoneAlreadyHolds() {
+        let model = FleetModel(store: RefusingPairedMacStore())
+        let session = UUID()
+
+        XCTAssertTrue(
+            model.timelineModel(for: session) === model.timelineModel(for: session),
+            "a second visit to the same session must find the pages it already downloaded"
+        )
+        XCTAssertFalse(
+            model.timelineModel(for: session) === model.timelineModel(for: UUID()),
+            "and two sessions must not share one feed"
+        )
+    }
+
+    /// Held conversation content is as much "this pairing" as the fleet snapshot is: a phone
+    /// that unpaired and kept a transcript in memory is showing the user something they
+    /// believe they revoked. The `phase` is what proves the old model was carrying state — it
+    /// only reaches `.failed` because this model asked for a page and was refused.
+    func testUnpairingDropsHeldConversationsRatherThanKeepingThemInMemory() {
+        let model = FleetModel(store: RefusingPairedMacStore())
+        let session = UUID()
+        let before = model.timelineModel(for: session)
+        before.loadLatest()
+        XCTAssertEqual(before.phase, .failed("Not connected to your Mac."),
+                       "the premise: this model is holding something")
+
+        model.unpair()
+
+        let after = model.timelineModel(for: session)
+        XCTAssertFalse(before === after, "the revoked pairing's transcript is still in memory")
+        XCTAssertEqual(after.phase, .idle)
+    }
+
     /// A real `FD2-` code, minted here rather than checked in: `PairingPayload.encoded()` is
     /// the Mac's own encoder, so this exercises the decode `adopt(code:)` actually performs.
     private static func scannableCode() -> String {
