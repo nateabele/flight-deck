@@ -212,5 +212,12 @@ public enum FleetRequestError: Error, Equatable, Sendable {
     /// `err` travels Mac → phone, so a newer Mac inventing a code must leave an older phone
     /// showing "the Mac said no" rather than failing to parse the frame at all. Same reason
     /// `WireSession.agent` is a `String`.
+    ///
+    /// The answer channel adds four, all refusals a person can act on: `prompt_changed` (your
+    /// Mac has moved on — what is up now is not what you tapped), `not_waiting` (nothing is
+    /// blocked on this tab), `unreadable_screen` (the terminal could not be read, or another
+    /// injection is resolving — try again in a moment), and `unanswerable` (a shape this Mac
+    /// will not drive; see `PromptQuestion.unanswerable`). `unsupported_agent` and
+    /// `unknown_session` keep the meanings `FleetCommand.prompt` gave them.
     case server(code: String)
 }
