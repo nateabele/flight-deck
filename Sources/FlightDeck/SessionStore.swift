@@ -2106,6 +2106,12 @@ final class SessionStore: ObservableObject {
         stopStatusWatchingIfUnused(account: closed.account)
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
+        // A queued prompt for a tab that no longer exists is the most literal case of "text
+        // that will never be typed", and its tokens go with it: `acceptedPromptTokens` is
+        // keyed by tab, so a reopened tab reusing this id starts with a clean dedupe window
+        // rather than inheriting one from a session that is over.
+        promptQueue.removeValue(forKey: id)
+        acceptedPromptTokens.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
         // `applyReadState` no longer clears a mark when a session's status disappears — a
         // mark now outlives its process. But closing a tab removes its id from `repos`
@@ -2579,6 +2585,11 @@ final class SessionStore: ObservableObject {
         cancelSupersededPrompts(transitions)
     }
 
+    /// Test seam, in the style of `flushPendingResumePromptsForTesting`. The registry tick is
+    /// the production driver, and a test that wants a second pass without fabricating another
+    /// registry scan says so here.
+    func flushPromptQueueForTesting() { flushPromptQueue() }
+
     /// Test seam. Production marks come from `applyReadState` and from restore; a test that
     /// only cares about how a mark is *pruned* should not have to script an edge to create it.
     func markUnreadForTesting(_ ids: Set<UUID>) {
@@ -2887,12 +2898,40 @@ final class SessionStore: ObservableObject {
         acceptedPromptTokens[id] = tokens
     }
 
-    /// One tab's turn at the input box. Task 5 gives this its expiry sweep and its tick.
+    /// Types the head of every tab's queue that is finally ready for it.
+    ///
+    /// Driven by the registry scan for the reason `flushPendingPrompts` is: what a queued
+    /// prompt waits on — a turn ending, a draft being cleared, claude finishing its boot — is
+    /// often not a status change at all, so gating the retry on one would strand it.
+    private func flushPromptQueue() {
+        for id in promptQueue.keys { flushPromptQueue(id) }
+    }
+
+    /// One tab's turn at the input box.
+    ///
+    /// **The head only, never the whole queue.** `inject` submits with a Return, so a second
+    /// entry in the same pass would be typed into a bar that has just started a turn.
+    /// `inject`'s idle gate would refuse it — but only after the settle, by which point the
+    /// entry looks flushed to everything upstream. One per pass, and the next pass is a
+    /// registry tick away.
     private func flushPromptQueue(_ id: UUID) {
+        // Expiry first, and it runs whether or not this tab can be typed into: a queue that
+        // is never drained because its tab lost its surface must still empty itself.
+        let currentTime = now()
+        promptQueue[id] = promptQueue[id]?.filter { currentTime < $0.deadline }
+        if promptQueue[id]?.isEmpty == true { promptQueue.removeValue(forKey: id) }
         guard let head = promptQueue[id]?.first else { return }
+        // Both other users of this input box go first, and neither costs anything to wait
+        // for: a rename is a direct user action that clears within a tick or two, and the
+        // resume queue holds text that stops making sense in two minutes. This queue has
+        // fifteen.
+        guard pendingRenames[id] == nil, pendingPrompts[id] == nil else { return }
         inject(
             head.text,
             into: id,
+            // Re-checked after the settle: the tab can be closed, or the entry can expire,
+            // while claude repaints. Matched on the TOKEN and not on the text, because two
+            // identical messages are two messages and retiring the wrong one loses the other.
             stillWanted: { [weak self] in self?.promptQueue[id]?.first?.token == head.token },
             onSent: { [weak self] in
                 guard let self, self.promptQueue[id]?.first?.token == head.token else { return }
@@ -3170,6 +3209,9 @@ final class SessionStore: ObservableObject {
             // waits on a `claude` that has not finished booting — which is not a status
             // change, so gating the retry on one would strand it.
             flushPendingPrompts()
+            // And the phone's queue, for the same reason and one more: what a phone-sent
+            // prompt waits on is usually a turn ENDING, and the tick is where that is seen.
+            flushPromptQueue()
         }
 
         // Resolve against a snapshot of the list before touching anything. Later tasks
