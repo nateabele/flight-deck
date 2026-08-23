@@ -129,6 +129,14 @@ struct SessionTimelineScreen: View {
         // send the mark from a gesture racing its own link, which is what stopped rows
         // opening at all. See `TimelinePaging`.
         .task(id: model.sessionID) { model.open() }
+        // `safeAreaInset`, not a row in the `List` and not an overlay: the inset is what
+        // reserves height so the last line of the conversation is not covered, and it is what
+        // rides above the keyboard when the field takes focus. A row would scroll away from
+        // the person typing into it — and it would also scroll away from `bottomSentinel`,
+        // which is how this screen knows whether the reader is at the live edge.
+        .safeAreaInset(edge: .bottom) {
+            PromptComposer(session: session, model: model)
+        }
         // The event trigger. `activity` and the title change live on the fleet socket, and a
         // change to either is the cheapest possible signal that this session has moved — most
         // importantly the busy → idle transition, which is the moment the last records of a

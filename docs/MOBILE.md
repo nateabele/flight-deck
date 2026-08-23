@@ -44,7 +44,7 @@ than assuming. See its own comments for the rest, and the note in `AGENTS.md`.
 ## Running the unit suite
 
 ```bash
-./scripts/test-ios.sh    # 86 tests, ~45s including creating and booting the simulator
+./scripts/test-ios.sh    # 108 tests, ~45s including creating and booting the simulator
 ```
 
 It creates a throwaway simulator, runs `FlightDeckMobileTests` inside `FlightDeckMobile`, and
@@ -95,6 +95,16 @@ at a device someone is testing on would overwrite the build under their hands.
   that folding a result into its call never swallows a result whose call is off the page and
   never swallows prose, and *when* an arriving page scrolls the list — always on the first one,
   never over a reader who has scrolled up.
+- `PromptComposer` — the composer's two decisions, which are the only parts of a SwiftUI view a
+  test in this process can reach: **whether this tab can take a message at all**, and whether
+  this draft can be sent. The first has three refusals with their exact copy (codex and any
+  agent this build has never heard of; a `"shell"` tab *and* a statusless one, which are
+  different values and not the same check; a session the fleet no longer lists) and three
+  negative controls — `idle`, `busy` and `waiting` are all **available**, because a prompt
+  arriving mid-turn is the ordinary case and the Mac queues it. The second is the Send button's
+  rule: refused for whitespace, refused for text the Mac's own `PromptText` would refuse, and
+  refused while an earlier message is still in flight, which is the double-tap guard that stops
+  one tap becoming two messages in an agent's queue.
 
 **What it structurally cannot cover.** Every one of these is on a checklist below instead, and
 none of them should ever grow an assertion here that merely re-reads the source:
@@ -206,10 +216,44 @@ run by anything on this machine.
     300-character `description` wraps under its key rather than clipping, and the indent — which
     is capped at five levels — has not eaten the column.
 
+Items 33-38 are the composer, and they matter more than their position at the bottom of this
+list suggests: **nobody can automate a real tap**, and this is the one feature on the phone
+that ends with text going into a live terminal. Everything a test could settle about it is
+settled (see `PromptComposer` under "Running the unit suite") and every one of these is
+something a person passes or fails by *watching the Mac*, not by watching the phone.
+
+33. **Type a message on the phone with the Mac's session idle.** It appears in the terminal's
+    input box and submits, and the outbox row above the field disappears once the message
+    comes back in the transcript. Nothing on the phone claims it landed before then — while it
+    is in flight the row says "Sending…", and after the ack it says "Waiting for your Mac to
+    type this", which is all an `ack` entitles anyone to say.
+34. **Type a message while the session is mid-turn.** The row says "Waiting for your Mac to
+    type this" and stays there; when the turn ends the text is typed and the row goes. This
+    is the ordinary case, not the edge one — it is when a person reaches for their phone — and
+    a composer that greyed itself out for the length of a turn would be a feature that stops
+    working exactly when it is wanted. The field must stay live throughout.
+35. **Type into the Mac's input box, leave the draft there, then send from the phone.** The
+    draft is killed, the phone's message is submitted, and the draft is yanked back —
+    unsubmitted, and character for character what it was. Nothing the user half-wrote is sent,
+    and nothing is lost. This is the item that protects work nobody else can see.
+36. **Open a codex session on the phone.** There is no field at all, and the line under the
+    conversation says Flight Deck can only type into a Claude session from here. Nothing is
+    typed into the codex TUI — **verify by watching the codex tab, not by trusting the phone**.
+    Its tab holds the thread's writer lock, and the terminal route has no input box that can be
+    found safely: `InputBar.read` locks onto a line beginning `❯`, which a plain shell draws
+    too. Do the same for a tab sitting at a shell prompt: same absence, different sentence.
+37. **Send from the phone, then quit Flight Deck before the ack.** Within fifteen seconds the
+    row turns orange and says the Mac didn't confirm it. It does **not** retry — a timeout
+    cannot tell "never arrived" from "arrived and the ack was lost", and a silent retry is how
+    a message gets typed twice — and tapping Dismiss removes the row without sending anything.
+38. **Tap Send twice as fast as you can, on a slow link.** One message reaches the agent, not
+    two. The button is disabled from the first tap until the first ack lands, which is the only
+    thing standing between an impatient thumb and a duplicated instruction.
+
 ## A second checklist: the iOS plumbing
 
-The fifteen items above test the *feature* — that pairing, replication, resume and revocation
-behave. These fifteen test the *app*, and they are separated because they have a different
+The thirty-eight items above test the *feature* — that pairing, replication, resume, revocation
+and now typing into a live agent behave. These fifteen test the *app*, and they are separated because they have a different
 character: each one was identified during review or execution as something no amount of reading
 or type-checking on the build machine could settle, and each has a specific observable outcome.
 Everything reviewers *could* settle by reading has already been settled and is deliberately
@@ -302,6 +346,23 @@ this: there is nothing to tap in a `layer.render(in:)` pass), a cut 64 KB `Read`
 and its scissors notice intact, and a `Bash` call whose JSON input is a tree directly above a
 result that is not JSON and is therefore monospaced text. That last one is the whole merge in a
 single screen.
+
+**And it is how the composer's surface was settled — by finding a defect that only exists in
+the dark.** Six states in both themes at 402×874, in `.superpowers/sdd/ui-renders/composer/`:
+an empty field on a live claude session, a typed draft with Send enabled, a message in flight,
+one accepted and waiting on the Mac, a failed one with its reason and its Dismiss, and a codex
+session showing the sentence and no field. The first construction was `.background(.bar)`, and
+the light render looked fine. The dark one was the evidence: a `Material` background makes
+SwiftUI blend `.secondary` content over it **vibrantly**, and the outbox row's own message text
+and the Send glyph both went to invisible against black — three of the dark PNGs came back
+byte-identical, which is what a state that draws nothing looks like. A `Divider` over
+`systemBackground`, and a two-layer `.palette` Send glyph with the arrow punched out in the
+page's colour, is what replaced it; it also gave the bar the top edge it never had in *either*
+theme, since a `.plain` list and a bar material are the same colour. Two caveats on the method:
+the seeded-draft states are rendered against a rebuilt mount rather than the real screen —
+there is nothing to type into in a `layer.render(in:)` pass, which is what `PromptComposer`'s
+`draft:` parameter is for, exactly as `TimelineBodyBlock.showsRaw` is — and the harness was
+deleted before the commit, as every harness on this page has been.
 
 **It is also how the timeline's design was chosen**, rather than argued. Three whole screens —
 a dense monospaced transcript, a chat thread, and the structured feed that shipped — were built
