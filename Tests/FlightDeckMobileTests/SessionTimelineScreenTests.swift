@@ -1,0 +1,264 @@
+import FleetKit
+import XCTest
+@testable import FlightDeckMobile
+
+/// The three decisions the session screen makes that are not layout.
+///
+/// What a unit test in this process cannot reach is everything SwiftUI renders — where a row
+/// lands, how a monospaced line wraps, whether `.listStyle(.plain)` did anything — and
+/// docs/MOBILE.md's checklist owns that. What it *can* reach is which row exists at all,
+/// which is where this screen's real failures live: a failure reported where nobody is
+/// looking, an empty state that lies about a fetch still running, "0 subagents" for an agent
+/// that never reports any, and a command captioned with a different command's output.
+///
+/// **Every fixture below keeps a record's id and its `callID` in different spaces on
+/// purpose.** Item ids are byte offsets (`"1400#0"`) and call ids are the agent's own
+/// (`"toolu_a1"`), which is exactly the distinction `TimelineItem.Body.callID` exists to
+/// state — and a fixture that let one stand in for the other would pass against an
+/// implementation that paired on the wrong one.
+final class SessionTimelineScreenTests: XCTestCase {
+
+    // MARK: Where a failure is said
+
+    /// **The deadline case, and the reason placement is a decision rather than a detail.**
+    /// A "Load earlier" tap that goes unanswered fails fifteen seconds later, by which time
+    /// the spinner on the top row has simply stopped. If the reason renders at the bottom of
+    /// a list the reader has scrolled to the top of, the screen has reproduced the exact
+    /// defect the deadline was added to prevent: something stopped, and nothing visible says
+    /// why.
+    func testAFailureWithAConversationOnScreenIsSaidAtTheTopWhereTheTapWasNotBelowTheFold() {
+        let phase = SessionTimelineModel.Phase.failed("Your Mac didn't answer in time.")
+
+        XCTAssertEqual(
+            SessionTimelineScreen.topNotice(phase: phase, hasItems: true, isLoadingOlder: false),
+            .failed("Your Mac didn't answer in time.")
+        )
+        XCTAssertNil(
+            SessionTimelineScreen.bottomNotice(phase: phase, hasItems: true),
+            "said twice is worse than said once in the wrong place"
+        )
+    }
+
+    /// With nothing on screen there is no top and no bottom — the notice is the whole screen
+    /// — and it must still appear exactly once.
+    func testAFailureOnAnEmptyScreenIsSaidOnceAndIsNotAnEmptyState() {
+        let phase = SessionTimelineModel.Phase.failed("Not connected to your Mac.")
+
+        XCTAssertNil(
+            SessionTimelineScreen.topNotice(phase: phase, hasItems: false, isLoadingOlder: false)
+        )
+        XCTAssertEqual(
+            SessionTimelineScreen.bottomNotice(phase: phase, hasItems: false),
+            .failed("Not connected to your Mac."),
+            "a refusal that renders as 'No messages yet.' blames the conversation for the link"
+        )
+    }
+
+    /// `phase` keeps the last failure until a fetch succeeds, so a reader who taps "Load
+    /// earlier" again would otherwise get a spinner sitting directly under the explanation of
+    /// the attempt before it — two rows describing two different moments as though they were
+    /// one.
+    func testARetryReplacesTheReasonTheLastAttemptFailedRatherThanSpinningBesideIt() {
+        XCTAssertNil(SessionTimelineScreen.topNotice(
+            phase: .failed("Your Mac didn't answer in time."),
+            hasItems: true, isLoadingOlder: true
+        ))
+    }
+
+    /// Three states, three screens. Collapsing "still loading" into "nothing here" is how an
+    /// empty state ends up claiming a session has no history when the page simply has not
+    /// landed yet.
+    func testAnEmptyConversationSaysSoOnlyOnceTheFetchHasAnswered() {
+        XCTAssertEqual(
+            SessionTimelineScreen.bottomNotice(phase: .loading, hasItems: false), .loading
+        )
+        XCTAssertEqual(
+            SessionTimelineScreen.bottomNotice(phase: .idle, hasItems: false), .empty
+        )
+    }
+
+    /// The conversation is the last thing the Mac said and it stays on screen through
+    /// everything: a page fetched above it does not replace it with a spinner, and an idle
+    /// screen full of content does not append "No messages yet." under it.
+    func testContentIsNeverFollowedByASpinnerOrByAnEmptyState() {
+        XCTAssertNil(SessionTimelineScreen.topNotice(
+            phase: .loading, hasItems: true, isLoadingOlder: false
+        ))
+        XCTAssertNil(SessionTimelineScreen.bottomNotice(phase: .loading, hasItems: true))
+        XCTAssertNil(SessionTimelineScreen.bottomNotice(phase: .idle, hasItems: true))
+    }
+
+    // MARK: What the session is doing
+
+    /// **`subagentCount` is 0 for codex at all times and 0 there means unknown**, which is
+    /// why this goes through `subagentSummary` and why the second half of this test is not
+    /// redundant: an implementation that read the count directly would say "0 subagents" for
+    /// every codex session on the fleet, and one that special-cased only zero would start
+    /// claiming counts the moment a future Mac put a number there for another reason.
+    func testACodexSessionNeverClaimsANumberOfSubagents() {
+        XCTAssertEqual(
+            SessionTimelineScreen.activityFooter(
+                for: session(agent: "codex", activity: "busy", subagentCount: 0)
+            ),
+            .working("Working")
+        )
+        XCTAssertEqual(
+            SessionTimelineScreen.activityFooter(
+                for: session(agent: "codex", activity: "busy", subagentCount: 3)
+            ),
+            .working("Working"),
+            "nothing emits a sub-agent count for codex, so a count there is not ground truth"
+        )
+    }
+
+    /// Claude has a real count, and it is singularized the way the Mac's own tooltip
+    /// singularizes it — this footer and the list's status glyph describe the same session
+    /// two taps apart.
+    func testAClaudeSessionCountsItsSubagentsTheWayTheMacDoes() {
+        XCTAssertEqual(
+            SessionTimelineScreen.activityFooter(
+                for: session(agent: "claude", activity: "busy", subagentCount: 1)
+            ),
+            .working("Working — 1 subagent")
+        )
+        XCTAssertEqual(
+            SessionTimelineScreen.activityFooter(
+                for: session(agent: "claude", activity: "busy", subagentCount: 3)
+            ),
+            .working("Working — 3 subagents")
+        )
+        XCTAssertEqual(
+            SessionTimelineScreen.activityFooter(
+                for: session(agent: "claude", activity: "busy", subagentCount: 0)
+            ),
+            .working("Working"),
+            "a claude session between sub-agents is working, not working on nothing"
+        )
+    }
+
+    /// The reason is dropped when it is empty as well as when it is absent. An agent that
+    /// sends `""` — and `waitingFor` is verbatim from the agent — would otherwise leave the
+    /// footer reading "Waiting for you — " with the sentence cut off after the dash.
+    func testWaitingCarriesTheReasonAndAnEmptyReasonIsNotADanglingDash() {
+        XCTAssertEqual(
+            SessionTimelineScreen.activityFooter(
+                for: session(activity: "waiting", waitingFor: "permission prompt")
+            ),
+            .waiting("Waiting for you — permission prompt")
+        )
+        XCTAssertEqual(
+            SessionTimelineScreen.activityFooter(for: session(activity: "waiting")),
+            .waiting("Waiting for you")
+        )
+        XCTAssertEqual(
+            SessionTimelineScreen.activityFooter(
+                for: session(activity: "waiting", waitingFor: "")
+            ),
+            .waiting("Waiting for you")
+        )
+    }
+
+    /// The footer is the one live claim on the screen, so every state that is not live must
+    /// make none. `nil` for the session covers the two ways it goes missing — closed on the
+    /// Mac while the screen is open, and a fleet that has not arrived yet — and an activity
+    /// this build has never heard of gets the same silence, for the reason `WireSession`
+    /// carries `activity` as a `String` at all.
+    func testASessionThatIsNotWorkingSaysNothingAtTheFootOfTheConversation() {
+        XCTAssertNil(SessionTimelineScreen.activityFooter(for: session(activity: "idle")))
+        XCTAssertNil(SessionTimelineScreen.activityFooter(for: session(activity: nil)))
+        XCTAssertNil(SessionTimelineScreen.activityFooter(for: session(activity: "compacting")))
+        XCTAssertNil(SessionTimelineScreen.activityFooter(for: nil))
+    }
+
+    // MARK: Pairing a call with its output
+
+    /// **A session running two tools at once interleaves their records**, so "the first
+    /// result in the feed" is a different call's output roughly half the time — and a caption
+    /// under the wrong command is worse than no caption at all. `callID` is the agent's own
+    /// id and the only thing that pairs these; `id` is a byte offset and pairs nothing.
+    func testAToolCallIsPairedByCallIDAndNotByPositionOrByOffset() {
+        let items = interleavedCalls()
+
+        XCTAssertEqual(
+            SessionTimelineScreen.pairedResult(for: items[0], in: items)?.id, "1600#0",
+            "call toolu_a1's output is the one carrying toolu_a1, wherever it landed"
+        )
+        XCTAssertEqual(
+            SessionTimelineScreen.pairedResult(for: items[1], in: items)?.id, "1400#0"
+        )
+    }
+
+    /// The tool is still running, or its result fell the other side of a page boundary.
+    /// Either way the honest answer is nothing, not the nearest result to hand.
+    func testACallWhoseResultIsNotHeldIsPairedWithNothingRatherThanAStranger() {
+        let items = [
+            toolCall(id: "1000#0", callID: "toolu_a1"),
+            toolResult(id: "1400#0", callID: "toolu_b2"),
+        ]
+
+        XCTAssertNil(SessionTimelineScreen.pairedResult(for: items[0], in: items))
+    }
+
+    /// A result row opens its own detail screen too, and it must not be handed itself as its
+    /// own output — its `callID` matches its own, so the kind guard is the only thing between
+    /// that row and showing the same text twice.
+    func testAResultRowIsPairedWithNothingSoItCannotCaptionItself() {
+        let items = interleavedCalls()
+
+        XCTAssertNil(SessionTimelineScreen.pairedResult(for: items[2], in: items))
+        XCTAssertNil(SessionTimelineScreen.pairedResult(for: items[3], in: items))
+    }
+
+    /// Codex's `event_msg` records carry no call id at all, and neither does anything a
+    /// future mapper fails to find one in. Two records that both have *no* id are not two
+    /// halves of one call, and matching them on that basis pairs every such call with the
+    /// first anonymous result in the conversation.
+    func testACallWithNoIdIsPairedWithNothingRatherThanWithAnotherRecordThatAlsoHasNone() {
+        let items = [
+            toolCall(id: "1000#0", callID: nil),
+            toolResult(id: "1400#0", callID: nil),
+        ]
+
+        XCTAssertNil(SessionTimelineScreen.pairedResult(for: items[0], in: items))
+    }
+
+    /// Two calls in flight, each answered after the other one was issued, with the results
+    /// arriving in the opposite order to the calls. `items[0]`'s output is the LAST row and
+    /// `items[1]`'s is the first result in the list, so an implementation that took position
+    /// for pairing gets both of them wrong rather than one of them right by luck.
+    private func interleavedCalls() -> [TimelineItem] {
+        [
+            toolCall(id: "1000#0", callID: "toolu_a1"),
+            toolCall(id: "1200#0", callID: "toolu_b2"),
+            toolResult(id: "1400#0", callID: "toolu_b2"),
+            toolResult(id: "1600#0", callID: "toolu_a1"),
+        ]
+    }
+
+    private func toolCall(id: String, callID: String?) -> TimelineItem {
+        TimelineItem(
+            id: id, kind: .toolCall, status: .complete,
+            body: TimelineItem.Body(
+                text: "{\n  \"command\": \"git status\"\n}", summary: "git status",
+                tool: "Bash", callID: callID
+            )
+        )
+    }
+
+    private func toolResult(id: String, callID: String?) -> TimelineItem {
+        TimelineItem(
+            id: id, kind: .toolResult, status: .complete,
+            body: TimelineItem.Body(text: "nothing to commit", tool: "Bash", callID: callID)
+        )
+    }
+
+    private func session(
+        agent: String = "claude", activity: String?, waitingFor: String? = nil,
+        subagentCount: Int = 0
+    ) -> WireSession {
+        WireSession(
+            id: UUID(), title: "flight-deck", agent: agent,
+            activity: activity, waitingFor: waitingFor, subagentCount: subagentCount
+        )
+    }
+}

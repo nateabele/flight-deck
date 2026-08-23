@@ -34,6 +34,14 @@ final class FleetModel: TimelinePaging {
     @ObservationIgnored private let store: any PairedMacStoring
     @ObservationIgnored private var connector: FleetConnector?
     @ObservationIgnored private var runner: PairingRunner?
+    /// One open session's model per tab id, kept so that going back to the list and forward
+    /// again shows the conversation the phone already holds instead of re-downloading it.
+    ///
+    /// **`@ObservationIgnored` is load-bearing, not tidiness.** `timelineModel(for:)` inserts
+    /// into this from inside a `navigationDestination` closure — that is, during a view
+    /// update — and an observed mutation there would invalidate the very view that is being
+    /// built. Nothing renders this dictionary; the screens observe the models in it.
+    @ObservationIgnored private var timelineModels: [UUID: SessionTimelineModel] = [:]
 
     init(store: any PairedMacStoring = KeychainPairedMacStore()) {
         self.store = store
@@ -168,6 +176,11 @@ final class FleetModel: TimelinePaging {
         store.clear()
         mac = nil
         fleet = .empty
+        // Held conversation content is as much "this pairing" as the snapshot is. A phone
+        // that unpaired and kept a session's transcript in memory is showing the user
+        // something they believe they revoked — and it is what the next pairing, to a
+        // different Mac, would open a session onto if a tab id ever collided.
+        timelineModels.removeAll()
         state = .idle
         lastLive = nil
         pairingProgress = nil
@@ -175,6 +188,30 @@ final class FleetModel: TimelinePaging {
     }
 
     func markRead(_ id: UUID) { connector?.send(.markRead(id: id)) }
+
+    /// The model behind one session screen, made once and kept.
+    ///
+    /// **Cached because the alternative is a screen that empties itself.** A
+    /// `navigationDestination` closure runs again on any change to what it reads — a fleet
+    /// event, a title, the connection state — and a model built inside it would be a *new*
+    /// model each time, with an empty feed and a `.latest` fetch to fill it. Held here, the
+    /// screen keeps its conversation, its scroll position and its cursors across every
+    /// re-evaluation, and `SessionTimelineModel.loadLatest` asks for what is new rather than
+    /// for the end of the file again.
+    ///
+    /// Keyed on the **tab id**, never the conversation id: the latter is not stable across a
+    /// re-pin and, for codex, differs from the tab id from birth — the same rule the fleet
+    /// list's `ForEach` states.
+    ///
+    /// The models hold this object back (`SessionTimelineModel` keeps its pager strongly),
+    /// which is a cycle broken in `unpair()` and bounded by the app's own lifetime otherwise:
+    /// there is exactly one `FleetModel` and it outlives every screen.
+    func timelineModel(for id: UUID) -> SessionTimelineModel {
+        if let existing = timelineModels[id] { return existing }
+        let model = SessionTimelineModel(sessionID: id, fleet: self)
+        timelineModels[id] = model
+        return model
+    }
 
     /// Ask the Mac for a page of a session's conversation.
     ///

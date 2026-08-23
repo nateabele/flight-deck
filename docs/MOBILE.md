@@ -44,7 +44,7 @@ than assuming. See its own comments for the rest, and the note in `AGENTS.md`.
 ## Running the unit suite
 
 ```bash
-./scripts/test-ios.sh    # 16 tests, ~25s including creating and booting the simulator
+./scripts/test-ios.sh    # 47 tests, ~40s including creating and booting the simulator
 ```
 
 It creates a throwaway simulator, runs `FlightDeckMobileTests` inside `FlightDeckMobile`, and
@@ -63,6 +63,15 @@ at a device someone is testing on would overwrite the build under their hands.
   to four distinct messages with `.wrongCode` and `.attemptsExhausted` not swapped.
 - `SessionStatusGlyph.label(for:)` — the accessibility vocabulary, string for string against
   what `SessionStatus.tooltip` produces on the Mac for the same state.
+- `SessionTimelineModel` — which fetch is in flight, that a second one is refused while it is,
+  that a fetch nobody answers fails on its own deadline instead of spinning forever, and that a
+  late answer to a dead request changes nothing.
+- `SessionTimelineScreen` — the three decisions the session screen makes that are not layout:
+  *where* a failure is said (at the top, with the conversation still under it — the bottom of a
+  list is where nobody is looking fifteen seconds after a "Load earlier" tap), that an empty
+  state never appears while a fetch is running, that a codex session never claims a number of
+  sub-agents, and that a tool call is paired with its output by `callID` rather than by
+  position.
 
 **What it structurally cannot cover.** Every one of these is on a checklist below instead, and
 none of them should ever grow an assertion here that merely re-reads the source:
@@ -113,6 +122,25 @@ run by anything on this machine.
     second. Then, on the *first* Mac, enter its own correct code — it still has all three
     attempts minus the one the phone spent on it. The budget is per-Mac (spec §7); a global
     counter would have left the first Mac short.
+
+16. **Tap any session row — it opens.** Every row, read or unread, connected or not. This is
+    the item that came back three times as "tapping sessions does nothing", and it was true:
+    until Task 4 the row was a `Button` only when it was unread and there was nothing to open.
+17. **Tap an unread row and watch both things happen**: the screen pushes *and* the dot clears
+    on the Mac. One gesture, two effects — the mark rides the same tap (spec §8), and a
+    `simultaneousGesture` on a `NavigationLink` is the only untested part of that pairing.
+18. **Scroll to the top of a long conversation and tap "Load earlier".** Older messages arrive
+    above the reader without moving what they were reading. Do it twice more, to the top of the
+    transcript, and the row goes away rather than re-fetching the first page forever.
+19. **Open a session, go back, and open it again.** The conversation is still there, and no
+    fetch runs for what the phone already holds — the model is cached per session, so this is
+    where a rebuilt-on-every-update model would show up as a screen that empties itself.
+20. **Quit Flight Deck on the Mac with a session screen open, then tap "Load earlier".** The
+    reason appears at the TOP of the list, above the button, with the conversation still under
+    it — never a blank screen, and never a message at the bottom where the reader is not.
+21. **Rename a session on the Mac while its screen is open** — the title in the navigation bar
+    changes. The session is read live out of the fleet rather than captured when the screen was
+    pushed.
 
 ## A second checklist: the iOS plumbing
 
@@ -171,10 +199,22 @@ found.
 Items 10-15 are the typed path, and what is unproven there has narrowed since they were
 written: `FlightDeckMobileTests` now runs the field's own rewriting and the failure-message
 mapping (see "Running the unit suite"). What remains is everything a test process cannot see.
-`UIHostingController` renders blank without a window, so the offscreen `layer.render(in:)`
-technique that proved the Mac's sheet does not transfer, and `screencapture` is denied on this
-machine — so no assertion on this side has ever looked at a pixel, at a keyboard, or at a
-network.
+`screencapture` is denied on this machine, and no assertion on this side has ever looked at a
+keyboard or at a network.
+
+**A pixel is now reachable, though, and the earlier claim here that it was not is wrong.** The
+offscreen `layer.render(in:)` technique that proved the Mac's sheet *does* transfer to the
+simulator, on one condition the first attempt missed: the hosting controller's view must be in
+a `UIWindow` that has been made key and visible, with a run-loop turn before the render.
+`drawHierarchy(in:afterScreenUpdates:)` yields a blank image there whatever you do, which is
+what the "renders blank without a window" note above was really recording.
+
+That is how `SessionTimelineScreen` was checked at Task 4 — a real list, in a real window,
+drawing "Load earlier", three monospaced rows with their disclosure chevrons, and a
+"Working — 2 subagents" footer. It is deliberately not a committed test: what it proves is that
+something rendered, and the assertion that would guard it is a count of collection-view cells,
+which is exactly the brittle shape this file warns against. Reach for it when a screen changes
+shape and you want to *look* at it, not to hold it in place.
 
 10. **Type with a hardware keyboard, and paste a lowercase code.** Both come out
     `XXXX-XXXX-XXXX` in uppercase, with `O` read as `0` and `I`/`L` as `1`. The rewrite itself
