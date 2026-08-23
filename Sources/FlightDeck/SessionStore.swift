@@ -2615,6 +2615,34 @@ final class SessionStore: ObservableObject {
     /// pre-repin path, which is the failure both of those paths exist to prevent.
     func watchedTranscriptURL(of id: UUID) -> URL? { attachments[id]?.binding.transcriptURL }
 
+    /// Which agent a tab runs, and which file its conversation is read from.
+    ///
+    /// Three answers rather than an optional, because a phone renders them differently: a tab
+    /// that is gone is a stale row, a tab whose agent reports no transcript can never have
+    /// one, and a transcript that is simply not on disk yet is the ordinary state of a claude
+    /// session before its first turn (`TimelineReader` reports that one, not this).
+    ///
+    /// Keyed on the tab `id`, never `conversationID`: the latter is not stable across a
+    /// re-pin, and for codex it differs from the tab id from birth.
+    ///
+    /// The live attachment first, then the adapter: an attached tab is being tailed right now
+    /// and its binding is settled, while a tab with no agent process still has a conversation
+    /// worth reading. Everything agent-shaped goes through `AgentAdapter.binding(for:)` and
+    /// never through `Session.transcriptDirectory` or `ClaudeSession` — same rule
+    /// `toolContext()` follows, so that claude deriving its path from a cwd does not become a
+    /// rule every future agent inherits.
+    ///
+    /// A read, and only a read. It changes no fleet state, so it adds no mutation site for
+    /// `FleetReplicator`'s DEBUG drift check to miss and needed no `FleetEvent` case.
+    func timelineSource(of id: UUID) -> TimelineSource {
+        guard let at = locate(id) else { return .unknownSession }
+        let session = repos[at.repo].sessions[at.session]
+        let url = attachments[id]?.binding.transcriptURL
+            ?? adapter(for: instance(for: session)).binding(for: session).transcriptURL
+        guard let url else { return .noTranscript }
+        return .file(agent: session.agent, url: url)
+    }
+
     func title(of id: UUID) -> String? {
         guard let at = locate(id) else { return nil }
         return repos[at.repo].sessions[at.session].title
