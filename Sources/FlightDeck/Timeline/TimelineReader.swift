@@ -81,11 +81,25 @@ enum TimelineReader: Sendable {
         // When the budget did drop from an end, that end must move with what it dropped, or
         // the page claims a byte range wider than the records it carries and the next request
         // from that cursor re-serves what the client already has.
-        let start = dropped && fromOldest ? (kept.first?.line.offset ?? source.end) : source.start
-        // `+ 1` is the `\n` the pager stripped: `SourceLine.text` is the line's bytes minus
-        // exactly its terminator, so this is the boundary just past the last record kept.
+        //
+        // **Both values are line offsets the pager handed over — never arithmetic over a
+        // decoded `String`.** `offset + text.utf8.count + 1` reads like the same number and is
+        // not one: `SourceLine.text` has been through `String(decoding:)`, which substitutes a
+        // three-byte U+FFFD for every invalid byte, so that sum overshoots by two per bad byte
+        // the moment a record is not valid UTF-8. An `end` past the record's real boundary
+        // lands the client's next `.after(end)` INSIDE the following record, which the pager
+        // then cuts at the next newline and the mapper drops as a fragment — one record gone
+        // for good, with the cursor already past it — or, if the overshoot clears the file,
+        // outside `(0...size)`, which answers `reset` and tells the phone to discard the
+        // conversation. `TranscriptPager.forwards` refuses the same arithmetic in the same
+        // words, and this is the one cursor here that is not simply passed through.
+        //
+        // The exact boundary is already in hand at each end: the oldest record still kept, and
+        // the first record dropped. Blank lines between them are harmless — they carry no
+        // record, so `.after`/`.before` of a boundary just below one loses nothing.
+        let start = dropped && fromOldest ? (kept.first?.line.offset ?? source.start) : source.start
         let end = dropped && !fromOldest
-            ? (kept.last.map { $0.line.offset + $0.line.text.utf8.count + 1 } ?? source.start)
+            ? (mapped.dropFirst(kept.count).first?.line.offset ?? source.end)
             : source.end
         return .success(TimelinePage(
             session: session,
@@ -130,7 +144,11 @@ enum TimelineReader: Sendable {
         var kept = ""
         var bytes = 0
         for character in item.body.text {
-            let width = String(character).utf8.count
+            // `character.utf8.count`, not `String(character).utf8.count`: this loop runs over
+            // 64 KB of text per oversized item, and the `String` version allocates one for
+            // every character of it. `ToolInputSummary.capped` is where that spelling came
+            // from, and there the input is 200 bytes and it does not matter.
+            let width = character.utf8.count
             if bytes + width > TimelineLimits.maxItemBytes { break }
             kept.append(character)
             bytes += width

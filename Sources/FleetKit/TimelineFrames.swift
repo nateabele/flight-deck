@@ -194,10 +194,17 @@ public enum FleetRequestError: Error, Equatable, Sendable {
     case disconnected
     /// The Mac answered `err`. Codes this plan produces: `unknown_session` (no such tab),
     /// `no_transcript` (the tab's agent reports no transcript file — a codex thread whose
-    /// `thread/start` never returned a path), `unreadable` (a path that is not there yet, the
-    /// ordinary state of a claude tab before its first turn), `stopped` (the service is gone).
+    /// `thread/start` never returned a path), `unreadable`, `stopped` (the service is gone).
     /// Until the reader is wired the Mac answers every request `unhandled`, which is what is
     /// actually on this wire today — a client must treat an unrecognised code as "no page".
+    ///
+    /// **`unreadable` is showable and retryable, and it covers two states on purpose**: a path
+    /// that is not there yet — the ordinary state of a claude tab before its first turn — and
+    /// a transcript that exists and holds no line boundary to page from, which is what a file
+    /// mid-first-record looks like. Render it as "no history yet" and let the next fetch try
+    /// again. It deliberately is NOT an empty page: that answer is indistinguishable from a
+    /// genuinely empty conversation, so it would have a phone state permanently and falsely
+    /// that a conversation with history in it is empty. See `TimelineReadFailure` on the Mac.
     ///
     /// A `String` rather than an enum, and that is the decode-unknown rule in this direction:
     /// `err` travels Mac → phone, so a newer Mac inventing a code must leave an older phone
