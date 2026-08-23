@@ -44,7 +44,7 @@ than assuming. See its own comments for the rest, and the note in `AGENTS.md`.
 ## Running the unit suite
 
 ```bash
-./scripts/test-ios.sh    # 67 tests, ~45s including creating and booting the simulator
+./scripts/test-ios.sh    # 80 tests, ~45s including creating and booting the simulator
 ```
 
 It creates a throwaway simulator, runs `FlightDeckMobileTests` inside `FlightDeckMobile`, and
@@ -72,6 +72,13 @@ at a device someone is testing on would overwrite the build under their hands.
   input opens on, that both agents' ISO-8601 spellings parse and anything else renders as
   nothing, that truncation is said with its size and only when something was cut, and that a
   VoiceOver label is capped so one row is not a quarter hour of speech.
+- `JSONTree` — which tool bodies are drawn as a tree at all, and what a row of one says.
+  The three gates (kind, parses whole, has structure) with a **real truncated
+  `AskUserQuestion` input** proving the fallback, plus the VoiceOver vocabulary: a container's
+  size and open/closed state, array positions spoken one-based, and a 300-character option
+  description capped rather than read out. The parser and the flattening are `FleetKit`'s and
+  run in `FlightDeckTests/JSONValueTests` on macOS — key order, number lexemes, every prefix of
+  a real body refused, and the two-levels-then-stop default expansion.
 - `SessionTimelineScreen` — the decisions the session screen makes that are not layout:
   *where* a failure is said (at the top, with the conversation still under it — the bottom of a
   list is where nobody is looking fifteen seconds after a "Load earlier" tap), that an empty
@@ -175,6 +182,21 @@ run by anything on this machine.
 29. **Look at a long conversation at the largest accessibility text size.** Rows grow; the
     symbol column, the timestamp and the tool cards do not collide or clip. Rendered offscreen
     at `.accessibilityExtraExtraExtraLarge` and it holds, but a render is not a device.
+30. **Tap an `AskUserQuestion` row and open its options.** The input opens as a TREE, two levels
+    deep, with `options: [3]` collapsed; tapping that row opens the three options and tapping
+    an option opens its `label`, `description` and `preview`. Then tap **Raw** — the same
+    ninety lines of pretty-printed JSON that were there before, and **Copy** puts that text on
+    the clipboard in either mode. Go back and open the row again: it is on the tree, because
+    the mode is per-screen and is deliberately not remembered.
+31. **Tap a tool call whose input the Mac CUT** (a `Bash` heredoc past 64 KB is the one shape
+    observed doing it). There must be **no tree toggle at all**, the monospaced text must be
+    there, and the scissors notice must still say both byte counts. A parse error where the
+    content should be, or a tree drawn from a fragment, is the failure this whole path is
+    shaped around. Rendered offscreen (`.superpowers/sdd/ui-renders/json/truncated-*.png`) and
+    it holds; nobody has tapped it.
+32. **Look at a tree with a very long string value at the largest accessibility text size.** A
+    300-character `description` wraps under its key rather than clipping, and the indent — which
+    is capped at five levels — has not eaten the column.
 
 ## A second checklist: the iOS plumbing
 
