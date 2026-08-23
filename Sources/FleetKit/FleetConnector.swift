@@ -85,6 +85,19 @@ public final class FleetConnector: @unchecked Sendable {
     /// either: `FleetClient` gates `onFrame` on `hasEnded`, and `accept()` refuses a client
     /// that is neither a live racer nor the current winner.
     private var pending: [Int: (Result<TimelinePage, FleetRequestError>) -> Void] = [:]
+    /// Outstanding **commands**, by correlation id, for callers that need to know the Mac
+    /// heard them.
+    ///
+    /// A second table beside `pending` rather than a generic one, and it is safe because the
+    /// two share a single `cid` space: `FleetClient.send` mints both verbs from one `nextCID`,
+    /// deliberately (see its comment), so a number is filed in at most one of these and
+    /// `apply` can try each in turn. A generic reply type would have meant retyping `pending`,
+    /// widening `ServerFrame`, and touching every call site of a channel already shipped.
+    ///
+    /// Same exactly-once rule as `pending`, for a stronger reason: `send(_:)` without a
+    /// completion drops silently when nothing is connected, which is harmless for `markRead`
+    /// and is not harmless for a prompt. `drainPending()` empties this table too.
+    private var pendingAcks: [Int: (Result<Void, FleetRequestError>) -> Void] = [:]
     private var browser: NWBrowser?
     private var fleet = FleetSnapshot.empty
     private var attempt = 0
@@ -149,6 +162,30 @@ public final class FleetConnector: @unchecked Sendable {
         _ = winner?.send(command)
     }
 
+    /// Ask the Mac to do something and hear that it heard.
+    ///
+    /// `ack` still means dispatched, not done — the observable effect arrives separately, as
+    /// a northbound event or (for a prompt) in the agent's own transcript. What this adds
+    /// over `send(_:)` is the *hearing*: `.success` on `ack`, `.failure(.server(code:))` on
+    /// `err`, and `.failure(.disconnected)` — **synchronously** — when there is no socket.
+    ///
+    /// Same asymmetry and same reason as `request(_:then:)`: a dropped command with no caller
+    /// waiting is merely ineffective, while a dropped answer to a caller that IS waiting is a
+    /// person who believes they told an agent something.
+    public func send(
+        _ command: FleetCommand,
+        then completion: @escaping (Result<Void, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(command)
+        // `0` is `FleetClient`'s "there is no connection to write to" — a seatbelt rather
+        // than a live case, kept for the reason `request(_:then:)`'s own guard is kept: the
+        // alternative to a redundant check is a completion that is silently never filed.
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingAcks[cid] = completion
+    }
+
     /// Ask the Mac for something and get exactly one answer.
     ///
     /// Answers **synchronously with `.disconnected`** when nothing is connected, rather than
@@ -182,6 +219,22 @@ public final class FleetConnector: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let completion = pending.removeValue(forKey: cid) else { return }
         completion(result)
+    }
+
+    /// Resolves one outstanding command, reporting whether there was one.
+    ///
+    /// Removed before it is invoked, exactly as `resolve` does and for the same reason: a
+    /// completion is free to re-enter — `stop()` from inside one is ordinary — and whatever
+    /// it does next must find nothing left filed under this number.
+    ///
+    /// The `Bool` is what lets `apply` try this table first and fall through to `pending`
+    /// without either arm having to know which verb a `cid` belonged to.
+    @discardableResult
+    private func resolveAck(_ cid: Int, with result: Result<Void, FleetRequestError>) -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingAcks.removeValue(forKey: cid) else { return false }
+        completion(result)
+        return true
     }
 
     // MARK: The race
@@ -317,19 +370,25 @@ public final class FleetConnector: @unchecked Sendable {
             resolve(cid, with: .success(page))
             return
         case .err(let cid, let code):
-            // A command's `err` changes no fleet state and is dropped here; a request's is
-            // the only answer that request will ever get. `code` is carried through
-            // verbatim rather than interpreted: `unhandled` (no reader wired) and
-            // `unsupported` (a request this Mac cannot parse) are both on this wire today,
-            // and a newer Mac may invent more.
+            // Commands first, then requests. The two tables share one `cid` space
+            // (`FleetClient.nextCID` mints for both), so a number is in at most one of them
+            // and the order cannot cross an answer — it is stated so a future third table is
+            // added deliberately rather than by accident.
+            //
+            // `code` is carried through verbatim rather than interpreted: `unhandled` (no
+            // handler wired) and `unsupported` (a request this Mac cannot parse) are both on
+            // this wire today, and a newer Mac may invent more.
+            if resolveAck(cid, with: .failure(.server(code: code))) { return }
             resolve(cid, with: .failure(.server(code: code)))
             return
         case .ack(let cid):
-            // An `ack` correlated to a request is a server that answered the wrong verb —
+            // An `ack` for a command with a completion filed is that completion's answer.
+            if resolveAck(cid, with: .success(())) { return }
+            // An `ack` correlated to a REQUEST is a server that answered the wrong verb —
             // "dispatched, not done" is no answer to a question whose point is the data it
             // carries back. Released as a server error rather than dropped, so the caller is
-            // freed either way. An `ack` for a command matches nothing here and is a no-op,
-            // which is what it has always been.
+            // freed either way. An `ack` matching neither table is a `send(_:)` with no
+            // completion, and is the no-op it has always been.
             resolve(cid, with: .failure(.server(code: "unexpected_ack")))
             return
         }
@@ -456,8 +515,7 @@ public final class FleetConnector: @unchecked Sendable {
         drainPending()
     }
 
-    /// Answers every outstanding request `.disconnected`. Drained, not cleared — see
-    /// `pending`.
+    /// Answers every outstanding request and command. Drained, not cleared — see `pending`.
     ///
     /// Called only once `winner` is already nil, and that ordering is load-bearing rather
     /// than tidiness. A completion hearing `.disconnected` is exactly the caller most likely
@@ -475,6 +533,12 @@ public final class FleetConnector: @unchecked Sendable {
         let outstanding = pending
         pending.removeAll()
         for completion in outstanding.values { completion(.failure(.disconnected)) }
+        // Commands too, and the same `removeAll`-before-the-loop discipline: a completion
+        // that re-enters through `stop()` runs this whole drain again and must find nothing
+        // left to answer a second time.
+        let outstandingAcks = pendingAcks
+        pendingAcks.removeAll()
+        for completion in outstandingAcks.values { completion(.failure(.disconnected)) }
     }
 
     private func report(_ state: State) { onState?(state) }
