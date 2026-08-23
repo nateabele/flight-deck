@@ -10,6 +10,81 @@ public enum SnapshotReason: String, Codable, Equatable, Sendable {
     case seqTooOld
 }
 
+/// What a client chose, in the one dialog a session is blocked on.
+///
+/// **This is the only thing this feature puts on the wire.** There is no request for the
+/// question and no frame that carries it: which dialog is open, and what it says, are
+/// *derived* on both ends by `OpenPrompt.find` over a transcript the phone already fetched
+/// and the Mac already owns. Only the answer travels. Nothing was left out here.
+///
+/// **Three cases, and the absence of a fourth is a security property rather than an
+/// omission.** Where claude's permission dialog offers a *"Yes, and don't ask again for Bash
+/// commands in /Users/nate"* row, that row is a **durable grant** — one that outlives the tap,
+/// made from a phone, from a label a fixed-width terminal wrapped. No case here names it, so
+/// there is no index a client can send and no button a card can draw; and
+/// `SessionStore.answerPrompt`'s `.allow` arm targets the dialog's FIRST row and nothing else.
+/// A phone cannot widen its own future authority. (Captured dialogs from claude 2.1.241 show a
+/// Bash permission offering only two rows, with no such option present — the property is what
+/// holds when a build does offer one.) Do not add a case for it.
+///
+/// **`deny` is Escape, and that is the point.** The refusal path — the one a worried person
+/// reaches for from a pocket, having read four words of a command — sends one key event and
+/// reads nothing off the screen; the session's transcript then closes the call
+/// `is_error=True "The user doesn't want to proceed with this tool use. The tool use was
+/// rejected"`, which is a real denial and not a dismissal. It carries no index and no label
+/// because it needs none: it cannot be wrong about which row it is on, because it is not on a
+/// row. Every parsing risk in this feature therefore lives on the approval side, which is
+/// where it belongs.
+///
+/// `option` is for `AskUserQuestion` only, where the Mac has the real labels from its own
+/// transcript. `label` is a **cross-check**, never an instruction: the Mac matches its own copy
+/// on screen and refuses when the client's disagrees. Nothing a client sends becomes a keystroke.
+public enum PromptAnswer: Codable, Equatable, Sendable {
+    case option(index: Int, label: String)
+    /// A permission dialog's first row.
+    case allow
+    /// Escape.
+    case deny
+
+    enum CodingKeys: String, CodingKey { case answer, index, label }
+
+    /// Internal and `CaseIterable` where `FleetCommand.Op` is `private`, because this is the
+    /// wire vocabulary the security property is stated in: `AnswerFrameCodingTests` counts
+    /// these cases, and that assertion is the only thing that fails when a fourth is added.
+    enum Tag: String, Codable, CaseIterable { case option, allow, deny }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .option(let index, let label):
+            try c.encode(Tag.option, forKey: .answer)
+            try c.encode(index, forKey: .index)
+            try c.encode(label, forKey: .label)
+        case .allow:
+            try c.encode(Tag.allow, forKey: .answer)
+        case .deny:
+            try c.encode(Tag.deny, forKey: .answer)
+        }
+    }
+
+    /// An unrecognised value throws, like `FleetCommand`'s `op` and unlike
+    /// `TimelineItem.Kind`'s. Direction decides: this travels phone → Mac and is *executed*,
+    /// and there is no default that is not a wrong answer — here, a keystroke in a live
+    /// terminal. `TimelineAnchor.init(name:cursor:)` makes the same argument at length.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(Tag.self, forKey: .answer) {
+        case .option:
+            self = .option(
+                index: try c.decode(Int.self, forKey: .index),
+                label: try c.decode(String.self, forKey: .label)
+            )
+        case .allow: self = .allow
+        case .deny: self = .deny
+        }
+    }
+}
+
 /// Something the client asks the Mac to do.
 ///
 /// `ack` means *dispatched*, not done — see §4. Typing into a pty has no delivery
@@ -41,12 +116,36 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// which dedupes on it and acks a repeat without queueing anything.
     case prompt(id: UUID, token: UUID, text: String)
 
-    enum CodingKeys: String, CodingKey { case op, id, token, text }
+    /// Answer the dialog that tab `id` is blocked on.
+    ///
+    /// **The only frame the answering feature adds, in either direction.** Nothing asks the
+    /// Mac what the question is: `OpenPrompt.find` runs on both ends over the same transcript
+    /// — the phone's copy from the history channel, the Mac's own tail — so the question is
+    /// derived, never served. What is missing without this case is only the write path.
+    ///
+    /// `call` is the blocked tool call's `tool_use_id`, and it is **derived independently on
+    /// both ends** rather than served by one and echoed by the other. That is what closes the
+    /// race: the Mac re-derives on this path and refuses a call that is no longer the newest
+    /// unanswered one (`prompt_changed`), typing nothing.
+    ///
+    /// It closes the harder race too, which a served-and-echoed id would not: the user approves
+    /// in the terminal, claude raises the next dialog immediately, and the session **never
+    /// leaves `waiting`** — so no activity change is emitted and a card that looks live is
+    /// describing a dialog that is gone. A cache of "what I last served" still matches there.
+    /// A re-derivation does not, because the new dialog is a different call.
+    ///
+    /// `token` is the client's own idempotency key, minted once per tap, for the reason
+    /// `.prompt`'s is: the socket can drop between the command landing and its `ack` being
+    /// read, so a retry must be free.
+    case answerPrompt(id: UUID, token: UUID, call: String, answer: PromptAnswer)
+
+    enum CodingKeys: String, CodingKey { case op, id, token, text, call, answer, index, label }
 
     private enum Op: String, Codable {
         case markRead = "session.markRead"
         case markUnread = "session.markUnread"
         case prompt = "session.prompt"
+        case answerPrompt = "prompt.answer"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -63,12 +162,24 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encode(id, forKey: .id)
             try c.encode(token, forKey: .token)
             try c.encode(text, forKey: .text)
+        case .answerPrompt(let id, let token, let call, let answer):
+            try c.encode(Op.answerPrompt, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(call, forKey: .call)
+            // Flattened into the same object rather than nested, exactly as `ClientFrame`
+            // flattens a command into a frame: two keyed containers over one encoder merge
+            // into a single JSON object, and one command reading as one line is what makes a
+            // dump usable.
+            try answer.encode(to: encoder)
         }
     }
 
     /// `op` is read BEFORE `id`, where the two-case version read `id` first. That mattered
     /// not at all while every case had the same one field and matters now: a prompt missing
-    /// its `token` must be refused as the *prompt* it claimed to be.
+    /// its `token` must be refused as the *prompt* it claimed to be, and an answer missing its
+    /// `call` as the *answer* it claimed to be — an intent with nothing to apply it to, which
+    /// accepted would act on whatever dialog happened to be up.
     ///
     /// **`text` is decoded as an ordinary `String` and is never judged here.** An unknown
     /// `op` throws — the phone → Mac direction rule `FleetRequest` states, because a command
@@ -91,6 +202,13 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 id: try c.decode(UUID.self, forKey: .id),
                 token: try c.decode(UUID.self, forKey: .token),
                 text: try c.decode(String.self, forKey: .text)
+            )
+        case .answerPrompt:
+            self = .answerPrompt(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                call: try c.decode(String.self, forKey: .call),
+                answer: try PromptAnswer(from: decoder)
             )
         }
     }
