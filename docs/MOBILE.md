@@ -44,7 +44,7 @@ than assuming. See its own comments for the rest, and the note in `AGENTS.md`.
 ## Running the unit suite
 
 ```bash
-./scripts/test-ios.sh    # 108 tests, ~45s including creating and booting the simulator
+./scripts/test-ios.sh    # 116 tests, ~45s including creating and booting the simulator
 ```
 
 It creates a throwaway simulator, runs `FlightDeckMobileTests` inside `FlightDeckMobile`, and
@@ -79,6 +79,16 @@ at a device someone is testing on would overwrite the build under their hands.
   description capped rather than read out. The parser and the flattening are `FleetKit`'s and
   run in `FlightDeckTests/JSONValueTests` on macOS — key order, number lexemes, every prefix of
   a real body refused, and the two-levels-then-stop default expansion.
+- `TimelineStyle.proseLineLimit` / `.opensDetail` — **how much of a message the row shows,
+  and whether tapping it leads anywhere.** One decision with three consequences, asserted as
+  one: prose is drawn whole, so its row carries no chevron and offers Copy instead; a tool
+  body, a thinking block, a `.prompt` and an `.unknown` keep their clamps and their way in.
+  The ceiling is asserted against a **real 6,775-character answer** that runs to 201 lines in
+  the row's column — cut at the ceiling, and still leading somewhere. And the invariant
+  underneath both, stated once so it cannot drift: clamped and tappable are the same fact, so
+  there is no whole body with a chevron and no cut body with nowhere to go. `exceeds` is
+  asserted to count what *wraps* rather than what was typed, on a 2,400-character paragraph
+  with no newline in it at all — the shape a real answer takes.
 - `TimelineStyle.rendersMarkdown` / `.spoken` — **which parser touches which body.** Prose
   (`.assistantText`, `.userTurn`) is drawn as the Markdown it was written in; a tool call, a
   tool result and an `.unknown` never are. That boundary has a sharp edge worth stating: cmark
@@ -250,9 +260,24 @@ something a person passes or fails by *watching the Mac*, not by watching the ph
     two. The button is disabled from the first tap until the first ack lands, which is the only
     thing standing between an impatient thumb and a duplicated instruction.
 
+39. **Open a session and read an answer without leaving it.** A `Claude` row draws the whole
+    message — headings, lists, fenced code — and has **no chevron**. The tool cards above and
+    below it still do. This is the item the whole change exists for, and the failure it guards
+    is the one the user reported: an answer clamped to a few lines with a drill-down onto the
+    same words.
+40. **Long-press an answer.** Copy appears, and the clipboard holds that message. This is the
+    only way to take an answer off the phone now that the row does not push a screen, and it is
+    the one capability the drill-down was still carrying. **Text selection is gone with it** —
+    check whether you miss it; if you do, the fix is on the row, not back in the chevron.
+41. **Find an answer long enough to hit the ceiling** (120 lines in the row's column — a long
+    architecture write-up does it; a pasted file in your own turn certainly does). It stops
+    **mid-line**, with "Read the whole message" under the cut, and tapping the row opens the
+    whole thing. A cut with no line under it, or a line under a message that was *not* cut, are
+    the two ways this can be wrong.
+
 ## A second checklist: the iOS plumbing
 
-The thirty-eight items above test the *feature* — that pairing, replication, resume, revocation
+The forty-one items above test the *feature* — that pairing, replication, resume, revocation
 and now typing into a live agent behave. These fifteen test the *app*, and they are separated because they have a different
 character: each one was identified during review or execution as something no amount of reading
 or type-checking on the build machine could settle, and each has a specific observable outcome.
@@ -334,6 +359,42 @@ height clamp cutting **mid-line** is what makes it read as "there is more below"
 the end of the message; and — the one that matters most — that a screen of rendered prose sat
 directly above the tool cards leaves them untouched, `** TEST FAILED **` still literal in a
 result panel and a `Read`'s numbered lines still numbered lines rather than an ordered list.
+
+**And it is how prose came out of the drill-down and onto the timeline.** The row used to cut
+every message at fourteen lines' worth of height with a chevron into a screen that repeated it
+word for word — and 75.7% of the 7,987 real assistant messages on this machine are shorter than
+that clamp, so three times in four the chevron led to nothing new. Before and after, both
+themes, five scenes drawn from real transcripts, in
+`.superpowers/sdd/ui-renders/prose-full/`: a four-line reply, a heading-and-list answer, a
+fenced-code answer, an answer past the ceiling, and the whole fixture conversation with prose
+among the tool cards. Four things only the renders could settle:
+
+- **The chevron had to go, and the render is the argument.** A `List` floats its disclosure
+  indicator at the row's vertical centre. Unclamped, the heading-and-list answer is 970pt tall
+  and the long one 2,804pt — so the chevron ends up a screenful or two from anything, pointing
+  at a screen with the same words on it. Prose rows are no longer `NavigationLink`s; Copy moved
+  onto the row as a long-press, since that was the only thing the detail screen still offered
+  them. Rows that really do hide something — tool cards, thinking, `.prompt`, `.unknown` — keep
+  both the link and the chevron.
+- **A ceiling is worth having, and 120 lines is where it went.** `unbounded-light.png` is one
+  real 201-line answer with nothing bounding it: 4,067pt, six screenfuls, the conversation
+  nowhere in sight — and the worst case is not that answer but a 64 KB paste in a user turn,
+  which is around a thousand lines. At 120 the same message still reads for four screenfuls
+  before it stops. 98.8% of real assistant messages never reach it.
+- **The ceiling has to say so at the cut, not at the row's centre.** With the chevron two
+  screenfuls up, the only signal left was the mid-line cut. `after/very-long-*.png` is the cut
+  with "Read the whole message" directly under it, legible in both themes — the dark one
+  checked, because that is where this branch has already lost a control to vibrancy once.
+- **The tool cards are untouched.** `after/mixed-*.png` is the whole fixture conversation:
+  answers set whole in the system font, `** TEST FAILED **` still literal in a red result
+  panel, a `Read`'s numbered lines still numbered lines.
+
+Two notes on the method. The blank-render trap bit twice and both times the harness caught it
+rather than a human: the screen scrolls to its newest row on the first page, so any scene whose
+content passes the window height comes back an empty PNG — the fix is a canvas taller than the
+content, and the guard is a check that no two of the ten PNGs are byte-identical, which is what
+reported it. And the harness was deleted before the commit, as every harness on this page has
+been.
 
 **And it is how the tree and the Markdown were merged into one detail screen.** The two landed
 independently and each rewrote the same block, so what had to be looked at was not either

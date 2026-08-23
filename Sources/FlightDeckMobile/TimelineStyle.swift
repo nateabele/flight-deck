@@ -248,6 +248,112 @@ enum TimelineStyle {
         return plain.isEmpty ? item.body.text : plain
     }
 
+    // MARK: How much of a body the row shows
+
+    /// The prose column, in characters. 370pt of row at `.body` fits about 42 of them.
+    ///
+    /// **Measured, not guessed** — `UIFont.preferredFont(forTextStyle: .body)` laid out against
+    /// the row's real width in the offscreen harness — and it is only ever used to *estimate*.
+    /// Nothing is laid out from it. Dynamic Type moves the real number, and moving it can only
+    /// make a long body look shorter than it is here, which costs a tall row some extra height
+    /// and can never hide a word: the clamp and the way into the detail screen are the same
+    /// decision (`opensDetail(_:)`), so a body the estimate calls short is a body drawn whole.
+    static let proseColumns = 42
+
+    /// The most of one message a row will ever draw: 120 lines, about four screenfuls of
+    /// phone.
+    ///
+    /// **Not a compromise on "prose renders in full" — it is what stops one message from
+    /// being the whole screen.** The corpus on this machine says how rarely it bites: of 7,987
+    /// real assistant messages, 98.8% are under it and the longest is 312 lines. Of 2,133 real
+    /// user turns only 82.3% are, and that asymmetry is the case it exists for — a user turn
+    /// is where a whole file, a stack trace or a 64 KB paste arrives. The largest turn on this
+    /// machine is 89 KB; cut to `TimelineLimits.maxItemBytes` it is still upwards of fifteen
+    /// hundred lines, which is fifty screenfuls with the conversation nowhere near it.
+    ///
+    /// A body that hits it is cut mid-line and keeps its chevron, exactly as every clamped row
+    /// always has, so the ceiling is the one case where a prose row still has more to show.
+    static let proseCeilingLines = 120
+
+    /// Whether a body runs past `limit` lines in the prose column — hard breaks plus wraps.
+    ///
+    /// **It stops the moment the answer is known**, which is what makes it safe to call from a
+    /// row body. A 64 KB paste costs the same as a six-line answer: the loop cannot run past
+    /// `(limit + 1) × columns` characters before it has its `true`, so the work is bounded by
+    /// the ceiling rather than by the body. A `String.count` over 64 KB is grapheme-walking on
+    /// the scroll path, and this list can be hundreds of rows long.
+    static func exceeds(_ limit: Int, _ text: String, columns: Int = proseColumns) -> Bool {
+        var lines = 1
+        var column = 0
+        for character in text {
+            if character == "\n" {
+                lines += 1
+                column = 0
+            } else {
+                column += 1
+                if column > columns {
+                    lines += 1
+                    column = 1
+                }
+            }
+            if lines > limit { return true }
+        }
+        return false
+    }
+
+    /// How many lines of a body the ROW draws, or `nil` for one it draws WHOLE.
+    ///
+    /// **Prose is drawn whole, and that is the whole of this change.** It used to be cut at
+    /// fourteen lines' worth of height with a chevron into a screen that showed the same words
+    /// again — and 75.7% of real assistant messages are under fourteen lines, so for three
+    /// messages in four the chevron led to nothing at all and for the fourth it led to reading
+    /// the answer somewhere other than the conversation it belongs to.
+    ///
+    /// Everything that is not prose keeps its clamp, and each one keeps it for its own reason:
+    ///
+    /// - `.thinking` is styled *as a whole* — italic, secondary, six lines — and that
+    ///   whole-block treatment is the only thing separating it from an answer. It is also not
+    ///   what a reader came for; see `rendersMarkdown(_:)`, which refuses it for the same
+    ///   reason.
+    /// - `.prompt` and `.unknown` are machine text (spec §9, and a kind from a newer Mac), and
+    ///   a tool body is 64 KB of command output at the per-item cap. Fourteen lines of that is
+    ///   enough to recognise it; the whole of it inline would bury the conversation, which is
+    ///   the case the detail screen exists for.
+    ///
+    /// A tool row never reaches this — its card has two clamps of its own, in
+    /// `TimelineRow.toolCard` — and the answer it would get is the conservative one anyway.
+    static func proseLineLimit(for item: TimelineItem) -> Int? {
+        switch item.kind {
+        case .assistantText, .userTurn:
+            return exceeds(proseCeilingLines, item.body.text) ? proseCeilingLines : nil
+        case .thinking:
+            return 6
+        case .prompt, .unknown, .toolCall, .toolResult:
+            return 14
+        }
+    }
+
+    /// Whether tapping this row leads anywhere — that is, whether the detail screen has
+    /// anything on it the row does not already show.
+    ///
+    /// **A row that shows everything gets no chevron and no tap**, and the alternatives were
+    /// both worse. A chevron onto a screen with the identical words is a promise of more that
+    /// is not there; a row that opens one with no chevron is a hidden gesture, and this app has
+    /// already paid for the mirror of that — "tapping a session does nothing" came back three
+    /// times on the fleet list, and it was true. What the detail screen still offered such a
+    /// row was Copy, so Copy moved onto the row itself (`TimelineRow`'s `CopyAction`).
+    ///
+    /// A tool row always leads somewhere: its card is two clamped slots of machine text, its
+    /// input is frequently a JSON tree, and either half may have been cut at the byte cap.
+    static func opensDetail(_ item: TimelineItem) -> Bool {
+        switch item.kind {
+        case .toolCall, .toolResult:
+            return true
+        default:
+            return proseLineLimit(for: item) != nil
+        }
+    }
+
     // MARK: What a body IS
 
     /// The body as a JSON tree, when drawing it as one is better than drawing the text.

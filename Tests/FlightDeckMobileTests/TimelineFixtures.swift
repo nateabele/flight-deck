@@ -409,6 +409,88 @@ enum TimelineFixtures {
         at: "2026-08-20T03:05:05.173Z"
     )
 
+    /// A real four-sentence answer — bold, inline code, one paragraph — off
+    /// `~/.claude/projects/-Users-nate/ed0a7d6a-…jsonl`. **The median case, and the one the
+    /// clamp was hurting most**: 4 wrapped lines against a 14-line clamp, so nothing was ever
+    /// cut, and the row still carried a chevron into a screen with the identical text on it.
+    static let assistantShortReply = TimelineItem(
+        id: "11980#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                **Found the loop**: `loginwindow` has logged **154,072** "Unable to get PID for context ... status -600" errors in 6 hours (~7/sec), and WindowServer + syspolicyd are each burning ~45% CPU. Let me find when this started and what triggered it.
+                """#),
+        at: "2026-08-06T15:44:07.934Z"
+    )
+
+    /// A real 6,775-character answer with four `##` headings, three horizontal rules, nested
+    /// `###` sections and eleven bold runs — **201 lines** in the row's 42-character column,
+    /// past the 99th percentile of the 7,987 assistant messages on this machine, and 4,067pt
+    /// tall when nothing bounds it: six screenfuls of phone.
+    ///
+    /// **This is the body the ceiling is argued from.** Verbatim from
+    /// `~/.claude/projects/-Users-nate/8261151b-…jsonl`, because a ceiling chosen against
+    /// invented text is a number somebody picked.
+    static let assistantVeryLongAnswer = TimelineItem(
+        id: "12240#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                All four agents are in. Here's the consolidated picture.
+
+                ## What Contio is
+
+                **Contio Inc.** — Boise/Eagle, Idaho. Founder/CEO Aaron Klein (founding CEO of Riskalyze → Nitrogen). ~$5.5M seed closed Dec 2024, ~10 people, public launch Jan 28 2026. Product is **MeetingOS**: a native desktop app that processes meeting audio in real time without a bot joining the call, targeted first at financial advisors. Notably, **Precept is one of their 12 named launch partners** — flagging in case that's the angle here.
+
+                ---
+
+                ## Architecture estimate
+
+                ### Client tier
+                **Tauri** (Rust shell, not Electron), shipping v0.61.0 — still pre-1.0. Universal macOS `.pkg` and Windows x64 installer from `files.contio.ai`. Inside it, a **React + Vite + TypeScript SPA** that appears to be shared across desktop, web, and iOS/Android webviews. Stack from the chunk manifest and bundle: TanStack Query, Radix UI, Tailwind, Zustand, React Router, TipTap, date-fns, lucide.
+
+                Collaboration is the interesting part: **Yjs/Yrs CRDTs** over the **Hocuspocus** wire protocol, against hosted **TipTap Collaboration Cloud**. The `YrsFFI` repo ships **Swift and Kotlin** bindings — so they built one Rust collaboration core and are targeting native mobile with it, not just webviews. Auth is **AWS Cognito** plus a custom passwordless OTP flow layered on top.
+
+                ### Backend tier
+                A **Go monolith, internal codename `rome`**, almost certainly **Gin** — `api.contio.ai` returns an exactly-18-byte `404 page not found`, which is Gin's signature rather than stdlib's 19-byte version. This is corroborated independently by leaked package paths in the OpenAPI schema keys (`rome_api_controllers_external_v1_oauth.*`), which also reveal the internal layout as `controllers/external/{v1,partner}` and confirm specs are swaggo-generated from code.
+
+                The User API and Partner API are **one deployment with two routing surfaces**, not separate services — they share error types and generic `ListResponse` shapes on the same host. Data layer is **Postgres with read replicas**: the health endpoint returns distinct `writer_pool` and `reader_pool` status. The MCP gateway is the one non-Go piece — `mcp.contio.ai` reports `x-powered-by: Express`, so Node.
+
+                They run their **own OAuth2/OIDC provider** (JWKS, authorize/token/introspect/revoke/userinfo, Dynamic Client Registration), which is a meaningful build-vs-buy choice at this size.
+
+                ### Audio / AI tier
+                **Deepgram for ASR**, consumed from Rust via a forked SDK — this is hard evidence, not inference. The speech tier is deliberately split onto **GCP**: `stt.contio.ai` → `rome-glb-prod` behind a Google load balancer fronted by **Caddy**, while everything else is AWS. The status page lists **Transcription A and B** as separate services, suggesting redundancy or dual providers.
+
+                Model hosting per the privacy policy: **AWS Bedrock, Google Vertex, and Azure Foundry**, running **Anthropic (Opus/Sonnet/Haiku), Gemini, and Deepgram**.
+
+                ### Infrastructure
+                **AWS us-east-1 is the primary plane** (account `223021964315`, leaked via a KMS ARN in response headers). ALB + CloudFront + S3 with KMS encryption; bucket `rome-workspace-prod-us-east-1`. **Four full environment tiers** — dev/beta/stage/prod — each with its own dedicated ALB. **Terraform** for IaC, including a hand-rolled custom provider for **Nango**, which brokers all third-party OAuth. Cloudflare for DNS (mostly DNS-only, not proxied). Framer for marketing, MkDocs Material for docs, self-hosted status page.
+
+                SaaS layer, essentially a complete inventory from the app's CSP: **PostHog** (analytics, feature flags, *and* error capture — they use `captureException` instead of Sentry), **Intercom**, **ProductFruits**, **Nango**, **LaunchList over SendGrid**, plus GTM/GA and a full B2B ad-retargeting suite. **No Stripe anywhere**, which fits sales-led billing rather than self-serve.
+
+                ---
+
+                ## Assessment
+
+                **The engineering maturity is well ahead of the company's size and age.** Four environment tiers, IaC with a custom provider, their own OIDC provider with DCR, idempotency keys, per-principal rate limiting, SOC 2 Type II, a hosted MCP server with proper protected-resource metadata, and no exposed source maps — from ~10 people, ~6 months post-launch. That's a small senior team (principal engineers ex-Intuit, ex-Duetto, ex-Kount; no CTO, no job postings anywhere, hiring purely by founder network) making deliberate infrastructure choices rather than defaults.
+
+                **The Partner API is roughly twice the User API** — 124 operations vs 59 — and contains an entire layer the marketing site never mentions: toolkits with versioning and installations, workflow runs and steps, automations, sessions with turns, partner IdP with SSO. Read plainly, the meeting product is the wedge and the actual bet is an embeddable agent-execution platform.
+
+                **Rough edges worth knowing**: specs are **Swagger 2.0** in 2026 (no `oneOf`/`anyOf`; 184 partner schemas will be painful to evolve), pagination is **offset-based** over a mutating corpus — their own docs warn items shift between pages under concurrent writes. Their AWS account ID is exposed on every `app` response, and the full internal topology including codenames is enumerable from certificate transparency. None of these are vulnerabilities, just more surface than intended.
+
+                ---
+
+                ## Confidence
+
+                **Hard evidence** (fetched directly): Go/Gin backend, `rome` codename and internal package layout, Postgres with read replicas, AWS/GCP split, four env tiers, Tauri + React/Vite client, Yjs/Yrs + Hocuspocus + TipTap Cloud, Deepgram via Rust, Nango + Terraform, Cognito, the full SaaS list, all API design details.
+
+                **Inferred but strong**: the Partner-API-as-real-product reading; Transcription A/B as redundancy.
+
+                **Genuinely unresolved**: `phoenix.contio.ai` and `vista.contio.ai` are named production services behind the ALB that return 403 — purpose unknown. I specifically checked the bundle for Arize/Phoenix/OTel strings and found only false positives, so I'm *not* claiming observability tooling. And the **model mix is contradictory**: trade press quoted Klein naming self-hosted Llama and DeepSeek, while the privacy policy names Anthropic and Gemini via Bedrock/Vertex/Foundry. These reconcile if open-weight models do STT/summarization on the GCP tier and commercial APIs do reasoning, but that's a guess — Contio has never published an architecture write-up.
+
+                One notable absence given the SOC 2 Type II claim: **no subprocessor list exists anywhere** — no trust center, no `/subprocessors`, no `/security.txt`. The privacy policy is the only vendor disclosure they've published.
+
+                Want me to turn this into a diagram of the service topology, or dig deeper into any one tier — the Partner API surface being the most substantive remaining target?
+                """#),
+        at: "2026-08-07T22:40:29.136Z"
+    )
+
     static func session(
         title: String = "screen-s5 — session timeline", agent: String = "claude",
         activity: String? = "busy", waitingFor: String? = nil, subagentCount: Int = 2
