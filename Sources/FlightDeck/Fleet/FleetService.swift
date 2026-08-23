@@ -31,6 +31,10 @@ final class FleetService: ObservableObject {
     /// store, and because there is exactly one of it — a request carries its own session id,
     /// so nothing about it is per-connection.
     private let timeline: TimelineService
+    /// Carries out a phone's answer to a blocked dialog. Held here rather than built per
+    /// command for the reason `timeline` is: it holds the store, and there is exactly one of
+    /// it — a command carries its own session id, so nothing about it is per-connection.
+    private let prompts: PromptService
     private(set) var boundPort: NWEndpoint.Port?
     /// The window's own listener, and the port it is on. Both are `nil` whenever no window is
     /// open, which is invariant 2 stated as a field rather than as a comment.
@@ -66,6 +70,7 @@ final class FleetService: ObservableObject {
             return FleetProjection.snapshot(of: store)
         }
         self.timeline = TimelineService(store: store)
+        self.prompts = PromptService(store: store)
         self.serviceName = Self.derivedServiceName(preferences: preferences)
         store.replicator = replicator
         wireHandlers()
@@ -386,6 +391,14 @@ final class FleetService: ObservableObject {
         try await reloadKeys()
     }
 
+    /// Test seam, forwarding to `PromptService.tail` — the same seam `PromptServiceTests`
+    /// substitutes, reached through here because `prompts` is private and a loopback test has
+    /// no other way to put a transcript in front of it. No production caller.
+    var promptTailForTesting: @Sendable (URL, Int) -> [SourceLine] {
+        get { prompts.tail }
+        set { prompts.tail = newValue }
+    }
+
     /// Convenience for the tests and for nothing else — production dials a discovered or
     /// remembered endpoint, never a hard-coded host.
     func loopbackEndpoint() throws -> NWEndpoint {
@@ -447,17 +460,31 @@ final class FleetService: ObservableObject {
             if let code = store.submitPrompt(text, token: token, to: id).errorCode {
                 return .err(cid: cid, code: code)
             }
-        case .answerPrompt:
-            // A placeholder, and it REFUSES rather than acks on purpose: an `ack` means
-            // dispatched, and no intermediate build may claim to have answered a dialog it
-            // never touched. Task 8 replaces this whole arm with the `PromptService` call —
-            // it does not extend it.
-            return .err(cid: cid, code: "unhandled")
+        case .answerPrompt(let id, let token, let call, let answer):
+            // Every refusal is the service's and the store's to make, for the reason `.prompt`
+            // states: they are the only things that know the tab's agent, its status, its
+            // transcript and its screen, and splitting the checks across two files is how they
+            // drift. No validation is repeated here and none should be added — not even the
+            // `sessionExists` the two read marks do, which `PromptService` answers as
+            // `unknown_session` from the source it has to resolve anyway.
+            //
+            // Synchronous, and it must stay synchronous: `onCommand` answers inline, and
+            // `PromptService.answer`'s read is a tail sized for exactly that.
+            if case .failure(let code) = prompts.answer(
+                session: id, call: call, answer: answer, token: token
+            ) {
+                return .err(cid: cid, code: code.code)
+            }
         }
         // `ack` means dispatched, not done. For the two read marks the observable effect is
         // the northbound `session.unread` event the store call just recorded; for a prompt it
-        // is the `.userTurn` the agent writes into its own transcript, which the phone reads
-        // back over the history channel. One rule for both, which is why they share a frame.
+        // is the `.userTurn` the agent writes into its own transcript, and for an answer the
+        // `tool_result` closing the call — both read back over the history channel. One rule
+        // for all four, which is why they share a frame. An answer is dispatched at the
+        // keystroke: `SessionStore.drive` re-reads the screen after the repaint and declines
+        // to press Return on a row that no longer says what was asked for, and that refusal
+        // arrives too late to be a reply. It is recoverable by the person at the keyboard;
+        // a wrong Return would not have been.
         return .ack(cid: cid)
     }
 }
