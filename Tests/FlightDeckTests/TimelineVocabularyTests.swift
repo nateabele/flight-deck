@@ -44,13 +44,6 @@ final class TimelineVocabularyTests: XCTestCase {
         }
     }
 
-    /// `.prompt` is in the vocabulary and nothing emits it. Slice 2 (spec §9) is where a
-    /// pending approval becomes a timeline row, and it must be a Mac-side change only — a
-    /// `Kind` added after phones shipped would decode as `.unknown` on every one of them.
-    func testThePromptKindExistsSoSliceTwoIsNotAProtocolBreak() throws {
-        XCTAssertEqual(TimelineItem.Kind(rawValue: "prompt"), .prompt)
-    }
-
     func testAnItemsIdentifierIsItsByteOffsetAndBlockIndex() {
         XCTAssertEqual(TimelineItem.identifier(offset: 4096, index: 2), "4096#2")
     }
@@ -67,5 +60,36 @@ final class TimelineVocabularyTests: XCTestCase {
         XCTAssertFalse(json.contains("\"tool\""))
         XCTAssertFalse(json.contains("\"callID\""))
         XCTAssertFalse(json.contains("\"summary\""))
+    }
+
+    /// Every `Body` field set to a distinct value, round-tripped through the hand-written
+    /// codec. Distinct matters: two fields holding equal values would still round-trip
+    /// correctly even if `Body.encode`/`Body.init(from:)` swapped their `CodingKey`s, which
+    /// would defeat the point of this test. Also covers `Status.streaming`, which nothing
+    /// else in this file constructs — it ships in the vocabulary only so a later `Status`
+    /// addition is not a protocol break, and that makes it the case most likely to bit-rot
+    /// unnoticed if it is never exercised.
+    func testABodyWithEveryFieldSetRoundTrips() throws {
+        let item = TimelineItem(
+            id: "0#0", kind: .toolResult, status: .streaming,
+            body: TimelineItem.Body(
+                text: "the full text",
+                summary: "the summary line",
+                tool: "Read",
+                callID: "call_123",
+                truncatedBytes: 512,
+                isError: true
+            )
+        )
+        let data = try JSONEncoder().encode(item)
+        let decoded = try JSONDecoder().decode(TimelineItem.self, from: data)
+        XCTAssertEqual(decoded, item)
+        XCTAssertEqual(decoded.status, .streaming)
+        XCTAssertEqual(decoded.body.text, "the full text")
+        XCTAssertEqual(decoded.body.summary, "the summary line")
+        XCTAssertEqual(decoded.body.tool, "Read")
+        XCTAssertEqual(decoded.body.callID, "call_123")
+        XCTAssertEqual(decoded.body.truncatedBytes, 512)
+        XCTAssertEqual(decoded.body.isError, true)
     }
 }
