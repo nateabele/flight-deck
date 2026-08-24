@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// Claude conformance. A thin shell over `ClaudeSession`, which stays the single source of
@@ -29,6 +30,29 @@ struct ClaudeAdapter: AgentAdapter {
     /// `<home>/sessions`, one file per live session, scanned by `SessionStatusWatcher`. It is
     /// where every claude status glyph in the sidebar comes from.
     static let hasStatusRegistry = true
+
+    /// Claude's rename is `/rename <name>` typed at a pty that may be a bare shell, so the
+    /// shell strip is load-bearing here in a way it is nowhere else.
+    nonisolated static func sanitizedTitle(_ raw: String) -> String? {
+        ClaudeSession.sanitizedName(raw)
+    }
+
+    /// What `claude`'s own `/resume` picker shows: the conversation's name when it has one,
+    /// else its first real user message.
+    nonisolated static func title(fromTranscriptAt url: URL) -> String? {
+        ConversationTitle.resolve(transcriptAt: url)
+    }
+
+    nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+        ClaudeTimelineMapper.items(inLine: line, at: offset)
+    }
+
+    /// `<home>/.claude.json` → `oauthAccount.emailAddress` / `organizationName`.
+    nonisolated static let homeMarkerFile = ".claude.json"
+
+    nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
+        AccountDirectory.claudeIdentity(from: data)
+    }
 
     /// Where this account's `projects` directory lives, read on every derivation rather than
     /// captured as a value. It is derived from the home of the account the adapter was built

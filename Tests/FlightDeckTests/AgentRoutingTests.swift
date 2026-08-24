@@ -1,3 +1,4 @@
+import FleetKit
 import XCTest
 @testable import FlightDeck
 
@@ -202,6 +203,39 @@ final class AgentRoutingTests: XCTestCase {
                        "the adapter route must reach the same sanitizer as the sidebar's")
     }
 
+    /// **The behaviour change §4.6 of the audit named, end to end and in both places it
+    /// shows.** Nothing in the suite asserted the old behaviour, so nothing failed when it
+    /// changed — see `AgentTitleTests` for why that is the point.
+    ///
+    /// `thread/name/set` is JSON-RPC: the name is a JSON string field, and no shell, pty or
+    /// quoting step exists anywhere between the sidebar and codex's thread store. So the
+    /// title the user typed is the title codex is given AND the title the sidebar shows, and
+    /// those two agreeing is what stops the next tail of `session_index.jsonl` flicking it
+    /// back.
+    func testRenamingACodexTabKeepsPunctuationClaudeWouldHaveStripped() async throws {
+        let store = makeStore()
+        store.launchFailureReporter = SilentReporter()
+        let t = RenameTransport()
+        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: t)), for: .codex, account: nil)
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { $0() }
+        guard case .success(let id) = await store.createSession(agent: .codex, in: tmp.path) else {
+            return XCTFail("codex tab creation must succeed against a scripted transport")
+        }
+        let namesAfterCreation = t.names.count
+
+        store.rename(id, to: "fix build (part 2)")
+        for _ in 0..<100 where t.names.count == namesAfterCreation { await Task.yield() }
+
+        XCTAssertEqual(t.names.last, "fix build (part 2)",
+                       "thread/name/set touches no shell; stripping is claude's rule, not a "
+                       + "universal one")
+        XCTAssertEqual(store.title(of: id), "fix build (part 2)",
+                       "the sidebar and the thread name must be byte-identical, or the next "
+                       + "tail flicks the title back")
+    }
+
     private func entry(_ conversation: UUID, activity: SessionActivity) -> ClaudeStatusFile.Entry {
         .init(pid: 1, sessionID: conversation, activity: activity, waitingFor: nil,
               startedAt: 1, cwd: tmp.path)
@@ -219,6 +253,19 @@ final class AgentRoutingTests: XCTestCase {
         static let negotiatesIdentity = false
         static let needsRuntimeStart = false
         static let hasStatusRegistry = true
+        nonisolated static func sanitizedTitle(_ raw: String) -> String? {
+            ClaudeAdapter.sanitizedTitle(raw)
+        }
+        nonisolated static func title(fromTranscriptAt url: URL) -> String? {
+            ClaudeAdapter.title(fromTranscriptAt: url)
+        }
+        nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+            ClaudeAdapter.timelineItems(inLine: line, at: offset)
+        }
+        nonisolated static let homeMarkerFile = ClaudeAdapter.homeMarkerFile
+        nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
+            ClaudeAdapter.identity(fromHomeData: data)
+        }
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)

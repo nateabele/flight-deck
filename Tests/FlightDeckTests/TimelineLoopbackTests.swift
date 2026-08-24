@@ -52,6 +52,19 @@ final class TimelineLoopbackTests: XCTestCase {
         static let negotiatesIdentity = false
         static let needsRuntimeStart = false
         static let hasStatusRegistry = true
+        nonisolated static func sanitizedTitle(_ raw: String) -> String? {
+            ClaudeAdapter.sanitizedTitle(raw)
+        }
+        nonisolated static func title(fromTranscriptAt url: URL) -> String? {
+            ClaudeAdapter.title(fromTranscriptAt: url)
+        }
+        nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+            ClaudeAdapter.timelineItems(inLine: line, at: offset)
+        }
+        nonisolated static let homeMarkerFile = ClaudeAdapter.homeMarkerFile
+        nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
+            ClaudeAdapter.identity(fromHomeData: data)
+        }
         let url: URL?
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)

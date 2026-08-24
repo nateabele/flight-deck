@@ -1,3 +1,4 @@
+import FleetKit
 import XCTest
 @testable import FlightDeck
 
@@ -24,6 +25,19 @@ final class CodexStatusRoutingTests: XCTestCase {
         static let negotiatesIdentity = true
         static let needsRuntimeStart = true
         static let hasStatusRegistry = false
+        nonisolated static func sanitizedTitle(_ raw: String) -> String? {
+            CodexAdapter.sanitizedTitle(raw)
+        }
+        nonisolated static func title(fromTranscriptAt url: URL) -> String? {
+            CodexAdapter.title(fromTranscriptAt: url)
+        }
+        nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+            CodexAdapter.timelineItems(inLine: line, at: offset)
+        }
+        nonisolated static let homeMarkerFile = CodexAdapter.homeMarkerFile
+        nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
+            CodexAdapter.identity(fromHomeData: data)
+        }
         let thread: UUID
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
@@ -84,7 +98,7 @@ final class CodexStatusRoutingTests: XCTestCase {
         // Deterministic rather than whatever `NSApp` reports under `xctest`: read state and
         // notification delivery both branch on it.
         store.appIsActive = { false }
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         return store
     }
 

@@ -204,7 +204,7 @@ final class SessionCreationTests: XCTestCase {
     @MainActor
     func testNewSessionTargetsTheLastActiveProjectEvenWhenItIsEmpty() {
         let store = SessionStore(provider: nil, persistence: nil)
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
         store.moveSession(a.id, toProjectAt: URL(fileURLWithPath: "/b", isDirectory: true))
         // /a is now an empty project, /b holds the session and is last-active.
@@ -218,7 +218,7 @@ final class SessionCreationTests: XCTestCase {
     @MainActor
     func testLastActiveProjectFollowsAMovedSelectedSession() {
         let store = SessionStore(provider: nil, persistence: nil)
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
         store.moveSession(a.id, toProjectAt: URL(fileURLWithPath: "/moved", isDirectory: true))
 
@@ -240,7 +240,7 @@ final class SessionCreationTests: XCTestCase {
     @MainActor
     func testOnlyAnEmptyProjectStillCreatesWithoutPrompting() {
         let store = SessionStore(provider: nil, persistence: nil)
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
         store.closeSession(a.id)
         // /a survives as an empty project — a project's lifetime is explicit now, and

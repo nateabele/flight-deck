@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// Codex conformance, driven over `codex app-server` JSON-RPC rather than by typing at a pty.
@@ -59,6 +60,40 @@ struct CodexAdapter: AgentAdapter {
     /// `CodexRuntime` is what turns that into a status. A `claude` registry scan can neither
     /// confirm nor refute a codex thread.
     static let hasStatusRegistry = false
+
+    /// **Trim, control-strip and cap — and NO shell-metacharacter strip, which is a
+    /// deliberate change to shipped behaviour.**
+    ///
+    /// `SessionStore.rename` used to run every agent's title through
+    /// `ClaudeSession.sanitizedName`, whose metacharacter strip exists because claude's
+    /// rename is *typed at a pty that may be a bare shell*. Codex's rename is
+    /// `thread/name/set` over JSON-RPC: no shell, no pty, no quoting, at any point on the
+    /// path. The strip therefore bought nothing and cost the user their punctuation —
+    /// `fix build (part 2)` became `fix build part 2` in codex's own thread list, in
+    /// `session_index.jsonl`, and in the sidebar.
+    ///
+    /// Control characters are still stripped, and that is not the shell rule under another
+    /// name: a newline in a title breaks a sidebar row whatever the channel. See `AgentTitle`.
+    nonisolated static func sanitizedTitle(_ raw: String) -> String? {
+        AgentTitle.sanitized(raw, removing: CharacterSet())
+    }
+
+    /// **`nil`, and that is an answer rather than a gap.** A codex thread's name lives in
+    /// `session_index.jsonl` and reaches the store through `CodexNameWatcher`; the rollout
+    /// carries conversation content, not a name. Returning claude's parser here would hand a
+    /// codex rollout to a claude JSONL parser, which is exactly what the store's default did.
+    nonisolated static func title(fromTranscriptAt url: URL) -> String? { nil }
+
+    nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+        CodexTimelineMapper.items(inRolloutLine: line, at: offset)
+    }
+
+    /// `<home>/auth.json` → the `email` claim of `tokens.id_token`.
+    nonisolated static let homeMarkerFile = "auth.json"
+
+    nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
+        AccountDirectory.codexIdentity(from: data)
+    }
 
     let rpc: CodexRPC
 
