@@ -532,9 +532,7 @@ final class SessionStore: ObservableObject {
     /// A builder rather than a stored literal now that there is one per account, but the
     /// wiring is the point: a bare `ClaudeAdapter()` carries neither this account's
     /// transcripts root — a test would then derive transcript paths under the developer's real
-    /// `~/.claude/projects`, and a second login would read the first login's transcripts —
-    /// nor the route a title claude reports takes back to the tabs following that
-    /// conversation.
+    /// `~/.claude/projects`, and a second login would read the first login's transcripts.
     ///
     /// The account is captured as an id and resolved on every derivation, not baked into a
     /// URL here: `projectsRoot` is a closure precisely so a home that moves (a relocated
@@ -545,14 +543,6 @@ final class SessionStore: ObservableObject {
             projectsRoot: { [weak self] in
                 guard let self else { return ClaudeSession.defaultProjectsRoot }
                 return self.transcriptsRoot(forAccount: account)
-            },
-            injectRename: { [weak self] conversationID, title in
-                // The adapter speaks conversation ids; `pendingRenames` is keyed by tab, and
-                // two tabs can follow one conversation. See `tabs(following:)`.
-                guard let self else { return }
-                for tab in self.tabs(following: conversationID) {
-                    self.injectPendingRename(tab, title)
-                }
             }
         )
     }
@@ -1281,8 +1271,9 @@ final class SessionStore: ObservableObject {
         // InputBar, and this tab is a bare shell that has not even started the agent yet. The
         // registry scan retries it until the agent is up, or the deadline passes.
         //
-        // Deliberately NOT routed through `ClaudeAdapter.injectRename`, which is what this
-        // used to do: that is the *rename* channel, and it typed `/rename /login` at the tab.
+        // Deliberately NOT routed through claude's rename channel, which is what this used
+        // to do via `ClaudeAdapter.injectRename` (deleted as dead code once nothing reached
+        // it): that channel typed `/rename /login` at the tab, and login is not a rename.
         if let inject = invocation.inject {
             pendingPrompts[created.id] = DeferredPrompt(
                 text: inject, deadline: now().addingTimeInterval(Self.resumePromptWindow)
@@ -2607,8 +2598,8 @@ final class SessionStore: ObservableObject {
     }
 
     /// Test seam: every tab's id, sidebar order — `repos.flatMap(\.sessions)` is the same
-    /// walk the sidebar does. (Not the same walk `tabs(following:)` does: that one scans
-    /// `attachments`, a different collection, which is the whole subject of this file.)
+    /// walk the sidebar does. (Not a walk over `attachments`, a different collection, which
+    /// is the whole subject of this file.)
     var allSessionIDsForTesting: [UUID] { repos.flatMap(\.sessions).map(\.id) }
 
     /// Test seam: which tabs are currently attached to an agent runtime. `attachments`
@@ -2661,9 +2652,12 @@ final class SessionStore: ObservableObject {
         let session = repos[at.repo].sessions[at.session]
         switch session.agent {
         case .claude:
-            // Byte-identical to what every tab did before this dispatch existed. Not routed
-            // through `ClaudeAdapter.rename` only because that route is `async`; it lands on
-            // this same method, and `AgentRoutingTests` covers that it does.
+            // Inline, not through `adapter.rename`, and this is the one place an agent
+            // branch is deliberate rather than incidental: `AgentAdapter.rename` is `async`,
+            // so dispatching claude through it would push `injectPendingRename` into a later
+            // run-loop turn — and the injection contract is that `inject` decides *now*
+            // whether the bar is busy, deferring only if it is. Codex has no such
+            // constraint: its rename is a request and nothing waits on it.
             injectPendingRename(id, name)
         case .codex:
             let adapter = adapter(for: instance(for: session))
@@ -2675,11 +2669,10 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// Queues a rename for `claude` and tries it at once. The one route into `pendingRenames`
-    /// — `SessionStore.rename` above and `ClaudeAdapter.rename` (which is how an agent that
-    /// owns its own conversation name reaches the same behaviour) both land here, so
-    /// `inject`'s `injecting` guard stays the single place a second injection into a busy tab
-    /// can be refused.
+    /// Queues a rename for `claude` and tries it at once. `SessionStore.rename` above is the
+    /// only route into `pendingRenames` — `ClaudeAdapter.rename` never reaches here; see its
+    /// doc comment for why claude's leg stays inline instead — so `inject`'s `injecting`
+    /// guard stays the single place a second injection into a busy tab can be refused.
     ///
     /// Sanitized *here*, not only in `rename`: what this queues becomes text typed into a
     /// pty, and an adapter's caller arrives with whatever its agent was handed. `rename` runs
@@ -3423,13 +3416,6 @@ final class SessionStore: ObservableObject {
     private func stopWatching(_ tabID: UUID) {
         guard let attachment = attachments.removeValue(forKey: tabID) else { return }
         runtime(for: attachment.instance).detach(attachment.token)
-    }
-
-    /// Which tabs are currently attached to a conversation. Usually one.
-    private func tabs(following conversationID: UUID) -> [UUID] {
-        attachments
-            .filter { $0.value.binding.conversationID == conversationID }
-            .map(\.key)
     }
 
     /// One place where an agent's report becomes tab state, whichever agent reported it.

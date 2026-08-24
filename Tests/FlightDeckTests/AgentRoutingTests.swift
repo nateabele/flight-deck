@@ -178,8 +178,9 @@ final class AgentRoutingTests: XCTestCase {
 
     /// `SessionSidebar` calls `store.rename` for every tab regardless of agent, so this is
     /// the route production actually takes — unlike
-    /// `testTheAdaptersRenameTypesThroughTheStoresOwnInjectionRoute` below, which calls the
-    /// adapter directly and therefore could not have caught a store that never dispatched.
+    /// `testClaudeRenameDispatchesInlineAndNeverReachesTheAdapter` below, which installs a
+    /// recording stand-in for `.claude`'s adapter and therefore could not have caught a
+    /// store that never dispatched.
     func testRenamingACodexTabRenamesTheCodexThread() async throws {
         let store = makeStore()
         store.launchFailureReporter = SilentReporter()
@@ -232,12 +233,18 @@ final class AgentRoutingTests: XCTestCase {
         XCTAssertTrue(t.methods.isEmpty, "claude's rename must not reach codex's app-server")
     }
 
-    /// `AgentAdapter.rename` is how an agent that owns its own conversation name gets asked
-    /// to change it. For claude that is still `/rename` typed into the pty, so it must land
-    /// on the *same* route `SessionStore.rename` uses — one `pendingRenames` entry behind one
-    /// `injecting` guard, not a second injector wired in beside it.
-    func testTheAdaptersRenameTypesThroughTheStoresOwnInjectionRoute() async throws {
+    /// Was `testTheAdaptersRenameTypesThroughTheStoresOwnInjectionRoute`, which called
+    /// `adapter.rename` directly to prove claude's rename lands on the same injection route
+    /// as the sidebar's. That route no longer exists to prove: `ClaudeAdapter.rename` is now
+    /// unreachable in production (`SessionStore.rename` dispatches `.claude` inline) and
+    /// `assertionFailure`s if a caller ever reaches it, so a test cannot call it directly
+    /// without crashing the run. This proves the same property the other way around: install
+    /// a recording stand-in for `.claude`'s adapter and confirm `store.rename` never asks it
+    /// to rename anything, while still typing `/rename` into the pty exactly as before.
+    func testClaudeRenameDispatchesInlineAndNeverReachesTheAdapter() {
         let store = makeStore()
+        let recorder = RenameCallRecorder()
+        store.overrideAdapter(RecordingRenameAdapter(recorder: recorder), for: .claude, account: nil)
         let spy = SpyInjector()
         store.injectorOverride = spy
         store.injectionSettle = { $0() }
@@ -245,13 +252,13 @@ final class AgentRoutingTests: XCTestCase {
         store.applyRegistry([1: entry(session.pinnedConversationID, activity: .idle)])
         spy.events.removeAll()
 
-        let adapter = store.adapter(for: .claude, account: nil)
-        // Deliberately unsanitized: the adapter route is the one an agent's own caller
-        // reaches, and what it queues becomes text typed into a pty.
-        try await adapter.rename(adapter.binding(for: session), to: "  from\nthe adapter  ")
+        store.rename(session.id, to: "renamed")
 
-        XCTAssertEqual(spy.events, [.killLine, .text("/rename fromthe adapter"), .ret],
-                       "the adapter route must reach the same sanitizer as the sidebar's")
+        XCTAssertEqual(spy.events, [.killLine, .text("/rename renamed"), .ret],
+                       "claude renames dispatch inline through the store's own injector")
+        XCTAssertTrue(recorder.calls.isEmpty,
+                       "claude's rename must never reach `adapter.rename` — see "
+                       + "`ClaudeAdapter.rename`'s doc comment for why")
     }
 
     /// Guard, not a reproduction. The 2026-08-23 fan-out cannot be reproduced from outside —
@@ -337,6 +344,41 @@ final class AgentRoutingTests: XCTestCase {
         func launchCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "stub-launch" }
         func resumeCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "stub-resume" }
         func rename(_: AgentBinding, to: String) async throws {}
+        func loginInvocation(for account: AgentAccount) -> LoginInvocation { LoginInvocation(command: "", inject: nil) }
+    }
+
+    /// What `RecordingRenameAdapter` books every `rename` call into. A separate reference
+    /// type because `AgentAdapter` conformers here are structs, and a struct's own copy could
+    /// not be read back after `overrideAdapter` took it by value.
+    private final class RenameCallRecorder {
+        private(set) var calls: [(AgentBinding, String)] = []
+        func record(_ binding: AgentBinding, _ title: String) { calls.append((binding, title)) }
+    }
+
+    /// A `ClaudeAdapter` stand-in for exactly one job: proving `SessionStore.rename` never
+    /// calls `adapter.rename` for claude. The real `ClaudeAdapter.rename` now
+    /// `assertionFailure`s the moment anything reaches it, so nothing in this suite may call
+    /// it directly — this records the call instead of crashing, so a test can assert on
+    /// whether one arrived.
+    private struct RecordingRenameAdapter: AgentAdapter {
+        static let id: AgentID = .claude
+        let recorder: RenameCallRecorder
+
+        func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
+            binding(for: session)
+        }
+
+        func binding(for session: Session) -> AgentBinding {
+            AgentBinding(conversationID: session.pinnedConversationID, transcriptURL: nil)
+        }
+
+        func location(for session: Session) -> AgentLocation {
+            AgentLocation(workingDirectory: session.transcriptDirectory, binding: binding(for: session))
+        }
+
+        func launchCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
+        func resumeCommand(_: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
+        func rename(_ binding: AgentBinding, to title: String) async throws { recorder.record(binding, title) }
         func loginInvocation(for account: AgentAccount) -> LoginInvocation { LoginInvocation(command: "", inject: nil) }
     }
 

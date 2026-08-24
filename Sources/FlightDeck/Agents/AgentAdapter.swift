@@ -51,8 +51,9 @@ protocol AgentAdapter {
     /// hand back a *different* conversation. The caller re-pins when it does.
     func rebind(for session: Session, options: AgentOptions) async throws -> AgentBinding
 
-    /// Renames the agent's own conversation. Claude types `/rename` into the pty; codex
-    /// sends a request. Throwing is legal — the caller keeps the local title either way.
+    /// Renames the agent's own conversation. Codex sends a request; claude's own leg never
+    /// reaches this method at all — see `ClaudeAdapter.rename`'s doc comment for why. Throwing
+    /// is legal — the caller keeps the local title either way.
     func rename(_ binding: AgentBinding, to title: String) async throws
 
     /// The environment that binds a process to this account. Claude answers `CLAUDE_CONFIG_DIR`,
