@@ -162,6 +162,7 @@ final class SessionStore: ObservableObject {
     private struct TabAttachment {
         let instance: AgentInstance
         let binding: AgentBinding
+        let token: AttachmentToken
     }
 
     /// One agent attachment per tab, torn down with the tab. Replaces the per-session
@@ -2605,6 +2606,10 @@ final class SessionStore: ObservableObject {
         return repos[at.repo].sessions[at.session].pinnedConversationID
     }
 
+    /// Test seam: every tab's id, sidebar order. `repos.flatMap(\.sessions)` is the same
+    /// walk the sidebar and `tabs(following:)` both do.
+    var allSessionIDsForTesting: [UUID] { repos.flatMap(\.sessions).map(\.id) }
+
     /// Test seam: which tabs are currently attached to an agent runtime. `attachments`
     /// itself stays private; this exposes just enough to assert a closed tab's late `repin`
     /// completion did not resurrect one.
@@ -3402,30 +3407,21 @@ final class SessionStore: ObservableObject {
         // comes from. A no-op for every account that already has one, and for codex, whose
         // tabs have no registry behind them at all.
         if instance.agent == .claude { startStatusWatching(account: instance.account) }
-        // Recorded before the attach, because the fan-out closure below reads it.
-        attachments[tabID] = TabAttachment(instance: instance, binding: binding)
-        runtime(for: instance).attach(binding) { [weak self] event in
-            guard let self else { return }
-            // Fanned out here rather than in the runtime because a runtime keys its one
-            // source by conversation, and two tabs can follow the same conversation — a user
-            // resuming it twice, which `conflictedSessionIDs` already flags. Both tabs used
-            // to hold their own watcher on that one transcript and both used to rename; this
-            // is what keeps that true with a single attachment behind them.
-            for tab in self.tabs(following: binding.conversationID) {
-                self.apply(event, to: tab)
-            }
+        // The token is the routing identity: the closure below names its tab directly, so
+        // nothing scans `attachments` to decide who an event belongs to. Two tabs following
+        // one conversation are two subscribers on one source inside the runtime, which is
+        // where that multiplexing now lives.
+        let token = runtime(for: instance).attach(binding, for: tabID) { [weak self] event in
+            self?.apply(event, to: tabID)
         }
+        attachments[tabID] = TabAttachment(instance: instance, binding: binding, token: token)
     }
 
-    /// Drops a tab's attachment, and the runtime's only when this was the last tab on it.
-    ///
-    /// That guard is the other half of the fan-out above: the runtime is keyed by
-    /// conversation, so detaching for one of two tabs sharing one would silently stop the
-    /// other tab's observation too.
+    /// Drops a tab's subscription. The runtime tears its source down when the last
+    /// subscriber leaves, so the store no longer has to ask whether anyone else is following.
     private func stopWatching(_ tabID: UUID) {
         guard let attachment = attachments.removeValue(forKey: tabID) else { return }
-        guard tabs(following: attachment.binding.conversationID).isEmpty else { return }
-        runtime(for: attachment.instance).detach(attachment.binding)
+        runtime(for: attachment.instance).detach(attachment.token)
     }
 
     /// Which tabs are currently attached to a conversation. Usually one.
