@@ -55,9 +55,7 @@ struct ClaudeAdapter: AgentAdapter {
     }
 
     func resumeCommand(_ binding: AgentBinding, _ session: Session, _ options: AgentOptions) -> String {
-        ClaudeSession.resumeCommand(
-            sessionID: binding.conversationID, title: session.title, flags: flags(options)
-        )
+        ClaudeSession.resumeCommand(sessionID: binding.conversationID, flags: flags(options))
     }
 
     func rename(_ binding: AgentBinding, to title: String) async throws {
