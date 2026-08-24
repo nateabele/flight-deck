@@ -64,6 +64,25 @@ protocol AgentAdapter {
     /// No default: there is no generically-correct answer, and a guessed one would silently
     /// ship a wrong login command for a future agent. Every conformer states its own.
     func loginInvocation(for account: AgentAccount) -> LoginInvocation
+
+    /// **Whether keystrokes may be sent to this agent's live terminal at all.**
+    ///
+    /// One capability, not three, because the three things `SessionStore` does to a running
+    /// TUI are one channel: a message typed into the input box and submitted
+    /// (`submitPrompt`), `/rename <name>` typed into that same box (`flushPendingRename`),
+    /// and Escape / arrows / Return driving a dialog (`answerPrompt`). All of them are text
+    /// at a pty whose screen grammar this build has to be able to read, and an agent whose
+    /// screen it cannot read is refused all three for the same reason.
+    ///
+    /// **Static rather than an instance member, and that is load-bearing.**
+    /// `SessionStore.adapter(for:)` answers codex out of `makeCodexStackIfNeeded`, so asking
+    /// an instance would memoize a stack and spin up a runtime just to ask a question — and
+    /// the first caller is `restore`, which must be able to ask about a codex tab before it
+    /// has built anything for it. A capability is a property of the agent, not of one
+    /// account's live stack.
+    ///
+    /// Read through `AgentID.hasTextChannel` below, which is what the store consults.
+    static var hasTextChannel: Bool { get }
 }
 
 extension AgentAdapter {
@@ -80,6 +99,25 @@ extension AgentAdapter {
     /// an agent that needs more can still override.
     func environment(for account: AgentAccount) -> [String: String] {
         [account.agent.homeEnvironmentKey: account.home.path]
+    }
+}
+
+/// The capability questions the store asks about an agent it is holding by name.
+///
+/// A switch rather than a stored table, and a construction table rather than a policy: the
+/// *answers* live on the adapters, which is what stops "can this be typed into" from being
+/// re-decided at each call site, and the compiler makes a third agent state its own rather
+/// than inherit claude's by default.
+@MainActor
+extension AgentID {
+    /// See `AgentAdapter.hasTextChannel`. Consulted at four sites in `SessionStore` —
+    /// `restore`'s auto-resume gate, `inject`, `submitPrompt` and `answerPrompt` — and by
+    /// `PromptService`, so those five cannot come to different conclusions about one agent.
+    var hasTextChannel: Bool {
+        switch self {
+        case .claude: ClaudeAdapter.hasTextChannel
+        case .codex: CodexAdapter.hasTextChannel
+        }
     }
 }
 

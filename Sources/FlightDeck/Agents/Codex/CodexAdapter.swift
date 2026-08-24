@@ -9,6 +9,38 @@ import Foundation
 struct CodexAdapter: AgentAdapter {
     static let id: AgentID = .codex
 
+    /// **Not yet — and this is a capability answer, not a permanent verdict.** Whoever makes
+    /// codex drivable changes this one line and implements what it promises; nothing else in
+    /// `SessionStore` or `PromptService` re-decides it by name.
+    ///
+    /// Two halves, and they no longer have the same status:
+    ///
+    /// - **Typing a turn is foreclosed on the app-server route, permanently.** A codex tab is
+    ///   a `codex resume <id>` TUI holding the thread's writer lock, and `prepare`'s own probe
+    ///   recorded the answer: `thread/resume failed: thread <id> already has an active writer
+    ///   (code -32600)`. Metadata survives that lock — which is why `thread/name/set` renames
+    ///   work — but a turn does not.
+    /// - **Typing at the pty is unbuilt, not impossible.** A capture against codex-cli 0.148.0
+    ///   settles what the shipped refusal assumed: codex's input marker is `›` (U+203A) and
+    ///   claude's is `❯` (U+276F), and `InputBar.read` keys on `❯` as the first
+    ///   character — so it matches *nothing at all* on a codex screen. The near-miss
+    ///   `SessionStore.rename` records was never "InputBar found codex's box"; it was
+    ///   "InputBar keys on a glyph a bare shell prompt also draws" — a risk about the shell,
+    ///   and unchanged. What is still missing is a reader that accepts codex's composer and
+    ///   rejects a shell prompt, and an answer to `inject`'s draft dance: Ctrl-Y restores
+    ///   only because Claude Code keeps a deleted-text ring, and codex has not been shown to.
+    ///
+    /// The dialog half is the closer of the two. Codex's approval list is nearer
+    /// `ChoiceDialog`'s model than claude's own — contiguous numbering, one marker on the
+    /// focused row, blank-line termination, a stable footer, and an echoed prompt that carries
+    /// the marker with no number — so marker-and-number is the right defence there too. What
+    /// does NOT transfer is the row ordering: codex's row 1 is a durable grant (`Yes, and
+    /// don't ask again for commands that start with …`) and row 2 is deny, so "the first
+    /// row, and only ever the first row" is exactly as load-bearing for codex as
+    /// `SessionStore.answerPrompt` says it is for claude, and must be proved from a capture
+    /// rather than inherited.
+    static let hasTextChannel = false
+
     let rpc: CodexRPC
 
     /// Deadline for `read`, in seconds. `CodexRPC.request` has none of its own — only the

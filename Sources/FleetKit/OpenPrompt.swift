@@ -129,8 +129,26 @@ public enum OpenPrompt: Equatable, Sendable {
     /// the session ever leaving `waiting`. A cache of "what was last served" would still match
     /// in that second case; a re-derivation cannot.
     ///
-    /// Two conditions, and both are necessary:
+    /// Three conditions, and all are necessary:
     ///
+    /// - **An agent whose dialogs a Mac can drive.** Everything this type produces is an
+    ///   *offer*: Allow and Deny, or an option list, drawn from claude's dialog grammar and
+    ///   answered by keystrokes at claude's screen. A card for an agent nothing can answer is
+    ///   an offer that cannot be honoured — the tap comes back `unsupported_agent` — and
+    ///   drawing one is worse than drawing none, so an agent with no known dialog is blocked
+    ///   on nothing as far as this type is concerned.
+    ///
+    ///   A `String` compared against a literal, exactly as `WireSession.subagentSummary` is
+    ///   and for the same reason: `agent` is a bare `String` so an agent this build has never
+    ///   heard of degrades to "renders without one" rather than taking the screen down, and
+    ///   inventing a dialog for it would be the same mistake as inventing a count. **Add an
+    ///   agent to this list when — and only when — something can actually answer for it.**
+    ///
+    ///   This is presentation only. The refusal that protects a terminal is
+    ///   `SessionStore.answerPrompt`'s, over on the Mac, and it is not weakened by anything
+    ///   decided here. A codex approval list is closer to `ChoiceDialog`'s model than claude's
+    ///   own is, so this is a capability that may well be earned; what it needs first is a
+    ///   Mac that can drive it, not a card that says it can.
     /// - **`activity == "waiting"`.** An unanswered call on an idle or busy session is a call
     ///   whose result has not been read yet, which is the ordinary state of any feed a beat
     ///   behind the file.
@@ -140,7 +158,13 @@ public enum OpenPrompt: Equatable, Sendable {
     /// For `AskUserQuestion` the pair is exact, because that tool's *execution is the human
     /// answering*. For every other tool it means "approving or running", and `waiting` is what
     /// separates the two.
-    public static func find(in items: [TimelineItem], activity: String?) -> OpenPrompt? {
+    ///
+    /// `agent` is required rather than defaulted, so no caller can derive an open prompt
+    /// without saying whose it is.
+    public static func find(
+        in items: [TimelineItem], agent: String?, activity: String?
+    ) -> OpenPrompt? {
+        guard agent == "claude" else { return nil }
         guard activity == "waiting" else { return nil }
 
         // Built from the WHOLE feed first. A merged feed can hold a result above its own call

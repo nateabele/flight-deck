@@ -49,14 +49,17 @@ final class PromptService {
 
     /// Answer the dialog `session` is blocked on, if `call` still names it.
     ///
-    /// Two refusals before anything is typed. `not_waiting` — nothing is blocked, so there is
-    /// nothing to answer and a keystroke would land in the input bar. `prompt_changed` — the
+    /// Three refusals before anything is typed. `not_waiting` — nothing is blocked, so there
+    /// is nothing to answer and a keystroke would land in the input bar. `unsupported_agent`
+    /// — this build cannot type into that agent's terminal at all. `prompt_changed` — the
     /// newest unanswered call is not the one named, which covers both the user answering in
     /// the terminal and the agent having moved to its next dialog.
     ///
-    /// Everything below this — the agent, the screen, the shape of the answer — is
+    /// Everything below this — the screen, the shape of the answer — is
     /// `SessionStore.answerPrompt`'s to refuse, and its code is forwarded verbatim. Splitting
-    /// a check across two files is how the two drift.
+    /// a check across two files is how the two drift, which is why the agent refusal here is
+    /// `AgentAdapter.hasTextChannel` — the *same question* the store asks — and not a second
+    /// name check that could answer differently.
     func answer(
         session: UUID, call: String, answer: PromptAnswer, token: UUID
     ) -> Result<Void, TimelineErrorCode> {
@@ -72,7 +75,28 @@ final class PromptService {
         let activity = store.status(for: session)?.activity
         guard activity == .waiting else { return .failure("not_waiting") }
 
-        guard case .file(.claude, let url) = source else { return .failure("prompt_changed") }
+        // **Two facts that were one line for too long.** This used to read `guard case
+        // .file(.claude, let url) = source else { return .failure("prompt_changed") }`, so a
+        // codex tab — which has a perfectly real `.file(.codex, url)` — was told
+        // `prompt_changed`, which the phone renders as "Your Mac has moved on from this."
+        // That is untrue, it reads as transient, and it invites a retry that can never
+        // succeed: the exact reasoning `submitPrompt` gives for putting its agent test before
+        // its status test.
+        //
+        // Asked of the agent rather than of the source's shape, so a tab with no transcript
+        // is not quietly exempted from the question — `.noTranscript` names no agent, and it
+        // is the shape a codex sign-in tab has.
+        guard store.agent(of: session)?.hasTextChannel == true else {
+            return .failure("unsupported_agent")
+        }
+        // Whatever is left is a tab this Mac can drive but has nothing to read: no transcript
+        // at all. `prompt_changed` is right for it, and is the only thing that code now means.
+        //
+        // `ClaudeOpenCall.find` below stays claude's transcript grammar, and `hasTextChannel`
+        // is claude's alone today, so the two agree by construction. An agent that gains a
+        // text channel gains its own open-call derivation here with it — that guard is what
+        // makes it a decision rather than a silent inheritance.
+        guard case .file(_, let url) = source else { return .failure("prompt_changed") }
         let lines = tail(url, Self.tailRecords)
         // **The comparison this whole service exists for.** `find` says what the terminal is
         // blocked on now; `call` says what the phone was showing when a thumb came down. They

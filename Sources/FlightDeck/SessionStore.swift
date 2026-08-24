@@ -1766,7 +1766,19 @@ final class SessionStore: ObservableObject {
 
             // `!orphaned`: offering to continue a tab that cannot be launched at all would
             // put the wrong-login resume one click behind a prompt the app raised itself.
-            if autoResume, !orphaned,
+            //
+            // `hasTextChannel`: this queue ends at `inject`, which types into a live TUI, so a
+            // tab whose terminal this build cannot read must never get an entry in it. That is
+            // the same failure `rename` records as the near-miss which justifies the codex
+            // caution everywhere else — text queued against a pty, retried every registry
+            // tick, waiting to match something and paste itself into a live session — and this
+            // path simply predates the caution. It is reachable, not theoretical: codex emits
+            // `.busy` on `task_started` and `.idle` on `task_complete`, and the 120-second
+            // window is driven by the claude registry tick.
+            //
+            // After `!orphaned` on purpose: the ordering costs an orphaned codex tab nothing,
+            // and it keeps this gate from being the thing that first asks about an agent.
+            if autoResume, !orphaned, session.agent.hasTextChannel,
                let activity = entry.activity.flatMap(SessionActivity.init(rawValue:)),
                Self.resumableActivities.contains(activity) {
                 pendingPrompts[entry.id] = DeferredPrompt(
@@ -2590,6 +2602,21 @@ final class SessionStore: ObservableObject {
     /// driver. There is no production caller and there must not be one.
     func holdInjectionForTesting(_ id: UUID) { injecting.insert(id) }
 
+    /// Seeds the deferred-prompt queue directly, in the same charter as
+    /// `holdInjectionForTesting`: no production caller, and there must not be one.
+    ///
+    /// It exists because `restore`'s gate now stops the production path from ever queuing for
+    /// an agent with no text channel, and `inject`'s own refusal has to be provable *on its
+    /// own*. A test that could only reach the injector through that queue would be green
+    /// because of the gate above it rather than because of the guard it names — and the two
+    /// are the difference between "nothing was queued" and "nothing was typed", which is what
+    /// this bug needs asserted separately.
+    func queuePendingPromptForTesting(_ text: String, for id: UUID) {
+        pendingPrompts[id] = DeferredPrompt(
+            text: text, deadline: now().addingTimeInterval(Self.resumePromptWindow)
+        )
+    }
+
     /// Test seam, in the style of `flushPendingResumePromptsForTesting`. The registry tick is
     /// the production driver, and a test that wants a second pass without fabricating another
     /// registry scan says so here.
@@ -2662,6 +2689,19 @@ final class SessionStore: ObservableObject {
     func title(of id: UUID) -> String? {
         guard let at = locate(id) else { return nil }
         return repos[at.repo].sessions[at.session].title
+    }
+
+    /// Which agent a tab runs, for a caller that has to ask a *capability* about it — today
+    /// `PromptService`, so its refusal can be `AgentAdapter.hasTextChannel` rather than a
+    /// second name check of its own. `nil` for a tab that is gone, which every caller already
+    /// has to handle.
+    ///
+    /// Deliberately not derived from `timelineSource(of:)`: that answers `.noTranscript`
+    /// without naming an agent, so a caller reading the agent off it would silently lose the
+    /// question for exactly the tabs least able to answer it.
+    func agent(of id: UUID) -> AgentID? {
+        guard let at = locate(id) else { return nil }
+        return repos[at.repo].sessions[at.session].agent
     }
 
     /// Sidebar → the agent. Updates the title immediately, then tells the agent, by whatever
@@ -2825,21 +2865,19 @@ final class SessionStore: ObservableObject {
 
     /// A client asked for text to be typed into a live agent and submitted.
     ///
-    /// **claude only, and the refusal for codex is a finding rather than a gap.** Claude's
-    /// route is the one `rename` already takes: type into the pty through `inject`, the
-    /// single funnel where an idle status, a readable one-row `InputBar` and the
-    /// kill-and-yank draft dance are all decided. Codex has neither half of it. Its tab is a
-    /// `codex resume <id>` TUI holding the thread's writer lock, so the app-server route that
-    /// carries its rename cannot start a turn — `CodexAdapter.prepare` documents the exact
-    /// refusal, `thread <id> already has an active writer (code -32600)`. And the pty route
-    /// has no input box to read: `InputBar.read` locks onto the last line starting `❯`, a
-    /// glyph a plain shell prompt also draws, which is precisely how a queued `/rename` for a
-    /// codex tab would have pasted itself into a live session — see `rename`, which is the
-    /// reason that dispatch exists at all. Guessing at a second TUI's input box with the
-    /// user's own words is a worse version of a bug this codebase has already paid for.
+    /// **Only an agent with a text channel, and that question is asked of the agent rather
+    /// than re-decided here.** `AgentAdapter.hasTextChannel` holds the refusal and its
+    /// evidence; this is one of the five places that consult it — `answerPrompt`, `inject`,
+    /// `restore`'s auto-resume gate and `PromptService` are the others — so no two of them
+    /// can come to different conclusions about one agent. Claude's route is the one `rename`
+    /// already takes: type into the pty through `inject`, the single funnel where an idle
+    /// status, a readable one-row `InputBar` and the kill-and-yank draft dance are all
+    /// decided. Guessing at a second TUI's input box with the user's own words is a worse
+    /// version of a bug this codebase has already paid for — see `rename`, which is the
+    /// reason that dispatch exists at all.
     ///
-    /// **The order of the checks is load-bearing twice.** The agent test comes before the
-    /// status test, so a codex tab is told `unsupportedAgent` — never on this tab — rather
+    /// **The order of the checks is load-bearing twice.** The capability test comes before
+    /// the status test, so a codex tab is told `unsupportedAgent` — never on this tab — rather
     /// than `notRunning`, which would invite a retry that can never succeed. And the token
     /// test comes before the text is validated, so a retry of something already accepted is
     /// idempotent even if the two sends disagreed about the text; they cannot, since a token
@@ -2852,7 +2890,7 @@ final class SessionStore: ObservableObject {
     @discardableResult
     func submitPrompt(_ raw: String, token: UUID, to id: UUID) -> PromptDispatch {
         guard let at = locate(id) else { return .unknownSession }
-        guard repos[at.repo].sessions[at.session].agent == .claude else {
+        guard repos[at.repo].sessions[at.session].agent.hasTextChannel else {
             return .unsupportedAgent
         }
         if acceptedPromptTokens[id, default: []].contains(token) { return .duplicate }
@@ -3008,11 +3046,13 @@ final class SessionStore: ObservableObject {
     /// derivation by the caller), an intent, and a token. Nothing a phone sends becomes a label
     /// matched on screen. That is the difference between a remote control and a remote keyboard.
     ///
-    /// **The order of the checks is load-bearing twice**, as `submitPrompt`'s is. The agent
-    /// test precedes the status test, so a codex tab that happens to be `waiting` is told
-    /// `unsupportedAgent` — never on this tab — rather than being let through to a terminal
-    /// whose dialogs this build has never read. And the token test precedes anything being
-    /// typed, so a retry types nothing even if the screen has moved on.
+    /// **The order of the checks is load-bearing twice**, as `submitPrompt`'s is. The
+    /// capability test — `AgentAdapter.hasTextChannel`, the same question `submitPrompt`
+    /// asks, and driving a dialog is the same channel as typing into one — precedes the
+    /// status test, so a codex tab that happens to be `waiting` is told `unsupportedAgent`
+    /// — never on this tab — rather than being let through to a terminal whose dialogs this
+    /// build has never read. And the token test precedes anything being typed, so a retry
+    /// types nothing even if the screen has moved on.
     ///
     /// Changes no fleet state and emits no `FleetEvent`: what the phone answered becomes
     /// visible through the status the agent writes and the transcript it appends.
@@ -3021,7 +3061,7 @@ final class SessionStore: ObservableObject {
         _ open: OpenPrompt, with answer: PromptAnswer, in id: UUID, token: UUID
     ) -> AnswerDispatch {
         guard let at = locate(id) else { return .unknownSession }
-        guard repos[at.repo].sessions[at.session].agent == .claude else {
+        guard repos[at.repo].sessions[at.session].agent.hasTextChannel else {
             return .unsupportedAgent
         }
         if answeredPromptTokens[id, default: []].contains(token) { return .duplicate }
@@ -3174,6 +3214,20 @@ final class SessionStore: ObservableObject {
     ///
     /// The gates, and why each one:
     ///
+    /// - **An agent with a text channel only.** Everything below this line is *claude's*
+    ///   text channel — `InputBar`'s one-row box, and a kill-and-yank dance that works only
+    ///   because Claude Code keeps a deleted-text ring — and it is reached from callers that
+    ///   carry no agent at all: `flushPendingPrompts` drains a queue seeded by `restore`, and
+    ///   `flushPendingRename` drains one seeded by a keystroke. This is the single funnel
+    ///   both pass through, so it is the one place that can refuse a terminal this build
+    ///   cannot read, and `AgentAdapter.hasTextChannel` is the question it asks.
+    ///
+    ///   **Widening this back out is not the cautious move.** Nothing codex has goes through
+    ///   here: `sendToShell` types resume commands and `initialInput` directly at the pty and
+    ///   never touches this funnel, and `CodexAdapter.loginInvocation` has `inject: nil`, so
+    ///   no codex sign-in text is ever queued either. What passes through today is claude's
+    ///   `/login`, claude's `/rename`, a restore's "Keep going" and a phone's message — all
+    ///   of them claude's, all of them typed into a box only claude's grammar can find.
     /// - **Idle only.** While `busy` the text queues behind the running turn; while
     ///   `waiting` a Return answers a permission prompt or dialog instead of submitting;
     ///   `shell` means no `claude` is running at all, so the text would hit a bare shell.
@@ -3201,7 +3255,8 @@ final class SessionStore: ObservableObject {
         stillWanted: @escaping @MainActor () -> Bool,
         onSent: @escaping @MainActor () -> Void
     ) -> Bool {
-        guard statuses[id]?.activity == .idle,
+        guard session(for: id)?.agent.hasTextChannel == true,
+              statuses[id]?.activity == .idle,
               let injector = injector(for: id),
               let viewport = injector.readViewport(),
               let bar = InputBar.read(fromViewport: viewport),
@@ -3258,6 +3313,12 @@ final class SessionStore: ObservableObject {
     /// Driven by the registry scan because a queued prompt usually waits on an agent that has
     /// not finished booting — which is not a status change, so gating the retry on one would
     /// strand it.
+    ///
+    /// No agent test of its own: `inject`'s first gate is the one that refuses a terminal
+    /// this build cannot type into, and it is deliberately there rather than here so
+    /// `flushPendingRename` is covered by the same guard. An entry that cannot be typed sits
+    /// until its deadline and is dropped unsent, which is what this loop already does with
+    /// one that never becomes injectable.
     private func flushPendingPrompts() {
         let currentTime = now()
         for (id, prompt) in pendingPrompts {
