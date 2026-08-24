@@ -33,6 +33,16 @@ final class SpyInjector: TextInjecting {
     /// nil models a surface whose screen cannot be read at all.
     var viewportIsReadable = true
 
+    /// A verbatim captured screen to return instead of the modelled one.
+    ///
+    /// The modelled rendering below is claude's permission-dialog layout, hand-built from one
+    /// capture. That is the right fixture for the *store's* logic and the wrong one the
+    /// moment a test is about a second agent's screen grammar: it would be asserting that the
+    /// store drives a dialog this spy drew in claude's shape. With this set, the store reads
+    /// what codex actually printed. Wins over both `renderedRows` and `showOptions`, so a
+    /// test that sets it cannot half-model a screen by accident.
+    var viewportOverride: String?
+
     /// The option list on screen, when one is up. Empty means the input bar is showing
     /// instead, which is what `renderedRows` models — and which every rename and typed-prompt
     /// test in this suite depends on.
@@ -96,6 +106,7 @@ final class SpyInjector: TextInjecting {
     /// parser that reads both is tested against the captures and not against this.
     func readViewport() -> String? {
         guard viewportIsReadable else { return nil }
+        if let viewportOverride { return viewportOverride }
         let rule = String(repeating: "─", count: 92)
         guard options.isEmpty else {
             let rows = options.enumerated().map { index, label in

@@ -55,9 +55,11 @@ enum TimelineReader: Sendable {
         // Mapped per line, keeping each line's items together, because the budget below drops
         // whole RECORDS. Half a record on screen — a tool call with no result, an assistant
         // message missing its second paragraph — is worse than one fewer record.
-        let mapper = self.mapper(for: agent)
+        // Asked of the agent — `AgentAdapter.timelineItems(inLine:at:)` — rather than
+        // switched on here, so this stays a file about paging and budgets. `nonisolated`
+        // there is what lets it be called from this `Sendable` type off the main actor.
         let mapped: [(line: SourceLine, items: [TimelineItem])] = source.lines.map {
-            ($0, mapper($0.text, $0.offset).map(capped))
+            ($0, agent.timelineItems(inLine: $0.text, at: $0.offset).map(capped))
         }
 
         // Backwards anchors trim the oldest end and move `start`; forwards trims the newest
@@ -113,13 +115,6 @@ enum TimelineReader: Sendable {
             hasMore: source.hasMore || dropped,
             reset: false
         ))
-    }
-
-    private static func mapper(for agent: AgentID) -> (String, Int) -> [TimelineItem] {
-        switch agent {
-        case .claude: return ClaudeTimelineMapper.items(inLine:at:)
-        case .codex: return CodexTimelineMapper.items(inRolloutLine:at:)
-        }
     }
 
     /// Cuts an oversized body and records what was dropped, so a client can say "showing the

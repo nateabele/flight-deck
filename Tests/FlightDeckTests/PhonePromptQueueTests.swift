@@ -194,7 +194,7 @@ final class PhonePromptQueueTests: XCTestCase {
     /// was.
     func testAReopenedTabDoesNotInheritTheClosedOnesTokens() {
         let (store, _, id, conversation) = makeStore(activity: .busy)
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         store.launchFailureReporter = SilentReporter()
         let token = UUID()
         XCTAssertEqual(store.submitPrompt("ship it", token: token, to: id), .queued)

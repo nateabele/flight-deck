@@ -22,6 +22,20 @@ final class ChoiceDialogTests: XCTestCase {
 
     private func viewport(_ lines: [String]) -> String { lines.joined(separator: "\n") }
 
+    /// Every screen in this file is claude's, so its marker is stated once here rather than
+    /// at thirty-four call sites. `ChoiceDialog` itself takes the glyph as a parameter with
+    /// **no default** — see `CodexDialogDriverTests` for the other agent's, and
+    /// `ChoiceDialog.codexMarker` for why a default would be claude's grammar applied to
+    /// somebody else's screen.
+    private func focusedRow(inViewport viewport: String) -> Int? {
+        ChoiceDialog.focusedRow(inViewport: viewport, marker: ChoiceDialog.claudeMarker)
+    }
+
+    private func row(_ index: Int, reads label: String, inViewport viewport: String) -> Bool {
+        ChoiceDialog.row(index, reads: label, inViewport: viewport,
+                         marker: ChoiceDialog.claudeMarker)
+    }
+
     /// The three options `permission-write.captured.txt` offers, verbatim. Note what is NOT
     /// here: no "don't ask again for Bash commands in /Users/nate" row appeared in any capture,
     /// so the durable-grant shape this feature refuses to name is uncaptured as well as
@@ -43,7 +57,7 @@ final class ChoiceDialogTests: XCTestCase {
         for name in ["permission-bash.captured", "permission-write.captured",
                      "permission-write-60col.captured", "question-single.captured",
                      "question-multi.captured", "workspace-trust.captured"] {
-            XCTAssertEqual(ChoiceDialog.focusedRow(inViewport: try captured(name)), 0,
+            XCTAssertEqual(focusedRow(inViewport: try captured(name)), 0,
                            "\(name) must still open on its first row")
         }
     }
@@ -52,11 +66,11 @@ final class ChoiceDialogTests: XCTestCase {
 
     func testAPermissionDialogsRowsReadAsTheirLabelsOnARealScreen() throws {
         let screen = try captured("permission-bash.captured")
-        XCTAssertTrue(ChoiceDialog.row(0, reads: "Yes", inViewport: screen))
-        XCTAssertTrue(ChoiceDialog.row(1, reads: "No", inViewport: screen))
-        XCTAssertFalse(ChoiceDialog.row(0, reads: "No", inViewport: screen),
+        XCTAssertTrue(row(0, reads: "Yes", inViewport: screen))
+        XCTAssertTrue(row(1, reads: "No", inViewport: screen))
+        XCTAssertFalse(row(0, reads: "No", inViewport: screen),
                        "a label on the screen but not on THAT row is the interlock's whole job")
-        XCTAssertFalse(ChoiceDialog.row(2, reads: "Yes", inViewport: screen),
+        XCTAssertFalse(row(2, reads: "Yes", inViewport: screen),
                        "2.1.241 offers Bash exactly two options; a third row is not there to "
                        + "confirm and must not trap")
     }
@@ -64,7 +78,7 @@ final class ChoiceDialogTests: XCTestCase {
     func testAThreeOptionPermissionDialogsRowsReadAsTheirLabels() throws {
         let screen = try captured("permission-write.captured")
         for (index, label) in writePermissionLabels.enumerated() {
-            XCTAssertTrue(ChoiceDialog.row(index, reads: label, inViewport: screen),
+            XCTAssertTrue(row(index, reads: label, inViewport: screen),
                           "row \(index) must read as \(label.prefix(24))…")
         }
     }
@@ -76,7 +90,7 @@ final class ChoiceDialogTests: XCTestCase {
     func testALabelWrappedByANarrowTerminalStillReads() throws {
         let screen = try captured("permission-write-60col.captured")
         for (index, label) in writePermissionLabels.enumerated() {
-            XCTAssertTrue(ChoiceDialog.row(index, reads: label, inViewport: screen),
+            XCTAssertTrue(row(index, reads: label, inViewport: screen),
                           "row \(index) wraps but still reads as its label")
         }
     }
@@ -86,8 +100,8 @@ final class ChoiceDialogTests: XCTestCase {
     /// capture whose layout differs from both of the ones this was written for.
     func testAFolderTrustDialogsRowsRead() throws {
         let screen = try captured("workspace-trust.captured")
-        XCTAssertTrue(ChoiceDialog.row(0, reads: "Yes, I trust this folder", inViewport: screen))
-        XCTAssertTrue(ChoiceDialog.row(1, reads: "No, exit", inViewport: screen))
+        XCTAssertTrue(row(0, reads: "Yes, I trust this folder", inViewport: screen))
+        XCTAssertTrue(row(1, reads: "No, exit", inViewport: screen))
     }
 
     /// **The bug the capture exercise existed to catch, and the end-to-end claim the answer
@@ -105,7 +119,7 @@ final class ChoiceDialogTests: XCTestCase {
         let labels = try transcriptLabels("question-single.captured")
         XCTAssertEqual(labels, ["Rust", "Go", "Swift"])
         for (index, label) in labels.enumerated() {
-            XCTAssertTrue(ChoiceDialog.row(index, reads: label, inViewport: screen),
+            XCTAssertTrue(row(index, reads: label, inViewport: screen),
                           "row \(index) must read as the transcript's \(label)")
         }
     }
@@ -119,12 +133,13 @@ final class ChoiceDialogTests: XCTestCase {
     func testARowConfirmsItsOwnLabelAndNoOther() throws {
         let screen = try captured("question-single.captured")
         let labels = try transcriptLabels("question-single.captured")
-        for row in 0..<5 {
+        for screenRow in 0..<5 {
             for (index, label) in labels.enumerated() {
                 XCTAssertEqual(
-                    ChoiceDialog.row(row, reads: label, inViewport: screen), row == index,
-                    "row \(row) vs \(label): if these ever stop lining up one-to-one, blind "
-                    + "counting would select the wrong option and this is where that is found"
+                    row(screenRow, reads: label, inViewport: screen), screenRow == index,
+                    "row \(screenRow) vs \(label): if these ever stop lining up one-to-one, "
+                    + "blind counting would select the wrong option and this is where that "
+                    + "is found"
                 )
             }
         }
@@ -138,7 +153,7 @@ final class ChoiceDialogTests: XCTestCase {
         let labels = try transcriptLabels("question-multi.captured")
         XCTAssertEqual(labels, ["Trail mix", "Dark chocolate", "Beef jerky", "Fresh fruit"])
         for (index, label) in labels.enumerated() {
-            XCTAssertFalse(ChoiceDialog.row(index, reads: label, inViewport: screen),
+            XCTAssertFalse(row(index, reads: label, inViewport: screen),
                            "\(label) is drawn behind a checkbox on a list this build cannot "
                            + "answer; confirming it would be confirming the wrong screen")
         }
@@ -150,7 +165,7 @@ final class ChoiceDialogTests: XCTestCase {
     /// text, or its text *joined with* what follows, never as what follows alone.
     func testAnOptionsDescriptionIsNotItsRowsLabel() throws {
         let screen = try captured("question-single.captured")
-        XCTAssertFalse(ChoiceDialog.row(
+        XCTAssertFalse(row(
             1, reads: "Simple, fast-compiling language with a large standard library and "
             + "effortless cross-compilation to static binaries.", inViewport: screen
         ))
@@ -169,8 +184,8 @@ final class ChoiceDialogTests: XCTestCase {
             "❯ ",
             "────────────────────────────────────────────",
         ])
-        XCTAssertFalse(ChoiceDialog.row(0, reads: "Yes", inViewport: afterwards))
-        XCTAssertNil(ChoiceDialog.focusedRow(inViewport: afterwards))
+        XCTAssertFalse(row(0, reads: "Yes", inViewport: afterwards))
+        XCTAssertNil(focusedRow(inViewport: afterwards))
     }
 
     // MARK: - The echoed prompt
@@ -188,14 +203,14 @@ final class ChoiceDialogTests: XCTestCase {
         for name in ["permission-bash.captured", "permission-write.captured",
                      "question-single.captured", "question-multi.captured"] {
             let screen = try captured(name)
-            XCTAssertEqual(screen.filter { $0 == ChoiceDialog.marker }.count, 2,
+            XCTAssertEqual(screen.filter { $0 == ChoiceDialog.claudeMarker }.count, 2,
                            "\(name) must still carry both markers — the prompt echo and the "
                            + "focused row — or it no longer exercises the trap")
-            XCTAssertEqual(ChoiceDialog.focusedRow(inViewport: screen), 0,
+            XCTAssertEqual(focusedRow(inViewport: screen), 0,
                            "\(name): the dialog's marker is read, not the echo's")
         }
         XCTAssertEqual(
-            ChoiceDialog.focusedRow(inViewport: viewport([
+            focusedRow(inViewport: viewport([
                 "❯ Run this exact bash command and show me the output: ls /",
                 "",
                 " Do you want to proceed?",
@@ -212,12 +227,12 @@ final class ChoiceDialogTests: XCTestCase {
     // MARK: - Degenerate screens the captures cannot produce
 
     func testAListWithNoMarkerHasNoFocusedRow() {
-        XCTAssertNil(ChoiceDialog.focusedRow(inViewport: viewport(["   1. Yes", "   2. No"])),
+        XCTAssertNil(focusedRow(inViewport: viewport(["   1. Yes", "   2. No"])),
                      "a list nobody is on is not a dialog being offered")
     }
 
     func testTwoMarkedRowsHaveNoFocusedRow() {
-        XCTAssertNil(ChoiceDialog.focusedRow(inViewport: viewport([" ❯ 1. Yes", " ❯ 2. No"])))
+        XCTAssertNil(focusedRow(inViewport: viewport([" ❯ 1. Yes", " ❯ 2. No"])))
     }
 
     /// The scrollback holds an echo of an earlier, identical dialog. The LAST occurrence is the
@@ -230,9 +245,9 @@ final class ChoiceDialogTests: XCTestCase {
             "   1. Keep going",
             " ❯ 2. Stop",
         ])
-        XCTAssertEqual(ChoiceDialog.focusedRow(inViewport: screen), 1)
-        XCTAssertTrue(ChoiceDialog.row(0, reads: "Keep going", inViewport: screen))
-        XCTAssertFalse(ChoiceDialog.row(0, reads: "Yes", inViewport: screen),
+        XCTAssertEqual(focusedRow(inViewport: screen), 1)
+        XCTAssertTrue(row(0, reads: "Keep going", inViewport: screen))
+        XCTAssertFalse(row(0, reads: "Yes", inViewport: screen),
                        "the frozen dialog above is scrollback, not a choice anyone has")
     }
 
@@ -240,22 +255,22 @@ final class ChoiceDialogTests: XCTestCase {
     /// diff hunk — and confirming one would let Return be pressed on a paragraph.
     func testASingleRowIsNotAList() {
         let screen = viewport([" ❯ 1. Continue"])
-        XCTAssertNil(ChoiceDialog.focusedRow(inViewport: screen))
-        XCTAssertFalse(ChoiceDialog.row(0, reads: "Continue", inViewport: screen))
+        XCTAssertNil(focusedRow(inViewport: screen))
+        XCTAssertFalse(row(0, reads: "Continue", inViewport: screen))
     }
 
     /// And it is a run with no gap in it. Rows numbered 1 and 3 are two lists of one, not one
     /// list of two.
     func testRowsNumberedOutOfSequenceAreNotOneList() {
         let screen = viewport([" ❯ 1. Yes", "   3. No"])
-        XCTAssertNil(ChoiceDialog.focusedRow(inViewport: screen))
-        XCTAssertFalse(ChoiceDialog.row(0, reads: "Yes", inViewport: screen))
+        XCTAssertNil(focusedRow(inViewport: screen))
+        XCTAssertFalse(row(0, reads: "Yes", inViewport: screen))
     }
 
     /// A blank line between two rows ends the list. Nothing claude draws splits a list that
     /// way, so a "list" spanning one is two things that happen to be numbered.
     func testABlankLineEndsTheList() {
-        XCTAssertNil(ChoiceDialog.focusedRow(inViewport: viewport([" ❯ 1. Yes", "", "   2. No"])))
+        XCTAssertNil(focusedRow(inViewport: viewport([" ❯ 1. Yes", "", "   2. No"])))
     }
 
     /// **Where an `AskUserQuestion`'s list ends.** claude draws `Chat about this` *below* the
@@ -263,30 +278,30 @@ final class ChoiceDialogTests: XCTestCase {
     /// nothing rather than reaching across the break for it.
     func testAQuestionsListStopsAtTheRuleDrawnBelowIt() throws {
         let screen = try captured("question-single.captured")
-        XCTAssertTrue(ChoiceDialog.row(3, reads: "Type something.", inViewport: screen),
+        XCTAssertTrue(row(3, reads: "Type something.", inViewport: screen),
                       "the row above the rule is still in the list")
-        XCTAssertFalse(ChoiceDialog.row(4, reads: "Chat about this", inViewport: screen),
+        XCTAssertFalse(row(4, reads: "Chat about this", inViewport: screen),
                        "the row below it is not")
     }
 
     func testAnEmptyViewportConfirmsNothing() {
-        XCTAssertNil(ChoiceDialog.focusedRow(inViewport: ""))
-        XCTAssertFalse(ChoiceDialog.row(0, reads: "Yes", inViewport: ""))
+        XCTAssertNil(focusedRow(inViewport: ""))
+        XCTAssertFalse(row(0, reads: "Yes", inViewport: ""))
     }
 
     /// An index the screen does not have is a refusal, not a trap. A list shorter than the
     /// caller expected is exactly the state a stale answer arrives in.
     func testAnIndexOutsideTheListConfirmsNothing() throws {
         let screen = try captured("permission-bash.captured")
-        XCTAssertFalse(ChoiceDialog.row(9, reads: "Yes", inViewport: screen))
-        XCTAssertFalse(ChoiceDialog.row(-1, reads: "Yes", inViewport: screen))
+        XCTAssertFalse(row(9, reads: "Yes", inViewport: screen))
+        XCTAssertFalse(row(-1, reads: "Yes", inViewport: screen))
     }
 
     /// A terminal lays text out on a grid, so the gap between two words on screen is however
     /// many cells claude decided to leave. Both sides of the comparison are normalized, which
     /// is also what makes the U+00A0 claude draws after a marker survive the trip.
     func testSpacingOnTheGridDoesNotDefeatAMatch() {
-        XCTAssertTrue(ChoiceDialog.row(
+        XCTAssertTrue(row(
             0, reads: "Yes, I trust this folder",
             inViewport: viewport([" ❯ 1. Yes,\u{a0}I  trust this   folder", "   2. No, exit"])
         ))

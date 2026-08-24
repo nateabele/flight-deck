@@ -314,8 +314,12 @@ final class PromptServiceTests: XCTestCase {
     /// is the code `SessionStore.answerPrompt` already defines for exactly this and the phone
     /// already has copy for, and routing it here is what lets that copy ever appear.
     ///
-    /// The refusal is `AgentAdapter.hasTextChannel` — the same question the store asks, not a
-    /// second name check that could answer differently.
+    /// **The refusal moved, and the code did not.** It was `dialogDriver` alone; codex now
+    /// has one, so what refuses here is `AgentAdapter.openPromptReader` — this file's own
+    /// half. Driving a dialog needs a screen grammar, and codex has one; knowing WHICH dialog
+    /// is up needs a transcript grammar, and codex writes nothing to its rollout when an
+    /// approval goes up, so there is no call id for a phone's tap to be checked against.
+    /// Both are asked of the same adapter, not re-decided here.
     ///
     /// The tail is deliberately claude-shaped records rather than nothing: that distinguishes
     /// "the file was never read" from "it was read and held no call", and a service that
@@ -328,6 +332,65 @@ final class PromptServiceTests: XCTestCase {
         service.tail = { _, _ in lines }
         XCTAssertEqual(
             code(service.answer(session: id, call: "toolu_A", answer: .deny, token: UUID())),
+            "unsupported_agent"
+        )
+        XCTAssertTrue(
+            spy.events.isEmpty,
+            "no Escape at a dialog this build cannot identify — the driver could press the "
+            + "key, which is exactly why the second half of the question has to be asked"
+        )
+    }
+
+    /// **The case that actually pins this file's guard, and the one above does not.**
+    ///
+    /// A coverage gap found by mutation: deleting the capability guard from `PromptService`
+    /// entirely leaves the whole 1687-test suite green, because the tab in the test above has
+    /// a real `.file(.codex, url)` source, so a service without the guard falls through to
+    /// `SessionStore.answerPrompt` — which has a capability guard of its own and answers
+    /// `unsupported_agent` anyway. That test was measuring the store's refusal forwarded
+    /// through this file, not this file's.
+    ///
+    /// A codex **sign-in tab** is the shape that tells them apart, and it is the shape this
+    /// guard's own comment names: `openSignInSession` mints a tab with no `transcriptPath`,
+    /// so `timelineSource` answers `.noTranscript`, so a service without the guard never
+    /// reaches the store at all — it falls to `prompt_changed`, the sentence about a dialog
+    /// that moved, for a tab that never had one.
+    func testACodexSignInTabIsRefusedAsUnsupportedRatherThanAsChanged() {
+        let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.transcriptsRootOverride = projectsRoot
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
+        store.launchFailureReporter = SilentReporter()
+        // A store with no `PreferencesStore` resolves every tab to the nil account, whatever
+        // the sign-in account's own id is — which is the key this override has to be filed
+        // under, and for codex a miss means building a real stack.
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: ScriptedCodexTransport())),
+            for: .codex, account: nil
+        )
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { $0() }
+        let account = AgentAccount(
+            agent: .codex, displayName: "signing in",
+            home: projectsRoot.appendingPathComponent("codex-home", isDirectory: true)
+        )
+        let session = store.openSignInSession(
+            for: account, in: tmp.path,
+            using: LoginInvocation(command: "codex login", inject: nil)
+        )
+        // The tab has to be waiting, or `not_waiting` refuses first and this proves nothing.
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .waiting)])
+        spy.events.removeAll()
+
+        let service = PromptService(store: store)
+        // Non-empty, so a service that reached the read would find a call rather than being
+        // saved by an empty tail — the distinction `prompt_changed` would otherwise hide.
+        // Built out here rather than inside the `@Sendable` seam, which cannot reach `self`.
+        let lines = [SourceLine(offset: 0, text: bashLine("toolu_A"))]
+        service.tail = { _, _ in lines }
+
+        XCTAssertEqual(
+            code(service.answer(session: session.id, call: "toolu_A", answer: .deny, token: UUID())),
             "unsupported_agent"
         )
         XCTAssertTrue(spy.events.isEmpty, "no Escape into a codex TUI this build cannot read")

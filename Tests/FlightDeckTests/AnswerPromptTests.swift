@@ -370,35 +370,83 @@ final class AnswerPromptTests: XCTestCase {
         }
     }
 
-    /// **The order of the two guards, and an IDLE codex tab is the only fixture that pins
-    /// it.** Agent first answers `unsupportedAgent` — never on this tab. Status first would
-    /// answer `notWaiting` — not right now — inviting a retry that can never succeed. A
-    /// *waiting* codex tab cannot tell the two apart, because it clears the status gate either
-    /// way; that fixture proves something else, below.
-    func testACodexTabIsRefusedBeforeItsStatusIsConsulted() async throws {
+    /// **The refusal these two tests used to assert is gone, deliberately.** They read
+    /// `unsupportedAgent` for a codex tab, on the reasoning that codex had no dialog this
+    /// build had ever read. Five verbatim codex-cli 0.148.0 screens now say otherwise, and
+    /// `CodexDialogDriver` is that reading — so what refuses a codex tab here is the ordinary
+    /// status gate, exactly as it refuses a claude one.
+    ///
+    /// The ordering property the first of them pinned — agent before status, so a tab that
+    /// can never be answered hears "never" rather than "not right now" — is no longer
+    /// falsifiable by fixture, because both shipped agents now have a driver. It is stated in
+    /// `answerPrompt`'s doc and would need a third agent to test. Recorded rather than
+    /// deleted quietly.
+    func testAnIdleCodexTabIsRefusedByTheStatusGateLikeAnyOther() async throws {
         let (store, spy, id) = try await makeCodexStore(activity: .idle)
         XCTAssertEqual(
-            store.answerPrompt(permission, with: .deny, in: id, token: UUID()), .unsupportedAgent
+            store.answerPrompt(permission, with: .deny, in: id, token: UUID()), .notWaiting
         )
-        XCTAssertTrue(spy.events.isEmpty)
+        XCTAssertTrue(spy.events.isEmpty, "idle must send nothing, not even Escape")
     }
 
-    /// A codex tab that is ALSO waiting — the fixture where the Escape is reachable, so the
-    /// agent guard is the only thing standing between a tap and a keystroke into a
-    /// `codex resume` TUI. The two codex tests are not redundant: that one proves the order,
-    /// this one proves the guard prevents the send. Same pairing as
-    /// `PhonePromptDispatchTests`'s two.
-    func testAWaitingCodexTabIsRefusedRatherThanDriven() async throws {
+    /// **Deny on codex is one Escape, and codex's own footer says so** — `Press enter to
+    /// confirm or esc to cancel`, on every captured approval. It reads nothing at all, which
+    /// is why it is the one answer that works on a screen no parser can make sense of; here
+    /// the spy's screen is deliberately unreadable to prove that.
+    func testAWaitingCodexTabIsDeniedWithASingleEscape() async throws {
         let (store, spy, id) = try await makeCodexStore(activity: .waiting)
-        spy.showOptions(["Yes", "No"], selected: 0)
-        XCTAssertEqual(store.status(for: id)?.activity, .waiting,
-                       "the fixture is only meaningful if the status guard would have passed")
+        spy.viewportIsReadable = false
         XCTAssertEqual(
-            store.answerPrompt(permission, with: .deny, in: id, token: UUID()), .unsupportedAgent
+            store.answerPrompt(permission, with: .deny, in: id, token: UUID()), .dispatched
         )
-        XCTAssertTrue(spy.events.isEmpty,
-                      "codex has no dialog this build has ever read, and a stray Escape into a "
-                      + "live TUI is not free")
+        XCTAssertEqual(spy.events, [.escape])
+    }
+
+    /// **Allow, driven off the screen codex actually printed.** The cursor opens on row 0,
+    /// `CodexDialogDriver.allowRow` is 0, so no arrow is sent; the re-read confirms the
+    /// marker is still on row 0 and only then does Return go out.
+    func testAllowOnACapturedCodexApprovalPressesReturnWithoutMoving() async throws {
+        let (store, spy, id) = try await makeCodexStore(activity: .waiting)
+        spy.viewportOverride = try TimelineFixtureTests.text(
+            "approval-command.captured", in: "Codex"
+        )
+        XCTAssertEqual(
+            store.answerPrompt(permission, with: .allow, in: id, token: UUID()), .dispatched
+        )
+        XCTAssertEqual(spy.events, [.ret], "row 0 is already the plain approval; nothing moves")
+    }
+
+    /// **The re-read interlock, on the only fixture pair in the repo that can prove it.**
+    /// `approval-command-row1` is the same dialog after one Down, so the cursor is on the
+    /// DURABLE GRANT. Allow sends one Up — and then re-reads a screen that has not repainted,
+    /// finds the marker still on row 1, and presses nothing. A driver that trusted its own
+    /// arithmetic would have granted "don't ask again for commands that start with
+    /// `mkdir -p …`" from somebody's pocket.
+    func testAllowOnACodexDialogDoesNotReturnUntilTheMarkerHasActuallyMoved() async throws {
+        let (store, spy, id) = try await makeCodexStore(activity: .waiting)
+        spy.viewportOverride = try TimelineFixtureTests.text(
+            "approval-command-row1.captured", in: "Codex"
+        )
+        XCTAssertEqual(
+            store.answerPrompt(permission, with: .allow, in: id, token: UUID()), .dispatched
+        )
+        XCTAssertEqual(spy.events, [.arrow(-1)],
+                       "the marker did not move, so no Return may follow")
+    }
+
+    /// **The marker is per-agent, and this is what a defaulted one would have hidden.** A
+    /// claude tab handed codex's captured approval finds no list at all — `❯` (U+276F) is not
+    /// `›` (U+203A) — so it refuses rather than driving somebody else's dialog.
+    func testAClaudeTabRefusesACodexScreen() throws {
+        let (store, spy, id) = makeStore(activity: .waiting)
+        spy.viewportOverride = try TimelineFixtureTests.text(
+            "approval-command.captured", in: "Codex"
+        )
+        XCTAssertEqual(
+            store.answerPrompt(permission, with: .allow, in: id, token: UUID()),
+            .unreadableScreen
+        )
+        XCTAssertTrue(spy.events.isEmpty)
     }
 
     func testAnUnknownTabIsRefused() {
