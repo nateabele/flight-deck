@@ -180,10 +180,15 @@ public enum FleetTLS {
         sec_protocol_options_append_tls_ciphersuite(
             sec, tls_ciphersuite_t(rawValue: numericCast(TLS_PSK_WITH_AES_128_GCM_SHA256))!
         )
-        // No `multipathServiceType` and no PSK-selection block, unlike the fleet parameters.
-        // A pairing exchange is four frames on one LAN inside a two-minute window — it has no
-        // roaming to survive — and with exactly one registered PSK there is no identity to
-        // attribute a connection to.
+        // No PSK-selection block, unlike the fleet parameters: with exactly one registered
+        // PSK there is no identity to attribute a connection to.
+        //
+        // No `multipathServiceType` either — but that is no longer what distinguishes these
+        // from the fleet parameters, because the fleet ones no longer set it. The reasoning
+        // recorded here (a pairing exchange is four frames on one LAN inside a two-minute
+        // window, so it has no roaming to survive) is still true and is why this path never
+        // had it. See `parameters(keys:identities:)` for why the other path lost it: MPTCP
+        // without the entitlement makes a listener drop plain SYNs on Wi-Fi outright.
         return NWParameters(tls: tls)
     }
 
@@ -239,10 +244,31 @@ public enum FleetTLS {
         )
 
         let parameters = NWParameters(tls: tls)
-        // The phone roams between networks and the Mac's address changes under it; letting
-        // an established connection survive a path change is most of what makes roaming
-        // (§3) feel like nothing happened.
-        parameters.multipathServiceType = .handover
+        // NO `multipathServiceType` HERE. It was `.handover` — so an established connection
+        // would survive the phone changing networks, which is most of what made roaming (§3)
+        // feel like nothing happened — and it made the Mac unreachable from the phone
+        // ENTIRELY, over Wi-Fi, in a way that looked like a firewall for a whole day.
+        //
+        // MPTCP needs `com.apple.developer.networking.multipath`, which Apple grants by
+        // application and which this app does not have. On the phone the property is
+        // therefore silently ignored and the connector dials plain TCP; on the Mac the
+        // listener honours it. A listener expecting MP_CAPABLE on a multipath-eligible
+        // interface DROPS a plain SYN — no RST, no log, no counter.
+        //
+        // Which is exactly what a capture showed: 46 SYNs from the phone carrying
+        // `mss,nop,wscale,TS,sackOK` and no MP_CAPABLE, 0 SYN-ACKs back, `netstat -s -p tcp`
+        // completely unmoved while the IP layer's "packets for this host" climbed. The same
+        // socket accepted loopback and bridged connections throughout, because MPTCP does not
+        // engage on those paths — which is also why the simulator, which is loopback-only,
+        // never caught it, and why pf, the Application Firewall, Little Snitch and the
+        // local-network grant all had to be cleared one by one before the cause was found.
+        //
+        // Proven in isolation before removal: two plain-TCP `NWListener`s differing in this
+        // one property, on adjacent ports. From the phone's Safari the multipath one hung and
+        // the control loaded.
+        //
+        // Do not restore this without the entitlement on BOTH sides. Roaming is worth having;
+        // it is not worth trading every connection for.
         return parameters
     }
 }
