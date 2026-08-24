@@ -139,7 +139,8 @@ struct SessionTimelineScreen: View {
                 // is blocked on sits directly above the field, so a reader whose keyboard is up
                 // can still see what they are answering.
                 PromptCard(
-                    open: model.blocked(activity: session?.activity),
+                    open: model.blocked(agent: session?.agent, activity: session?.activity),
+                    agent: session?.agent,
                     state: model.answerState,
                     model: model
                 )

@@ -116,17 +116,49 @@ final class SessionTimelineBlockedTests: XCTestCase {
         let (model, stub) = makeModel()
         model.loadLatest()
         stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
-        guard case .question("toolu_A", let question)? = model.blocked(activity: "waiting")
+        guard case .question("toolu_A", let question)? =
+            model.blocked(agent: "claude", activity: "waiting")
         else { return XCTFail("expected a question") }
         XCTAssertEqual(question.options.map(\.label), ["Yes", "No"])
+    }
+
+    /// **No card for an agent nothing can answer for.** The feed here is claude-shaped and
+    /// holds a genuinely open call — the identical feed draws a card one line below — so what
+    /// this asserts is the agent gate and not an empty feed. A codex tab that reported
+    /// `waiting` would otherwise draw Allow/Deny built from claude's dialog grammar, over
+    /// claude's row ordering, whose answer comes back `unsupported_agent`: an offer that
+    /// cannot be honoured, which is worse than no offer at all.
+    func testACodexTabIsBlockedOnNothingEvenWithAnOpenCallOnScreen() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
+        XCTAssertNil(model.blocked(agent: "codex", activity: "waiting"))
+        XCTAssertNotNil(
+            model.blocked(agent: "claude", activity: "waiting"),
+            "the same feed must still block a claude tab, or this is asserting the feed"
+        )
+    }
+
+    /// An agent added after this build shipped is not given claude's dialog either — the
+    /// `WireSession.subagentSummary` rule, applied to a whole card.
+    func testAnUnknownAgentIsBlockedOnNothing() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
+        for agent in [nil, "", "gemini"] as [String?] {
+            XCTAssertNil(
+                model.blocked(agent: agent, activity: "waiting"),
+                "agent \(String(describing: agent))"
+            )
+        }
     }
 
     func testNothingIsBlockedWhileTheSessionIsNotWaiting() {
         let (model, stub) = makeModel()
         model.loadLatest()
         stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
-        XCTAssertNil(model.blocked(activity: "busy"))
-        XCTAssertNil(model.blocked(activity: nil))
+        XCTAssertNil(model.blocked(agent: "claude", activity: "busy"))
+        XCTAssertNil(model.blocked(agent: "claude", activity: nil))
     }
 
     /// **The Mac answered first.** The result arrives on the next fetch, and the card is gone
@@ -135,12 +167,12 @@ final class SessionTimelineBlockedTests: XCTestCase {
         let (model, stub) = makeModel()
         model.loadLatest()
         stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
-        XCTAssertNotNil(model.blocked(activity: "waiting"))
+        XCTAssertNotNil(model.blocked(agent: "claude", activity: "waiting"))
         model.loadNewer()
         stub.answer(.success(page(
             [askItem(callID: "toolu_A"), resultItem(callID: "toolu_A")], session: model.sessionID
         )))
-        XCTAssertNil(model.blocked(activity: "waiting"))
+        XCTAssertNil(model.blocked(agent: "claude", activity: "waiting"))
     }
 
     func testTappingAnOptionSendsAnAnswerNamingTheCall() {

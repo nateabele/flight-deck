@@ -11,6 +11,13 @@ import Foundation
 struct ClaudeAdapter: AgentAdapter {
     static let id: AgentID = .claude
 
+    /// Claude's screen is the one this build can actually read: `InputBar.read` finds its
+    /// one-row input box, `ChoiceDialog` reads its select lists, and both were derived from
+    /// the verbatim captures `Fixtures/Claude/dialogs.captured.provenance.json` records with
+    /// their sha256s. Everything `SessionStore` types — a phone's message, `/rename`, an
+    /// answer to a dialog — goes into that box or that list.
+    static let hasTextChannel = true
+
     /// Where this account's `projects` directory lives, read on every derivation rather than
     /// captured as a value. It is derived from the home of the account the adapter was built
     /// for, and `SessionStore.transcriptsRootOverride` — a fixture/test seam — is assigned
