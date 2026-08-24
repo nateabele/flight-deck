@@ -19,20 +19,43 @@ import Network
 /// can leave silently — the assertions are how "confined to `queue`" stays a fact rather than
 /// becoming a comment.
 public final class PairingInitiator: @unchecked Sendable {
-    public enum Failure: Error, Equatable, Sendable {
+    public enum Failure: Error, Equatable, Sendable, CaseIterable {
         /// The Mac rejected our confirmation, or its own did not verify, or the sealed blob
         /// did not open. All three mean the same thing to the user — the code did not match
         /// this Mac — and only one of them costs an attempt on the Mac's counter.
         case wrongCode
         /// This Mac's window is burned. The user must arm again, not retype.
         case attemptsExhausted
-        /// Never reached the Mac at all. Distinct from `wrongCode` because it sends the user
-        /// to the network, not to the keyboard.
-        case connectionFailed
+        /// The connection never came up: no route, nothing listening, or a TLS handshake
+        /// that failed outright. Distinct from `wrongCode` because it sends the user to the
+        /// network, not to the keyboard.
+        case unreachable
+        /// It came up, and the Mac hung up before answering. Different advice from
+        /// `unreachable`: the network is fine and the Mac is there, so retrying is worth more
+        /// than checking Wi-Fi.
+        case droppedByMac
+        /// It came up and nothing came back before `exchangeTimeout`.
+        ///
+        /// **Split out of a single `connectionFailed` because collapsing it cost a day.** A
+        /// listener that accepted the SYN and never answered — a real bug, MPTCP without the
+        /// entitlement — presented as "Couldn't reach that Mac. Check you're both on the same
+        /// Wi-Fi." on a phone that was demonstrably on the same Wi-Fi as the Mac it could
+        /// ping. The advice was not merely unhelpful, it pointed away from the fault and the
+        /// diagnosis needed packet captures to get back on track.
+        case noAnswer
         /// The Mac spoke, and what it said was not this protocol. It also carries one local
         /// failure that is not the Mac's fault at all, knowingly — see `start()`'s `catch`.
         case malformedResponse
     }
+
+    /// Whether this attempt's connection ever reached `.ready`.
+    ///
+    /// The difference between "nothing was there" and "it was there and hung up" is not
+    /// visible at the point either is reported: an endpoint with no listener ends the receive
+    /// loop exactly as a Mac that closed mid-exchange does, so `onEnd` alone cannot tell them
+    /// apart. This flag is the only thing that can, and getting it wrong means telling a user
+    /// their Mac dropped them when in fact nothing was ever listening.
+    private var reachedReady = false
 
     public var onPaired: ((_ key: FleetDeviceKey, _ macName: String) -> Void)?
     public var onFailure: ((Failure) -> Void)?
@@ -40,7 +63,7 @@ public final class PairingInitiator: @unchecked Sendable {
     /// The deadline for the **whole exchange**, not just for reaching the Mac: it is armed
     /// once in `start()` and never re-armed, so it bounds TLS, the WebSocket upgrade and all
     /// four frames together. A Mac that completes TLS and then stalls before the sealed frame
-    /// reports `.connectionFailed` at this deadline, which is what a pairing screen needs — a
+    /// reports `.noAnswer` at this deadline, which is what a pairing screen needs — a
     /// peer that answered and went quiet is exactly as unpairable as a dead address, and
     /// `NWConnection` will wait out either one well past any patience the screen has.
     ///
@@ -71,6 +94,11 @@ public final class PairingInitiator: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         cancel()
         settled = false
+        // Cleared with `settled`, and it has to be: `PairingRunner` walks a list of candidate
+        // endpoints through this same object, so a Mac that answered on attempt one would
+        // otherwise make attempt two's dead endpoint report `droppedByMac` — the previous
+        // Mac's success misreported as this one's failure.
+        reachedReady = false
         generation += 1
         let generation = self.generation
 
@@ -101,6 +129,7 @@ public final class PairingInitiator: @unchecked Sendable {
             dispatchPrecondition(condition: .onQueue(self.queue))
             switch state {
             case .ready:
+                self.reachedReady = true
                 guard let session = self.session, let connection = self.connection else {
                     return
                 }
@@ -124,7 +153,7 @@ public final class PairingInitiator: @unchecked Sendable {
                     self.fail(.malformedResponse)
                 }
             case .failed, .cancelled:
-                self.fail(.connectionFailed)
+                self.fail(.unreachable)
             default:
                 break
             }
@@ -137,13 +166,16 @@ public final class PairingInitiator: @unchecked Sendable {
         } onEnd: { [weak self] _ in
             guard let self else { return }
             dispatchPrecondition(condition: .onQueue(self.queue))
-            self.fail(.connectionFailed)
+            // An endpoint with nothing listening ends this loop identically to a Mac that
+            // closed mid-exchange, so the verdict comes from whether the socket was ever
+            // usable — not from being here.
+            self.fail(self.reachedReady ? .droppedByMac : .unreachable)
         }
 
         connection.start(queue: queue)
         queue.asyncAfter(deadline: .now() + exchangeTimeout) { [weak self] in
             guard let self, generation == self.generation else { return }
-            self.fail(.connectionFailed)
+            self.fail(.noAnswer)
         }
     }
 

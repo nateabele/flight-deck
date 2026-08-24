@@ -2526,6 +2526,20 @@ final class SessionStore: ObservableObject {
     /// drift from `repos`; it is cheap, and `repos` is already `@Published`.
     var sidebarRows: [SidebarRow] { SidebarRow.rows(for: repos) }
 
+    /// Open a new session in a project named by id rather than by URL.
+    ///
+    /// The wire has only the id — a phone has no business knowing a path on this machine, and
+    /// a path arriving from off-box would be a directory this process opens on a client's say
+    /// so. Resolving it here also means the project's own defaults are applied by the one
+    /// method that already knows them.
+    ///
+    /// `nil` when the project is gone, which a phone holding a stale snapshot can ask about.
+    @discardableResult
+    func newSession(inProject id: Repo.ID) -> Session? {
+        guard let index = repos.firstIndex(where: { $0.id == id }) else { return nil }
+        return newSession(in: repos[index].url)
+    }
+
     func setCollapsed(_ isCollapsed: Bool, forProjectAt id: Repo.ID) {
         guard let index = repos.firstIndex(where: { $0.id == id }),
               repos[index].isCollapsed != isCollapsed else { return }
@@ -3441,6 +3455,10 @@ final class SessionStore: ObservableObject {
     func viewport(of id: UUID) -> String? { injector(for: id)?.readViewport() }
 
     func sessionExists(_ id: UUID) -> Bool { locate(id) != nil }
+
+    /// The project half of `sessionExists`, for the commands whose only precondition is that
+    /// their target still exists. A phone can hold a snapshot older than a project's removal.
+    func projectExists(_ id: Repo.ID) -> Bool { repos.contains { $0.id == id } }
 
     /// Switches registry polling on and covers the tabs that already exist. Called from the
     /// production convenience init only, so tests using `init(provider:persistence:)` never

@@ -182,8 +182,18 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering {
             return "No Mac on this network accepted that code. Check it against your Mac's screen."
         case .attemptsExhausted:
             return "Too many tries. Show a new code on your Mac and start again."
-        case .connectionFailed:
+        case .unreachable:
             return "Couldn't reach that Mac. Check you're both on the same Wi-Fi."
+        case .droppedByMac:
+            return "That Mac closed the connection before finishing. Try the code again."
+        case .noAnswer:
+            // Deliberately does NOT say "check your Wi-Fi": reaching this case means the
+            // connection came UP, so the network is demonstrably working and that advice
+            // points away from the fault. Naming the firewall is the useful half — the one
+            // real instance of this was a listener that accepted the connection and never
+            // replied.
+            return "That Mac answered the connection but not the pairing. "
+                + "It may be busy, or something on it is blocking Flight Deck."
         case .malformedResponse:
             return "That Mac answered with something Flight Deck didn't understand. Update both apps."
         }
@@ -213,6 +223,21 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering {
     }
 
     func markRead(_ id: UUID) { connector?.send(.markRead(id: id)) }
+
+    /// Close a tab on the Mac. Destructive, and gated behind a confirming gesture on screen.
+    func closeSession(_ id: UUID) { connector?.send(.closeSession(id: id)) }
+
+    /// Collapse or expand a project. Sends the TARGET state, never a toggle, so two clients
+    /// that disagree about what is currently collapsed converge instead of ping-ponging.
+    func setCollapsed(_ isCollapsed: Bool, project id: UUID) {
+        connector?.send(.setProjectCollapsed(id: id, isCollapsed: isCollapsed))
+    }
+
+    /// Open a new session in a project, with that project's own defaults.
+    ///
+    /// Nothing is sent but the project: agent, account and working directory are resolved on
+    /// the Mac, which is the only place they are configured.
+    func newSession(inProject id: UUID) { connector?.send(.newSession(project: id)) }
 
     /// The model behind one session screen, made once and kept.
     ///

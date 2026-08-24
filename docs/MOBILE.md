@@ -317,9 +317,17 @@ page.
     "security" — does **not** catch a driver that presses Return blind, because its fixture
     already starts on row 0, so a blind Return happens to be right. The test that catches a
     blind Return is a different one, `testAllowMovesToTheFirstRowAndReturns`, whose fixture
-    starts on row 2 — and neither of them stands on a real surface. So a real dialog whose
-    cursor is not already on row 0 is what this item adds and nothing else has: moving the
-    cursor by hand first is the whole point of the item, not a flourish. If the selection lands
+    starts on row 2.
+    **Since 2026-08-24 one of them does stand on a real surface.**
+    `testAllowOnACapturedClaudeDialogWillNotReturnUntilTheMarkerMoves` runs the `.allow` path
+    against `permission-write-row2.captured.txt`, a real 2.1.241 Write dialog captured after
+    two Down keystrokes, and asserts no Return goes out while the marker is still on the
+    accept-edits row. That is the security property, on a screen claude actually drew.
+    **What this item still adds, and it is not nothing: a screen that REPAINTS.** A capture is
+    a still image, so the automated test can only prove the driver refuses to press Return
+    when the marker has not moved. It cannot prove the happy path — arrows sent, claude
+    repaints, marker is genuinely on row 0, Return lands there. Only a live dialog can, which
+    is why moving the cursor by hand first is still the point of this item. If the selection lands
     anywhere but the first row, **stop**:
     `SessionStore.answerPrompt`'s `.allow` arm and the captured dialogs disagree about the
     dialog's ordering, and the fix is a fresh capture and a rewritten arm, never an edited

@@ -95,6 +95,30 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     case markRead(id: UUID)
     case markUnread(id: UUID)
 
+    /// Close tab `id`, exactly as closing it on the Mac would.
+    ///
+    /// Destructive and deliberately not softened: there is no "closed" state to return from,
+    /// which is why the phone puts this behind a full-swipe confirmation rather than a tap.
+    /// The Mac records history the same way it does for a local close, so the recovery story
+    /// is the one that already exists rather than a second one invented for the phone.
+    case closeSession(id: UUID)
+
+    /// Collapse or expand project `id`'s session list.
+    ///
+    /// Carries the target state rather than toggling, so two clients disagreeing about what
+    /// is currently collapsed cannot ping-pong: the last writer wins and both converge on the
+    /// value it sent. `SessionStore.setCollapsed` already no-ops when nothing changes, so a
+    /// redundant command costs an early return and no event.
+    case setProjectCollapsed(id: UUID, isCollapsed: Bool)
+
+    /// Open a new session in project `id`, with that project's defaults.
+    ///
+    /// No agent, account or working directory on the wire. Everything a new tab needs is
+    /// already resolved on the Mac — `newSession(in:)` picks the launch account, mints the
+    /// title and inherits the project's directory — and a phone that supplied any of it would
+    /// be a second place those defaults live.
+    case newSession(project: UUID)
+
     /// Type `text` into tab `id`'s live agent and submit it.
     ///
     /// **A `cmd` and not a `req`, and `FleetRequest`'s own doc comment draws the line.** A
@@ -139,13 +163,19 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// read, so a retry must be free.
     case answerPrompt(id: UUID, token: UUID, call: String, answer: PromptAnswer)
 
-    enum CodingKeys: String, CodingKey { case op, id, token, text, call, answer, index, label }
+    enum CodingKeys: String, CodingKey {
+        case op, id, token, text, call, answer, index, label
+        case isCollapsed, project
+    }
 
     private enum Op: String, Codable {
         case markRead = "session.markRead"
         case markUnread = "session.markUnread"
         case prompt = "session.prompt"
         case answerPrompt = "prompt.answer"
+        case closeSession = "session.close"
+        case setProjectCollapsed = "project.collapse"
+        case newSession = "session.new"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -157,6 +187,16 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case .markUnread(let id):
             try c.encode(Op.markUnread, forKey: .op)
             try c.encode(id, forKey: .id)
+        case .closeSession(let id):
+            try c.encode(Op.closeSession, forKey: .op)
+            try c.encode(id, forKey: .id)
+        case .setProjectCollapsed(let id, let isCollapsed):
+            try c.encode(Op.setProjectCollapsed, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(isCollapsed, forKey: .isCollapsed)
+        case .newSession(let project):
+            try c.encode(Op.newSession, forKey: .op)
+            try c.encode(project, forKey: .project)
         case .prompt(let id, let token, let text):
             try c.encode(Op.prompt, forKey: .op)
             try c.encode(id, forKey: .id)
@@ -197,6 +237,15 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             self = .markRead(id: try c.decode(UUID.self, forKey: .id))
         case .markUnread:
             self = .markUnread(id: try c.decode(UUID.self, forKey: .id))
+        case .closeSession:
+            self = .closeSession(id: try c.decode(UUID.self, forKey: .id))
+        case .setProjectCollapsed:
+            self = .setProjectCollapsed(
+                id: try c.decode(UUID.self, forKey: .id),
+                isCollapsed: try c.decode(Bool.self, forKey: .isCollapsed)
+            )
+        case .newSession:
+            self = .newSession(project: try c.decode(UUID.self, forKey: .project))
         case .prompt:
             self = .prompt(
                 id: try c.decode(UUID.self, forKey: .id),

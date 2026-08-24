@@ -44,7 +44,7 @@ final class PairingRateLimitTests: XCTestCase {
         }
         initiator.start(code: code, endpoint: endpoint)
         await fulfillment(of: [settled], timeout: 15)
-        return outcome ?? .failure(.connectionFailed)
+        return outcome ?? .failure(.unreachable)
     }
 
     func testThreeWrongCodesBurnTheWindowAndTheFourthIsRefusedEvenWhenCorrect() async throws {
