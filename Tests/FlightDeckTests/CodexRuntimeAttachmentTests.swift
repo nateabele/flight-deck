@@ -43,7 +43,7 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         let runtime = CodexRuntime(indexURL: index)
 
         var seen: [AgentEvent] = []
-        runtime.attach(AgentBinding(conversationID: id, transcriptURL: url)) { seen.append($0) }
+        _ = runtime.attach(AgentBinding(conversationID: id, transcriptURL: url), for: UUID()) { seen.append($0) }
         runtime.drainForTesting() // prime both watchers
 
         try append(turn, to: url)
@@ -60,8 +60,8 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         let runtime = CodexRuntime(indexURL: index)
 
         var mineSeen: [AgentEvent] = [], theirsSeen: [AgentEvent] = []
-        runtime.attach(AgentBinding(conversationID: mine, transcriptURL: mineURL)) { mineSeen.append($0) }
-        runtime.attach(AgentBinding(conversationID: theirs, transcriptURL: theirsURL)) { theirsSeen.append($0) }
+        _ = runtime.attach(AgentBinding(conversationID: mine, transcriptURL: mineURL), for: UUID()) { mineSeen.append($0) }
+        _ = runtime.attach(AgentBinding(conversationID: theirs, transcriptURL: theirsURL), for: UUID()) { theirsSeen.append($0) }
         runtime.drainForTesting()
 
         try append(turn, to: mineURL)
@@ -79,9 +79,9 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
 
         var seen: [AgentEvent] = []
         let binding = AgentBinding(conversationID: id, transcriptURL: url)
-        runtime.attach(binding) { seen.append($0) }
+        let token = runtime.attach(binding, for: UUID()) { seen.append($0) }
         runtime.drainForTesting()
-        runtime.detach(binding)
+        runtime.detach(token)
 
         try append(turn, to: url)
         try append(indexLine(id, "after detach"), to: index)
@@ -100,7 +100,7 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
 
         var seen: [AgentEvent] = []
         let runtime = CodexRuntime(indexURL: index)
-        runtime.attach(AgentBinding(conversationID: id, transcriptURL: url)) { seen.append($0) }
+        _ = runtime.attach(AgentBinding(conversationID: id, transcriptURL: url), for: UUID()) { seen.append($0) }
         runtime.drainForTesting()
 
         XCTAssertEqual(seen, [])
@@ -111,7 +111,7 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         let runtime = CodexRuntime(indexURL: index)
 
         var seen: [AgentEvent] = []
-        runtime.attach(AgentBinding(conversationID: id, transcriptURL: nil)) { seen.append($0) }
+        _ = runtime.attach(AgentBinding(conversationID: id, transcriptURL: nil), for: UUID()) { seen.append($0) }
         runtime.drainForTesting()
 
         try append(indexLine(id, "still named"), to: index)

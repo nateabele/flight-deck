@@ -83,15 +83,6 @@ final class CodexRuntime: AgentRuntime {
         }
     }
 
-    /// Deprecated conversation-keyed API, removed in Task 6. See `ClaudeRuntime`.
-    func attach(_ binding: AgentBinding, onEvent: @escaping (AgentEvent) -> Void) {
-        _ = attach(binding, for: binding.conversationID, onEvent: onEvent)
-    }
-
-    func detach(_ binding: AgentBinding) {
-        detach(AttachmentToken(conversationID: binding.conversationID, tab: binding.conversationID))
-    }
-
     private func nameWatcher() -> CodexNameWatcher {
         if let names { return names }
         let watcher = CodexNameWatcher(url: indexURL, clock: clock)
