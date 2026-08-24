@@ -8,7 +8,7 @@ final class SessionStatusStoreTests: XCTestCase {
         // Synchronous stand-in for the background transcript read: the rows below can
         // change conversation under a stable pid, which repins, and the real resolver
         // would put a `Task.detached` file read behind a status assertion.
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         return store
     }
 

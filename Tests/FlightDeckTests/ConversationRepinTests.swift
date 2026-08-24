@@ -7,7 +7,7 @@ final class ConversationRepinTests: XCTestCase {
         let store = SessionStore(provider: nil, persistence: nil)
         // Synchronous stand-in for the background transcript read, so tests need no
         // expectations — same rationale as `TranscriptWatcher.drain()` being callable.
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         return store
     }
 
@@ -40,7 +40,7 @@ final class ConversationRepinTests: XCTestCase {
 
     func testResumeAdoptsTheResumedConversationsTitle() {
         let store = makeStore()
-        store.titleResolver = { _, done in done("the resumed conversation") }
+        store.titleResolver = { _, _, done in done("the resumed conversation") }
         let session = store.newSession(in: tmp)
         let resumed = UUID()
 
@@ -91,7 +91,7 @@ final class ConversationRepinTests: XCTestCase {
     func testResumeIsPersisted() {
         let persistence = FakePersistence()
         let store = SessionStore(provider: nil, persistence: persistence)
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         let session = store.newSession(in: tmp)
         let resumed = UUID()
 
@@ -108,7 +108,7 @@ final class ConversationRepinTests: XCTestCase {
     func testUnchangedConversationDoesNotRepin() {
         let store = makeStore()
         var resolverCalls = 0
-        store.titleResolver = { _, done in resolverCalls += 1; done(nil) }
+        store.titleResolver = { _, _, done in resolverCalls += 1; done(nil) }
         let session = store.newSession(in: tmp)
 
         store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])
@@ -124,7 +124,7 @@ final class ConversationRepinTests: XCTestCase {
     func testTabClosedDuringTitleResolutionDoesNotGetAWatcher() {
         let store = makeStore()
         var pending: ((String?) -> Void)?
-        store.titleResolver = { _, done in pending = done }
+        store.titleResolver = { _, _, done in pending = done }
         let session = store.newSession(in: tmp)
 
         store.applyRegistry([1: row(session.pinnedConversationID, cwd: tmp.path)])   // anchor
@@ -166,7 +166,7 @@ final class ConversationRepinTests: XCTestCase {
     func testAStaleTitleResolutionCannotOvertakeALaterRepin() {
         let store = makeStore()
         var pending: [(String?) -> Void] = []
-        store.titleResolver = { _, done in pending.append(done) }
+        store.titleResolver = { _, _, done in pending.append(done) }
         let session = store.newSession(in: tmp)
         let older = UUID()
         let newer = UUID()

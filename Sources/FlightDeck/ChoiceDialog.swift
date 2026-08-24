@@ -33,8 +33,11 @@ import Foundation
 ///
 /// ## What a real screen looks like
 ///
-/// Every rule here comes from the six captures in `Tests/FlightDeckTests/Fixtures/Claude/`
-/// (claude 2.1.241), not from the binary's string table:
+/// Every rule here comes from captures — the six claude 2.1.241 screens in
+/// `Tests/FlightDeckTests/Fixtures/Claude/` and, since, the five codex-cli 0.148.0 screens in
+/// `Fixtures/Codex/` — not from either binary's string table. **Every structural rule below
+/// held unmodified against codex's screens; only the marker glyph differed**, which is why it
+/// is now a parameter and why nothing else here is per-agent:
 ///
 /// - The marker is `❯`, but **its column varies by dialog kind** — column 2 for a permission
 ///   and for folder-trust, column 1 for an `AskUserQuestion`. claude positions with absolute
@@ -56,21 +59,39 @@ import Foundation
 /// happens to contain the same words — which is why every uncertain answer is `nil` or `false`
 /// rather than a best guess.
 enum ChoiceDialog {
-    /// U+276F, the marker claude draws on the focused row.
+    /// U+276F, the marker **claude** draws on the focused row.
     ///
     /// The same glyph `InputBar` keys on — which is precisely why that type must never be
     /// pointed at a dialog: it would read the selected option as a draft and Ctrl-U it. And
     /// why the marker alone is not enough here; see the trap above.
-    static let marker: Character = "❯"
+    static let claudeMarker: Character = "❯"
+
+    /// U+203A, the marker **codex** draws on the focused row — a *different character*, and
+    /// the whole reason `marker` is a parameter below rather than a constant.
+    ///
+    /// Three glyphs are in play on one machine and conflating any two of them is the hazard:
+    /// claude's `❯` (U+276F), codex's `›` (U+203A), and a shell prompt's `>` (U+003E), which
+    /// is what this machine's fish draws. Established by codepoint dump of the captured lines
+    /// in `Fixtures/Codex/tui.captured.provenance.json`, not by eye — on screen they are
+    /// indistinguishable. Note what follows for `InputBar`, which tests `first == ❯`: it
+    /// matches *nothing at all* on a codex screen, so it never could have mistaken codex's
+    /// composer for a draft. The near-miss `SessionStore.rename` records is about a SHELL
+    /// theme drawing `❯`, and is unchanged by anything here.
+    static let codexMarker: Character = "›"
 
     /// Which row of the select list on screen the cursor is on, or nil when no list can be
     /// read, none is marked, or two are.
     ///
     /// The one fact that exists nowhere but the screen. Arrows are relative, so this is what
     /// turns a target row into a number of key presses — and it is all `.allow` needs, since
-    /// Allow is row 0 and carries no label the Mac can check against.
-    static func focusedRow(inViewport viewport: String) -> Int? {
-        guard let list = list(inViewport: viewport) else { return nil }
+    /// the approval row carries no label the Mac can check against.
+    ///
+    /// **`marker` has no default, deliberately.** Widening the parser to a second agent is
+    /// the moment a defaulted `❯` stops being a convenience and becomes claude's grammar
+    /// silently applied to somebody else's screen. Every caller is a driver stating its own
+    /// agent's glyph; there is no generic answer to fall back to.
+    static func focusedRow(inViewport viewport: String, marker: Character) -> Int? {
+        guard let list = list(inViewport: viewport, marker: marker) else { return nil }
         let marked = list.indices.filter { list[$0].isMarked }
         // A list with no cursor, or with two, is not a dialog anyone is being offered.
         guard marked.count == 1 else { return nil }
@@ -83,10 +104,12 @@ enum ChoiceDialog {
     /// is looking at — and never means "count instead". `index` out of range is false rather
     /// than a trap, because the list on screen is shorter than the caller expected exactly when
     /// something has gone wrong.
-    static func row(_ index: Int, reads label: String, inViewport viewport: String) -> Bool {
-        guard let list = list(inViewport: viewport), list.indices.contains(index) else {
-            return false
-        }
+    static func row(
+        _ index: Int, reads label: String, inViewport viewport: String, marker: Character
+    ) -> Bool {
+        guard let list = list(inViewport: viewport, marker: marker),
+              list.indices.contains(index)
+        else { return false }
         return list[index].reads(normalized(label))
     }
 
@@ -127,7 +150,7 @@ enum ChoiceDialog {
     /// deliberately *not* stripped. This feature refuses to answer a multi-select
     /// (`PromptQuestion.multiSelectReason`), so a screen it cannot drive is a screen the
     /// interlock must decline to confirm.
-    private static func parse(_ line: String) -> Row? {
+    private static func parse(_ line: String, marker: Character) -> Row? {
         var rest = Substring(line).drop(while: { $0 == " " })
         var isMarked = false
         if rest.first == marker {
@@ -161,12 +184,12 @@ enum ChoiceDialog {
     /// hunk, not a choice. A blank line, a rule, or any other unindented text ends the run —
     /// which is what splits an `AskUserQuestion`'s options from the `5. Chat about this` claude
     /// draws below the closing rule.
-    private static func list(inViewport viewport: String) -> [Row]? {
+    private static func list(inViewport viewport: String, marker: Character) -> [Row]? {
         var lists: [[Row]] = []
         var current: [Row] = []
 
         for line in viewport.components(separatedBy: "\n") {
-            if let row = parse(line) {
+            if let row = parse(line, marker: marker) {
                 if row.number == current.count + 1 {
                     current.append(row)
                     continue
@@ -174,7 +197,7 @@ enum ChoiceDialog {
                 // The numbering broke. Close what is open; this row may still head a new list.
                 lists.append(current)
                 current = row.number == 1 ? [row] : []
-            } else if !current.isEmpty, let continuation = continuation(line) {
+            } else if !current.isEmpty, let continuation = continuation(line, marker: marker) {
                 current[current.count - 1].continuations.append(continuation)
             } else {
                 lists.append(current)
@@ -189,8 +212,8 @@ enum ChoiceDialog {
     ///
     /// Indentation is what excludes the footer (`Enter to select · ↑/↓ to navigate …`) and the
     /// full-width `─` rules, which claude draws from column 1.
-    private static func continuation(_ line: String) -> String? {
-        guard line.first == " ", parse(line) == nil else { return nil }
+    private static func continuation(_ line: String, marker: Character) -> String? {
+        guard line.first == " ", parse(line, marker: marker) == nil else { return nil }
         let text = normalized(line)
         return text.isEmpty ? nil : text
     }

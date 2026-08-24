@@ -6,13 +6,10 @@ import Foundation
 /// guess. Identity is display-only, so a wrong answer must degrade to "no answer", never to a
 /// plausible-looking wrong email next to a real account.
 enum AccountDirectory {
-    /// The file whose presence marks a directory as one of this agent's homes.
-    static func marker(for agent: AgentID) -> String {
-        switch agent {
-        case .claude: return ".claude.json"
-        case .codex:  return "auth.json"
-        }
-    }
+    /// The file whose presence marks a directory as one of this agent's homes. Asked of the
+    /// agent — see `AgentAdapter.homeMarkerFile` — so a third agent states its own rather
+    /// than being added to a switch here.
+    static func marker(for agent: AgentID) -> String { agent.homeMarkerFile }
 
     static func looksLikeHome(_ url: URL, agent: AgentID) -> Bool {
         FileManager.default.fileExists(atPath: url.appendingPathComponent(marker(for: agent)).path)
@@ -56,13 +53,12 @@ enum AccountDirectory {
     static func identity(atHome home: URL, agent: AgentID) -> AccountIdentity? {
         guard let data = try? Data(contentsOf: home.appendingPathComponent(marker(for: agent)))
         else { return nil }
-        switch agent {
-        case .claude: return claudeIdentity(from: data)
-        case .codex:  return codexIdentity(from: data)
-        }
+        return agent.identity(fromHomeData: data)
     }
 
-    /// `<home>/.claude.json` → `oauthAccount.emailAddress` / `organizationName`.
+    /// `<home>/.claude.json` → `oauthAccount.emailAddress` / `organizationName`. Reached
+    /// through `ClaudeAdapter.identity(fromHomeData:)`; the parse stays here because the two
+    /// parsers are the same job written twice and read best side by side.
     static func claudeIdentity(from data: Data) -> AccountIdentity? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let account = root["oauthAccount"] as? [String: Any]

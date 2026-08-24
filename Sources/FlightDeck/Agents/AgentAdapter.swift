@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// Everything `SessionStore` needs from an agent, and nothing about how that agent works.
@@ -65,24 +66,223 @@ protocol AgentAdapter {
     /// ship a wrong login command for a future agent. Every conformer states its own.
     func loginInvocation(for account: AgentAccount) -> LoginInvocation
 
-    /// **Whether keystrokes may be sent to this agent's live terminal at all.**
+    /// **How a message is typed into this agent's live terminal — or `nil`, which IS the
+    /// refusal.**
     ///
-    /// One capability, not three, because the three things `SessionStore` does to a running
-    /// TUI are one channel: a message typed into the input box and submitted
-    /// (`submitPrompt`), `/rename <name>` typed into that same box (`flushPendingRename`),
-    /// and Escape / arrows / Return driving a dialog (`answerPrompt`). All of them are text
-    /// at a pty whose screen grammar this build has to be able to read, and an agent whose
-    /// screen it cannot read is refused all three for the same reason.
+    /// Everything `SessionStore` types into a running TUI goes through here: a phone's
+    /// message (`submitPrompt`), `/rename <name>` (`flushPendingRename`), and a restore's
+    /// "Keep going". All of them are text at a pty whose input box this build has to be able
+    /// to find, and an agent whose box it cannot find is refused all three at one site —
+    /// `inject` — because that is the single funnel all three pass through.
     ///
-    /// **Static rather than an instance member, and that is load-bearing.**
-    /// `SessionStore.adapter(for:)` answers codex out of `makeCodexStackIfNeeded`, so asking
-    /// an instance would memoize a stack and spin up a runtime just to ask a question — and
-    /// the first caller is `restore`, which must be able to ask about a codex tab before it
-    /// has built anything for it. A capability is a property of the agent, not of one
-    /// account's live stack.
+    /// **`nil` rather than a `Bool` beside a body, so the refusal is stated once.** A
+    /// predicate and an implementation are two statements of one fact and they drift; a
+    /// missing object cannot disagree with itself about whether it is missing.
     ///
-    /// Read through `AgentID.hasTextChannel` below, which is what the store consults.
-    static var hasTextChannel: Bool { get }
+    /// **Widening this back out is not the cautious move.** Nothing codex has goes through
+    /// the funnel: `sendToShell` types resume commands and `initialInput` directly at the pty
+    /// and never touches it, and `CodexAdapter.loginInvocation` has `inject: nil`, so no
+    /// codex sign-in text is ever queued either.
+    ///
+    /// Read through `AgentID.textChannel` below, which is what the store consults.
+    static var textChannel: AgentTextChannel? { get }
+
+    /// **How a select-list dialog this agent has raised is driven — or `nil`, the refusal.**
+    ///
+    /// Split from `textChannel` because the two are genuinely different channels and an
+    /// agent can have one without the other. Driving a dialog needs no input box and no kill
+    /// ring: it is arrows counted against a screen grammar, a Return, and an Escape that
+    /// reads nothing at all. Codex is exactly that case — its approval list fits
+    /// `ChoiceDialog`'s model more closely than claude's own does, while its composer still
+    /// has no answer to `inject`'s draft dance.
+    ///
+    /// Read through `AgentID.dialogDriver` below.
+    static var dialogDriver: AgentDialogDriver? { get }
+
+    /// **Whether this agent's conversation identity is a round trip that can fail, rather
+    /// than a local mint.**
+    ///
+    /// Claude chooses the id itself and cannot be wrong about it. Codex is *told* one, by an
+    /// app-server that has to be running to tell it, and can be told that the conversation
+    /// the store held a pin for no longer exists.
+    ///
+    /// Three sites ask it, and they are the same question seen from two ends. `createSession`
+    /// asks whether making a tab needs the `async` negotiation at all — an agent that mints
+    /// locally takes the synchronous path and never spawns anything. `restore` and
+    /// `reinsertClosed` ask whether the resume text must be DEFERRED until identity has been
+    /// settled against the agent: `binding(for:)` is a pure read of the pin and cannot tell a
+    /// conversation that still exists from one deleted between launches, so typing `codex
+    /// resume <gone>` would open the tab onto an error instead of a session. Claude needs
+    /// none of it, because its resume command carries its own fallback.
+    ///
+    /// No default, for the reason `loginInvocation` has none: `false` is claude's answer, and
+    /// an agent that inherited it silently would have its identity treated as unfailable.
+    static var negotiatesIdentity: Bool { get }
+
+    /// **Whether something has to be RUNNING before `prepare`/`rebind` can be called.**
+    ///
+    /// Claude: nothing — its adapter is a pure function of paths. Codex: a probed binary, a
+    /// spawned `codex app-server` and a completed handshake, per account.
+    ///
+    /// A predicate rather than the proposal's `func prepareRuntime() async throws`, and
+    /// deliberately so. The *doing* is `SessionStore.startCodex`, and it is the store's by
+    /// ownership rather than by accident: it memoizes one in-flight handshake per account in
+    /// `codexHandshake`, builds through `makeCodexStackIfNeeded`, and tears the stack back
+    /// down through `stopCodex(account:expected:)` on failure. A `CodexAdapter` is a value
+    /// *produced by* one of those stacks, so moving the start onto it would mean moving the
+    /// per-account stack registry onto the thing the registry hands out. That is an inversion,
+    /// not a move — and this member is what the nine name checks needed either way.
+    static var needsRuntimeStart: Bool { get }
+
+    /// **Whether an external per-account status registry describes this agent's tabs.**
+    ///
+    /// Claude writes one file per session into `<home>/sessions` and `SessionStatusWatcher`
+    /// scans it; codex reports through its app-server and has no such directory at all. Three
+    /// sites ask: two decide whether to start an account's registry watcher, and one decides
+    /// whether a registry tick may rebuild a tab's status — a scan that lists `claude`
+    /// processes can neither confirm nor refute a codex thread, so rebuilding blindly would
+    /// erase a codex tab's status on every tick.
+    ///
+    /// **A Bool rather than the proposal's `observationRoots(for:) -> [ObservationRoot]`, and
+    /// this is the open question that proposal flagged, answered from inside the code.** The
+    /// roots themselves cannot live here: `SessionStore.statusRoot(forAccount:)`,
+    /// `transcriptsRoot(forAccount:)` and `codexIndexURL(for:)` each begin with a nil check
+    /// on a store-owned override, and the property that makes a fixture run safe is that the
+    /// override wins for EVERY account from ONE place (`AccountObservationRootTests`). An
+    /// adapter answering with roots would either duplicate that check or lose it. And none of
+    /// the three sites wants a list — each wants a yes or no, and would immediately
+    /// destructure any list back into the call the store already makes. A type constructed
+    /// only to be taken apart again has no reader.
+    static var hasStatusRegistry: Bool { get }
+
+    // ─── Pure mappings and namings. `nonisolated`, because none of them touches actor
+    //     state and three of them are reached from off the main actor: `TimelineReader` is
+    //     `Sendable` and parses a page on a background queue, and `AccountDirectory` is
+    //     reached from preference migration before any store exists. ───
+
+    /// **A legal conversation name for THIS agent's rename channel.**
+    ///
+    /// Claude strips shell metacharacters, because its rename is typed at a pty that may be a
+    /// bare shell. Codex does not, because `thread/name/set` is JSON-RPC and touches no
+    /// shell — see `AgentTitle`, which holds the half both agents share.
+    nonisolated static func sanitizedTitle(_ raw: String) -> String?
+
+    /// **A conversation's own name, read out of its transcript** — for a tab that repointed
+    /// at a conversation this app did not start.
+    ///
+    /// Claude: `ConversationTitle.resolve`, which mirrors what `claude`'s own `/resume`
+    /// picker shows. Codex: `nil`, and that is an answer rather than a gap — a codex thread's
+    /// name lives in `session_index.jsonl` and reaches the store through `CodexNameWatcher`,
+    /// never out of the rollout. Handing a codex rollout to claude's JSONL parser is exactly
+    /// what the store used to do by default.
+    nonisolated static func title(fromTranscriptAt url: URL) -> String?
+
+    /// **One line of this agent's transcript, as timeline items.**
+    ///
+    /// The pattern the rest of this protocol was written to match rather than a site that
+    /// needed fixing: two pure functions with one signature, tested from captured fixtures,
+    /// refusing rather than guessing. All that moves is where the switch lives.
+    nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem]
+
+    /// **The file whose presence marks a directory as one of this agent's homes**, and what
+    /// that file says about who is signed in.
+    ///
+    /// Identity is display-only, so a wrong answer must degrade to "no answer" — never to a
+    /// plausible-looking wrong email next to a real account.
+    nonisolated static var homeMarkerFile: String { get }
+    nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity?
+
+    /// **How this agent's transcript says what it is blocked on — or `nil`, the refusal.**
+    ///
+    /// The third capability object, and the other half of `dialogDriver`. Driving a dialog
+    /// needs a screen grammar; knowing *which* dialog is on screen needs a transcript
+    /// grammar, and an agent can have either without the other. Codex is exactly that case:
+    /// its approval list is drivable, and it writes nothing to its rollout when that list
+    /// goes up (`CodexEventMapper`), so there is no record to find and no call id for a
+    /// phone's tap to be checked against.
+    ///
+    /// **An object rather than a method returning `nil`, for the same reason the other two
+    /// are.** A method's `nil` would mean both "no dialog is open" and "this agent has no
+    /// derivation", and those are different sentences on a phone — `prompt_changed` versus
+    /// `unsupported_agent`. It also lets `PromptService` refuse before reading the file.
+    static var openPromptReader: AgentOpenPromptReader? { get }
+}
+
+/// Deriving what an agent is blocked on from a window of its transcript.
+///
+/// A window rather than the whole file because an agent cannot proceed past a dialog, so the
+/// open call is always among the last records; a few rather than one so that a result for an
+/// *earlier* call is inside the window and cannot make an already-answered call look open —
+/// the only way this can be wrong in the dangerous direction.
+@MainActor
+protocol AgentOpenPromptReader {
+    func openPrompt(inTranscriptTail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt?
+}
+
+/// **Typing a message into a live agent and submitting it.**
+///
+/// The body of `SessionStore.inject`, moved out from under the store so that "which screen
+/// grammar" is the adapter's answer rather than a claude-shaped default reached by callers
+/// carrying no agent at all.
+///
+/// **There is deliberately no `readiness(viewport:)` member.** A channel that could report
+/// `.ready(draft:)` would be claiming to tell a real draft from a placeholder hint, and
+/// `InputBar`'s own doc records that it cannot: Claude Code renders the hint in exactly the
+/// shape of a draft and the two differ only in colour, which `ghostty_surface_read_text` does
+/// not return. The safe reading is the kill itself — kill, then compare `content` before and
+/// after — so the whole dance stays inside one call rather than being split across a question
+/// that would have to guess.
+@MainActor
+protocol AgentTextChannel {
+    /// Type `text` and submit it, preserving whatever draft was there — or refuse.
+    ///
+    /// **The contract the caller's bookkeeping depends on: `settle` is called exactly once
+    /// iff this returns `true`.** `SessionStore` marks the tab mid-injection before calling
+    /// and clears the mark inside the `settle` it supplies, so a channel that returned `true`
+    /// without settling would leave the tab refusing every later injection for the life of
+    /// the process.
+    ///
+    /// `stillWanted` is re-checked after the settle delay, because the request can be
+    /// replaced or cancelled while the agent repaints. `onSent` runs once the text has been
+    /// submitted, and is where the caller retires its pending entry.
+    func submit(
+        _ text: String,
+        into injector: TextInjecting,
+        settle: (@escaping () -> Void) -> Void,
+        stillWanted: @escaping @MainActor () -> Bool,
+        onSent: @escaping @MainActor () -> Void
+    ) -> Bool
+}
+
+/// **Driving a select-list dialog the agent has raised.**
+///
+/// The interlock in front of an irreversible keypress, as `ChoiceDialog` documents it, with
+/// the two things that are *not* shared between agents named as members: which row is the
+/// plain approval, and how a refusal is delivered.
+@MainActor
+protocol AgentDialogDriver {
+    /// Which row of the select list on screen the cursor is on, or nil when no list can be
+    /// read, none is marked, or two are.
+    func focusedRow(inViewport viewport: String) -> Int?
+
+    /// The interlock: does row `index` read as `label`? False means refuse — never "count
+    /// instead".
+    func row(_ index: Int, reads label: String, inViewport viewport: String) -> Bool
+
+    /// **The plain-approval row, and it has no default on purpose.**
+    ///
+    /// Both shipped agents order their approval dialogs the same way — plain yes, then a
+    /// DURABLE GRANT, then deny — and both answer `0`. That coincidence is exactly why this
+    /// must not be a defaulted constant: an agent that inherited `0` without checking would
+    /// be one release away from silently granting "and don't ask again" from a pocket. Every
+    /// conformer states its own, proved from that agent's own captured screens, and the
+    /// compiler catches one that forgets.
+    var allowRow: Int { get }
+
+    /// Refusal with no reading at all — one key event, no viewport parse, no row arithmetic.
+    /// It is the path a worried person reaches for from a pocket, and it is deliberately the
+    /// one path that cannot be wrong about which row it is on, because it is not on a row.
+    func deny(_ injector: TextInjecting)
 }
 
 extension AgentAdapter {
@@ -108,17 +308,119 @@ extension AgentAdapter {
 /// *answers* live on the adapters, which is what stops "can this be typed into" from being
 /// re-decided at each call site, and the compiler makes a third agent state its own rather
 /// than inherit claude's by default.
+///
+/// **Static, and that is load-bearing — it is why these are properties of `AgentID` rather
+/// than methods on an adapter instance.** `SessionStore.adapter(for:)` answers codex out of
+/// `makeCodexStackIfNeeded`, so asking an instance would memoize a stack and spin up a
+/// runtime just to ask a question. The first caller is `restore`, which must be able to ask
+/// about a codex tab before it has built anything for it, and `PromptService` holds only a
+/// tab id. Neither can afford that, and neither should have to: a capability is a property
+/// of the agent, not of one account's live stack. Nothing either channel does reads adapter
+/// state — they read a screen and press keys — so there is nothing an instance would supply.
 @MainActor
 extension AgentID {
-    /// See `AgentAdapter.hasTextChannel`. Consulted at four sites in `SessionStore` —
-    /// `restore`'s auto-resume gate, `inject`, `submitPrompt` and `answerPrompt` — and by
-    /// `PromptService`, so those five cannot come to different conclusions about one agent.
-    var hasTextChannel: Bool {
+    /// See `AgentAdapter.textChannel`. Consulted at three sites in `SessionStore` —
+    /// `restore`'s auto-resume gate, `submitPrompt` and `inject` — so none of them can come
+    /// to a different conclusion about one agent.
+    var textChannel: AgentTextChannel? {
         switch self {
-        case .claude: ClaudeAdapter.hasTextChannel
-        case .codex: CodexAdapter.hasTextChannel
+        case .claude: ClaudeAdapter.textChannel
+        case .codex: CodexAdapter.textChannel
         }
     }
+
+    /// See `AgentAdapter.dialogDriver`. Consulted by `SessionStore.answerPrompt` and by
+    /// `PromptService`, which is the split that stops those two drifting — the property
+    /// `PromptService`'s own comment claims and used to fail at.
+    var dialogDriver: AgentDialogDriver? {
+        switch self {
+        case .claude: ClaudeAdapter.dialogDriver
+        case .codex: CodexAdapter.dialogDriver
+        }
+    }
+
+    /// See `AgentAdapter.openPromptReader`. Consulted by `PromptService` alone — the store is
+    /// handed the derived `OpenPrompt` and never derives one itself.
+    var openPromptReader: AgentOpenPromptReader? {
+        switch self {
+        case .claude: ClaudeAdapter.openPromptReader
+        case .codex: CodexAdapter.openPromptReader
+        }
+    }
+
+    /// See `AgentAdapter.negotiatesIdentity`. Consulted by `createSession`, `restore` and
+    /// `reinsertClosed`.
+    var negotiatesIdentity: Bool {
+        switch self {
+        case .claude: ClaudeAdapter.negotiatesIdentity
+        case .codex: CodexAdapter.negotiatesIdentity
+        }
+    }
+
+    /// See `AgentAdapter.needsRuntimeStart`. Consulted by `preparedAdapter(for:)`.
+    var needsRuntimeStart: Bool {
+        switch self {
+        case .claude: ClaudeAdapter.needsRuntimeStart
+        case .codex: CodexAdapter.needsRuntimeStart
+        }
+    }
+
+    /// See `AgentAdapter.hasStatusRegistry`. Consulted by `startStatusWatching()`,
+    /// `startWatching(tabID:)` and `applyRegistry`.
+    var hasStatusRegistry: Bool {
+        switch self {
+        case .claude: ClaudeAdapter.hasStatusRegistry
+        case .codex: CodexAdapter.hasStatusRegistry
+        }
+    }
+}
+
+/// The pure mappings, read the same way and kept in their own extension because they are
+/// **nonisolated**: `TimelineReader` maps a page off the main actor, and `AccountDirectory`
+/// answers preference migration before a store exists. Same construction table, same reason
+/// — the answers live on the adapters so a third agent states its own.
+extension AgentID {
+    /// See `AgentAdapter.sanitizedTitle`. Consulted by `SessionStore.rename`,
+    /// `injectPendingRename` and `applyExternalTitle`.
+    func sanitizedTitle(_ raw: String) -> String? {
+        switch self {
+        case .claude: ClaudeAdapter.sanitizedTitle(raw)
+        case .codex: CodexAdapter.sanitizedTitle(raw)
+        }
+    }
+
+    /// See `AgentAdapter.title(fromTranscriptAt:)`. Consulted by `SessionStore.titleResolver`'s
+    /// default, which is what `repin` reaches.
+    func title(fromTranscriptAt url: URL) -> String? {
+        switch self {
+        case .claude: ClaudeAdapter.title(fromTranscriptAt: url)
+        case .codex: CodexAdapter.title(fromTranscriptAt: url)
+        }
+    }
+
+    /// See `AgentAdapter.timelineItems(inLine:at:)`. Consulted by `TimelineReader.page`.
+    func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+        switch self {
+        case .claude: ClaudeAdapter.timelineItems(inLine: line, at: offset)
+        case .codex: CodexAdapter.timelineItems(inLine: line, at: offset)
+        }
+    }
+
+    /// See `AgentAdapter.homeMarkerFile`. Consulted by `AccountDirectory`.
+    var homeMarkerFile: String {
+        switch self {
+        case .claude: ClaudeAdapter.homeMarkerFile
+        case .codex: CodexAdapter.homeMarkerFile
+        }
+    }
+
+    func identity(fromHomeData data: Data) -> AccountIdentity? {
+        switch self {
+        case .claude: ClaudeAdapter.identity(fromHomeData: data)
+        case .codex: CodexAdapter.identity(fromHomeData: data)
+        }
+    }
+
 }
 
 /// How to sign an account in. Two fields rather than one because the two agents differ in

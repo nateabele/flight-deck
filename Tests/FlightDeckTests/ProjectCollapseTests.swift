@@ -126,7 +126,7 @@ final class ProjectCollapseTests: XCTestCase {
 
     func testMoveSessionIntoACollapsedDestinationExpandsIt() {
         let (store, _) = makeStore()
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         let a = store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
         store.newSession(in: URL(fileURLWithPath: "/w/b", isDirectory: true))
         let destination = store.repos.first { $0.url.lastPathComponent == "b" }!.id

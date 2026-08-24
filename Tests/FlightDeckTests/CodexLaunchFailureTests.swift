@@ -1,3 +1,4 @@
+import FleetKit
 import XCTest
 @testable import FlightDeck
 
@@ -73,10 +74,28 @@ final class CodexLaunchFailureTests: XCTestCase {
     /// genuinely mid-negotiation.
     private final class GatedAdapter: AgentAdapter {
         static let id: AgentID = .codex
-        /// Codex's answer, because this stands in for codex — the store reads the capability
-        /// off `AgentID`, so a stub that disagreed would describe an agent that does not
-        /// exist.
-        static let hasTextChannel = false
+        /// Codex's answers, because this stands in for codex — the store reads both
+        /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
+        /// does not exist.
+        static let textChannel: AgentTextChannel? = nil
+        static let dialogDriver: AgentDialogDriver? = nil
+        static let negotiatesIdentity = true
+        static let needsRuntimeStart = true
+        static let hasStatusRegistry = false
+        nonisolated static func sanitizedTitle(_ raw: String) -> String? {
+            CodexAdapter.sanitizedTitle(raw)
+        }
+        nonisolated static func title(fromTranscriptAt url: URL) -> String? {
+            CodexAdapter.title(fromTranscriptAt: url)
+        }
+        nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+            CodexAdapter.timelineItems(inLine: line, at: offset)
+        }
+        nonisolated static let homeMarkerFile = CodexAdapter.homeMarkerFile
+        nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
+            CodexAdapter.identity(fromHomeData: data)
+        }
+        static let openPromptReader: AgentOpenPromptReader? = CodexAdapter.openPromptReader
         private var resume: CheckedContinuation<Void, Never>?
         private var entered: CheckedContinuation<Void, Never>?
         private var hasEntered = false
