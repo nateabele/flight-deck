@@ -50,6 +50,9 @@ final class AgentLocationTests: XCTestCase {
         /// does not exist.
         static let textChannel: AgentTextChannel? = ClaudeTextChannel()
         static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
+        static let negotiatesIdentity = false
+        static let needsRuntimeStart = false
+        static let hasStatusRegistry = true
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)
         }
