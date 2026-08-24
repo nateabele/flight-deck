@@ -128,9 +128,14 @@ struct PromptComposer: View {
                 .lineLimit(1...6)
                 .textFieldStyle(.plain)
                 .font(.body)
-                // Off, both of them: this text is going into a terminal, and an autocorrected
-                // file path or a capitalised flag is a message that means something else.
-                .autocorrectionDisabled()
+                // Autocorrect ON, autocapitalisation OFF, and the split is deliberate.
+                //
+                // Both used to be off, on the reasoning that this text goes into a terminal
+                // and an autocorrected file path is a message that means something else. That
+                // holds for capitalisation — a flag turned into `-Rf` by a capital is silently
+                // a different command — and does not hold for the rest: most of what gets
+                // typed here is a sentence to an agent, not a shell word, and typing prose on
+                // a phone with autocorrect off is its own kind of wrong message.
                 .textInputAutocapitalization(.never)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
