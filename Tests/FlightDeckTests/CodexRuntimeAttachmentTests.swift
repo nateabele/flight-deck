@@ -138,6 +138,25 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         XCTAssertEqual(second, [.title("renamed")])
     }
 
+    func testDetachingOneOfTwoLeavesTheOtherWatching() throws {
+        let id = UUID()
+        let runtime = CodexRuntime(indexURL: index)
+
+        var first: [AgentEvent] = []
+        var second: [AgentEvent] = []
+        let binding = AgentBinding(conversationID: id, transcriptURL: nil)
+        let a = runtime.attach(binding, for: UUID()) { first.append($0) }
+        _ = runtime.attach(binding, for: UUID()) { second.append($0) }
+        runtime.drainForTesting() // prime
+
+        runtime.detach(a)
+        try append(indexLine(id, "after"), to: index)
+        runtime.drainForTesting()
+
+        XCTAssertTrue(first.isEmpty, "a detached subscriber must receive nothing")
+        XCTAssertEqual(second, [.title("after")], "the surviving subscriber must keep its watcher")
+    }
+
     func testDetachingTheLastSubscriberUnregistersTheThread() throws {
         let id = UUID()
         let runtime = CodexRuntime(indexURL: index)
