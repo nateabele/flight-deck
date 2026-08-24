@@ -130,8 +130,11 @@ Today the state directory and the preferences domain are decided separately, whi
 ```swift
 enum StateWorld {
     case owned(directory: URL, defaults: UserDefaults)
-    case forked(directory: URL, from: URL, owner: ProcessIdentity)
+    case forked(directory: URL, defaults: UserDefaults, from: URL, owner: ProcessIdentity)
 }
+
+/// Both cases carry a defaults suite, so no consumer can reach `.standard` implicitly.
+/// A fork's suite is its own, seeded by copying the contended world's preferences once.
 ```
 
 Resolution order, once, at launch:
@@ -140,7 +143,11 @@ Resolution order, once, at launch:
 |---|---|---|
 | Release | `~/Library/Application Support/Flight Deck` | standard domain |
 | `#if DEBUG` | `~/Library/Application Support/Flight Deck (Debug)` | `dev.flightdeck.FlightDeck.debug` |
-| `-FlightDeckStateDir <p>` | `<p>` | suite derived from `<p>` |
+| `-FlightDeckStateDir <p>` | `<p>` | `dev.flightdeck.FlightDeck.<h>` |
+
+`<h>` is a short stable digest of the resolved absolute path, so two overrides never share a
+suite and the same override always reuses one. The suite name is derived, never passed
+separately — a directory and a preferences domain cannot be pointed at different worlds.
 
 Both stores derive from the resolved world. Forgetting a flag stops being possible because
 there is no flag to forget: a debug build is isolated by virtue of being a debug build.
@@ -200,8 +207,13 @@ on the migration path, so it sits armed indefinitely.
 
 ### 4.1 A pin must follow its thread
 
-A compaction writes the continuation to a new conversation id. On restore, and on registry
-ticks, detect a superseded pin and repoint it.
+A compaction writes the continuation to a new conversation id. Detect a superseded pin and
+repoint it.
+
+**Cost.** The check is not a per-tick whole-file read. A registry tick already tells us when a
+tab's `claude` is writing somewhere the tab is not following; the lineage read runs only on
+that transition, and on restore. Reading the last record of the pinned file and the first of a
+candidate is enough to test the link below — neither is a full-file load.
 
 Guarded by a **strong link only**: the continuation's first record's `parentUuid` equals the
 pinned file's last record's `uuid`. Not a similarity heuristic, not shared-uuid overlap —
