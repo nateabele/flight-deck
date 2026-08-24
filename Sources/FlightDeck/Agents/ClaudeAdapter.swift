@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 /// Claude conformance. A thin shell over `ClaudeSession`, which stays the single source of
 /// truth for command construction and path derivation.
@@ -10,6 +11,11 @@ import Foundation
 @MainActor
 struct ClaudeAdapter: AgentAdapter {
     static let id: AgentID = .claude
+
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
+        category: String(describing: ClaudeAdapter.self)
+    )
 
     /// Where this account's `projects` directory lives, read on every derivation rather than
     /// captured as a value. It is derived from the home of the account the adapter was built
@@ -61,12 +67,20 @@ struct ClaudeAdapter: AgentAdapter {
     /// reasoning.
     ///
     /// A silent no-op here would be exactly the latent hazard this plan exists to remove: the
-    /// 2026-08-23 incident was a fan-out nobody noticed had gone stale. So this fails loudly
-    /// instead — an `assertionFailure` plus a thrown error — meaning a future refactor that
-    /// starts routing claude through the adapter surfaces immediately rather than quietly
-    /// dropping every rename.
+    /// 2026-08-23 incident was a fan-out nobody noticed had gone stale. So in Debug and CI this
+    /// traps: `assertionFailure` plus a thrown error, so a future refactor that starts routing
+    /// claude through the adapter surfaces immediately rather than quietly dropping every
+    /// rename.
+    ///
+    /// In Release, `assertionFailure` compiles out and the thrown error is swallowed by
+    /// `SessionStore.rename`'s `try? await adapter.rename(...)` on the codex leg — so this
+    /// degrades to a logged failure rather than a crash. That degrade is deliberate: trapping
+    /// in Release would crash a session manager holding dozens of live terminals over a
+    /// cosmetic rename, which is a far worse outcome than a name silently staying stale. The
+    /// `Logger` call below is what leaves a breadcrumb for that case.
     func rename(_ binding: AgentBinding, to title: String) async throws {
         assertionFailure("ClaudeAdapter.rename is unreachable — claude renames dispatch inline through SessionStore.rename, never through the adapter")
+        Self.logger.fault("ClaudeAdapter.rename reached in Release — claude renames dispatch inline through SessionStore.rename, never through the adapter")
         throw RenameUnreachable()
     }
 

@@ -28,6 +28,11 @@ final class ClaudeRuntime: AgentRuntime {
         let token = AttachmentToken(conversationID: id, tab: tab)
 
         if let existing = sources[id] {
+            // `binding.transcriptURL` is discarded here — the joining subscriber gets the
+            // first attacher's watcher, not its own. If two tabs land on one conversation
+            // with different transcript directories, both end up tailing the first attacher's
+            // file, and a later `retarget` of the second tab (SessionStore.retarget) cannot
+            // repoint it while the first tab stays attached. Tracked follow-up, not fixed here.
             existing.subscribers.add(token, onEvent)
             return token
         }
