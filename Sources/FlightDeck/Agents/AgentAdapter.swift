@@ -234,6 +234,17 @@ protocol AgentOpenPromptReader {
 /// that would have to guess.
 @MainActor
 protocol AgentTextChannel {
+    /// Whether this agent's input box is on screen AND empty right now.
+    ///
+    /// Asked before typing into a tab that is mid-turn. Typing into a running turn is fine —
+    /// the agent queues it, which is what a person at the keyboard relies on — but only into
+    /// an EMPTY box: mid-turn there is no safe way to put a half-written draft back, because
+    /// the kill-and-yank `submit` uses depends on reading a screen that is repainting.
+    ///
+    /// An agent whose box cannot be read answers `false` and the caller defers, which is the
+    /// same thing it does for a box with something in it.
+    func isComposerEmpty(_ injector: TextInjecting) -> Bool
+
     /// Type `text` and submit it, preserving whatever draft was there — or refuse.
     ///
     /// **The contract the caller's bookkeeping depends on: `settle` is called exactly once

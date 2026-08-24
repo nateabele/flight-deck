@@ -24,6 +24,14 @@ import Foundation
 /// `sendText` and `sendReturn` are separate because a paste is not typing — see
 /// `TextInjecting.sendReturn()`.
 struct ClaudeTextChannel: AgentTextChannel {
+    func isComposerEmpty(_ injector: TextInjecting) -> Bool {
+        guard let viewport = injector.readViewport(),
+              let bar = InputBar.read(fromViewport: viewport),
+              bar.rows.count == 1
+        else { return false }
+        return bar.content.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
     func submit(
         _ text: String,
         into injector: TextInjecting,
