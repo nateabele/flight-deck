@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// Everything `SessionStore` needs from an agent, and nothing about how that agent works.
@@ -153,6 +154,43 @@ protocol AgentAdapter {
     /// destructure any list back into the call the store already makes. A type constructed
     /// only to be taken apart again has no reader.
     static var hasStatusRegistry: Bool { get }
+
+    // ─── Pure mappings and namings. `nonisolated`, because none of them touches actor
+    //     state and three of them are reached from off the main actor: `TimelineReader` is
+    //     `Sendable` and parses a page on a background queue, and `AccountDirectory` is
+    //     reached from preference migration before any store exists. ───
+
+    /// **A legal conversation name for THIS agent's rename channel.**
+    ///
+    /// Claude strips shell metacharacters, because its rename is typed at a pty that may be a
+    /// bare shell. Codex does not, because `thread/name/set` is JSON-RPC and touches no
+    /// shell — see `AgentTitle`, which holds the half both agents share.
+    nonisolated static func sanitizedTitle(_ raw: String) -> String?
+
+    /// **A conversation's own name, read out of its transcript** — for a tab that repointed
+    /// at a conversation this app did not start.
+    ///
+    /// Claude: `ConversationTitle.resolve`, which mirrors what `claude`'s own `/resume`
+    /// picker shows. Codex: `nil`, and that is an answer rather than a gap — a codex thread's
+    /// name lives in `session_index.jsonl` and reaches the store through `CodexNameWatcher`,
+    /// never out of the rollout. Handing a codex rollout to claude's JSONL parser is exactly
+    /// what the store used to do by default.
+    nonisolated static func title(fromTranscriptAt url: URL) -> String?
+
+    /// **One line of this agent's transcript, as timeline items.**
+    ///
+    /// The pattern the rest of this protocol was written to match rather than a site that
+    /// needed fixing: two pure functions with one signature, tested from captured fixtures,
+    /// refusing rather than guessing. All that moves is where the switch lives.
+    nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem]
+
+    /// **The file whose presence marks a directory as one of this agent's homes**, and what
+    /// that file says about who is signed in.
+    ///
+    /// Identity is display-only, so a wrong answer must degrade to "no answer" — never to a
+    /// plausible-looking wrong email next to a real account.
+    nonisolated static var homeMarkerFile: String { get }
+    nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity?
 }
 
 /// **Typing a message into a live agent and submitting it.**
@@ -298,6 +336,53 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.hasStatusRegistry
         case .codex: CodexAdapter.hasStatusRegistry
+        }
+    }
+}
+
+/// The pure mappings, read the same way and kept in their own extension because they are
+/// **nonisolated**: `TimelineReader` maps a page off the main actor, and `AccountDirectory`
+/// answers preference migration before a store exists. Same construction table, same reason
+/// — the answers live on the adapters so a third agent states its own.
+extension AgentID {
+    /// See `AgentAdapter.sanitizedTitle`. Consulted by `SessionStore.rename`,
+    /// `injectPendingRename` and `applyExternalTitle`.
+    func sanitizedTitle(_ raw: String) -> String? {
+        switch self {
+        case .claude: ClaudeAdapter.sanitizedTitle(raw)
+        case .codex: CodexAdapter.sanitizedTitle(raw)
+        }
+    }
+
+    /// See `AgentAdapter.title(fromTranscriptAt:)`. Consulted by `SessionStore.titleResolver`'s
+    /// default, which is what `repin` reaches.
+    func title(fromTranscriptAt url: URL) -> String? {
+        switch self {
+        case .claude: ClaudeAdapter.title(fromTranscriptAt: url)
+        case .codex: CodexAdapter.title(fromTranscriptAt: url)
+        }
+    }
+
+    /// See `AgentAdapter.timelineItems(inLine:at:)`. Consulted by `TimelineReader.page`.
+    func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+        switch self {
+        case .claude: ClaudeAdapter.timelineItems(inLine: line, at: offset)
+        case .codex: CodexAdapter.timelineItems(inLine: line, at: offset)
+        }
+    }
+
+    /// See `AgentAdapter.homeMarkerFile`. Consulted by `AccountDirectory`.
+    var homeMarkerFile: String {
+        switch self {
+        case .claude: ClaudeAdapter.homeMarkerFile
+        case .codex: CodexAdapter.homeMarkerFile
+        }
+    }
+
+    func identity(fromHomeData data: Data) -> AccountIdentity? {
+        switch self {
+        case .claude: ClaudeAdapter.identity(fromHomeData: data)
+        case .codex: CodexAdapter.identity(fromHomeData: data)
         }
     }
 }

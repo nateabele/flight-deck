@@ -2637,10 +2637,16 @@ final class SessionStore: ObservableObject {
     /// actor and calls back on it; tests substitute a synchronous closure so they need no
     /// expectations. The read is one-shot per resume and can touch a multi-megabyte file,
     /// which is why it does not run inline.
-    var titleResolver: @MainActor (URL, @escaping @MainActor (String?) -> Void) -> Void = {
-        url, done in
+    ///
+    /// **It carries the agent, and that is the fix rather than a tidy-up.** The default used
+    /// to be `ConversationTitle.resolve` — a claude JSONL parser — reached from `repin`
+    /// through an agent-blind `binding(for:).transcriptURL`, so a repointed codex tab would
+    /// have had its rollout parsed as a claude transcript. `AgentAdapter.title(fromTranscriptAt:)`
+    /// answers `nil` for an agent whose names do not live in its transcript.
+    var titleResolver: @MainActor (AgentID, URL, @escaping @MainActor (String?) -> Void) -> Void = {
+        agent, url, done in
         Task.detached(priority: .userInitiated) {
-            let title = ConversationTitle.resolve(transcriptAt: url)
+            let title = agent.title(fromTranscriptAt: url)
             await done(title)
         }
     }
@@ -2729,9 +2735,11 @@ final class SessionStore: ObservableObject {
     /// Codex has no such constraint: its rename is a request, and nothing waits on it.
     func rename(_ id: UUID, to newTitle: String) {
         guard let at = locate(id),
-              // Sanitized for both agents, not just claude's: it is what the sidebar shows,
-              // and the whole point below is that codex's thread name matches the sidebar.
-              let name = ClaudeSession.sanitizedName(newTitle)
+              // Sanitized by THIS agent's rule, not by claude's for everyone. It is what the
+              // sidebar shows and what the rename below sends, and those two must agree —
+              // but which characters are legal is a property of the channel the name travels
+              // down, and codex's is JSON-RPC. See `AgentAdapter.sanitizedTitle`.
+              let name = agent(of: id)?.sanitizedTitle(newTitle)
         else { return }
 
         repos[at.repo].sessions[at.session].title = name
@@ -2770,7 +2778,11 @@ final class SessionStore: ObservableObject {
     /// One pending rename per tab, replaced rather than queued: renaming twice before the
     /// injection lands should type the second name once, not both names in turn.
     private func injectPendingRename(_ id: UUID, _ title: String) {
-        guard let name = ClaudeSession.sanitizedName(title) else { return }
+        // Claude's rule by name, not by lookup: what this queues is text typed at claude's
+        // pty, so it is claude's channel whatever tab asked for it. `pendingRenames` has no
+        // other producer — `AgentAdapter.rename` for an agent that renames over a wire never
+        // reaches here.
+        guard let name = ClaudeAdapter.sanitizedTitle(title) else { return }
         pendingRenames[id] = name
         flushPendingRename(id)
     }
@@ -3363,7 +3375,7 @@ final class SessionStore: ObservableObject {
     /// `rename` matches the title we already set and stops here.
     func applyExternalTitle(_ id: UUID, _ title: String) {
         guard let at = locate(id),
-              let name = ClaudeSession.sanitizedName(title),
+              let name = repos[at.repo].sessions[at.session].agent.sanitizedTitle(title),
               repos[at.repo].sessions[at.session].title != name
         else { return }
 
@@ -3830,7 +3842,7 @@ final class SessionStore: ObservableObject {
             persist()
             return
         }
-        titleResolver(url) { [weak self] title in
+        titleResolver(updated.agent, url) { [weak self] title in
             // Two things can happen during a read that is a whole-file load: the tab can
             // close, and the tab can be repinned again (a second resume, or a fork).
             // `pinnedConversationID(of:)` covers both — it is nil for a closed tab, whose

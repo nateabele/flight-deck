@@ -5,7 +5,7 @@ import XCTest
 final class SessionProjectMoveTests: XCTestCase {
     private func makeStore() -> SessionStore {
         let store = SessionStore(provider: nil, persistence: nil)
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         return store
     }
 
@@ -282,7 +282,7 @@ final class SessionProjectMoveTests: XCTestCase {
     func testARepinsDirectoryIsPersisted() {
         let persistence = SessionPersistenceTests.FakePersistence()
         let store = SessionStore(provider: nil, persistence: persistence)
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
         let resumed = UUID()
 
@@ -370,7 +370,7 @@ final class SessionProjectMoveTests: XCTestCase {
     func testARetargetDuringATitleReadKeepsTheNewerWatcher() {
         let store = makeStore()
         var pending: [(String?) -> Void] = []
-        store.titleResolver = { _, done in pending.append(done) }
+        store.titleResolver = { _, _, done in pending.append(done) }
         let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
         let resumed = UUID()
 

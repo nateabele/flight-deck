@@ -1,3 +1,4 @@
+import FleetKit
 import XCTest
 @testable import FlightDeck
 
@@ -33,6 +34,19 @@ final class CodexOptionsRoutingTests: XCTestCase {
         static let negotiatesIdentity = true
         static let needsRuntimeStart = true
         static let hasStatusRegistry = false
+        nonisolated static func sanitizedTitle(_ raw: String) -> String? {
+            CodexAdapter.sanitizedTitle(raw)
+        }
+        nonisolated static func title(fromTranscriptAt url: URL) -> String? {
+            CodexAdapter.title(fromTranscriptAt: url)
+        }
+        nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+            CodexAdapter.timelineItems(inLine: line, at: offset)
+        }
+        nonisolated static let homeMarkerFile = CodexAdapter.homeMarkerFile
+        nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
+            CodexAdapter.identity(fromHomeData: data)
+        }
         private(set) var prepared: [AgentOptions] = []
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
