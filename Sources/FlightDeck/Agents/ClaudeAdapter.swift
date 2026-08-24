@@ -54,6 +54,11 @@ struct ClaudeAdapter: AgentAdapter {
         AccountDirectory.claudeIdentity(from: data)
     }
 
+    /// The phone's own derivation, run on the Mac over the same mapper — see
+    /// `ClaudeOpenCall`, which exists so there is exactly one implementation of the
+    /// call/result pairing rather than two that can disagree about which dialog is up.
+    static let openPromptReader: AgentOpenPromptReader? = ClaudeOpenPromptReader()
+
     /// Where this account's `projects` directory lives, read on every derivation rather than
     /// captured as a value. It is derived from the home of the account the adapter was built
     /// for, and `SessionStore.transcriptsRootOverride` — a fixture/test seam — is assigned

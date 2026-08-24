@@ -314,8 +314,12 @@ final class PromptServiceTests: XCTestCase {
     /// is the code `SessionStore.answerPrompt` already defines for exactly this and the phone
     /// already has copy for, and routing it here is what lets that copy ever appear.
     ///
-    /// The refusal is `AgentAdapter.dialogDriver` — the same question the store asks, of the
-    /// same object, not a second name check that could answer differently.
+    /// **The refusal moved, and the code did not.** It was `dialogDriver` alone; codex now
+    /// has one, so what refuses here is `AgentAdapter.openPromptReader` — this file's own
+    /// half. Driving a dialog needs a screen grammar, and codex has one; knowing WHICH dialog
+    /// is up needs a transcript grammar, and codex writes nothing to its rollout when an
+    /// approval goes up, so there is no call id for a phone's tap to be checked against.
+    /// Both are asked of the same adapter, not re-decided here.
     ///
     /// The tail is deliberately claude-shaped records rather than nothing: that distinguishes
     /// "the file was never read" from "it was read and held no call", and a service that
@@ -330,7 +334,11 @@ final class PromptServiceTests: XCTestCase {
             code(service.answer(session: id, call: "toolu_A", answer: .deny, token: UUID())),
             "unsupported_agent"
         )
-        XCTAssertTrue(spy.events.isEmpty, "no Escape into a codex TUI this build cannot read")
+        XCTAssertTrue(
+            spy.events.isEmpty,
+            "no Escape at a dialog this build cannot identify — the driver could press the "
+            + "key, which is exactly why the second half of the question has to be asked"
+        )
     }
 
     /// **The case that actually pins this file's guard, and the one above does not.**

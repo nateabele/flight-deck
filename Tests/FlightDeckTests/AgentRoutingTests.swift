@@ -266,6 +266,7 @@ final class AgentRoutingTests: XCTestCase {
         nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
             ClaudeAdapter.identity(fromHomeData: data)
         }
+        static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)
