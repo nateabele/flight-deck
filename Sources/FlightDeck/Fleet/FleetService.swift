@@ -18,6 +18,9 @@ final class FleetService: ObservableObject {
     /// `FleetAttachment.slot`.
     @Published private(set) var attachedSlots: Set<UUID> = []
 
+    /// Held while any phone is attached; see `holdSleepAwake`.
+    private var sleepAssertion: (any NSObjectProtocol)?
+
     private static let logger = Logger(
         subsystem: "dev.flightdeck.FlightDeck", category: "fleet"
     )
