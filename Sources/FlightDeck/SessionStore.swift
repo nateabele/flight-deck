@@ -3019,6 +3019,7 @@ final class SessionStore: ObservableObject {
         inject(
             head.text,
             into: id,
+            allowMidTurn: true,
             // Re-checked after the settle: the tab can be closed, or the entry can expire,
             // while claude repaints. Matched on the TOKEN and not on the text, because two
             // identical messages are two messages and retiring the wrong one loses the other.
@@ -3298,13 +3299,39 @@ final class SessionStore: ObservableObject {
     private func inject(
         _ text: String,
         into id: UUID,
+        allowMidTurn: Bool = false,
         stillWanted: @escaping @MainActor () -> Bool,
         onSent: @escaping @MainActor () -> Void
     ) -> Bool {
+        // **`.busy` is allowed, into an empty box only.** This required `.idle`, and that is
+        // why a prompt sent from the phone could be accepted and then quietly die: the queue
+        // drained only when the tab reached idle, so a tab running back-to-back turns never
+        // drained it and the entry expired at `phonePromptWindow` having never been typed —
+        // while the same text typed at the Mac worked, because the agent queues mid-turn.
+        //
+        // The empty-box condition is the whole safety story for typing into a running turn.
+        // `submit`'s kill-and-yank can restore a draft when the screen is settled; mid-turn it
+        // is reading a screen that is repainting, so a draft is deferred rather than risked.
+        //
+        // `.waiting` stays refused, and that is why this is a whitelist rather than `!= .idle`.
+        // A waiting tab has a select-list dialog up: text typed there goes to the dialog and
+        // the Return after it PICKS AN OPTION. Answering a dialog is `answerPrompt`'s job,
+        // behind an interlock that reads the screen before committing — a prompt must never
+        // become an answer by arriving at the wrong moment. `.shell` is refused for its own
+        // reason: a bare prompt would RUN the text rather than read it.
         guard let channel = session(for: id)?.agent.textChannel,
-              statuses[id]?.activity == .idle,
+              let activity = statuses[id]?.activity,
+              activity == .idle || activity == .busy,
               let injector = injector(for: id)
         else { return false }
+        // Mid-turn is for PROMPTS, not for everything that types. A rename is `/rename x`,
+        // a slash command whose effect the user is watching for, and queueing it behind a
+        // running turn to land minutes later is worse than waiting for the box. A prompt is
+        // the opposite: it is a message to the agent, and landing in its queue is exactly
+        // where the sender wanted it.
+        if activity == .busy {
+            guard allowMidTurn, channel.isComposerEmpty(injector) else { return false }
+        }
         // See `injecting`'s doc comment: this is the one place both callers funnel through,
         // so it is the one place that can refuse a second injection for a tab that already
         // has one resolving.

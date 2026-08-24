@@ -236,6 +236,10 @@ final class PhonePromptDispatchTests: XCTestCase {
     /// one-per-tab with replace semantics, could not have held.
     func testTwoPromptsForABusyTabBothWaitInOrder() {
         let (store, spy, id) = makeStore(activity: .busy)
+        // A draft in the box, so the pair still queues: mid-turn typing is allowed into an
+        // EMPTY box only, and this test is about ORDER, not about the mid-turn rule.
+        spy.typeDraft(["half a thought"])
+        spy.events.removeAll()
         XCTAssertEqual(store.submitPrompt("one", token: UUID(), to: id), .queued)
         XCTAssertEqual(store.submitPrompt("two", token: UUID(), to: id), .queued)
         XCTAssertTrue(spy.events.isEmpty, "nothing may be typed into a running turn")
