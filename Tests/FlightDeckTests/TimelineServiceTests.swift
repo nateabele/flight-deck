@@ -49,6 +49,7 @@ final class TimelineServiceTests: XCTestCase {
         nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
             ClaudeAdapter.identity(fromHomeData: data)
         }
+        static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
         let url: URL?
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

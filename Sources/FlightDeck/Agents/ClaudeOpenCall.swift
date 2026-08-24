@@ -23,3 +23,14 @@ enum ClaudeOpenCall {
         )
     }
 }
+
+/// Claude's conformance to `AgentOpenPromptReader`. Two lines, and deliberately a separate
+/// type from `ClaudeOpenCall` itself: that enum is the pure derivation and is reached from
+/// tests directly, while this is the capability the adapter hands out.
+struct ClaudeOpenPromptReader: AgentOpenPromptReader {
+    func openPrompt(
+        inTranscriptTail lines: [SourceLine], activity: SessionActivity?
+    ) -> OpenPrompt? {
+        ClaudeOpenCall.find(in: lines, activity: activity)
+    }
+}

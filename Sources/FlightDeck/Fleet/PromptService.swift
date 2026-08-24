@@ -59,7 +59,8 @@ final class PromptService {
     /// `SessionStore.answerPrompt`'s to refuse, and its code is forwarded verbatim. Splitting
     /// a check across two files is how the two drift, which is why the agent refusal here is
     /// `AgentAdapter.dialogDriver` — the *same question* the store asks, of the same object —
-    /// and not a second name check that could answer differently.
+    /// plus `openPrompt`, which is this file's own half and is asked of the same adapter
+    /// rather than hardcoded to one agent's transcript grammar.
     func answer(
         session: UUID, call: String, answer: PromptAnswer, token: UUID
     ) -> Result<Void, TimelineErrorCode> {
@@ -87,24 +88,28 @@ final class PromptService {
         // is not quietly exempted from the question — `.noTranscript` names no agent, and it
         // is the shape a codex sign-in tab has.
         //
-        // The DIALOG capability, not the text one: this path answers a dialog, and an agent
-        // can have a driver without a composer this build can type into.
-        guard store.agent(of: session)?.dialogDriver != nil else {
-            return .failure("unsupported_agent")
-        }
-        // Whatever is left is a tab this Mac can drive but has nothing to read: no transcript
-        // at all. `prompt_changed` is right for it, and is the only thing that code now means.
-        //
-        // `ClaudeOpenCall.find` below stays claude's transcript grammar. An agent that gains
-        // a dialog driver needs its own open-call derivation here with it, or it reaches this
-        // line and is told `prompt_changed` — so that guard is what makes reaching the read
-        // below a decision rather than a silent inheritance.
+        // **Two capabilities, and both are needed here.** Driving a dialog needs a screen
+        // grammar (`dialogDriver`); knowing WHICH dialog is on screen needs a transcript
+        // grammar (`openPrompt`), and an agent can have either without the other. Codex is
+        // exactly that: its approval list is drivable, and it writes nothing to its rollout
+        // when the list goes up, so there is no call id for a phone's tap to be checked
+        // against. Asking only the first would answer such a tab `prompt_changed` two lines
+        // below — *"Your Mac has moved on from this."* for a dialog this build cannot see at
+        // all — which is the defect §4.2 of the audit records, through the other door.
+        guard let agent = store.agent(of: session),
+              agent.dialogDriver != nil,
+              let reader = agent.openPromptReader
+        else { return .failure("unsupported_agent") }
+        // Whatever is left is a tab this Mac can drive AND read, but that has nothing to read
+        // *from*: no transcript at all. `prompt_changed` is right for it, and is the only
+        // thing that code now means.
         guard case .file(_, let url) = source else { return .failure("prompt_changed") }
         let lines = tail(url, Self.tailRecords)
-        // **The comparison this whole service exists for.** `find` says what the terminal is
-        // blocked on now; `call` says what the phone was showing when a thumb came down. They
-        // are only the same dialog if they are the same call.
-        guard let open = ClaudeOpenCall.find(in: lines, activity: activity), open.callID == call
+        // **The comparison this whole service exists for.** The derivation says what the
+        // terminal is blocked on now; `call` says what the phone was showing when a thumb
+        // came down. They are only the same dialog if they are the same call.
+        guard let open = reader.openPrompt(inTranscriptTail: lines, activity: activity),
+              open.callID == call
         else { return .failure("prompt_changed") }
 
         let outcome = store.answerPrompt(open, with: answer, in: session, token: token)

@@ -191,6 +191,32 @@ protocol AgentAdapter {
     /// plausible-looking wrong email next to a real account.
     nonisolated static var homeMarkerFile: String { get }
     nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity?
+
+    /// **How this agent's transcript says what it is blocked on — or `nil`, the refusal.**
+    ///
+    /// The third capability object, and the other half of `dialogDriver`. Driving a dialog
+    /// needs a screen grammar; knowing *which* dialog is on screen needs a transcript
+    /// grammar, and an agent can have either without the other. Codex is exactly that case:
+    /// its approval list is drivable, and it writes nothing to its rollout when that list
+    /// goes up (`CodexEventMapper`), so there is no record to find and no call id for a
+    /// phone's tap to be checked against.
+    ///
+    /// **An object rather than a method returning `nil`, for the same reason the other two
+    /// are.** A method's `nil` would mean both "no dialog is open" and "this agent has no
+    /// derivation", and those are different sentences on a phone — `prompt_changed` versus
+    /// `unsupported_agent`. It also lets `PromptService` refuse before reading the file.
+    static var openPromptReader: AgentOpenPromptReader? { get }
+}
+
+/// Deriving what an agent is blocked on from a window of its transcript.
+///
+/// A window rather than the whole file because an agent cannot proceed past a dialog, so the
+/// open call is always among the last records; a few rather than one so that a result for an
+/// *earlier* call is inside the window and cannot make an already-answered call look open —
+/// the only way this can be wrong in the dangerous direction.
+@MainActor
+protocol AgentOpenPromptReader {
+    func openPrompt(inTranscriptTail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt?
 }
 
 /// **Typing a message into a live agent and submitting it.**
@@ -313,6 +339,15 @@ extension AgentID {
         }
     }
 
+    /// See `AgentAdapter.openPromptReader`. Consulted by `PromptService` alone — the store is
+    /// handed the derived `OpenPrompt` and never derives one itself.
+    var openPromptReader: AgentOpenPromptReader? {
+        switch self {
+        case .claude: ClaudeAdapter.openPromptReader
+        case .codex: CodexAdapter.openPromptReader
+        }
+    }
+
     /// See `AgentAdapter.negotiatesIdentity`. Consulted by `createSession`, `restore` and
     /// `reinsertClosed`.
     var negotiatesIdentity: Bool {
@@ -385,6 +420,7 @@ extension AgentID {
         case .codex: CodexAdapter.identity(fromHomeData: data)
         }
     }
+
 }
 
 /// How to sign an account in. Two fields rather than one because the two agents differ in

@@ -8,11 +8,12 @@ import Foundation
 /// shared between agents.
 struct ClaudeDialogDriver: AgentDialogDriver {
     func focusedRow(inViewport viewport: String) -> Int? {
-        ChoiceDialog.focusedRow(inViewport: viewport)
+        ChoiceDialog.focusedRow(inViewport: viewport, marker: ChoiceDialog.claudeMarker)
     }
 
     func row(_ index: Int, reads label: String, inViewport viewport: String) -> Bool {
-        ChoiceDialog.row(index, reads: label, inViewport: viewport)
+        ChoiceDialog.row(index, reads: label, inViewport: viewport,
+                         marker: ChoiceDialog.claudeMarker)
     }
 
     /// **The first row, and only ever the first row.** Claude's permission dialog is ordered

@@ -47,6 +47,7 @@ final class CodexOptionsRoutingTests: XCTestCase {
         nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
             CodexAdapter.identity(fromHomeData: data)
         }
+        static let openPromptReader: AgentOpenPromptReader? = CodexAdapter.openPromptReader
         private(set) var prepared: [AgentOptions] = []
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

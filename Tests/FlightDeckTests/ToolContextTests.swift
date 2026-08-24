@@ -120,6 +120,7 @@ final class ToolContextTests: XCTestCase {
         nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
             ClaudeAdapter.identity(fromHomeData: data)
         }
+        static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
         static let pinned = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

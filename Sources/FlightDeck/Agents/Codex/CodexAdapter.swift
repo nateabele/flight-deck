@@ -43,8 +43,15 @@ struct CodexAdapter: AgentAdapter {
     /// and don't ask again for commands that start with …`) and row 2 is deny, so "the first
     /// row, and only ever the first row" is exactly as load-bearing for codex as
     /// `SessionStore.answerPrompt` says it is for claude, and must be proved from a capture
-    /// rather than inherited — which is why `AgentDialogDriver.allowRow` has no default.
-    static let dialogDriver: AgentDialogDriver? = nil
+    /// rather than inherited — which is why `AgentDialogDriver.allowRow` has no default, and
+    /// why `CodexDialogDriver.allowRow` states codex's own from codex's own screen.
+    ///
+    /// **What this does and does not turn on.** It makes `answerPrompt` willing to drive a
+    /// codex dialog; it does not make one reachable from a phone, because
+    /// `openPrompt(inTranscriptTail:)` below is `nil` and a codex tab never reports `waiting`
+    /// in the first place. Both of those are features nobody has built, stated as `nil`
+    /// rather than hidden inside a name check.
+    static let dialogDriver: AgentDialogDriver? = CodexDialogDriver()
 
     /// Codex assigns thread ids itself, so identity is *returned* rather than minted — and
     /// the round trip can come back saying the thread is gone, which is why a restored codex
@@ -94,6 +101,17 @@ struct CodexAdapter: AgentAdapter {
     nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
         AccountDirectory.codexIdentity(from: data)
     }
+
+    /// **`nil`, and this is the half of the answer path codex does not have.** Codex writes
+    /// nothing to its rollout when an approval prompt goes up — verified with a prompt live
+    /// on screen, recorded in `CodexEventMapper` — so there is no record to find and no call
+    /// id to compare a phone's tap against. `dialogDriver` above can drive the dialog; this
+    /// is what would tell it *which* dialog, and it does not exist yet.
+    ///
+    /// The buildable route is `thread/read`'s `activeFlags`, which
+    /// `CodexThreadStatus.activity` already maps to `.waiting` and nothing polls. That is a
+    /// feature, not a refusal — see the audit's §3.2 part 1.
+    static let openPromptReader: AgentOpenPromptReader? = nil
 
     let rpc: CodexRPC
 
