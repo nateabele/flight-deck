@@ -64,16 +64,6 @@ final class ClaudeRuntime: AgentRuntime {
         sources[token.conversationID] = nil
     }
 
-    /// Deprecated conversation-keyed API, kept only until `SessionStore` moves to tokens
-    /// (Task 5) so the suite stays green mid-migration. Removed in Task 6.
-    func attach(_ binding: AgentBinding, onEvent: @escaping (AgentEvent) -> Void) {
-        _ = attach(binding, for: binding.conversationID, onEvent: onEvent)
-    }
-
-    func detach(_ binding: AgentBinding) {
-        detach(AttachmentToken(conversationID: binding.conversationID, tab: binding.conversationID))
-    }
-
     /// Fan-out point for the shared status watcher. `SessionStore` owns the one
     /// `SessionStatusWatcher` and hands its output here rather than this type owning a
     /// second one — the registry must be scanned once per tick, not once per tab.
