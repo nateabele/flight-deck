@@ -2606,8 +2606,9 @@ final class SessionStore: ObservableObject {
         return repos[at.repo].sessions[at.session].pinnedConversationID
     }
 
-    /// Test seam: every tab's id, sidebar order. `repos.flatMap(\.sessions)` is the same
-    /// walk the sidebar and `tabs(following:)` both do.
+    /// Test seam: every tab's id, sidebar order — `repos.flatMap(\.sessions)` is the same
+    /// walk the sidebar does. (Not the same walk `tabs(following:)` does: that one scans
+    /// `attachments`, a different collection, which is the whole subject of this file.)
     var allSessionIDsForTesting: [UUID] { repos.flatMap(\.sessions).map(\.id) }
 
     /// Test seam: which tabs are currently attached to an agent runtime. `attachments`
