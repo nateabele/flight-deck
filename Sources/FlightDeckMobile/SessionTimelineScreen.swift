@@ -37,6 +37,16 @@ struct SessionTimelineScreen: View {
     /// appearing and disappearing, and the only thing that separates "following a live turn"
     /// from "yanking a reader out of the history they scrolled up to read".
     @State private var readerIsAtBottom = true
+    /// When the reader last had a finger on the list.
+    ///
+    /// The sentinel below goes off screen for TWO different reasons and they mean opposite
+    /// things: the reader scrolled up into the history (stop following), or a new row was
+    /// appended underneath it and pushed it out (keep following — this is the case following
+    /// exists for). `onDisappear` alone cannot tell them apart, so it used to treat both as
+    /// "the reader left", and the first live message turned following off and left it off
+    /// until the reader scrolled back down by hand. This timestamp is what separates them:
+    /// only a disappearance the reader's own gesture caused counts.
+    @State private var lastReaderScroll: Date = .distantPast
     /// The long answers the reader has opened. **On the screen, not on the row** — see
     /// `Expansion`, which is entirely about why.
     @State private var expansion = Expansion()
@@ -85,6 +95,12 @@ struct SessionTimelineScreen: View {
             // inside the first. The fleet list's own comment explains why IT keeps
             // inset-grouped; the two screens differ because what they hold differs.
             .listStyle(.plain)
+            // `simultaneousGesture`, so the list keeps scrolling and rows keep taking taps —
+            // this only observes. `minimumDistance: 1` because the point is to know a drag
+            // happened at all, not to interpret it.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 1).onChanged { _ in lastReaderScroll = Date() }
+            )
             // `initial: true` so the first page a screen ever draws is followed too. Without
             // it the jump only happens on the SECOND page, and opening a session lands on the
             // oldest row of the newest page — which is what shipped.
@@ -98,11 +114,41 @@ struct SessionTimelineScreen: View {
                 // Next run-loop turn, because the row being scrolled to is inserted by this
                 // same change and a `List` has not laid it out yet when `onChange` runs.
                 DispatchQueue.main.async {
-                    // The opening jump is not animated: a screen that visibly scrolls itself
-                    // from the top on every open reads as a bug. Following a live turn is,
-                    // because there the movement is the information.
-                    withAnimation(isFirst ? nil : .easeOut(duration: 0.2)) {
-                        scroll.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                    // **Unanimated, including when following a live turn.** The previous
+                    // version animated everything but the opening jump, on the reasoning that
+                    // "there the movement is the information". It did not scroll at all.
+                    //
+                    // A console trace of three consecutive follows settled it: `follow()`
+                    // returned SCROLL for every one of them with `atBottom=true`, so the
+                    // decision was never in question — but only the FIRST, the unanimated
+                    // opening jump, was followed by the bottom sentinel reappearing. The
+                    // animated ones produced no `onAppear` at all, which is the sentinel
+                    // saying the list never moved. `withAnimation` around `scrollTo`, in a
+                    // lazy `List` whose target row was de-materialised by the same insertion
+                    // that triggered this, silently does nothing.
+                    // A SECOND hop before scrolling at all. The row this change inserted is
+                    // not laid out when `onChange` runs, and one hop is not always enough —
+                    // scrolling to a row `List` has not placed yet is what silently did
+                    // nothing when this was first written.
+                    DispatchQueue.main.async {
+                        // Animated again, deliberately. An earlier version dropped the
+                        // animation because animated follows were not moving the list at all,
+                        // but the console trace that showed this could not separate "animated"
+                        // from "single hop": the one call that worked was ALSO the only
+                        // unanimated one AND the only whole-page open rather than a one-row
+                        // append. The extra hop above addresses the layout half; the animation
+                        // stays because a list that jumps loses the reader's place.
+                        withAnimation(isFirst ? nil : .easeOut(duration: 0.25)) {
+                            scroll.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                        }
+                        // The net, and it is why the animation is safe to keep. If the
+                        // animated scroll no-ops the way it used to, this lands it anyway a
+                        // third of a second later. When the animation DID work this is a
+                        // scroll to where the list already is, which is invisible — so the
+                        // failure mode is a late snap instead of never arriving.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            scroll.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                        }
                     }
                 }
             }
@@ -198,6 +244,12 @@ struct SessionTimelineScreen: View {
     /// The id of the row that marks the end of the conversation.
     private static let bottomAnchor = "timeline.bottom"
 
+    /// How recently the reader must have touched the list for the sentinel going off screen
+    /// to count as them leaving the live edge. Long enough to cover the lag between a finger
+    /// moving and a 1-point row clearing the viewport, short enough that a message arriving a
+    /// moment after an unrelated tap-drag is still followed.
+    private static let scrollGestureWindow: TimeInterval = 1
+
     /// A zero-height row at the very end, and it does two jobs that both need something to
     /// exist down there: it is what `scrollTo` aims at — the last *entry* is the wrong target,
     /// since a tall card scrolled to its own bottom still leaves the footer off screen — and
@@ -211,7 +263,14 @@ struct SessionTimelineScreen: View {
             .listRowSeparator(.hidden)
             .accessibilityHidden(true)
             .onAppear { readerIsAtBottom = true }
-            .onDisappear { readerIsAtBottom = false }
+            // Gated on a recent gesture — see `lastReaderScroll`. A sentinel pushed off the
+            // bottom by the very row we are about to follow to must NOT count as the reader
+            // leaving, or following stops on the first message it was supposed to follow.
+            .onDisappear {
+                if Date().timeIntervalSince(lastReaderScroll) < Self.scrollGestureWindow {
+                    readerIsAtBottom = false
+                }
+            }
     }
 
     private var entries: [Entry] { Self.entries(from: model.feed.items) }

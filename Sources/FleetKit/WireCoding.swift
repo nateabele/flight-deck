@@ -15,11 +15,12 @@ enum FleetEventTag: String, Codable {
     case renamed = "session.renamed"
     case activityChanged = "session.activity"
     case unreadChanged = "session.unread"
+    case promptExpired = "prompt.expired"
 }
 
 extension FleetEvent: Codable {
     enum CodingKeys: String, CodingKey {
-        case t, id, at, order, title, origin
+        case t, id, at, order, title, origin, token
         case project, session, projectId
         case activity, waitingFor, subagentCount, isUnread, isCollapsed
     }
@@ -77,6 +78,10 @@ extension FleetEvent: Codable {
             try c.encode(FleetEventTag.unreadChanged, forKey: .t)
             try c.encode(id, forKey: .id)
             try c.encode(isUnread, forKey: .isUnread)
+        case .promptExpired(let id, let token):
+            try c.encode(FleetEventTag.promptExpired, forKey: .t)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
         }
     }
 
@@ -120,6 +125,9 @@ extension FleetEvent: Codable {
         case .unreadChanged:
             self = .unreadChanged(id: try c.decode(UUID.self, forKey: .id),
                                   isUnread: try c.decode(Bool.self, forKey: .isUnread))
+        case .promptExpired:
+            self = .promptExpired(id: try c.decode(UUID.self, forKey: .id),
+                                  token: try c.decode(UUID.self, forKey: .token))
         }
     }
 }

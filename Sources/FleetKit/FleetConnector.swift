@@ -36,6 +36,13 @@ public final class FleetConnector: @unchecked Sendable {
 
     public var onState: ((State) -> Void)?
     public var onFleet: ((FleetSnapshot) -> Void)?
+    /// Each event as it lands, in addition to the folded snapshot `onFleet` publishes.
+    ///
+    /// Most events describe the fleet and are fully expressed by the snapshot, which is why
+    /// this did not exist. `promptExpired` is the first that does not: it is addressed to one
+    /// screen's outbox, which is not snapshot state, so folding it changes nothing and a
+    /// client watching only `onFleet` would never learn its message was dropped.
+    public var onEvent: ((FleetEvent) -> Void)?
     /// Backoff between races; the last value repeats. Settable so tests do not wait it out.
     public var retryDelays: [TimeInterval] = [1, 2, 5, 15, 30]
     /// How long a race may run before it is abandoned and retried. Well short of a TCP
@@ -361,6 +368,9 @@ public final class FleetConnector: @unchecked Sendable {
         case .event(let seq, let event):
             fleet.apply(event)
             advance(to: seq)
+            // After the fold and after the seq advances: a handler that acts on this must not
+            // see a connector describing an older fleet than the event it is being handed.
+            onEvent?(event)
         case .page(let cid, let page):
             // Resolved and returned WITHOUT touching `lastSeq`. A page carries no sequence
             // (see `ServerFrame.page`), and reaching `advance(to:)` from here would let a

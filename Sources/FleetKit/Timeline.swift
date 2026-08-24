@@ -22,6 +22,19 @@ public struct TimelineItem: Identifiable, Codable, Hashable, Sendable {
     /// `WireSession.agent` being a `String`.
     public enum Kind: String, Codable, Hashable, Sendable {
         case userTurn, assistantText, thinking, toolCall, toolResult, prompt
+        /// The harness talking, in a record the agent files under the user's name.
+        ///
+        /// Claude Code delivers task notifications, `system-reminder`s, slash-command echoes
+        /// and `!` shell output as `user` records whose content is wrapper markup. Only some
+        /// carry `isMeta` — of 132 task notifications in one real transcript, not one did —
+        /// so the record-level flags this mapper already honours do not catch them, and they
+        /// rendered as the user's own words under a "You" heading. Attributing a machine's
+        /// output to a person is the same harm `isMeta` and `isCompactSummary` are filtered
+        /// for; this is the third form of it and the only one with no flag to key on.
+        ///
+        /// A distinct kind rather than a silent drop, because the content is worth reading —
+        /// it just is not the user saying it.
+        case systemNotice
         case unknown
 
         public init(from decoder: any Decoder) throws {

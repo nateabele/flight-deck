@@ -2975,8 +2975,18 @@ final class SessionStore: ObservableObject {
         // Expiry first, and it runs whether or not this tab can be typed into: a queue that
         // is never drained because its tab lost its surface must still empty itself.
         let currentTime = now()
+        // Captured before the filter drops them, because a phone is waiting on each one. The
+        // window expiring is not an error on anyone's part — the tab was busy longer than the
+        // message stayed worth typing — but it IS the end of that message, and the only place
+        // that fact exists. Dropping these silently left the phone's outbox row saying
+        // "Waiting for your Mac to type this" about a prompt that no longer existed anywhere,
+        // with the `.queued` ack as the last thing it had ever been told.
+        let expired = promptQueue[id]?.filter { currentTime >= $0.deadline } ?? []
         promptQueue[id] = promptQueue[id]?.filter { currentTime < $0.deadline }
         if promptQueue[id]?.isEmpty == true { promptQueue.removeValue(forKey: id) }
+        if !expired.isEmpty {
+            emit(expired.map { .promptExpired(id: id, token: $0.token) })
+        }
         guard let head = promptQueue[id]?.first else { return }
         // Both other users of this input box go first, and neither costs anything to wait
         // for: a rename is a direct user action that clears within a tick or two, and the

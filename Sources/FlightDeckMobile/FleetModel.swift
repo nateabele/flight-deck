@@ -316,6 +316,16 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering {
         connector.onFleet = { [weak self] fleet in
             MainActor.assumeIsolated { self?.fleet = fleet }
         }
+        // Routed to the tab's own model rather than held here: the outbox belongs to the
+        // screen that sent the prompt, and `timelineModels` is already the map from a session
+        // to it. A tab with no live model dropped the event on purpose — there is no outbox
+        // row to fail, because the row only exists while that screen's model does.
+        connector.onEvent = { [weak self] event in
+            MainActor.assumeIsolated {
+                guard case .promptExpired(let id, let token) = event else { return }
+                self?.timelineModels[id]?.promptExpired(token)
+            }
+        }
         connector.onState = { [weak self] state in
             MainActor.assumeIsolated {
                 self?.state = state

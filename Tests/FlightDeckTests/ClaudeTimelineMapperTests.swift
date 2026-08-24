@@ -19,6 +19,62 @@ final class ClaudeTimelineMapperTests: XCTestCase {
         ClaudeTimelineMapper.items(inLine: line, at: offset)
     }
 
+    // MARK: Harness-injected records are not the user talking
+
+    /// The bug this exists for: a task notification rendered under a "You" heading, because
+    /// it arrives as a `user` record and — unlike `/compact` summaries and claude's own
+    /// interstitials — carries NO `isMeta`. Of 132 in one real transcript, not one had it, so
+    /// the record-level guards above cannot catch this class at all.
+    func testATaskNotificationIsANoticeAndNotAUserTurn() {
+        let items = items(#"""
+            {"type": "user", "uuid": "u1", "timestamp": "2026-08-21T10:00:00.000Z", "isSidechain": false, "message": {"role": "user", "content": "<task-notification>\n<task-id>abc</task-id>\n<status>failed</status>\n</task-notification>"}}
+            """#)
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].kind, .systemNotice, "must not be attributed to the user")
+        XCTAssertEqual(items[0].body.tool, "task-notification", "labels itself")
+        XCTAssertTrue(items[0].body.text.contains("<task-id>abc</task-id>"))
+        XCTAssertFalse(items[0].body.text.contains("<task-notification>"),
+                       "the wrapper is the label, not the body")
+    }
+
+    /// A record can be both. The prose stays the user's, in document order, and only the
+    /// injected part is reattributed — the alternative is losing a real message to a reminder
+    /// that happened to ride along with it.
+    func testProseKeepsItsAuthorWhenAReminderRidesAlong() {
+        let items = items(#"""
+            {"type": "user", "uuid": "u1", "timestamp": "2026-08-21T10:00:00.000Z", "isSidechain": false, "message": {"role": "user", "content": "look at this\n<system-reminder>be careful</system-reminder>"}}
+            """#)
+        XCTAssertEqual(items.map(\.kind), [.userTurn, .systemNotice])
+        XCTAssertEqual(items[0].body.text, "look at this")
+        XCTAssertNil(items[0].body.tool, "a user turn has no wrapper label")
+        XCTAssertEqual(items[1].body.text, "be careful")
+        XCTAssertEqual(items[0].id, "100#0")
+        XCTAssertEqual(items[1].id, "100#1", "ids stay dense and in document order")
+    }
+
+    /// `<bash-stderr></bash-stderr>` is the common one: a wrapper with nothing in it would
+    /// draw an empty row that says less than no row at all.
+    func testAnEmptyWrapperIsDroppedRatherThanDrawnBlank() {
+        let items = items(#"""
+            {"type": "user", "uuid": "u1", "timestamp": "2026-08-21T10:00:00.000Z", "isSidechain": false, "message": {"role": "user", "content": "<bash-input>ls</bash-input>\n<bash-stdout></bash-stdout>"}}
+            """#)
+        XCTAssertEqual(items.count, 1, "the empty bash-stdout contributes nothing")
+        XCTAssertEqual(items[0].body.tool, "bash-input")
+        XCTAssertEqual(items[0].body.text, "ls")
+    }
+
+    /// The list is fixed on purpose. A message that opens with a tag the harness does not use
+    /// is somebody typing angle brackets, and reattributing it would be the same bug pointed
+    /// the other way.
+    func testAnUnrecognisedTagIsStillTheUsersOwnWords() {
+        let items = items(#"""
+            {"type": "user", "uuid": "u1", "timestamp": "2026-08-21T10:00:00.000Z", "isSidechain": false, "message": {"role": "user", "content": "<div>my own angle brackets</div>"}}
+            """#)
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].kind, .userTurn)
+        XCTAssertEqual(items[0].body.text, "<div>my own angle brackets</div>")
+    }
+
     func testAUserRecordWithStringContentIsOneUserTurn() {
         let items = items("""
             {"type":"user","uuid":"u1","timestamp":"2026-08-21T10:00:00.000Z",\
