@@ -49,16 +49,6 @@ final class AgentRoutingTests: XCTestCase {
         return (store, provider)
     }
 
-    /// A store already wired to `FakeAgentRuntime` for `.claude`, with `sessionCount` tabs
-    /// already created against it — the fixture the routing test below needs.
-    private func makeStoreWithFakeRuntime(sessionCount: Int) -> (SessionStore, FakeAgentRuntime) {
-        let store = makeStore()
-        let fake = FakeAgentRuntime()
-        store.overrideRuntime(fake, for: .claude, account: nil)
-        for _ in 0..<sessionCount { _ = store.newSession(in: tmp) }
-        return (store, fake)
-    }
-
     /// Matches `ConversationRepinTests.row`: a registry row good enough to drive
     /// `applyRegistry` through a full repin. Two distinct `procStart`s are what let
     /// `ConversationPin` anchor two tabs to two different pids rather than folding both
@@ -261,29 +251,9 @@ final class AgentRoutingTests: XCTestCase {
                        + "`ClaudeAdapter.rename`'s doc comment for why")
     }
 
-    /// Guard, not a reproduction. The 2026-08-23 fan-out cannot be reproduced from outside —
-    /// `attachments` is in-memory and we never established what corrupted it. This asserts the
-    /// property that made the corruption possible is gone: an event delivered on one tab's
-    /// subscription changes that tab and no other.
-    func testATitleEventChangesOnlyTheSubscribingTab() {
-        let (store, runtime) = makeStoreWithFakeRuntime(sessionCount: 3)
-        let tabs = store.allSessionIDsForTesting
-        let target = tabs[1]
-        let before = tabs.map { store.title(of: $0) }
-
-        runtime.emit(.title("only-me"), for: store.pinnedConversationID(of: target)!)
-
-        XCTAssertEqual(store.title(of: target), "only-me")
-        for (index, tab) in tabs.enumerated() where tab != target {
-            XCTAssertEqual(store.title(of: tab), before[index], "tab \(tab) was not subscribed to that event")
-        }
-    }
-
-    /// Fix round 1 (F-1): a genuine reproduction, not just a guard. The test above uses three
-    /// *distinct* conversations, where the old value-matching `tabs(following:)` scan happens
-    /// to return exactly one tab — it could not have caught the 2026-08-23 incident. This one
-    /// drives two tabs onto the SAME conversation the way `ConversationRepinTests` proves is
-    /// reachable, then emits on ONE tab's token specifically.
+    /// Fix round 1 (F-1): a genuine reproduction, not just a guard. This drives two tabs onto
+    /// the SAME conversation the way `ConversationRepinTests` proves is reachable, then emits
+    /// on ONE tab's token specifically.
     ///
     /// Inexpressible against the pre-token API: `attach` returned `Void`, so nothing a test
     /// could hold would ever identify one specific tab's subscription. And it fails against

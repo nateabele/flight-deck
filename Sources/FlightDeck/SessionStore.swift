@@ -167,8 +167,9 @@ final class SessionStore: ObservableObject {
 
     /// One agent attachment per tab, torn down with the tab. Replaces the per-session
     /// `TranscriptWatcher` this used to hold: the watcher now lives inside `ClaudeRuntime`,
-    /// and what the store keeps is the binding it attached — which is also what tells it
-    /// which tabs a conversation's report belongs to.
+    /// and what the store keeps here is keyed by tab only. Nothing scans this table to
+    /// decide which tabs an event belongs to — that routing is decided entirely by the
+    /// `AttachmentToken` the runtime hands back from `attach`, which names the tab directly.
     private var attachments: [UUID: TabAttachment] = [:]
 
     /// The agent integrations, one per `AgentInstance` — an agent *as an account*, not per
@@ -2597,11 +2598,6 @@ final class SessionStore: ObservableObject {
         return repos[at.repo].sessions[at.session].pinnedConversationID
     }
 
-    /// Test seam: every tab's id, sidebar order — `repos.flatMap(\.sessions)` is the same
-    /// walk the sidebar does. (Not a walk over `attachments`, a different collection, which
-    /// is the whole subject of this file.)
-    var allSessionIDsForTesting: [UUID] { repos.flatMap(\.sessions).map(\.id) }
-
     /// Test seam: which tabs are currently attached to an agent runtime. `attachments`
     /// itself stays private; this exposes just enough to assert a closed tab's late `repin`
     /// completion did not resurrect one.
@@ -2652,12 +2648,8 @@ final class SessionStore: ObservableObject {
         let session = repos[at.repo].sessions[at.session]
         switch session.agent {
         case .claude:
-            // Inline, not through `adapter.rename`, and this is the one place an agent
-            // branch is deliberate rather than incidental: `AgentAdapter.rename` is `async`,
-            // so dispatching claude through it would push `injectPendingRename` into a later
-            // run-loop turn — and the injection contract is that `inject` decides *now*
-            // whether the bar is busy, deferring only if it is. Codex has no such
-            // constraint: its rename is a request and nothing waits on it.
+            // Inline, not through `adapter.rename` — see this method's doc comment above for
+            // why claude's leg stays synchronous.
             injectPendingRename(id, name)
         case .codex:
             let adapter = adapter(for: instance(for: session))
