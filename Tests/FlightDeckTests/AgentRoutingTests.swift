@@ -59,6 +59,48 @@ final class AgentRoutingTests: XCTestCase {
         return (store, fake)
     }
 
+    /// Matches `ConversationRepinTests.row`: a registry row good enough to drive
+    /// `applyRegistry` through a full repin. Two distinct `procStart`s are what let
+    /// `ConversationPin` anchor two tabs to two different pids rather than folding both
+    /// rows onto one — see `makeStoreWithTwoTabsSharingOneConversation` below.
+    private func row(_ sid: UUID, pid: pid_t = 1, cwd: String,
+                     procStart: String = "start-a") -> ClaudeStatusFile.Entry {
+        .init(pid: pid, sessionID: sid, activity: .busy, waitingFor: nil,
+              startedAt: 1, cwd: cwd, procStart: procStart)
+    }
+
+    /// Two tabs repinned onto ONE conversation via `applyRegistry` — the same route
+    /// `ConversationRepinTests.testTwoTabsResumedOntoOneConversationAreBothFlagged` proves is
+    /// reachable in production, not a contrivance: each tab's own registry row independently
+    /// repins it onto `shared` (distinct pids and `procStart`s, so `ConversationPin` follows
+    /// each tab's own anchor instead of both rows resolving against one). `titleResolver` is
+    /// stubbed synchronous, same as `ConversationRepinTests.makeStore()`, so both repins —
+    /// and the runtime (re)attaches they trigger — are complete by the time this returns.
+    private func makeStoreWithTwoTabsSharingOneConversation() -> (
+        store: SessionStore, runtime: FakeAgentRuntime, first: Session, second: Session, shared: UUID
+    ) {
+        let store = makeStore()
+        store.titleResolver = { _, done in done(nil) }
+        let fake = FakeAgentRuntime()
+        store.overrideRuntime(fake, for: .claude, account: nil)
+        let first = store.newSession(in: tmp)
+        let second = store.newSession(in: tmp)
+        let shared = UUID()
+
+        store.applyRegistry([
+            1: row(first.pinnedConversationID, pid: 1, cwd: tmp.path),
+            2: row(second.pinnedConversationID, pid: 2, cwd: tmp.path, procStart: "start-b"),
+        ])
+        store.applyRegistry([
+            1: row(shared, pid: 1, cwd: tmp.path),
+            2: row(shared, pid: 2, cwd: tmp.path, procStart: "start-b"),
+        ])
+        XCTAssertEqual(store.conflictedSessionIDs, [first.id, second.id],
+                       "fixture must actually land both tabs on `shared`, or the test below "
+                       + "proves nothing")
+        return (store, fake, first, second, shared)
+    }
+
     /// `account: nil` throughout this file, and it is not a placeholder: every store here is
     /// built with no `PreferencesStore`, so there is no account to name and `nil` is exactly
     /// the key `SessionStore.instance(for:)` resolves for the tabs these tests create. An
@@ -228,6 +270,46 @@ final class AgentRoutingTests: XCTestCase {
         for (index, tab) in tabs.enumerated() where tab != target {
             XCTAssertEqual(store.title(of: tab), before[index], "tab \(tab) was not subscribed to that event")
         }
+    }
+
+    /// Fix round 1 (F-1): a genuine reproduction, not just a guard. The test above uses three
+    /// *distinct* conversations, where the old value-matching `tabs(following:)` scan happens
+    /// to return exactly one tab — it could not have caught the 2026-08-23 incident. This one
+    /// drives two tabs onto the SAME conversation the way `ConversationRepinTests` proves is
+    /// reachable, then emits on ONE tab's token specifically.
+    ///
+    /// Inexpressible against the pre-token API: `attach` returned `Void`, so nothing a test
+    /// could hold would ever identify one specific tab's subscription. And it fails against
+    /// the old `for tab in tabs(following: binding.conversationID) { apply(event, to: tab) }`
+    /// fan-out — verified by temporarily restoring that closure body and re-running this test,
+    /// which then renamed both tabs. See task-5-report.md, "F-1 verification", for the exact
+    /// before/after.
+    func testATitleOnOneTabsTokenLeavesTheOtherTabOnTheSameConversationAlone() {
+        let (store, runtime, first, second, shared) = makeStoreWithTwoTabsSharingOneConversation()
+        let firstBefore = store.title(of: first.id)
+
+        runtime.emit(.title("only-second"), to: AttachmentToken(conversationID: shared, tab: second.id))
+
+        XCTAssertEqual(store.title(of: second.id), "only-second")
+        XCTAssertEqual(store.title(of: first.id), firstBefore,
+                       "an event on one tab's token must not reach another tab following the "
+                       + "same conversation")
+    }
+
+    /// F-2: the seam between the store's stored `attachment.token` and the runtime's
+    /// subscriber set, which no runtime-level test can reach — a `stopWatching` that detached
+    /// a synthesized token instead of the one it actually stored would leave both
+    /// `ClaudeRuntimeTests` and `CodexRuntimeAttachmentTests` green while quietly cutting the
+    /// survivor off (or leaking the closed tab's subscription forever).
+    func testClosingOneOfTwoTabsOnOneConversationLeavesTheOtherWatching() {
+        let (store, runtime, first, second, shared) = makeStoreWithTwoTabsSharingOneConversation()
+
+        store.closeSession(first.id)
+        runtime.emit(.title("after-close"), for: shared)
+
+        XCTAssertEqual(store.title(of: second.id), "after-close",
+                       "closing one of two tabs sharing a conversation must not detach the "
+                       + "survivor")
     }
 
     private func entry(_ conversation: UUID, activity: SessionActivity) -> ClaudeStatusFile.Entry {

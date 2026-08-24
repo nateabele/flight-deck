@@ -29,4 +29,13 @@ final class FakeAgentRuntime: AgentRuntime {
             handler(event)
         }
     }
+
+    /// Delivers to exactly one subscriber — the whole point of `AttachmentToken` existing.
+    /// `emit(_:for:)` above still fans out by conversation, which is correct for it (it
+    /// simulates a real source, and a real source is one per conversation) but useless for
+    /// proving that two tabs sharing one conversation stay independent once the *store*
+    /// routes by token.
+    func emit(_ event: AgentEvent, to token: AttachmentToken) {
+        handlers[token]?(event)
+    }
 }
