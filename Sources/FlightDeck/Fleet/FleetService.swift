@@ -448,6 +448,14 @@ final class FleetService: ObservableObject {
         case .markUnread(let id):
             guard store.sessionExists(id) else { return .err(cid: cid, code: "unknown_session") }
             store.markUnread(id)
+        case .renameSession(let id, let title):
+            guard store.sessionExists(id) else { return .err(cid: cid, code: "unknown_session") }
+            // The store refuses a title its agent cannot use — empty after sanitising, or all
+            // metacharacters for an agent renamed down a pty. Answered rather than swallowed,
+            // so the phone can say why instead of showing a name that never took.
+            guard store.rename(id, to: title) else {
+                return .err(cid: cid, code: "rejected_title")
+            }
         case .closeSession(let id):
             guard store.sessionExists(id) else { return .err(cid: cid, code: "unknown_session") }
             // `recordingHistory` left at its default, so a tab closed from the phone can be

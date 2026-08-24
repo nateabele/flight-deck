@@ -2747,14 +2747,18 @@ final class SessionStore: ObservableObject {
     /// later turn of the run loop — which is exactly the guarantee the injection contract is
     /// built on (`inject` decides *now* whether the bar is busy, and defers only if it is).
     /// Codex has no such constraint: its rename is a request, and nothing waits on it.
-    func rename(_ id: UUID, to newTitle: String) {
+    /// `@discardableResult` because every existing caller is a local UI action that has
+    /// already validated its own field; the Bool exists for the fleet command, which has to
+    /// answer a phone that sent a title this agent cannot use.
+    @discardableResult
+    func rename(_ id: UUID, to newTitle: String) -> Bool {
         guard let at = locate(id),
               // Sanitized by THIS agent's rule, not by claude's for everyone. It is what the
               // sidebar shows and what the rename below sends, and those two must agree —
               // but which characters are legal is a property of the channel the name travels
               // down, and codex's is JSON-RPC. See `AgentAdapter.sanitizedTitle`.
               let name = agent(of: id)?.sanitizedTitle(newTitle)
-        else { return }
+        else { return false }
 
         repos[at.repo].sessions[at.session].title = name
         emit(.renamed(id: id, title: name, origin: .user))
@@ -2775,6 +2779,11 @@ final class SessionStore: ObservableObject {
             // pop an alert over a cosmetic failure.
             Task { try? await adapter.rename(binding, to: name) }
         }
+        // True means the name was ACCEPTED and the local title changed — not that the agent
+        // has been told. The codex arm above is deliberately fire-and-forget and the claude
+        // arm queues, so "renamed" here is the same ack-means-dispatched promise every other
+        // fleet command makes.
+        return true
     }
 
     /// Queues a rename for `claude` and tries it at once. The one route into `pendingRenames`
