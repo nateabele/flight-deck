@@ -42,6 +42,20 @@ xcrun devicectl device install app --device "$DEVICE" "$APP" \
 # dies the moment a script finishes, which on this project once looked like a networking bug
 # (a connection stuck in SYN_RCVD) that was really just the app being terminated mid-handshake.
 # To watch output, run the launch yourself with --console and leave it in the foreground.
+# A locked phone installs fine and refuses to launch, which is the ordinary case when the
+# handset is face-down on a desk. That is not a failure of the deploy — the new build IS on
+# the device — so it is reported as the one sentence it is rather than as a stack of
+# FBSOpenApplicationErrorDomain, and the script still exits 0.
 echo "==> relaunching"
-xcrun devicectl device process launch --device "$DEVICE" --terminate-existing "$BUNDLE_ID" \
-  | grep -E 'Launched|error' || true
+if ! launch_out=$(xcrun devicectl device process launch \
+    --device "$DEVICE" --terminate-existing "$BUNDLE_ID" 2>&1); then
+  if printf '%s' "$launch_out" | grep -q "could not be, unlocked"; then
+    echo "    installed, but NOT relaunched: the device is locked. Unlock it and open the app,"
+    echo "    or re-run this script."
+  else
+    printf '%s\n' "$launch_out" | tail -4
+    exit 1
+  fi
+else
+  printf '%s\n' "$launch_out" | grep -E 'Launched' || true
+fi
