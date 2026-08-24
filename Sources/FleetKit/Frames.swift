@@ -103,6 +103,14 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// is the one that already exists rather than a second one invented for the phone.
     case closeSession(id: UUID)
 
+    /// Which session this client is looking at, or `nil` when it has left one.
+    ///
+    /// Presence, not state: the Mac shows it beside the tab so somebody at the desk can see
+    /// their phone is on that conversation. Deliberately NOT part of the fleet snapshot —
+    /// it is a property of a live connection, dies with it, and putting it in replicated
+    /// state would mean an event for something that cannot be replayed meaningfully.
+    case viewing(session: UUID?)
+
     /// Rename tab `id`.
     ///
     /// The title is sanitised on the Mac, per agent, and the two agents differ: claude's
@@ -186,6 +194,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case setProjectCollapsed = "project.collapse"
         case newSession = "session.new"
         case renameSession = "session.rename"
+        case viewing = "session.viewing"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -200,6 +209,10 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case .closeSession(let id):
             try c.encode(Op.closeSession, forKey: .op)
             try c.encode(id, forKey: .id)
+        case .viewing(let session):
+            try c.encode(Op.viewing, forKey: .op)
+            // Absent rather than null when leaving: one short line in a dump either way.
+            try c.encodeIfPresent(session, forKey: .id)
         case .renameSession(let id, let title):
             try c.encode(Op.renameSession, forKey: .op)
             try c.encode(id, forKey: .id)
@@ -253,6 +266,8 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             self = .markUnread(id: try c.decode(UUID.self, forKey: .id))
         case .closeSession:
             self = .closeSession(id: try c.decode(UUID.self, forKey: .id))
+        case .viewing:
+            self = .viewing(session: try c.decodeIfPresent(UUID.self, forKey: .id))
         case .renameSession:
             self = .renameSession(
                 id: try c.decode(UUID.self, forKey: .id),

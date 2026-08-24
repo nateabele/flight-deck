@@ -15,7 +15,7 @@ import UIKit
 /// simulator — see `scripts/test-ios.sh`.
 @MainActor
 @Observable
-final class FleetModel: TimelinePaging, PromptSending, PromptAnswering {
+final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting {
     private(set) var mac: PairedMac?
     private(set) var fleet = FleetSnapshot.empty
     private(set) var state = FleetConnector.State.idle
@@ -223,6 +223,11 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering {
     }
 
     func markRead(_ id: UUID) { connector?.send(.markRead(id: id)) }
+
+    /// Which session this phone is looking at, or nil on leaving. Fire-and-forget: presence
+    /// is cosmetic, and a dropped report costs a badge rather than correctness — the Mac
+    /// prunes on disconnect regardless.
+    func viewing(_ session: UUID?) { connector?.send(.viewing(session: session)) }
 
     /// Rename a tab. The title is sanitised on the Mac, per agent — see the command.
     func renameSession(_ id: UUID, to title: String) {

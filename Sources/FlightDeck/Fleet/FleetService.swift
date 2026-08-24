@@ -21,6 +21,12 @@ final class FleetService: ObservableObject {
     /// Held while any phone is attached; see `holdSleepAwake`.
     private var sleepAssertion: (any NSObjectProtocol)?
 
+    /// Which session each live connection is looking at.
+    private var viewingByClient: [UUID: UUID] = [:]
+
+    /// Sessions some phone currently has open. Drives the sidebar's presence badge.
+    @Published private(set) var phoneActiveSessions: Set<UUID> = []
+
     private static let logger = Logger(
         subsystem: "dev.flightdeck.FlightDeck", category: "fleet"
     )
@@ -107,8 +113,8 @@ final class FleetService: ObservableObject {
             self.noteAttached(attachment)
             return self.frames(resumingFrom: lastSeq)
         }
-        server.onCommand = { [weak self] _, cid, command in
-            self?.apply(command, cid: cid) ?? .err(cid: cid, code: "stopped")
+        server.onCommand = { [weak self] client, cid, command in
+            self?.apply(command, from: client, cid: cid) ?? .err(cid: cid, code: "stopped")
         }
         server.onRequest = { [weak self] _, cid, request, reply in
             guard let self else { return reply(.err(cid: cid, code: "stopped")) }
@@ -151,7 +157,43 @@ final class FleetService: ObservableObject {
                 // sync by patching it per-event is exactly the stale-count bug this signal
                 // shape replaces.
                 self.attachedSlots = slots
+                self.holdSleepAwake(slots.isEmpty == false)
+                // A phone that vanished mid-session never sends `viewing(nil)`, so presence is
+                // pruned from the authoritative attached set rather than trusted to clean up
+                // after itself — otherwise a badge glows for a phone that is gone.
+                if slots.isEmpty, !self.viewingByClient.isEmpty {
+                    self.viewingByClient.removeAll()
+                    self.publishPhonePresence()
+                }
             }
+        }
+    }
+
+    private func publishPhonePresence() {
+        phoneActiveSessions = Set(viewingByClient.values)
+    }
+
+    /// Keeps the Mac awake for exactly as long as a phone is attached, and no longer.
+    ///
+    /// A sleeping Mac does not keep its fleet sockets: TCP does not survive system sleep and
+    /// nothing here changes that. The alternative — Wake on Demand, where a Bonjour sleep
+    /// proxy answers for the sleeping Mac — needs a proxy on the network and `womp` on the
+    /// current power source, and on a laptop's battery profile neither is typically true.
+    ///
+    /// Scoped to a live phone rather than taken for the app's lifetime: an assertion held
+    /// whenever Flight Deck runs would flatten a laptop overnight for a phone nobody is using.
+    ///
+    /// **Prevents IDLE sleep only.** Closing the lid still sleeps and no assertion overrides
+    /// that — it is a hardware path, not a policy one.
+    private func holdSleepAwake(_ shouldHold: Bool) {
+        if shouldHold, sleepAssertion == nil {
+            sleepAssertion = ProcessInfo.processInfo.beginActivity(
+                options: [.idleSystemSleepDisabled],
+                reason: "A paired phone is connected to this Mac"
+            )
+        } else if !shouldHold, let held = sleepAssertion {
+            ProcessInfo.processInfo.endActivity(held)
+            sleepAssertion = nil
         }
     }
 
@@ -443,8 +485,21 @@ final class FleetService: ObservableObject {
         }
     }
 
-    private func apply(_ command: FleetCommand, cid: Int) -> ServerFrame {
+    private func apply(
+        _ command: FleetCommand, from client: FleetAttachment, cid: Int
+    ) -> ServerFrame {
         switch command {
+        case .viewing(let session):
+            // Keyed on the CONNECTION id, not the pairing slot: one phone reconnecting is two
+            // connections, and keying on the slot would let a dead connection's presence
+            // outlive it until the new one happened to report something.
+            //
+            // No `sessionExists` guard. Presence is cosmetic, and a phone that opened a tab
+            // the Mac closed a moment ago should get silence rather than an error it cannot
+            // act on — the badge simply has nothing to attach to.
+            if let session { viewingByClient[client.id] = session }
+            else { viewingByClient.removeValue(forKey: client.id) }
+            publishPhonePresence()
         case .markRead(let id):
             guard store.sessionExists(id) else { return .err(cid: cid, code: "unknown_session") }
             store.markRead(id)

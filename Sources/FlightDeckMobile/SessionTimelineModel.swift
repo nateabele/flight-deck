@@ -42,6 +42,15 @@ protocol TimelinePaging: AnyObject {
 /// send that is never answered, a refusal delivered before the call returns — are exactly the
 /// ones no real link produces on demand. Two protocols, so a stub can answer one verb and
 /// leave the other outstanding.
+/// Telling the Mac which session this phone is looking at.
+///
+/// Its own protocol for the reason the others are: a screen model that took the concrete
+/// `FleetModel` could not be stood up in a test without a socket.
+@MainActor
+protocol PresenceReporting: AnyObject {
+    func viewing(_ session: UUID?)
+}
+
 @MainActor
 protocol PromptSending: AnyObject {
     func sendPrompt(
@@ -128,7 +137,8 @@ final class SessionTimelineModel {
 
     private(set) var answerState = AnswerState.idle
 
-    @ObservationIgnored private let fleet: any TimelinePaging & PromptSending & PromptAnswering
+    @ObservationIgnored private let fleet:
+        any TimelinePaging & PromptSending & PromptAnswering & PresenceReporting
     @ObservationIgnored private let timeout: Duration
     /// The fetch whose answer is still allowed to change anything, or `nil` when none is.
     ///
@@ -157,7 +167,7 @@ final class SessionTimelineModel {
     /// milliseconds rather than in fifteen seconds. Nothing in the app passes it.
     init(
         sessionID: UUID,
-        fleet: any TimelinePaging & PromptSending & PromptAnswering,
+        fleet: any TimelinePaging & PromptSending & PromptAnswering & PresenceReporting,
         timeout: Duration = .seconds(15)
     ) {
         self.sessionID = sessionID
@@ -293,6 +303,10 @@ final class SessionTimelineModel {
 
     /// The reader has read a failure and wants the row gone.
     func dismiss(_ id: UUID) { outbox.dismiss(id) }
+
+    /// The screen appeared or went away. Reported so the Mac can show, beside the tab, that a
+    /// phone is on this conversation.
+    func viewing(_ isViewing: Bool) { fleet.viewing(isViewing ? sessionID : nil) }
 
     /// What this session is blocked on, or nil.
     ///
