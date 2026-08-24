@@ -174,6 +174,11 @@ struct SessionTimelineScreen: View {
         // send the mark from a gesture racing its own link, which is what stopped rows
         // opening at all. See `TimelinePaging`.
         .task(id: model.sessionID) { model.open() }
+        // Reported from the SCREEN rather than the model: the model is cached per tab and
+        // outlives the screen (see `FleetModel.timelineModel(for:)`), so tying presence to its
+        // lifetime would leave a badge glowing for a conversation nobody is looking at.
+        .onAppear { model.viewing(true) }
+        .onDisappear { model.viewing(false) }
         // `safeAreaInset`, not a row in the `List` and not an overlay: the inset is what
         // reserves height so the last line of the conversation is not covered, and it is what
         // rides above the keyboard when the field takes focus. A row would scroll away from

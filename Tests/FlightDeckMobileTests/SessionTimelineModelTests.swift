@@ -9,7 +9,11 @@ import XCTest
 /// an answer that arrives after its deadline, and a refusal delivered *before* the request
 /// returns are all ordinary on a real link and none of them is reproducible on demand.
 @MainActor
-private final class StubPager: TimelinePaging, PromptSending, PromptAnswering {
+private final class StubPager: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting {
+    /// Recorded so a test can assert the screen reports itself; see `viewing(_:)`.
+    private(set) var viewingReports: [UUID?] = []
+    func viewing(_ session: UUID?) { viewingReports.append(session) }
+
     private(set) var requests: [FleetRequest] = []
     /// Every session this pager was told had been looked at, in order.
     private(set) var marksRead: [UUID] = []

@@ -6,7 +6,11 @@ import XCTest
 /// test can assert what happens *while* one is outstanding — which is where a second tap and
 /// a deadline both live. The same reason `StubFleet` holds its page completion.
 @MainActor
-private final class StubPager: TimelinePaging, PromptSending, PromptAnswering {
+private final class StubPager: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting {
+    /// Recorded so a test can assert the screen reports itself; see `viewing(_:)`.
+    private(set) var viewingReports: [UUID?] = []
+    func viewing(_ session: UUID?) { viewingReports.append(session) }
+
     private(set) var requests: [FleetRequest] = []
     private var pendingPages: [(Result<TimelinePage, FleetRequestError>) -> Void] = []
 

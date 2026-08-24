@@ -218,7 +218,8 @@ struct FlightDeckApp: App {
     }
 
     var body: some Scene {
-        RootWindow(store: store, preferences: preferences)
+        RootWindow(store: store, preferences: preferences,
+                   phoneActiveSessions: fleet.phoneActiveSessions)
             .commands {
                 SessionCommands(store: store, preferences: preferences)
                 EditCommands()

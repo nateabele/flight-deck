@@ -1,6 +1,42 @@
 import AppKit
 import SwiftUI
 
+/// A phone is on this conversation right now.
+///
+/// **A dot rather than a glyph, and it pulses rather than blinking.** The row already carries
+/// a status glyph, a conflict marker and an account marker; a fourth *symbol* would read as a
+/// fourth kind of warning. A soft pulsing dot reads as presence — something alive — which is
+/// what it is, and it is the one thing on this row that is about a person rather than a state.
+///
+/// The glow is a shadow in the dot's own colour rather than a blur layer: it stays put under
+/// the row's `transition`, where a separately-animated blur would slide at its own rate and
+/// arrive after the dot.
+private struct PhonePresenceBadge: View {
+    /// Driven from `onAppear` rather than a `TimelineView`, so the animation costs nothing
+    /// when no phone is attached — which is almost always. A `TimelineView` here would re-run
+    /// the whole sidebar row on a display-linked schedule for a badge that is usually absent.
+    @State private var pulsing = false
+
+    var body: some View {
+        Circle()
+            .fill(Color.accentColor)
+            .frame(width: 7, height: 7)
+            .shadow(color: .accentColor.opacity(pulsing ? 0.9 : 0.3), radius: pulsing ? 4 : 1.5)
+            .scaleEffect(pulsing ? 1.0 : 0.72)
+            .opacity(pulsing ? 1.0 : 0.55)
+            .animation(
+                // `autoreverses` rather than two keyframes: the ease has to be symmetric or the
+                // dot appears to snap at one end of the cycle.
+                .easeInOut(duration: 0.9).repeatForever(autoreverses: true),
+                value: pulsing
+            )
+            .onAppear { pulsing = true }
+            .accessibilityLabel("A phone is viewing this session")
+            .accessibilityIdentifier("session-phone-presence")
+            .help("A paired phone has this session open")
+    }
+}
+
 /// One sidebar row. Owns only its transient edit state; the title itself lives in the Store.
 private struct SessionRow: View {
     @ObservedObject var store: SessionStore
@@ -10,6 +46,9 @@ private struct SessionRow: View {
     /// today — see `SidebarRow.accountMismatched`. A work session left open in a personal
     /// repo shows up here rather than silently running as the wrong login.
     let isAccountMismatched: Bool
+    /// A phone currently has this conversation open. Presence, not state — see
+    /// `FleetService.phoneActiveSessions`.
+    var isPhoneActive: Bool = false
 
     @State private var isEditing = false
     @State private var draft = ""
@@ -78,6 +117,16 @@ private struct SessionRow: View {
                 // recognizer on the table view never fires, because the synthetic double-click
                 // delivers no mouse-ups. Rename is also reachable from the context menu and
                 // from Return.
+                if isPhoneActive {
+                    PhonePresenceBadge()
+                        // Slides out of the leading edge and takes the title with it, rather
+                        // than popping and shoving the row sideways in one frame.
+                        .transition(
+                            .move(edge: .leading)
+                                .combined(with: .opacity)
+                                .combined(with: .scale(scale: 0.4, anchor: .leading))
+                        )
+                }
                 Text(session.title)
                     .accessibilityIdentifier("session-row-title")
             }
@@ -228,6 +277,10 @@ private struct SessionRow: View {
 struct SessionSidebar: View {
     @ObservedObject var store: SessionStore
     var preferences: PreferencesStore?
+    /// Sessions a paired phone currently has open. Passed in rather than read from a service
+    /// here: this view renders and holds no state of its own, and the fleet is not its
+    /// dependency — `RootView` already owns both.
+    var phoneActiveSessions: Set<UUID> = []
     /// Injectable so a future test can drive the close flow without a panel; production
     /// always gets the real alert.
     var confirmer: ProjectCloseConfirming = NSAlertProjectCloseConfirmer()
@@ -289,9 +342,15 @@ struct SessionSidebar: View {
                             store: store,
                             session: session,
                             isConflicted: conflicted.contains(session.id),
-                            isAccountMismatched: mismatched.contains(session.id)
+                            isAccountMismatched: mismatched.contains(session.id),
+                            isPhoneActive: phoneActiveSessions.contains(session.id)
                         )
                         .tag(session.id)
+                        // Animated HERE, on the container, not inside the badge: the badge is
+                        // created and destroyed by the `if`, so it cannot animate its own
+                        // arrival — only something that outlives the change can.
+                        .animation(.spring(response: 0.35, dampingFraction: 0.75),
+                                   value: phoneActiveSessions.contains(session.id))
                     }
 
                 case .empty:

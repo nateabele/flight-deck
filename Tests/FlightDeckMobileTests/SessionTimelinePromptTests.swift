@@ -6,7 +6,10 @@ import XCTest
 /// Bonjour browse and a Mac to answer anything at all, so this is the only way a send that is
 /// never answered — the case the deadline exists for — can be produced.
 @MainActor
-private final class StubFleet: TimelinePaging, PromptSending, PromptAnswering {
+private final class StubFleet: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting {
+    private(set) var viewingReports: [UUID?] = []
+    func viewing(_ session: UUID?) { viewingReports.append(session) }
+
     private(set) var requests: [FleetRequest] = []
     private(set) var commands: [FleetCommand] = []
     private var pendingPages: [(Result<TimelinePage, FleetRequestError>) -> Void] = []
