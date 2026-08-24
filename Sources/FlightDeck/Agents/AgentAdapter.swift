@@ -65,24 +65,104 @@ protocol AgentAdapter {
     /// ship a wrong login command for a future agent. Every conformer states its own.
     func loginInvocation(for account: AgentAccount) -> LoginInvocation
 
-    /// **Whether keystrokes may be sent to this agent's live terminal at all.**
+    /// **How a message is typed into this agent's live terminal — or `nil`, which IS the
+    /// refusal.**
     ///
-    /// One capability, not three, because the three things `SessionStore` does to a running
-    /// TUI are one channel: a message typed into the input box and submitted
-    /// (`submitPrompt`), `/rename <name>` typed into that same box (`flushPendingRename`),
-    /// and Escape / arrows / Return driving a dialog (`answerPrompt`). All of them are text
-    /// at a pty whose screen grammar this build has to be able to read, and an agent whose
-    /// screen it cannot read is refused all three for the same reason.
+    /// Everything `SessionStore` types into a running TUI goes through here: a phone's
+    /// message (`submitPrompt`), `/rename <name>` (`flushPendingRename`), and a restore's
+    /// "Keep going". All of them are text at a pty whose input box this build has to be able
+    /// to find, and an agent whose box it cannot find is refused all three at one site —
+    /// `inject` — because that is the single funnel all three pass through.
     ///
-    /// **Static rather than an instance member, and that is load-bearing.**
-    /// `SessionStore.adapter(for:)` answers codex out of `makeCodexStackIfNeeded`, so asking
-    /// an instance would memoize a stack and spin up a runtime just to ask a question — and
-    /// the first caller is `restore`, which must be able to ask about a codex tab before it
-    /// has built anything for it. A capability is a property of the agent, not of one
-    /// account's live stack.
+    /// **`nil` rather than a `Bool` beside a body, so the refusal is stated once.** A
+    /// predicate and an implementation are two statements of one fact and they drift; a
+    /// missing object cannot disagree with itself about whether it is missing.
     ///
-    /// Read through `AgentID.hasTextChannel` below, which is what the store consults.
-    static var hasTextChannel: Bool { get }
+    /// **Widening this back out is not the cautious move.** Nothing codex has goes through
+    /// the funnel: `sendToShell` types resume commands and `initialInput` directly at the pty
+    /// and never touches it, and `CodexAdapter.loginInvocation` has `inject: nil`, so no
+    /// codex sign-in text is ever queued either.
+    ///
+    /// Read through `AgentID.textChannel` below, which is what the store consults.
+    static var textChannel: AgentTextChannel? { get }
+
+    /// **How a select-list dialog this agent has raised is driven — or `nil`, the refusal.**
+    ///
+    /// Split from `textChannel` because the two are genuinely different channels and an
+    /// agent can have one without the other. Driving a dialog needs no input box and no kill
+    /// ring: it is arrows counted against a screen grammar, a Return, and an Escape that
+    /// reads nothing at all. Codex is exactly that case — its approval list fits
+    /// `ChoiceDialog`'s model more closely than claude's own does, while its composer still
+    /// has no answer to `inject`'s draft dance.
+    ///
+    /// Read through `AgentID.dialogDriver` below.
+    static var dialogDriver: AgentDialogDriver? { get }
+}
+
+/// **Typing a message into a live agent and submitting it.**
+///
+/// The body of `SessionStore.inject`, moved out from under the store so that "which screen
+/// grammar" is the adapter's answer rather than a claude-shaped default reached by callers
+/// carrying no agent at all.
+///
+/// **There is deliberately no `readiness(viewport:)` member.** A channel that could report
+/// `.ready(draft:)` would be claiming to tell a real draft from a placeholder hint, and
+/// `InputBar`'s own doc records that it cannot: Claude Code renders the hint in exactly the
+/// shape of a draft and the two differ only in colour, which `ghostty_surface_read_text` does
+/// not return. The safe reading is the kill itself — kill, then compare `content` before and
+/// after — so the whole dance stays inside one call rather than being split across a question
+/// that would have to guess.
+@MainActor
+protocol AgentTextChannel {
+    /// Type `text` and submit it, preserving whatever draft was there — or refuse.
+    ///
+    /// **The contract the caller's bookkeeping depends on: `settle` is called exactly once
+    /// iff this returns `true`.** `SessionStore` marks the tab mid-injection before calling
+    /// and clears the mark inside the `settle` it supplies, so a channel that returned `true`
+    /// without settling would leave the tab refusing every later injection for the life of
+    /// the process.
+    ///
+    /// `stillWanted` is re-checked after the settle delay, because the request can be
+    /// replaced or cancelled while the agent repaints. `onSent` runs once the text has been
+    /// submitted, and is where the caller retires its pending entry.
+    func submit(
+        _ text: String,
+        into injector: TextInjecting,
+        settle: (@escaping () -> Void) -> Void,
+        stillWanted: @escaping @MainActor () -> Bool,
+        onSent: @escaping @MainActor () -> Void
+    ) -> Bool
+}
+
+/// **Driving a select-list dialog the agent has raised.**
+///
+/// The interlock in front of an irreversible keypress, as `ChoiceDialog` documents it, with
+/// the two things that are *not* shared between agents named as members: which row is the
+/// plain approval, and how a refusal is delivered.
+@MainActor
+protocol AgentDialogDriver {
+    /// Which row of the select list on screen the cursor is on, or nil when no list can be
+    /// read, none is marked, or two are.
+    func focusedRow(inViewport viewport: String) -> Int?
+
+    /// The interlock: does row `index` read as `label`? False means refuse — never "count
+    /// instead".
+    func row(_ index: Int, reads label: String, inViewport viewport: String) -> Bool
+
+    /// **The plain-approval row, and it has no default on purpose.**
+    ///
+    /// Both shipped agents order their approval dialogs the same way — plain yes, then a
+    /// DURABLE GRANT, then deny — and both answer `0`. That coincidence is exactly why this
+    /// must not be a defaulted constant: an agent that inherited `0` without checking would
+    /// be one release away from silently granting "and don't ask again" from a pocket. Every
+    /// conformer states its own, proved from that agent's own captured screens, and the
+    /// compiler catches one that forgets.
+    var allowRow: Int { get }
+
+    /// Refusal with no reading at all — one key event, no viewport parse, no row arithmetic.
+    /// It is the path a worried person reaches for from a pocket, and it is deliberately the
+    /// one path that cannot be wrong about which row it is on, because it is not on a row.
+    func deny(_ injector: TextInjecting)
 }
 
 extension AgentAdapter {
@@ -108,15 +188,34 @@ extension AgentAdapter {
 /// *answers* live on the adapters, which is what stops "can this be typed into" from being
 /// re-decided at each call site, and the compiler makes a third agent state its own rather
 /// than inherit claude's by default.
+///
+/// **Static, and that is load-bearing — it is why these are properties of `AgentID` rather
+/// than methods on an adapter instance.** `SessionStore.adapter(for:)` answers codex out of
+/// `makeCodexStackIfNeeded`, so asking an instance would memoize a stack and spin up a
+/// runtime just to ask a question. The first caller is `restore`, which must be able to ask
+/// about a codex tab before it has built anything for it, and `PromptService` holds only a
+/// tab id. Neither can afford that, and neither should have to: a capability is a property
+/// of the agent, not of one account's live stack. Nothing either channel does reads adapter
+/// state — they read a screen and press keys — so there is nothing an instance would supply.
 @MainActor
 extension AgentID {
-    /// See `AgentAdapter.hasTextChannel`. Consulted at four sites in `SessionStore` —
-    /// `restore`'s auto-resume gate, `inject`, `submitPrompt` and `answerPrompt` — and by
-    /// `PromptService`, so those five cannot come to different conclusions about one agent.
-    var hasTextChannel: Bool {
+    /// See `AgentAdapter.textChannel`. Consulted at three sites in `SessionStore` —
+    /// `restore`'s auto-resume gate, `submitPrompt` and `inject` — so none of them can come
+    /// to a different conclusion about one agent.
+    var textChannel: AgentTextChannel? {
         switch self {
-        case .claude: ClaudeAdapter.hasTextChannel
-        case .codex: CodexAdapter.hasTextChannel
+        case .claude: ClaudeAdapter.textChannel
+        case .codex: CodexAdapter.textChannel
+        }
+    }
+
+    /// See `AgentAdapter.dialogDriver`. Consulted by `SessionStore.answerPrompt` and by
+    /// `PromptService`, which is the split that stops those two drifting — the property
+    /// `PromptService`'s own comment claims and used to fail at.
+    var dialogDriver: AgentDialogDriver? {
+        switch self {
+        case .claude: ClaudeAdapter.dialogDriver
+        case .codex: CodexAdapter.dialogDriver
         }
     }
 }

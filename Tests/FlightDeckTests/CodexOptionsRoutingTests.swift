@@ -25,10 +25,11 @@ final class CodexOptionsRoutingTests: XCTestCase {
     /// spawns and no thread is created.
     private final class RecordingCodexAdapter: AgentAdapter {
         static let id: AgentID = .codex
-        /// Codex's answer, because this stands in for codex — the store reads the capability
-        /// off `AgentID`, so a stub that disagreed would describe an agent that does not
-        /// exist.
-        static let hasTextChannel = false
+        /// Codex's answers, because this stands in for codex — the store reads both
+        /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
+        /// does not exist.
+        static let textChannel: AgentTextChannel? = nil
+        static let dialogDriver: AgentDialogDriver? = nil
         private(set) var prepared: [AgentOptions] = []
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

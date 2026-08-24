@@ -211,10 +211,11 @@ final class AgentRoutingTests: XCTestCase {
     /// which of the two the store asked for.
     private struct StubAdapter: AgentAdapter {
         static let id: AgentID = .claude
-        /// Claude's answer, because this stands in for claude — the store reads the
-        /// capability off `AgentID`, so a stub that disagreed would describe an agent that
+        /// Claude's answers, because this stands in for claude — the store reads both
+        /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.
-        static let hasTextChannel = true
+        static let textChannel: AgentTextChannel? = ClaudeTextChannel()
+        static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)
