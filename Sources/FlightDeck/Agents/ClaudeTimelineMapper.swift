@@ -49,13 +49,7 @@ enum ClaudeTimelineMapper {
         switch type {
         case "user":
             if let text = message["content"] as? String {
-                return [
-                    TimelineItem(
-                        id: TimelineItem.identifier(offset: offset, index: 0),
-                        kind: .userTurn, status: .complete,
-                        body: TimelineItem.Body(text: text), at: at
-                    )
-                ]
+                return normalized(text, offset: offset, at: at)
             }
             return blocks(message).enumerated().compactMap { index, block in
                 userItem(block, offset: offset, index: index, at: at)
@@ -67,6 +61,76 @@ enum ClaudeTimelineMapper {
         default:
             return []
         }
+    }
+
+    /// Wrappers Claude Code injects into a `user` record that are not the user talking.
+    ///
+    /// Deliberately a fixed list rather than "anything that looks like a tag": a message that
+    /// genuinely opens with `<div>` is the user's own words and must stay theirs. Everything
+    /// here was observed in a real transcript; the counts in one 20MB session were
+    /// task-notification 132, bash-input 8, bash-stdout 8, local-command-caveat 4,
+    /// command-name 2, local-command-stdout 2, system-reminder 1.
+    static let harnessWrappers: Set<String> = [
+        "task-notification", "system-reminder",
+        "local-command-stdout", "local-command-caveat",
+        "bash-input", "bash-stdout", "bash-stderr",
+        "command-name", "command-message", "command-args",
+    ]
+
+    /// One `user` record's string content, split into what the harness said and what the
+    /// person said.
+    ///
+    /// A record can be both: a slash command echoes `<command-name>` and `<command-message>`
+    /// back to back, and a `!` command's `<bash-stdout>` is followed by `<bash-stderr>`. Each
+    /// wrapper becomes its own `.systemNotice`, tagged with the wrapper's own name so a client
+    /// can label it without re-parsing; anything left outside them stays a `.userTurn`. Order
+    /// is document order, so a real message that arrived alongside a reminder still reads in
+    /// the position it was written.
+    static func normalized(_ text: String, offset: Int, at: String?) -> [TimelineItem] {
+        var items: [TimelineItem] = []
+        var rest = Substring(text)
+
+        func emit(_ tag: String?, _ body: Substring) {
+            let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+            // An empty wrapper — `<bash-stderr></bash-stderr>` is the common one — is a row
+            // that would say nothing, so it is dropped rather than drawn blank.
+            guard !trimmed.isEmpty else { return }
+            items.append(
+                TimelineItem(
+                    id: TimelineItem.identifier(offset: offset, index: items.count),
+                    kind: tag == nil ? .userTurn : .systemNotice, status: .complete,
+                    body: TimelineItem.Body(text: trimmed, tool: tag), at: at
+                )
+            )
+        }
+
+        while let open = nextWrapper(in: rest) {
+            emit(nil, rest[rest.startIndex..<open.range.lowerBound])
+            let afterOpen = open.range.upperBound
+            if let close = rest.range(of: "</\(open.tag)>", range: afterOpen..<rest.endIndex) {
+                emit(open.tag, rest[afterOpen..<close.lowerBound])
+                rest = rest[close.upperBound...]
+            } else {
+                // Unclosed: take the remainder as the wrapper's body rather than leaving it
+                // to fall through as user prose, which is the failure being fixed.
+                emit(open.tag, rest[afterOpen...])
+                return items
+            }
+        }
+        emit(nil, rest)
+        return items
+    }
+
+    /// The earliest recognised opening tag in `text`, or `nil`.
+    private static func nextWrapper(
+        in text: Substring
+    ) -> (tag: String, range: Range<Substring.Index>)? {
+        var best: (tag: String, range: Range<Substring.Index>)?
+        for tag in harnessWrappers {
+            guard let r = text.range(of: "<\(tag)>") else { continue }
+            if best == nil || r.lowerBound < best!.range.lowerBound { best = (tag, r) }
+        }
+        return best
     }
 
     private static func blocks(_ message: [String: Any]) -> [[String: Any]] {

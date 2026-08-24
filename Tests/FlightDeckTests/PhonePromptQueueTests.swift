@@ -143,6 +143,49 @@ final class PhonePromptQueueTests: XCTestCase {
         XCTAssertNil(store.promptQueue[id])
     }
 
+    /// **Dropping it is right; dropping it silently was not.** The window is deliberate — a
+    /// message surfacing hours later in a conversation that has moved on is worse than one
+    /// that never arrived — but the phone was told `.queued` at submit time and then nothing
+    /// ever contradicted that, so its outbox row sat at "Waiting for your Mac to type this"
+    /// for a prompt that no longer existed on either machine.
+    ///
+    /// The token is what carries the news, because the token is what the phone's outbox is
+    /// keyed on; the text is already over there.
+    func testAnExpiredPromptTellsThePhoneItWasDropped() {
+        let (store, _, id, conversation) = makeStore(activity: .busy)
+        let replicator = attachedReplicator(to: store)
+        let token = UUID()
+        store.submitPrompt("ship it", token: token, to: id)
+        store.now = { [clock] in clock.addingTimeInterval(SessionStore.phonePromptWindow + 1) }
+
+        goIdle(store, conversation)
+
+        XCTAssertTrue(
+            replicator.recorded.contains { $0 == .promptExpired(id: id, token: token) },
+            "an expired prompt must be reported, not merely forgotten"
+        )
+    }
+
+    /// The other half, and the one a careless implementation breaks: a prompt that WAS typed
+    /// must never be reported as expired. `onSent` and the expiry filter both remove the same
+    /// entry, and reporting from the wrong one would tell the reader their delivered message
+    /// was lost.
+    func testAPromptThatWasTypedIsNotReportedAsExpired() {
+        let (store, _, id, conversation) = makeStore(activity: .busy)
+        let replicator = attachedReplicator(to: store)
+        let token = UUID()
+        store.submitPrompt("ship it", token: token, to: id)
+
+        goIdle(store, conversation)
+
+        XCTAssertNil(store.promptQueue[id], "it was typed")
+        XCTAssertFalse(
+            replicator.recorded.contains { if case .promptExpired = $0 { return true }
+                                           else { return false } },
+            "a delivered prompt must not be reported as dropped"
+        )
+    }
+
     func testTheWindowIsLongerThanAResumePrompts() {
         XCTAssertGreaterThan(SessionStore.phonePromptWindow, SessionStore.resumePromptWindow)
     }

@@ -49,6 +49,13 @@ enum TimelineStyle {
             // Slice 2 (spec §9) emits these. Worded exactly as `SessionStatusGlyph.label`
             // words the same state, so the fleet row and this screen agree.
             return "Waiting for you"
+        case .systemNotice:
+            // The wrapper's own name, humanised — "Task notification", "System reminder".
+            // Named rather than lumped under one word because the reader's first question
+            // about a row that is not their own words is which machine wrote it.
+            guard let tag = item.body.tool, !tag.isEmpty else { return "Notice" }
+            let words = tag.split(separator: "-").joined(separator: " ")
+            return words.prefix(1).uppercased() + words.dropFirst()
         case .unknown:
             return "Unrecognized"
         }
@@ -78,6 +85,7 @@ enum TimelineStyle {
         case .thinking: return "brain"
         case .toolCall, .toolResult: return symbol(forTool: item.body.tool)
         case .prompt: return "questionmark.circle.fill"
+        case .systemNotice: return "gearshape.fill"
         case .unknown: return "circle.dotted"
         }
     }
@@ -109,6 +117,7 @@ enum TimelineStyle {
         case .thinking: return .secondary
         case .toolCall, .toolResult: return .green
         case .prompt: return .orange
+        case .systemNotice: return .secondary
         case .unknown: return .secondary
         }
     }
@@ -226,7 +235,7 @@ enum TimelineStyle {
     static func rendersMarkdown(_ item: TimelineItem) -> Bool {
         switch item.kind {
         case .assistantText, .userTurn: return true
-        case .thinking, .toolCall, .toolResult, .prompt, .unknown: return false
+        case .thinking, .toolCall, .toolResult, .prompt, .unknown, .systemNotice: return false
         }
     }
 
@@ -343,7 +352,7 @@ enum TimelineStyle {
             return exceeds(proseCeilingLines, item.body.text) ? proseCeilingLines : nil
         case .thinking:
             return 6
-        case .prompt, .unknown, .toolCall, .toolResult:
+        case .prompt, .unknown, .toolCall, .toolResult, .systemNotice:
             return 14
         }
     }
@@ -457,7 +466,7 @@ enum TimelineStyle {
             return true
         case .assistantText, .userTurn:
             return false
-        case .thinking, .prompt, .unknown:
+        case .thinking, .prompt, .unknown, .systemNotice:
             return proseLineLimit(for: item) != nil
         }
     }

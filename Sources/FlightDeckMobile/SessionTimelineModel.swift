@@ -483,6 +483,18 @@ final class SessionTimelineModel {
     static let noConfirmation =
         "Your Mac didn't confirm this. Check the conversation before sending it again."
 
+    /// The Mac accepted this and ran out of time to type it.
+    ///
+    /// Worded as a fact about the Mac rather than an error, because nothing went wrong: the
+    /// tab stayed busy for longer than the message stayed worth saying. It ends with what to
+    /// do, because unlike every other failure here the message is genuinely gone and only the
+    /// reader can decide whether it still applies.
+    static let expired =
+        "Your Mac stayed busy and didn't send this in time. Send it again if it still applies."
+
+    /// A queued prompt the Mac dropped when its window closed. See `FleetEvent.promptExpired`.
+    func promptExpired(_ token: UUID) { outbox.fail(token, Self.expired) }
+
     /// Copy for a prompt that did not land.
     ///
     /// **Deliberately NOT `message(for:)`.** The same wire code means a different thing on
