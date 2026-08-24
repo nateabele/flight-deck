@@ -448,6 +448,19 @@ final class FleetService: ObservableObject {
         case .markUnread(let id):
             guard store.sessionExists(id) else { return .err(cid: cid, code: "unknown_session") }
             store.markUnread(id)
+        case .closeSession(let id):
+            guard store.sessionExists(id) else { return .err(cid: cid, code: "unknown_session") }
+            // `recordingHistory` left at its default, so a tab closed from the phone can be
+            // reopened by the same undo a tab closed on the Mac can. A phone-specific close
+            // that skipped history would be the one destructive action with no way back.
+            store.closeSession(id)
+        case .setProjectCollapsed(let id, let isCollapsed):
+            guard store.projectExists(id) else { return .err(cid: cid, code: "unknown_project") }
+            store.setCollapsed(isCollapsed, forProjectAt: id)
+        case .newSession(let project):
+            guard store.newSession(inProject: project) != nil else {
+                return .err(cid: cid, code: "unknown_project")
+            }
         case .prompt(let id, let token, let text):
             // Every refusal, "no such tab" included, is the store's to make: it is the only
             // thing that knows the tab's agent, its status and whether it has a surface, and

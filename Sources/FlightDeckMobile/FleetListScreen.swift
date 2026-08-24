@@ -22,16 +22,17 @@ struct FleetListScreen: View {
                         // Keyed on the session's tab id, never its conversation id — the
                         // latter is not stable across a re-pin and, for codex, differs from
                         // the tab id from birth.
-                        ForEach(project.sessions) { session in
-                            sessionRow(session)
+                        // Driven by the Mac's own `isCollapsed`, not by local state: the
+                        // Mac already owns this per project and emits `projectCollapsed`, so
+                        // a phone keeping its own copy would disagree with the desk the
+                        // moment either end toggled.
+                        if !project.isCollapsed {
+                            ForEach(project.sessions) { session in
+                                sessionRow(session)
+                            }
                         }
                     } header: {
-                        HStack {
-                            Text(project.name).font(.footnote.monospaced())
-                            Spacer()
-                            Text("\(project.sessions.count)").font(.caption.monospacedDigit())
-                        }
-                        .listRowInsets(Self.rowInsets)
+                        projectHeader(project)
                     }
                 }
             }
@@ -139,11 +140,74 @@ struct FleetListScreen: View {
     /// has moved to `SessionTimelineModel.open()`, which runs when the conversation is
     /// actually on screen. That is also the truer reading of spec §8 — the mark means "I have
     /// looked at this", and a tap that never opened anything is not a look.
+    /// A project's header: a chevron that collapses it, its name and count, and a `+`.
+    ///
+    /// The chevron is a `Button` around the whole leading group rather than the glyph alone,
+    /// because a 12pt chevron is well under the 44pt touch target the platform asks for and
+    /// the name beside it is dead space that wants the same job.
+    private func projectHeader(_ project: WireProject) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                model.setCollapsed(!project.isCollapsed, project: project.id)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        // Rotated rather than swapped for `chevron.down`: rotation animates
+                        // through the intermediate angles, and a glyph swap cannot.
+                        .rotationEffect(.degrees(project.isCollapsed ? 0 : 90))
+                        .animation(.easeInOut(duration: 0.15), value: project.isCollapsed)
+                        .foregroundStyle(.secondary)
+                    Text(project.name).font(.footnote.monospaced())
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(project.isCollapsed
+                ? "Expand \(project.name)" : "Collapse \(project.name)")
+
+            Spacer()
+            Text("\(project.sessions.count)").font(.caption.monospacedDigit())
+
+            // Tap creates with the project's defaults; press and hold opens the menu. A plain
+            // `Menu` would make the common case a two-step, and `primaryAction` is what keeps
+            // the tap immediate while leaving the long press its own job.
+            Menu {
+                Button {
+                    model.newSession(inProject: project.id)
+                } label: {
+                    Label("New session", systemImage: "plus")
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.footnote.weight(.semibold))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            } primaryAction: {
+                model.newSession(inProject: project.id)
+            }
+            .accessibilityLabel("New session in \(project.name)")
+        }
+        .listRowInsets(Self.rowInsets)
+    }
+
     private func sessionRow(_ session: WireSession) -> some View {
         NavigationLink(value: session.id) {
             row(session)
         }
         .listRowInsets(Self.rowInsets)
+        // `allowsFullSwipe: false`, which is the whole safety story for this gesture. A full
+        // swipe closes on release with nothing in between, and this is the one action on the
+        // screen that destroys something — a flick while scrolling a list of live sessions
+        // would be indistinguishable from an intentional close. Requiring the button means
+        // the destructive step is always a second, deliberate tap.
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                model.closeSession(session.id)
+            } label: {
+                Label("Close", systemImage: "xmark")
+            }
+        }
     }
 
     /// The font is set HERE, on the title itself, and not once on the enclosing `List`.

@@ -293,6 +293,51 @@ final class AnswerPromptTests: XCTestCase {
         XCTAssertEqual(spy.events, [.arrow(-1), .arrow(-1), .ret])
     }
 
+    /// **The security property on a real surface, which is what every other test here lacks.**
+    ///
+    /// `testAllowMovesToTheFirstRowAndReturns` and `testNoAnswerCanReachTheDontAskAgainRow`
+    /// both run against `spy.showOptions`, a screen this test suite draws itself. That is
+    /// enough to pin the driver's arithmetic and not enough to pin the driver against claude:
+    /// a synthetic screen agrees with whatever the parser expects, by construction.
+    ///
+    /// This one runs against `permission-write-row2.captured.txt` — a real 2.1.241 Write
+    /// dialog, captured after two Down keystrokes, so the marker is on row 2 and row 1 is the
+    /// accept-edits grant. `docs/MOBILE.md` item 43 existed because nothing automated could
+    /// reach this state; it can now.
+    ///
+    /// The assertion is the interlock, not the arithmetic: the fixture is a still image and
+    /// cannot repaint, so `.allow` sends its two Ups, re-reads a screen where the marker has
+    /// not moved, and presses NOTHING. A driver that trusted its own arithmetic would have
+    /// pressed Return with the marker sitting on "Yes, and switch to accept edits" — granting
+    /// auto-approval for the session from somebody's pocket.
+    func testAllowOnACapturedClaudeDialogWillNotReturnUntilTheMarkerMoves() throws {
+        let (store, spy, id) = makeStore(activity: .waiting)
+        spy.viewportOverride = try TimelineFixtureTests.text(
+            "permission-write-row2.captured", in: "Claude"
+        )
+        XCTAssertEqual(
+            store.answerPrompt(permission, with: .allow, in: id, token: UUID()), .dispatched
+        )
+        XCTAssertFalse(spy.events.contains(.ret),
+                       "no Return may go out while the marker is still on the grant row")
+        XCTAssertEqual(spy.events, [.arrow(-1), .arrow(-1)],
+                       "two Ups for a marker on row 2, and nothing else")
+    }
+
+    /// The fixture's own shape, asserted so the test above cannot quietly stop meaning
+    /// anything. If a future capture lands with the marker already on row 0, the interlock
+    /// test would pass for the wrong reason — it would send no arrows and press no Return
+    /// because there was nothing to do.
+    func testTheCapturedClaudeDialogReallyHasItsMarkerOffTheFirstRow() throws {
+        let screen = try TimelineFixtureTests.text("permission-write-row2.captured", in: "Claude")
+        XCTAssertTrue(screen.contains("  1. Yes"), "row 0 is present and unmarked")
+        XCTAssertTrue(screen.contains("❯ 3. No"), "the marker is on the third row")
+        XCTAssertTrue(
+            screen.contains("2. Yes, and switch to accept edits"),
+            "row 1 is the grant this must never land on"
+        )
+    }
+
     /// **The security property, as a test.** There is no answer that reaches row 1 — the
     /// "don't ask again" row — and this asserts it from the outside: `.allow` on a three-row
     /// dialog leaves the marker at row 0, never row 1.

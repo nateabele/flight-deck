@@ -49,7 +49,7 @@ final class PairingInitiatorTests: XCTestCase {
         }
         initiator.start(code: code, endpoint: endpoint)
         await fulfillment(of: [settled], timeout: 15)
-        return outcome ?? .failure(.connectionFailed)
+        return outcome ?? .failure(.unreachable)
     }
 
     /// The whole phone side against the whole Mac side, over a real socket. Both halves come
@@ -122,7 +122,7 @@ final class PairingInitiatorTests: XCTestCase {
         }
         initiator.start(code: .mint(), endpoint: .hostPort(host: "127.0.0.1", port: port))
         await fulfillment(of: [settled], timeout: 15)
-        XCTAssertEqual(failure, .connectionFailed)
+        XCTAssertEqual(failure, .unreachable, "nothing was listening, so nothing came up")
     }
 
     /// The other half of what `exchangeTimeout` bounds, and the half the unreachable-endpoint
@@ -152,8 +152,12 @@ final class PairingInitiatorTests: XCTestCase {
         initiator.start(code: .mint(), endpoint: await silent.endpoint())
         // Ordered: the frame proves the exchange got past `.ready`, so the failure that
         // follows is a stall being cut off rather than a connect that never happened.
+        //
+        // Those two used to be the same case, and this comment was the only place the
+        // difference was written down. `.noAnswer` says it in the type now, which is what
+        // lets the phone stop telling a connected user to check their Wi-Fi.
         await fulfillment(of: [heard, settled], timeout: 15, enforceOrder: true)
-        XCTAssertEqual(failure, .connectionFailed)
+        XCTAssertEqual(failure, .noAnswer, "it answered the connection, then said nothing")
     }
 
     /// A responder that answers the frames but never knew the code. Its SPAKE2 half is real —

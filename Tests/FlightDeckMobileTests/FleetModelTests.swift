@@ -78,16 +78,38 @@ final class FleetModelTests: XCTestCase {
     /// one to the App Store, and a single "pairing failed" for all four would send them
     /// nowhere. Asserted as four distinct strings rather than four literals, so this keeps
     /// working when the copy is reworded and stops working when two branches collapse.
+    ///
+    /// **Driven off `CaseIterable`, not a hand-written list.** The list version passed for
+    /// however long it took someone to add a case and forget this file, which is the only way
+    /// this property ever breaks. Enumerating the type means a new failure with no copy of its
+    /// own fails here the moment it exists.
     func testEveryPairingFailureGetsItsOwnMessage() {
-        let messages = [
-            PairingInitiator.Failure.wrongCode,
-            .attemptsExhausted,
-            .connectionFailed,
-            .malformedResponse,
-        ].map(FleetModel.message(for:))
+        let all = PairingInitiator.Failure.allCases
+        let messages = all.map(FleetModel.message(for:))
 
-        XCTAssertEqual(Set(messages).count, 4, "two failures share one message: \(messages)")
+        XCTAssertEqual(
+            Set(messages).count, all.count,
+            "two failures share one message: \(zip(all, messages).map { "\($0) -> \($1)" })"
+        )
         XCTAssertFalse(messages.contains(where: \.isEmpty))
+    }
+
+    /// **The specific collapse that cost a day, pinned so it cannot come back.**
+    ///
+    /// `noAnswer` means the connection came UP and the Mac did not reply — so the network is
+    /// demonstrably working, and telling the user to check their Wi-Fi points away from the
+    /// fault. That is exactly what happened: a listener that accepted the connection and never
+    /// answered read as "Couldn't reach that Mac. Check you're both on the same Wi-Fi." on a
+    /// phone that could ping the Mac, and the real cause took packet captures to find.
+    func testTheNoAnswerCaseDoesNotBlameTheNetwork() {
+        let message = FleetModel.message(for: .noAnswer)
+        XCTAssertFalse(message.lowercased().contains("wi-fi"),
+                       "the connection succeeded; Wi-Fi advice sends the user the wrong way")
+        XCTAssertFalse(message.lowercased().contains("couldn't reach"),
+                       "it WAS reached — that is what distinguishes this from .unreachable")
+        XCTAssertTrue(message.lowercased().contains("blocking")
+                        || message.lowercased().contains("busy"),
+                      "say what it could actually be")
     }
 
     /// The history channel's one entry point from the phone, and the only thing it must never
