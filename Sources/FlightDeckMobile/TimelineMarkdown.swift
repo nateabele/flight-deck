@@ -39,15 +39,45 @@ enum TimelineMarkdown {
     /// at 17pt while the paragraph under it grew to 53 at
     /// `.accessibilityExtraExtraExtraLarge`, which is the failure docs/MOBILE.md item 29
     /// exists to catch.
+    /// Light purple, and two of them, because one value cannot be both.
+    ///
+    /// A tint that reads as "slightly purple" against white is too dark to read against
+    /// black, and the light-on-dark value washes out to nearly invisible the other way. Each
+    /// side is picked against its own background rather than derived from the other.
+    private static let codeTint = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.78, green: 0.70, blue: 1.00, alpha: 1)
+            : UIColor(red: 0.40, green: 0.26, blue: 0.70, alpha: 1)
+    })
+
+    /// The wash behind a code span. Deliberately faint — this sits inside running prose, and
+    /// anything stronger turns a paragraph with three spans in it into a striped page.
+    ///
+    /// Neutral white on dark rather than a tinted one: over the dark background a purple wash
+    /// reads as a colour cast on the text rather than as a surface behind it.
+    private static let codeWash = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(white: 1.0, alpha: 0.10)
+            : UIColor(red: 0.45, green: 0.30, blue: 0.75, alpha: 0.09)
+    })
+
     static let theme = Theme()
         // Inline code: the tool card's font, one step down, because a `git status` inside a
-        // sentence is the same kind of thing as a `git status` in a command panel. No
-        // background chip — an inline background in SwiftUI paints the full line box, so a
-        // code span in the middle of a wrapped paragraph draws a bar through the lines above
-        // and below it.
+        // sentence is the same kind of thing as a `git status` in a command panel — now with
+        // a tint and a wash behind it, so a span is findable at a glance instead of being
+        // distinguishable only by letterform.
+        //
+        // **`BackgroundColor` here is a TEXT style, not `.background()`.** The note this
+        // replaces said an inline background was impossible because it "paints the full line
+        // box, so a code span in the middle of a wrapped paragraph draws a bar through the
+        // lines above and below it". That is true of the view modifier and not of this: a
+        // text style is an attribute on the run, so it paints the glyphs' own box and wraps
+        // with them. The original conclusion was right about the tool it had tried.
         .code {
             FontFamilyVariant(.monospaced)
             FontSize(.em(0.92))
+            ForegroundColor(Self.codeTint)
+            BackgroundColor(Self.codeWash)
         }
         .strong { FontWeight(.semibold) }
         .emphasis { FontStyle(.italic) }
