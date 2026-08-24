@@ -32,10 +32,13 @@ xcodebuild -project FlightDeck.xcodeproj -scheme FleetKitiOS \
 # found by whoever first installed on hardware. `builtin-process-xcframework` fails hard
 # when no slice matches the platform, so this is a real check and a cheap one.
 #
-# A framework needs no provisioning profile, which is the only reason a device build is
-# possible here: FleetKitiOS sets CODE_SIGNING_ALLOWED=NO in project.yml, and it is repeated
-# on the command line so this line keeps working if that ever changes. The app target cannot
-# do this — it has no DEVELOPMENT_TEAM — which is why only the framework is built for device.
+# A framework needs no provisioning profile: FleetKitiOS sets CODE_SIGNING_ALLOWED=NO in
+# project.yml, and it is repeated on the command line so this line keeps working if that ever
+# changes. The app target is a different matter — it now carries DEVELOPMENT_TEAM[sdk=iphoneos*]
+# and so CAN be built for device, but only on a machine enrolled in that team, with a profile
+# to fetch and an Apple ID to fetch it with. Requiring that here would turn a portable compile
+# gate into one that fails for everyone outside the team, so the device app build stays a
+# manual step (docs/MOBILE.md) and this script builds only the framework for device.
 xcodebuild -project FlightDeck.xcodeproj -scheme FleetKitiOS \
   -configuration Debug -sdk iphoneos \
   -destination 'generic/platform=iOS' \
