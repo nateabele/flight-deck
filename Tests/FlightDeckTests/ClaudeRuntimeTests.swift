@@ -66,4 +66,43 @@ final class ClaudeRuntimeTests: XCTestCase {
 
         XCTAssertEqual(seen, [.activity(.busy)])
     }
+
+    func testTwoTabsOnOneConversationBothReceive() throws {
+        let id = UUID()
+        let url = dir.appendingPathComponent("shared.jsonl")
+        let runtime = ClaudeRuntime()
+
+        var first: [AgentEvent] = []
+        var second: [AgentEvent] = []
+        let binding = AgentBinding(conversationID: id, transcriptURL: url)
+        _ = runtime.attach(binding, for: UUID()) { first.append($0) }
+        _ = runtime.attach(binding, for: UUID()) { second.append($0) }
+        runtime.drainForTesting()
+
+        try titleLine("renamed", id).write(to: url, atomically: true, encoding: .utf8)
+        runtime.drainForTesting()
+
+        XCTAssertEqual(first, [.title("renamed")], "the second attach must not stop the first tab's watcher")
+        XCTAssertEqual(second, [.title("renamed")])
+    }
+
+    func testDetachingOneOfTwoLeavesTheOtherWatching() throws {
+        let id = UUID()
+        let url = dir.appendingPathComponent("shared.jsonl")
+        let runtime = ClaudeRuntime()
+
+        var first: [AgentEvent] = []
+        var second: [AgentEvent] = []
+        let binding = AgentBinding(conversationID: id, transcriptURL: url)
+        let a = runtime.attach(binding, for: UUID()) { first.append($0) }
+        _ = runtime.attach(binding, for: UUID()) { second.append($0) }
+        runtime.drainForTesting()
+
+        runtime.detach(a)
+        try titleLine("after", id).write(to: url, atomically: true, encoding: .utf8)
+        runtime.drainForTesting()
+
+        XCTAssertTrue(first.isEmpty, "a detached subscriber must receive nothing")
+        XCTAssertEqual(second, [.title("after")], "the surviving subscriber must keep its watcher")
+    }
 }
