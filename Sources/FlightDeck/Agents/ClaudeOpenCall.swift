@@ -18,6 +18,8 @@ import Foundation
 enum ClaudeOpenCall {
     static func find(in lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt? {
         let items = lines.flatMap { ClaudeTimelineMapper.items(inLine: $0.text, at: $0.offset) }
-        return OpenPrompt.find(in: items, activity: activity?.rawValue)
+        return OpenPrompt.find(
+            in: items, agent: AgentID.claude.rawValue, activity: activity?.rawValue
+        )
     }
 }

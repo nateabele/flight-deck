@@ -24,6 +24,11 @@ import SwiftUI
 /// (`TimelineRow`) reserves monospace for that, and a question written for a person is prose.
 struct PromptCard: View {
     let open: OpenPrompt?
+    /// The session's agent, straight off the wire and never a client-side enum — see
+    /// `TimelineStyle.agentName`. Only ever used to *name* what is waiting; whether a card
+    /// appears at all is `OpenPrompt.find`'s decision, which refuses an agent no Mac can
+    /// answer for before this view is ever handed one.
+    let agent: String?
     let state: SessionTimelineModel.AnswerState
     let model: SessionTimelineModel
 
@@ -67,12 +72,25 @@ struct PromptCard: View {
 
     static let sentFootnote = "Sent to your Mac."
 
-    static func title(for open: OpenPrompt) -> String {
+    /// **The agent's own name, from the wire, never a literal.** This used to say "Claude"
+    /// whatever was on the other end — which was a lie the moment any other agent could reach
+    /// this card, and a lie nothing in the type system would have caught.
+    ///
+    /// An agent the fleet did not name, or one this build has never heard of, gets the
+    /// sentence with no name in it rather than an invented one — `TimelineStyle.agentName`
+    /// answers `nil` there, and `WireSession.subagentSummary`'s rule applies: silence beats a
+    /// guess. Belt and braces with `OpenPrompt.find`'s gate on purpose: the gate decides
+    /// whether a card exists, this decides whose name is on it, and if the gate is ever
+    /// widened for an agent that becomes answerable the copy is already honest.
+    static func title(for open: OpenPrompt, agent: String?) -> String {
         switch open {
         case .question(_, let question): return question.question
         case .permission(_, let tool, _):
-            guard let tool, !tool.isEmpty else { return "Claude is waiting for you" }
-            return "Claude wants to run \(tool)"
+            let name = TimelineStyle.agentName(agent)
+            guard let tool, !tool.isEmpty else {
+                return name.map { "\($0) is waiting for you" } ?? "Waiting for you"
+            }
+            return name.map { "\($0) wants to run \(tool)" } ?? "Waiting to run \(tool)"
         }
     }
 
@@ -93,7 +111,7 @@ struct PromptCard: View {
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.orange)
                 }
-                Text(Self.title(for: open))
+                Text(Self.title(for: open, agent: agent))
                     .font(.callout.weight(.medium))
                     .fixedSize(horizontal: false, vertical: true)
                 if let subtitle = Self.subtitle(for: open) {

@@ -84,22 +84,61 @@ final class PromptCardTests: XCTestCase {
     /// shows — and it is all the phone has, because the dialog's own wording exists nowhere it
     /// can read.
     func testAPermissionCardIsTitledFromTheToolAndItsSummary() {
-        XCTAssertEqual(PromptCard.title(for: permission), "Claude wants to run Bash")
+        XCTAssertEqual(
+            PromptCard.title(for: permission, agent: "claude"), "Claude wants to run Bash"
+        )
         XCTAssertEqual(PromptCard.subtitle(for: permission), "rm -rf build")
     }
 
     func testAPermissionCardForAToolWithNoSummaryStillHasATitle() {
         XCTAssertEqual(
-            PromptCard.title(for: .permission(callID: "x", tool: nil, summary: nil)),
+            PromptCard.title(
+                for: .permission(callID: "x", tool: nil, summary: nil), agent: "claude"
+            ),
             "Claude is waiting for you"
         )
         XCTAssertNil(PromptCard.subtitle(for: .permission(callID: "x", tool: nil, summary: nil)))
     }
 
+    /// **The name comes off the wire, and it used to be a literal.** A card that says
+    /// "Claude" over another agent's session is a lie about whose terminal is blocked, and
+    /// the only reason it is not on screen today is `OpenPrompt.find`'s gate — a second
+    /// mechanism, in another module. If that gate is ever widened for an agent that becomes
+    /// answerable, this is what keeps the sentence true.
+    func testAPermissionCardNamesTheAgentTheFleetReported() {
+        XCTAssertEqual(
+            PromptCard.title(for: permission, agent: "codex"), "Codex wants to run Bash"
+        )
+        XCTAssertEqual(
+            PromptCard.title(for: .permission(callID: "x", tool: nil, summary: nil),
+                             agent: "codex"),
+            "Codex is waiting for you"
+        )
+    }
+
+    /// An agent the fleet did not name — or one a newer Mac added after this build shipped —
+    /// gets the sentence with nobody's name in it rather than an invented one. The same rule
+    /// `WireSession.subagentSummary` states for a count it has no grounds to assert: silence
+    /// beats a guess, and `TimelineStyle.agentName` is the one table that decides it.
+    func testAnUnnamedAgentIsNotGivenAName() {
+        for agent in [nil, ""] as [String?] {
+            XCTAssertEqual(
+                PromptCard.title(for: permission, agent: agent), "Waiting to run Bash",
+                "agent \(String(describing: agent))"
+            )
+            XCTAssertEqual(
+                PromptCard.title(for: .permission(callID: "x", tool: nil, summary: nil),
+                                 agent: agent),
+                "Waiting for you",
+                "agent \(String(describing: agent))"
+            )
+        }
+    }
+
     /// A question's own words are its title, and it has no second line: an option's meaning
     /// lives in that option's description, not above the list.
     func testAQuestionIsTitledWithTheQuestionAndHasNoSubtitle() {
-        XCTAssertEqual(PromptCard.title(for: question()), "Which?")
+        XCTAssertEqual(PromptCard.title(for: question(), agent: "claude"), "Which?")
         XCTAssertNil(PromptCard.subtitle(for: question()))
     }
 

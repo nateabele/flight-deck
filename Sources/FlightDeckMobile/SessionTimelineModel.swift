@@ -303,10 +303,12 @@ final class SessionTimelineModel {
     /// `activity` change (already pushed) plus records (already fetched on that change), and a
     /// question being answered on the Mac is a `tool_result` arriving on the next fetch.
     ///
-    /// A function of `activity` rather than a stored property, so it cannot go stale: the
-    /// screen passes the live `WireSession.activity` it is already reading.
-    func blocked(activity: String?) -> OpenPrompt? {
-        OpenPrompt.find(in: feed.items, activity: activity)
+    /// A function of `agent` and `activity` rather than a stored property, so it cannot go
+    /// stale: the screen passes the live `WireSession` fields it is already reading. Both are
+    /// `find`'s to judge — including whether this Mac can answer for that agent at all, which
+    /// is why a codex tab is blocked on nothing here however it is drawn elsewhere.
+    func blocked(agent: String?, activity: String?) -> OpenPrompt? {
+        OpenPrompt.find(in: feed.items, agent: agent, activity: activity)
     }
 
     /// Answer the dialog `call` names.

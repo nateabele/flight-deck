@@ -120,15 +120,15 @@ final class OpenPromptTests: XCTestCase {
     /// nobody is blocked on.
     func testAnUnansweredCallOnAnIdleSessionIsNotOpen() {
         let items = [call("toolu_A", tool: "Bash", offset: 0)]
-        XCTAssertNil(OpenPrompt.find(in: items, activity: "idle"))
-        XCTAssertNil(OpenPrompt.find(in: items, activity: "busy"))
-        XCTAssertNil(OpenPrompt.find(in: items, activity: nil))
+        XCTAssertNil(OpenPrompt.find(in: items, agent: "claude", activity: "idle"))
+        XCTAssertNil(OpenPrompt.find(in: items, agent: "claude", activity: "busy"))
+        XCTAssertNil(OpenPrompt.find(in: items, agent: "claude", activity: nil))
     }
 
     func testAnUnansweredToolCallWhileWaitingIsAPermissionRequest() {
         let items = [call("toolu_A", tool: "Bash", summary: "rm -rf build", offset: 0)]
         XCTAssertEqual(
-            OpenPrompt.find(in: items, activity: "waiting"),
+            OpenPrompt.find(in: items, agent: "claude", activity: "waiting"),
             .permission(callID: "toolu_A", tool: "Bash", summary: "rm -rf build")
         )
     }
@@ -136,7 +136,7 @@ final class OpenPromptTests: XCTestCase {
     func testAnUnansweredPromptCallWhileWaitingIsAQuestion() throws {
         let items = [call("toolu_A", tool: "AskUserQuestion", kind: .prompt,
                           text: try Self.capturedInput("question-single.captured"), offset: 0)]
-        let open = OpenPrompt.find(in: items, activity: "waiting")
+        let open = OpenPrompt.find(in: items, agent: "claude", activity: "waiting")
         guard case .question("toolu_A", let question)? = open else {
             return XCTFail("expected a question, got \(String(describing: open))")
         }
@@ -157,7 +157,7 @@ final class OpenPromptTests: XCTestCase {
             call("toolu_NEW", tool: "Bash", offset: 200),
             result("toolu_NEW", offset: 300),
         ]
-        XCTAssertNil(OpenPrompt.find(in: items, activity: "waiting"))
+        XCTAssertNil(OpenPrompt.find(in: items, agent: "claude", activity: "waiting"))
     }
 
     /// A result can arrive out of order in a merged feed — `TimelineFeed` orders by byte
@@ -169,7 +169,7 @@ final class OpenPromptTests: XCTestCase {
             result("toolu_A", offset: 0),
             call("toolu_A", tool: "Bash", offset: 100),
         ]
-        XCTAssertNil(OpenPrompt.find(in: items, activity: "waiting"))
+        XCTAssertNil(OpenPrompt.find(in: items, agent: "claude", activity: "waiting"))
     }
 
     func testTheNewestUnansweredCallWins() {
@@ -178,7 +178,7 @@ final class OpenPromptTests: XCTestCase {
             call("toolu_NEW", tool: "Bash", offset: 100),
         ]
         XCTAssertEqual(
-            OpenPrompt.find(in: items, activity: "waiting"),
+            OpenPrompt.find(in: items, agent: "claude", activity: "waiting"),
             .permission(callID: "toolu_NEW", tool: "Bash", summary: nil)
         )
     }
@@ -194,7 +194,7 @@ final class OpenPromptTests: XCTestCase {
             call("toolu_A", tool: "AskUserQuestion", kind: .prompt,
                  text: try Self.truncatedInput(), offset: 100),
         ]
-        XCTAssertNil(OpenPrompt.find(in: items, activity: "waiting"))
+        XCTAssertNil(OpenPrompt.find(in: items, agent: "claude", activity: "waiting"))
     }
 
     /// **A row with no `callID` is never an open call, whatever kind it is.** Prose never
@@ -211,7 +211,7 @@ final class OpenPromptTests: XCTestCase {
             TimelineItem(id: "200#0", kind: .userTurn, status: .complete, body: .init(text: "hi")),
         ]
         XCTAssertEqual(
-            OpenPrompt.find(in: items, activity: "waiting"),
+            OpenPrompt.find(in: items, agent: "claude", activity: "waiting"),
             .permission(callID: "toolu_A", tool: "Bash", summary: nil)
         )
     }
@@ -227,7 +227,7 @@ final class OpenPromptTests: XCTestCase {
             call("toolu_NEW", tool: "Elicit", kind: .unknown, offset: 100),
         ]
         XCTAssertEqual(
-            OpenPrompt.find(in: items, activity: "waiting"),
+            OpenPrompt.find(in: items, agent: "claude", activity: "waiting"),
             .permission(callID: "toolu_OLD", tool: "Bash", summary: nil)
         )
     }
