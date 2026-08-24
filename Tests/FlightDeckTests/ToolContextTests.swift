@@ -103,6 +103,9 @@ final class ToolContextTests: XCTestCase {
         /// does not exist.
         static let textChannel: AgentTextChannel? = ClaudeTextChannel()
         static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
+        static let negotiatesIdentity = false
+        static let needsRuntimeStart = false
+        static let hasStatusRegistry = true
         static let pinned = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

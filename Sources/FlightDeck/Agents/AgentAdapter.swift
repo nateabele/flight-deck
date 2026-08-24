@@ -97,6 +97,62 @@ protocol AgentAdapter {
     ///
     /// Read through `AgentID.dialogDriver` below.
     static var dialogDriver: AgentDialogDriver? { get }
+
+    /// **Whether this agent's conversation identity is a round trip that can fail, rather
+    /// than a local mint.**
+    ///
+    /// Claude chooses the id itself and cannot be wrong about it. Codex is *told* one, by an
+    /// app-server that has to be running to tell it, and can be told that the conversation
+    /// the store held a pin for no longer exists.
+    ///
+    /// Three sites ask it, and they are the same question seen from two ends. `createSession`
+    /// asks whether making a tab needs the `async` negotiation at all — an agent that mints
+    /// locally takes the synchronous path and never spawns anything. `restore` and
+    /// `reinsertClosed` ask whether the resume text must be DEFERRED until identity has been
+    /// settled against the agent: `binding(for:)` is a pure read of the pin and cannot tell a
+    /// conversation that still exists from one deleted between launches, so typing `codex
+    /// resume <gone>` would open the tab onto an error instead of a session. Claude needs
+    /// none of it, because its resume command carries its own fallback.
+    ///
+    /// No default, for the reason `loginInvocation` has none: `false` is claude's answer, and
+    /// an agent that inherited it silently would have its identity treated as unfailable.
+    static var negotiatesIdentity: Bool { get }
+
+    /// **Whether something has to be RUNNING before `prepare`/`rebind` can be called.**
+    ///
+    /// Claude: nothing — its adapter is a pure function of paths. Codex: a probed binary, a
+    /// spawned `codex app-server` and a completed handshake, per account.
+    ///
+    /// A predicate rather than the proposal's `func prepareRuntime() async throws`, and
+    /// deliberately so. The *doing* is `SessionStore.startCodex`, and it is the store's by
+    /// ownership rather than by accident: it memoizes one in-flight handshake per account in
+    /// `codexHandshake`, builds through `makeCodexStackIfNeeded`, and tears the stack back
+    /// down through `stopCodex(account:expected:)` on failure. A `CodexAdapter` is a value
+    /// *produced by* one of those stacks, so moving the start onto it would mean moving the
+    /// per-account stack registry onto the thing the registry hands out. That is an inversion,
+    /// not a move — and this member is what the nine name checks needed either way.
+    static var needsRuntimeStart: Bool { get }
+
+    /// **Whether an external per-account status registry describes this agent's tabs.**
+    ///
+    /// Claude writes one file per session into `<home>/sessions` and `SessionStatusWatcher`
+    /// scans it; codex reports through its app-server and has no such directory at all. Three
+    /// sites ask: two decide whether to start an account's registry watcher, and one decides
+    /// whether a registry tick may rebuild a tab's status — a scan that lists `claude`
+    /// processes can neither confirm nor refute a codex thread, so rebuilding blindly would
+    /// erase a codex tab's status on every tick.
+    ///
+    /// **A Bool rather than the proposal's `observationRoots(for:) -> [ObservationRoot]`, and
+    /// this is the open question that proposal flagged, answered from inside the code.** The
+    /// roots themselves cannot live here: `SessionStore.statusRoot(forAccount:)`,
+    /// `transcriptsRoot(forAccount:)` and `codexIndexURL(for:)` each begin with a nil check
+    /// on a store-owned override, and the property that makes a fixture run safe is that the
+    /// override wins for EVERY account from ONE place (`AccountObservationRootTests`). An
+    /// adapter answering with roots would either duplicate that check or lose it. And none of
+    /// the three sites wants a list — each wants a yes or no, and would immediately
+    /// destructure any list back into the call the store already makes. A type constructed
+    /// only to be taken apart again has no reader.
+    static var hasStatusRegistry: Bool { get }
 }
 
 /// **Typing a message into a live agent and submitting it.**
@@ -216,6 +272,32 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.dialogDriver
         case .codex: CodexAdapter.dialogDriver
+        }
+    }
+
+    /// See `AgentAdapter.negotiatesIdentity`. Consulted by `createSession`, `restore` and
+    /// `reinsertClosed`.
+    var negotiatesIdentity: Bool {
+        switch self {
+        case .claude: ClaudeAdapter.negotiatesIdentity
+        case .codex: CodexAdapter.negotiatesIdentity
+        }
+    }
+
+    /// See `AgentAdapter.needsRuntimeStart`. Consulted by `preparedAdapter(for:)`.
+    var needsRuntimeStart: Bool {
+        switch self {
+        case .claude: ClaudeAdapter.needsRuntimeStart
+        case .codex: CodexAdapter.needsRuntimeStart
+        }
+    }
+
+    /// See `AgentAdapter.hasStatusRegistry`. Consulted by `startStatusWatching()`,
+    /// `startWatching(tabID:)` and `applyRegistry`.
+    var hasStatusRegistry: Bool {
+        switch self {
+        case .claude: ClaudeAdapter.hasStatusRegistry
+        case .codex: CodexAdapter.hasStatusRegistry
         }
     }
 }

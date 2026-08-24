@@ -1178,7 +1178,9 @@ final class SessionStore: ObservableObject {
             launchFailureReporter.report(error)
             return .failure(error)
         }
-        guard agent != .claude else {
+        // An agent that mints its own conversation id has nothing to negotiate, so it takes
+        // the synchronous path and never touches anything this method builds below.
+        guard agent.negotiatesIdentity else {
             return .success(newSession(in: url, at: index, account: explicit).id)
         }
 
@@ -1346,9 +1348,9 @@ final class SessionStore: ObservableObject {
         // Counted before the override check, deliberately: what the tests need to assert is
         // that a path *asked* for a running app-server, and a test that let it actually start
         // one would spawn `codex`. One ask is one account's — two logins asking is two.
-        if instance.agent == .codex { codexServerRequestsForTesting += 1 }
+        if instance.agent.needsRuntimeStart { codexServerRequestsForTesting += 1 }
         if let registered = adapters[instance] { return registered }
-        guard instance.agent == .codex else { return adapter(for: instance) }
+        guard instance.agent.needsRuntimeStart else { return adapter(for: instance) }
         try await startCodex(account: instance.account)
         return makeCodexStackIfNeeded(account: instance.account).adapter
     }
@@ -1733,7 +1735,7 @@ final class SessionStore: ObservableObject {
             //
             // An orphaned codex tab is left out of that list rather than deferred into it:
             // settling it would spawn an app-server for a login that no longer exists.
-            let deferred = session.agent == .codex
+            let deferred = session.agent.negotiatesIdentity
             if deferred, !orphaned { deferredCodexResumes.append(session.id) }
             let initialInput: String
             if orphaned || deferred {
@@ -2461,7 +2463,7 @@ final class SessionStore: ObservableObject {
         }
 
         let orphaned = accountIsMissing(for: session)
-        let deferred = session.agent == .codex
+        let deferred = session.agent.negotiatesIdentity
         let initialInput: String
         if orphaned || deferred {
             initialInput = ""
@@ -3427,7 +3429,7 @@ final class SessionStore: ObservableObject {
     /// after this point are picked up by `startWatching(tabID:)`.
     func startStatusWatching() {
         isStatusWatchingEnabled = true
-        for session in repos.flatMap(\.sessions) where session.agent == .claude {
+        for session in repos.flatMap(\.sessions) where session.agent.hasStatusRegistry {
             startStatusWatching(account: instance(for: session).account)
         }
     }
@@ -3462,8 +3464,9 @@ final class SessionStore: ObservableObject {
     /// last scan into every later tick, and pids get reused.
     private func stopStatusWatchingIfUnused(account: UUID?) {
         guard let watcher = statusWatchers[account] else { return }
-        let live = AgentInstance(agent: .claude, account: account)
-        guard !repos.flatMap(\.sessions).contains(where: { instance(for: $0) == live }) else { return }
+        guard !repos.flatMap(\.sessions).contains(where: {
+            $0.agent.hasStatusRegistry && instance(for: $0).account == account
+        }) else { return }
         watcher.stop()
         statusWatchers[account] = nil
         registryRows[account] = nil
@@ -3505,8 +3508,19 @@ final class SessionStore: ObservableObject {
         // Resolve against a snapshot of the list before touching anything. Later tasks
         // apply repins and project moves here, and those mutate `repos` — iterating it
         // while it changes would resolve some tabs against a stale view.
+        //
+        // **Filtered by the same capability as the status rebuild below, and that closes a
+        // drift rather than changing an outcome.** These rows are a scan of `claude`
+        // processes, so a tab on an agent with no such registry has nothing here that could
+        // describe it: the match is `sessionID == pinnedConversationID`, and a claude
+        // conversation UUID colliding with a codex thread UUID is not a thing. So codex
+        // always resolved `unchanged` and all three branches below found nothing to do —
+        // safe by UUID improbability rather than by a guard, while the loop sixty lines down
+        // *was* guarded. Two loops over one list, one gated and one not, is how they come
+        // apart; and were this one ever to fire, `repin` would hand a codex rollout to
+        // `ConversationTitle.resolve`, which is a claude JSONL parser.
         let resolutions: [(tab: UUID, resolution: ConversationPin.Resolution)] =
-            repos.flatMap(\.sessions).map { session in
+            repos.flatMap(\.sessions).filter(\.agent.hasStatusRegistry).map { session in
                 (session.id, ConversationPin.resolve(
                     conversationID: session.pinnedConversationID,
                     // The transcript directory, not the project: this is the value echoed
@@ -3577,7 +3591,7 @@ final class SessionStore: ObservableObject {
             // codex tab's status on every tick and hand the diff below a fabricated
             // `busy → gone` edge, marking it unread and withdrawing its banner on no
             // evidence at all.
-            guard session.agent == .claude else {
+            guard session.agent.hasStatusRegistry else {
                 next[session.id] = statuses[session.id]
                 continue
             }
@@ -3946,7 +3960,7 @@ final class SessionStore: ObservableObject {
         // runtime tails its transcript, and its account's registry is where the status glyph
         // comes from. A no-op for every account that already has one, and for codex, whose
         // tabs have no registry behind them at all.
-        if instance.agent == .claude { startStatusWatching(account: instance.account) }
+        if instance.agent.hasStatusRegistry { startStatusWatching(account: instance.account) }
         // Recorded before the attach, because the fan-out closure below reads it.
         attachments[tabID] = TabAttachment(instance: instance, binding: binding)
         runtime(for: instance).attach(binding) { [weak self] event in

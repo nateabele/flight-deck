@@ -29,7 +29,6 @@ struct CodexAdapter: AgentAdapter {
     ///   and unchanged. What is still missing is a reader that accepts codex's composer and
     ///   rejects a shell prompt, and an answer to `inject`'s draft dance: Ctrl-Y restores
     ///   only because Claude Code keeps a deleted-text ring, and codex has not been shown to.
-    ///
     static let textChannel: AgentTextChannel? = nil
 
     /// **The closer of the two, and now a separate question.** Driving a dialog needs no
@@ -45,6 +44,21 @@ struct CodexAdapter: AgentAdapter {
     /// `SessionStore.answerPrompt` says it is for claude, and must be proved from a capture
     /// rather than inherited — which is why `AgentDialogDriver.allowRow` has no default.
     static let dialogDriver: AgentDialogDriver? = nil
+
+    /// Codex assigns thread ids itself, so identity is *returned* rather than minted — and
+    /// the round trip can come back saying the thread is gone, which is why a restored codex
+    /// tab has its resume text deferred until `rebind` has settled it.
+    static let negotiatesIdentity = true
+
+    /// A probed binary, a spawned `codex app-server` and a completed handshake, before
+    /// `prepare` or `rebind` can be called at all. See `SessionStore.startCodex`, which owns
+    /// the per-account memoization this predicate gates.
+    static let needsRuntimeStart = true
+
+    /// Codex has no per-account status directory: it reports through its app-server, and
+    /// `CodexRuntime` is what turns that into a status. A `claude` registry scan can neither
+    /// confirm nor refute a codex thread.
+    static let hasStatusRegistry = false
 
     let rpc: CodexRPC
 

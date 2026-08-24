@@ -33,6 +33,9 @@ final class TimelineServiceTests: XCTestCase {
         /// does not exist.
         static let textChannel: AgentTextChannel? = ClaudeTextChannel()
         static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
+        static let negotiatesIdentity = false
+        static let needsRuntimeStart = false
+        static let hasStatusRegistry = true
         let url: URL?
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

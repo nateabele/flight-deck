@@ -30,6 +30,9 @@ final class CodexOptionsRoutingTests: XCTestCase {
         /// does not exist.
         static let textChannel: AgentTextChannel? = nil
         static let dialogDriver: AgentDialogDriver? = nil
+        static let negotiatesIdentity = true
+        static let needsRuntimeStart = true
+        static let hasStatusRegistry = false
         private(set) var prepared: [AgentOptions] = []
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

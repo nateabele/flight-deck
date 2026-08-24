@@ -19,6 +19,17 @@ struct ClaudeAdapter: AgentAdapter {
     static let textChannel: AgentTextChannel? = ClaudeTextChannel()
     static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
 
+    /// Claude mints its own conversation id — Flight Deck has always chosen the tab's own —
+    /// so there is nothing to negotiate and nothing that can come back different.
+    static let negotiatesIdentity = false
+
+    /// Nothing to bring up. This adapter is a pure function of paths and flags.
+    static let needsRuntimeStart = false
+
+    /// `<home>/sessions`, one file per live session, scanned by `SessionStatusWatcher`. It is
+    /// where every claude status glyph in the sidebar comes from.
+    static let hasStatusRegistry = true
+
     /// Where this account's `projects` directory lives, read on every derivation rather than
     /// captured as a value. It is derived from the home of the account the adapter was built
     /// for, and `SessionStore.transcriptsRootOverride` — a fixture/test seam — is assigned

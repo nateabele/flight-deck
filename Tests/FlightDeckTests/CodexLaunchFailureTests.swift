@@ -78,6 +78,9 @@ final class CodexLaunchFailureTests: XCTestCase {
         /// does not exist.
         static let textChannel: AgentTextChannel? = nil
         static let dialogDriver: AgentDialogDriver? = nil
+        static let negotiatesIdentity = true
+        static let needsRuntimeStart = true
+        static let hasStatusRegistry = false
         private var resume: CheckedContinuation<Void, Never>?
         private var entered: CheckedContinuation<Void, Never>?
         private var hasEntered = false
