@@ -153,9 +153,28 @@ struct PromptComposer: View {
         Button {
             model.send(draft)
             draft = ""
+            // And again on the next turn of the run loop, which is not redundant.
+            //
+            // `TextField(axis: .vertical)` is UITextView-backed, and clearing its binding in
+            // the same update cycle as the tap — while the field still holds focus — leaves
+            // the view painting the OLD text over the new, empty state. The state itself is
+            // correct; only the pixels are wrong, which is a genuinely confusing bug to look
+            // at because the message did send.
+            //
+            // How that was pinned down, since "the text does not clear" reads like the
+            // opposite: the Send button goes DISABLED after the tap. `canSend` disables only
+            // when the tab is unavailable, a send is in flight, or `PromptText(draft) == nil`.
+            // Editing the field re-enables it, which rules out the in-flight case — so the
+            // reason it was disabled is that `draft` was already empty, while the field went
+            // on showing its contents. Typing merely re-syncs the binding, which is why
+            // editing "fixed" it.
+            //
             // The keyboard is deliberately NOT dismissed — nothing here resigns focus,
             // because the next thing a person does after sending is usually to send again,
-            // and putting the keyboard away costs them a tap to say one more thing.
+            // and putting the keyboard away costs them a tap to say one more thing. That
+            // rules out the other common fix for this (resigning first responder, or giving
+            // the field a new `.id()`), both of which drop the keyboard.
+            DispatchQueue.main.async { draft = "" }
         } label: {
             // Two layers, arrow and disc, because one tint is not readable in both states in
             // both themes: a single `.secondary` fill on black is a glyph that is simply not

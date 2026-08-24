@@ -46,6 +46,31 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering {
     init(store: any PairedMacStoring = KeychainPairedMacStore()) {
         self.store = store
         self.mac = store.load()
+        // A cold launch asks for EVERYTHING, whatever cursor the pairing was saved with.
+        //
+        // `lastSeq` is a resume cursor: `hello(lastSeq:)` with a non-zero value means "send
+        // only what changed after that", and only zero means "send the whole snapshot"
+        // (Frames.swift). It is persisted with the pairing, but `fleet` is NOT — it starts at
+        // `.empty` every launch and nothing restores it. So a relaunch used to say "I am at
+        // seq N" while holding no snapshot at all, get a handful of deltas back, apply them to
+        // nothing, and sit there fully connected and completely empty — which the list then
+        // reported, correctly and uselessly, as "No sessions yet".
+        //
+        // It never recovered on its own, either: the cursor was already current, so the Mac
+        // had nothing further to send and no reason to resend what it had.
+        //
+        // The invariant this restores is that a resume cursor and the snapshot it resumes onto
+        // must persist together or not at all. Here that is "not at all" — one extra full
+        // snapshot per launch, which is what this protocol does for a first-time pairing
+        // anyway. Reconnects DURING a run still resume, because `mac.lastSeq` advances
+        // normally from here; only the value inherited from disk is discarded.
+        //
+        // Persisting the snapshot instead would also close this, and would additionally make
+        // the list appear instantly. It is the better end state and is deliberately not done
+        // here: a restored snapshot must also restore `lastLive`, or the list renders stale
+        // data with no way to tell it from live — the exact failure `FleetListScreen`'s stale
+        // banner exists to prevent.
+        mac?.lastSeq = 0
         if mac != nil { connect() }
     }
 
