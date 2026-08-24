@@ -67,6 +67,27 @@ targets:
         PRODUCT_NAME: Flight Deck
         PRODUCT_MODULE_NAME: FlightDeck
         CODE_SIGN_ENTITLEMENTS: Sources/FlightDeck/FlightDeck.entitlements
+        # Signed with a real identity rather than left to "Sign to Run Locally", and this
+        # is not cosmetic. An ad-hoc signature has no team and no stable identifier, so
+        # macOS derives the bundle's DESIGNATED REQUIREMENT from a hash of the binary
+        # itself — literally `designated => cdhash H"2b05ca2c…"`. Every rebuild changes
+        # that hash, so to TCC, the Application Firewall and the macOS 15+ local-network
+        # gate each build is a brand-new application that has never been granted anything,
+        # and every grant attached to the previous hash is silently dead.
+        #
+        # That is not theoretical: it is what stopped a paired iPhone from reaching this
+        # Mac after a release swap. The phone's SYN arrived on en0 (confirmed by tcpdump,
+        # which taps below the filters) and was dropped before it reached a listening,
+        # dual-stack socket that accepted the identical connection over loopback — while
+        # `socketfilterfw --listapps` still cheerfully reported the app as allowed, because
+        # the entry it was reporting on described a binary that no longer existed.
+        #
+        # With a team identity the requirement becomes identifier + anchor + leaf OU, which
+        # is stable across rebuilds, so a permission granted once stays granted. Every
+        # `scripts/swap-release.sh` run before this change reset them all.
+        DEVELOPMENT_TEAM: 2T9E3N27J8
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
         INFOPLIST_KEY_CFBundleDisplayName: Flight Deck
         # macOS 15+ gates local-network access behind a user prompt, and an app with no
