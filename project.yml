@@ -215,18 +215,31 @@ targets:
         PRODUCT_MODULE_NAME: FlightDeckMobile
         PRODUCT_BUNDLE_IDENTIFIER: dev.flightdeck.FlightDeckMobile
         TARGETED_DEVICE_FAMILY: "1,2"
-        # No DEVELOPMENT_TEAM: there is no provisioning profile on this machine, and pinning
-        # a team would break the simulator build. Set it when installing on hardware.
+        # The source art is a full-bleed square with no alpha, deliberately. iOS applies its
+        # own superellipse mask at roughly 22% of the icon's width, which is far deeper than
+        # the ~5.5% rounding the supplied artwork had baked in — so shipping that as-is would
+        # have masked away the corners AND severed the icon's own bright rim, leaving a border
+        # that stops abruptly near each corner. `Assets.xcassets`'s icon is cropped just inside
+        # that rim so the field runs to the edge and the mask has only field to cut.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
-        # Ad-hoc signed rather than unsigned. "The simulator does not need signing" was true
-        # right up until the app touched the Keychain: an unsigned app has no keychain access
-        # group, so `SecItemUpdate`/`SecItemAdd` fail with `errSecMissingEntitlement`
-        # (-34018) the instant pairing tries to save. That is not a simulator quirk to work
-        # around — the pairing record IS a Keychain item, so an app that cannot reach the
-        # Keychain cannot pair at all, and the first person to run this found out by watching
-        # it die. Ad-hoc ("-") gives the simulator build an identity and an access group
-        # without needing a team or a profile.
-        CODE_SIGN_IDENTITY: "-"
+        # **Two identities, chosen per SDK, and the split is deliberate.**
+        #
+        # Ad-hoc for the simulator, rather than unsigned. "The simulator does not need signing"
+        # was true right up until the app touched the Keychain: an unsigned app has no keychain
+        # access group, so `SecItemUpdate`/`SecItemAdd` fail with `errSecMissingEntitlement`
+        # (-34018) the instant pairing tries to save. The pairing record IS a Keychain item, so
+        # an app that cannot reach the Keychain cannot pair at all, and the first person to run
+        # this found out by watching it die. Ad-hoc ("-") gives the simulator build an identity
+        # and an access group without needing a team or a profile.
+        #
+        # A real identity for a device, because ad-hoc will not install on one. `DEVELOPMENT_TEAM`
+        # is scoped to `iphoneos` for the reason the old comment gave for omitting it entirely:
+        # pinned unconditionally it drags the simulator build onto a provisioning profile too,
+        # so a profile problem would take out both destinations at once instead of one.
+        DEVELOPMENT_TEAM[sdk=iphoneos*]: 2T9E3N27J8
+        CODE_SIGN_IDENTITY[sdk=iphonesimulator*]: "-"
+        CODE_SIGN_IDENTITY[sdk=iphoneos*]: Apple Development
         CODE_SIGNING_REQUIRED: "YES"
         CODE_SIGNING_ALLOWED: "YES"
         # Same reason as FlightDeck (macOS) above: FleetKitiOS's swiftmodule now depends on
