@@ -16,7 +16,8 @@ struct ClaudeAdapter: AgentAdapter {
     /// the verbatim captures `Fixtures/Claude/dialogs.captured.provenance.json` records with
     /// their sha256s. Everything `SessionStore` types — a phone's message, `/rename`, an
     /// answer to a dialog — goes into that box or that list.
-    static let hasTextChannel = true
+    static let textChannel: AgentTextChannel? = ClaudeTextChannel()
+    static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
 
     /// Where this account's `projects` directory lives, read on every derivation rather than
     /// captured as a value. It is derived from the home of the account the adapter was built

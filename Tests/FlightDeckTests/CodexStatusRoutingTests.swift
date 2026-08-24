@@ -16,10 +16,11 @@ final class CodexStatusRoutingTests: XCTestCase {
     /// tab that comes back is pinned to it. No transport, so nothing here can spawn or hang.
     private struct StubCodexAdapter: AgentAdapter {
         static let id: AgentID = .codex
-        /// Codex's answer, because this stands in for codex. The store reads the capability
-        /// off `AgentID`, not off the injected adapter, so a stub that said otherwise would
-        /// be describing an agent that does not exist.
-        static let hasTextChannel = false
+        /// Codex's answers, because this stands in for codex. The store reads both
+        /// capabilities off `AgentID`, not off the injected adapter, so a stub that said
+        /// otherwise would be describing an agent that does not exist.
+        static let textChannel: AgentTextChannel? = nil
+        static let dialogDriver: AgentDialogDriver? = nil
         let thread: UUID
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

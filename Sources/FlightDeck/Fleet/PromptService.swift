@@ -58,8 +58,8 @@ final class PromptService {
     /// Everything below this — the screen, the shape of the answer — is
     /// `SessionStore.answerPrompt`'s to refuse, and its code is forwarded verbatim. Splitting
     /// a check across two files is how the two drift, which is why the agent refusal here is
-    /// `AgentAdapter.hasTextChannel` — the *same question* the store asks — and not a second
-    /// name check that could answer differently.
+    /// `AgentAdapter.dialogDriver` — the *same question* the store asks, of the same object —
+    /// and not a second name check that could answer differently.
     func answer(
         session: UUID, call: String, answer: PromptAnswer, token: UUID
     ) -> Result<Void, TimelineErrorCode> {
@@ -86,16 +86,19 @@ final class PromptService {
         // Asked of the agent rather than of the source's shape, so a tab with no transcript
         // is not quietly exempted from the question — `.noTranscript` names no agent, and it
         // is the shape a codex sign-in tab has.
-        guard store.agent(of: session)?.hasTextChannel == true else {
+        //
+        // The DIALOG capability, not the text one: this path answers a dialog, and an agent
+        // can have a driver without a composer this build can type into.
+        guard store.agent(of: session)?.dialogDriver != nil else {
             return .failure("unsupported_agent")
         }
         // Whatever is left is a tab this Mac can drive but has nothing to read: no transcript
         // at all. `prompt_changed` is right for it, and is the only thing that code now means.
         //
-        // `ClaudeOpenCall.find` below stays claude's transcript grammar, and `hasTextChannel`
-        // is claude's alone today, so the two agree by construction. An agent that gains a
-        // text channel gains its own open-call derivation here with it — that guard is what
-        // makes it a decision rather than a silent inheritance.
+        // `ClaudeOpenCall.find` below stays claude's transcript grammar. An agent that gains
+        // a dialog driver needs its own open-call derivation here with it, or it reaches this
+        // line and is told `prompt_changed` — so that guard is what makes reaching the read
+        // below a decision rather than a silent inheritance.
         guard case .file(_, let url) = source else { return .failure("prompt_changed") }
         let lines = tail(url, Self.tailRecords)
         // **The comparison this whole service exists for.** `find` says what the terminal is

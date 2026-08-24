@@ -10,8 +10,8 @@ struct CodexAdapter: AgentAdapter {
     static let id: AgentID = .codex
 
     /// **Not yet — and this is a capability answer, not a permanent verdict.** Whoever makes
-    /// codex drivable changes this one line and implements what it promises; nothing else in
-    /// `SessionStore` or `PromptService` re-decides it by name.
+    /// codex typeable writes the channel and returns it here; nothing else in `SessionStore`
+    /// or `PromptService` re-decides it by name.
     ///
     /// Two halves, and they no longer have the same status:
     ///
@@ -30,16 +30,21 @@ struct CodexAdapter: AgentAdapter {
     ///   rejects a shell prompt, and an answer to `inject`'s draft dance: Ctrl-Y restores
     ///   only because Claude Code keeps a deleted-text ring, and codex has not been shown to.
     ///
-    /// The dialog half is the closer of the two. Codex's approval list is nearer
-    /// `ChoiceDialog`'s model than claude's own — contiguous numbering, one marker on the
-    /// focused row, blank-line termination, a stable footer, and an echoed prompt that carries
-    /// the marker with no number — so marker-and-number is the right defence there too. What
-    /// does NOT transfer is the row ordering: codex's row 1 is a durable grant (`Yes, and
-    /// don't ask again for commands that start with …`) and row 2 is deny, so "the first
+    static let textChannel: AgentTextChannel? = nil
+
+    /// **The closer of the two, and now a separate question.** Driving a dialog needs no
+    /// input box and no kill ring, so everything blocking `textChannel` above is irrelevant
+    /// to it: codex's approval list is nearer `ChoiceDialog`'s model than claude's own —
+    /// contiguous numbering, one marker on the focused row, blank-line termination, a stable
+    /// footer, and an echoed prompt that carries the marker with no number — so
+    /// marker-and-number-and-neighbour is the right defence there too.
+    ///
+    /// What does NOT transfer is the row ordering: codex's row 1 is a durable grant (`Yes,
+    /// and don't ask again for commands that start with …`) and row 2 is deny, so "the first
     /// row, and only ever the first row" is exactly as load-bearing for codex as
     /// `SessionStore.answerPrompt` says it is for claude, and must be proved from a capture
-    /// rather than inherited.
-    static let hasTextChannel = false
+    /// rather than inherited — which is why `AgentDialogDriver.allowRow` has no default.
+    static let dialogDriver: AgentDialogDriver? = nil
 
     let rpc: CodexRPC
 

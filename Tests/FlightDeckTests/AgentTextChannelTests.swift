@@ -3,12 +3,12 @@ import XCTest
 
 /// **The one question, and the two places that never asked it.**
 ///
-/// `AgentAdapter.hasTextChannel` answers "may keystrokes be sent to this agent's live
-/// terminal at all", and `SessionStore` consults it at four sites. Two of those replaced an
-/// `agent == .claude` name check and are already pinned elsewhere — `PhonePromptDispatchTests`
-/// for `submitPrompt`, `AnswerPromptTests` for `answerPrompt` — which is what proves the
-/// rewrite changed no behaviour. The other two had **no gate of any kind**, and are what this
-/// file exists for:
+/// `AgentAdapter.textChannel` answers "may a message be typed into this agent's live terminal
+/// at all", and a `nil` there IS the refusal. `SessionStore` consults it at three sites. One
+/// of them replaced an `agent == .claude` name check and is pinned elsewhere —
+/// `PhonePromptDispatchTests` for `submitPrompt` — which is what proves the rewrite changed
+/// no behaviour. The other two had **no gate of any kind**, and are what this file exists
+/// for:
 ///
 /// - `restore`'s auto-resume gate queued `"Keep going"` for *any* tab persisted in a resumable
 ///   activity, and codex persists `.busy` — `CodexEventMapper` emits it on `task_started`.
@@ -85,14 +85,14 @@ final class AgentTextChannelTests: XCTestCase {
 
     // MARK: - The capability itself
 
-    /// Read through `AgentID`, but *answered* by the adapters — flipping
-    /// `CodexAdapter.hasTextChannel` has to fail this, or the enum is deciding a capability
-    /// the agent should be stating for itself.
+    /// Read through `AgentID`, but *answered* by the adapters — giving
+    /// `CodexAdapter.textChannel` a value has to fail this, or the enum is deciding a
+    /// capability the agent should be stating for itself.
     func testOnlyClaudeHasATextChannel() {
-        XCTAssertTrue(AgentID.claude.hasTextChannel)
-        XCTAssertEqual(AgentID.claude.hasTextChannel, ClaudeAdapter.hasTextChannel)
-        XCTAssertFalse(AgentID.codex.hasTextChannel)
-        XCTAssertEqual(AgentID.codex.hasTextChannel, CodexAdapter.hasTextChannel)
+        XCTAssertNotNil(AgentID.claude.textChannel)
+        XCTAssertNotNil(ClaudeAdapter.textChannel)
+        XCTAssertNil(AgentID.codex.textChannel)
+        XCTAssertNil(CodexAdapter.textChannel)
     }
 
     // MARK: - restore: nothing is queued

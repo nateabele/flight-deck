@@ -73,10 +73,11 @@ final class CodexLaunchFailureTests: XCTestCase {
     /// genuinely mid-negotiation.
     private final class GatedAdapter: AgentAdapter {
         static let id: AgentID = .codex
-        /// Codex's answer, because this stands in for codex — the store reads the capability
-        /// off `AgentID`, so a stub that disagreed would describe an agent that does not
-        /// exist.
-        static let hasTextChannel = false
+        /// Codex's answers, because this stands in for codex — the store reads both
+        /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
+        /// does not exist.
+        static let textChannel: AgentTextChannel? = nil
+        static let dialogDriver: AgentDialogDriver? = nil
         private var resume: CheckedContinuation<Void, Never>?
         private var entered: CheckedContinuation<Void, Never>?
         private var hasEntered = false
