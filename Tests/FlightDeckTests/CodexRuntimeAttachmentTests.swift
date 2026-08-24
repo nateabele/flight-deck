@@ -119,4 +119,40 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
 
         XCTAssertEqual(seen, [.title("still named")])
     }
+
+    func testTwoTabsOnOneThreadBothReceiveNameEvents() throws {
+        let id = UUID()
+        let runtime = CodexRuntime(indexURL: index)
+
+        var first: [AgentEvent] = []
+        var second: [AgentEvent] = []
+        let binding = AgentBinding(conversationID: id, transcriptURL: nil)
+        _ = runtime.attach(binding, for: UUID()) { first.append($0) }
+        _ = runtime.attach(binding, for: UUID()) { second.append($0) }
+        runtime.drainForTesting() // prime
+
+        try append(indexLine(id, "renamed"), to: index)
+        runtime.drainForTesting()
+
+        XCTAssertEqual(first, [.title("renamed")], "the second attach must not replace the first's registration")
+        XCTAssertEqual(second, [.title("renamed")])
+    }
+
+    func testDetachingTheLastSubscriberUnregistersTheThread() throws {
+        let id = UUID()
+        let runtime = CodexRuntime(indexURL: index)
+        var seen: [AgentEvent] = []
+        let binding = AgentBinding(conversationID: id, transcriptURL: nil)
+        let a = runtime.attach(binding, for: UUID()) { seen.append($0) }
+        let b = runtime.attach(binding, for: UUID()) { seen.append($0) }
+        runtime.drainForTesting() // prime
+
+        runtime.detach(a)
+        runtime.detach(b)
+
+        try append(indexLine(id, "late"), to: index)
+        runtime.drainForTesting()
+
+        XCTAssertTrue(seen.isEmpty, "no subscriber remains, so nothing may be delivered")
+    }
 }
