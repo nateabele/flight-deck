@@ -112,8 +112,16 @@ final class ClaudeSessionTests: XCTestCase {
     func testResumeCommandFallsBackToFreshSession() {
         let id = sid.uuidString.lowercased()
         XCTAssertEqual(
-            ClaudeSession.resumeCommand(sessionID: sid, title: "my work"),
-            "claude --resume \(id) || claude --session-id \(id) --name 'my work'\n"
+            ClaudeSession.resumeCommand(sessionID: sid),
+            "claude --resume \(id) || claude --session-id \(id)\n"
+        )
+    }
+
+    func testResumeFallbackDoesNotNameTheSession() {
+        let command = ClaudeSession.resumeCommand(sessionID: fixedID)
+        XCTAssertFalse(
+            command.contains("--name"),
+            "a failed --resume must not rename a conversation: this is what stamped 24 transcripts on 2026-08-23"
         )
     }
 
@@ -140,7 +148,7 @@ final class ClaudeSessionTests: XCTestCase {
 
     func testResumeCommandAppliesFlagsToBothBranches() {
         let command = ClaudeSession.resumeCommand(
-            sessionID: fixedID, title: "one",
+            sessionID: fixedID,
             flags: FlagSet(values: ["--model": .value("opus")])
         )
         // The fallback branch must be configured too, or a pruned transcript silently
@@ -149,9 +157,9 @@ final class ClaudeSessionTests: XCTestCase {
     }
 
     func testResumeCommandWithNoFlagsIsUnchanged() {
-        let command = ClaudeSession.resumeCommand(sessionID: fixedID, title: "one")
+        let command = ClaudeSession.resumeCommand(sessionID: fixedID)
         let id = "4f3a0000-0000-0000-0000-000000000001"
-        XCTAssertEqual(command, "claude --resume \(id) || claude --session-id \(id) --name 'one'\n")
+        XCTAssertEqual(command, "claude --resume \(id) || claude --session-id \(id)\n")
     }
 
     func testFlagValuesAreQuotedNotStripped() throws {
@@ -203,7 +211,7 @@ final class ClaudeSessionTests: XCTestCase {
 
     func testResumeCommandDropsEmptyListFlags() {
         let command = ClaudeSession.resumeCommand(
-            sessionID: fixedID, title: "one",
+            sessionID: fixedID,
             flags: FlagSet(values: ["--add-dir": .list([])])
         )
         XCTAssertFalse(command.contains("--add-dir"))
