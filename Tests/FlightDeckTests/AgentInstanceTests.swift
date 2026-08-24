@@ -119,8 +119,11 @@ final class AgentInstanceTests: XCTestCase {
     }
 
     @MainActor final class FakeRuntime: AgentRuntime {
-        func attach(_ binding: AgentBinding, onEvent: @escaping (AgentEvent) -> Void) {}
-        func detach(_ binding: AgentBinding) {}
+        func attach(_ binding: AgentBinding, for tab: UUID,
+                    onEvent: @escaping (AgentEvent) -> Void) -> AttachmentToken {
+            AttachmentToken(conversationID: binding.conversationID, tab: tab)
+        }
+        func detach(_ token: AttachmentToken) {}
     }
 
     /// Answers `thread/read` with the very thread it was asked about, so a restored tab

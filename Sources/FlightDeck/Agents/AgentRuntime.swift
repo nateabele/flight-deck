@@ -9,6 +9,11 @@ import Foundation
 /// `AgentInstance` (agent + account), not by agent alone.
 @MainActor
 protocol AgentRuntime: AnyObject {
-    func attach(_ binding: AgentBinding, onEvent: @escaping (AgentEvent) -> Void)
-    func detach(_ binding: AgentBinding)
+    /// Subscribes `tab` to `binding`'s conversation. The returned token is the only way to
+    /// unsubscribe, and the only thing that decides who an event reaches — deliberately not
+    /// a value match on the conversation id, which is what let one event write 21 tabs.
+    func attach(
+        _ binding: AgentBinding, for tab: UUID, onEvent: @escaping (AgentEvent) -> Void
+    ) -> AttachmentToken
+    func detach(_ token: AttachmentToken)
 }

@@ -49,6 +49,16 @@ final class AgentRoutingTests: XCTestCase {
         return (store, provider)
     }
 
+    /// A store already wired to `FakeAgentRuntime` for `.claude`, with `sessionCount` tabs
+    /// already created against it — the fixture the routing test below needs.
+    private func makeStoreWithFakeRuntime(sessionCount: Int) -> (SessionStore, FakeAgentRuntime) {
+        let store = makeStore()
+        let fake = FakeAgentRuntime()
+        store.overrideRuntime(fake, for: .claude, account: nil)
+        for _ in 0..<sessionCount { _ = store.newSession(in: tmp) }
+        return (store, fake)
+    }
+
     /// `account: nil` throughout this file, and it is not a placeholder: every store here is
     /// built with no `PreferencesStore`, so there is no account to name and `nil` is exactly
     /// the key `SessionStore.instance(for:)` resolves for the tabs these tests create. An
@@ -200,6 +210,24 @@ final class AgentRoutingTests: XCTestCase {
 
         XCTAssertEqual(spy.events, [.killLine, .text("/rename fromthe adapter"), .ret],
                        "the adapter route must reach the same sanitizer as the sidebar's")
+    }
+
+    /// Guard, not a reproduction. The 2026-08-23 fan-out cannot be reproduced from outside —
+    /// `attachments` is in-memory and we never established what corrupted it. This asserts the
+    /// property that made the corruption possible is gone: an event delivered on one tab's
+    /// subscription changes that tab and no other.
+    func testATitleEventChangesOnlyTheSubscribingTab() {
+        let (store, runtime) = makeStoreWithFakeRuntime(sessionCount: 3)
+        let tabs = store.allSessionIDsForTesting
+        let target = tabs[1]
+        let before = tabs.map { store.title(of: $0) }
+
+        runtime.emit(.title("only-me"), for: store.pinnedConversationID(of: target)!)
+
+        XCTAssertEqual(store.title(of: target), "only-me")
+        for (index, tab) in tabs.enumerated() where tab != target {
+            XCTAssertEqual(store.title(of: tab), before[index], "tab \(tab) was not subscribed to that event")
+        }
     }
 
     private func entry(_ conversation: UUID, activity: SessionActivity) -> ClaudeStatusFile.Entry {
