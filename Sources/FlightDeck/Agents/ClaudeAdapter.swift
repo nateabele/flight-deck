@@ -18,10 +18,6 @@ struct ClaudeAdapter: AgentAdapter {
     /// would keep pointing at the real projects directory for the life of a fixture run.
     var projectsRoot: () -> URL = { ClaudeSession.defaultProjectsRoot }
 
-    /// How a rename reaches `claude`: by typing `/rename <name>` into the tab's pty.
-    /// Injected so tests need no terminal. Production wires this to `SessionStore.inject`.
-    var injectRename: (UUID, String) async -> Void = { _, _ in }
-
     func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
         // Claude takes the id we choose, and Flight Deck has always chosen the tab's own —
         // which is what `pinnedConversationID` is at birth. Nothing to negotiate, so this is
@@ -58,9 +54,25 @@ struct ClaudeAdapter: AgentAdapter {
         ClaudeSession.resumeCommand(sessionID: binding.conversationID, flags: flags(options))
     }
 
+    /// Unreachable in production: `SessionStore.rename` dispatches `.claude` inline to
+    /// `injectPendingRename` — never through an adapter, because this method is `async` and
+    /// the injection contract needs a synchronous now-or-deferred decision — so only `.codex`
+    /// ever calls `adapter.rename`. See `SessionStore.rename`'s doc comment for the full
+    /// reasoning.
+    ///
+    /// A silent no-op here would be exactly the latent hazard this plan exists to remove: the
+    /// 2026-08-23 incident was a fan-out nobody noticed had gone stale. So this fails loudly
+    /// instead — an `assertionFailure` plus a thrown error — meaning a future refactor that
+    /// starts routing claude through the adapter surfaces immediately rather than quietly
+    /// dropping every rename.
     func rename(_ binding: AgentBinding, to title: String) async throws {
-        await injectRename(binding.conversationID, title)
+        assertionFailure("ClaudeAdapter.rename is unreachable — claude renames dispatch inline through SessionStore.rename, never through the adapter")
+        throw RenameUnreachable()
     }
+
+    /// Local to this file: the only thing that needs to know `ClaudeAdapter.rename` is
+    /// unreachable is whatever caller finds a way to reach it.
+    private struct RenameUnreachable: Error {}
 
     /// Claude has no shell-level login subcommand — it authenticates inside a running
     /// session — so signing in means launching claude plain and then typing `/login` at it,
