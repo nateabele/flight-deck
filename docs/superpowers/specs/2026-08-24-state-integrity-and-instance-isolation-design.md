@@ -1,12 +1,47 @@
 # State Integrity and Instance Isolation — Design
 
-**Status:** designed, ready to plan. Written after the 2026-08-23 incident in which 21 tabs
-were renamed to one name and one tab silently lost 63 hours of history.
+**Status:** approved 2026-08-24, ready to plan. Written after the 2026-08-23 incident in which
+21 tabs were renamed to one name and one tab silently lost 63 hours of history.
 
 **Scope:** three independent layers — event routing (L1), process/state isolation (L2), and
-pin correctness plus recovery tooling (L3). Deliberately *not* the `FleetState` encapsulation
-of `2026-08-18-fleet-state-encapsulation-design.md`: that remains deferred for the reason it
-already documents, and nothing here blocks it or is blocked by it.
+pin correctness plus recovery tooling (L3). Every change sits at or above the
+`AgentRuntime`/`AgentAdapter` boundary; see §0.
+
+## Context
+
+On 2026-08-23 a Flight Deck restart left 21 tabs renamed to a single name
+(`mobile-radiant-kernighan`) and one tab — `mobile` — silently rewound past 63 hours of work.
+Investigation established three independent defects that compounded, plus a structural hazard
+that let a debug build reach the real fleet's state. `sessions.json` was valid JSON throughout:
+the losses were semantic, not file corruption, which is why none of the existing safeguards
+noticed.
+
+This spec makes state corruption structurally impossible rather than merely tested for, and
+makes debug/release collision impossible rather than opt-out. Three layers, independent, in
+order of how much they hurt.
+
+`FleetState` encapsulation (`2026-08-18-fleet-state-encapsulation-design.md`) is a separate
+concern, not a prerequisite: it addresses event-log drift, and would fix neither the routing
+defect nor the isolation hazard. Its own deferral note is now stale — the agent-adapter work it
+was waiting on has landed — so it is schedulable on its own merits, before or after this. This
+spec neither blocks it nor depends on it, and §2 is written so that landing it afterwards is a
+mechanical move of storage rather than a redesign.
+
+## 0. Cross-cutting requirement: agent-agnostic
+
+Every change here is at or above the `AgentRuntime` / `AgentAdapter` boundary, and must behave
+identically for claude, codex, and any agent added later. Nothing in this spec may branch on
+`AgentID` outside an adapter implementation.
+
+This is a correctness requirement, not tidiness. The corruption was never claude-specific:
+`CodexRuntime.attach` (`CodexRuntime.swift:33-49`) has the identical conversation-keyed
+replace-on-second-attach shape as `ClaudeRuntime.attach` (`ClaudeRuntime.swift:19-36`), and
+`CodexNameWatcher` emits `.title` through the same `onEvent` closure into the same store
+fan-out. A codex tab could have been renamed by exactly the same defect.
+
+Where a capability genuinely differs between agents — conversation lineage is the one real case
+— it is expressed as an `AgentAdapter` member with a safe default, never as a branch in the
+store.
 
 ## 1. The incident, as established
 
@@ -57,15 +92,19 @@ predicts this incident, but it is opt-in, silent when forgotten, and redirects *
 
 ## 2. L1 — identity-routed events
 
-### The shape today
+### The shape today, in both runtimes
 
-`ClaudeRuntime.attachments` is keyed by `binding.conversationID`
-(`ClaudeRuntime.swift:31-35`), so a second tab attaching to a conversation **replaces** the
-first's `Attachment`: its watcher is stopped and its closure orphaned. The store's fan-out is
-compensation for that lost subscriber identity, not an independent feature.
+Both runtimes key their attachments by `binding.conversationID`, so a second tab attaching to
+a conversation **replaces** the first's `Attachment` — its watcher stopped, its closure
+orphaned:
 
-So the fan-out cannot simply be deleted. Subscriber identity has to be restored to the
-runtime first.
+- `ClaudeRuntime.swift:34-35` — `attachments[id]?.watcher?.stop(); attachments[id] = …`
+- `CodexRuntime.swift:46-47` — identical, plus `nameWatcher().register(id) { … }` at `:49`,
+  whose per-id registration replaces the previous closure the same way.
+
+The store's fan-out is compensation for that lost subscriber identity, not an independent
+feature. So the fan-out cannot simply be deleted; subscriber identity has to be restored to
+the runtimes first.
 
 ### The change
 
@@ -77,13 +116,18 @@ protocol AgentRuntime: AnyObject {
 }
 ```
 
-A runtime keeps one `Source` per conversation — the single `TranscriptWatcher`, exactly as
-now — and the source holds a **list of subscribers**, each carrying its own tab id and
-closure. An event notifies each subscriber directly. `detach(token)` removes one subscriber
-and tears the watcher down only when the list empties.
+A runtime keeps one `Source` per conversation — the single watcher, exactly as now — and the
+source holds a **list of subscribers**, each carrying its own tab id and closure. An event
+notifies each subscriber directly. `detach(token)` removes one subscriber and tears the
+watcher down only when the list empties.
 
-In the store, `apply(event, to:)` takes the tab id from the subscription.
-`tabs(following:)` leaves the event path entirely.
+Both runtimes adopt this; the shared subscriber-list mechanics live in one place so a third
+agent cannot reintroduce the defect by copying the current shape. Codex's `CodexNameWatcher`
+registration moves behind the same list, so a name event reaches every subscriber on that
+thread and no others.
+
+In the store, `apply(event, to:)` takes the tab id from the subscription. `tabs(following:)`
+leaves the event path entirely.
 
 ### Why this is a fix and not a guard
 
@@ -95,32 +139,45 @@ determine what corrupted the dictionary.
 
 ### Behaviours preserved
 
-All three the current doc comments defend:
+All three the current doc comments defend, for both agents:
 
 - two tabs sharing one conversation both receive events (two subscribers, one source);
-- one `TranscriptWatcher` per conversation, not per tab;
+- one watcher per conversation, not per tab;
 - detaching one of two sharers does not stop the other.
 
-And one bug fixed incidentally: attaching a second tab no longer stops the first's watcher.
+And one bug fixed incidentally, in both runtimes: attaching a second tab no longer stops the
+first's watcher.
 
 ### Also in scope
 
-`SessionStore.swift:548` fans a rename out over `tabs(following:)` as well. Per the
-root-cause work `ClaudeAdapter.rename` is unreachable in production — `SessionStore.rename`
-dispatches claude inline (`SessionStore.swift:2661`) and only codex reaches the adapter
-(`:2668`). **Delete the dead path.** Unreachable fan-out is the exact shape that caused this.
+`SessionStore.swift:548` fans a rename out over `tabs(following:)` as well, in the
+`injectRename` closure. Per the root-cause work `ClaudeAdapter.rename` is unreachable in
+production — `SessionStore.rename` dispatches claude inline (`SessionStore.swift:2661`) and
+only codex reaches `adapter.rename` (`:2668`). **Delete the dead path.** Unreachable fan-out
+is the exact shape that caused this.
+
+That leaves a real agent asymmetry in `SessionStore.rename`: claude inline, codex through the
+adapter. It is deliberate and documented (routing claude through the `async` adapter would
+push `injectPendingRename` into a later run-loop turn, breaking the injection contract). The
+plan should either make it uniform behind a synchronous adapter entry point or restate the
+justification at the new call site — not leave it as an undocumented branch on agent type.
 
 ### Tests
+
+Each runs against **both** runtimes via the `AgentRuntime` protocol, not against
+`ClaudeRuntime` alone:
 
 - N tabs on distinct conversations, emit one title, assert exactly one title changed.
   *This test fails against today's code* and is the regression gate for the incident.
 - Two tabs on one conversation both receive.
 - Detach one of two sharers; the other still receives.
 - Detach the last sharer; the watcher stops.
+- Codex-specific: a name event from `CodexNameWatcher` reaches only that thread's subscribers.
 
 ## 3. L2 — process and state isolation
 
-Two independent defences, because "bulletproof" means no single point of failure.
+Two independent defences, because "bulletproof" means no single point of failure. This layer
+is agent-agnostic by nature — it is about where state lives, not what wrote it.
 
 ### 3.1 One decision point, two consumers
 
@@ -176,9 +233,9 @@ requirement forbids.
 
 ### 3.3 What a fork does
 
-Forking the state would fork the tabs, and this instance would then `claude --resume`
-conversations the other instance owns — writing to shared transcripts, which is the collision
-being removed. So **a fork resumes nothing**:
+Forking the state would fork the tabs, and this instance would then resume conversations the
+other instance owns — writing to shared transcripts (claude) or shared threads (codex), which
+is the collision being removed. So **a fork resumes nothing**:
 
 - copies `projects` and preferences from the contended directory;
 - starts with an **empty session list**;
@@ -207,34 +264,55 @@ on the migration path, so it sits armed indefinitely.
 
 ### 4.1 A pin must follow its thread
 
-A compaction writes the continuation to a new conversation id. Detect a superseded pin and
-repoint it.
+A conversation can be superseded: claude's compaction writes the continuation to a new
+conversation id, and any agent may fork or re-thread. The tab's pin must follow, or the tab
+silently shows stale history — which is what cost 63 hours.
 
-**Cost.** The check is not a per-tick whole-file read. A registry tick already tells us when a
-tab's `claude` is writing somewhere the tab is not following; the lineage read runs only on
-that transition, and on restore. Reading the last record of the pinned file and the first of a
-candidate is enough to test the link below — neither is a full-file load.
+**Expressed on the adapter, not in the store.** Lineage is the one capability that genuinely
+differs by agent, so it becomes an `AgentAdapter` member:
 
-Guarded by a **strong link only**: the continuation's first record's `parentUuid` equals the
-pinned file's last record's `uuid`. Not a similarity heuristic, not shared-uuid overlap —
-those are fine for a diagnostic sweep but not for automatically repointing a tab.
+```swift
+/// The conversation that supersedes `binding`'s, when the agent can prove one exists.
+/// Default implementation returns nil: an agent that cannot prove supersession must not guess.
+func supersedingConversation(for binding: AgentBinding) async -> ConversationLink?
+```
 
-When no strong link exists but the pinned transcript looks abandoned, do not guess: flag it
+- **Claude** implements it from the transcript: the candidate's first record's `parentUuid`
+  equals the pinned file's last record's `uuid`. A **strong link only** — not a similarity
+  heuristic, not shared-uuid overlap. Those are fine for a diagnostic sweep, never for
+  automatically repointing a tab.
+- **Codex** implements it from its thread index / `thread/read`, which already reports the
+  authoritative thread identity — the same source `repinRestoredCodex`
+  (`SessionStore.swift:1899`) uses today.
+- **A future agent** inherits the default and is simply never auto-repointed.
+
+The store calls the adapter and applies the result uniformly. It never parses a transcript.
+
+**Cost.** Not a per-tick whole-file read. A registry tick already tells us when a tab's agent
+is writing somewhere the tab is not following; the lineage query runs only on that transition,
+and on restore. For claude, reading the last record of the pinned file and the first of a
+candidate is enough — neither is a full-file load.
+
+When no strong link exists but the pinned conversation looks abandoned, do not guess: flag it
 (§4.3) and let the user choose.
 
-### 4.2 A failed resume must never write
+### 4.2 A failure path must never rename a conversation
 
 `resumeCommand`'s fallback runs `--name '<title>'`, so a *failed resume* performs a *write*
 that renames a conversation. That is what stamped 24 transcripts, and it recurs every launch.
 
-Drop `--name` from the fallback. A failed `--resume` surfaces on the tab; it does not silently
-start a differently-named session. More generally: **no failure path may rename a
-conversation.**
+Drop `--name` from the fallback. A failed resume surfaces on the tab; it does not silently
+start a differently-named session.
+
+Stated as a cross-agent invariant: **no failure or recovery path may rename a conversation.**
+The plan must audit codex's equivalents against it — `CodexAdapter.rename`'s
+`thread/name/set` (`CodexAdapter.swift:41`) and the restore-time `repinRestoredCodex` path —
+and add the same guard, so this is fixed as a class rather than at claude's one call site.
 
 ### 4.3 Detection, surfaced
 
 Nothing told the user the `mobile` pin was stale — that is why it cost a day rather than a
-minute. Add:
+minute. Add, driven by the adapter-mediated check in §4.1 so it works for every agent:
 
 - a sidebar indicator on any tab whose pin looks superseded, alongside the existing
   `conflictedSessionIDs` and `accountMismatchedSessionIDs` treatments;
@@ -243,7 +321,7 @@ minute. Add:
 ### 4.4 Validation, backups, quarantine
 
 - **Schema version** on the snapshot, plus invariant validation on load: unique tab ids,
-  well-formed pins, absolute directories.
+  well-formed pins, absolute directories. All agent-independent fields.
 - **Refuse partial application.** An invalid snapshot is never half-loaded; it is quarantined
   and the newest good backup is offered.
 - **Rolling backups** written once per launch before the first write, keeping ~20. Not per
@@ -255,18 +333,48 @@ For when the app will not start, in the spirit of `scripts/swap-release.sh`:
 `list`, `doctor` (stale pins, duplicate pins, missing transcripts), `repin`, `retitle`,
 `rollback`, `fork`.
 
+`doctor` reports on every tab regardless of agent. Where a check needs agent knowledge it
+degrades rather than lies: a codex tab whose thread it cannot resolve is reported as
+"unverified", never as healthy and never as broken.
+
 ## 5. Sequencing
 
 L1, L2 and L3 are independent and land in that order. L1 first: it is the smallest change,
 it removes the corruption class, and its regression test fails today. L2 next: it is what
 stops a debug build reaching the real fleet at all. L3 last and largest.
 
-L3.2 (drop `--name` from the fallback) is a one-line change that stops damage compounding on
-every restart, and should land with L1 rather than wait for the rest of L3.
+§4.2's one-line removal of `--name` from the fallback stops damage compounding on every
+restart, and should land with L1 rather than wait for the rest of L3.
 
 ## 6. Out of scope
 
-- `FleetState` encapsulation — still deferred, for its own documented reason.
+- `FleetState` encapsulation — schedulable independently now that the adapter work has landed;
+  see Context.
 - The one-off repair of the 21 titles and the `mobile` re-pin, which is operational, not a
-  code change.
+  code change. The repair script is staged and waiting on the app being quit.
 - Answering why 21 attachments shared one conversation id. §2 makes it unnecessary to answer.
+
+## Verification
+
+Per layer, end to end, and every agent-facing check run for **both** claude and codex tabs:
+
+- **L1** — `swift test` with the new routing suite, parameterised over both runtimes. The
+  N-tabs-one-title test is the gate: it must fail before the change and pass after. Then a real
+  run: two tabs resumed onto one conversation, rename one, confirm both update and no third tab
+  does — once with claude tabs, once with codex tabs.
+- **L2** — launch a debug build while the release build is running. Expect: debug lands in
+  `Flight Deck (Debug)`, banner shown, empty deck, and `sessions.json` in the real directory
+  byte-identical afterwards (compare checksums). Then launch a debug build with the release
+  build quit: expect a full, normal deck — the guarantee that an empty deck is unreachable off
+  the contended path.
+- **L3** — reconstruct the incident from the preserved transcripts: point a fixture claude tab
+  at a pre-compaction conversation whose continuation exists, confirm the adapter reports the
+  link and the store repoints; confirm a missing strong link flags rather than guesses; confirm
+  a codex tab resolves its thread through the codex adapter over the same store code path; and
+  confirm a stub adapter with the default implementation is never auto-repointed. Confirm a
+  failed resume writes no rename to any transcript or thread.
+- **Regression guard on the real fleet** — `scripts/fd-state doctor` reports zero stale pins,
+  zero duplicate pins, zero missing transcripts, and no "unverified" rows it cannot explain,
+  across all 27 tabs.
+- `./scripts/smoke.sh` afterwards, confirming `sessions.json` (`sessionCounter`) and
+  `preferences.v1` are unchanged, per the existing state-storage rule.
