@@ -103,6 +103,15 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// is the one that already exists rather than a second one invented for the phone.
     case closeSession(id: UUID)
 
+    /// Rename tab `id`.
+    ///
+    /// The title is sanitised on the Mac, per agent, and the two agents differ: claude's
+    /// rename is typed at a pty, so shell metacharacters are stripped, while codex's is
+    /// JSON-RPC and only needs trimming. That difference is why no cleaning happens here —
+    /// a client that pre-sanitised would either be wrong for one agent or duplicate a rule
+    /// that lives on `AgentAdapter`.
+    case renameSession(id: UUID, title: String)
+
     /// Collapse or expand project `id`'s session list.
     ///
     /// Carries the target state rather than toggling, so two clients disagreeing about what
@@ -165,7 +174,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case op, id, token, text, call, answer, index, label
-        case isCollapsed, project
+        case isCollapsed, project, title
     }
 
     private enum Op: String, Codable {
@@ -176,6 +185,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case closeSession = "session.close"
         case setProjectCollapsed = "project.collapse"
         case newSession = "session.new"
+        case renameSession = "session.rename"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -190,6 +200,10 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case .closeSession(let id):
             try c.encode(Op.closeSession, forKey: .op)
             try c.encode(id, forKey: .id)
+        case .renameSession(let id, let title):
+            try c.encode(Op.renameSession, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(title, forKey: .title)
         case .setProjectCollapsed(let id, let isCollapsed):
             try c.encode(Op.setProjectCollapsed, forKey: .op)
             try c.encode(id, forKey: .id)
@@ -239,6 +253,14 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             self = .markUnread(id: try c.decode(UUID.self, forKey: .id))
         case .closeSession:
             self = .closeSession(id: try c.decode(UUID.self, forKey: .id))
+        case .renameSession:
+            self = .renameSession(
+                id: try c.decode(UUID.self, forKey: .id),
+                // Never judged here, for the reason the class comment above gives about
+                // `text`: a `cmd` this build cannot decode ends the socket, so a hostile or
+                // over-long title must decode cleanly and be refused by the store.
+                title: try c.decode(String.self, forKey: .title)
+            )
         case .setProjectCollapsed:
             self = .setProjectCollapsed(
                 id: try c.decode(UUID.self, forKey: .id),

@@ -4,6 +4,16 @@ import SwiftUI
 struct FleetListScreen: View {
     let model: FleetModel
     @State private var confirmingUnpair = false
+    /// The session being renamed, and the text so far. One optional rather than an id plus a
+    /// separate string: two pieces of state can disagree — a stale title against a new id is
+    /// a rename applied to the wrong tab — and this way they cannot.
+    @State private var renaming: Renaming?
+
+    struct Renaming: Identifiable {
+        let id: UUID
+        var title: String
+    }
+
 
     var body: some View {
         NavigationStack {
@@ -46,6 +56,28 @@ struct FleetListScreen: View {
             // the list, not the list's own metrics.
             .opacity(isStale ? 0.5 : 1)
             .refreshable { model.reconnect() }
+            // `item:` rather than `isPresented:` + a separate id, so the alert cannot outlive
+            // the thing it is renaming.
+            .alert("Rename session", isPresented: Binding(
+                get: { renaming != nil },
+                set: { if !$0 { renaming = nil } }
+            )) {
+                TextField("Name", text: Binding(
+                    get: { renaming?.title ?? "" },
+                    set: { renaming?.title = $0 }
+                ))
+                // Off for the same reason the composer's capitalisation is: a tab name is
+                // frequently a branch or a path fragment, and a capital changes what it says.
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                Button("Cancel", role: .cancel) { renaming = nil }
+                Button("Rename") {
+                    if let renaming {
+                        model.renameSession(renaming.id, to: renaming.title)
+                    }
+                    renaming = nil
+                }
+            }
             .navigationDestination(for: UUID.self) { id in
                 // The session is looked up LIVE rather than captured at push time, so a
                 // rename or a status change on the Mac reaches a screen that is already
@@ -206,6 +238,18 @@ struct FleetListScreen: View {
                 model.closeSession(session.id)
             } label: {
                 Label("Close", systemImage: "xmark")
+            }
+        }
+        // Long press. A `contextMenu` rather than a second swipe action: renaming is not
+        // destructive and does not want the swipe lane's weight, and a menu leaves room for
+        // whatever else belongs on a session later.
+        .contextMenu {
+            Button {
+                // Seeded with the CURRENT title, so the common edit is a word changed rather
+                // than a name retyped.
+                renaming = Renaming(id: session.id, title: session.title)
+            } label: {
+                Label("Rename", systemImage: "pencil")
             }
         }
     }

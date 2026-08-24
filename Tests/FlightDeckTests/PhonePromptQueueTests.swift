@@ -72,6 +72,18 @@ final class PhonePromptQueueTests: XCTestCase {
                        "and a pass that cannot type it must leave it where it is")
     }
 
+    /// **The line that must not move.** A waiting tab has a select-list dialog up: text typed
+    /// there goes into the dialog and the Return after it PICKS AN OPTION. A prompt arriving
+    /// at that moment must never become an answer — that is `answerPrompt`'s job, behind an
+    /// interlock that reads the screen before committing.
+    func testAPromptToAWaitingTabIsHeldAndNeverTyped() {
+        let (store, spy, id, _) = makeStore(activity: .waiting)
+        store.submitPrompt("ship it", token: UUID(), to: id)
+
+        XCTAssertTrue(spy.events.isEmpty, "nothing may be typed at a dialog")
+        XCTAssertNotNil(store.promptQueue[id], "held, not discarded")
+    }
+
     func testAQueuedPromptIsTypedOnceTheTurnEnds() {
         let (store, spy, id, conversation) = makeStore(activity: .busy)
         store.submitPrompt("ship it", token: UUID(), to: id)

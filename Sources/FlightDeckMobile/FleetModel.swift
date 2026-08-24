@@ -224,6 +224,11 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering {
 
     func markRead(_ id: UUID) { connector?.send(.markRead(id: id)) }
 
+    /// Rename a tab. The title is sanitised on the Mac, per agent — see the command.
+    func renameSession(_ id: UUID, to title: String) {
+        connector?.send(.renameSession(id: id, title: title))
+    }
+
     /// Close a tab on the Mac. Destructive, and gated behind a confirming gesture on screen.
     func closeSession(_ id: UUID) { connector?.send(.closeSession(id: id)) }
 
