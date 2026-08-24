@@ -45,6 +45,10 @@ final class AgentLocationTests: XCTestCase {
     /// Mirrors `ClaudeAdapter` with only `location` replaced.
     private struct RelocatingAdapter: AgentAdapter {
         static let id: AgentID = .claude
+        /// Claude's answer, because this stands in for claude — the store reads the
+        /// capability off `AgentID`, so a stub that disagreed would describe an agent that
+        /// does not exist.
+        static let hasTextChannel = true
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)
         }

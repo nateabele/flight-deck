@@ -28,6 +28,10 @@ final class TimelineServiceTests: XCTestCase {
     /// business writing there.
     private struct FixedTranscriptAdapter: AgentAdapter {
         static let id: AgentID = .claude
+        /// Claude's answer, because this stands in for claude — the store reads the
+        /// capability off `AgentID`, so a stub that disagreed would describe an agent that
+        /// does not exist.
+        static let hasTextChannel = true
         let url: URL?
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

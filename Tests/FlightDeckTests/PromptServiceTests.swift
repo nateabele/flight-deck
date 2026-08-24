@@ -305,26 +305,32 @@ final class PromptServiceTests: XCTestCase {
         XCTAssertEqual(spy.events, [.escape], "the retry is answered, not carried out twice")
     }
 
-    /// A codex tab's transcript is never read by the claude mapper, so there is no open call
-    /// to match — `prompt_changed`, before the store is ever asked.
+    /// **A codex tab is told the true reason, and `prompt_changed` is not it.**
     ///
-    /// **The agent check is not duplicated here**, and the `.claude` in the source pattern is
-    /// not one: it names which mapper may be pointed at the file, not which agents may be
-    /// answered. `SessionStore.answerPrompt`'s `unsupportedAgent` remains the only place that
-    /// decides that, which is why `AnswerPromptTests` is where it is pinned — and it is the
-    /// backstop here, so nothing is typed either way.
+    /// This line used to answer `prompt_changed` for every non-claude tab, which the phone
+    /// renders as *"Your Mac has moved on from this."* — a sentence about a dialog that
+    /// moved, offered for a tab whose dialog did not move and never could be answered. It
+    /// reads as transient, so it invites a retry that can never succeed. `unsupported_agent`
+    /// is the code `SessionStore.answerPrompt` already defines for exactly this and the phone
+    /// already has copy for, and routing it here is what lets that copy ever appear.
+    ///
+    /// The refusal is `AgentAdapter.hasTextChannel` — the same question the store asks, not a
+    /// second name check that could answer differently.
     ///
     /// The tail is deliberately claude-shaped records rather than nothing: that distinguishes
     /// "the file was never read" from "it was read and held no call", and a service that
-    /// pointed the claude mapper at a codex transcript would find a call in this fixture.
-    func testACodexTabHasNoOpenCallToMatch() async throws {
+    /// pointed the claude mapper at a codex transcript would find a call in this fixture. So
+    /// a service that dropped this guard would fall through and answer `prompt_changed` from
+    /// the *next* one, which is what the old assertion could not tell apart.
+    func testACodexTabIsRefusedAsUnsupportedRatherThanAsChanged() async throws {
         let (service, _, spy, id) = try await makeCodexService(activity: .waiting)
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_A"))]
         service.tail = { _, _ in lines }
         XCTAssertEqual(
             code(service.answer(session: id, call: "toolu_A", answer: .deny, token: UUID())),
-            "prompt_changed"
+            "unsupported_agent"
         )
         XCTAssertTrue(spy.events.isEmpty, "no Escape into a codex TUI this build cannot read")
     }
+
 }
