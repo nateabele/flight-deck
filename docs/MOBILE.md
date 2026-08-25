@@ -439,6 +439,12 @@ page.
     Then confirm it, and check the Mac's **Reopen Closed Session** brings the tab back *on the
     same conversation*, which is what the dialog's message promises.
 
+61. **Put the Mac on Wi-Fi with Tailscale up, put the phone on cellular with Wi-Fi OFF, and scan
+    the QR.** The Mac's pairing modal dismisses and the phone's fleet list populates. This is the
+    scenario that produced the defect the ranked endpoint list and the two-endpoint pairing code
+    exist to fix (see [NETWORKING.md](NETWORKING.md), "Discovery and reconnection") — a phone
+    that never leaves the LAN cannot exercise it, so no single machine can automate this one.
+
 ## A second checklist: the iOS plumbing
 
 The fifty items above test the *feature* — that pairing, replication, resume, revocation, and
