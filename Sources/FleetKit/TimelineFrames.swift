@@ -144,9 +144,21 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// to `TimelineLimits.maxLimit` by the reader rather than refused here.
     case timeline(session: UUID, anchor: TimelineAnchor, limit: Int)
 
-    enum CodingKeys: String, CodingKey { case op, session, anchor, cursor, limit }
+    /// The rows of project `project`'s New Session menu.
+    ///
+    /// **A request rather than snapshot state**, for the reason `WireNewSessionOptions`
+    /// records: the rows come from preferences, preferences emit no fleet events, and a
+    /// snapshot that changes with nothing recorded is what `FleetReplicator`'s drift check
+    /// exists to catch. Same shape as `timeline` — ask, get an answer on the `cid`, keep it
+    /// out of the log.
+    case newSessionOptions(project: UUID)
 
-    private enum Op: String, Codable { case timeline = "timeline.page" }
+    enum CodingKeys: String, CodingKey { case op, session, anchor, cursor, limit, project }
+
+    private enum Op: String, Codable {
+        case timeline = "timeline.page"
+        case newSessionOptions = "session.newOptions"
+    }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -159,6 +171,9 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             // would invite a reader to treat it as offset 0 — the opposite end of the file.
             try c.encodeIfPresent(anchor.cursor, forKey: .cursor)
             try c.encode(limit, forKey: .limit)
+        case .newSessionOptions(let project):
+            try c.encode(Op.newSessionOptions, forKey: .op)
+            try c.encode(project, forKey: .project)
         }
     }
 
@@ -183,6 +198,8 @@ public enum FleetRequest: Codable, Equatable, Sendable {
                 anchor: anchor,
                 limit: try c.decode(Int.self, forKey: .limit)
             )
+        case .newSessionOptions:
+            self = .newSessionOptions(project: try c.decode(UUID.self, forKey: .project))
         }
     }
 }

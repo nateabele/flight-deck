@@ -85,6 +85,28 @@ final class FleetService: ObservableObject {
         wireHandlers()
     }
 
+    /// The rows of one project's New Session menu, or nil when there is no such project.
+    ///
+    /// Built from `NewSessionAffordance.menu(agents:preferences:resolved:)` — the same call the
+    /// sidebar makes, with the same arguments — so the two menus cannot disagree.
+    private func newSessionOptions(for project: UUID) -> WireNewSessionOptions? {
+        guard let path = store.projectPath(project) else { return nil }
+        let rows = NewSessionOptionsProjection.rows(for: menuEntries(forProjectAt: path)) {
+            preferences.account(id: $0)?.displayName
+        }
+        // An empty answer is a real answer: every agent was omitted for having no live
+        // account. The phone greys its `+` out rather than offering a row that cannot launch.
+        return WireNewSessionOptions(project: project, options: rows)
+    }
+
+    private func menuEntries(forProjectAt path: String) -> [NewSessionAffordance.MenuEntry] {
+        let agents = preferences.agentOrder(forProject: path)
+        return NewSessionAffordance.menu(
+            agents: agents, preferences: preferences.preferences,
+            resolved: preferences.resolvedAccounts(for: agents, project: path)
+        )
+    }
+
     private static func derivedServiceName(preferences: PreferencesStore) -> String {
         let raw = Host.current().localizedName ?? "Mac"
         let cleaned = raw.unicodeScalars
@@ -139,6 +161,18 @@ final class FleetService: ObservableObject {
                     case .failure(let code): reply(.err(cid: cid, code: code.code))
                     }
                 }
+            case .newSessionOptions(let project):
+                // Answered synchronously: this reads preferences and the project list, both of
+                // which are already on this actor. No file I/O, so nothing to hop for.
+                //
+                // Nothing here writes and nothing enters `FleetSnapshot` — which is the whole
+                // design. Menu rows come from preferences, preferences emit no fleet events,
+                // and a snapshot that changed without one is what `FleetReplicator`'s drift
+                // assertion catches. It caught it once already; see the spec.
+                guard let options = self.newSessionOptions(for: project) else {
+                    return reply(.err(cid: cid, code: "unknown_project"))
+                }
+                reply(.newSessionOptions(cid: cid, options))
             }
         }
         server.onAttachedSlotsChanged = { [weak self] slots in
@@ -546,9 +580,34 @@ final class FleetService: ObservableObject {
         case .setProjectCollapsed(let id, let isCollapsed):
             guard store.projectExists(id) else { return .err(cid: cid, code: "unknown_project") }
             store.setCollapsed(isCollapsed, forProjectAt: id)
-        case .newSession(let project):
-            guard store.newSession(inProject: project) != nil else {
+        case .newSession(let project, let agent, let accountIndex):
+            guard let path = store.projectPath(project) else {
                 return .err(cid: cid, code: "unknown_project")
+            }
+            // Both nil is a plain `+` tap: the project's defaults, exactly as before this
+            // feature existed and exactly what an older phone sends.
+            guard let agent, let accountIndex, let picked = AgentID(rawValue: agent) else {
+                guard store.newSession(inProject: project) != nil else {
+                    return .err(cid: cid, code: "unknown_project")
+                }
+                break
+            }
+            // Re-resolved now, not read from anything the phone sent: the row it tapped was
+            // described from a menu that may since have changed shape. A row whose agent no
+            // longer matches falls back to the project's default rather than opening as an
+            // account nobody chose — `NewSessionOptionsProjection.account` is where that
+            // judgement lives and why.
+            let account = NewSessionOptionsProjection.account(
+                forAgent: agent, index: accountIndex, in: menuEntries(forProjectAt: path)
+            )
+            guard account != nil else {
+                guard store.newSession(inProject: project) != nil else {
+                    return .err(cid: cid, code: "unknown_project")
+                }
+                break
+            }
+            Task { @MainActor in
+                await self.store.createFromMenu(agent: picked, chooseFolder: { nil }, account: account)
             }
         case .prompt(let id, let token, let text):
             // Every refusal, "no such tab" included, is the store's to make: it is the only

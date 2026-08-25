@@ -249,6 +249,46 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// the Mac, which is the only place they are configured.
     func newSession(inProject id: UUID) { connector?.send(.newSession(project: id)) }
 
+    /// Open a session as a particular row of the project's New Session menu.
+    ///
+    /// The row is named by its agent and its position among that agent's accounts, never by an
+    /// account id — see `WireNewSessionOption`. The Mac re-resolves both and falls back to the
+    /// project's default if the agent no longer matches.
+    func newSession(inProject id: UUID, agent: String, accountIndex: Int) {
+        connector?.send(.newSession(project: id, agent: agent, accountIndex: accountIndex))
+    }
+
+    /// What each project's `+` should offer, as last answered.
+    ///
+    /// **Absent and empty are different states and are held apart.** A project with no entry
+    /// has not been answered — the request is in flight, or this Mac predates the feature and
+    /// never will — and falls back to the single default row. A project whose entry is an
+    /// empty array *was* answered, and the answer was that nothing can be launched: every
+    /// agent was omitted for having no live account. That greys the `+` out. Collapsing the
+    /// two would offer a row whose only possible outcome is a refusal from the far end.
+    private(set) var newSessionOptions: [UUID: [WireNewSessionOption]] = [:]
+
+    /// Ask for every project's rows.
+    ///
+    /// **One request per project**, mirroring `timeline.page`: the reply path already
+    /// correlates by `cid`, and N small independent fetches mean one slow project cannot hold
+    /// up the rest of the list.
+    ///
+    /// Called when the list appears, on reconnect, and on returning to the foreground. The
+    /// third is the one that matters: the rows derive from preferences, preferences emit no
+    /// fleet events, and there is no hook to push a change from — so the only moment the phone
+    /// can learn that an account was signed in on the Mac is the moment someone picks the phone
+    /// up and it asks again.
+    func refreshNewSessionOptions() {
+        guard let connector else { return }
+        for project in fleet.projects {
+            connector.requestNewSessionOptions(project: project.id) { [weak self] result in
+                guard let self, case .success(let answer) = result else { return }
+                self.newSessionOptions[answer.project] = answer.options
+            }
+        }
+    }
+
     /// The model behind one session screen, made once and kept.
     ///
     /// **Cached because the alternative is a screen that empties itself.** A
@@ -349,7 +389,18 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // This is only true while the connector runs on `.main`. If it is ever given its own
         // queue, these must become hops and this comment must go.
         connector.onFleet = { [weak self] fleet in
-            MainActor.assumeIsolated { self?.fleet = fleet }
+            MainActor.assumeIsolated {
+                self?.fleet = fleet
+                // **Every snapshot, which is every connect** — first dial, reconnect, and the
+                // redial on return from the background. That covers all three moments the
+                // menu can have gone stale without a single one of them needing its own hook,
+                // because preferences emit no fleet events and there is nothing to be told.
+                //
+                // A project that appears later by event, rather than in a snapshot, has no
+                // rows until the next connect and falls back to the default row. That is the
+                // supported state, not a gap: it is also what an older Mac produces forever.
+                self?.refreshNewSessionOptions()
+            }
         }
         // Routed to the tab's own model rather than held here: the outbox belongs to the
         // screen that sent the prompt, and `timelineModels` is already the map from a session

@@ -186,4 +186,47 @@ final class FleetListScreenTests: XCTestCase {
             ]
         )
     ])
+    // MARK: The New Session menu
+
+    private func option(
+        _ agent: String, _ name: String, index: Int, account: String?, isDefault: Bool = false
+    ) -> WireNewSessionOption {
+        WireNewSessionOption(
+            agent: agent, agentName: name, index: index,
+            accountName: account, isDefault: isDefault
+        )
+    }
+
+    /// **The order is the Mac's ⌘N ladder, so it is kept rather than sorted** — and asserted
+    /// rather than trusted, because a sort anywhere in this translation would put the phone
+    /// quietly out of step with the sidebar about what ⌘N does, with nothing else to notice.
+    /// The names below are deliberately in the wrong alphabetical order for the arrival order.
+    func testAgentGroupsKeepTheOrderTheyArrivedIn() {
+        let groups = FleetListScreen.agentGroups(in: [
+            option("codex", "Codex", index: 0, account: nil),
+            option("claude", "Claude", index: 0, account: "Work", isDefault: true),
+            option("claude", "Claude", index: 1, account: "Personal"),
+        ])
+        XCTAssertEqual(groups.map(\.agent), ["codex", "claude"],
+                       "arrival order, not alphabetical")
+        XCTAssertEqual(groups[1].rows.map(\.index), [0, 1])
+        XCTAssertEqual(groups[1].name, "Claude")
+    }
+
+    /// An agent's rows stay together even when the Mac interleaves them, so a submenu is never
+    /// split into two menus of one.
+    func testAnAgentsRowsAreGroupedTogether() {
+        let groups = FleetListScreen.agentGroups(in: [
+            option("claude", "Claude", index: 0, account: "Work"),
+            option("codex", "Codex", index: 0, account: nil),
+            option("claude", "Claude", index: 1, account: "Personal"),
+        ])
+        XCTAssertEqual(groups.count, 2)
+        XCTAssertEqual(groups[0].rows.count, 2, "both claude rows, in one group")
+    }
+
+    func testNoOptionsIsNoGroups() {
+        XCTAssertTrue(FleetListScreen.agentGroups(in: []).isEmpty)
+    }
+
 }

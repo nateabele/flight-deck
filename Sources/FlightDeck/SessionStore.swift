@@ -3496,6 +3496,13 @@ final class SessionStore: ObservableObject {
     /// their target still exists. A phone can hold a snapshot older than a project's removal.
     func projectExists(_ id: Repo.ID) -> Bool { repos.contains { $0.id == id } }
 
+    /// Where project `id` lives, or nil if there is no such project. The path is what the
+    /// preference lookups are keyed on — agent order and resolved accounts are both per
+    /// project directory — so a caller holding only an id needs this to ask them anything.
+    func projectPath(_ id: Repo.ID) -> String? {
+        repos.first { $0.id == id }?.url.path
+    }
+
     /// Switches registry polling on and covers the tabs that already exist. Called from the
     /// production convenience init only, so tests using `init(provider:persistence:)` never
     /// touch the real registry or spin a timer.
