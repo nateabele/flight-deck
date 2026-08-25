@@ -19,7 +19,7 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
     /// and did: it showed an empty sheet.
     public var id: UUID { key.slot }
 
-    public static let currentVersion = 2
+    public static let currentVersion = 3
     /// The scheme half of the code, with the version spelled into it — `FD2-`.
     ///
     /// Two letters and a digit rather than `flightdeck2:`, and the QR does benefit: `F`, `D`,
@@ -48,6 +48,15 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
     /// `FleetService.derivedServiceName` already caps at 24 plus a suffix, and a Mac name
     /// longer than 64 bytes is being displayed on a phone, where it will be truncated anyway.
     private static let maxNameBytes = 64
+    /// One byte of count, so 255 is the format's ceiling. **2 is the policy**, and it is
+    /// measured rather than chosen: at correction level `M` a two-endpoint record renders to
+    /// 47 modules — byte for byte what v2 produces today — and a three-endpoint one to 51,
+    /// which breaks `PairingCodeImageTests.testThePackedPayloadProducesAMateriallySmallerQR`
+    /// against its 0.75 threshold. Two is also exactly the requirement: one address that
+    /// works off the LAN and one that works on it. Any *further* LAN address is Bonjour's
+    /// job, which is the one thing Bonjour can do that a QR cannot. Do not raise this to buy
+    /// robustness the browser already provides.
+    private static let maxEndpoints = 2
 
     public var version: Int
     public var key: FleetDeviceKey
@@ -68,8 +77,8 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
     /// are *candidates* to race, not an address to trust: the key identifies the Mac, and by
     /// the time the phone leaves the room every one of these may be wrong.
     ///
-    /// Only the first usable one survives the encoding — the rest are Bonjour's job, and the
-    /// remembered-endpoint race exists for reconnects rather than for pairing.
+    /// Only the first `maxEndpoints` usable ones survive the encoding — the rest are Bonjour's
+    /// job, and the remembered-endpoint race exists for reconnects rather than for pairing.
     public var endpoints: [String]
 
     public init(
@@ -90,7 +99,15 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
         bytes.append(UInt8(clamping: version))
         bytes.append(contentsOf: withUnsafeBytes(of: key.slot.uuid) { Data($0) })
         bytes.append(key.secret)
-        bytes.append(Self.packedEndpoint(endpoints.first))
+        // Was `packedEndpoint(endpoints.first)` — one address, unconditionally, which is why
+        // a Mac on a tailnet handed out a code carrying only its Wi-Fi address.
+        //
+        // `compactMap` before `prefix`, not after: an unusable candidate must not consume one
+        // of the two slots, so filtering has to happen before the cap is applied rather than
+        // after it — see `testAnUnusableEndpointDoesNotConsumeASlot`.
+        let packed = endpoints.compactMap(Self.packedEndpoint).prefix(Self.maxEndpoints)
+        bytes.append(UInt8(packed.count))
+        for endpoint in packed { bytes.append(endpoint) }
         bytes.append(Self.packedName(serviceName))
         bytes.append(Self.packedName(macName))
         // No sorted-keys hazard here, unlike v1's JSON: this walks a fixed field order, so two
@@ -100,26 +117,26 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
         return "\(Self.prefix)\(version)-" + bytes.crockfordBase32EncodedString()
     }
 
-    /// IPv4 and port, or six zero bytes when there is nothing usable to pack.
+    /// IPv4 and port, or nil when there is nothing usable to pack.
     ///
     /// IPv4 only, matching `LocalEndpoints`: a link-local IPv6 address needs a zone index to
     /// be dialable and would pack a candidate that can never connect. A Mac with no routable
-    /// v4 address still produces a scannable code — the phone finds it over Bonjour.
-    private static func packedEndpoint(_ text: String?) -> Data {
-        guard let text,
-              let colon = text.lastIndex(of: ":"),
+    /// v4 address still produces a scannable code carrying zero endpoints — the phone finds
+    /// it over Bonjour.
+    private static func packedEndpoint(_ text: String) -> Data? {
+        guard let colon = text.lastIndex(of: ":"),
               let port = UInt16(text[text.index(after: colon)...])
-        else { return Data(repeating: 0, count: 6) }
+        else { return nil }
         let octets = text[..<colon].split(separator: ".").compactMap { UInt8($0) }
-        guard octets.count == 4 else { return Data(repeating: 0, count: 6) }
+        guard octets.count == 4 else { return nil }
         return Data(octets) + Data([UInt8(port >> 8), UInt8(port & 0xFF)])
     }
 
-    private static func unpackedEndpoint(_ bytes: Data) -> [String] {
+    private static func unpackedEndpoint(_ bytes: Data) -> String? {
         let octets = [UInt8](bytes.prefix(4))
         let port = UInt16(bytes[bytes.startIndex + 4]) << 8 | UInt16(bytes[bytes.startIndex + 5])
-        guard octets.contains(where: { $0 != 0 }) || port != 0 else { return [] }
-        return ["\(octets[0]).\(octets[1]).\(octets[2]).\(octets[3]):\(port)"]
+        guard octets.contains(where: { $0 != 0 }) || port != 0 else { return nil }
+        return "\(octets[0]).\(octets[1]).\(octets[2]).\(octets[3]):\(port)"
     }
 
     /// A one-byte length followed by UTF-8, truncated on a *scalar* boundary.
@@ -155,7 +172,7 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
         }
 
         guard let bytes = Data(crockfordBase32: String(trimmed[trimmed.index(after: dash)...])),
-              bytes.count >= 56
+              bytes.count >= 50
         else { throw PairingPayloadError.malformed }
         // The body repeats the version so a hand-edited prefix cannot walk a mismatched body
         // past the gate above.
@@ -171,9 +188,20 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
         // `Data(...)`, not the bare slice: a slice of `bytes` keeps a non-zero `startIndex`,
         // and a 32-byte secret indexed from 17 is a trap for the next caller who subscripts it.
         let secret = Data(bytes[17..<49])
-        let endpoints = Self.unpackedEndpoint(bytes[49..<55])
 
-        var cursor = 55
+        // `Data(...)` on every slice, not the bare slice: a slice of `bytes` keeps a non-zero
+        // `startIndex`, and an endpoint indexed from 0 inside `unpackedEndpoint` is a trap.
+        let count = Int(bytes[49])
+        var cursor = 50
+        var endpoints: [String] = []
+        for _ in 0..<count {
+            guard cursor + 6 <= bytes.count else { throw PairingPayloadError.malformed }
+            if let endpoint = Self.unpackedEndpoint(Data(bytes[cursor..<(cursor + 6)])) {
+                endpoints.append(endpoint)
+            }
+            cursor += 6
+        }
+
         guard let serviceName = Self.readName(from: bytes, cursor: &cursor),
               let macName = Self.readName(from: bytes, cursor: &cursor),
               // Nothing may follow the mac name. Trailing bytes cannot produce a wrong key —

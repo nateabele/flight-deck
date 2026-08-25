@@ -24,7 +24,7 @@ final class PairingPayloadTests: XCTestCase {
     func testAPayloadRoundTrips() throws {
         let original = payload()
         let decoded = try PairingPayload(decoding: original.encoded())
-        XCTAssertEqual(decoded.version, 2)
+        XCTAssertEqual(decoded.version, 3)
         XCTAssertEqual(decoded.key.slot, original.key.slot)
         XCTAssertEqual(decoded.key.secret, original.key.secret)
         XCTAssertEqual(decoded.macName, original.macName)
@@ -53,14 +53,14 @@ final class PairingPayloadTests: XCTestCase {
     func testTheCodeUsesOnlyTheCrockfordAlphabetAndItsPrefix() {
         let allowed = Set("0123456789ABCDEFGHJKMNPQRSTVWXYZFD-")
         XCTAssertTrue(payload().encoded().allSatisfy { allowed.contains($0) })
-        XCTAssertTrue(payload().encoded().hasPrefix("FD2-"))
+        XCTAssertTrue(payload().encoded().hasPrefix("FD3-"))
     }
 
     /// Kept from v1, and still the reason the version lives in the prefix: a payload from a
     /// newer Mac may pack fields this version cannot parse, and reporting it as "damaged"
     /// sends the user to show a fresh code when what they need is to update the app.
     func testAFutureVersionIsRejectedByVersionNotByShape() {
-        let code = payload().encoded().replacingOccurrences(of: "FD2-", with: "FD9-")
+        let code = payload().encoded().replacingOccurrences(of: "FD3-", with: "FD9-")
         XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
             XCTAssertEqual(error as? PairingPayloadError, .unsupportedVersion(9))
         }
@@ -71,8 +71,8 @@ final class PairingPayloadTests: XCTestCase {
     /// gate. This is v1's `testAPrefixVersionDisagreeingWithTheBodyIsMalformed`, re-expressed.
     func testAPrefixVersionDisagreeingWithThePackedVersionIsMalformed() throws {
         var bytes = try XCTUnwrap(Data(crockfordBase32: String(payload().encoded().dropFirst(4))))
-        bytes[0] = 3
-        let code = "FD2-" + bytes.crockfordBase32EncodedString()
+        bytes[0] = 9
+        let code = "FD3-" + bytes.crockfordBase32EncodedString()
         XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
             XCTAssertEqual(error as? PairingPayloadError, .malformed)
         }
@@ -118,9 +118,9 @@ final class PairingPayloadTests: XCTestCase {
     func testACodeWithBytesAppendedPastTheEndIsMalformed() throws {
         let code = payload().encoded()
         var bytes = try XCTUnwrap(Data(crockfordBase32: String(code.dropFirst(4))))
-        XCTAssertEqual(bytes.count, 98, "the record whose end this test is about")
+        XCTAssertEqual(bytes.count, 99, "the record whose end this test is about")
         bytes.append(contentsOf: [0xFF, 0xFF, 0xFF, 0xFF])
-        let extended = "FD2-" + bytes.crockfordBase32EncodedString()
+        let extended = "FD3-" + bytes.crockfordBase32EncodedString()
         XCTAssertThrowsError(try PairingPayload(decoding: extended)) { error in
             XCTAssertEqual(error as? PairingPayloadError, .malformed)
         }
@@ -135,17 +135,78 @@ final class PairingPayloadTests: XCTestCase {
         XCTAssertNil(URL(string: payload().encoded())?.scheme)
     }
 
-    /// The QR carries one endpoint. The rest are Bonjour's job, and the remembered-endpoint
-    /// race exists for reconnects rather than for pairing (§8).
-    func testOnlyTheFirstUsableEndpointSurvives() throws {
-        let subject = payload(endpoints: ["10.0.0.5:5000", "192.168.1.20:53211", "127.0.0.1:9"])
+    /// v2 packed exactly one endpoint, which is why a Mac on a tailnet handed out a QR
+    /// carrying only its Wi-Fi address. Two is the cap — see `maxEndpoints`.
+    func testUpToTwoEndpointsSurvive() throws {
+        let subject = PairingPayload(
+            key: .mint(), macName: "Mac", serviceName: "svc",
+            endpoints: ["100.108.99.35:58625", "192.168.1.109:58625", "192.168.139.3:58625"]
+        )
         let decoded = try PairingPayload(decoding: subject.encoded())
-        XCTAssertEqual(decoded.endpoints, ["10.0.0.5:5000"])
+        XCTAssertEqual(decoded.endpoints, ["100.108.99.35:58625", "192.168.1.109:58625"])
+    }
+
+    func testASingleEndpointStillRoundTrips() throws {
+        let subject = PairingPayload(
+            key: .mint(), macName: "Mac", serviceName: "svc",
+            endpoints: ["192.168.1.20:53211"]
+        )
+        XCTAssertEqual(try PairingPayload(decoding: subject.encoded()).endpoints,
+                       ["192.168.1.20:53211"])
+    }
+
+    /// An unusable endpoint must not consume one of the two slots — under v2 it packed six
+    /// zero bytes and the slot was spent whether or not anything was in it.
+    func testAnUnusableEndpointDoesNotConsumeASlot() throws {
+        let subject = PairingPayload(
+            key: .mint(), macName: "Mac", serviceName: "svc",
+            endpoints: ["not-an-address", "192.168.1.20:53211", "10.0.0.4:53211"]
+        )
+        let decoded = try PairingPayload(decoding: subject.encoded())
+        XCTAssertEqual(decoded.endpoints, ["192.168.1.20:53211", "10.0.0.4:53211"])
+    }
+
+    /// A v2 code is now refused BY VERSION, so the phone can say "update your Mac" rather
+    /// than "that code is damaged" — two messages that send the user in opposite directions.
+    func testAV2CodeIsRejectedByVersionRatherThanAsDamaged() {
+        let v2 = "FD2-" + String(repeating: "A", count: 160)
+        XCTAssertThrowsError(try PairingPayload(decoding: v2)) { error in
+            XCTAssertEqual(error as? PairingPayloadError, .unsupportedVersion(2))
+        }
+    }
+
+    /// The format's ceiling is the count byte; 2 is only the encoder's policy. A decoder that
+    /// refused more would make the cap unraisable without another version bump.
+    ///
+    /// Hand-built, because `encoded()` caps at two by design and cannot produce this record.
+    func testTheDecoderAcceptsMoreEndpointsThanTheEncoderWillWrite() throws {
+        let key = FleetDeviceKey.mint()
+        var bytes = Data([UInt8(PairingPayload.currentVersion)])
+        bytes.append(contentsOf: withUnsafeBytes(of: key.slot.uuid) { Data($0) })
+        bytes.append(key.secret)
+        bytes.append(8)
+        // 192.168.<i>.20:53211 — 0xCFDB is 53211.
+        for index in 0..<8 {
+            bytes.append(Data([192, 168, UInt8(index), 20, 0xCF, 0xDB]))
+        }
+        for name in ["svc", "Mac"] {
+            let utf8 = Data(name.utf8)
+            bytes.append(UInt8(utf8.count))
+            bytes.append(utf8)
+        }
+        let decoded = try PairingPayload(
+            decoding: "FD\(PairingPayload.currentVersion)-"
+                + bytes.crockfordBase32EncodedString()
+        )
+        XCTAssertEqual(decoded.endpoints.count, 8)
+        XCTAssertEqual(decoded.endpoints.first, "192.168.0.20:53211")
     }
 
     /// A Mac with no routable address still produces a scannable code — the phone will find it
     /// over Bonjour. An encoder that refused here would fail pairing on a machine that is
-    /// perfectly pairable.
+    /// perfectly pairable. Round-trips to `[]` via a zero count byte, not six zero bytes as
+    /// under v2 — an unusable slot is no longer spent (see
+    /// `testAnUnusableEndpointDoesNotConsumeASlot`).
     func testAPayloadWithNoUsableEndpointStillRoundTrips() throws {
         let subject = payload(endpoints: [])
         let decoded = try PairingPayload(decoding: subject.encoded())

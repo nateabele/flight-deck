@@ -122,8 +122,12 @@ struct PairingScreen: View {
         switch error {
         case .notAPairingCode:
             return "That isn't a Flight Deck pairing code."
-        case .unsupportedVersion:
-            return "This code is from a newer version of Flight Deck. Update the app on your phone."
+        // Both directions are reachable from v3 onward: a phone that has been updated can meet
+        // a Mac that has not. "Update the app" would send half of those users the wrong way.
+        case .unsupportedVersion(let version):
+            return version < PairingPayload.currentVersion
+                ? "This code is from an older version of Flight Deck. Update the app on your Mac."
+                : "This code is from a newer version of Flight Deck. Update the app on your phone."
         case .malformed:
             return "That code is damaged. Show a new one on your Mac."
         }
