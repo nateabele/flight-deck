@@ -205,11 +205,7 @@ struct FleetListScreen: View {
             // `Menu` would make the common case a two-step, and `primaryAction` is what keeps
             // the tap immediate while leaving the long press its own job.
             Menu {
-                Button {
-                    model.newSession(inProject: project.id)
-                } label: {
-                    Label("New session", systemImage: "plus")
-                }
+                newSessionMenu(for: project)
             } label: {
                 Image(systemName: "plus")
                     .font(.footnote.weight(.semibold))
@@ -218,9 +214,97 @@ struct FleetListScreen: View {
             } primaryAction: {
                 model.newSession(inProject: project.id)
             }
+            .disabled(model.newSessionOptions[project.id]?.isEmpty == true)
             .accessibilityLabel("New session in \(project.name)")
         }
         .listRowInsets(Self.rowInsets)
+    }
+
+    /// The project's New Session rows, mirroring the menu at the foot of the desktop sidebar.
+    ///
+    /// **Drawn from the Mac's answer, never rebuilt here.** Which agents appear, in what order,
+    /// flat or nested, and which account wears the tick are all decided by
+    /// `NewSessionAffordance.menu` on the Mac; a second implementation on this side would drift
+    /// the first time one of those rules moved. This only chooses how a row looks.
+    ///
+    /// **A project with no answer yet still gets a row.** That is the request in flight, or a
+    /// Mac older than this feature which will never send one — so the fallback is a supported
+    /// state, not a placeholder. A project answered with *no* rows is the other thing entirely:
+    /// nothing can be launched, and the `+` above is disabled rather than offering a tap that
+    /// can only fail.
+    @ViewBuilder
+    private func newSessionMenu(for project: WireProject) -> some View {
+        let options = model.newSessionOptions[project.id]
+        if let options, !options.isEmpty {
+            // Grouped by agent, in arrival order — `Dictionary(grouping:)` would lose it, and
+            // the order is the ⌘N ladder.
+            ForEach(agentGroups(in: options), id: \.agent) { group in
+                if group.rows.count == 1, group.rows[0].accountName == nil {
+                    newSessionRow(project: project, option: group.rows[0], flat: true)
+                } else {
+                    Menu("New \(group.name) Session") {
+                        ForEach(group.rows, id: \.index) { option in
+                            newSessionRow(project: project, option: option, flat: false)
+                        }
+                    }
+                }
+            }
+        } else if options == nil {
+            Button {
+                model.newSession(inProject: project.id)
+            } label: {
+                Label("New session", systemImage: "plus")
+            }
+        }
+    }
+
+    /// One row. The tick marks the account a plain tap would use, and **only inside a
+    /// submenu**: on an agent's only account it would mark a choice that was never offered —
+    /// the same rule, for the same reason, as `SessionSidebar.newSessionMenuRow`.
+    @ViewBuilder
+    private func newSessionRow(
+        project: WireProject, option: WireNewSessionOption, flat: Bool
+    ) -> some View {
+        let name = flat ? "New \(option.agentName) Session" : (option.accountName ?? option.agentName)
+        Button {
+            model.newSession(inProject: project.id, agent: option.agent, accountIndex: option.index)
+        } label: {
+            if !flat, option.isDefault {
+                Label(name, systemImage: "checkmark")
+            } else {
+                Text(name)
+            }
+        }
+    }
+
+    /// The rows an agent at a time, keeping the order they arrived in.
+    struct AgentGroup: Equatable {
+        let agent: String
+        let name: String
+        let rows: [WireNewSessionOption]
+    }
+
+    /// **Order preserved, never sorted.** Position is what binds an agent to its keyboard chord
+    /// on the Mac, so a phone that sorted would quietly disagree with the sidebar about what
+    /// ⌘N does. Tested rather than trusted — see `FleetListScreenTests`.
+    static func agentGroups(in options: [WireNewSessionOption]) -> [AgentGroup] {
+        var order: [String] = []
+        var rows: [String: [WireNewSessionOption]] = [:]
+        var names: [String: String] = [:]
+        for option in options {
+            if rows[option.agent] == nil {
+                order.append(option.agent)
+                names[option.agent] = option.agentName
+            }
+            rows[option.agent, default: []].append(option)
+        }
+        return order.map {
+            AgentGroup(agent: $0, name: names[$0] ?? $0, rows: rows[$0] ?? [])
+        }
+    }
+
+    private func agentGroups(in options: [WireNewSessionOption]) -> [AgentGroup] {
+        Self.agentGroups(in: options)
     }
 
     private func sessionRow(_ session: WireSession) -> some View {

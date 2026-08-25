@@ -105,6 +105,15 @@ public final class FleetConnector: @unchecked Sendable {
     /// completion drops silently when nothing is connected, which is harmless for `markRead`
     /// and is not harmless for a prompt. `drainPending()` empties this table too.
     private var pendingAcks: [Int: (Result<Void, FleetRequestError>) -> Void] = [:]
+
+    /// The third table `apply(_:)`'s `.err` arm was written in anticipation of.
+    ///
+    /// A second answer type rather than a widened `pending`, on the same reasoning `pendingAcks`
+    /// records: making the reply generic would mean retyping `pending`, widening every caller of
+    /// a channel already shipped, and re-testing a history path this feature does not touch.
+    /// One `cid` space still, so a number is filed in at most one of the three and `apply` can
+    /// try each in turn. Drained with the others.
+    private var pendingOptions: [Int: (Result<WireNewSessionOptions, FleetRequestError>) -> Void] = [:]
     private var browser: NWBrowser?
     private var fleet = FleetSnapshot.empty
     private var attempt = 0
@@ -217,6 +226,19 @@ public final class FleetConnector: @unchecked Sendable {
         pending[cid] = completion
     }
 
+    /// Ask for a project's New Session rows. Same contract as `request(_:then:)` — exactly one
+    /// answer, `.disconnected` synchronously when there is nothing to ask.
+    public func requestNewSessionOptions(
+        project: UUID,
+        then completion: @escaping (Result<WireNewSessionOptions, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.newSessionOptions(project: project))
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingOptions[cid] = completion
+    }
+
     /// Resolves one outstanding request, or does nothing if nothing is waiting on that `cid`.
     ///
     /// Removed before it is invoked, which is what makes it exactly once: a completion is
@@ -225,6 +247,14 @@ public final class FleetConnector: @unchecked Sendable {
     private func resolve(_ cid: Int, with result: Result<TimelinePage, FleetRequestError>) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let completion = pending.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
+    private func resolveOptions(
+        _ cid: Int, with result: Result<WireNewSessionOptions, FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingOptions.removeValue(forKey: cid) else { return }
         completion(result)
     }
 
@@ -379,6 +409,11 @@ public final class FleetConnector: @unchecked Sendable {
             // launch.
             resolve(cid, with: .success(page))
             return
+        case .newSessionOptions(let cid, let options):
+            // Unsequenced, exactly like `page` and for the same reason — a menu is not fleet
+            // state and must not move the resume point.
+            resolveOptions(cid, with: .success(options))
+            return
         case .err(let cid, let code):
             // Commands first, then requests. The two tables share one `cid` space
             // (`FleetClient.nextCID` mints for both), so a number is in at most one of them
@@ -389,6 +424,10 @@ public final class FleetConnector: @unchecked Sendable {
             // handler wired) and `unsupported` (a request this Mac cannot parse) are both on
             // this wire today, and a newer Mac may invent more.
             if resolveAck(cid, with: .failure(.server(code: code))) { return }
+            if pendingOptions[cid] != nil {
+                resolveOptions(cid, with: .failure(.server(code: code)))
+                return
+            }
             resolve(cid, with: .failure(.server(code: code)))
             return
         case .ack(let cid):
@@ -549,6 +588,11 @@ public final class FleetConnector: @unchecked Sendable {
         let outstandingAcks = pendingAcks
         pendingAcks.removeAll()
         for completion in outstandingAcks.values { completion(.failure(.disconnected)) }
+        // And the menu rows. A phone whose fetch dies with the socket must be told, or its
+        // `+` sits on a fallback row forever with nothing on the way.
+        let outstandingOptions = pendingOptions
+        pendingOptions.removeAll()
+        for completion in outstandingOptions.values { completion(.failure(.disconnected)) }
     }
 
     private func report(_ state: State) { onState?(state) }

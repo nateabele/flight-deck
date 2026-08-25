@@ -134,7 +134,18 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// already resolved on the Mac — `newSession(in:)` picks the launch account, mints the
     /// title and inherits the project's directory — and a phone that supplied any of it would
     /// be a second place those defaults live.
-    case newSession(project: UUID)
+    ///
+    /// **`agent` and `accountIndex` are both optional and both nil is today's behaviour** — the
+    /// project's defaults, which is what a plain tap on `+` still sends. They arrive together,
+    /// from a row of the menu `FleetRequest.newSessionOptions` answered, and `accountIndex` is a
+    /// *position* rather than an id for the reason `WireNewSessionOption` gives: an account id
+    /// resolves to a home directory and may not travel.
+    ///
+    /// A position can go stale between the fetch and the tap. The Mac re-resolves the menu and
+    /// **checks the agent matches** before using the index; if it does not, it falls back to the
+    /// project's default rather than opening a session as an account nobody chose. A refusal is
+    /// recoverable and a silent wrong account is not.
+    case newSession(project: UUID, agent: String? = nil, accountIndex: Int? = nil)
 
     /// Type `text` into tab `id`'s live agent and submit it.
     ///
@@ -182,7 +193,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case op, id, token, text, call, answer, index, label
-        case isCollapsed, project, title
+        case isCollapsed, project, title, agent, accountIndex
     }
 
     private enum Op: String, Codable {
@@ -221,9 +232,14 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encode(Op.setProjectCollapsed, forKey: .op)
             try c.encode(id, forKey: .id)
             try c.encode(isCollapsed, forKey: .isCollapsed)
-        case .newSession(let project):
+        case .newSession(let project, let agent, let accountIndex):
             try c.encode(Op.newSession, forKey: .op)
             try c.encode(project, forKey: .project)
+            // `encodeIfPresent`, so a plain `+` tap puts exactly the bytes on the wire it put
+            // there before this feature existed — and an older Mac decoding it sees the frame
+            // it has always seen.
+            try c.encodeIfPresent(agent, forKey: .agent)
+            try c.encodeIfPresent(accountIndex, forKey: .accountIndex)
         case .prompt(let id, let token, let text):
             try c.encode(Op.prompt, forKey: .op)
             try c.encode(id, forKey: .id)
@@ -282,7 +298,11 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 isCollapsed: try c.decode(Bool.self, forKey: .isCollapsed)
             )
         case .newSession:
-            self = .newSession(project: try c.decode(UUID.self, forKey: .project))
+            self = .newSession(
+                project: try c.decode(UUID.self, forKey: .project),
+                agent: try c.decodeIfPresent(String.self, forKey: .agent),
+                accountIndex: try c.decodeIfPresent(Int.self, forKey: .accountIndex)
+            )
         case .prompt:
             self = .prompt(
                 id: try c.decode(UUID.self, forKey: .id),
@@ -374,10 +394,14 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     /// client paging back through an hour of transcript move the resume point it hands the
     /// Mac on its next `hello`.
     case page(cid: Int, TimelinePage)
+    /// The reply to `FleetRequest.newSessionOptions`. Unsequenced for the same reason `page`
+    /// is: a menu is not fleet state, and giving it a `seq` would move the resume point a
+    /// client hands back on its next `hello`.
+    case newSessionOptions(cid: Int, WireNewSessionOptions)
 
-    enum CodingKeys: String, CodingKey { case t, seq, fleet, reason, cid, code, page }
+    enum CodingKeys: String, CodingKey { case t, seq, fleet, reason, cid, code, page, options }
 
-    private enum Tag: String, Codable { case snapshot, ack, err, page }
+    private enum Tag: String, Codable { case snapshot, ack, err, page, options }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -403,6 +427,10 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.page, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(page, forKey: .page)
+        case .newSessionOptions(let cid, let options):
+            try c.encode(Tag.options, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(options, forKey: .options)
         }
     }
 
@@ -425,6 +453,11 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             case .page:
                 self = .page(cid: try c.decode(Int.self, forKey: .cid),
                              try c.decode(TimelinePage.self, forKey: .page))
+            case .options:
+                self = .newSessionOptions(
+                    cid: try c.decode(Int.self, forKey: .cid),
+                    try c.decode(WireNewSessionOptions.self, forKey: .options)
+                )
             }
             return
         }

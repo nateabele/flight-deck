@@ -202,6 +202,48 @@ final class FleetAccountEmissionTests: XCTestCase {
                       "the project root still is — that is the client's subtitle")
     }
 
+    /// The same assertion, over the New Session menu's answer.
+    ///
+    /// **This is the test the first attempt at that feature failed, and it was right to.** The
+    /// backed-out version identified a menu row by its account UUID and sent it back on tap;
+    /// the row's identity is now the agent plus a *position*, which resolves to an account only
+    /// on the Mac. Encoded rather than inspected field by field, for the reason the snapshot
+    /// assertion above gives — it has to survive somebody adding a field to
+    /// `WireNewSessionOption`.
+    func testAnAccountsHomeNeverReachesTheNewSessionMenu() throws {
+        let account = AgentAccount(agent: .claude, displayName: "Work", home: home("work"))
+        let other = AgentAccount(agent: .claude, displayName: "Personal", home: home("personal"))
+        let preferences = PreferencesStore(persistence: nil)
+        preferences.preferences.storedAccounts = [account, other]
+
+        let agents = preferences.agentOrder(forProject: projectURL.path)
+        let entries = NewSessionAffordance.menu(
+            agents: agents, preferences: preferences.preferences,
+            resolved: preferences.resolvedAccounts(for: agents, project: projectURL.path)
+        )
+        let rows = NewSessionOptionsProjection.rows(for: entries) {
+            preferences.account(id: $0)?.displayName
+        }
+        XCTAssertFalse(rows.isEmpty, "two logins must produce a menu, or this asserts nothing")
+
+        let encoded = try XCTUnwrap(
+            String(
+                data: JSONEncoder().encode(
+                    WireNewSessionOptions(project: UUID(), options: rows)
+                ),
+                encoding: .utf8
+            )
+        ).replacingOccurrences(of: "\\/", with: "/")
+
+        for leaked in [account, other] {
+            XCTAssertFalse(encoded.contains(leaked.home.path),
+                           "a config directory is not a menu row")
+            XCTAssertFalse(encoded.contains(leaked.id.uuidString),
+                           "nor is the id that resolves to one")
+        }
+        XCTAssertTrue(encoded.contains("Work"), "the display name is what a row is for")
+    }
+
     // MARK: - Fixtures
 
     /// Discards every write, so nothing here reaches the developer's `sessions.json`.
