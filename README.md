@@ -43,6 +43,24 @@ Apple Silicon only. The build is ad-hoc signed rather than notarised, so the fir
 launch needs a right-click → Open before macOS will let it start. Latest build is on
 the [releases page](../../releases/latest).
 
+## Related work
+
+Other people building in the same neighbourhood — agent harnesses, orchestration
+surfaces, and the plumbing underneath them. Descriptions are their own.
+
+- [XHawk](https://xhawk.ai/) — multiplayer AI for human-agent work.
+- [qm](https://github.com/yc-software/qm) — a multiplayer agent harness for work.
+- [Agent Flywheel: the complete guide](https://agent-flywheel.com/complete-guide) —
+  planning, beads and agent swarms.
+- [activepieces](https://github.com/activepieces/activepieces) — AI workflow
+  automation, and roughly 400 MCP servers for agents to call.
+- [clawcodex](https://github.com/agentforce314/clawcodex) — a Claude Code rebuild in
+  Python, aimed at token efficiency.
+- [Plan for the CASS memory system](https://github.com/Dicklesworthstone/cass_memory_system/blob/main/docs/planning/PLAN_FOR_CASS_MEMORY_SYSTEM.md)
+  — a worked design doc for agent memory.
+- [local.ai](https://local.ai/nateabele)
+- [Grok Bot](https://x.ai/bot) — a new kind of colleague.
+
 ## License
 
 Copyright (c) 2026 Nate Abele. Released under the [BSD 3-Clause License](LICENSE).
