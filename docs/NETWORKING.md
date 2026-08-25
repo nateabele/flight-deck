@@ -96,10 +96,12 @@ The mechanical checklist, in the order the compiler will ask for it.
    be answered, and guessing answers the wrong question.
 3. **The reply frame**, if it is a request: a case on `ServerFrame`, a `Tag`, and no `seq`.
 4. **The client end.** `FleetConnector` holds one pending table per answer type — `pending`
-   (pages), `pendingAcks` (commands), `pendingOptions` (menu rows). They share a single `cid`
-   space, because `FleetClient.send` mints both verbs from one `nextCID`, so a number is filed in
-   at most one table and `apply` tries each in turn. A fourth table is added deliberately: add it
-   to `drainPending()` in the same commit, or a client whose socket dies waits forever.
+   (pages), `pendingAcks` (commands), `pendingOptions` (menu rows), `pendingEndpoints`
+   (`mac.endpoints` replies). They share a single `cid` space, because `FleetClient.send` mints
+   both verbs from one `nextCID`, so a number is filed in at most one table and `apply` tries
+   each in turn. Add a new table to `drainPending()` in the same commit, or a client whose
+   socket dies waits forever — `pendingEndpoints` followed that rule when it was added; see the
+   comment on it in `drainPending()`.
 5. **The Mac end.** `FleetService.onCommand` / `onRequest`. Answer synchronously if the work is
    already on the main actor; hop through a `Task` if it is file I/O, as the timeline does, and
    note that `reply` must land back on the socket's queue.
@@ -185,6 +187,48 @@ Two details of that are load-bearing:
 
 That redial is also the only moment anything preference-derived gets refreshed, since preferences
 have no push path. Hang such refreshes off snapshot arrival, which happens on every connect.
+
+### The endpoint refresh
+
+`FleetRequest.macEndpoints` is exactly that: a refresh hung off snapshot arrival rather than off
+the app-suspend redial above, so it also covers reconnects the redial never touches — a Mac
+restarting, a Wi-Fi drop and rejoin, first pairing itself — none of which need the phone app to
+have backgrounded at all. `FleetConnector` sends it on every `.snapshot` frame, which is every
+connect; `FleetService.onRequest`'s `.macEndpoints` case answers with `LocalEndpoints.routable`;
+and `adoptEndpoints` takes the answer as authoritative, keeping the address `promote()` last put
+in front when the Mac still claims it, and ignoring an empty answer outright — empty means the
+Mac could not enumerate, never that it has none, and erasing a working candidate on that strength
+would be worse than leaving the list stale.
+
+It is a request rather than a `FleetSnapshot` field for the reason "2. The snapshot must be
+reproducible from the event log" gives in general: an address changes with the network, not with
+a store mutation, so nothing ever emits a `FleetEvent` to record it — a snapshot field built from
+it would diverge from the replayed mirror on the very next connect and trip `FleetReplicator`'s
+drift assertion. `FleetService.onRequest`'s `.macEndpoints` case says exactly this at the call
+site, in case this section ever drifts from it.
+
+### Two endpoints, not more
+
+The pairing code (see "Pairing" above) now packs up to two of `LocalEndpoints`' ranked addresses
+instead of one — one that works off the LAN, one that works on it. The cap is measured, not
+chosen: at QR correction level `M`, `PairingPayload`'s packed record renders to **45 modules**
+with two endpoints, identical to what v2's one-endpoint record produced, and to **49** with
+three — which fails `PairingCodeImageTests.testThePackedPayloadProducesAMateriallySmallerQR`
+against its 0.75 threshold. Those are module *counts*, not what
+`PairingCodeImageTests.modules(of:)` returns: that helper reports the CoreImage *extent*, which
+is the module count plus a two-module quiet zone, so the same two shapes measure 47 and 51
+there. Keep the two units apart when citing this — an earlier revision of
+`PairingPayload.maxEndpoints`'s own comment conflated them and had to be corrected.
+
+`LocalEndpoints.ranked` decides which two survive by rank, not by sorting, and matches no
+interface name. `SCDynamicStore`'s `PrimaryInterface` key names whichever interface carries the
+default route — the LAN, ordinarily — and the kernel's `IFF_POINTOPOINT` flag names a tunnel;
+among tunnels, the CGNAT range `100.64.0.0/10` picks out Tailscale specifically, so a second VPN
+can still be ranked below it. The ranked list itself is built by concatenating one `filter`ed
+bucket per rank rather than by `Array.sorted(by:)`: `filter` preserves relative order by
+definition, and `sorted(by:)` promises no such thing, so ordering equal-rank candidates through
+a sort would rest on an incidental stdlib behaviour a later toolchain is free to withdraw —
+measured stable on the toolchain this was written against, which is precisely the problem.
 
 ## Concurrency
 

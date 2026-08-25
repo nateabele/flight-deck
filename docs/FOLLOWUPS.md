@@ -530,8 +530,12 @@ did not fix:
   no automated coverage and there cannot be on one machine with one network interface — the
   twelve-item checklist in [docs/MOBILE.md](MOBILE.md) is what stands in for it.
 
-- **No relay**, so reaching the Mac from off-LAN needs a VPN. Designed for as a further
-  candidate endpoint (spec §3, §12), not built in either plan.
+- **No relay**, so reaching the Mac from off-LAN still needs a VPN — that half is unchanged.
+  What changed, per `docs/superpowers/specs/2026-08-25-off-lan-endpoint-discovery.md`: the VPN
+  address is no longer merely a candidate designed for. It is packed as a second endpoint in the
+  pairing code alongside the LAN one, and refreshed on every connect over `mac.endpoints` — see
+  [docs/NETWORKING.md](NETWORKING.md), "The endpoint refresh" and "Two endpoints, not more" —
+  so a code scanned once keeps working after the tailnet address underneath it moves.
 
 - **"Neither documented fallback was needed" — WRONG, corrected 2026-08-20.** This entry
   originally claimed `sec_protocol_metadata_access_pre_shared_keys` "genuinely yields" the
