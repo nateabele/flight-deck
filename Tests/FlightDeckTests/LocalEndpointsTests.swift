@@ -50,35 +50,42 @@ final class LocalEndpointsTests: XCTestCase {
         XCTAssertEqual(ranked.count, 6)
     }
 
-    /// Forty interfaces, all landing on the same rank (broadcast, non-loopback,
-    /// non-point-to-point, and `primary` names none of them), supplied in a known order.
-    ///
-    /// `Array.sorted(by:)` documents no stability guarantee, so `ranked` puts the enumeration
-    /// offset in the sort key rather than depending on it. This fixture exists to size the
-    /// equal-rank group past the stdlib's small-partition insertion-sort fallback (~20
-    /// elements on the toolchains this was checked against). **It does not prove the offset
-    /// is load-bearing** — see `task-1-report.md` (2026-08-25 fix pass): on Swift 6.3.3
-    /// arm64, `sorted(by:)` was found to preserve input order for ties in every construction
-    /// tried, up to 100k elements across a dozen shapes, including this one, so a comparator
-    /// that dropped the offset entirely currently produces the same output here too. The
-    /// offset stays in the sort key because the API contract permits a future toolchain to
-    /// behave differently, not because this test can currently detect its removal.
-    private func manyEqualRankInterfaces() -> [LocalEndpoints.Interface] {
-        (0..<40).map { index in
-            .init(
-                name: "bridge\(index)", address: "10.0.0.\(index)",
-                isPointToPoint: false, isBroadcast: true, isLoopback: false
-            )
-        }
+    /// Equal ranks must keep enumeration order. This holds by construction — `ranked` builds
+    /// its output by filtering one rank bucket at a time and concatenating them, and `filter`
+    /// preserves relative order by definition, so there is no sort, and no incidental stdlib
+    /// behaviour, for this to rest on.
+    func testInterfacesOfEqualRankKeepTheirEnumerationOrder() {
+        let ranked = LocalEndpoints.ranked(affectedMac(), primary: "en0", port: 58625)
+        XCTAssertEqual(
+            ranked,
+            ["100.108.99.35:58625", "192.168.1.109:58625", "192.168.139.3:58625",
+             "192.168.117.0:58625", "192.168.97.0:58625", "127.0.0.1:58625"]
+        )
     }
 
-    /// Equal ranks must keep enumeration order. See `manyEqualRankInterfaces()` for why this
-    /// currently cannot be trusted as a regression guard against a comparator that drops the
-    /// offset — it still documents and checks the invariant `ranked` is meant to provide.
-    func testInterfacesOfEqualRankKeepTheirEnumerationOrder() {
-        let interfaces = manyEqualRankInterfaces()
-        let ranked = LocalEndpoints.ranked(interfaces, primary: nil, port: 58625)
-        XCTAssertEqual(ranked, interfaces.map { "\($0.address):58625" })
+    /// Every rank once: a CGNAT tunnel (0), a non-CGNAT tunnel (1), the primary interface (2),
+    /// a broadcast segment (3), and two interfaces that land on 4 for different reasons —
+    /// loopback, and "none of the above". `ranked` builds its output as one bucket per rank
+    /// from `0...lastRank`; a rank that fell outside that range would silently drop its
+    /// interface from the output rather than merely sort it last, so this pins the one new
+    /// failure mode the bucketed shape introduces.
+    func testEveryInterfaceAppearsExactlyOnceAcrossAllRanks() {
+        let interfaces: [LocalEndpoints.Interface] = [
+            .init(name: "utun7", address: "100.108.99.35", isPointToPoint: true, isBroadcast: false, isLoopback: false),
+            .init(name: "utun9", address: "10.1.2.3", isPointToPoint: true, isBroadcast: false, isLoopback: false),
+            .init(name: "en0", address: "192.168.1.109", isPointToPoint: false, isBroadcast: true, isLoopback: false),
+            .init(name: "bridge100", address: "192.168.139.3", isPointToPoint: false, isBroadcast: true, isLoopback: false),
+            .init(name: "lo0", address: "127.0.0.1", isPointToPoint: false, isBroadcast: false, isLoopback: true),
+            .init(name: "weird0", address: "203.0.113.9", isPointToPoint: false, isBroadcast: false, isLoopback: false),
+        ]
+        let ranked = LocalEndpoints.ranked(interfaces, primary: "en0", port: 58625)
+        XCTAssertEqual(ranked.count, interfaces.count)
+        for interface in interfaces {
+            XCTAssertEqual(
+                ranked.filter { $0 == "\(interface.address):58625" }.count, 1,
+                "\(interface.name) should appear exactly once"
+            )
+        }
     }
 
     /// 100.64/10, not "anything starting 100." — 100.128.0.1 is ordinary public space.

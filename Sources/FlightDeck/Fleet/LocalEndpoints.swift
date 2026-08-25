@@ -53,19 +53,27 @@ enum LocalEndpoints {
         Array(ranked.filter { !$0.hasPrefix("127.") }.prefix(limit))
     }
 
-    /// Ranks best-first. Stable within a rank.
+    /// Ranks best-first. Stable within a rank, by construction rather than by sort.
     ///
-    /// `sorted(by:)` is **not** stable in Swift, and equal ranks are the common case (three
-    /// bridges here), so the enumeration offset is part of the sort key. Without it the order
-    /// of same-rank candidates varies between runs and the pairing code stops being
-    /// reproducible for a fixed machine.
+    /// Bucketed rather than sorted, and that is the point: `Array.sorted(by:)` makes no
+    /// stability guarantee, so ordering equal-rank candidates through it would rest on an
+    /// incidental behaviour of the current stdlib. (Measured on Swift 6.3.3/arm64: it does
+    /// preserve tied order at every size and shape tried, 20 through 100,000 — which is
+    /// precisely the problem. A guarantee nothing promises is one no test can defend, and a
+    /// later toolchain is free to withdraw it silently.) `filter` preserves relative order
+    /// by definition, so concatenating one bucket per rank is stable by construction, and
+    /// there is no tiebreak key left for a refactor to "simplify" away.
     static func ranked(_ interfaces: [Interface], primary: String?, port: UInt16) -> [String] {
-        interfaces
-            .enumerated()
-            .map { (rank: rank(of: $0.element, primary: primary), offset: $0.offset, interface: $0.element) }
-            .sorted { ($0.rank, $0.offset) < ($1.rank, $1.offset) }
-            .map { "\($0.interface.address):\(port)" }
+        (0...Self.lastRank).flatMap { rank in
+            interfaces.filter { self.rank(of: $0, primary: primary) == rank }
+        }
+        .map { "\($0.address):\(port)" }
     }
+
+    /// The worst (highest) value `rank(of:primary:)` can return. Kept alongside it so the
+    /// bucket range in `ranked` and the rank scale itself cannot drift apart — a rank above
+    /// this would silently vanish from the output rather than merely sort last.
+    private static let lastRank = 4
 
     /// 0 is best. See the type's doc comment for why these two signals and not a name.
     private static func rank(of interface: Interface, primary: String?) -> Int {
