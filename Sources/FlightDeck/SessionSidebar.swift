@@ -19,13 +19,19 @@ private struct PhonePresenceBadge: View {
     /// the whole sidebar row on a display-linked schedule for a badge that is usually absent.
     @State private var pulsing = false
 
+    /// Green, not the accent colour. The accent is whatever the user picked and is already
+    /// spoken by selection and by links, so a badge wearing it reads as "selected" at a
+    /// glance. Green is the one colour in this sidebar that means *live* — the same thing the
+    /// status glyph uses for a running tab — and presence is exactly that claim.
+    private static let live = Color.green
+
     var body: some View {
         Image(systemName: "iphone.gen3")
             // `.caption2` and a semibold weight: at sidebar-row size a phone outline is mostly
             // its bezel, and a lighter stroke reads as a smudge rather than a handset.
             .font(.caption2.weight(.semibold))
-            .foregroundStyle(Color.accentColor)
-            .shadow(color: .accentColor.opacity(pulsing ? 0.9 : 0.25), radius: pulsing ? 4 : 1)
+            .foregroundStyle(Self.live)
+            .shadow(color: Self.live.opacity(pulsing ? 0.9 : 0.25), radius: pulsing ? 4 : 1)
             // A shallower scale range than a dot wants. A glyph with recognisable silhouette
             // has to stay readable AS that glyph through the whole cycle; pulsing it from 0.72
             // turns the phone into a speck at the bottom of every beat.
