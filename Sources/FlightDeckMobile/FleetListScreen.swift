@@ -14,6 +14,19 @@ struct FleetListScreen: View {
         var title: String
     }
 
+    /// The session the close confirmation is about, and its name for the prompt.
+    ///
+    /// One optional rather than an id plus a separate `Bool`, for the reason `Renaming` is
+    /// one: two pieces of state can disagree, and here the disagreement closes the wrong tab.
+    /// Carrying the title too means the prompt can name what it is about — "Close this
+    /// session?" over a list of eight of them is a question the reader cannot answer.
+    @State private var closing: Closing?
+
+    struct Closing: Identifiable {
+        let id: UUID
+        let title: String
+    }
+
 
     var body: some View {
         NavigationStack {
@@ -324,10 +337,25 @@ struct FleetListScreen: View {
                 Label("Close", systemImage: "xmark")
             }
         }
-        // Long press. A `contextMenu` rather than a second swipe action: renaming is not
-        // destructive and does not want the swipe lane's weight, and a menu leaves room for
-        // whatever else belongs on a session later.
+        // Long press. A `contextMenu` rather than more swipe actions: the swipe lane is for
+        // the one destructive verb and does not want three more, and a menu is what the Mac
+        // puts these on.
+        //
+        // **The items, their order and the divider all mirror `SessionSidebar`'s menu**, and
+        // the mirroring is the point rather than a coincidence: this is the same fleet seen
+        // from a second screen, and a reader who knows where "Mark as Unread" sits on the Mac
+        // should not have to learn a second arrangement to find it here.
         .contextMenu {
+            Button {
+                model.markUnread(session.id)
+            } label: {
+                // The dot the row itself draws when a session is unread, rather than mail's
+                // envelope: what this restores is `SessionStatusGlyph`'s fill, and naming it
+                // with a different metaphor than the thing it changes is how a menu item ends
+                // up meaning something slightly other than what it does.
+                Label("Mark as Unread", systemImage: "circle.fill")
+            }
+            Divider()
             Button {
                 // Seeded with the CURRENT title, so the common edit is a word changed rather
                 // than a name retyped.
@@ -335,6 +363,45 @@ struct FleetListScreen: View {
             } label: {
                 Label("Rename", systemImage: "pencil")
             }
+            // **Confirmed, where the swipe lane's Close is not**, and the asymmetry is
+            // deliberate rather than an inconsistency. The swipe already spends two separate
+            // gestures on the way here — `allowsFullSwipe: false` means the lane opens and
+            // then waits to be tapped — so it has the deliberateness built into the gesture.
+            // A menu item does not: it is one tap, on a control that opened under the finger
+            // that was already resting on the row. So this one asks.
+            Button(role: .destructive) {
+                closing = Closing(id: session.id, title: session.title)
+            } label: {
+                Label("Close Session", systemImage: "xmark")
+            }
+        }
+        // `item:` rather than `isPresented:` plus a separate id, for the reason the rename
+        // alert takes the same shape: the dialog cannot outlive the session it is about, so
+        // a fleet event that removes the row while the prompt is up cannot leave a Close
+        // pointed at whatever id took its place.
+        .confirmationDialog(
+            "Close “\(closing?.title ?? "")”?",
+            isPresented: Binding(
+                get: { closing != nil },
+                set: { if !$0 { closing = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Close Session", role: .destructive) {
+                if let closing { model.closeSession(closing.id) }
+                closing = nil
+            }
+            Button("Cancel", role: .cancel) { closing = nil }
+        } message: {
+            // **Recoverable, and it names where.** A close from the phone runs the same
+            // `SessionStore.closeSession` a local one does, which records the whole session —
+            // id and pinned conversation included — so the Mac's "Reopen Closed Session"
+            // rebuilds this tab *on the same conversation* rather than starting a fresh one.
+            // Saying so is the difference between a reader deciding this is reversible and a
+            // reader deciding not to risk it; saying it without naming the Mac would be a
+            // promise this screen cannot keep, because there is no reopen from here.
+            Text("The agent stops. You can bring it back with Reopen Closed Session on your "
+                 + "Mac, and it resumes this conversation.")
         }
     }
 

@@ -224,6 +224,19 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
 
     func markRead(_ id: UUID) { connector?.send(.markRead(id: id)) }
 
+    /// Put the unread mark back on a session the reader wants to return to.
+    ///
+    /// The counterpart to `markRead`, and it exists because unread is one fleet-wide fact
+    /// rather than a per-client one (spec §8): a session the phone opened is read on the Mac
+    /// too, so the phone has to be able to undo that or the mark is a one-way door from
+    /// whichever screen happened to see it first.
+    ///
+    /// Fire and forget in both directions, exactly like `markRead`: the command is a no-op
+    /// while disconnected, and the row does not change until the Mac echoes an
+    /// `unreadChanged` back. Nothing here sets it optimistically — a dot that appears and
+    /// then vanishes when the Mac disagrees is worse than one that takes a moment.
+    func markUnread(_ id: UUID) { connector?.send(.markUnread(id: id)) }
+
     /// Which session this phone is looking at, or nil on leaving. Fire-and-forget: presence
     /// is cosmetic, and a dropped report costs a badge rather than correctness — the Mac
     /// prunes on disconnect regardless.
