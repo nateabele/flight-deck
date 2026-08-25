@@ -379,6 +379,40 @@ page.
     card from the feed rather than transmitting it, and the row is what makes an answered
     question readable at all. Nobody has decided whether it reads as duplication or as context;
     this item is where that gets decided, by looking.
+51. **Highlight a sentence in an answer, and read the menu.** Copy and **Reply**, with Reply
+    at the end of the bar. Everything about this is unreachable from a test in this process:
+    `TimelineSegmentTests` pins where a body is split and `TimelineReplyTests` pins what lands
+    in the box, and neither can raise an edit menu. Check it on the reader's own turns too —
+    both kinds of prose are selectable, deliberately.
+52. **Drag a selection past the end of a message.** It stops at the message's edge, because
+    each prose run is its own text view. This is the one place the design is visibly narrower
+    than a web page, and the item exists so somebody decides by looking whether that reads as
+    a limit or as nothing at all.
+53. **Start a drag on prose and scroll the conversation.** The classic failure of a text view
+    inside a `List`: the text view eats the pan and the list stops moving. It should scroll.
+    Then long-press a fenced code block — that still copies the block, not the message.
+54. **Reply with something already in the box.** The quotation appends under what is there,
+    two newlines below it, and the keyboard comes up with the caret in the space it made. A
+    second Reply stacks rather than replacing. Then send it and watch the field clear —
+    including the deferred second clear, which is a real repaint bug and not superstition.
+55. **Compare a long answer against the Mac.** Prose is drawn by a second renderer now
+    (`TimelineProseText`, `TimelineMarkdown.theme` as attributes), and the two were compared
+    offscreen at 370pt in both themes — they matched line for line, 250pt against 246.3. What
+    that comparison could not cover is Dynamic Type: run the text size up to
+    `.accessibilityExtraExtraExtraLarge` and check headings still grow with the paragraphs.
+56. **Find a message past the ceiling and read the More link.** An unadorned accent word on
+    its own line, in the prose's left margin — no chevron. Tap it, then find Less in the same
+    place relative to the text. Then find a message that *ends* on a long code block: it draws
+    the block whole and offers **no** More at all, which is the case the clamp reports rather
+    than infers.
+57. **Open the `+` menu with two logins for one agent.** One row per agent in the sidebar's
+    order, a submenu where an agent has more than one account, a tick on the default — and the
+    tick only inside a submenu. Sign an account in on the Mac, background the phone, come back
+    and open it again: the new account is there. That last step is the only way the menu is
+    ever refreshed, since preferences emit no fleet events and there is nothing to push.
+58. **Point the phone at a Mac that predates the menu.** The `+` still offers one "New
+    session" row and still works. Then sign every account out on a current Mac: that project's
+    `+` greys out instead, because an empty answer and no answer mean different things.
 
 ## A second checklist: the iOS plumbing
 
