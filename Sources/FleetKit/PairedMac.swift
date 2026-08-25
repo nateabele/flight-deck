@@ -5,15 +5,16 @@ public struct PairedMac: Codable, Equatable, Sendable {
     public var key: FleetDeviceKey
     public var macName: String
     public var serviceName: String
-    /// Every REMEMBERED address, best-first — seeded once from the pairing payload's QR and
-    /// never grown after that. `FleetConnector.promote` only REORDERS this list, moving
-    /// whichever address just won a race to the front so the next launch connects on its
-    /// first attempt; it never adds an address that was not already here. Following a Mac
-    /// that changed network is not this list's job at all — it is done entirely by Bonjour
-    /// rediscovery, which is deliberately absent from this list (Bonjour is retried on every
-    /// launch rather than remembered — see `FleetConnector.Candidate.isRemembered`), so a
-    /// Mac reachable only by a new address is found by the browser, not by anything written
-    /// here.
+    /// Every REMEMBERED address, best-first — seeded from the pairing payload's QR, then
+    /// replaced wholesale whenever `FleetRequest.macEndpoints` answers, which is on every
+    /// connect. `FleetConnector.promote` still only REORDERS, moving whichever address won a
+    /// race to the front; `FleetConnector.adoptEndpoints` is what changes the membership, and
+    /// it keeps the promoted address in front when the Mac still claims it.
+    ///
+    /// Bonjour rediscovery remains deliberately absent from this list (it is retried on every
+    /// launch rather than remembered — see `FleetConnector.Candidate.isRemembered`), so a Mac
+    /// reachable only by a brand-new address on a LAN is still found by the browser. What the
+    /// refresh adds is the off-LAN case, where there is no browser to help.
     public var endpoints: [String]
     /// The highest sequence this phone has applied. Persisted so a relaunch resumes instead
     /// of re-downloading the fleet.

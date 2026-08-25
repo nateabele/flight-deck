@@ -56,6 +56,15 @@ final class FleetConnectorRequestTests: XCTestCase {
         // where the test put it — `adopt(_:)` sets it absolutely — and any later movement is
         // the page's doing and nothing else's.
         server.onHello = { _, _ in [.snapshot(seq: lastSeq, fleet: .empty, reason: .initial)] }
+        // Every snapshot makes the connector ask `FleetRequest.macEndpoints` — see
+        // `FleetConnector.apply`'s `.snapshot` arm — before this file's own request is ever
+        // sent. Every test here is about `.timeline`, not that refresh, so it is answered
+        // once, here, rather than making every test's own `onRequest` filter it out.
+        let onRequest = server.onRequest
+        server.onRequest = { attachment, cid, request, reply in
+            if case .macEndpoints = request { return reply(.macEndpoints(cid: cid, [])) }
+            onRequest?(attachment, cid, request, reply)
+        }
         let port = try await server.start(keys: [key], port: nil)
         let mac = PairedMac(
             key: key, macName: "Test", serviceName: "none-\(UUID().uuidString)",
@@ -416,7 +425,8 @@ final class FleetConnectorRequestTests: XCTestCase {
         let reconnected = expectation(description: "reconnected")
         connector.onState = { if case .connected = $0 { reconnected.fulfill() } }
         let expected = page("after the reconnect")
-        server.onRequest = { _, cid, _, reply in
+        server.onRequest = { _, cid, request, reply in
+            if case .macEndpoints = request { return reply(.macEndpoints(cid: cid, [])) }
             cids.append(cid)
             reply(.page(cid: cid, expected))
         }
@@ -425,7 +435,9 @@ final class FleetConnectorRequestTests: XCTestCase {
 
         connector.request(fetch(.after(20))) { results["after"] = $0; answered.fulfill() }
         await fulfillment(of: [answered], timeout: 10)
-        XCTAssertEqual(cids, [1, 1], "the second connection must genuinely reuse the number")
+        // `2`, not `1`: the automatic endpoint refresh (`FleetConnector.apply`'s `.snapshot`
+        // arm) claims cid 1 on every connection before this file's own request is ever sent.
+        XCTAssertEqual(cids, [2, 2], "the second connection must genuinely reuse the number")
         XCTAssertEqual(results, [
             "before": .failure(.disconnected), "after": .success(expected)
         ])

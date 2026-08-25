@@ -114,6 +114,10 @@ public final class FleetConnector: @unchecked Sendable {
     /// One `cid` space still, so a number is filed in at most one of the three and `apply` can
     /// try each in turn. Drained with the others.
     private var pendingOptions: [Int: (Result<WireNewSessionOptions, FleetRequestError>) -> Void] = [:]
+    /// A fourth answer type, on the same reasoning `pendingAcks` and `pendingOptions` give:
+    /// one table per answer shape, all four sharing the single `cid` space `FleetClient.send`
+    /// mints from, so a number is filed in at most one and `apply` tries each in turn.
+    private var pendingEndpoints: [Int: (Result<[String], FleetRequestError>) -> Void] = [:]
     private var browser: NWBrowser?
     private var fleet = FleetSnapshot.empty
     private var attempt = 0
@@ -237,6 +241,51 @@ public final class FleetConnector: @unchecked Sendable {
         let cid = winner.send(FleetRequest.newSessionOptions(project: project))
         guard cid != 0 else { return completion(.failure(.disconnected)) }
         pendingOptions[cid] = completion
+    }
+
+    /// Ask the Mac which addresses it can currently be reached on. Same contract as
+    /// `request(_:then:)` — exactly one answer, `.disconnected` synchronously when there is
+    /// nothing to ask.
+    ///
+    /// The answer is adopted by `adoptEndpoints` before the completion runs, so a caller that
+    /// only wants the refresh can pass an empty closure and ignore the value.
+    public func requestMacEndpoints(
+        then completion: @escaping (Result<[String], FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.macEndpoints)
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingEndpoints[cid] = completion
+    }
+
+    private func resolveEndpoints(
+        _ cid: Int, with result: Result<[String], FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingEndpoints.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
+    /// Takes the Mac's list as authoritative for membership, keeping the promoted address in
+    /// front when the Mac still claims it.
+    private func adoptEndpoints(_ list: [String]) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        // Empty means "this Mac could not enumerate", never "this Mac has no addresses" — we
+        // are reading the frame over one of them. Erasing a working candidate on the strength
+        // of an empty answer is the one outcome worse than a stale list.
+        guard !list.isEmpty else { return }
+        var next = list
+        // `promote()` puts whichever address last won a race at the front. Preserve that
+        // across a refresh; drop it when the Mac no longer claims it, which is precisely the
+        // stale candidate this request exists to remove.
+        if let promoted = mac.endpoints.first, let index = next.firstIndex(of: promoted) {
+            next.remove(at: index)
+            next.insert(promoted, at: 0)
+        }
+        guard next != mac.endpoints else { return }
+        mac.endpoints = next
+        try? store.save(mac)
     }
 
     /// Resolves one outstanding request, or does nothing if nothing is waiting on that `cid`.
@@ -395,6 +444,11 @@ public final class FleetConnector: @unchecked Sendable {
         case .snapshot(let seq, let snapshot, _):
             fleet = snapshot
             adopt(seq)
+            // **Every snapshot, which is every connect.** Addresses have no push path — the
+            // network emits no fleet events — so this is the moment they get refreshed, the
+            // same hook the New Session menu hangs off on the phone. The answer is adopted in
+            // the reply arm below; nothing here needs the value.
+            requestMacEndpoints { _ in }
         case .event(let seq, let event):
             fleet.apply(event)
             advance(to: seq)
@@ -414,14 +468,16 @@ public final class FleetConnector: @unchecked Sendable {
             // state and must not move the resume point.
             resolveOptions(cid, with: .success(options))
             return
-        case .macEndpoints:
-            // Minimal arm to keep this switch exhaustive. Task 4 replaces this with the real
-            // handling: adopting the addresses and resolving the pending request.
+        case .macEndpoints(let cid, let list):
+            // Unsequenced, exactly like `page` and `newSessionOptions` and for the same
+            // reason — addresses are not fleet state and must not move the resume point.
+            adoptEndpoints(list)
+            resolveEndpoints(cid, with: .success(list))
             return
         case .err(let cid, let code):
-            // Commands first, then requests. The two tables share one `cid` space
-            // (`FleetClient.nextCID` mints for both), so a number is in at most one of them
-            // and the order cannot cross an answer — it is stated so a future third table is
+            // Commands first, then requests. The tables share one `cid` space
+            // (`FleetClient.nextCID` mints for all of them), so a number is in at most one of
+            // them and the order cannot cross an answer — it is stated so a future table is
             // added deliberately rather than by accident.
             //
             // `code` is carried through verbatim rather than interpreted: `unhandled` (no
@@ -430,6 +486,10 @@ public final class FleetConnector: @unchecked Sendable {
             if resolveAck(cid, with: .failure(.server(code: code))) { return }
             if pendingOptions[cid] != nil {
                 resolveOptions(cid, with: .failure(.server(code: code)))
+                return
+            }
+            if pendingEndpoints[cid] != nil {
+                resolveEndpoints(cid, with: .failure(.server(code: code)))
                 return
             }
             resolve(cid, with: .failure(.server(code: code)))
@@ -597,6 +657,12 @@ public final class FleetConnector: @unchecked Sendable {
         let outstandingOptions = pendingOptions
         pendingOptions.removeAll()
         for completion in outstandingOptions.values { completion(.failure(.disconnected)) }
+        // And the endpoint refresh. Added the moment the table was, per the rule in
+        // docs/NETWORKING.md: a client whose socket dies with a request outstanding waits
+        // forever otherwise.
+        let outstandingEndpoints = pendingEndpoints
+        pendingEndpoints.removeAll()
+        for completion in outstandingEndpoints.values { completion(.failure(.disconnected)) }
     }
 
     private func report(_ state: State) { onState?(state) }
