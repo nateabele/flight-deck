@@ -46,10 +46,17 @@ final class TerminalSmokeTests: XCTestCase {
 
     /// macOS names the Settings window inconsistently across releases ("Preferences" on
     /// some, SwiftUI's generated "FlightDeck Settings" on others), so it is located
-    /// defensively by content — the window whose descendants include the Claude tab
+    /// defensively by content — the window whose descendants include the Agents tab
     /// button — rather than by a hard-coded title.
+    ///
+    /// Locating by content buys release-independence at the cost of a coupling that is easy to
+    /// miss: this anchor is a *tab title*, so renaming a tab silently turns every Preferences
+    /// assertion in this file into "the Preferences window did not open". That is exactly what
+    /// the "Claude" -> "Agents" rename did (the single Claude tab became the reorderable agent
+    /// registry), and the misleading message is why it read as a window bug rather than a
+    /// locator bug. If a tab is renamed again, this line is the first thing to change.
     private func preferencesWindow(_ app: XCUIApplication) -> XCUIElement {
-        app.windows.containing(.button, identifier: "Claude").firstMatch
+        app.windows.containing(.button, identifier: "Agents").firstMatch
     }
 
     /// The one behaviour that earns its own launch.
@@ -334,10 +341,21 @@ final class TerminalSmokeTests: XCTestCase {
             )
         }
 
-        XCTContext.runActivity(named: "sidebar button offers New Session when a session exists") { _ in
+        XCTContext.runActivity(named: "sidebar button offers a New Session for the default agent") { _ in
             let button = app.buttons["new-session"]
             XCTAssertTrue(button.waitForExistence(timeout: 5))
-            XCTAssertTrue(button.label.contains("New Session"), "got: \(button.label)")
+            // The label is agent-specific and live: `NewSessionAffordance.resolve` renders
+            // "New <Agent> Session" for the slot the held modifiers select, re-labelling to the
+            // next agent the instant ⇧ goes down on the way to ⌘⇧N. Unmodified, it names the
+            // first agent in this project's order, and with `-FlightDeckResetState` there are no
+            // stored preferences — so the order is `Preferences.defaultAgents`, whose first
+            // entry is `.claude` (`displayName` "Claude").
+            //
+            // Asserted whole rather than as a `contains("New Session")` substring, which is what
+            // this used to do: that spelling passes for "New Session" and fails for every
+            // agent-labelled variant, so it broke the moment the label went live and told us
+            // only that *something* differed.
+            XCTAssertEqual(button.label, "New Claude Session", "got: \(button.label)")
         }
 
         // New Window is the item `WindowGroup` used to contribute, and it is what was
@@ -347,7 +365,17 @@ final class TerminalSmokeTests: XCTestCase {
             let file = app.menuBarItems["File"]
             XCTAssertTrue(file.waitForExistence(timeout: 5))
             file.click()
-            XCTAssertTrue(app.menuItems["New Session"].waitForExistence(timeout: 5))
+            // One entry per agent in agent order, not a single "New Session" — `SessionCommands`
+            // splits them so two agents can never contribute two items with the same title.
+            // An agent with 2+ accounts renders as a submenu instead of a flat row, but the
+            // parent item carries the same title either way, so this holds for both shapes.
+            XCTAssertTrue(app.menuItems["New Claude Session"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.menuItems["New Codex Session"].exists)
+            XCTAssertFalse(
+                app.menuItems["New Session"].exists,
+                "the agent-less item is what the per-agent split replaced; two agents must not "
+                + "both answer to one title"
+            )
             XCTAssertTrue(app.menuItems["Add Project…"].exists)
             XCTAssertFalse(app.menuItems["New Window"].exists, "WindowGroup's New Window should be gone")
             app.typeKey(.escape, modifierFlags: [])
@@ -862,21 +890,28 @@ final class TerminalSmokeTests: XCTestCase {
             XCTAssertTrue(window.exists)
         }
 
-        // Preferences (⌘,) opens a separate window whose three tabs are wired to the flag
-        // catalog. The window is located by `preferencesWindow(_:)` rather than by title —
-        // see that helper's doc comment for why.
-        XCTContext.runActivity(named: "⌘, opens Preferences with three tabs") { _ in
+        // Preferences (⌘,) opens a separate window whose tabs are wired to the flag catalog.
+        // The window is located by `preferencesWindow(_:)` rather than by title — see that
+        // helper's doc comment for why, and for the coupling that costs.
+        XCTContext.runActivity(named: "⌘, opens Preferences with its four tabs") { _ in
             app.typeKey(",", modifierFlags: .command)
             let prefs = preferencesWindow(app)
             XCTAssertTrue(prefs.waitForExistence(timeout: 5), "Preferences window did not open")
-            XCTAssertTrue(prefs.buttons["Claude"].exists)
+            // Agents replaced the old single-agent Claude tab; Tools arrived with the external
+            // tools pane. Asserted by name so a renamed or dropped tab fails here — where the
+            // message names the tab — rather than downstream as a missing window.
+            XCTAssertTrue(prefs.buttons["Agents"].exists)
             XCTAssertTrue(prefs.buttons["Projects"].exists)
             XCTAssertTrue(prefs.buttons["Shell & Environment"].exists)
+            XCTAssertTrue(prefs.buttons["Tools"].exists)
         }
 
         XCTContext.runActivity(named: "toggling a control updates the command field") { _ in
             let prefs = preferencesWindow(app)
-            prefs.buttons["Claude"].click()
+            // The agent flag editor lives behind the Agents tab now. No row click is needed to
+            // reach Claude's: `AgentsSettingsTab` renders `agents.first` when its list has no
+            // selection yet, and `Preferences.defaultAgents` puts `.claude` first.
+            prefs.buttons["Agents"].click()
             let field = prefs.textViews["command-field"]
             XCTAssertTrue(field.waitForExistence(timeout: 5))
             XCTAssertFalse((field.value as? String ?? "").contains("--verbose"))
