@@ -398,10 +398,16 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     /// is: a menu is not fleet state, and giving it a `seq` would move the resume point a
     /// client hands back on its next `hello`.
     case newSessionOptions(cid: Int, WireNewSessionOptions)
+    /// The reply to `FleetRequest.macEndpoints`. Unsequenced for the same reason `page` and
+    /// `newSessionOptions` are: a list of addresses is not fleet state, and giving it a `seq`
+    /// would move the resume point a client hands back on its next `hello`.
+    case macEndpoints(cid: Int, [String])
 
-    enum CodingKeys: String, CodingKey { case t, seq, fleet, reason, cid, code, page, options }
+    enum CodingKeys: String, CodingKey {
+        case t, seq, fleet, reason, cid, code, page, options, endpoints
+    }
 
-    private enum Tag: String, Codable { case snapshot, ack, err, page, options }
+    private enum Tag: String, Codable { case snapshot, ack, err, page, options, endpoints }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -431,6 +437,10 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.options, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(options, forKey: .options)
+        case .macEndpoints(let cid, let list):
+            try c.encode(Tag.endpoints, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(list, forKey: .endpoints)
         }
     }
 
@@ -457,6 +467,11 @@ public enum ServerFrame: Codable, Equatable, Sendable {
                 self = .newSessionOptions(
                     cid: try c.decode(Int.self, forKey: .cid),
                     try c.decode(WireNewSessionOptions.self, forKey: .options)
+                )
+            case .endpoints:
+                self = .macEndpoints(
+                    cid: try c.decode(Int.self, forKey: .cid),
+                    try c.decode([String].self, forKey: .endpoints)
                 )
             }
             return

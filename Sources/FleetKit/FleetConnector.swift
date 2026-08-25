@@ -414,6 +414,10 @@ public final class FleetConnector: @unchecked Sendable {
             // state and must not move the resume point.
             resolveOptions(cid, with: .success(options))
             return
+        case .macEndpoints:
+            // Minimal arm to keep this switch exhaustive. Task 4 replaces this with the real
+            // handling: adopting the addresses and resolving the pending request.
+            return
         case .err(let cid, let code):
             // Commands first, then requests. The two tables share one `cid` space
             // (`FleetClient.nextCID` mints for both), so a number is in at most one of them

@@ -153,11 +153,21 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// out of the log.
     case newSessionOptions(project: UUID)
 
+    /// Every address this Mac can currently be reached on, best-first.
+    ///
+    /// **A request rather than snapshot state**, for the reason `newSessionOptions` records:
+    /// addresses come from the network, the network emits no fleet events, and a snapshot
+    /// that changes with nothing recorded is what `FleetReplicator`'s drift check exists to
+    /// catch. It is also what the pairing code cannot do on its own — a QR is scanned once
+    /// and its addresses are true only on the day it was drawn.
+    case macEndpoints
+
     enum CodingKeys: String, CodingKey { case op, session, anchor, cursor, limit, project }
 
     private enum Op: String, Codable {
         case timeline = "timeline.page"
         case newSessionOptions = "session.newOptions"
+        case macEndpoints = "mac.endpoints"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -174,6 +184,8 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case .newSessionOptions(let project):
             try c.encode(Op.newSessionOptions, forKey: .op)
             try c.encode(project, forKey: .project)
+        case .macEndpoints:
+            try c.encode(Op.macEndpoints, forKey: .op)
         }
     }
 
@@ -200,6 +212,8 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             )
         case .newSessionOptions:
             self = .newSessionOptions(project: try c.decode(UUID.self, forKey: .project))
+        case .macEndpoints:
+            self = .macEndpoints
         }
     }
 }
