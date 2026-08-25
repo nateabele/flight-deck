@@ -35,6 +35,60 @@ final class SessionRenameTests: XCTestCase {
         XCTAssertEqual(store.title(of: id), "my session")
     }
 
+    /// **A rename to the name it already has does nothing at all.**
+    ///
+    /// Everything past the guard is observable: a `.renamed` event to every paired phone, a
+    /// `persist()`, and — for claude — a rename **typed into the live pty**. So re-submitting
+    /// the current name is not merely wasted work, it interrupts a running agent to tell it
+    /// something it already knows. The sidebar seeds its editor with the current title and the
+    /// phone's alert does too, so "open the rename and press Return" is the ordinary way to
+    /// reach this, not a corner case.
+    ///
+    /// The injector is the assertion rather than the title, because the title is what a
+    /// no-op cannot change either way: only the spy can tell "left alone" apart from
+    /// "rewritten with the same string".
+    func testRenamingToTheNameItAlreadyHasTypesNothingIntoTheAgent() {
+        let (store, spy, id) = makeStore()
+        store.rename(id, to: "same name")
+        XCTAssertEqual(store.title(of: id), "same name", "the premise: that is its name now")
+        spy.events.removeAll()
+
+        let accepted = store.rename(id, to: "same name")
+
+        XCTAssertTrue(accepted,
+                      "false is the store's \"this title is unusable\" answer, which "
+                          + "FleetService turns into a rejected_title error on the phone — "
+                          + "and the session has exactly the name that was asked for")
+        XCTAssertEqual(spy.events, [], "nothing was typed at the agent")
+    }
+
+    /// Compared AFTER sanitising, so a title that only differs by what the agent's own rule
+    /// strips is the same title. Submitting "same name " over "same name" looks like a no-op
+    /// to the person doing it, and a guard that compared the raw string would disagree with
+    /// them — and then type into the pty to prove it.
+    func testATitleThatOnlyDiffersBeforeSanitisingIsStillANoOp() {
+        let (store, spy, id) = makeStore()
+        store.rename(id, to: "same name")
+        spy.events.removeAll()
+
+        XCTAssertTrue(store.rename(id, to: "  same name  "))
+
+        XCTAssertEqual(store.title(of: id), "same name")
+        XCTAssertEqual(spy.events, [], "nothing was typed at the agent")
+    }
+
+    /// The guard must not swallow a real rename that merely starts from the same session.
+    func testAGenuineRenameStillReachesTheAgent() {
+        let (store, spy, id) = makeStore()
+        store.rename(id, to: "first")
+        spy.events.removeAll()
+
+        XCTAssertTrue(store.rename(id, to: "second"))
+
+        XCTAssertEqual(store.title(of: id), "second")
+        XCTAssertFalse(spy.events.isEmpty, "a changed name is still typed at the agent")
+    }
+
     /// The sidebar is authoritative and updates even when the injection cannot run, so a
     /// deferred rename is never a lost rename.
     func testTitleUpdatesEvenWhenInjectionIsDeferred() {

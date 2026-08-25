@@ -2760,6 +2760,25 @@ final class SessionStore: ObservableObject {
               let name = agent(of: id)?.sanitizedTitle(newTitle)
         else { return false }
 
+        // **Already called that, so stop here.** Everything below this line is observable: a
+        // `.renamed` event to every paired phone, a `persist()`, and — for claude — a rename
+        // TYPED INTO THE LIVE PTY. Re-sending the current name is not merely wasted work, it
+        // interrupts a running agent to tell it something it already knows, and the injector
+        // may defer it behind a busy turn or a multi-row draft first.
+        //
+        // Reached by the ordinary gesture rather than by a corner case: both editors seed
+        // themselves with the CURRENT title — `SessionSidebar.beginRename` and the phone's
+        // rename alert — so opening one and pressing Return without typing lands exactly here.
+        //
+        // Compared AFTER sanitising, so a title differing only by what this agent's own rule
+        // strips is the same title. Comparing the raw string would disagree with the person
+        // who typed a trailing space, and then type at the pty to prove the point.
+        //
+        // `true`, not `false`: false is this method's "that title is unusable" answer, which
+        // `FleetService` turns into a `rejected_title` error on the phone. The session has
+        // exactly the name the caller asked for, which is acceptance by any reading.
+        guard repos[at.repo].sessions[at.session].title != name else { return true }
+
         repos[at.repo].sessions[at.session].title = name
         emit(.renamed(id: id, title: name, origin: .user))
         persist()
