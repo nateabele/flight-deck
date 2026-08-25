@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flight Deck — an orchestration-native terminal for macOS</title>
+<meta name="description" content="Run many coding agents across repos in one window. Live status for every session, context you own and can inspect, and a real terminal underneath.">
+
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flightdeckapp.dev/">
+<meta property="og:title" content="Flight Deck — an orchestration-native terminal for macOS">
+<meta property="og:description" content="Run many coding agents across repos in one window. Live status for every session, context you own and can inspect, and a real terminal underneath.">
+<meta property="og:image" content="https://flightdeckapp.dev/assets/icon-512.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#070b14">
+
+<link rel="icon" href="assets/favicon-64.png" sizes="64x64" type="image/png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<link rel="canonical" href="https://flightdeckapp.dev/">
+<link rel="stylesheet" href="styles.css">
+<!-- Marks that scripting is live, before first paint. The demo's hidden-until-
+     launched state is scoped to html.js, so without this the window would flash
+     into view and then be hidden again once demo.js ran. demo.js removes the
+     class again if it can't wire the launch up, so nothing stays hidden. -->
+<script>document.documentElement.classList.add('js');</script>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+<div class="aurora" aria-hidden="true"></div>
+
+<main id="main">
+
+<!-- ====================================================================== -->
+<!-- Hero                                                                   -->
+<!-- ====================================================================== -->
+<header class="hero" id="top">
+  <div class="wrap">
+    <h1>Every agent, <span class="grad">one deck.</span></h1>
+
+    <!-- Icon + label as Finder draws an app. Hover selects it the way Finder
+         does: the translucent rounded highlight behind the icon and the accent
+         pill behind the name appear together, never one without the other. -->
+    <div class="finder-item" id="fd-app" tabindex="0" role="button"
+         aria-label="Flight Deck.app — open to see it running"
+         title="Double-click to open">
+      <span class="finder-icon">
+        <img class="hero-icon" src="assets/icon-512.png" alt="Flight Deck app icon" width="116" height="116">
+      </span>
+      <span class="finder-label">Flight Deck.app</span>
+    </div>
+
+    <p class="hero-sub">
+      Flight Deck is a Mac-native terminal for orchestrating <em>lots</em> of agents.<br />Run a fleet
+      across every project you're building. See at a glance<br />what's
+      <span class="spinner" aria-hidden="true"><i style="transform:rotate(0deg);opacity:.22"></i><i style="transform:rotate(45deg);opacity:.32"></i><i style="transform:rotate(90deg);opacity:.42"></i><i style="transform:rotate(135deg);opacity:.52"></i><i style="transform:rotate(180deg);opacity:.62"></i><i style="transform:rotate(225deg);opacity:.72"></i><i style="transform:rotate(270deg);opacity:.82"></i><i style="transform:rotate(315deg);opacity:.92"></i></span>running, and what's
+      <!-- status-carousel.js enhances this into a rotating slot through the
+           app's other session states. Left as plain "blocked" markup here so
+           the sentence still reads correctly with JS off or motion reduced. -->
+      <span id="fd-status-carousel">
+        <svg class="inline-glyph glyph-waiting" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <mask id="heroQm" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
+            <rect width="16" height="16" fill="white"/>
+            <path d="M6.3 6.35a1.75 1.75 0 1 1 2.35 1.63c-.52.24-.72.6-.72 1.06v.28" stroke="black" stroke-width="1.3" stroke-linecap="round" fill="none"/>
+            <circle cx="8" cy="11.15" r="0.8" fill="black"/>
+          </mask>
+          <circle cx="8" cy="8" r="5.6" fill="currentColor" mask="url(#heroQm)"/>
+        </svg>blocked</span>.
+    </p>
+
+    <div class="hero-cta">
+      <!-- PLACEHOLDER: point at the real release artifact once shipping is set up -->
+      <a class="btn btn-primary" href="/download/FlightDeck-latest.dmg">Download for macOS</a>
+      <!-- href is the no-JS fallback; demo.js intercepts the click and reveals
+           the demo outright rather than playing the launch sequence. -->
+      <a class="btn btn-secondary" href="#demo">See what it does</a>
+    </div>
+
+    <p class="hero-note">Apple silicon · macOS 14 Sonoma or later · Works with Claude Code</p>
+  </div>
+</header>
+
+<!-- ====================================================================== -->
+<!-- Interactive demo — autoplays through its beats on a timer.             -->
+<!-- Pauses on hover, on keyboard focus, and whenever it's off-screen.      -->
+<!-- ====================================================================== -->
+<section class="demo" id="demo" aria-labelledby="demo-h">
+  <h2 id="demo-h" style="position:absolute;left:-9999px">Interactive demo</h2>
+  <div class="demo-inner">
+
+    <div class="window" role="img" aria-label="A replica of the Flight Deck window: a project and session sidebar on the left with live status glyphs, and a terminal running a coding agent on the right.">
+      <div class="titlebar">
+        <div class="lights">
+          <span class="light r"></span><span class="light y"></span><span class="light g"></span>
+        </div>
+        <div class="titlebar-title">Flight Deck</div>
+      </div>
+
+      <div class="split">
+        <aside class="sidebar">
+          <!-- First-paint fallback: demo.js replaces this with beat 1 on load.
+               Present so the window is never blank before the script runs, and
+               so the demo still reads as a screenshot with JS disabled. -->
+          <div class="sidebar-list" id="fd-list">
+            <div class="row row-project">
+              <svg class="chev" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.6 10.4 8 6 12.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span class="proj-name">flight-deck</span>
+            </div>
+            <div class="row row-session selected">
+              <span class="row-title">refactor-sidebar</span>
+              <span class="trail">
+                <span class="spinner" aria-hidden="true"><i style="transform:rotate(0deg);opacity:.22"></i><i style="transform:rotate(45deg);opacity:.32"></i><i style="transform:rotate(90deg);opacity:.42"></i><i style="transform:rotate(135deg);opacity:.52"></i><i style="transform:rotate(180deg);opacity:.62"></i><i style="transform:rotate(225deg);opacity:.72"></i><i style="transform:rotate(270deg);opacity:.82"></i><i style="transform:rotate(315deg);opacity:.92"></i></span>
+              </span>
+            </div>
+          </div>
+          <div class="sidebar-foot">
+            <button class="new-btn" type="button" tabindex="-1" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="none"><path d="M8 3.4v9.2M3.4 8h9.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+              <span id="fd-newbtn-label">New Session</span>
+              <span class="kbd">⌘N</span>
+            </button>
+          </div>
+        </aside>
+
+        <div class="terminal" id="fd-term">
+          <div class="term-body">
+            <span class="l"><span class="c-mag">●</span> <span class="c-white">Read</span><span class="c-dim">(Sources/FlightDeck/SessionSidebar.swift)</span></span>
+            <span class="l">  <span class="c-dim">⎿  Read 212 lines</span></span>
+          </div>
+          <div class="inputbox"><span class="marker">❯</span><span class="caret"></span></div>
+          <div class="term-status"><span>refactor-sidebar</span><span>~/Projects/flight-deck</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="demo-caption">
+      <p id="fd-caption">Open a project and start a session.</p>
+    </div>
+
+    <div class="demo-rail" id="fd-rail" role="tablist" aria-label="Demo steps"></div>
+
+  </div>
+
+  <!-- The demo's sticky hold, as real height. A sticky box is constrained to
+       its containing block's *content* box, so padding on .demo buys no hold
+       time at all — this spacer is the 160px it stays pinned for. -->
+  <div class="demo-track" aria-hidden="true"></div>
+</section>
+
+<!-- ====================================================================== -->
+<!-- Features                                                               -->
+<!-- ====================================================================== -->
+<section class="section" id="features">
+  <div class="wrap">
+
+    <div class="section-head reveal">
+      <span class="kicker">What you get</span>
+      <h2>Four things change when the fleet gets big</h2>
+      <p>
+        Running one agent is a terminal problem. Running twelve is an attention problem,
+        a continuity problem, and a context problem. Flight Deck is built around those.
+      </p>
+      <div class="legend">
+        <span class="tag tag-shipped">Shipped</span> working today
+        <span class="tag tag-building">Building</span> in progress
+        <span class="tag tag-planned">Planned</span> designed, not yet built
+      </div>
+    </div>
+
+    <div class="outcomes">
+
+      <!-- 01 ------------------------------------------------------------- -->
+      <article class="outcome reveal">
+        <div class="outcome-head">
+          <div class="outcome-num" aria-hidden="true"></div>
+          <div class="outcome-title">
+            <h3>Run a fleet, not a tab</h3>
+            <p class="lede">
+              One window holds every agent you have running, grouped the way you already
+              think about work: session inside project. You stop being the router between
+              a dozen terminal windows you can't tell apart.
+            </p>
+          </div>
+        </div>
+        <ol class="capabilities">
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Every agent in one place</h4>
+              <p>Sessions nest under the project they belong to. Add a project by dropping a folder on the sidebar.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Real terminals, not log viewers</h4>
+              <p>Each session is a genuine PTY rendered by the Ghostty engine on Metal — full escape-sequence fidelity, real scrollback, real input. Your agent behaves exactly as it does in a terminal, because it is in one.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Move at keyboard speed</h4>
+              <p>⌘N opens a session, ⌘⇧[ and ⌘⇧] walk the whole fleet across project boundaries, ⌘W closes the session rather than the window.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Arranged the way you think</h4>
+              <p>Drag sessions between projects and reorder projects themselves with the same gesture. Collapse the ones you're not watching.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Isolation when you want it</h4>
+              <p>Opt a session into its own git worktree and branch, review its diffs in place, then merge or discard — so parallel agents only collide where you let them.</p>
+            </div>
+            <span class="tag tag-planned">Planned</span>
+          </li>
+        </ol>
+      </article>
+
+      <!-- 02 ------------------------------------------------------------- -->
+      <article class="outcome reveal">
+        <div class="outcome-head">
+          <div class="outcome-num" aria-hidden="true"></div>
+          <div class="outcome-title">
+            <h3>Know who needs you, without looking</h3>
+            <p class="lede">
+              The expensive part of running many agents isn't starting them — it's noticing
+              when one stops. Every row reports what its agent is doing, continuously, so
+              your attention goes where it's actually needed.
+            </p>
+          </div>
+        </div>
+        <ol class="capabilities">
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Four states, told by shape and colour</h4>
+              <p>Working, blocked on you, running a background command, or idle. Distinct glyph and distinct tint for each — never colour alone — with the same distinction in the tooltip and for VoiceOver.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Subagent fan-out, live</h4>
+              <p>When a session dispatches parallel subagents, the count appears next to its spinner. You can see which sessions are genuinely expensive right now.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Nothing finishes into the void</h4>
+              <p>A session that completes while you're in another tab keeps an unread mark until you actually look at it — and the mark survives a relaunch.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Folded projects still tell the truth</h4>
+              <p>A collapsed project shows its session count and the most demanding state underneath it. A blocked agent can't hide inside a group you closed.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Notified only when it matters</h4>
+              <p>System notifications on the transitions worth interrupting for — a permission prompt, a finished run — not on every token.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Context budget per session</h4>
+              <p>How much of its window each session has burned, inline on the row, so you can see which conversation is about to compact before it does.</p>
+            </div>
+            <span class="tag tag-planned">Planned</span>
+          </li>
+        </ol>
+      </article>
+
+      <!-- 03 ------------------------------------------------------------- -->
+      <article class="outcome reveal">
+        <div class="outcome-head">
+          <div class="outcome-num" aria-hidden="true"></div>
+          <div class="outcome-title">
+            <h3>Close the lid without losing the fleet</h3>
+            <p class="lede">
+              A dozen live conversations is a lot of state to lose to a restart. Flight Deck
+              treats the whole fleet as durable: quit, update, reboot, and come back to the
+              same deck you left.
+            </p>
+          </div>
+        </div>
+        <ol class="capabilities">
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Sessions survive a relaunch</h4>
+              <p>Every session returns, each reattached to its own conversation rather than starting a fresh one — along with its project grouping, order, and collapsed state.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Names stay honest</h4>
+              <p>A session's title tracks what its agent is actually working on, in both directions — rename from the sidebar and the agent follows, or let the conversation name the row.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Work in flight gets picked back up</h4>
+              <p>Sessions that were mid-task at shutdown are offered a nudge to continue once they settle, so a restart costs you a keystroke instead of the thread. Per-session toggle if you'd rather it didn't.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Two tabs on one conversation, caught</h4>
+              <p>If two sessions end up pointed at the same conversation, both rows say so instead of silently interleaving their turns.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+        </ol>
+      </article>
+
+      <!-- 04 ------------------------------------------------------------- -->
+      <article class="outcome reveal">
+        <div class="outcome-head">
+          <div class="outcome-num" aria-hidden="true"></div>
+          <div class="outcome-title">
+            <h3>Own the context instead of guessing at it</h3>
+            <p class="lede">
+              This is the part that isn't a terminal feature. Your harness owns its private
+              context window — but Flight Deck runs a parallel layer beside it that you can
+              read, edit, and audit. What went in, where it came from, and why.
+            </p>
+          </div>
+        </div>
+        <ol class="capabilities">
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Per-project agent configuration</h4>
+              <p>Set your agent's flags globally, then override them per project, from real controls instead of a remembered command line. Flags the app doesn't recognise are preserved verbatim rather than dropped.</p>
+            </div>
+            <span class="tag tag-shipped">Shipped</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>One code index, shared by every session</h4>
+              <p>An incremental index of symbols, references, and call graphs — built once, served to every agent over MCP, instead of each session re-reading the same files to discover the same structure.</p>
+            </div>
+            <span class="tag tag-building">Building</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Any harness behind one adapter</h4>
+              <p>Claude Code and opencode normalise into a single event stream, so the sidebar, the notifications, and the context layer work the same regardless of what's driving the session.</p>
+            </div>
+            <span class="tag tag-building">Building</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Task-scoped context, assembled per turn</h4>
+              <p>Relevant index results, memory, and terminal output gathered for the prompt you just typed and injected as it goes — with a provenance view showing exactly what was added.</p>
+            </div>
+            <span class="tag tag-planned">Planned</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Memory you approve, not memory you discover</h4>
+              <p>Decisions and facts are mined from the event stream and proposed to you; what you accept persists and rolls up from session to project.</p>
+            </div>
+            <span class="tag tag-planned">Planned</span>
+          </li>
+          <li>
+            <span class="cap-num" aria-hidden="true"></span>
+            <div class="cap-body">
+              <h4>Compaction you can open</h4>
+              <p>When Flight Deck's own layer summarises, the summary is a document you can read and edit — not a thing that quietly happened to your conversation.</p>
+            </div>
+            <span class="tag tag-planned">Planned</span>
+          </li>
+        </ol>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ====================================================================== -->
+<!-- Foundation                                                             -->
+<!-- ====================================================================== -->
+<section class="section section-tight">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <span class="kicker">Under the hood</span>
+      <h2>Authentically Apple</h2>
+    </div>
+
+    <div class="grid-3 reveal">
+      <div class="card">
+        <div class="ico">
+          <svg viewBox="0 0 16 16" fill="none"><path d="M2 3.2h12v8.2H2z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M5.2 13.6h5.6M2 5.8h12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        </div>
+        <h3>Mac-native, from chrome to core</h3>
+        <p>Swift + AppKit + SwiftUI on Metal. It behaves the way the rest of your Mac behaves — sidebar materials, real menus, keyboard conventions, VoiceOver.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico">
+          <svg viewBox="0 0 16 16" fill="none"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 8 14 5M8 8v6.2M8 8 2 5" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        </div>
+        <h3>A real terminal, reused</h3>
+        <p>The terminal isn't a reimplementation. Flight Deck embeds Ghostty's engine and surface — the same renderer, input encoding, and escape handling — pinned to a known-good release.</p>
+      </div>
+
+      <div class="card">
+        <div class="ico">
+          <svg viewBox="0 0 16 16" fill="none"><path d="M3 3.6h10v9H3z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M5.4 6.6h5.2M5.4 9.3h3.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        </div>
+        <h3>Your state, on your disk</h3>
+        <p>Sessions live in a plain JSON file in Application Support and preferences in the standard defaults domain. Nothing about your fleet is stored anywhere but your machine.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================================== -->
+<!-- CTA                                                                    -->
+<!-- ====================================================================== -->
+<section class="cta">
+  <div class="cta-glow" aria-hidden="true"></div>
+  <div class="wrap">
+    <h2 class="reveal">All hands on deck</h2>
+    <p class="reveal">
+      One window for every agent, in a robust, snappy terminal
+    </p>
+    <div class="reveal">
+      <!-- PLACEHOLDER: point at the real release artifact once shipping is set up -->
+      <a class="btn btn-primary" href="/download/FlightDeck-latest.dmg">Download for macOS</a>
+    </div>
+    <div class="cta-meta reveal">
+      <span>Apple silicon</span><span class="dot"></span>
+      <span>macOS 14+</span><span class="dot"></span>
+      <span>100% free</span>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ====================================================================== -->
+<!-- Footer                                                                 -->
+<!-- ====================================================================== -->
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <img src="assets/icon-256.png" alt="" width="22" height="22">
+    <span>Flight Deck — an orchestration-native terminal for macOS</span>
+    <div class="footer-links">
+      <a href="#demo">Demo</a>
+      <a href="#features">Features</a>
+      <a href="#status">Status</a>
+    </div>
+  </div>
+</footer>
+
+<script src="demo.js" defer></script>
+<script src="status-carousel.js" defer></script>
+</body>
+</html>

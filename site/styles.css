@@ -1,0 +1,1181 @@
+/* ==========================================================================
+   Flight Deck — flightdeckapp.dev
+   Palette is sampled from the app icon: a deep navy squircle, a glowing
+   cyan chevron, and the receding stacked plates beneath it.
+   ========================================================================== */
+
+:root {
+  /* Ground — the icon's squircle, darkest at the corners */
+  --bg:            #070b14;
+  --bg-raised:     #0d1424;
+  --bg-panel:      #111a2c;
+  --bg-inset:      #060a11;
+
+  /* The chevron: cyan at the tip, blue where it meets the plates */
+  --glow-cyan:     #4fe3ff;
+  --glow-blue:     #1a92ff;
+  --glow-deep:     #0f5fd0;
+
+  /* macOS system accent (the unread dot tracks this in the real app) */
+  --accent:        #0a84ff;
+  --orange:        #ff9f0a;
+  --green:         #30d158;
+  --red:           #ff453a;
+
+  /* Type */
+  --fg:            #e9eef7;
+  --fg-secondary:  #94a3bb;
+  --fg-tertiary:   #5c6b85;
+  --hairline:      #1e2942;
+  --hairline-soft: #172136;
+
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+          "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco,
+          "Cascadia Mono", monospace;
+
+  --radius:        14px;
+  --radius-lg:     22px;
+  --maxw:          1080px;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 17px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  /* `clip`, not `hidden`. Both stop sideways overflow, but `hidden` makes the
+     body a scroll container, and a sticky descendant then sticks to a box that
+     never scrolls — so the demo's pin would silently do nothing. */
+  overflow-x: clip;
+}
+
+a { color: var(--glow-cyan); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+::selection { background: rgba(79, 227, 255, 0.28); }
+
+:focus-visible {
+  outline: 2px solid var(--glow-cyan);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
+.wrap { width: 100%; max-width: var(--maxw); margin: 0 auto; padding: 0 28px; }
+
+/* Ambient glow behind the whole page, echoing the icon's light source ------ */
+.aurora {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(760px 480px at 50% -8%,  rgba(26, 146, 255, 0.20), transparent 70%),
+    radial-gradient(520px 380px at 50% -2%,  rgba(79, 227, 255, 0.16), transparent 70%),
+    radial-gradient(900px 700px at 85% 40%,  rgba(15, 95, 208, 0.10), transparent 70%);
+}
+
+/* ==========================================================================
+   Buttons
+   ========================================================================== */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 11px 20px;
+  border-radius: 980px;
+  font-size: 15px;
+  font-weight: 590;
+  letter-spacing: -0.01em;
+  border: 1px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+              box-shadow 0.25s ease, background 0.2s ease, border-color 0.2s ease;
+}
+.btn:hover { text-decoration: none; transform: translateY(-1px); }
+.btn:active { transform: translateY(0); }
+
+.btn-primary {
+  background: linear-gradient(180deg, var(--glow-cyan) 0%, var(--glow-blue) 100%);
+  color: #04121f;
+  box-shadow: 0 6px 26px -6px rgba(26, 146, 255, 0.72),
+              inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+.btn-primary:hover {
+  box-shadow: 0 12px 38px -8px rgba(26, 146, 255, 0.9),
+              inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--hairline);
+  color: var(--fg);
+}
+.btn-secondary:hover { background: rgba(255, 255, 255, 0.09); }
+
+.btn-sm { padding: 7px 15px; font-size: 13.5px; }
+
+/* ==========================================================================
+   Hero
+   ========================================================================== */
+
+.hero {
+  position: relative;
+  z-index: 1;
+  padding: 88px 0 0;
+  text-align: center;
+}
+
+/* Finder icon + label ------------------------------------------------------
+   Proportions follow Finder's icon view: the label sits directly beneath the
+   icon in the system font at 13px, centred, wrapping to a second line rather
+   than truncating, with the accent selection pill appearing on hover the way
+   a selected item's does. */
+/* The icon travels down the page as you scroll and the demo launches out of
+   it, so it needs to pass *behind* the hero copy and buttons on the way. Those
+   get a higher layer; the icon sits below them but above the page background. */
+h1, .hero-sub, .hero-cta, .hero-note { position: relative; z-index: 3; }
+
+.finder-item {
+  /* Everything here is a ratio of the icon, the way Finder's icon view keeps
+     label size, gap, and pill geometry in step with the icon-size slider.
+     Change --icon and the whole item rescales. */
+  --icon: 116px;
+  position: relative;
+  z-index: 1;
+  cursor: pointer;
+  will-change: transform;
+  /* Driven by the scroll handler as the icon passes behind the hero copy.
+     Kept as a custom property rather than an inline opacity so that the
+     launch fade (.opened, higher specificity) still wins — an inline opacity
+     would outrank the class and the icon would never dissolve. */
+  opacity: var(--fade, 1);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(var(--icon) * 0.03);
+  width: max-content;
+  margin: 26px auto 34px;
+  /* Opacity-only entrance, and `backwards` rather than `both`, because the
+     scroll-driven travel owns this element's transform and the launch owns its
+     opacity. A filled animation wins over inline styles in the cascade, so the
+     shared `rise` keyframe's closing `transform: none` silently pinned the icon
+     in place, and a persisted `opacity: 1` would likewise stop it fading out
+     when the app opens. `backwards` still suppresses the pre-start flash. */
+  animation: rise-fade 0.9s 0.16s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+
+@keyframes rise-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* The selection highlight Finder draws behind a selected icon: a translucent
+   rounded rect, inset a little on every side rather than hugging the artwork.
+   It lives on a wrapper, not the img, so the icon's blue glow keeps shadowing
+   the artwork's own silhouette instead of this rectangle. */
+.finder-icon {
+  display: block;
+  padding: calc(var(--icon) * 0.055);
+  border-radius: calc(var(--icon) * 0.15);
+  transition: background 0.15s ease;
+}
+.finder-item:hover .finder-icon {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.hero-icon {
+  display: block;
+  width: var(--icon);
+  height: var(--icon);
+  border-radius: calc(var(--icon) * 0.224);
+  filter: drop-shadow(0 22px 50px rgba(26, 146, 255, 0.45));
+}
+
+.finder-label {
+  /* Matched to a real Finder icon label rather than eyeballed.
+
+     Ratio: Finder's own defaults (com.apple.finder IconViewSettings and
+     DesktopViewSettings) pair iconSize 64 with textSize 12 — so the label is
+     0.1875 of the icon, at every icon size.
+
+     Weight and tracking: Finder draws that label at 12px, where SF resolves
+     to the *Text* optical cut. Scaling to ~22px here crosses SF's ~20px
+     boundary into the *Display* cut, which is 7.1% lighter and 8.4% narrower
+     per em — which is exactly why a straight 400 looked too thin. Measured
+     against 12px/400 by ink coverage per em², weight 440 with 0.035em
+     tracking reproduces the Text cut's colour and width to within 0.3%.
+
+     Shipping at 590 rather than that matched 440: deliberate. This label is
+     hero-scale white on a near-black ground, where the surrounding halation
+     thins strokes optically, and it has to hold its own against a 92px
+     headline directly beneath it. 440 is the fidelity number; keep it if this
+     ever moves onto a light background or shrinks toward Finder's own size. */
+  font-family: var(--font);
+  font-size: calc(var(--icon) * 0.1875);
+  font-weight: 590;
+  line-height: 1.3;
+  letter-spacing: 0.035em;
+  color: #fff;
+  /* Wide enough that "Flight Deck.app" stays on one line; Finder wraps a long
+     name to the cell width, but a wrapped product name reads as a mistake. */
+  max-width: calc(var(--icon) * 2.4);
+  padding: calc(var(--icon) * 0.013) calc(var(--icon) * 0.055);
+  border-radius: calc(var(--icon) * 0.036);
+  text-align: center;
+  /* Finder shadows desktop labels for legibility over the wallpaper — subtle,
+     not the heavy drop it had before. */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+  transition: background 0.15s ease, color 0.15s ease, text-shadow 0.15s ease;
+}
+.finder-item:hover .finder-label {
+  background: var(--accent);
+  color: #fff;
+  text-shadow: none;
+}
+
+/* The selection flash the launch fires just before the window zooms out of the
+   icon — the same state hover shows, but snapped on rather than eased, because
+   this one is a click landing, not a pointer arriving. */
+.finder-item.selected .finder-icon {
+  background: rgba(255, 255, 255, 0.14);
+}
+.finder-item.selected .finder-label {
+  background: var(--accent);
+  color: #fff;
+  text-shadow: none;
+}
+.finder-item.selected .finder-icon,
+.finder-item.selected .finder-label { transition-duration: 80ms; }
+
+h1 {
+  margin: 0 0 20px;
+  /* One line at every width. The vw term and cap are checked against the
+     measured text width in both SF Pro Display and the Arial/Helvetica
+     fallback non-Apple platforms get — the fallback sets this string ~8%
+     wider, and still clears the gutters from 320px up. */
+  white-space: nowrap;
+  font-size: clamp(24px, 7.4vw, 92px);
+  line-height: 1.06;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  animation: rise 0.9s 0.1s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+h1 .grad {
+  background: linear-gradient(120deg, var(--glow-cyan) 10%, var(--glow-blue) 60%, var(--glow-deep) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.hero-sub {
+  max-width: 660px;
+  margin: 0 auto 34px;
+  font-size: clamp(17px, 2.1vw, 21px);
+  line-height: 1.5;
+  color: var(--fg-secondary);
+  animation: rise 0.9s 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+/* Status glyphs set inline in prose — the same shapes and tints the sidebar
+   uses, sized off the surrounding text rather than a fixed pixel size, so
+   they scale with the hero's clamp(). Both are decorative: the words they
+   precede already carry the meaning, so they stay out of the a11y tree. */
+.inline-glyph {
+  width: 0.92em;
+  height: 0.92em;
+  vertical-align: -0.13em;
+  margin-right: 0.14em;
+}
+.hero-sub .spinner {
+  --sp: 0.92em;
+  display: inline-block;
+  vertical-align: -0.13em;
+  margin-right: 0.16em;
+}
+
+.hero-cta {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+  flex-wrap: wrap;
+  animation: rise 0.9s 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.hero-note {
+  margin-top: 16px;
+  font-size: 13px;
+  color: var(--fg-tertiary);
+  animation: rise 0.9s 0.34s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(18px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .finder-item, h1, .hero-sub, .hero-cta, .hero-note { animation: none; }
+}
+
+/* ==========================================================================
+   The scroll-scrubbed demo — spans hero into the body
+   ========================================================================== */
+
+.demo {
+  position: relative;
+  z-index: 2;
+  padding: 40px 20px 24px;
+}
+
+/* How far the demo holds at the top before releasing. Must be height inside
+   .demo's content box, not padding on it: a sticky box is constrained to its
+   containing block's content box, so padding-bottom here reads as zero travel
+   and the pin silently never happens. */
+.demo-track { height: 160px; }
+
+.demo-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  /* Pins the moment the window reaches its landing offset — the same 76px the
+     launch lands it at — so the demo holds still while you scroll past it. */
+  position: sticky;
+  top: 76px;
+}
+
+/* The demo is hidden until the app "launches" out of the travelling icon.
+   Scoped under html.js — set by demo.js on startup — so that if the script
+   never runs, the demo is simply visible rather than invisible forever. */
+html.js .window { opacity: 0; }
+html.js .demo-caption,
+html.js .demo-rail {
+  opacity: 0;
+  transition: opacity 380ms ease 300ms;
+}
+html.js .demo.launched .demo-caption,
+html.js .demo.launched .demo-rail { opacity: 1; }
+
+/* "See what it does" reveals the demo outright, so the caption and rail come
+   up with the window rather than trailing it — the staggered delay exists to
+   let the zoom finish first, and there is no zoom on this path. */
+html.js .demo.instant .demo-caption,
+html.js .demo.instant .demo-rail { transition: opacity 10ms linear; }
+
+/* The icon dissolves as the window grows out of it. */
+html.js .finder-item { transition: opacity 260ms ease-out; }
+html.js .finder-item.opened { opacity: 0; pointer-events: none; }
+
+/* Caption above the window narrates the beat */
+.demo-caption {
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 20px;
+}
+.demo-caption p {
+  margin: 0;
+  font-size: 15.5px;
+  color: var(--fg-secondary);
+  max-width: 640px;
+  transition: opacity 0.32s ease, transform 0.32s ease;
+}
+.demo-caption p strong { color: var(--fg); font-weight: 600; }
+.demo-caption p.swap { opacity: 0; transform: translateY(6px); }
+
+/* Beat rail. The active pip doubles as the dwell timer: its fill runs the
+   length of the beat, so the advance is predictable rather than abrupt. */
+.demo-rail {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  justify-content: center;
+}
+.demo-rail button {
+  position: relative;
+  width: 30px; height: 4px;
+  padding: 0;
+  border: none;
+  border-radius: 980px;
+  background: var(--hairline);
+  cursor: pointer;
+  overflow: hidden;
+  transition: background 0.3s ease, width 0.3s ease;
+}
+.demo-rail button:hover { background: #2b3a5c; }
+.demo-rail button[aria-current="true"] {
+  width: 44px;
+  background: rgba(79, 227, 255, 0.2);
+}
+.pip-fill {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 0;
+  border-radius: 980px;
+  background: var(--glow-cyan);
+  box-shadow: 0 0 12px rgba(79, 227, 255, 0.6);
+}
+@keyframes pip { from { width: 0; } to { width: 100%; } }
+
+/* ==========================================================================
+   The app window replica
+   ========================================================================== */
+
+.window {
+  width: min(1000px, calc(100vw - 40px));
+  height: min(620px, 74vh);
+  min-height: 420px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 60px 130px -30px rgba(0, 0, 0, 0.9),
+    0 30px 60px -20px rgba(10, 30, 70, 0.7),
+    0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+
+/* --- Title bar (unified, as macOS draws it over a split view) ------------- */
+.titlebar {
+  display: flex;
+  align-items: center;
+  height: 38px;
+  padding: 0 13px;
+  background: linear-gradient(180deg, #202b40 0%, #1a2437 100%);
+  border-bottom: 1px solid #0a0f1a;
+  flex: none;
+  position: relative;
+}
+.lights { display: flex; gap: 8px; }
+.light {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.28);
+}
+.light.r { background: #ff5f57; }
+.light.y { background: #febc2e; }
+.light.g { background: #28c840; }
+
+.titlebar-title {
+  position: absolute;
+  left: 0; right: 0;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 590;
+  color: #b9c6dc;
+  pointer-events: none;
+  letter-spacing: -0.005em;
+}
+
+/* --- Split view ---------------------------------------------------------- */
+.split { display: flex; flex: 1; min-height: 0; }
+
+/* --- Sidebar ------------------------------------------------------------- */
+.sidebar {
+  width: 240px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  /* NSVisualEffectView .sidebar material, over a dark window */
+  background: rgba(28, 38, 58, 0.82);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  border-right: 1px solid #0a0f1a;
+  min-height: 0;
+}
+
+.sidebar-list {
+  flex: 1;
+  overflow: hidden;
+  padding: 8px 0 4px;
+  min-height: 0;
+}
+
+/* Rows share geometry with the app: 4px gap, ~22px row, 10px side inset */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  margin: 1px 9px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--fg);
+  cursor: default;
+  position: relative;
+  transition: background 0.12s ease-out;
+}
+.row-session { padding-left: 24px; }
+.row-session:hover { background: rgba(255, 255, 255, 0.06); }
+
+.row-session.selected {
+  /* macOS selected sidebar row: accent fill, full strength when key */
+  background: var(--accent);
+  color: #fff;
+}
+.row-session.selected .row-title { color: #fff; }
+
+.row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Project header: chevron + semibold subheadline in secondary */
+.row-project {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-secondary);
+  letter-spacing: -0.005em;
+  margin-top: 5px;
+}
+.row-project .chev {
+  width: 12px; height: 12px;
+  flex: none;
+  color: var(--fg-tertiary);
+  transition: transform 0.12s ease-out;
+  transform: rotate(90deg);
+}
+.row-project.collapsed .chev { transform: rotate(0deg); }
+.row-project .proj-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row-project .count {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-secondary);
+  margin-left: auto;
+  padding-right: 2px;
+}
+
+/* Trailing status cluster */
+.row .trail {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.row-project .trail { margin-left: 0; }
+
+.subcount {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--glow-cyan);
+  line-height: 1;
+}
+.row-session.selected .subcount { color: rgba(255, 255, 255, 0.92); }
+
+/* Status glyphs (SF Symbol shapes, drawn as SVG) */
+.glyph { width: 11px; height: 11px; flex: none; display: block; }
+.glyph-idle    { color: var(--fg-secondary); opacity: 0.8; }
+.glyph-unread  { color: var(--accent); opacity: 1; }
+.glyph-waiting { color: var(--orange); }
+.glyph-shell   { color: var(--green); }
+.row-session.selected .glyph-idle   { color: rgba(255, 255, 255, 0.85); opacity: 1; }
+.row-session.selected .glyph-unread { color: #fff; }
+
+/* The macOS indeterminate spinner, for .busy. Every dimension derives from
+   --sp so the same spoke geometry can be reused at text size in prose. */
+.spinner {
+  --sp: 12px;
+  width: var(--sp); height: var(--sp);
+  flex: none;
+  position: relative;
+  animation: spin-step 0.8s steps(8) infinite;
+}
+.spinner i {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: calc(var(--sp) * 0.1417);
+  height: calc(var(--sp) * 0.3);
+  margin: calc(var(--sp) * -0.45) 0 0 calc(var(--sp) * -0.0708);
+  border-radius: 980px;
+  background: var(--fg-secondary);
+  transform-origin: 50% calc(var(--sp) * 0.45);
+}
+.row-session.selected .spinner i { background: rgba(255, 255, 255, 0.95); }
+@keyframes spin-step { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+
+/* Conflict marker */
+.glyph-conflict { color: var(--fg-secondary); width: 13px; height: 13px; }
+
+/* Hover-revealed close button — absent until hover, exactly as the app does it */
+.row .close {
+  display: none;
+  width: 13px; height: 13px;
+  color: var(--fg-secondary);
+  flex: none;
+}
+.row:hover .close { display: block; }
+.row-session.selected:hover .close { color: rgba(255, 255, 255, 0.9); }
+
+.row-empty {
+  padding-left: 30px;
+  font-size: 12px;
+  color: var(--fg-tertiary);
+  height: 22px;
+  display: flex;
+  align-items: center;
+  margin: 1px 9px;
+}
+
+/* safeAreaInset(.bottom) button */
+.sidebar-foot {
+  flex: none;
+  padding: 8px;
+  border-top: 1px solid rgba(0, 0, 0, 0.35);
+}
+.sidebar-foot .new-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 6px;
+  border: none;
+  background: none;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.sidebar-foot .new-btn:hover { background: rgba(255, 255, 255, 0.07); }
+.sidebar-foot .new-btn .kbd {
+  margin-left: auto;
+  color: var(--fg-secondary);
+  font-size: 12px;
+}
+.sidebar-foot .new-btn svg { width: 12px; height: 12px; }
+
+/* --- Terminal pane ------------------------------------------------------- */
+.terminal {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-inset);
+  padding: 14px 18px;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.62;
+  color: #c8d4e6;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+/* Lines are block elements, so the newlines *between* them in the source must
+   collapse — otherwise every line renders double-spaced. Leading indentation
+   inside a line is preserved by pre-wrap on the line itself. */
+.term-body { white-space: normal; word-break: break-word; }
+.term-body .l {
+  display: block;
+  white-space: pre-wrap;
+  min-height: 1.62em;
+}
+
+/* Claude Code's on-screen vocabulary */
+.c-dim    { color: #55678a; }
+.c-cyan   { color: var(--glow-cyan); }
+.c-blue   { color: #6aa9ff; }
+.c-green  { color: #4ade80; }
+.c-orange { color: #ffb340; }
+.c-red    { color: #ff6b6b; }
+.c-white  { color: #eef3fb; }
+.c-mag    { color: #c48bff; }
+
+/* The ❯ input box Claude Code draws */
+.inputbox {
+  margin-top: 10px;
+  border: 1px solid #24344f;
+  border-radius: 5px;
+  padding: 4px 9px;
+  color: #55678a;
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+}
+.inputbox .marker { color: var(--glow-cyan); }
+.caret {
+  display: inline-block;
+  width: 6.6px;
+  height: 13px;
+  background: var(--glow-cyan);
+  /* Centred on the prompt row. NOT vertical-align: .inputbox is a flex
+     container, and flex items ignore it outright — which is why this looked
+     unchanged through two attempts to nudge it. Baseline alignment is also
+     wrong here: an empty inline-block's baseline is its bottom edge, so the
+     caret hung entirely above the text baseline. */
+  align-self: center;
+  animation: blink 1.1s steps(2) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .caret { animation: none; } }
+
+.term-status {
+  margin-top: 7px;
+  font-size: 11px;
+  color: #3f4f6d;
+  display: flex;
+  gap: 14px;
+}
+
+@media (max-width: 760px) {
+  .sidebar { width: 190px; }
+  .terminal { font-size: 10.5px; padding: 11px 13px; }
+}
+@media (max-width: 560px) {
+  .split { flex-direction: column; }
+  .sidebar { width: 100%; height: 230px; border-right: none; border-bottom: 1px solid #0a0f1a; }
+  .window { height: min(600px, 78vh); }
+}
+
+/* ==========================================================================
+   Sections
+   ========================================================================== */
+
+.section { position: relative; z-index: 1; padding: 104px 0; }
+.section-tight { padding: 72px 0; }
+
+.section-head { max-width: 720px; margin: 0 auto 64px; text-align: center; }
+.section-head .kicker {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 680;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--glow-cyan);
+  margin-bottom: 14px;
+}
+.section-head h2 {
+  margin: 0 0 16px;
+  font-size: clamp(30px, 4.4vw, 46px);
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  font-weight: 700;
+}
+.section-head p {
+  margin: 0;
+  font-size: 18px;
+  color: var(--fg-secondary);
+  line-height: 1.55;
+}
+
+.divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--hairline), transparent);
+  border: 0;
+  margin: 0;
+}
+
+/* ==========================================================================
+   Feature hierarchy — numbered outcomes with nested capabilities
+   ========================================================================== */
+
+.outcomes { counter-reset: outcome; display: flex; flex-direction: column; gap: 26px; }
+
+.outcome {
+  counter-increment: outcome;
+  background: linear-gradient(180deg, rgba(20, 30, 50, 0.7), rgba(13, 20, 36, 0.55));
+  border: 1px solid var(--hairline-soft);
+  border-radius: var(--radius-lg);
+  padding: 34px 36px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.35s ease, transform 0.35s ease;
+}
+.outcome::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: linear-gradient(180deg, var(--glow-cyan), var(--glow-blue) 45%, transparent);
+  opacity: 0.55;
+}
+.outcome:hover { border-color: var(--hairline); }
+
+.outcome-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  margin-bottom: 8px;
+}
+.outcome-num {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--glow-cyan);
+  padding-top: 8px;
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+}
+.outcome-num::before { content: counter(outcome, decimal-leading-zero); }
+
+.outcome-title { flex: 1; min-width: 0; }
+.outcome-title h3 {
+  margin: 0 0 8px;
+  font-size: clamp(22px, 2.7vw, 29px);
+  line-height: 1.2;
+  letter-spacing: -0.025em;
+  font-weight: 660;
+}
+.outcome-title .lede {
+  margin: 0;
+  font-size: 16.5px;
+  color: var(--fg-secondary);
+  line-height: 1.55;
+  max-width: 62ch;
+}
+
+.capabilities {
+  list-style: none;
+  margin: 26px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  counter-reset: cap;
+}
+.capabilities li {
+  counter-increment: cap;
+  display: grid;
+  grid-template-columns: 46px 1fr auto;
+  gap: 14px;
+  align-items: baseline;
+  padding: 13px 14px 13px 4px;
+  border-top: 1px solid var(--hairline-soft);
+}
+.capabilities li:first-child { border-top: none; }
+
+.cap-num {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-tertiary);
+  letter-spacing: 0.03em;
+}
+.cap-num::before { content: counter(outcome) "." counter(cap); }
+
+.cap-body h4 {
+  margin: 0 0 3px;
+  font-size: 15.5px;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  color: var(--fg);
+}
+.cap-body p {
+  margin: 0;
+  font-size: 14.5px;
+  color: var(--fg-secondary);
+  line-height: 1.52;
+  max-width: 68ch;
+}
+
+/* Shipped / building / planned */
+.tag {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 660;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border-radius: 980px;
+  white-space: nowrap;
+  border: 1px solid;
+  align-self: center;
+}
+.tag-shipped {
+  color: var(--green);
+  border-color: rgba(48, 209, 88, 0.34);
+  background: rgba(48, 209, 88, 0.10);
+}
+.tag-building {
+  color: var(--orange);
+  border-color: rgba(255, 159, 10, 0.34);
+  background: rgba(255, 159, 10, 0.10);
+}
+.tag-planned {
+  color: var(--fg-tertiary);
+  border-color: var(--hairline);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+@media (max-width: 680px) {
+  .outcome { padding: 26px 20px; }
+  .outcome-head { gap: 13px; }
+  .capabilities li {
+    grid-template-columns: 34px 1fr;
+    grid-template-areas: "num body" ".   tag";
+    row-gap: 8px;
+  }
+  .cap-num  { grid-area: num; }
+  .cap-body { grid-area: body; }
+  .tag { grid-area: tag; justify-self: start; }
+}
+
+/* Legend under the section head */
+.legend {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 24px;
+  font-size: 13px;
+  color: var(--fg-tertiary);
+  align-items: center;
+}
+
+/* ==========================================================================
+   Foundation strip
+   ========================================================================== */
+
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(268px, 1fr));
+  gap: 20px;
+}
+.card {
+  background: linear-gradient(180deg, rgba(20, 30, 50, 0.6), rgba(13, 20, 36, 0.45));
+  border: 1px solid var(--hairline-soft);
+  border-radius: var(--radius);
+  padding: 26px 24px;
+}
+.card .ico {
+  width: 34px; height: 34px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 15px;
+  background: rgba(79, 227, 255, 0.11);
+  border: 1px solid rgba(79, 227, 255, 0.2);
+  color: var(--glow-cyan);
+}
+.card .ico svg { width: 17px; height: 17px; }
+.card h3 {
+  margin: 0 0 7px;
+  font-size: 16.5px;
+  font-weight: 620;
+  letter-spacing: -0.015em;
+}
+.card p {
+  margin: 0;
+  font-size: 14.5px;
+  color: var(--fg-secondary);
+  line-height: 1.55;
+}
+
+/* ==========================================================================
+   Status / honesty band
+   ========================================================================== */
+
+.status-band {
+  background: linear-gradient(180deg, rgba(255, 159, 10, 0.055), transparent 70%);
+  border-top: 1px solid var(--hairline-soft);
+  border-bottom: 1px solid var(--hairline-soft);
+}
+.status-inner {
+  display: flex;
+  gap: 22px;
+  align-items: flex-start;
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 46px 0;
+}
+.status-inner .ico {
+  flex: none;
+  width: 38px; height: 38px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: rgba(255, 159, 10, 0.12);
+  border: 1px solid rgba(255, 159, 10, 0.26);
+  color: var(--orange);
+}
+.status-inner .ico svg { width: 19px; height: 19px; }
+.status-inner h3 { margin: 0 0 9px; font-size: 19px; font-weight: 640; letter-spacing: -0.02em; }
+.status-inner p { margin: 0 0 10px; font-size: 15.5px; color: var(--fg-secondary); line-height: 1.6; }
+.status-inner p:last-child { margin-bottom: 0; }
+
+@media (max-width: 600px) {
+  .status-inner { flex-direction: column; gap: 16px; padding: 36px 0; }
+}
+
+/* ==========================================================================
+   Download CTA
+   ========================================================================== */
+
+.cta { text-align: center; position: relative; z-index: 1; padding: 110px 0; }
+.cta-glow {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 700px; height: 400px;
+  max-width: 100%;
+  background: radial-gradient(closest-side, rgba(26, 146, 255, 0.20), transparent);
+  pointer-events: none;
+}
+.cta h2 {
+  position: relative;
+  margin: 0 0 16px;
+  font-size: clamp(30px, 4.6vw, 50px);
+  letter-spacing: -0.032em;
+  line-height: 1.1;
+  font-weight: 700;
+}
+.cta p {
+  position: relative;
+  margin: 0 auto 32px;
+  max-width: 540px;
+  font-size: 17.5px;
+  color: var(--fg-secondary);
+}
+.cta-meta {
+  position: relative;
+  margin-top: 20px;
+  font-size: 13px;
+  color: var(--fg-tertiary);
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.cta-meta .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--fg-tertiary); }
+
+/* ==========================================================================
+   Footer
+   ========================================================================== */
+
+.footer {
+  border-top: 1px solid var(--hairline-soft);
+  padding: 40px 0;
+  position: relative;
+  z-index: 1;
+}
+.footer-inner {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 13.5px;
+  color: var(--fg-tertiary);
+}
+.footer-inner img { width: 22px; height: 22px; border-radius: 6px; }
+.footer-links { margin-left: auto; display: flex; gap: 22px; }
+.footer-links a { color: var(--fg-secondary); }
+
+/* ==========================================================================
+   Scroll-reveal
+   ========================================================================== */
+
+.reveal {
+  opacity: 0;
+  transform: translateY(22px);
+  transition: opacity 0.7s cubic-bezier(0.2, 0.8, 0.2, 1),
+              transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.reveal.in { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .reveal { opacity: 1; transform: none; transition: none; }
+}
+
+/* Skip link */
+.skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--bg-panel);
+  color: var(--fg);
+  padding: 10px 16px;
+  border-radius: 8px;
+  z-index: 100;
+}
+
+.skip:focus { left: 12px; top: 12px; }
+
+/* ==========================================================================
+   Hero "blocked" state carousel — appended by status-carousel.js, which
+   also owns the width/height it sets inline. Rules only, no colours: the
+   glyphs reuse .glyph-idle/.glyph-unread/.glyph-waiting/.glyph-shell/
+   .glyph-conflict above so a state can never drift from the sidebar's tint.
+
+   The slot is the last thing before the sentence's full stop, so nothing
+   sits after it to jitter — its width shrink-wraps the current word instead
+   of being pinned to the widest state, and that width is itself animated
+   (JS drives the px value; width doesn't transition from auto) so the full
+   stop slides with it instead of snapping. */
+
+.status-carousel-viewport {
+  position: relative;
+  display: inline-block;
+  overflow: hidden;
+  vertical-align: -0.24em;
+  /* Less than .hero-sub's line-height (1.5) on purpose — an inline-block
+     this tall doesn't stretch the line box, it just clips inside it. */
+  height: 1.15em;
+  line-height: 1.15em;
+  transition: width 420ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.status-carousel-item {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  transition: transform 420ms cubic-bezier(0.2, 0.8, 0.2, 1),
+              opacity 420ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.status-carousel-item.is-entering { transform: translateY(100%); opacity: 0; }
+.status-carousel-item.is-current  { transform: translateY(0);    opacity: 1; }
+.status-carousel-item.is-leaving  { transform: translateY(-100%); opacity: 0; }
+
+/* Screen-reader equivalent for the animated (aria-hidden) slot above. Fixed
+   on the starting word rather than kept in sync with the rotation — an
+   aria-live region here would re-announce a new word at every interval,
+   which is noise, not information. */
+.status-carousel-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* person.2.fill's own artwork sits smaller inside its 16-unit viewBox than
+   the circle/questionmark/terminal paths do, so at a shared box size it
+   reads as undersized next to them — the same cause the sidebar works
+   around by bumping .glyph-conflict to 13px against .glyph's 11px (see
+   demo.js's GLYPH.conflict/styles.css .glyph-conflict). Same fix, scoped to
+   this slot: bump by that same ~1.18x ratio rather than touch demo.js. */
+.status-carousel-item .glyph-conflict {
+  width: 1.08em;
+  height: 1.08em;
+}
