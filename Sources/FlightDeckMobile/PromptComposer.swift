@@ -21,16 +21,25 @@ struct PromptComposer: View {
     let session: WireSession?
     let model: SessionTimelineModel
 
-    @State private var draft: String
+    /// **The draft lives on the model, not here.** Reply, on a selection in a timeline row,
+    /// has to reach the box from a view that knows nothing about this one — see
+    /// `SessionTimelineModel.draft`. What stayed is everything about the *field*: its focus,
+    /// its deferred repaint, and when it may be sent.
+    private var draft: Binding<String> {
+        Binding { model.draft } set: { model.draft = $0 }
+    }
 
-    /// `draft` is a parameter only so the offscreen render harness can look at a composer with
-    /// something in it — SwiftUI offers nothing to type into in a `layer.render(in:)` pass.
-    /// Same reason, same shape, as `TimelineBodyBlock.showsRaw`. Every caller on the screen
-    /// takes the default, which is empty.
-    init(session: WireSession?, model: SessionTimelineModel, draft: String = "") {
+    /// Taken when a quotation arrives, so the reader is typing into the space it just made
+    /// rather than hunting for the field. Never taken on an ordinary draft change: focusing a
+    /// composer on every keystroke is how a keyboard fights the person using it.
+    @FocusState private var isFocused: Bool
+
+    /// The `draft` parameter is gone with the `@State` it seeded; the offscreen render harness
+    /// sets `model.draft` before building the composer, which is one fewer way for the two to
+    /// disagree about what is in the box.
+    init(session: WireSession?, model: SessionTimelineModel) {
         self.session = session
         self.model = model
-        _draft = State(initialValue: draft)
     }
 
     /// Why this tab cannot take a message right now, or `nil` when it can.
@@ -84,7 +93,7 @@ struct PromptComposer: View {
 
     private var sendable: Bool {
         Self.canSend(
-            draft: draft, unavailable: unavailableReason, isSending: model.outbox.isSending
+            draft: model.draft, unavailable: unavailableReason, isSending: model.outbox.isSending
         )
     }
 
@@ -124,7 +133,8 @@ struct PromptComposer: View {
             // `axis: .vertical` so a pasted paragraph grows the field instead of scrolling a
             // single line the writer cannot see the start of. `lineLimit` caps the growth so
             // a long message does not push the conversation off screen entirely.
-            TextField("Message", text: $draft, axis: .vertical)
+            TextField("Message", text: draft, axis: .vertical)
+                .focused($isFocused)
                 .lineLimit(1...6)
                 .textFieldStyle(.plain)
                 .font(.body)
@@ -148,6 +158,10 @@ struct PromptComposer: View {
                 )
             sendButton
         }
+        // A quotation has just been appended. Take focus so the keyboard is up under the space
+        // the quote made — `quoteTicks` and not `model.draft`, so this fires for a Reply and
+        // never for typing.
+        .onChange(of: model.quoteTicks) { isFocused = true }
     }
 
     /// The glyph, not a worded button. This is the one control on the screen with an
@@ -156,8 +170,8 @@ struct PromptComposer: View {
     /// uses is for a caption-sized control in a panel header, which this is not.
     private var sendButton: some View {
         Button {
-            model.send(draft)
-            draft = ""
+            model.send(model.draft)
+            model.draft = ""
             // And again on the next turn of the run loop, which is not redundant.
             //
             // `TextField(axis: .vertical)` is UITextView-backed, and clearing its binding in
@@ -179,7 +193,7 @@ struct PromptComposer: View {
             // and putting the keyboard away costs them a tap to say one more thing. That
             // rules out the other common fix for this (resigning first responder, or giving
             // the field a new `.id()`), both of which drop the keyboard.
-            DispatchQueue.main.async { draft = "" }
+            DispatchQueue.main.async { model.draft = "" }
         } label: {
             // Two layers, arrow and disc, because one tint is not readable in both states in
             // both themes: a single `.secondary` fill on black is a glyph that is simply not
@@ -206,7 +220,7 @@ struct PromptComposer: View {
 
     private var sendHint: String {
         if model.outbox.isSending { return "Waiting for your Mac to confirm the last message" }
-        return draft.isEmpty ? "Type a message first" : "Sends this message to the agent"
+        return model.draft.isEmpty ? "Type a message first" : "Sends this message to the agent"
     }
 
     /// Why there is no field. A sentence rather than a disabled field, because a field that

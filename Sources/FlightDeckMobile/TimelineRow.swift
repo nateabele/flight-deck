@@ -65,6 +65,11 @@ struct TimelineRow: View {
     /// always passes one; it is optional so a row can be built with no screen behind it at all,
     /// which is what the offscreen harnesses and the filler rows in the tests do.
     var toggleExpanded: (() -> Void)?
+    /// Where Reply sends a highlighted passage. Optional for the same reason
+    /// `toggleExpanded` is: a row built with no screen behind it — the offscreen render
+    /// harnesses, the filler rows in the tests — has no composer to quote into, and prose that
+    /// is selectable-but-unrepliable is the correct behaviour there rather than a crash.
+    var onReply: ((String) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -253,8 +258,15 @@ struct TimelineRow: View {
     private func segmentView(_ segment: TimelineSegment) -> some View {
         switch segment {
         case .prose(let text):
-            Markdown(text)
-                .markdownTheme(TimelineMarkdown.theme)
+            if let onReply {
+                SelectableProseView(markdown: text, onReply: onReply)
+            } else {
+                // No composer behind this row, so nothing to reply into. MarkdownUI draws it,
+                // which is also the renderer the offscreen harnesses have always compared
+                // against.
+                Markdown(text)
+                    .markdownTheme(TimelineMarkdown.theme)
+            }
         case .code(let language, let text):
             Markdown(TimelineSegment.fenced(language: language, text))
                 .markdownTheme(TimelineMarkdown.theme)
