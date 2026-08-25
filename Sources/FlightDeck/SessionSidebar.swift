@@ -3,14 +3,16 @@ import SwiftUI
 
 /// A phone is on this conversation right now.
 ///
-/// **A dot rather than a glyph, and it pulses rather than blinking.** The row already carries
-/// a status glyph, a conflict marker and an account marker; a fourth *symbol* would read as a
-/// fourth kind of warning. A soft pulsing dot reads as presence — something alive — which is
-/// what it is, and it is the one thing on this row that is about a person rather than a state.
+/// **A phone, pulsing rather than blinking.** It began as a plain dot on the argument that the
+/// row already carries a status glyph, a conflict marker and an account marker, so a fourth
+/// symbol would read as a fourth warning. A dot is also ambiguous in exactly the way this
+/// badge must not be — it says "something", where the whole point is to say "your phone". The
+/// handset names itself, and the pulse is what keeps it reading as presence rather than as
+/// one more state flag.
 ///
-/// The glow is a shadow in the dot's own colour rather than a blur layer: it stays put under
+/// The glow is a shadow in the glyph's own colour rather than a blur layer: it stays put under
 /// the row's `transition`, where a separately-animated blur would slide at its own rate and
-/// arrive after the dot.
+/// arrive after the phone.
 private struct PhonePresenceBadge: View {
     /// Driven from `onAppear` rather than a `TimelineView`, so the animation costs nothing
     /// when no phone is attached — which is almost always. A `TimelineView` here would re-run
@@ -18,11 +20,16 @@ private struct PhonePresenceBadge: View {
     @State private var pulsing = false
 
     var body: some View {
-        Circle()
-            .fill(Color.accentColor)
-            .frame(width: 7, height: 7)
-            .shadow(color: .accentColor.opacity(pulsing ? 0.9 : 0.3), radius: pulsing ? 4 : 1.5)
-            .scaleEffect(pulsing ? 1.0 : 0.72)
+        Image(systemName: "iphone.gen3")
+            // `.caption2` and a semibold weight: at sidebar-row size a phone outline is mostly
+            // its bezel, and a lighter stroke reads as a smudge rather than a handset.
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(Color.accentColor)
+            .shadow(color: .accentColor.opacity(pulsing ? 0.9 : 0.25), radius: pulsing ? 4 : 1)
+            // A shallower scale range than a dot wants. A glyph with recognisable silhouette
+            // has to stay readable AS that glyph through the whole cycle; pulsing it from 0.72
+            // turns the phone into a speck at the bottom of every beat.
+            .scaleEffect(pulsing ? 1.0 : 0.88)
             .opacity(pulsing ? 1.0 : 0.55)
             .animation(
                 // `autoreverses` rather than two keyframes: the ease has to be symmetric or the

@@ -18,7 +18,7 @@ final class FleetService: ObservableObject {
     /// `FleetAttachment.slot`.
     @Published private(set) var attachedSlots: Set<UUID> = []
 
-    /// Held while any phone is attached; see `holdSleepAwake`.
+    /// Held while a pairing exists and the fleet is listening; see `refreshSleepAssertion`.
     private var sleepAssertion: (any NSObjectProtocol)?
 
     /// Which session each live connection is looking at.
@@ -157,7 +157,7 @@ final class FleetService: ObservableObject {
                 // sync by patching it per-event is exactly the stale-count bug this signal
                 // shape replaces.
                 self.attachedSlots = slots
-                self.holdSleepAwake(slots.isEmpty == false)
+                self.refreshSleepAssertion()
                 // A phone that vanished mid-session never sends `viewing(nil)`, so presence is
                 // pruned from the authoritative attached set rather than trusted to clean up
                 // after itself — otherwise a badge glows for a phone that is gone.
@@ -185,11 +185,27 @@ final class FleetService: ObservableObject {
     ///
     /// **Prevents IDLE sleep only.** Closing the lid still sleeps and no assertion overrides
     /// that — it is a hardware path, not a policy one.
+    /// Held whenever this Mac is REACHABLE by a paired phone — not merely while one is
+    /// attached.
+    ///
+    /// Scoping it to an attached phone was the first version and it could not work, because
+    /// the failure it was meant to prevent runs in the opposite order: the phone is put down,
+    /// its app is backgrounded, the connection drops, this assertion is released, the Mac
+    /// idle-sleeps, and now nothing can wake it to accept the reconnect. The assertion has to
+    /// outlive the connection or it only ever protects a session already in progress.
+    ///
+    /// Gated on there being a pairing at all, so a Mac nobody has paired with sleeps normally.
+    /// The cost is real and deliberate: a paired laptop will not idle-sleep while Flight Deck
+    /// runs. That IS the feature — "keep it reachable" and "let it sleep" cannot both hold.
+    private func refreshSleepAssertion() {
+        holdSleepAwake(!preferences.pairedDevices.isEmpty)
+    }
+
     private func holdSleepAwake(_ shouldHold: Bool) {
         if shouldHold, sleepAssertion == nil {
             sleepAssertion = ProcessInfo.processInfo.beginActivity(
                 options: [.idleSystemSleepDisabled],
-                reason: "A paired phone is connected to this Mac"
+                reason: "A paired phone can reach this Mac"
             )
         } else if !shouldHold, let held = sleepAssertion {
             ProcessInfo.processInfo.endActivity(held)
@@ -245,6 +261,9 @@ final class FleetService: ObservableObject {
         // is already advertising; the remembered port is only ever consulted by the first bind
         // of a launch, which is the whole point — a phone's `PairedMac.endpoints` are
         // `host:port` strings that die the instant this Mac comes back on a different port.
+        // Taken here rather than on first attach: a phone can only reconnect to a Mac that is
+        // awake, so the assertion has to be up before anyone dials in.
+        refreshSleepAssertion()
         let remembered = preferences.fleetPort.flatMap(NWEndpoint.Port.init(rawValue:))
         let requested = port ?? boundPort ?? remembered
         // Nothing holds the remembered port while Flight Deck is not running, so it is a
@@ -292,6 +311,10 @@ final class FleetService: ObservableObject {
         // window's key goes with it. See `closePairingListener()` for the rule that makes
         // these two the only direct calls left.
         closePairingListener()
+        // Released here and not left to the attachment signal: `server.stop()` empties the
+        // attached set, and an assertion keyed on that would survive a stop that unpaired
+        // everything.
+        holdSleepAwake(false)
         // `server.stop()` drops every attachment synchronously through `cancelConnections()`,
         // which fires `onAttachedSlotsChanged` itself — see `wireHandlers()` — so
         // `attachedSlots` is already empty by the time this returns; nothing to clear here.
