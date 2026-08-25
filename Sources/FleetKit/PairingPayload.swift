@@ -9,9 +9,11 @@ public enum PairingPayloadError: Error, Equatable {
 /// What the QR on the Mac's screen carries, and the only thing that ever crosses between
 /// the two devices out of band.
 ///
-/// `FD2-` + Crockford base32 of a packed byte record. Not a URL, deliberately — see the
+/// `FD3-` + Crockford base32 of a packed byte record. Not a URL, deliberately — see the
 /// plan's Task 1. The digits in the prefix are the version, and they are checked before a
-/// byte is decoded, so a code from a newer Mac is refused *as* too-new rather than as damaged.
+/// byte is decoded, so a code from a newer Mac is refused *as* too-new rather than as damaged
+/// — and, since v3, a code from an older Mac is refused *as* too-old rather than as damaged,
+/// the same way and for the same reason.
 public struct PairingPayload: Equatable, Sendable, Identifiable {
     /// The slot this code was minted for. Present so a presenter can drive a sheet from the
     /// payload itself rather than from a separate boolean — `.sheet(item:)` cannot render
@@ -20,19 +22,21 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
     public var id: UUID { key.slot }
 
     public static let currentVersion = 3
-    /// The scheme half of the code, with the version spelled into it — `FD2-`.
+    /// The scheme half of the code, with the version spelled into it — `FD3-`.
     ///
     /// Two letters and a digit rather than `flightdeck2:`, and the QR does benefit: `F`, `D`,
     /// the digits and `-` are in QR's *alphanumeric* charset where lowercase and `:` are not,
     /// so an all-uppercase code encodes at roughly two symbols per 11 bits instead of one per
     /// 8. Re-measured on the payload `PairingCodeImageTests` uses, at correction level `M`:
-    /// `FD2-<body>` is **45 modules**, the same body lowercased behind `fd2-` is **53**, and
-    /// v1's `flightdeck1:<base64>` is **65**. So the case is worth 8 modules and the 98-byte
+    /// `FD3-<body>` is **45 modules**, the same body lowercased behind `fd3-` is **53**, and
+    /// v1's `flightdeck1:<base64>` is **65**. So the case is worth 8 modules and the 99-byte
     /// packed record is worth 20 — the record is the larger win, but not the only one. (An
     /// earlier revision of this comment claimed both cases came out identically at "39
     /// modules"; neither number reproduces, and the figure it quoted was a CoreImage *extent*
     /// rather than a module count. See `PairingCodeImageTests.modules(of:)` for that
-    /// distinction, which is two modules wide.)
+    /// distinction, which is two modules wide. Re-measured again for v3's one-byte-longer
+    /// record — the count byte v3 added does not push it into the next module class, so
+    /// every number above is unchanged from v2.)
     ///
     /// Uppercase would stay regardless: the body is Crockford base32, which is only
     /// unambiguous in one case, and the short code beside this QR is read aloud across a room
@@ -40,9 +44,10 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
     ///
     /// The version stays in the prefix, and that is load-bearing exactly as it was in v1: a
     /// payload from a newer Mac may pack fields this version cannot parse, so decoding it
-    /// under this schema would fail as *damaged*. The phone shows different copy for damaged
-    /// ("show a new code on your Mac") and too-new ("update the app"), which send the user in
-    /// opposite directions.
+    /// under this schema would fail as *damaged*. The phone shows different copy for each of
+    /// the three outcomes — damaged ("show a new code on your Mac"), too-old ("update the app
+    /// on your Mac"), and too-new ("update the app on your phone") — which send the user in
+    /// as many different directions.
     private static let prefix = "FD"
     /// One byte of length prefix per name, so 255 is the format's ceiling. 64 is the policy:
     /// `FleetService.derivedServiceName` already caps at 24 plus a suffix, and a Mac name
@@ -50,7 +55,7 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
     private static let maxNameBytes = 64
     /// One byte of count, so 255 is the format's ceiling. **2 is the policy**, and it is
     /// measured rather than chosen: at correction level `M` a two-endpoint record renders to
-    /// 47 modules — byte for byte what v2 produces today — and a three-endpoint one to 51,
+    /// 45 modules — byte for byte what v2 produces today — and a three-endpoint one to 49,
     /// which breaks `PairingCodeImageTests.testThePackedPayloadProducesAMateriallySmallerQR`
     /// against its 0.75 threshold. Two is also exactly the requirement: one address that
     /// works off the LAN and one that works on it. Any *further* LAN address is Bonjour's

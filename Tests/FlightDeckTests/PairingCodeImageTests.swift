@@ -5,7 +5,7 @@ import FleetKit
 @testable import FlightDeck
 
 final class PairingCodeImageTests: XCTestCase {
-    /// A v2 payload — packed bytes in Crockford base32 behind an `FD2-` prefix, which is
+    /// A v3 payload — packed bytes in Crockford base32 behind an `FD3-` prefix, which is
     /// what `PairingCodeImage` is actually handed now.
     private func code() -> String {
         PairingPayload(
