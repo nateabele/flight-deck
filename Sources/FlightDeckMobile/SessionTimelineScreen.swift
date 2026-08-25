@@ -50,13 +50,19 @@ struct SessionTimelineScreen: View {
     /// The long answers the reader has opened. **On the screen, not on the row** — see
     /// `Expansion`, which is entirely about why.
     @State private var expansion = Expansion()
+    /// Whether the prefetch trigger is on screen, i.e. the reader is within a page of the
+    /// oldest history the phone holds. The only thing a failed prefetch can be retried on:
+    /// `onAppear` has already fired for a row that is still visible, so without this a read
+    /// that failed while the reader sat at the top would never be attempted again.
+    @State private var isNearOldest = false
 
     var body: some View {
         ScrollViewReader { scroll in
             List {
                 // Notices sit ABOVE the conversation whenever there is a conversation, because
-                // the only fetch a reader can trigger with content on screen is "Load earlier",
-                // and the bottom of a long list is somewhere they are not looking. See
+                // the fetch a reader can still trigger with content on screen — returning to a
+                // kept screen, which re-reads the live edge — has no row of its own, and the
+                // bottom of a long list is somewhere they are not looking. See
                 // `topNotice`/`bottomNotice`: exactly one of the two ever answers.
                 if let notice = Self.topNotice(
                     phase: model.phase, hasItems: !model.feed.items.isEmpty,
@@ -64,11 +70,10 @@ struct SessionTimelineScreen: View {
                 ) {
                     noticeRow(notice)
                 }
-                // **Both conditions belong to the feed, and `hasOlder` is the one that decides.**
-                // `olderAnchor` is non-nil at the top of history too, so a row offered on the
-                // cursor alone would sit there forever re-requesting the first page.
-                if model.feed.hasOlder {
-                    loadOlderRow
+                // Never a control: see `olderStatusRow`. `hasOlder` is what decides, because
+                // `olderAnchor` is non-nil at the top of history too.
+                if model.feed.hasOlder || model.olderFailure != nil {
+                    olderStatusRow
                 }
                 ForEach(entries) { entry in
                     entryRow(entry)
@@ -78,6 +83,20 @@ struct SessionTimelineScreen: View {
                         // middle of a rounded panel, which is the same defect that keeps the
                         // fleet list inset-grouped and this list plain.
                         .listRowSeparator(.hidden)
+                        // **The prefetch trigger, and its depth is the whole design.** It is
+                        // NOT the top row: an `onAppear` up there re-fires on every bounce of
+                        // an over-scroll and lands its page while the list is still settling,
+                        // which drags the reader upward — that defect is why this screen had a
+                        // button instead. A page down, the rubber-band never reaches it and
+                        // the read finishes before the reader arrives.
+                        .onAppear {
+                            guard entry.id == prefetchTriggerID else { return }
+                            isNearOldest = true
+                            model.prefetchOlder()
+                        }
+                        .onDisappear {
+                            if entry.id == prefetchTriggerID { isNearOldest = false }
+                        }
                 }
                 if let notice = Self.bottomNotice(
                     phase: model.phase, hasItems: !model.feed.items.isEmpty
@@ -99,7 +118,17 @@ struct SessionTimelineScreen: View {
             // this only observes. `minimumDistance: 1` because the point is to know a drag
             // happened at all, not to interpret it.
             .simultaneousGesture(
-                DragGesture(minimumDistance: 1).onChanged { _ in lastReaderScroll = Date() }
+                DragGesture(minimumDistance: 1).onChanged { _ in
+                    lastReaderScroll = Date()
+                    // The retry, and it is deliberately conditioned on there being something
+                    // to retry. Re-arming the prefetch on every drag would let a reader who
+                    // rests near the top pull the whole transcript a runway at a time; re-arming
+                    // it only after a failure recovers the one case the trigger cannot, at the
+                    // cost of nothing when history is arriving normally. `prefetchOlder` clears
+                    // the failure as it goes, so this fires once per failure, not once per
+                    // frame of the gesture.
+                    if isNearOldest, model.olderFailure != nil { model.prefetchOlder() }
+                }
             )
             // `initial: true` so the first page a screen ever draws is followed too. Without
             // it the jump only happens on the SECOND page, and opening a session lands on the
@@ -314,38 +343,70 @@ struct SessionTimelineScreen: View {
         }
     }
 
-    /// A button, not an `onAppear` trigger. An automatic fetch on the top row appearing fires
-    /// again on every bounce of an over-scroll and, worse, fires while the list is still
-    /// settling after the previous page was inserted — so the reader is dragged upward by
-    /// content arriving above them. An explicit tap costs one gesture and puts the reader in
-    /// charge of where they are.
-    private var loadOlderRow: some View {
-        Button {
-            model.loadOlder()
-        } label: {
-            HStack(spacing: 6) {
-                Spacer()
-                if model.isLoadingOlder {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "arrow.up").font(.caption2)
-                    Text("Load earlier").font(.footnote.weight(.medium))
-                }
-                Spacer()
+    /// What sits above the oldest row the phone holds: a spinner while history is on its way,
+    /// the reason if the last read of it failed, and **nothing at all** once the beginning of
+    /// the conversation is reached.
+    ///
+    /// **Not a button, and that is the point of this whole change.** It used to be one — "Load
+    /// earlier" — on the reasoning that an automatic fetch fires on over-scroll bounce and
+    /// drags the reader upward, and that an explicit tap puts them in charge of where they
+    /// are. Both halves of that were true and the conclusion was still wrong: it made every
+    /// trip into history a tap followed by a wait, on a screen whose entire job is reading.
+    /// The fetch is now started a page early by the trigger in the list body, so by the time
+    /// the reader gets here the rows are usually already in place and this row is not drawn at
+    /// all. What is left of it is a report, never a control — there is nothing here to press,
+    /// and nothing that fails to load leaves the reader with a decision to make.
+    ///
+    /// The failure is shown without a retry for the same reason: `prefetchOlder` is re-armed
+    /// by the reader's next scroll near the top, so the recovery is the gesture they were
+    /// already making.
+    @ViewBuilder
+    private var olderStatusRow: some View {
+        HStack(spacing: 6) {
+            Spacer(minLength: 0)
+            if let failure = model.olderFailure {
+                Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
+                Text(failure)
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ProgressView().controlSize(.small)
             }
-            .padding(.vertical, 8)
-            .background(
-                Capsule().fill(Color(.secondarySystemBackground))
-            )
+            Spacer(minLength: 0)
         }
-        .buttonStyle(.plain)
+        .padding(.vertical, 8)
         .foregroundStyle(.secondary)
-        // The label is stated rather than left to the content, because half the time the
-        // content is a `ProgressView` — which announces nothing — and a reader on VoiceOver
-        // would lose the only way up through the conversation for as long as a fetch runs.
-        .accessibilityLabel("Load earlier")
+        // Stated rather than left to the content: half the time the content is a
+        // `ProgressView`, which announces nothing, and a reader on VoiceOver arriving at the
+        // top of what has loaded would be told only that the conversation ends there.
+        .accessibilityLabel(model.olderFailure ?? "Loading earlier messages")
         .listRowInsets(Self.rowInsets)
         .listRowSeparator(.hidden)
+    }
+
+    /// The entry whose appearance starts the next read of history, or `nil` when there is no
+    /// history left to read.
+    private var prefetchTriggerID: String? {
+        model.feed.hasOlder ? Self.prefetchTrigger(entries) : nil
+    }
+
+    /// How far below the oldest loaded row the trigger sits, in entries.
+    ///
+    /// One page's worth. Shallower and the rubber-band at the top of the list starts reaching
+    /// it — the defect that made this a button in the first place. Deeper and it fires while
+    /// the reader is still in the middle of what they have, which is a read they may never
+    /// need. `defaultLimit` is in *records* and one record can carry several entries, so this
+    /// is a floor on the real distance rather than an estimate of it.
+    static let prefetchDepth = TimelineLimits.defaultLimit
+
+    /// **Clamped to the first entry, and the clamp is what makes a short feed work.** A feed
+    /// holding less than a page has no entry at `prefetchDepth`, so an unclamped lookup would
+    /// return `nil` — and a screen that only ever loaded one short page would never ask for a
+    /// second. Those are exactly the sessions where the reader reaches the top fastest.
+    static func prefetchTrigger(_ entries: [Entry]) -> String? {
+        guard !entries.isEmpty else { return nil }
+        return entries[min(prefetchDepth, entries.count - 1)].id
     }
 
     // MARK: One entry per thing that happened
@@ -470,16 +531,20 @@ struct SessionTimelineScreen: View {
     /// The notice that belongs above the conversation, or `nil` for none.
     ///
     /// **This is where a failure lands once there is content**, and the placement is the
-    /// point. `SessionTimelineModel` only reaches `.failed` from a fetch the reader caused —
-    /// a poll is quiet by design — so with content on screen the failure is almost always the
-    /// "Load earlier" tap at the top, and the deadline makes that a *fifteen second* gap
-    /// between the tap and the answer. Putting the reason at the bottom of a list the reader
-    /// has scrolled to the top of is the same defect as a spinner that never ends: the
-    /// spinner stops, and nothing they can see says why.
+    /// point. `SessionTimelineModel` only reaches `.failed` from a fetch the reader caused,
+    /// and with content already on screen that means returning to a kept screen, whose
+    /// `loadLatest` re-reads the live edge — the deadline makes a dead link a *fifteen second*
+    /// gap before anything is said. Putting the reason at the bottom of a list the reader has
+    /// scrolled to the top of is the same defect as a spinner that never ends: the spinner
+    /// stops, and nothing they can see says why.
+    ///
+    /// **A failed prefetch is not one of these** and must never become one: it reports itself
+    /// in `olderFailure`, above the oldest row, precisely so a read nobody asked for cannot
+    /// put an error at the top of a conversation that is still perfectly readable.
     ///
     /// Suppressed while `isLoadingOlder`, because `phase` keeps the last failure until a
-    /// fetch succeeds: a retry would otherwise spin on the row directly under the stale
-    /// explanation of the attempt before it.
+    /// fetch succeeds: a read of history would otherwise run underneath the stale explanation
+    /// of an attempt before it.
     static func topNotice(
         phase: SessionTimelineModel.Phase, hasItems: Bool, isLoadingOlder: Bool
     ) -> Notice? {
@@ -530,24 +595,26 @@ struct SessionTimelineScreen: View {
         }
     }
 
-    /// The reason, and — when the whole screen is the failure — a way to try again.
+    /// The reason, and a way to try again.
     ///
-    /// With a conversation on screen there is deliberately **no** button here: the failure is
-    /// almost always the "Load earlier" tap, and that button is the row directly below this
-    /// one. A second control doing the same job one row apart is how a reader ends up
-    /// re-issuing a fetch they cannot see the state of.
+    /// **The button used to be withheld when there was content on screen**, on the reasoning
+    /// that the failure was almost always the "Load earlier" tap and that button was the row
+    /// directly below this one — so a second control doing the same job one row apart was how
+    /// a reader ended up re-issuing a fetch they could not see the state of. That row is gone
+    /// now, and with it the argument: `phase` can only reach `.failed` from a fetch the reader
+    /// caused, a prefetch reports itself in `olderFailure` instead, and withholding the button
+    /// here would leave a reader who returned to a screen that failed to re-read the live edge
+    /// with nothing to touch at all.
     private func failureNotice(_ message: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if model.feed.items.isEmpty {
-                Button("Try again") { model.loadLatest() }
-                    .font(.footnote.weight(.medium))
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-            }
+            Button("Try again") { model.loadLatest() }
+                .font(.footnote.weight(.medium))
+                .buttonStyle(.bordered)
+                .controlSize(.small)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)

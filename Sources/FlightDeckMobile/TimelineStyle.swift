@@ -431,11 +431,33 @@ enum TimelineStyle {
     ///
     /// Deliberately independent of the expansion state: a row that can expand is a row that can
     /// collapse again, and the link is drawn in both states (More, then Less). What it must
-    /// never do is appear on a body that had nothing cut, which is what the `nil` from
-    /// `proseLineLimit(for:)` — asked **unexpanded**, since an expanded row's limit is `nil` by
-    /// construction — rules out.
+    /// never do is appear on a body that had nothing cut — which is now `clampedProse`'s own
+    /// answer rather than an inference from a line count. The two parted company when the cut
+    /// began overshooting to finish a fenced block: a message ending on such a block is over
+    /// the ceiling by `exceeds` and yet drawn whole, and asking the line count would put a More
+    /// link on it with nothing behind it.
     static func expandsInPlace(_ item: TimelineItem) -> Bool {
-        rendersMarkdown(item) && proseLineLimit(for: item) != nil
+        rendersMarkdown(item) && clampedProse(for: item).hasMore
+    }
+
+    /// What a prose row draws, as segments, with the budget already spent.
+    ///
+    /// **This replaces `proseText(for:expanded:)` on the render path** and differs from it in
+    /// one way that matters: the cut is taken between segments rather than in the middle of the
+    /// markdown source, so a fenced block the budget lands inside is drawn whole instead of as
+    /// a panel with no bottom edge. `proseText` stays for what still asks the older question —
+    /// how much of a body a row would show as one string — and for the tests written against it.
+    ///
+    /// A kind that does not render markdown has no segments to speak of and gets its whole body
+    /// as one prose run; those rows draw through `Text` and `.lineLimit` as they always have.
+    static func clampedProse(for item: TimelineItem, expanded: Bool = false) -> TimelineSegmenter.Clamped {
+        guard rendersMarkdown(item) else {
+            return .init(segments: [.prose(item.body.text)], hasMore: false)
+        }
+        guard !expanded, exceeds(proseCeilingLines, item.body.text) else {
+            return .init(segments: TimelineSegmenter.segments(of: item.body.text), hasMore: false)
+        }
+        return TimelineSegmenter.clamp(item.body.text, budget: proseCeilingLines)
     }
 
     /// Whether tapping this row leads anywhere — that is, whether the detail screen has
