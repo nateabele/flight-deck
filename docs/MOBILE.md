@@ -99,7 +99,9 @@ at a device someone is testing on would overwrite the build under their hands.
   asterisks, and a listener cannot skim past those.
 - `SessionTimelineScreen` — the decisions the session screen makes that are not layout:
   *where* a failure is said (at the top, with the conversation still under it — the bottom of a
-  list is where nobody is looking fifteen seconds after a "Load earlier" tap), that an empty
+  list is where nobody is looking fifteen seconds after a re-read of the live edge times out),
+  where a failed *prefetch* is said instead (also at the top, but never through `phase`, so a
+  background read cannot take the conversation off the screen), that an empty
   state never appears while a fetch is running, that a codex session never claims a number of
   sub-agents, that a tool call is paired with its output by `callID` rather than by position,
   that folding a result into its call never swallows a result whose call is off the page and
@@ -184,15 +186,24 @@ run by anything on this machine.
 17. **Tap an unread row and watch both things happen**: the screen pushes *and* the dot clears
     on the Mac. One gesture, two effects — the mark rides the same tap (spec §8), and a
     `simultaneousGesture` on a `NavigationLink` is the only untested part of that pairing.
-18. **Scroll to the top of a long conversation and tap "Load earlier".** Older messages arrive
-    above the reader without moving what they were reading. Do it twice more, to the top of the
-    transcript, and the row goes away rather than re-fetching the first page forever.
+18. **Scroll steadily up through a long conversation and never wait.** There is no "Load
+    earlier" and there must not be one: history is read a page before the reader reaches it, in
+    runs of `SessionTimelineModel.prefetchPages`, so rows are already in place when they arrive.
+    Watch two things while scrolling. First, that pages landing above the reader do not move
+    what they are reading. Second, that the spinner at the top appears rarely or never — it is
+    the miss case, not the normal one, and a reader who sees it on every page is watching the
+    runway fail to keep up. Keep going to the top of the transcript: the spinner goes away for
+    good rather than re-fetching the first page forever, and nothing is left above the oldest
+    row.
 19. **Open a session, go back, and open it again.** The conversation is still there, and no
     fetch runs for what the phone already holds — the model is cached per session, so this is
     where a rebuilt-on-every-update model would show up as a screen that empties itself.
-20. **Quit Flight Deck on the Mac with a session screen open, then tap "Load earlier".** The
-    reason appears at the TOP of the list, above the button, with the conversation still under
-    it — never a blank screen, and never a message at the bottom where the reader is not.
+20. **Quit Flight Deck on the Mac with a session screen open, then scroll up into history.**
+    The reason appears at the TOP of the list, where the missing history would have been, with
+    the conversation still under it — never a blank screen, never a message at the bottom where
+    the reader is not, and never `phase`'s full-screen failure, because a read nobody asked for
+    must not take the conversation away. Then scroll again without reconnecting: it retries on
+    the gesture, so there is nothing to tap and nothing that stays stuck.
 21. **Rename a session on the Mac while its screen is open** — the title in the navigation bar
     changes. The session is read live out of the fleet rather than captured when the screen was
     pushed.
@@ -413,6 +424,20 @@ page.
 58. **Point the phone at a Mac that predates the menu.** The `+` still offers one "New
     session" row and still works. Then sign every account out on a current Mac: that project's
     `+` greys out instead, because an empty answer and no answer mean different things.
+
+59. **Mark a session read on the phone, then unread again from the row's menu.** Open a session
+    so its dot clears on the Mac, come back, press and hold the row, and choose "Mark as
+    Unread". The dot returns **on the Mac as well** — unread is one fleet-wide fact (spec §8),
+    and this is the half that proves it is not a one-way door: before this item existed, a
+    session the phone had opened could not be flagged to come back to from the phone at all.
+    Nothing changes until the Mac echoes it, so watch for the dot arriving rather than blinking.
+60. **Close a session from the row's menu, and from the swipe lane, and note that only one of
+    them asks.** The menu's "Close Session" opens a confirmation naming that session; the swipe
+    lane's Close still closes on its second tap with no prompt. That asymmetry is deliberate —
+    the swipe spends two gestures getting there, a menu item spends one — so read it as intended
+    rather than as an inconsistency to tidy up. Cancel the dialog and confirm nothing closed.
+    Then confirm it, and check the Mac's **Reopen Closed Session** brings the tab back *on the
+    same conversation*, which is what the dialog's message promises.
 
 ## A second checklist: the iOS plumbing
 
