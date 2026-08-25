@@ -173,6 +173,21 @@ final class FleetService: ObservableObject {
                     return reply(.err(cid: cid, code: "unknown_project"))
                 }
                 reply(.newSessionOptions(cid: cid, options))
+            case .macEndpoints:
+                // Answered synchronously: enumerating interfaces is a syscall, not file I/O,
+                // so there is nothing to hop a `Task` for and `reply` lands on `queue` as
+                // `onRequest` requires.
+                //
+                // Nothing here writes and nothing enters `FleetSnapshot` — addresses change
+                // with no event recorded, which is exactly the shape `FleetReplicator`'s
+                // drift assertion catches.
+                guard let boundPort = self.boundPort else {
+                    return reply(.err(cid: cid, code: "not_listening"))
+                }
+                reply(.macEndpoints(
+                    cid: cid,
+                    LocalEndpoints.routable(port: boundPort.rawValue, limit: 4)
+                ))
             }
         }
         server.onAttachedSlotsChanged = { [weak self] slots in
