@@ -334,7 +334,10 @@ struct SessionTimelineScreen: View {
             // a row growing by two thousand points is not a transition anything can follow,
             // and `List` animating a height change that large under the finger reads as the
             // screen having lost its place. The rest of the message is simply there.
-            toggleExpanded: { expansion.toggle(entry.id) }
+            toggleExpanded: { expansion.toggle(entry.id) },
+            // Straight onto the model, which is where the draft lives — the row never learns
+            // that a composer exists.
+            onReply: { model.quote($0) }
         )
         if TimelineStyle.opensDetail(entry.item) {
             NavigationLink(value: entry.item) { row }

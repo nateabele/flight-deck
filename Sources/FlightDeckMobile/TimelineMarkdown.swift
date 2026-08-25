@@ -44,7 +44,7 @@ enum TimelineMarkdown {
     /// A tint that reads as "slightly purple" against white is too dark to read against
     /// black, and the light-on-dark value washes out to nearly invisible the other way. Each
     /// side is picked against its own background rather than derived from the other.
-    private static let codeTint = Color(uiColor: UIColor { traits in
+    static let codeTint = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
             ? UIColor(red: 0.78, green: 0.70, blue: 1.00, alpha: 1)
             : UIColor(red: 0.40, green: 0.26, blue: 0.70, alpha: 1)
@@ -55,7 +55,7 @@ enum TimelineMarkdown {
     ///
     /// Neutral white on dark rather than a tinted one: over the dark background a purple wash
     /// reads as a colour cast on the text rather than as a surface behind it.
-    private static let codeWash = Color(uiColor: UIColor { traits in
+    static let codeWash = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
             ? UIColor(white: 1.0, alpha: 0.10)
             : UIColor(red: 0.45, green: 0.30, blue: 0.75, alpha: 0.09)

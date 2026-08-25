@@ -131,6 +131,48 @@ final class SessionTimelineModel {
     static let prefetchPages = 3
     /// Messages this screen has sent and not yet seen come back. Drawn beside the
     /// conversation, never inside it — see `PromptOutbox`, which is where the reasoning lives.
+    /// What is in the composer, held here rather than in the composer itself.
+    ///
+    /// **It moved because Reply fires from a timeline row.** A `@State` inside `PromptComposer`
+    /// is reachable only from inside `PromptComposer`, and the whole point of the Reply action
+    /// on a selection is that a row twenty rows up can put a quotation into the box. This model
+    /// already owns everything else about the screen's send path, so the draft belongs beside
+    /// the outbox it becomes.
+    ///
+    /// The composer still owns the *field* — its focus, its deferred repaint, its enablement.
+    /// Only the string moved.
+    var draft = ""
+
+    /// Bumped every time a quotation is appended, so the composer can take focus.
+    ///
+    /// A counter rather than a `Bool` anyone has to reset: the second Reply in a row must be
+    /// distinguishable from the first, and a flag that is already `true` is not. The composer
+    /// watches this and nothing else — it never asks whether the draft changed, because a
+    /// person typing must not be re-focused on every keystroke.
+    private(set) var quoteTicks = 0
+
+    /// Append `selection` to the draft as a quotation, the way replying to a message quotes it.
+    ///
+    /// - every line is prefixed, not just the first: a two-line quote with one marker is not a
+    ///   quote, it is a quote and a stray sentence;
+    /// - two trailing newlines, so the reader's own words start on a blank line under it;
+    /// - it **appends**. A draft already being written is not discarded because someone
+    ///   highlighted a sentence, and a second Reply stacks a second quotation rather than
+    ///   replacing the first.
+    ///
+    /// An all-whitespace selection is dropped. The edit menu can be raised on one — a drag that
+    /// caught only a paragraph break — and quoting it would put two blank markers in the box.
+    func quote(_ selection: String) {
+        guard !selection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let quoted = selection
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.isEmpty ? ">" : "> " + $0 }
+            .joined(separator: "\n")
+        let separator = draft.isEmpty || draft.hasSuffix("\n") ? "" : "\n"
+        draft += separator + quoted + "\n\n"
+        quoteTicks += 1
+    }
+
     private(set) var outbox = PromptOutbox()
 
     /// Where the one answer this screen may have in flight has got to.
