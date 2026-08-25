@@ -65,16 +65,22 @@ import SwiftUI
 /// (used by "Add Project", and in-process because the app is unsandboxed) is table-backed too.
 /// Without a scope check, double-clicking a folder in the open panel would map a row index onto
 /// `sidebarRows` and rename an unrelated session, and Return in Settings would be swallowed.
-/// So every path requires the event's window to be the window that hosted the sidebar when the
-/// monitor started — Settings and the open panel are separate windows and are excluded outright.
+/// So every path asks `SessionWindow` whether the event landed in the session window — Settings
+/// and the open panel carry different identifiers and are excluded outright.
+///
+/// **The scope check is asked per event, and must stay that way.** It used to be a window
+/// captured once at `start()` from `NSApp.keyWindow ?? NSApp.mainWindow`, retried for two
+/// seconds and then abandoned. Both of those properties are nil for as long as the app is
+/// inactive, so an app launched in the background — every `scripts/swap-release.sh` relaunch —
+/// captured nothing and compared every later event against nil. The monitor stayed installed
+/// and silently matched nothing for the life of the process: double-click-to-rename dead,
+/// and Return-to-rename with it, since Return is only reachable once the mouse path has made
+/// the table first responder. Rename via the context menu still worked, which is what made it
+/// read as a rename bug rather than a monitor bug. See `SessionWindow`.
 @MainActor
 final class SidebarInputMonitor {
     private var mouseToken: Any?
     private var keyToken: Any?
-
-    /// The window that owned the sidebar when the monitor started. Weak: the monitor must not
-    /// keep a window alive, and a closed window should simply stop matching.
-    private weak var host: NSWindow?
 
     /// Rename the session at this table row index.
     var renameRow: ((Int) -> Void)?
@@ -86,8 +92,6 @@ final class SidebarInputMonitor {
     private static let returnKeyCode: UInt16 = 36
 
     func start() {
-        captureHostWindow()
-
         if mouseToken == nil {
             mouseToken = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
                 self?.handleMouseDown(event)
@@ -107,7 +111,6 @@ final class SidebarInputMonitor {
         if let keyToken { NSEvent.removeMonitor(keyToken) }
         mouseToken = nil
         keyToken = nil
-        host = nil
     }
 
     deinit {
@@ -123,26 +126,10 @@ final class SidebarInputMonitor {
         }
     }
 
-    /// SwiftUI's `onAppear` can run before the view is in a window, so this retries briefly.
-    private func captureHostWindow(attempt: Int = 0) {
-        guard host == nil else { return }
-        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
-            host = window
-            return
-        }
-        guard attempt < 40 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.captureHostWindow(attempt: attempt + 1)
-        }
-    }
-
     private func handleMouseDown(_ event: NSEvent) {
         // Scope check first: Settings ▸ Projects and `NSOpenPanel` are table-backed too.
-        guard let window = event.window, window === host, let content = window.contentView else { return }
-
-        // `NSView.hitTest(_:)` takes a point in the RECEIVER'S SUPERVIEW coordinates; for a
-        // window's `contentView` that is already `locationInWindow`, so no conversion.
-        guard let hit = content.hitTest(event.locationInWindow) else { return }
+        // `hitView` answers nil for both, so nothing below can act on their rows.
+        guard let window = event.window, let hit = SessionWindow.hitView(for: event) else { return }
         guard let (table, rowIndex) = Self.sidebarRow(under: hit) else { return }
 
         if event.clickCount == 2 {
@@ -168,8 +155,8 @@ final class SidebarInputMonitor {
         guard event.keyCode == Self.returnKeyCode else { return false }
         // Any modifier means this is some other command, not a plain Return.
         guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty else { return false }
-        // Same scope check as the mouse path: only this sidebar's window.
-        guard let window = NSApp.keyWindow, window === host else { return false }
+        // Same scope check as the mouse path: only the session window.
+        guard let window = NSApp.keyWindow, SessionWindow.isSessionWindow(window) else { return false }
         // Only when a table holds focus. This is what keeps Return working normally in the
         // terminal and inside the rename field editor.
         guard window.firstResponder is NSTableView else { return false }

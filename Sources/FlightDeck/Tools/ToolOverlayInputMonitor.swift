@@ -5,7 +5,11 @@ import AppKit
 /// **Shaped after `SidebarInputMonitor`, including its scoping discipline.** One passive local
 /// monitor that never consumes an event, so terminal input, hit-testing and list dragging
 /// cannot change. `NSEvent.addLocalMonitorForEvents` sees every event in the process, so it
-/// must prove what it is looking at before acting.
+/// must prove what it is looking at before acting — which it does by asking `SessionWindow`,
+/// per event. It inherited that discipline from `SidebarInputMonitor` and it inherited the bug
+/// with it: both used to latch `NSApp.keyWindow ?? NSApp.mainWindow` once at `start()`, and
+/// both properties are nil for as long as the app is inactive, so a background launch left the
+/// cluster unable to fade in for the life of the process. There is no captured window now.
 ///
 /// **Why mouse movement is available at all.** macOS only generates `mouseMoved` when
 /// something asks for it. `Ghostty.SurfaceView.updateTrackingAreas` installs an
@@ -21,14 +25,11 @@ import AppKit
 final class ToolOverlayInputMonitor {
     private var mouseToken: Any?
     private var keyToken: Any?
-    private weak var host: NSWindow?
 
     var onMouseMovedOverTerminal: (() -> Void)?
     var onKeyPressed: (() -> Void)?
 
     func start() {
-        captureHostWindow()
-
         if mouseToken == nil {
             mouseToken = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
                 self?.handleMouseMoved(event)
@@ -37,7 +38,7 @@ final class ToolOverlayInputMonitor {
         }
         if keyToken == nil {
             keyToken = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self, let window = event.window, window === self.host else { return event }
+                guard let self, SessionWindow.isSessionWindow(event.window) else { return event }
                 self.onKeyPressed?()
                 return event   // never consumed
             }
@@ -49,7 +50,6 @@ final class ToolOverlayInputMonitor {
         if let keyToken { NSEvent.removeMonitor(keyToken) }
         mouseToken = nil
         keyToken = nil
-        host = nil
     }
 
     deinit {
@@ -64,24 +64,8 @@ final class ToolOverlayInputMonitor {
         }
     }
 
-    /// SwiftUI's `onAppear` can run before the view is in a window, so this retries briefly.
-    private func captureHostWindow(attempt: Int = 0) {
-        guard host == nil else { return }
-        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
-            host = window
-            return
-        }
-        guard attempt < 40 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.captureHostWindow(attempt: attempt + 1)
-        }
-    }
-
     private func handleMouseMoved(_ event: NSEvent) {
-        guard let window = event.window, window === host, let content = window.contentView else { return }
-        // `NSView.hitTest(_:)` takes a point in the receiver's SUPERVIEW coordinates; for a
-        // window's `contentView` that is already `locationInWindow`, so no conversion.
-        guard let hit = content.hitTest(event.locationInWindow) else { return }
+        guard let hit = SessionWindow.hitView(for: event) else { return }
         guard Self.isOverTerminal(hit) else { return }
         onMouseMovedOverTerminal?()
     }
