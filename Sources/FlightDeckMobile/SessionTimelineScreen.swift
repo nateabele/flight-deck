@@ -400,13 +400,20 @@ struct SessionTimelineScreen: View {
     /// is a floor on the real distance rather than an estimate of it.
     static let prefetchDepth = TimelineLimits.defaultLimit
 
-    /// **Clamped to the first entry, and the clamp is what makes a short feed work.** A feed
-    /// holding less than a page has no entry at `prefetchDepth`, so an unclamped lookup would
-    /// return `nil` — and a screen that only ever loaded one short page would never ask for a
-    /// second. Those are exactly the sessions where the reader reaches the top fastest.
+    /// **Falls back to the OLDEST entry, and the direction is the trap.** `entries` is
+    /// oldest-first, so the trigger's index counts down from the top of history: index
+    /// `prefetchDepth` is the row with a page of history above it. A feed shorter than that
+    /// has no such row — and clamping the index to `count - 1` picks the *newest* row instead,
+    /// which fires the read the instant the screen draws and every time the reader returns to
+    /// the bottom. The fallback has to be index 0: on a feed this short there is no runway to
+    /// be had, so the earliest possible ask is the right one.
+    ///
+    /// Not `nil`, which is what an unclamped lookup answers: a screen that loaded one short
+    /// page would then never ask for a second, and those are exactly the sessions where the
+    /// reader reaches the top fastest.
     static func prefetchTrigger(_ entries: [Entry]) -> String? {
         guard !entries.isEmpty else { return nil }
-        return entries[min(prefetchDepth, entries.count - 1)].id
+        return entries.count > prefetchDepth ? entries[prefetchDepth].id : entries[0].id
     }
 
     // MARK: One entry per thing that happened
