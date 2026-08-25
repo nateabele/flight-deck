@@ -1,7 +1,22 @@
 # Flight Deck — Architecture (as built)
 
-This describes the code **as it exists today** (the walking skeleton). For the intended
-full design and the reasoning, see the [design spec](superpowers/specs/2026-07-09-flight-deck-design.md).
+This describes the code **as it exists today**. For the intended full design and the reasoning,
+see the [design spec](superpowers/specs/2026-07-09-flight-deck-design.md); for what is still
+unbuilt, see the last section here.
+
+It began as a walking skeleton and is well past one: two agents behind a common adapter, a
+preferences core, external tools, transcript history, and a fleet replicated to a phone that
+runs on real hardware. Sections below are ordered roughly as that grew.
+
+**If you are about to change something, there is probably a working document for it.**
+This file says what the pieces *are*; those say how to change one without breaking what is
+holding it up.
+
+| Changing | Read |
+|---|---|
+| The phone's screens | [MOBILE-UI.md](MOBILE-UI.md), then [MOBILE.md](MOBILE.md)'s checklist |
+| The wire, pairing, discovery | [NETWORKING.md](NETWORKING.md) |
+| Anything, at runtime, on this machine | [AGENT-OPERATIONS.md](AGENT-OPERATIONS.md) |
 
 ## The spine
 
@@ -43,7 +58,7 @@ Net: **~97% of `GhosttyEmbed/` is reused Ghostty code**; the Flight-Deck-authore
 ## Linkage & build config (`project.yml`, XcodeGen)
 
 - **`GhosttyKit.xcframework`** (the built `libghostty`, a static-lib xcframework) is linked via `dependencies: [{ framework: vendor/ghostty-artifacts/GhosttyKit.xcframework, embed: false }]`. The reused Swift files `import GhosttyKit`. **Not** a raw `-lghostty` + header-search-path setup.
-- **`SWIFT_VERSION: "5.0"`** (Swift 5 language mode under the Swift 6.3 compiler) — required so the vendored Ghostty code compiles without Swift-6 strict-concurrency breakage. Deliberate; see FOLLOWUPS.
+- **`SWIFT_VERSION: "5.0"` on the app target only** (Swift 5 language mode under the Swift 6.3 compiler) — required so the vendored Ghostty code compiles without Swift-6 strict-concurrency breakage. Deliberate; see FOLLOWUPS. Everything added since is Swift 6: `FleetKit`, its iOS twin, `FlightDeckMobile` and the test targets all set `SWIFT_VERSION: "6.0"`, which is why FleetKit's queue-confined classes carry explicit `@unchecked Sendable` conformances rather than inheriting a laxer default.
 - **`OTHER_LDFLAGS: -lstdc++`** — `libghostty` statically bundles C++ (glslang); matches Ghostty's own project.
 - **`SWIFT_OBJC_BRIDGING_HEADER: Sources/FlightDeck/BridgingHeader.h`** — imports the two owned ObjC headers (`ObjCExceptionCatcher.h`, `VibrantLayer.h`), which transitively expose Foundation/QuartzCore target-wide (Ghostty relies on this implicit-Foundation trick). `HEADER_SEARCH_PATHS` points at `GhosttyEmbed/`.
 - **Entitlements** (`FlightDeck.entitlements`) are the non-sandboxed subset (no `app-sandbox`, `disable-library-validation` on) — required to link a non-notarized static `libghostty`.
@@ -148,7 +163,10 @@ to session-encounter order with every project expanded.
 
 ## Session status pipeline
 
-Sidebar rows show what each Claude session is doing. Two sources feed one map:
+Sidebar rows show what each session is doing. **This section describes the claude path**, which
+is the one with the polled registry; codex reports its state over JSON-RPC and through
+`CodexRolloutWatcher` instead, and both arrive as the same `SessionStatus` through the agent's
+`AgentRuntime` (see "Agents" below). Two sources feed one map:
 
 ```
 <account home>/sessions/<pid>.json ──> SessionStatusWatcher ──┐
@@ -305,17 +323,27 @@ The spine is live end to end and proven that way: a real client completes a TLS-
 against a real listener, takes a snapshot of a live `SessionStore`, follows its mutations,
 resumes after a drop and marks a session read — all inside `./scripts/test-unit.sh`.
 
-The phone is built on top of that and **has never been run**. It is designed to take a code off
-the Mac's screen — scanned, or twelve characters typed — find the Mac over Bonjour or by racing
-remembered addresses, and show the running fleet in the terminal's own idiom: one project
-section per open project, one row per session, renamed and marked read from either side. Every
-part of that below the UI is covered by the macOS test suite, because it deliberately lives in
-`FleetKit`. The screens themselves have never executed a line. `scripts/build-ios.sh` now really
-*builds* the app target rather than type-checking it, which is what first put Swift 6's
-region-based isolation over these sources and immediately found an error `-typecheck` had been
-passing over for the life of the branch — but a build is not a run, and a simulator has no
-camera in any case. `docs/MOBILE.md` carries the checklist of what a device would have to
-confirm, and says plainly which parts are least proven. Plan 2 built the phone and the pairing
+**The phone runs.** It takes a code off the Mac's screen — scanned, or twelve characters typed —
+finds the Mac over Bonjour or by racing remembered addresses, and shows the running fleet in the
+terminal's own idiom: one project section per open project, one row per session, renamed, marked
+read and closed from either side, with the conversation itself readable and answerable. It has
+paired against a real Mac from both a simulator and a real handset, and
+`./scripts/deploy-phone.sh` installs and relaunches it on the device.
+
+What that does and does not settle is worth being precise about, because this paragraph used to
+say "has never been run" and the correction is not "so it is proven now":
+
+- **Its logic is tested.** `FlightDeckMobileTests` is an app-hosted suite on a simulator
+  covering the phone's decision-making — the typed-code field, `FleetModel`'s orderings, the
+  status vocabulary, how a body is split into segments, what a quotation puts in the composer.
+- **Its appearance is not, and cannot be.** That process has no window: nothing there lays out,
+  draws or taps a view. See [MOBILE-UI.md](MOBILE-UI.md) for what follows from that and how to
+  look at a change anyway.
+- **Everything below the UI is covered by the macOS suite**, because it deliberately lives in
+  `FleetKit` — including real sockets, a real handshake and real loopback runs.
+
+`docs/MOBILE.md` carries the checklist of what only a device on a real network can confirm and
+says plainly which parts are least proven. Plan 2 built the phone and the pairing
 UI on top of the spine Plan 1 built (Plan 1:
 `docs/superpowers/plans/2026-08-19-fleet-replication-spine.md`; Plan 2:
 `docs/superpowers/plans/2026-08-19-fleet-pairing-and-ios.md`). The manual checklist for what
@@ -388,6 +416,34 @@ timeline needed no `FleetEvent`, no broadcast, and left the drift check above wi
 to guard. `TimelineLoopbackTests` is the end-to-end proof: a real service over a real socket
 answering a real client out of a real file on disk, including the second page fetched from the
 first page's cursor.
+
+**The phone talks back, and what it sends is held until the Mac confirms it.** A prompt typed
+on the phone goes as `FleetCommand.prompt` carrying a client-minted token; `SessionStore`
+dedupes on that token and queues the text until the agent's input box is free, so sending
+mid-turn — which is when someone reaches for their phone — is the ordinary case rather than a
+refusal. Until the Mac echoes the turn back as a `FleetEvent`, the message sits in
+`PromptOutbox` above the composer, dimmed: it is not in the conversation, because the
+conversation is what the agent has actually written. **Nothing is set optimistically anywhere on
+this screen** — the same rule covers marking a session unread — because a row that appears and
+then vanishes when the Mac disagrees is worse than one that takes a moment. `ack` means
+dispatched, and the outbox retires a row on exact string equality with the turn that comes back,
+so anything that rewrites a draft on its way out would strand it. `AskUserQuestion` is the same
+shape in the other direction: an open question replicates as `OpenPrompt`, the phone draws it as
+a card with one button per option, and `FleetCommand.answerPrompt` sends the choice.
+`PhonePromptLoopbackTests` and `AnswerLoopbackTests` are the end-to-end proofs.
+
+**Requests carry the things that are not state at all.** The pulled channel described above is
+not only for history. The phone's New Session menu is the other user of it: its rows come from
+`NewSessionAffordance.menu` — the same function the desktop sidebar draws from, so the two
+cannot disagree about which agents appear, in what order, or which account is ticked — and they
+are answered on a `cid` rather than replicated. They have to be. Menu rows derive from
+preferences, preferences emit no `FleetEvent`, and a snapshot field built from them changes the
+fleet with nothing recorded, which is exactly what the drift assertion above catches; an earlier
+implementation put them in `WireProject` and failed three Mac tests for that reason. Rows are
+identified by agent plus **position** among that agent's accounts, never by an account id, for
+the reason the next paragraph gives, and the Mac re-resolves that position — validating the
+agent — when a row comes back. [NETWORKING.md](NETWORKING.md) has the full recipe for adding a
+command or a request, including both of those traps.
 
 **Accounts are deliberately not fleet state.** An account *is* a config directory —
 `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, where that login's credentials live — so `WireSession`
@@ -517,8 +573,25 @@ checksum on the phone all cost nothing. Per-Mac rather than global is load-beari
 `PairingRunner` walks discovered Macs one at a time, so a user with two on the LAN must not
 exhaust the budget on the right one by trying the wrong one first. The phone's half is
 `PairingBrowser`, `PairingRunner` and `PairingInitiator`; the whole exchange is covered against
-real sockets on macOS, and has never run on iOS — see [docs/MOBILE.md](MOBILE.md).
+real sockets on macOS, and **has now run on iOS** — a typed-code pairing from a simulator and
+from a handset, against a real Mac. The QR path still has no simulator coverage for the obvious
+reason that a simulator has no camera. See [docs/MOBILE.md](MOBILE.md) for the checklist, and
+[NETWORKING.md](NETWORKING.md) for what a cross-process run does and does not prove — the
+distinction matters here more than anywhere else in the codebase.
 
 ## Not yet built (design, not code)
 
-Harness adapters, the shared code index, the context engine, and the sidebar are **design only** so far — see the [spec](superpowers/specs/2026-07-09-flight-deck-design.md) §1–§9. Nothing in the current codebase implements them.
+**The shared code index and the context engine** are design only — see the
+[spec](superpowers/specs/2026-07-09-flight-deck-design.md) §1–§9. Nothing in the codebase
+implements either, and no file below `Sources/` mentions them.
+
+Two items that used to be on this list are not any more, and are described above instead:
+**harness adapters** (`Sources/FlightDeck/Agents/`, a protocol with two implementations —
+`ClaudeAdapter` and `CodexAdapter`, each with its own runtime, dialog driver and timeline
+mapper) and **the sidebar** ("Sidebar structure").
+
+Also designed and deliberately deferred rather than unbuilt: encapsulating `SessionStore`'s
+fleet state behind a type whose every mutator records its own event
+([spec](superpowers/specs/2026-08-18-fleet-state-encapsulation-design.md)). The `#if DEBUG`
+drift assertion described above is the interim measure standing in for it, and must not be
+removed before it lands.
