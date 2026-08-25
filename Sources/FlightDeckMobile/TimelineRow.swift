@@ -206,16 +206,63 @@ struct TimelineRow: View {
     @ViewBuilder
     private var proseBody: some View {
         if TimelineStyle.rendersMarkdown(item) {
-            Markdown(TimelineStyle.proseText(for: item, expanded: isExpanded))
-                .markdownTheme(TimelineMarkdown.theme)
-                .font(proseFont)
-                .foregroundStyle(proseColor)
+            // `spacing: 0`, and it is load-bearing rather than tidy. A single `Markdown`
+            // document spaces its own blocks through `markdownMargin` — `.em(0.7)` under a
+            // fenced block, and so on — and those margins survive the split into one view per
+            // segment. Any `VStack` spacing on top of them would be added between blocks that
+            // already have their gap, so a segmented body would drift apart from the same
+            // message rendered whole.
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                    segmentView(segment)
+                }
+            }
+            .font(proseFont)
+            .foregroundStyle(proseColor)
         } else {
             Text(item.body.text)
                 .font(proseFont)
                 .italic(item.kind == .thinking)
                 .foregroundStyle(proseColor)
                 .lineLimit(TimelineStyle.proseLineLimit(for: item, expanded: isExpanded))
+        }
+    }
+
+    /// The body this row draws, already cut to the ceiling if it needed cutting.
+    ///
+    /// Recomputed per evaluation rather than cached: the walk is bounded by the budget, so a
+    /// collapsed row pays for a hundred and twenty lines whatever the body's size, and an
+    /// expanded one is drawing all of it anyway.
+    private var segments: [TimelineSegment] {
+        TimelineStyle.clampedProse(for: item, expanded: isExpanded).segments
+    }
+
+    /// One segment, drawn by whichever renderer can honour it.
+    ///
+    /// **Code and rich blocks go back through MarkdownUI as markdown**, rather than being
+    /// re-styled by hand, and that is what keeps a segmented body pixel-identical to the whole
+    /// document it came from: `TimelineMarkdown.theme` already gives a fenced block its grey
+    /// fill and a table its margins, so handing the block back as source and letting the theme
+    /// do its job cannot drift from itself.
+    ///
+    /// **The press-to-copy goes on the segment**, so the gesture yields the block a reader
+    /// pressed rather than the whole message. The row's own Copy still covers the message; on
+    /// prose it will shortly be the selection menu's Select All that does, which is the same
+    /// text by a different route.
+    @ViewBuilder
+    private func segmentView(_ segment: TimelineSegment) -> some View {
+        switch segment {
+        case .prose(let text):
+            Markdown(text)
+                .markdownTheme(TimelineMarkdown.theme)
+        case .code(let language, let text):
+            Markdown(TimelineSegment.fenced(language: language, text))
+                .markdownTheme(TimelineMarkdown.theme)
+                .modifier(CopyAction(text: text))
+        case .richBlock(let text):
+            Markdown(text)
+                .markdownTheme(TimelineMarkdown.theme)
+                .modifier(CopyAction(text: text))
         }
     }
 
@@ -333,17 +380,28 @@ struct TimelineRow: View {
     /// a statement and this is a control, and the render is what settled it — in `.secondary`
     /// at `.caption2` it reads as a third line of footnote and nothing says it can be tapped.
     /// `.contentShape` keeps the touch target on the words: a `Button` whose label is a small
-    /// `Label` in a 2,700pt row must not claim the row.
+    /// word in a 2,700pt row must not claim the row.
+    ///
+    /// **A word, not a `Label`.** It used to carry a chevron pointing the way the content was
+    /// about to move. The chevron is what made it read as a control bolted underneath the
+    /// message rather than part of it — and the message is the thing this screen is for. What
+    /// is left is the accent colour, which on a screen whose prose is `.primary` is enough to
+    /// say it can be tapped, and the position: its own line, in the prose's own left margin,
+    /// where the text it continues ended.
+    ///
+    /// **Both directions still, one word.** Less sits where More sat — the line after the prose
+    /// — which in an opened row is four screenfuls further down, since that is where the prose
+    /// now ends. What the position buys is that the way out is always in the same place
+    /// *relative to the text*, which the alternative could not offer: a link trailing the cut
+    /// sentence puts More mid-paragraph and Less at the very end of the message, two different
+    /// shapes for one control.
     private var moreLink: some View {
         Button {
             toggleExpanded?()
         } label: {
-            Label(
-                isExpanded ? "Less" : "More",
-                systemImage: isExpanded ? "chevron.up" : "chevron.down"
-            )
-            .font(.caption2.weight(.semibold))
-            .contentShape(Rectangle())
+            Text(isExpanded ? "Less" : "More")
+                .font(.footnote.weight(.semibold))
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(Color.accentColor)

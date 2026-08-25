@@ -18,11 +18,49 @@ import XCTest
 /// implementation that paired on the wrong one.
 final class SessionTimelineScreenTests: XCTestCase {
 
+    // MARK: When history is asked for
+
+    /// **The trigger is not the top row, and the distance is the whole design.** An `onAppear`
+    /// on the oldest row re-fires on every bounce of an over-scroll and lands its page while
+    /// the list is still settling, dragging the reader upward — which is why this screen used
+    /// to make them tap a button instead. A page below the top, the rubber-band never reaches
+    /// it, and the read finishes before the reader does.
+    func testTheReadOfMoreHistoryStartsAPageBeforeTheReaderReachesTheTop() {
+        let entries = SessionTimelineScreen.entries(
+            from: (0..<200).map { prose(at: $0 * 10) }
+        )
+
+        let trigger = SessionTimelineScreen.prefetchTrigger(entries)
+
+        XCTAssertEqual(trigger, entries[SessionTimelineScreen.prefetchDepth].id)
+        XCTAssertNotEqual(trigger, entries.first?.id,
+                          "the oldest row is exactly what must NOT be the trigger")
+    }
+
+    /// **The clamp, and the sessions it exists for are the ones that need it most.** A feed
+    /// holding less than a page has no entry at `prefetchDepth`, so an unclamped lookup
+    /// answers `nil` — and a screen that loaded one short page would then never ask for a
+    /// second, leaving the reader at the top of a conversation that has more behind it.
+    func testAFeedShorterThanTheRunwayStillHasATriggerRatherThanNone() {
+        let entries = SessionTimelineScreen.entries(from: (0..<3).map { prose(at: $0 * 10) })
+        XCTAssertLessThan(entries.count, SessionTimelineScreen.prefetchDepth, "the premise")
+
+        XCTAssertEqual(SessionTimelineScreen.prefetchTrigger(entries), entries.first?.id,
+                       "the oldest row it has, because there is nothing deeper to use")
+    }
+
+    /// Nothing to trigger on, and nothing to crash on: an empty feed is the state every
+    /// session is in for the first round trip of its life.
+    func testAnEmptyConversationHasNothingToTriggerOn() {
+        XCTAssertNil(SessionTimelineScreen.prefetchTrigger([]))
+    }
+
     // MARK: Where a failure is said
 
     /// **The deadline case, and the reason placement is a decision rather than a detail.**
-    /// A "Load earlier" tap that goes unanswered fails fifteen seconds later, by which time
-    /// the spinner on the top row has simply stopped. If the reason renders at the bottom of
+    /// A re-read of the live edge that goes unanswered — the fetch a reader causes by coming
+    /// back to a kept screen — fails fifteen seconds later, by which time whatever was
+    /// spinning has simply stopped. If the reason renders at the bottom of
     /// a list the reader has scrolled to the top of, the screen has reproduced the exact
     /// defect the deadline was added to prevent: something stopped, and nothing visible says
     /// why.
@@ -364,6 +402,16 @@ final class SessionTimelineScreenTests: XCTestCase {
             toolResult(id: "1400#0", callID: "toolu_b2"),
             toolResult(id: "1600#0", callID: "toolu_a1"),
         ]
+    }
+
+    /// A plain assistant turn at a given byte offset. Prose rather than a call, so
+    /// `entries(from:)` folds nothing and the entry count matches the item count — which is
+    /// what makes an assertion about the trigger's *depth* mean what it says.
+    private func prose(at offset: Int) -> TimelineItem {
+        TimelineItem(
+            id: "\(offset)#0", kind: .assistantText, status: .complete,
+            body: TimelineItem.Body(text: "turn at \(offset)")
+        )
     }
 
     private func toolCall(id: String, callID: String?) -> TimelineItem {

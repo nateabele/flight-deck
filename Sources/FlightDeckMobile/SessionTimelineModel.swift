@@ -107,6 +107,28 @@ final class SessionTimelineModel {
     /// Whether a page fetched upwards is in flight, so the scroll trigger cannot fire five
     /// times while the first one is still reading.
     private(set) var isLoadingOlder = false
+    /// Why the last read of older history failed, or `nil`.
+    ///
+    /// **Separate from `phase`, and that separation is the whole reason a background prefetch
+    /// is safe.** A read the reader never asked for must not be able to take the conversation
+    /// off the screen: `phase` is what the screen draws *instead of* content, so a prefetch
+    /// reaching it would replace a session full of history with "Not connected to your Mac"
+    /// because the link dropped while somebody was reading. This is drawn above the oldest
+    /// row instead, where the history that is missing would have been.
+    private(set) var olderFailure: String?
+
+    /// How many pages of history the phone keeps ahead of the reader.
+    ///
+    /// Three, because one is not a buffer. A page is `TimelineLimits.defaultLimit` records
+    /// and a flick covers that, so a single page of runway puts the reader back on a spinner
+    /// — which is the wait the "Load earlier" button used to make explicit, now made
+    /// surprising. Three pages is roughly the distance a fast scroll covers in the time a
+    /// page takes to arrive on a slow link, and it is a ceiling rather than a quota: a
+    /// conversation with two pages of history left fetches two.
+    ///
+    /// Deliberately not "all of it". Backfilling a whole transcript is unbounded work on a
+    /// phone, and `maxPageBytes` says a page can be 128 KB.
+    static let prefetchPages = 3
     /// Messages this screen has sent and not yet seen come back. Drawn beside the
     /// conversation, never inside it — see `PromptOutbox`, which is where the reasoning lives.
     private(set) var outbox = PromptOutbox()
@@ -151,6 +173,28 @@ final class SessionTimelineModel {
     @ObservationIgnored private var inFlight: Int?
     @ObservationIgnored private var lastFetch = 0
     @ObservationIgnored private var deadline: Task<Void, Never>?
+    /// Pages of history read since the reader last came near the top, against
+    /// `prefetchPages`. Reset by each trigger rather than accumulated, so the runway is a
+    /// distance ahead of the reader and not a budget for the session.
+    @ObservationIgnored private var olderRun = 0
+    /// Whether the runway is still short and should keep filling once the slot is free.
+    ///
+    /// Separate from `isLoadingOlder`, which is only ever "a request is out right now". The
+    /// runway spans several requests with gaps between them — and a gap can be a *forward*
+    /// fetch that jumped the queue — so the intent has to outlive any one of them or the
+    /// remaining pages are simply dropped.
+    @ObservationIgnored private var wantsOlder = false
+    /// A forward fetch that was refused because a prefetch held the slot, owed back.
+    ///
+    /// **The live edge outranks the runway**, which is why this exists at all. Every fetch
+    /// shares one slot, and the prefetch now runs on a scroll rather than on a tap — so the
+    /// read that follows a live turn, and the one that confirms a sent message reached the
+    /// agent, are suddenly competing with three background reads and would simply be dropped.
+    /// A dropped one leaves the conversation ending in the middle, or an outbox row saying a
+    /// message never landed when it did. A `Bool` rather than a queue because every forward
+    /// fetch computes its own anchor from `feed.newerAnchor` when it finally runs: two owed
+    /// reads are the same read.
+    @ObservationIgnored private var deferredNewer = false
     /// One deadline per send in flight, keyed by the send's own token.
     ///
     /// A table rather than the single `deadline` a fetch uses, because a person can tap Send
@@ -208,15 +252,33 @@ final class SessionTimelineModel {
         fetch(anchor: feed.newerAnchor, older: false)
     }
 
-    /// Called when the top of the list comes into view.
+    /// Called when the reader comes within a page of the oldest history the phone holds —
+    /// **not** when they reach it.
+    ///
+    /// **There is no "Load earlier" any more, and this is what replaced it.** The button was
+    /// a deliberate choice once: an `onAppear` hung off the *top* row re-fires on every bounce
+    /// of an over-scroll and lands its page while the list is still settling, which drags the
+    /// reader upward. What made it tolerable was that the reader was never surprised by the
+    /// wait — they had asked for it. That is the wrong trade: the wait is the defect, and the
+    /// fix is to have already done the reading. The trigger now sits a page BELOW the top
+    /// (`SessionTimelineScreen.prefetchTrigger`), which is both far enough from the rubber-band
+    /// to be untouched by it and early enough that the page lands before the reader arrives.
     ///
     /// **Both conditions, and `hasOlder` is the one that stops the fetch.** `olderAnchor` is
     /// non-nil at the top of history too — a feed sitting on the first record still has a
     /// perfectly good `oldest` — so checking only the cursor would re-request the same first
-    /// page forever, with a spinner on the row every time.
-    func loadOlder() {
+    /// page forever. Under a tap that was a wasted round trip per tap; under a scroll trigger
+    /// it is a loop for the life of the screen.
+    ///
+    /// Clearing `olderFailure` here is what makes a retry a retry: the screen re-arms this on
+    /// the reader's own scroll, and a reason left over from the last attempt sitting above a
+    /// running one is the same stale-explanation defect `topNotice` is suppressed for.
+    func prefetchOlder() {
         guard feed.hasOlder, let anchor = feed.olderAnchor else { return }
-        fetch(anchor: anchor, older: true)
+        olderRun = 0
+        olderFailure = nil
+        wantsOlder = true
+        fetch(anchor: anchor, older: true, quiet: true)
     }
 
     /// Called by the poll and by a fleet event for this session. Quiet: it does not touch
@@ -374,7 +436,14 @@ final class SessionTimelineModel {
     private func fetch(anchor: TimelineAnchor, older: Bool, quiet: Bool = false) {
         // Guards every fetch. Two overlapping requests would both be computed from the same
         // cursor, so the second would re-fetch what the first had already added.
-        guard inFlight == nil else { return }
+        //
+        // A refused BACKWARD fetch needs nothing remembered here: `wantsOlder` already says
+        // the runway is short, and `drain` re-issues it from whatever `olderAnchor` has
+        // become by then. A refused forward one is owed back — see `deferredNewer`.
+        guard inFlight == nil else {
+            if !older { deferredNewer = true }
+            return
+        }
         lastFetch += 1
         let fetch = lastFetch
         inFlight = fetch
@@ -388,8 +457,8 @@ final class SessionTimelineModel {
         // so a pending request can sit for the TCP retransmit horizon, which is minutes. The
         // spinner lives in `phase`, so without this it is a spinner with no end and no
         // explanation — the precise failure this whole channel was built to avoid — and
-        // worse, `inFlight` would never clear, so every later poll and every "Load earlier"
-        // tap would be silently refused for the life of the screen.
+        // worse, `inFlight` would never clear, so every later poll and every prefetch would
+        // be silently refused for the life of the screen.
         //
         // Armed BEFORE the request is issued, because the request can complete before it
         // returns (`.disconnected` does, synchronously, by design). That completion cancels
@@ -399,8 +468,16 @@ final class SessionTimelineModel {
         deadline = Task { [weak self] in
             try? await Task.sleep(for: timeout)
             guard !Task.isCancelled, let self, self.claim(fetch) else { return }
-            guard !quiet else { return }
-            self.phase = .failed("Your Mac didn't answer in time.")
+            if older {
+                self.olderFailure = "Your Mac didn't answer in time."
+                self.wantsOlder = false
+            } else if !quiet {
+                self.phase = .failed("Your Mac didn't answer in time.")
+            }
+            // A timeout frees the slot exactly as an answer does, so whatever was owed on it
+            // is owed now. Without this a forward fetch deferred behind a prefetch that then
+            // timed out is never issued again, and the screen quietly stops following.
+            self.drain()
         }
 
         fleet.timelinePage(
@@ -420,10 +497,25 @@ final class SessionTimelineModel {
                 // so start again from the end rather than leaving a blank screen that will
                 // never fill in. `newerAnchor` is `.latest` again by itself now.
                 if page.reset { return self.loadLatest() }
-                self.chase(page, from: anchor, quiet: quiet)
+                if older {
+                    self.olderRun += 1
+                    self.olderFailure = nil
+                } else if self.chase(page, from: anchor, quiet: quiet) {
+                    // The forward chase took the slot; whatever else is owed waits for it.
+                    return
+                }
+                self.drain()
             case .failure(let error):
-                guard !quiet else { return }
-                self.phase = .failed(Self.message(for: error))
+                if older {
+                    // Quiet in `phase`, loud where the missing history is. The runway stops
+                    // here rather than spending its remaining pages on a link that just
+                    // refused one — the reader's next scroll is what asks again.
+                    self.olderFailure = Self.message(for: error)
+                    self.wantsOlder = false
+                } else if !quiet {
+                    self.phase = .failed(Self.message(for: error))
+                }
+                self.drain()
             }
         }
     }
@@ -450,8 +542,9 @@ final class SessionTimelineModel {
     /// A page is capped at `TimelineLimits.defaultLimit` records and `maxPageBytes`, so a
     /// screen returned to after a long turn is several pages behind, and one `.after` fetch
     /// would show the conversation ending in the middle with nothing to say it had. There is
-    /// no affordance for that either — "Load earlier" is at the top, and the poll only runs
-    /// while the session is busy. So it is chased here.
+    /// no affordance for that either — there is nothing in this screen a reader can touch to
+    /// ask for what comes *after* what they hold, and the poll only runs while the session is
+    /// busy. So it is chased here.
     ///
     /// **Only `.after`, because `hasMore` means different things in the two directions.** On
     /// a `.before` or a `.latest` page it reports what precedes `start` — `TimelineReader`
@@ -463,9 +556,42 @@ final class SessionTimelineModel {
     /// `hasMore` as `end < size` and returns `end == cursor` with `hasMore` false when there
     /// is no complete record to hand over, so a chase cannot spin on a cursor that has not
     /// moved — and the progress guard here says so rather than trusting it from a file away.
-    private func chase(_ page: TimelinePage, from anchor: TimelineAnchor, quiet: Bool) {
-        guard case .after(let cursor) = anchor, page.hasMore, page.end > cursor else { return }
+    /// Returns whether it issued a fetch, because the caller has other work owed on the same
+    /// slot and must not start a second one on top of this.
+    @discardableResult
+    private func chase(
+        _ page: TimelinePage, from anchor: TimelineAnchor, quiet: Bool
+    ) -> Bool {
+        guard case .after(let cursor) = anchor, page.hasMore, page.end > cursor else {
+            return false
+        }
         fetch(anchor: .after(page.end), older: false, quiet: quiet)
+        return true
+    }
+
+    /// The one place a freed slot decides what runs next.
+    ///
+    /// **Order is the policy: the live edge first, the runway second.** A forward fetch is
+    /// owed when the reader is being shown a session that is still moving, or when a message
+    /// they sent is waiting for the transcript to confirm it; more history is owed to a
+    /// scroll that has not happened yet. Draining in the other order would hold a live turn
+    /// off screen for up to `prefetchPages` round trips.
+    ///
+    /// Nothing is lost by that ordering: `wantsOlder` outlives the forward fetch, so the
+    /// runway resumes from `olderAnchor` when that one lands, one page further along than it
+    /// would have been.
+    ///
+    /// Terminates because every path either clears the flag it acted on or advances
+    /// `olderRun`, and `fetch` re-enters here only through a completion.
+    private func drain() {
+        if deferredNewer {
+            deferredNewer = false
+            return loadNewer()
+        }
+        guard wantsOlder else { return }
+        guard olderRun < Self.prefetchPages, feed.hasOlder, let anchor = feed.olderAnchor
+        else { return wantsOlder = false }
+        fetch(anchor: anchor, older: true, quiet: true)
     }
 
     /// Copy, not a code. Each of these is a different thing for the reader to do about it,

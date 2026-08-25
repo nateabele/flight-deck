@@ -227,7 +227,9 @@ final class SessionTimelineModelTests: XCTestCase {
 
     /// `olderAnchor` is non-nil at the top of history too — the feed still has a perfectly
     /// good `oldest` — so `hasOlder` is the only thing that stops the fetch. A model that
-    /// checked the cursor alone would re-request the first page forever.
+    /// checked the cursor alone would re-request the first page forever, and now that the
+    /// fetch is automatic there is no tap rationing it: it would spin on the first page for
+    /// the life of the screen.
     func testPagingUpStopsAtTheTopOfHistoryEvenThoughTheCursorIsStillThere() {
         let pager = StubPager()
         let model = model(pager)
@@ -236,10 +238,10 @@ final class SessionTimelineModelTests: XCTestCase {
         XCTAssertNotNil(model.feed.olderAnchor, "the premise: there is still a cursor")
         XCTAssertFalse(model.feed.hasOlder)
 
-        model.loadOlder()
+        model.prefetchOlder()
 
         XCTAssertEqual(pager.requests.count, 1, "the top of the transcript was already reached")
-        XCTAssertFalse(model.isLoadingOlder, "and no spinner is left on the row")
+        XCTAssertFalse(model.isLoadingOlder, "and no spinner is left at the top")
     }
 
     func testPagingUpAsksFromThePagesOwnStartAndNotFromTheFirstItemsOffset() {
@@ -248,19 +250,109 @@ final class SessionTimelineModelTests: XCTestCase {
         model.loadLatest()
         pager.answer(tail())
 
-        model.loadOlder()
+        model.prefetchOlder()
 
         XCTAssertEqual(pager.anchors.last, .before(1000),
                        "1040 is where the first record is; 1000 is where the page began, and "
                            + "the record behind the boundary is lost by asking for the former")
-        XCTAssertTrue(model.isLoadingOlder, "the row shows a spinner while this runs")
+        XCTAssertTrue(model.isLoadingOlder, "the top shows a spinner while this runs")
         XCTAssertEqual(model.phase, .idle, "and the screen full of content is not replaced")
 
         pager.answer(page([item(240, "earlier")], start: 200, end: 1000, hasMore: false))
 
         XCTAssertFalse(model.isLoadingOlder)
         XCTAssertEqual(model.feed.items.map(\.body.text), ["earlier", "first", "second"])
-        XCTAssertFalse(model.feed.hasOlder, "and the row goes away")
+        XCTAssertFalse(model.feed.hasOlder, "and the top goes quiet")
+    }
+
+    /// **The runway, and it is the whole point of the prefetch.** One page behind the reader
+    /// is not a buffer: a page is 40 records, a flick covers that, and the reader lands on a
+    /// spinner — which is the "Load earlier" wait under a different name. So a trigger pulls
+    /// `prefetchPages` of them, each anchored on the last one's own `start`, without waiting
+    /// to be asked again.
+    func testNearingTheTopPullsAWholeRunwayRatherThanTheOnePageATapUsedTo() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.loadLatest()
+        pager.answer(tail())
+
+        model.prefetchOlder()
+        pager.answer(page([item(940, "p1")], start: 900, end: 1000, hasMore: true))
+        pager.answer(page([item(840, "p2")], start: 800, end: 900, hasMore: true))
+        pager.answer(page([item(740, "p3")], start: 700, end: 800, hasMore: true))
+
+        XCTAssertEqual(pager.anchors,
+                       [.latest, .before(1000), .before(900), .before(800)],
+                       "each page is asked for from the one before it, three deep")
+        XCTAssertEqual(pager.requests.count, 4,
+                       "and the run stops at \(SessionTimelineModel.prefetchPages) rather "
+                           + "than reading the whole transcript on one trigger")
+        XCTAssertFalse(model.isLoadingOlder)
+        XCTAssertEqual(model.phase, .idle, "none of it is a screen state")
+    }
+
+    /// The runway is a ceiling, not a quota: a conversation with two pages of history left
+    /// stops after two. Without this the third request asks `.before` a cursor at the top of
+    /// the file, and the Mac answers an empty page forever.
+    func testTheRunwayStopsAtTheBeginningRatherThanAskingPastIt() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.loadLatest()
+        pager.answer(tail())
+
+        model.prefetchOlder()
+        pager.answer(page([item(940, "p1")], start: 900, end: 1000, hasMore: true))
+        pager.answer(page([item(840, "p2")], start: 800, end: 900, hasMore: false))
+
+        XCTAssertEqual(pager.requests.count, 3, "the beginning is the beginning")
+        XCTAssertFalse(model.feed.hasOlder)
+        XCTAssertFalse(model.isLoadingOlder)
+    }
+
+    /// **A prefetch nobody asked for must not take the conversation away.** It runs on a
+    /// scroll rather than on a tap, so treating its failure the way a reader-triggered fetch
+    /// is treated would replace a screen full of history with an error message because the
+    /// phone lost its link while somebody was reading. The reason goes at the top, where the
+    /// missing history is, and `phase` never hears about it.
+    func testAPrefetchThatFailsSaysSoAtTheTopAndLeavesTheConversationOnScreen() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.loadLatest()
+        pager.answer(tail())
+
+        model.prefetchOlder()
+        pager.answer(.failure(.disconnected))
+
+        XCTAssertEqual(model.phase, .idle, "the history on screen is still the truth")
+        XCTAssertEqual(model.feed.items.map(\.body.text), ["first", "second"],
+                       "and it is still there")
+        XCTAssertEqual(model.olderFailure, "Not connected to your Mac.")
+        XCTAssertFalse(model.isLoadingOlder, "the spinner stops, or it is a spinner with no end")
+    }
+
+    /// The retry, and it is why no button came back. `onAppear` fires once for a row that is
+    /// already on screen, so a failed prefetch would strand a reader at the top of what the
+    /// phone managed to load with nothing to touch. The screen re-arms this on the reader's
+    /// own scroll — see `SessionTimelineScreen.prefetchTrigger` — and the second attempt has
+    /// to be a real request, not a refusal from a model still holding the first one's state.
+    func testAFailedPrefetchIsAskedForAgainRatherThanStrandingTheReaderAtTheTop() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.loadLatest()
+        pager.answer(tail())
+        model.prefetchOlder()
+        pager.answer(.failure(.disconnected))
+
+        model.prefetchOlder()
+
+        XCTAssertEqual(pager.anchors.last, .before(1000), "it asks again, from the same cursor")
+        XCTAssertNil(model.olderFailure,
+                     "and the reason for the last attempt goes with the new one")
+
+        pager.answer(page([item(240, "earlier")], start: 200, end: 1000, hasMore: false))
+
+        XCTAssertEqual(model.feed.items.map(\.body.text), ["earlier", "first", "second"])
+        XCTAssertNil(model.olderFailure)
     }
 
     // MARK: Reaching the live edge
@@ -303,10 +395,37 @@ final class SessionTimelineModelTests: XCTestCase {
         XCTAssertEqual(pager.requests.count, 1,
                        "hasMore on a .latest page is about older records, not newer ones")
 
-        model.loadOlder()
+        model.prefetchOlder()
         pager.answer(page([item(240, "earlier")], start: 200, end: 1000, hasMore: true))
 
-        XCTAssertEqual(pager.requests.count, 2, "and the same is true paging up")
+        XCTAssertEqual(pager.anchors.last, .before(200),
+                       "the runway keeps reading BACKWARDS on that hasMore, which is what it "
+                           + "is a fact about — it must never turn into a forward fetch")
+    }
+
+    /// **The live edge must not be starved by the runway.** Every fetch shares one `inFlight`
+    /// slot, and a prefetch now runs on a scroll rather than on a tap — so the fetch that
+    /// follows a live turn, and the one that confirms a sent message reached the agent, are
+    /// suddenly competing with three background reads. Dropped, they would leave the
+    /// conversation ending in the middle and an outbox row claiming a message never landed.
+    /// So a forward fetch refused by a running prefetch is re-issued when the slot frees.
+    func testAFetchOfTheLiveEdgeRefusedByARunningPrefetchIsReissuedRatherThanLost() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.loadLatest()
+        pager.answer(tail())
+        model.prefetchOlder()
+        XCTAssertTrue(model.isLoadingOlder, "the premise: the slot is held by the runway")
+
+        model.loadNewer()
+
+        XCTAssertEqual(pager.anchors, [.latest, .before(1000)],
+                       "it cannot go out yet — one fetch at a time")
+
+        pager.answer(page([item(940, "p1")], start: 900, end: 1000, hasMore: false))
+
+        XCTAssertEqual(pager.anchors.last, .after(1200),
+                       "and the moment the runway is done it goes out, from the newest cursor")
     }
 
     // MARK: Failure
