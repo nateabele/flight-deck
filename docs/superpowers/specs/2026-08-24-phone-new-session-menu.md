@@ -72,10 +72,26 @@ The menu is not fleet state. It is a question with an answer, like a transcript 
 
 A SwiftUI `Menu` builds its content when opened, so the rows must already be in hand.
 
-Fetch per project when the fleet list appears, cache on `FleetModel`, and refresh on reconnect.
-A project whose options have not arrived yet falls back to the single default row — which is
-also what a Mac older than this feature will always produce, so the fallback is not a
-placeholder but a supported state.
+**One request per project**, mirroring `timeline.page`: the reply path already correlates by
+`cid`, and N small independent fetches mean one slow project cannot hold up the rest of the
+list. Cache on `FleetModel`.
+
+**Fetch on appear, on reconnect, and on returning to the foreground.** The third is not
+belt-and-braces — it is the only one that covers the realistic staleness case. Options derive
+from preferences, preferences emit no fleet events, and there is no hook to push from, so the
+phone cannot be told that an account was signed in. What it can do is ask again at the moment
+the reader picks the phone up, which is when a change made on the Mac would have happened.
+
+### Absent is not empty
+
+The cache must distinguish **no answer yet** from **an answer with no rows**, because they mean
+opposite things and the same fallback would be wrong for one of them.
+
+- **No answer yet** — the request is in flight, or the Mac predates this feature and will never
+  send one. Fall back to the single default row. This is a supported state, not a placeholder.
+- **An answer with zero rows** — every agent was omitted for having no live account. There is
+  nothing to launch, so the `+` is **disabled**. Offering the default row here would be offering
+  a tap whose only possible outcome is a failure reported from the other end of the wire.
 
 ## Acceptance
 
@@ -85,6 +101,8 @@ placeholder but a supported state.
 - [ ] The tick marks the default account, and appears only inside a submenu.
 - [ ] Tapping `+` without opening the menu still creates with the project's defaults.
 - [ ] An agent with no live account does not appear.
+- [ ] A project whose answer has zero rows disables the `+`; one whose answer has not arrived
+      still offers the default row.
 - [ ] **No account id, and no account home path, appears anywhere in an encoded frame** —
       extend `testAnAccountsHomeNeverReachesTheWire` to cover the new request's answer.
 - [ ] The replicator drift assertion stays green (nothing new in the snapshot).
@@ -106,4 +124,5 @@ placeholder but a supported state.
 2. Mac answers it from `NewSessionAffordance.menu`, with the opaque index. Test the privacy
    assertion here, before anything renders.
 3. `FleetCommand.newSession` gains `agent`/`accountIndex`; Mac resolves and validates.
-4. Phone fetches and caches per project; menu renders from the cache with the flat/submenu rule.
+4. Phone fetches and caches per project — on appear, reconnect and foreground — with absent
+   and empty held as distinct states; menu renders from the cache with the flat/submenu rule.
