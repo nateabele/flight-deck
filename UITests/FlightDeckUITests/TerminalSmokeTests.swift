@@ -805,18 +805,34 @@ final class TerminalSmokeTests: XCTestCase {
             let markedCell = app.cells.element(boundBy: 3)
             let dot = markedCell.descendants(matching: .any).matching(identifier: "session-status").firstMatch
 
-            // Assert on the LABEL, not on the icon's existence.
+            // Assert on whether the row READS as unread — not on the icon existing, and not on
+            // one specific wording.
             //
-            // Measured: the seeded sessions DO carry a live status here, so the status icon is
-            // already present before anything is marked — an existence check would fail its own
-            // precondition. What "unread" changes is the wording: `SessionStatus.tooltip(unread:)`
-            // returns "Finished — not yet viewed" for an idle+unread session and the plain status
-            // tooltip otherwise, and that label is what the icon publishes.
-            let unreadWording = "not yet viewed"
-            XCTAssertTrue(dot.waitForExistence(timeout: 5), "precondition: the row has a status icon")
+            // `SessionStatusIcon` renders unread two different ways, and which one appears is
+            // not something this test controls. With a live `SessionStatus` the label is
+            // `SessionStatus.tooltip(unread:)` ("Finished — not yet viewed"); with a nil status
+            // it is the literal "Unread"; and a nil status that is *not* marked renders nothing
+            // at all, so the element does not exist. No `claude` runs under test, so nil-status
+            // is the path actually measured here: absent before the mark, present reading
+            // "Unread" after it, absent again once the mark clears.
+            //
+            // This used to assert the icon already existed as a precondition, on a comment
+            // claiming the seeded sessions carry a live status. They do not — a stray `claude`
+            // left over from an earlier run can give a row a status, which is presumably what
+            // was measured once, and that made the precondition fail whenever no such process
+            // happened to be around. Reading the state instead of the chrome holds either way.
+            func readsUnread(_ label: String) -> Bool {
+                label == "Unread" || label.contains("not yet viewed")
+            }
+            // Never interpolate `dot.label` unguarded: resolving `.label` on an element that
+            // does not exist raises "Failed to get matching snapshot" and aborts the whole test
+            // method, which is exactly how the stale precondition above took every later
+            // activity down with it.
+            func iconLabel() -> String { dot.exists ? dot.label : "<no status icon>" }
+
             XCTAssertFalse(
-                dot.label.contains(unreadWording),
-                "precondition: row must not already read as unread before it is marked, got \(dot.label)"
+                dot.exists && readsUnread(dot.label),
+                "precondition: row must not already read as unread before it is marked, got \(iconLabel())"
             )
 
             title.rightClick()
@@ -838,8 +854,8 @@ final class TerminalSmokeTests: XCTestCase {
             firstItem.click()
 
             XCTAssertTrue(
-                waitFor(timeout: 5) { dot.exists && dot.label.contains(unreadWording) },
-                "marking a session unread did not change its status icon to the unread wording, got \(dot.label)"
+                waitFor(timeout: 5) { dot.exists && readsUnread(dot.label) },
+                "marking a session unread did not make its row read as unread, got \(iconLabel())"
             )
 
             // Selecting a DIFFERENT row, then the marked row again, must clear the mark.
@@ -847,10 +863,13 @@ final class TerminalSmokeTests: XCTestCase {
             settle()
             title.click()
 
+            // Cleared means "no longer reads as unread". With a nil status that is the icon
+            // disappearing outright, so requiring it to still exist would assert the presence of
+            // chrome the feature deliberately removes.
             XCTAssertTrue(
-                waitFor(timeout: 5) { dot.exists && !dot.label.contains(unreadWording) },
-                "re-selecting a marked row must clear its unread mark, but the icon still reads "
-                + "as unread (\(dot.label))"
+                waitFor(timeout: 5) { !dot.exists || !readsUnread(dot.label) },
+                "re-selecting a marked row must clear its unread mark, but the row still reads "
+                + "as unread (\(iconLabel()))"
             )
         }
 
