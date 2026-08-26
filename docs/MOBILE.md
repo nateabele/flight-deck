@@ -447,7 +447,7 @@ page.
 
 ## A second checklist: the iOS plumbing
 
-The fifty items above test the *feature* — that pairing, replication, resume, revocation, and
+The sixty-one items above test the *feature* — that pairing, replication, resume, revocation, and
 now typing into and answering a live agent behave. These fifteen test the *app*, and they are
 separated because they have a different character: each one was identified during review or
 execution as something no amount of reading or type-checking on the build machine could settle,

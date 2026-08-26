@@ -448,7 +448,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         // Try the frame's own tags first; anything else is an event's tag, which is why
         // the two namespaces must never collide. `FleetEventTag`'s values are all dotted
-        // and these four are not, which keeps that a property rather than a promise.
+        // and these six are not, which keeps that a property rather than a promise.
         if let tag = try? c.decode(Tag.self, forKey: .t) {
             switch tag {
             case .snapshot:
