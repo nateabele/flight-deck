@@ -446,13 +446,6 @@ private struct ExpandAction: ViewModifier {
     }
 }
 
-/// Copy, for the rows that have nowhere to send a reader for it.
-///
-/// A modifier taking an optional string rather than a `.contextMenu` written inline, because
-/// the two branches of `TimelineStyle.rowCopyText(for:)` are different view types and a
-/// `@ViewBuilder` around the whole row would erase them on every row in the list. `nil` is
-/// "this row leads somewhere that has a Copy button already", or "there is nothing to copy" —
-/// that function decides both, so there is no second emptiness test here.
 /// One segment, drawn by whichever renderer can honour it.
 ///
 /// **Its own view rather than a method on the row, because it has two callers.**
@@ -488,6 +481,14 @@ struct TimelineSegmentView: View {
     }
 }
 
+/// Copy, for the rows that have nowhere to send a reader for it.
+///
+/// A modifier taking an optional string rather than a `.contextMenu` written inline, because
+/// the two branches of `TimelineStyle.rowCopyText(for:)` are different view types and a
+/// `@ViewBuilder` around the whole row would erase them on every row in the list. `nil` is
+/// "this row leads somewhere that has a Copy button already", or "there is nothing to copy" —
+/// that function decides both, so there is no second emptiness test here.
+///
 /// Internal rather than file-private: `TimelineSegmentView` above is used from
 /// `TaskNotificationBody` too, so this travels with it.
 struct CopyAction: ViewModifier {
