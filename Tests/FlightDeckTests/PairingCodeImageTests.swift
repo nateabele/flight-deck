@@ -51,10 +51,26 @@ final class PairingCodeImageTests: XCTestCase {
     /// compares the generated code against the same content in v1's shape — rather than
     /// asserting a QR version, which depends on an encoding-mode choice CoreImage does not
     /// document.
+    ///
+    /// **The subject supplies three endpoints, and that is load-bearing.** This test is what
+    /// `PairingPayload.maxEndpoints` and NETWORKING.md's "Two endpoints, not more" both cite
+    /// as the guard on the cap, and it can only be that guard if the *encoder's* cap decides
+    /// how many reach the QR. With one endpoint supplied it did not: raising `maxEndpoints`
+    /// to 3 still packed one, produced a byte-identical string, and passed. Two would not
+    /// have caught it either — the cap has to be the binding constraint at both settings.
+    /// At 2 this packs two and measures 47 against v1's 67 (0.701, passes); at 3 it packs
+    /// three and measures 51 (0.761, fails). Verified by sabotage in both directions.
+    ///
+    /// The v1 baseline keeps its ONE endpoint deliberately, which makes the comparison
+    /// stricter rather than looser: the packed code is carrying more addresses than the
+    /// legacy code it is measured against and still has to come in under three quarters of
+    /// its size. Do not "even them up" — that would slacken the threshold, and the point of
+    /// §8's measurement is the format, not the address count.
     func testThePackedPayloadProducesAMateriallySmallerQR() throws {
         let subject = PairingPayload(
             key: .mint(), macName: "Nate's MacBook Pro",
-            serviceName: "flightdeck-macbook-a1b2", endpoints: ["192.168.1.20:53211"]
+            serviceName: "flightdeck-macbook-a1b2",
+            endpoints: ["100.108.99.35:53211", "192.168.1.20:53211", "192.168.139.3:53211"]
         )
         let v1Body = #"{"eps":["192.168.1.20:53211"],"name":"Nate's MacBook Pro","psk":"\#(subject.key.secret.base64EncodedString())","slot":"\#(subject.key.slot.uuidString)","svc":"flightdeck-macbook-a1b2","v":1}"#
         let v1 = "flightdeck1:" + Data(v1Body.utf8).base64EncodedString()
