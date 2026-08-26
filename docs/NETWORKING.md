@@ -220,6 +220,16 @@ is the module count plus a two-module quiet zone, so the same two shapes measure
 there. Keep the two units apart when citing this — an earlier revision of
 `PairingPayload.maxEndpoints`'s own comment conflated them and had to be corrected.
 
+Which list the code is built from is a separate decision from the cap, and getting it wrong
+costs a slot rather than a byte: `FleetService.arm()` calls `LocalEndpoints.routable(port:limit:)`
+with `PairingPayload.maxEndpoints` as the limit — **not** `current`. `current` includes loopback,
+ranked last, and `127.0.0.1:<port>` packs into the record exactly as well as any other IPv4:port,
+so a Wi-Fi-only Mac (`lo0` and `en0` and nothing else) shipped a QR whose second slot was a dial
+the phone made to itself. The filter has to run before the cap, not after it. Both paths that
+reach a client — the QR and the `mac.endpoints` reply — therefore go through `routable`;
+`LocalEndpointsTests.testWhatTheQRCarriesForAPlainMacBookAndForATailnettedOne` drives interfaces
+all the way through to a decoded code, which is the seam neither side's tests covered.
+
 `LocalEndpoints.ranked` decides which two survive by rank, not by sorting, and matches no
 interface name. `SCDynamicStore`'s `PrimaryInterface` key names whichever interface carries the
 default route — the LAN, ordinarily — and the kernel's `IFF_POINTOPOINT` flag names a tunnel;

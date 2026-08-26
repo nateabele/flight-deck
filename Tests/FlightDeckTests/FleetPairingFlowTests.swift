@@ -212,11 +212,35 @@ final class FleetPairingFlowTests: XCTestCase {
         await fulfillment(of: [refused], timeout: 8)
     }
 
+    /// Two properties of the code's candidate list, on whatever machine this runs on.
+    ///
+    /// The bare `XCTAssertFalse(endpoints.isEmpty)` this used to open with is gone on purpose,
+    /// and it was not a real guard: loopback is what kept it true on a machine with no
+    /// network, and loopback is exactly what `arm()` now filters out (see `LocalEndpoints`).
+    /// Re-asserting non-emptiness would fail on a networkless build machine for a code that is
+    /// entirely correct — Bonjour finds that Mac.
+    ///
+    /// What the assertions below do instead: pin the list to `LocalEndpoints.routable` at the
+    /// payload's own cap, which is what the port claim in the name rests on, and prove loopback
+    /// was enumerated and then dropped. That second pair holds on *every* machine — `lo0` is
+    /// always there — so it cannot pass vacuously the way the emptiness check could.
     func testThePairingCodeAdvertisesTheListenersRealPort() async throws {
         let (_, _, service) = try await standUp()
         let armed = try await service.arm()
         let port = try XCTUnwrap(service.boundPort)
-        XCTAssertFalse(armed.payload.endpoints.isEmpty, "a code with no candidates cannot be raced")
+        XCTAssertEqual(
+            armed.payload.endpoints,
+            LocalEndpoints.routable(port: port.rawValue, limit: PairingPayload.maxEndpoints),
+            "the code must carry the ranked, loopback-stripped, capped list"
+        )
         XCTAssertTrue(armed.payload.endpoints.allSatisfy { $0.hasSuffix(":\(port.rawValue)") })
+        XCTAssertTrue(
+            LocalEndpoints.current(port: port.rawValue).contains { $0.hasPrefix("127.") },
+            "loopback is enumerated, so the next assertion is about filtering rather than luck"
+        )
+        XCTAssertFalse(
+            armed.payload.endpoints.contains { $0.hasPrefix("127.") },
+            "127.0.0.1 packs fine as an IPv4:port — it must not spend one of the two QR slots"
+        )
     }
 }
