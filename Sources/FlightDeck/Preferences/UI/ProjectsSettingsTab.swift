@@ -13,7 +13,17 @@ import SwiftUI
 struct ProjectsSettingsTab: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore
-    @State private var selected: String?
+
+    /// The selection lives on the store, not in `@State`, so a caller outside this view can
+    /// point the pane at one project — "Configure…" on a sidebar project row opens Settings
+    /// here with that project already picked. See `PreferencesOpener.select`.
+    private var selected: String? { preferences.selectedProjectPath }
+    private var selection: Binding<String?> {
+        Binding(
+            get: { preferences.selectedProjectPath },
+            set: { preferences.selectedProjectPath = $0 }
+        )
+    }
 
     private var paths: [String] {
         let open = sessions.repos.map(\.url.standardizedFileURL.path)
@@ -29,7 +39,7 @@ struct ProjectsSettingsTab: View {
             // a preferences tab that produced a pane visibly unlike every sibling tab, with
             // the tab strip pushed off-centre.
             HSplitView {
-                List(paths, id: \.self, selection: $selected) { path in
+                List(paths, id: \.self, selection: selection) { path in
                     VStack(alignment: .leading, spacing: 1) {
                         Text(URL(fileURLWithPath: path).lastPathComponent)
                         Text(path)
@@ -47,7 +57,9 @@ struct ProjectsSettingsTab: View {
                     // Covers both "Remove Overrides" and reverting every override to empty
                     // (which also removes the record, see the option bindings below): either
                     // can drop the selected path from the list out from under the detail pane.
-                    if let selected, !newPaths.contains(selected) { self.selected = nil }
+                    if let selected, !newPaths.contains(selected) {
+                        preferences.selectedProjectPath = nil
+                    }
                 }
 
                 Group {

@@ -355,9 +355,10 @@ struct AccountsSection: View {
     ///
     /// Reads the account's `LoginInvocation` off its adapter and hands the whole thing to the
     /// store, which owns both halves. This view used to unwrap the invocation itself and push
-    /// the `/login` half through `ClaudeAdapter.injectRename` behind an `as? ClaudeAdapter`
-    /// downcast — that downcast is what dragged the *rename* channel into a login, and a view
-    /// has no business knowing which adapter class it is holding in the first place.
+    /// the `/login` half through claude's rename channel (`ClaudeAdapter.injectRename`, since
+    /// deleted as dead code) behind an `as? ClaudeAdapter` downcast — that downcast is what
+    /// dragged the *rename* channel into a login, and a view has no business knowing which
+    /// adapter class it is holding in the first place.
     private func signIn(_ account: AgentAccount) {
         let adapter = sessions.adapter(for: account.agent, account: account.id)
         let directory = frontmostProjectPath ?? account.home.path

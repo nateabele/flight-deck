@@ -4,6 +4,11 @@ import SwiftUI
 /// frees ⌘N — `WindowGroup` claims it for File ▸ New Window. Closing this window quits,
 /// because `AppDelegate.applicationShouldTerminateAfterLastWindowClosed` returns true.
 struct RootWindow: Scene {
+    /// The scene id — and, because SwiftUI stamps it onto the `NSWindow`, the way the rest of
+    /// the app recognizes this window among `NSApp.windows`. Shared rather than spelled twice
+    /// so the two cannot drift; see `SessionWindow`, which is what reads it.
+    static let id = "main"
+
     @ObservedObject var store: SessionStore
     var preferences: PreferencesStore?
     /// Sessions a paired phone has open. Threaded down rather than reached for: the fleet is
@@ -12,7 +17,7 @@ struct RootWindow: Scene {
     var phoneActiveSessions: Set<UUID> = []
 
     var body: some Scene {
-        Window("Flight Deck", id: "main") {
+        Window("Flight Deck", id: Self.id) {
             RootView(store: store, preferences: preferences,
                      phoneActiveSessions: phoneActiveSessions)
                 .frame(minWidth: 800, minHeight: 500)

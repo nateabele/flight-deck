@@ -12,12 +12,12 @@ import Foundation
 /// account's `session_index.jsonl`, fanned out by conversation id.
 @MainActor
 final class CodexRuntime: AgentRuntime {
-    private struct Attachment {
-        let onEvent: (AgentEvent) -> Void
+    private struct Source {
+        let subscribers: SubscriberList
         let watcher: CodexRolloutWatcher?
     }
 
-    private var attachments: [UUID: Attachment] = [:]
+    private var sources: [UUID: Source] = [:]
     private let clock: WatchClock?
     private let indexURL: URL
 
@@ -30,30 +30,57 @@ final class CodexRuntime: AgentRuntime {
         self.indexURL = indexURL
     }
 
-    func attach(_ binding: AgentBinding, onEvent: @escaping (AgentEvent) -> Void) {
+    /// Subscribes `tab` to `binding`'s thread, starting a watcher if this is the first
+    /// subscriber. A second tab on the same thread joins the existing source rather than
+    /// replacing it — which is what the old `attachments[id] = …` did, stopping the first
+    /// tab's watcher and leaving the store to compensate with a value-matched fan-out.
+    func attach(
+        _ binding: AgentBinding, for tab: UUID, onEvent: @escaping (AgentEvent) -> Void
+    ) -> AttachmentToken {
         let id = binding.conversationID
+        let token = AttachmentToken(conversationID: id, tab: tab)
+
+        if let existing = sources[id] {
+            // `binding.transcriptURL` is discarded here — the joining subscriber gets the
+            // first attacher's watcher, not its own. If two tabs land on one thread with
+            // different transcript directories, both end up tailing the first attacher's
+            // file, and a later `retarget` of the second tab (SessionStore.retarget) cannot
+            // repoint it while the first tab stays attached. Tracked follow-up, not fixed here.
+            existing.subscribers.add(token, onEvent)
+            return token
+        }
+
+        let subscribers = SubscriberList()
+        subscribers.add(token, onEvent)
 
         var watcher: CodexRolloutWatcher?
         if let url = binding.transcriptURL {
-            watcher = CodexRolloutWatcher(url: url, clock: clock, onEvent: onEvent)
+            watcher = CodexRolloutWatcher(url: url, clock: clock) { subscribers.emit($0) }
             watcher?.start()
         }
-        // Stopped explicitly rather than left to the replaced `Attachment` being released: it
-        // survives its owner by its registration on the shared `WatchClock`, and although that
-        // registration is weak and self-prunes, an invariant that holds only because of a
-        // retention detail two files away is not one to lean on.
-        attachments[id]?.watcher?.stop()
-        attachments[id] = Attachment(onEvent: onEvent, watcher: watcher)
+        sources[id] = Source(subscribers: subscribers, watcher: watcher)
 
-        // Registered even when there is no rollout to tail: a tab still has a name.
-        nameWatcher().register(id) { onEvent(.title($0)) }
+        // Registered once per thread, not once per tab: a tab still has a name even with no
+        // rollout to tail, and the list below is what fans that name out to every subscriber.
+        nameWatcher().register(id) { subscribers.emit(.title($0)) }
+        return token
     }
 
-    func detach(_ binding: AgentBinding) {
-        let id = binding.conversationID
-        attachments[id]?.watcher?.stop()
-        attachments[id] = nil
+    /// Drops one subscriber, and the watcher — plus the shared name watcher's registration —
+    /// only when it was the last.
+    ///
+    /// Stopped explicitly rather than left to the released `Source`: it survives its owner by
+    /// its registration on the shared `WatchClock`, and although that registration is weak
+    /// and self-prunes, an invariant that holds only because of a retention detail two files
+    /// away is not one to lean on.
+    func detach(_ token: AttachmentToken) {
+        let id = token.conversationID
+        guard let source = sources[id] else { return }
+        source.subscribers.remove(token)
+        guard source.subscribers.isEmpty else { return }
 
+        source.watcher?.stop()
+        sources[id] = nil
         names?.unregister(id)
         if names?.isEmpty == true {
             names?.stop()
@@ -71,7 +98,7 @@ final class CodexRuntime: AgentRuntime {
 
     /// Test seam mirroring `ClaudeRuntime.drainForTesting()`, so runtime tests need no clock.
     func drainForTesting() {
-        for attachment in attachments.values { attachment.watcher?.drain() }
+        for source in sources.values { source.watcher?.drain() }
         names?.drain()
     }
 }

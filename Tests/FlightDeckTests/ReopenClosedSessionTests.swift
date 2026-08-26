@@ -64,9 +64,7 @@ final class ReopenClosedSessionTests: XCTestCase {
 
         XCTAssertEqual(
             provider.configs.last?.initialInput,
-            ClaudeSession.resumeCommand(
-                sessionID: session.pinnedConversationID, title: session.title
-            )
+            ClaudeSession.resumeCommand(sessionID: session.pinnedConversationID)
         )
     }
 
