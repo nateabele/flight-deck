@@ -55,12 +55,15 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
     private static let maxNameBytes = 64
     /// One byte of count, so 255 is the format's ceiling. **2 is the policy**, and it is
     /// measured rather than chosen: at correction level `M` a two-endpoint record renders to
-    /// 45 modules — byte for byte what v2 produces today — and a three-endpoint one to 49,
-    /// which breaks `PairingCodeImageTests.testThePackedPayloadProducesAMateriallySmallerQR`
-    /// against its 0.75 threshold. Two is also exactly the requirement: one address that
-    /// works off the LAN and one that works on it. Any *further* LAN address is Bonjour's
-    /// job, which is the one thing Bonjour can do that a QR cannot. Do not raise this to buy
-    /// robustness the browser already provides.
+    /// 45 modules — module for module what v2 produces today, though not byte for byte, since
+    /// the record is 105 bytes against v2's 98 — and a three-endpoint one to 49, which breaks
+    /// `PairingCodeImageTests.testThePackedPayloadProducesAMateriallySmallerQR` against its
+    /// 0.75 threshold. That test now supplies THREE endpoints so this cap is what decides how
+    /// many reach the QR; with the single endpoint it used to supply, raising this to 3
+    /// changed nothing and the guard cited here did not exist. Two is also exactly the
+    /// requirement: one address that works off the LAN and one that works on it. Any
+    /// *further* LAN address is Bonjour's job, which is the one thing Bonjour can do that a
+    /// QR cannot. Do not raise this to buy robustness the browser already provides.
     private static let maxEndpoints = 2
 
     public var version: Int
