@@ -210,7 +210,15 @@ struct TimelineRow: View {
     /// `TimelineStyle.proseText`.
     @ViewBuilder
     private var proseBody: some View {
-        if TimelineStyle.rendersMarkdown(item) {
+        // **Before the markdown branch, and it has to be.** `rendersMarkdown` gates on the
+        // KIND, so admitting `.systemNotice` there would send a `system-reminder`'s ordinary
+        // prose through the markdown parser too. A notification is recognised by its CONTENT
+        // instead — `parse` answers nil for every notice that is not a run of fields, and each
+        // of those falls through to the branches below exactly as it always did.
+        if let notification = TimelineStyle.taskNotification(for: item) {
+            TaskNotificationBody(notification: notification, expanded: isExpanded, onReply: onReply)
+                .foregroundStyle(proseColor)
+        } else if TimelineStyle.rendersMarkdown(item) {
             // `spacing: 0`, and it is load-bearing rather than tidy. A single `Markdown`
             // document spaces its own blocks through `markdownMargin` — `.em(0.7)` under a
             // fenced block, and so on — and those margins survive the split into one view per
@@ -450,7 +458,10 @@ private struct ExpandAction: ViewModifier {
 /// `@ViewBuilder` around the whole row would erase them on every row in the list. `nil` is
 /// "this row leads somewhere that has a Copy button already", or "there is nothing to copy" —
 /// that function decides both, so there is no second emptiness test here.
-private struct CopyAction: ViewModifier {
+/// Internal rather than file-private: `TaskNotificationBody` draws the same three segment
+/// kinds and must offer the same Copy on a fenced block, and two copies of one gesture is how
+/// they drift apart.
+struct CopyAction: ViewModifier {
     let text: String?
 
     @ViewBuilder

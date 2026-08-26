@@ -206,7 +206,13 @@ struct TimelineBodyBlock: View {
     /// showing, which is the failure the branch exists to prevent.
     @ViewBuilder
     private var content: some View {
-        if let document, !showsRaw {
+        if let notification = TimelineStyle.taskNotification(for: item) {
+            // The same structure the row draws, `expanded` so the result is whole. Without
+            // this the screen renders `body.text` directly — so tapping a row that had just
+            // been rescued from its own markup would show the reader that markup again, one
+            // gesture away, which is the defect rather than a lesser version of it.
+            TaskNotificationBody(notification: notification, expanded: true)
+        } else if let document, !showsRaw {
             JSONTreeView(document: document)
         } else if item.body.text.isEmpty {
             Text("(empty)").font(.body).foregroundStyle(.secondary)
