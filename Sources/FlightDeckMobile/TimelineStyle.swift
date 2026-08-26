@@ -450,6 +450,17 @@ enum TimelineStyle {
     ///
     /// A kind that does not render markdown has no segments to speak of and gets its whole body
     /// as one prose run; those rows draw through `Text` and `.lineLimit` as they always have.
+    /// The task notification this item carries, or `nil` for every other notice and every
+    /// other kind.
+    ///
+    /// Gated on the kind first so the parse is not attempted over every assistant message on
+    /// the screen, and answered by the CONTENT rather than by `body.tool`: a body that does not
+    /// parse must render as it always did, whatever the wrapper it arrived under claimed.
+    static func taskNotification(for item: TimelineItem) -> TaskNotification? {
+        guard item.kind == .systemNotice else { return nil }
+        return TaskNotification.parse(item.body.text)
+    }
+
     static func clampedProse(for item: TimelineItem, expanded: Bool = false) -> TimelineSegmenter.Clamped {
         guard rendersMarkdown(item) else {
             return .init(segments: [.prose(item.body.text)], hasMore: false)
