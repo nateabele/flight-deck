@@ -462,6 +462,27 @@ page.
     keeps *dropping* and redialling because something on the path objects to the probes, or a
     measurable battery cost from a socket that never goes quiet.
 
+65. **Open a session full of task notifications and read one.** A session that ran subagents
+    is the fixture — `Schedule`'s has 45. Not one `<` may be visible in any row. Each reads as
+    a summary sentence with its outcome at the trailing edge of the heading row, a short table
+    of `task` / `call` / `output` / `usage` underneath, and then the agent's own report as
+    markdown. `usage` in particular must read "65,202 tokens · 36 tools · 3m 53s" and never the
+    `<subagent_tokens>` tags it arrives as — that field is the one whose value is itself markup,
+    so it is the one that regresses first.
+66. **Tap that row, then use the Copy button, then read it with VoiceOver.** All three surfaces
+    were fixed after the row was, and each is a separate way for the markup to come back. The
+    detail screen shows the same structure with the outcome in ITS header and the report whole
+    (and a fenced block inside that report must have a visible edge, not vanish into the grey
+    panel). Copy puts readable text on the clipboard, never tags. VoiceOver announces the
+    summary, the outcome, and then **the report** — if you hear a task id and a `/private/tmp/`
+    path and then nothing, the 240-character clip is eating the thing you were listening for.
+67. **Find a `!` command whose output happens to start with a tag** — `!cat` any HTML or XML
+    file — and confirm it renders as output, whole. It arrives under `bash-stdout` but as the
+    same `.systemNotice` kind as a notification, and a body like `<html>…</html>` parses as a
+    perfectly good run of fields. If it is mistaken for a notification the row collapses the
+    whole file to a single line and the content is gone from the row, the clipboard and
+    VoiceOver at once.
+
 ## A second checklist: the iOS plumbing
 
 The sixty-one items above test the *feature* — that pairing, replication, resume, revocation, and

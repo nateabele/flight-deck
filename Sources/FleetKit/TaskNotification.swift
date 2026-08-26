@@ -149,14 +149,16 @@ public struct TaskNotification: Equatable, Sendable {
     /// Reads a task-notification body: the inner text of `<task-notification>…</…>`, already
     /// unwrapped and trimmed by `ClaudeTimelineMapper.normalized`.
     ///
-    /// Returns `nil` for anything that is not this shape — most importantly for the bodies
-    /// `normalized` emits under every OTHER wrapper name (`system-reminder`,
-    /// `local-command-stdout`, and the rest of `harnessWrappers`), which are ordinary prose
-    /// and must keep rendering exactly as they do today. `nil` is also what a caller gets for
-    /// a body that is only `<note>…</note>` boilerplate with nothing else in it — see the
-    /// guard at the end — because a `TaskNotification` with every field empty is not
-    /// distinguishable from "parsing found nothing", and the caller needs that distinction to
-    /// fall back to plain text.
+    /// Returns `nil` for anything that is not this shape — ordinary prose, an empty body, a
+/// document with no fields at all.
+///
+/// **It does NOT, on its own, make every other harness wrapper safe**, and an earlier version
+/// of this comment claimed it did. `normalized` emits `.systemNotice` for `bash-stdout`,
+/// `local-command-stdout` and the rest of `harnessWrappers` — arbitrary command output — and a
+/// body that happens to open with a tag (a `!cat` of an HTML fragment) parses here perfectly
+/// well. What keeps that output intact is the caller: `TimelineStyle.taskNotification(for:)`
+/// requires the wrapper to have been named `task-notification` as well as the body to parse.
+/// See its comment for the failure that rule prevents.
     public static func parse(_ body: String) -> TaskNotification? {
         let text = Substring(body)
         guard let first = tagOpen(in: text, after: text.startIndex) else { return nil }

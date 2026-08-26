@@ -77,6 +77,14 @@ struct TimelineItemDetailScreen: View {
             Text(TimelineStyle.heading(for: item, agent: agent))
                 .font(.subheadline.weight(.semibold))
             Spacer(minLength: 8)
+            // The outcome, on the same edge the row puts it — `TaskNotificationBody.headline`
+            // explains why it belongs on a heading row rather than beside the summary, and
+            // that reasoning does not stop applying because the reader tapped through. Without
+            // it, tapping a notification LOST the one fact it is read for; the clipboard was
+            // carrying a status the screen itself would not show.
+            if let status = TimelineStyle.taskNotification(for: item)?.status, !status.isEmpty {
+                TaskNotificationStatus(status: status)
+            }
             // The agent's own timestamp, verbatim off the wire and formatted here — the Mac
             // deliberately never parses it (see `TimelineItem.at`). A string that does not
             // parse renders as nothing rather than as a formatted lie about a date nobody has.
@@ -126,12 +134,18 @@ struct TimelineItemDetailScreen: View {
 /// One titled panel: a body, a Copy button, and — when the body is whole JSON — a toggle
 /// between the tree and the text the Mac actually sent.
 ///
-/// **Three ways to draw a body, and they are mutually exclusive.** Prose the agent or the
-/// reader wrote is Markdown, set in the system font on the page itself; a tool body that is
-/// whole JSON is a tree, with the toggle; everything else is the text exactly as it arrived,
-/// monospaced when it is machine text. The three cannot overlap, because the two gates are
-/// gates on the *kind*: `TimelineStyle.rendersMarkdown(_:)` admits only `.assistantText` and
-/// `.userTurn`, and `TimelineStyle.jsonDocument(for:)` only `.toolCall` and `.toolResult`.
+/// **Four ways to draw a body, and they are mutually exclusive.** A task notification is
+/// structure; prose the agent or the reader wrote is Markdown, set in the system font on the
+/// page itself; a tool body that is whole JSON is a tree, with the toggle; everything else is
+/// the text exactly as it arrived, monospaced when it is machine text.
+///
+/// **Three of the four gates are gates on the KIND, and the notification's is not** — that
+/// asymmetry is worth stating because the exclusivity argument used to rest on all of them
+/// being kind-gates. `rendersMarkdown(_:)` admits only `.assistantText` and `.userTurn`, and
+/// `jsonDocument(for:)` only `.toolCall` and `.toolResult`, so neither can ever see a
+/// `.systemNotice`. The notification gate asks a narrower question inside that kind — the
+/// wrapper's name AND a body that parses — so it cannot reach the other three's kinds either.
+/// They do not overlap, but they do not not-overlap for one uniform reason any more.
 ///
 /// **A view rather than a function on the screen**, because the toggle needs state and the
 /// screen draws two of these. Its own `@State` per panel is also the only correct place for it:
@@ -245,7 +259,15 @@ struct TimelineBodyBlock: View {
     /// An empty prose body keeps its panel: what is drawn there is the "(empty)" placeholder,
     /// not prose, and a lone grey word on the page reads as a rendering failure.
     private var panelled: Bool {
-        !TimelineStyle.rendersMarkdown(item) || item.body.text.isEmpty
+        // **A task notification is drawn unpanelled**, for exactly the reason stated above: its
+        // result goes through `TimelineMarkdown.theme`, which fills a fenced block with
+        // `secondarySystemBackground` — the panel's own fill. An agent's report carrying a
+        // command or a block of test output would draw that block with no edge, which is the
+        // collision this property exists to avoid rather than an exception to it. It reaches
+        // here at all only because `rendersMarkdown` gates on the KIND, and the kind is
+        // `.systemNotice`.
+        guard TimelineStyle.taskNotification(for: item) == nil else { return false }
+        return !TimelineStyle.rendersMarkdown(item) || item.body.text.isEmpty
     }
 
     @ViewBuilder

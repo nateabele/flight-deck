@@ -150,4 +150,14 @@ final class TaskNotificationTests: XCTestCase {
 
         XCTAssertEqual(notification.result, "Status: DONE, still writ")
     }
+
+    /// The final guard's most interesting branch, named in `parse`'s own comment as the reason
+    /// it exists and — until now — pinned by nothing. A body whose only field is `note` has
+    /// that field dropped, leaving a notification with nothing in it at all; returning an
+    /// all-empty struct instead of nil would put an empty structured row on the screen where a
+    /// notice used to be. An untested guard is one refactor away from being deleted as dead.
+    func testABodyWhoseOnlyFieldIsNoteReturnsNilRatherThanAnEmptyNotification() {
+        let body = "<note>A task-notification fires each time this agent stops.</note>"
+        XCTAssertNil(TaskNotification.parse(body))
+    }
 }
