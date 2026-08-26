@@ -258,7 +258,6 @@ struct TimelineRow: View {
         TimelineStyle.clampedProse(for: item, expanded: isExpanded).segments
     }
 
-
     private var proseFont: Font {
         switch item.kind {
         case .thinking: return .callout
