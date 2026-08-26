@@ -1,3 +1,4 @@
+import FleetKit
 import XCTest
 @testable import FlightDeck
 
@@ -105,5 +106,43 @@ final class LocalEndpointsTests: XCTestCase {
         XCTAssertEqual(routable.count, 4)
         XCTAssertFalse(routable.contains("127.0.0.1:58625"))
         XCTAssertEqual(routable.first, "100.108.99.35:58625")
+    }
+
+    /// The seam, end to end: interfaces → `ranked` → `routable` → `encoded()` → `decoding:`,
+    /// asserting what the QR a phone scans actually carries.
+    ///
+    /// This gap is what let the loopback defect through. `ranked`'s own tests stop at the
+    /// ranked list and `PairingPayloadTests` starts from hand-supplied endpoints, so nothing
+    /// exercised the one thing that decides which addresses reach a phone: what `arm()` feeds
+    /// the encoder. It fed `current`, loopback and all, and every test on either side of the
+    /// seam stayed green.
+    ///
+    /// A plain MacBook is the shape asserted, because it is the one where the defect costs the
+    /// most: `lo0` and `en0` and nothing else, so the encoder's two slots were the Wi-Fi
+    /// address and a dial to the phone itself. The tunnelled shape is the second case — both
+    /// slots earn their place there.
+    func testWhatTheQRCarriesForAPlainMacBookAndForATailnettedOne() throws {
+        let plain: [LocalEndpoints.Interface] = [
+            .init(name: "lo0", address: "127.0.0.1", isPointToPoint: false, isBroadcast: false, isLoopback: true),
+            .init(name: "en0", address: "192.168.1.5", isPointToPoint: false, isBroadcast: true, isLoopback: false),
+        ]
+        XCTAssertEqual(try scanned(from: plain, primary: "en0"), ["192.168.1.5:58625"])
+        XCTAssertEqual(
+            try scanned(from: affectedMac(), primary: "en0"),
+            ["100.108.99.35:58625", "192.168.1.109:58625"]
+        )
+    }
+
+    /// One machine's interfaces, through every step between them and a decoded pairing code.
+    private func scanned(
+        from interfaces: [LocalEndpoints.Interface], primary: String?
+    ) throws -> [String] {
+        let ranked = LocalEndpoints.ranked(interfaces, primary: primary, port: 58625)
+        let payload = PairingPayload(
+            key: .mint(), macName: "Nate's MacBook Pro", serviceName: "flightdeck-macbook-a1b2",
+            // Exactly what `FleetService.arm()` builds — the same call with the same limit.
+            endpoints: LocalEndpoints.routable(from: ranked, limit: PairingPayload.maxEndpoints)
+        )
+        return try PairingPayload(decoding: payload.encoded()).endpoints
     }
 }

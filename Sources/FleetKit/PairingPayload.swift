@@ -64,7 +64,13 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
     /// requirement: one address that works off the LAN and one that works on it. Any
     /// *further* LAN address is Bonjour's job, which is the one thing Bonjour can do that a
     /// QR cannot. Do not raise this to buy robustness the browser already provides.
-    private static let maxEndpoints = 2
+    ///
+    /// Public because `FleetService.arm()` has to size the list it builds to the same number
+    /// — it pre-filters loopback out (see `LocalEndpoints.routable`), and a filter that runs
+    /// AFTER the cap would have already spent a slot. Spelling `2` at that call site instead
+    /// would make the two numbers free to drift, and the failure is silent: the encoder would
+    /// quietly truncate a list the caller believed it had sized.
+    public static let maxEndpoints = 2
 
     public var version: Int
     public var key: FleetDeviceKey
@@ -87,6 +93,10 @@ public struct PairingPayload: Equatable, Sendable, Identifiable {
     ///
     /// Only the first `maxEndpoints` usable ones survive the encoding — the rest are Bonjour's
     /// job, and the remembered-endpoint race exists for reconnects rather than for pairing.
+    /// The cap is a backstop here rather than the working filter: `FleetService.arm()` already
+    /// hands over a list ranked, loopback-stripped and cut to `maxEndpoints`, because dropping
+    /// loopback after the cap rather than before it costs a slot on any Mac whose first two
+    /// enumerated addresses include `lo0`.
     public var endpoints: [String]
 
     public init(

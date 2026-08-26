@@ -402,7 +402,15 @@ final class FleetService: ObservableObject {
         let armed = armer.arm(
             macName: macName,
             serviceName: serviceName,
-            endpoints: LocalEndpoints.current(port: port)
+            // `routable`, not `current`: loopback is enumerated and ranked last, but `current`
+            // still returns it, and `127.0.0.1:<port>` packs into the QR as happily as any
+            // other IPv4:port. On a Wi-Fi-only Mac — no VPN, no VMs, no Internet Sharing, so
+            // just `lo0` and `en0` — that spends the code's second slot on a dial the phone
+            // makes to itself. The limit is the payload's own cap, so the filtering happens
+            // BEFORE the slots are allocated rather than after.
+            endpoints: LocalEndpoints.routable(
+                port: port, limit: PairingPayload.maxEndpoints
+            )
         )
         if let pending = armer.pending {
             preferences.upsert(pending)

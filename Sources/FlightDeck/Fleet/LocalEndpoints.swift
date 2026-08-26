@@ -19,8 +19,15 @@ import SystemConfiguration
 /// Loopback is enumerated and ranked last. It is NOT here for the loopback tests — every one
 /// of those builds its own endpoint array (`FleetConnectorTests`, `PairedMacStoreTests`) or
 /// calls `FleetService.loopbackEndpoint()`. It is here so a Mac with no network at all still
-/// produces a list rather than an empty one, and it costs a real phone nothing because the
-/// cap drops it long before the wire.
+/// produces a list rather than an empty one.
+///
+/// Ranking it last is not, by itself, enough to keep it off the wire, and an earlier revision
+/// of this comment claimed otherwise: `127.0.0.1:<port>` packs into a pairing code as happily
+/// as any other IPv4:port, so on a Wi-Fi-only Mac (`lo0` + `en0` and nothing else) it landed
+/// in the QR's second slot and the phone raced a dial to itself. **`routable` is what drops
+/// it, so every path that reaches a client goes through `routable` — both the `mac.endpoints`
+/// reply and `FleetService.arm()`.** `current` is the unfiltered list, and nothing but
+/// `routable` should call it.
 enum LocalEndpoints {
     /// One interface as the ranking sees it.
     ///
@@ -34,7 +41,8 @@ enum LocalEndpoints {
         var isLoopback: Bool
     }
 
-    /// The full ranked list, loopback included and last. What the pairing code is built from.
+    /// The full ranked list, loopback included and last. The input to `routable`, and not
+    /// something to hand a client directly — see the type's doc comment.
     static func current(port: UInt16) -> [String] {
         ranked(enumerate(), primary: primaryInterfaceName(), port: port)
     }
