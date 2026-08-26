@@ -186,19 +186,32 @@ Two details of that are load-bearing:
   socket every time a banner appears.
 
 That redial is also the only moment anything preference-derived gets refreshed, since preferences
-have no push path. Hang such refreshes off snapshot arrival, which happens on every connect.
+have no push path. Hang such refreshes off the connector reporting `.connected` — see the next
+section for why "snapshot arrival" is not the same thing.
 
 ### The endpoint refresh
 
-`FleetRequest.macEndpoints` is exactly that: a refresh hung off snapshot arrival rather than off
+`FleetRequest.macEndpoints` is exactly that: a refresh hung off the connection rather than off
 the app-suspend redial above, so it also covers reconnects the redial never touches — a Mac
 restarting, a Wi-Fi drop and rejoin, first pairing itself — none of which need the phone app to
-have backgrounded at all. `FleetConnector` sends it on every `.snapshot` frame, which is every
-connect; `FleetService.onRequest`'s `.macEndpoints` case answers with `LocalEndpoints.routable`;
-and `adoptEndpoints` takes the answer as authoritative, keeping the address `promote()` last put
-in front when the Mac still claims it, and ignoring an empty answer outright — empty means the
-Mac could not enumerate, never that it has none, and erasing a working candidate on that strength
-would be worse than leaving the list stale.
+have backgrounded at all.
+
+**It is fired from `FleetConnector.accept()`, where `.connected` is reported, and not from
+`apply`'s `.snapshot` arm.** That distinction is the whole of it, and the first implementation
+got it wrong: a snapshot is *not* every connect. `FleetReplicator.resume(from:)` resnapshots
+only for a first connection, for a Mac whose `seq` went backwards (a restart), or for a client
+that fell off the 4096-entry ring. Every other reconnect is answered with a replay — events, or
+nothing at all. So a phone that drops Wi-Fi and rejoins, or is backgrounded and foregrounded
+against a Mac that has been up a while, resumed by replay and never refreshed — the roaming
+case the feature exists for. `.connected` covers snapshot and replay alike, once per connection.
+It is not, incidentally, the hook the New Session menu uses; that is `onFleet`, which fires on
+snapshots *and* on every event.
+
+From there the mechanics are unchanged: `FleetService.onRequest`'s `.macEndpoints` case answers
+with `LocalEndpoints.routable`; and `adoptEndpoints` takes the answer as authoritative, keeping
+the address `promote()` last put in front when the Mac still claims it, and ignoring an empty
+answer outright — empty means the Mac could not enumerate, never that it has none, and erasing a
+working candidate on that strength would be worse than leaving the list stale.
 
 It is a request rather than a `FleetSnapshot` field for the reason "2. The snapshot must be
 reproducible from the event log" gives in general: an address changes with the network, not with

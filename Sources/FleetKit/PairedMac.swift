@@ -6,8 +6,12 @@ public struct PairedMac: Codable, Equatable, Sendable {
     public var macName: String
     public var serviceName: String
     /// Every REMEMBERED address, best-first — seeded from the pairing payload's QR, then
-    /// replaced wholesale whenever `FleetRequest.macEndpoints` answers, which is on every
-    /// connect. `FleetConnector.promote` still only REORDERS, moving whichever address won a
+    /// replaced wholesale whenever `FleetRequest.macEndpoints` answers. That is once per
+    /// connection, asked from `FleetConnector.accept()` at the moment `.connected` is
+    /// reported — **not** on snapshot arrival, which is where it used to be hung and which is
+    /// not every connect: a resume the Mac can serve from its event ring replays instead, and
+    /// a phone rejoining a network takes that path. `FleetConnector.promote` still only
+    /// REORDERS, moving whichever address won a
     /// race to the front; `FleetConnector.adoptEndpoints` is what changes the membership, and
     /// it keeps the promoted address in front when the Mac still claims it.
     ///

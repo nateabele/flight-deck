@@ -56,10 +56,17 @@ final class FleetConnectorRequestTests: XCTestCase {
         // where the test put it — `adopt(_:)` sets it absolutely — and any later movement is
         // the page's doing and nothing else's.
         server.onHello = { _, _ in [.snapshot(seq: lastSeq, fleet: .empty, reason: .initial)] }
-        // Every snapshot makes the connector ask `FleetRequest.macEndpoints` — see
-        // `FleetConnector.apply`'s `.snapshot` arm — before this file's own request is ever
-        // sent. Every test here is about `.timeline`, not that refresh, so it is answered
-        // once, here, rather than making every test's own `onRequest` filter it out.
+        // Every connect makes the connector ask `FleetRequest.macEndpoints` — see
+        // `FleetConnector.accept()`, where `.connected` is reported — before this file's own
+        // request is ever sent. Every test here is about `.timeline`, not that refresh, so it
+        // is answered once, here, rather than making every test's own `onRequest` filter it
+        // out.
+        //
+        // Note what this wrapper costs: `server.onRequest` is left permanently non-nil, which
+        // disables `FleetSocketServer`'s nil-handler `unhandled` auto-reply for every test in
+        // this file. A future test that sends a request without installing its own handler
+        // will therefore hang waiting on a reply nobody sends, and the symptom — a
+        // `fulfillment` timeout — points nowhere near this line.
         let onRequest = server.onRequest
         server.onRequest = { attachment, cid, request, reply in
             if case .macEndpoints = request { return reply(.macEndpoints(cid: cid, [])) }

@@ -23,6 +23,27 @@ final class FleetConnectorEndpointTests: XCTestCase {
         var code: String?
     }
 
+    /// How many times the Mac was asked. Touched from the socket queue, read after `settle`.
+    private final class Counter: @unchecked Sendable {
+        private(set) var value = 0
+        func bump() { value += 1 }
+    }
+
+    /// Waits until everything the connector had already sent has been answered and applied.
+    ///
+    /// A request of our own, and the answer to it cannot overtake anything sent before it:
+    /// frames are ordered on the connection and `apply` is serial on `queue`. So by the time
+    /// this returns, an endpoint reply the connector asked for on connect has landed, and a
+    /// duplicate ask would have been counted. Sleeping for that instead would be a race
+    /// dressed up as a delay. The server answers this one `unhandled`; the verb is irrelevant.
+    private func settle(_ connector: FleetConnector) async {
+        let sequenced = expectation(description: "sequenced")
+        connector.request(.timeline(session: UUID(), anchor: .latest, limit: 1)) { _ in
+            sequenced.fulfill()
+        }
+        await fulfillment(of: [sequenced], timeout: 5)
+    }
+
     private func snapshot() -> FleetSnapshot {
         FleetSnapshot(projects: [
             WireProject(id: UUID(), name: "fd", path: "/w/fd", sessions: [])
@@ -62,23 +83,84 @@ final class FleetConnectorEndpointTests: XCTestCase {
         return connector
     }
 
-    /// Every snapshot is every connect, and it is the only hook the refresh has — addresses
-    /// have no push path.
-    func testTheConnectorAsksForEndpointsOnSnapshotArrival() async throws {
+    /// A first connection: the Mac answers `hello` with a snapshot, and the refresh fires
+    ///
+    /// — **once**. Counted rather than left to `assertForOverFulfill`, because the ask now
+    /// lives in `accept()` and the snapshot arm it moved out of is still right there: leaving
+    /// a copy behind would make every first connect ask twice.
+    ///
+    /// `assertForOverFulfill` is switched OFF for that, which reads backwards and is not.
+    /// Measured with the ask deliberately wired into both places: over-fulfilling throws an
+    /// `NSInternalInconsistencyException` that nothing catches, so `xctest` aborts the whole
+    /// process and every later test in the bundle simply never runs. The counter reports the
+    /// same defect as one ordinary failed assertion.
+    func testTheConnectorAsksForEndpointsOnceOnASnapshotConnect() async throws {
         let key = FleetDeviceKey.mint()
+        let asks = Counter()
         let asked = expectation(description: "asked")
         asked.assertForOverFulfill = false
         let server = FleetSocketServer()
         let fleet = snapshot()
         server.onHello = { _, _ in [.snapshot(seq: 1, fleet: fleet, reason: .initial)] }
         server.onRequest = { _, cid, request, reply in
-            if case .macEndpoints = request { asked.fulfill() }
+            guard case .macEndpoints = request else {
+                return reply(.err(cid: cid, code: "unhandled"))
+            }
+            asks.bump()
+            asked.fulfill()
             reply(.macEndpoints(cid: cid, ["100.64.0.1:9"]))
         }
         servers.append(server)
         let port = try await server.start(keys: [key], port: nil)
-        _ = await connect(key: key, endpoints: ["127.0.0.1:\(port.rawValue)"], store: InMemoryPairedMacStore())
+        let connector = await connect(
+            key: key, endpoints: ["127.0.0.1:\(port.rawValue)"], store: InMemoryPairedMacStore()
+        )
         await fulfillment(of: [asked], timeout: 5)
+        await settle(connector)
+        XCTAssertEqual(asks.value, 1, "one ask per connection, not one per hook it is wired to")
+    }
+
+    /// The reconnect the refresh is actually for, and the one it used to miss entirely.
+    ///
+    /// `FleetReplicator.resume(from:)` sends a snapshot only for a first connection, for a Mac
+    /// whose `seq` went backwards, or for a client that fell off the 4096-entry ring. Every
+    /// other reconnect is answered with a REPLAY — events, or nothing at all — and that is the
+    /// shape here: a phone resuming from `lastSeq: 1` against a server whose `onHello` returns
+    /// an event and, by construction, never a snapshot. A Wi-Fi drop and rejoin is exactly
+    /// this, and roaming is the scenario the whole feature exists for.
+    ///
+    /// Hung off `apply`'s `.snapshot` arm, as it originally was, nothing fired on this path at
+    /// all: the phone reconnected on the far side of the world holding the addresses it left
+    /// with.
+    func testAResumeThatReplaysStillRefreshesTheEndpoints() async throws {
+        let key = FleetDeviceKey.mint()
+        let asked = expectation(description: "asked")
+        let server = FleetSocketServer()
+        server.onHello = { _, lastSeq in [.event(seq: lastSeq + 1, .sessionRemoved(id: UUID()))] }
+        server.onRequest = { _, cid, request, reply in
+            guard case .macEndpoints = request else {
+                return reply(.err(cid: cid, code: "unhandled"))
+            }
+            asked.fulfill()
+            reply(.macEndpoints(cid: cid, ["100.64.0.1:9"]))
+        }
+        servers.append(server)
+        let port = try await server.start(keys: [key], port: nil)
+
+        let store = InMemoryPairedMacStore()
+        let mac = PairedMac(
+            key: key, macName: "Mac", serviceName: "none-\(UUID().uuidString)",
+            endpoints: ["127.0.0.1:\(port.rawValue)"], lastSeq: 1
+        )
+        store.save(mac)
+        let connector = FleetConnector(mac: mac, store: store, browse: false)
+        self.connector = connector
+        connector.start()
+        await fulfillment(of: [asked], timeout: 5)
+        // Asked is half of it; adopted is the other half.
+        await settle(connector)
+        XCTAssertEqual(store.load()?.endpoints, ["100.64.0.1:9"],
+                       "a replayed resume must adopt the Mac's current addresses, not just ask")
     }
 
     /// The Mac enumerated its own interfaces, so its answer is authoritative for membership:
