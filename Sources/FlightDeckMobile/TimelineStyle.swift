@@ -457,17 +457,6 @@ enum TimelineStyle {
     ///
     /// A kind that does not render markdown has no segments to speak of and gets its whole body
     /// as one prose run; those rows draw through `Text` and `.lineLimit` as they always have.
-    /// The task notification this item carries, or `nil` for every other notice and every
-    /// other kind.
-    ///
-    /// Gated on the kind first so the parse is not attempted over every assistant message on
-    /// the screen, and answered by the CONTENT rather than by `body.tool`: a body that does not
-    /// parse must render as it always did, whatever the wrapper it arrived under claimed.
-    static func taskNotification(for item: TimelineItem) -> TaskNotification? {
-        guard item.kind == .systemNotice else { return nil }
-        return TaskNotification.parse(item.body.text)
-    }
-
     static func clampedProse(for item: TimelineItem, expanded: Bool = false) -> TimelineSegmenter.Clamped {
         guard rendersMarkdown(item) else {
             return .init(segments: [.prose(item.body.text)], hasMore: false)
@@ -476,6 +465,30 @@ enum TimelineStyle {
             return .init(segments: TimelineSegmenter.segments(of: item.body.text), hasMore: false)
         }
         return TimelineSegmenter.clamp(item.body.text, budget: proseCeilingLines)
+    }
+
+    /// The task notification this item carries, or `nil` for everything else.
+    ///
+    /// **All three conditions, and the wrapper name is the one that stops a disaster.**
+    /// `.systemNotice` is not only `task-notification`: `ClaudeTimelineMapper.harnessWrappers`
+    /// emits the same kind for `bash-stdout`, `bash-stderr`, `local-command-stdout` and six
+    /// more — which is to say, for arbitrary command output. A `!cat` of an HTML fragment
+    /// parses perfectly as a run of fields, and then the row draws one line reading
+    /// `html   hi` while the file itself is gone from the screen, from VoiceOver and from the
+    /// clipboard. Content that rendered fine before this feature existed becomes unrecoverable
+    /// from the phone.
+    ///
+    /// An earlier version of this gated on the parse ALONE, reasoning that a body which does
+    /// not parse must render as it always did whatever wrapper it claimed. That argument is
+    /// sound and answers a different question: it forbids trusting `tool` *instead of* parsing.
+    /// Requiring both can only remove false positives — it cannot invent one — and `tool` is
+    /// right there, already trusted two functions up by `heading(for:)` to print the words
+    /// "Task notification" at the top of this very row.
+    static func taskNotification(for item: TimelineItem) -> TaskNotification? {
+        guard item.kind == .systemNotice, item.body.tool == "task-notification" else {
+            return nil
+        }
+        return TaskNotification.parse(item.body.text)
     }
 
     /// Whether tapping this row leads anywhere — that is, whether the detail screen has

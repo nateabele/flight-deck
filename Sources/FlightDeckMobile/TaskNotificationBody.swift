@@ -44,8 +44,11 @@ struct TaskNotificationBody: View {
     @ViewBuilder
     private var headline: some View {
         if let summary = notification.summary, !summary.isEmpty {
+            // Names its own font, like every other `Text` on this screen: `List { … }.font(…)`
+            // does not reach row content, and a row that inherits while its neighbour does not
+            // is the defect that sent `FleetListScreen` back from testing.
             Text(summary)
-                .fontWeight(.medium)
+                .font(.body.weight(.medium))
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -93,6 +96,25 @@ struct TaskNotificationBody: View {
     }
 }
 
+/// A notification's outcome, drawn identically wherever it appears.
+///
+/// Its own view because there are two call sites — the row's heading and the detail screen's —
+/// and a status that is a capsule in one place and bare text in the other is the same drift
+/// `TimelineSegmentView` was extracted to stop.
+struct TaskNotificationStatus: View {
+    let status: String
+
+    var body: some View {
+        Text(status)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Color(.secondarySystemBackground)))
+            .fixedSize()
+    }
+}
+
 /// The pure decisions behind the view above, separated so they can be asserted.
 ///
 /// A unit test in this process has no window — `docs/MOBILE.md` is explicit that SwiftUI
@@ -101,10 +123,15 @@ struct TaskNotificationBody: View {
 enum TaskNotificationFormat {
     /// How many lines of a notification's RESULT a collapsed row draws.
     ///
-    /// The same 14 `TimelineStyle.proseLineLimit` has always returned for a `.systemNotice`,
-    /// kept deliberately: what changed is not the budget but what it is spent on. It used to
-    /// be spent counting `<tool-use-id>` lines.
-    static let resultLines = 14
+    /// Taken FROM `TimelineStyle.proseLineLimit` rather than restated as a second `14`, so the
+    /// two cannot drift apart while a comment goes on claiming they agree. What changed with
+    /// this feature is not the budget but what it is spent on: it used to be spent counting
+    /// `<tool-use-id>` lines.
+    static var resultLines: Int {
+        TimelineStyle.proseLineLimit(for: .init(
+            id: "", kind: .systemNotice, status: .complete, body: .init(text: "")
+        )) ?? 14
+    }
 
     /// The label a field is drawn under.
     ///
@@ -180,10 +207,16 @@ enum TaskNotificationFormat {
         var parts: [String] = []
         if let summary = notification.summary, !summary.isEmpty { parts.append(summary) }
         if let status = notification.status, !status.isEmpty { parts.append(status) }
+        // **The result before the plumbing, and the order is the whole announcement.**
+        // `accessibilityLabel` clips at 240 characters, and on a real record the ids and the
+        // temp path spend 271 of them before the report begins — so a listener heard a task
+        // id, a tool-use id, and a truncated `/private/tmp/...` path, and then nothing. Not
+        // markup any more, but not the thing they were listening for either. An id read aloud
+        // is unusable by ear regardless; it goes last, where the clip can have it.
+        if let result = notification.result, !result.isEmpty { parts.append(result) }
         for field in notification.fields {
             parts.append("\(label(for: field.label)): \(displayValue(for: field))")
         }
-        if let result = notification.result, !result.isEmpty { parts.append(result) }
         return parts.joined(separator: ". ")
     }
 

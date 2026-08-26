@@ -129,13 +129,7 @@ struct TimelineRow: View {
             // heading row's trailing edge — a reader scanning a column of these looks down one
             // edge for "did it work?", and a status indented under each summary is not on it.
             if let status = TimelineStyle.taskNotification(for: item)?.status, !status.isEmpty {
-                Text(status)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color(.secondarySystemBackground)))
-                    .fixedSize()
+                TaskNotificationStatus(status: status)
             }
             if let time = TimelineStyle.time(item.at) {
                 Text(time)
@@ -241,7 +235,7 @@ struct TimelineRow: View {
             // message rendered whole.
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
-                    segmentView(segment)
+                    TimelineSegmentView(segment: segment, onReply: onReply)
                 }
             }
             .font(proseFont)
@@ -264,22 +258,6 @@ struct TimelineRow: View {
         TimelineStyle.clampedProse(for: item, expanded: isExpanded).segments
     }
 
-    /// One segment, drawn by whichever renderer can honour it.
-    ///
-    /// **Code and rich blocks go back through MarkdownUI as markdown**, rather than being
-    /// re-styled by hand, and that is what keeps a segmented body pixel-identical to the whole
-    /// document it came from: `TimelineMarkdown.theme` already gives a fenced block its grey
-    /// fill and a table its margins, so handing the block back as source and letting the theme
-    /// do its job cannot drift from itself.
-    ///
-    /// **The press-to-copy goes on the segment**, so the gesture yields the block a reader
-    /// pressed rather than the whole message. The row's own Copy still covers the message; on
-    /// prose it will shortly be the selection menu's Select All that does, which is the same
-    /// text by a different route.
-    @ViewBuilder
-    private func segmentView(_ segment: TimelineSegment) -> some View {
-        TimelineSegmentView(segment: segment, onReply: onReply)
-    }
 
     private var proseFont: Font {
         switch item.kind {

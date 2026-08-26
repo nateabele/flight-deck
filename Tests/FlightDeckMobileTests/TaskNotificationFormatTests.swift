@@ -151,6 +151,70 @@ final class TaskNotificationFormatTests: XCTestCase {
 
     // MARK: The gate
 
+    /// **The failure this guard exists for, and it destroys content rather than merely
+    /// mis-styling it.** `.systemNotice` is not only `task-notification` — `harnessWrappers`
+    /// emits the same kind for `bash-stdout` and eight others, which is to say for arbitrary
+    /// command output. A `!cat` of an HTML fragment parses as a perfectly good run of fields,
+    /// and a version of this gated on the parse alone drew one line reading `html   hi` while
+    /// the file vanished from the row, from VoiceOver and from the clipboard at once.
+    func testCommandOutputThatHappensToBeTagsIsNotMistakenForANotification() {
+        let stdout = TimelineItem(
+            id: "1000#0", kind: .systemNotice, status: .complete,
+            body: TimelineItem.Body(
+                text: "<html>\n<body>hi</body>\n</html>",
+                tool: "bash-stdout"
+            )
+        )
+
+        XCTAssertNil(TimelineStyle.taskNotification(for: stdout),
+                     "a wrapper that is not task-notification is not one, whatever it parses as")
+        XCTAssertEqual(TimelineStyle.spoken(stdout), "<html>\n<body>hi</body>\n</html>",
+                       "and its output still reaches a listener whole")
+    }
+
+    /// The same body under the right wrapper still parses — the gate must not be so tight that
+    /// it stops recognising the thing it is for.
+    func testTheSameBodyUnderTheRightWrapperIsStillANotification() {
+        let real = TimelineItem(
+            id: "1000#0", kind: .systemNotice, status: .complete,
+            body: TimelineItem.Body(text: "<status>completed</status>", tool: "task-notification")
+        )
+        XCTAssertEqual(TimelineStyle.taskNotification(for: real)?.status, "completed")
+    }
+
+    // MARK: What a listener actually reaches
+
+    /// **Ordering, measured against the clip rather than assumed.** `accessibilityLabel` cuts
+    /// at 240 characters, and on a real record the summary, the two opaque ids and a
+    /// `/private/tmp/...` path spend 271 of them before the report begins — so a listener heard
+    /// ids and a severed path and never the report. The earlier test missed this because its
+    /// fixture was short enough that the clip never bit; this one uses a real-length path.
+    func testAListenerHearsTheReportRatherThanBeingCutOffInsideATempPath() {
+        let item = TimelineItem(
+            id: "1000#0", kind: .systemNotice, status: .complete,
+            body: TimelineItem.Body(
+                text: """
+                <task-id>a09ec251ce8bf1e2d</task-id>
+                <tool-use-id>toolu_011UTbMqwEPEvNQPDJZshN7i</tool-use-id>
+                <output-file>/private/tmp/claude-501/-Users-nate-Projects-Protos-n-Tools-\
+                Schedule/cdf92b5f-0e3a-4f42-b3b1-6ea59e168ff5/tasks/a09ec251ce8bf1e2d.output\
+                </output-file>
+                <status>completed</status>
+                <summary>Agent "Implement sidebar sections feature" finished</summary>
+                <result>Status: DONE. All 157 tests passing.</result>
+                """,
+                tool: "task-notification"
+            )
+        )
+
+        let spoken = TimelineStyle.accessibilityLabel(for: item, agent: "claude")
+
+        XCTAssertTrue(spoken.contains("Status: DONE"),
+                      "the report is what a listener came for and must survive the clip")
+        XCTAssertTrue(spoken.contains("completed"))
+    }
+
+
     /// A `system-reminder` is ordinary prose under a wrapper, not a run of fields. It must take
     /// the path it always took — this is the assertion that says the new branch cannot capture
     /// every notice on the screen.
