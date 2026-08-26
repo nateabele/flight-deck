@@ -30,9 +30,9 @@ answer is not state at all.
 
 **A reply must never carry a `seq`.** It is the rule most easily broken by accident and the
 damage is invisible: a phone paging back through an hour of transcript would move the resume
-point it hands back on its next `hello`, and reconnect from the wrong place. `ServerFrame.page`
-and `ServerFrame.newSessionOptions` both say this in their doc comments. Say it again in the
-third one.
+point it hands back on its next `hello`, and reconnect from the wrong place. All three reply
+frames say so in their own doc comments — `ServerFrame.page`, `ServerFrame.newSessionOptions`
+and `ServerFrame.macEndpoints`. Say it again in the fourth, and update this count when you do.
 
 ### Which one is my new thing?
 
