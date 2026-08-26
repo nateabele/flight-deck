@@ -1,0 +1,33 @@
+  23
+  22
+  21
+  20
+  19
+  18
+  17
+  16
+  15
+  14
+  13
+  12
+  11
+  10
+  9
+  8
+  7
+  6
+  5
+  4
+  3
+  2
+  1
+
+✻ Crunched for 4s · done 9:29 AM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker · restart with CLAUDE_CODE_FORCE_SESSION_PE…
+  Opus 5 (1M context)  [░░░░░░░░░░] 0%  ⎇ master
+  ⏵⏵ auto mode on (shift+tab to cycle)
+        You've used 86% of your weekly limit · resets Aug 27 at 4pm (America/Chicago) · try /model sonnet · ~2× runway

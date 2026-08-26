@@ -1,0 +1,12 @@
+u ▐▛███▛█  Claude Code v2.1.246
+▝▜██████▀  Opus 5 (1M context) · Claude Pro
+  ▝▝ ▝▝    ~/Projects/Protos-n-Tools/flight-deck
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Count from 1 to 40, one number per line, with a short word after each.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker · restart with CLAUDE_CODE_FORCE_SESSION_PE…
+  Opus 5 (1M context)  [░░░░░░░░░░] 0%  ⎇ master                                                      ● high · /effort
+  ⏵⏵ auto mode on (shift+tab to cycle)
