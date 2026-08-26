@@ -429,6 +429,31 @@ public final class FleetConnector: @unchecked Sendable {
             attempt = 0
             if candidate.isRemembered { promote(candidate.description) }
             report(.connected(macName: mac.macName))
+            // Addresses have no push path — the network emits no fleet events — so a connect
+            // is the only moment they can be refreshed. Hung off `.connected` rather than off
+            // `apply`'s `.snapshot` arm, where it used to live under the claim that "every
+            // snapshot is every connect": that is false, and false in the case the feature
+            // exists for. `FleetReplicator.resume(from:)` resnapshots only on a first
+            // connection, after the Mac's `seq` went backwards, or when the client fell off
+            // the 4096-entry ring; every other reconnect is answered with a replay — events,
+            // or nothing at all. A phone that drops Wi-Fi and rejoins, or is backgrounded and
+            // foregrounded against a Mac that has been up a while, takes that path every
+            // time, and never refreshed. Here it covers snapshot and replay alike, once per
+            // connection, because this block only runs when `winner` is installed.
+            //
+            // (Nor is this "the same hook the New Session menu hangs off", as the comment in
+            // the `.snapshot` arm also claimed. That menu hangs off `onFleet`, which fires on
+            // snapshots *and* on every event.)
+            //
+            // Two orderings inside this block are load-bearing. After `winner = client`, or
+            // `requestMacEndpoints` no-ops on its own `guard let winner`. After `promote()`,
+            // because `adoptEndpoints` reads `mac.endpoints.first` to decide which address
+            // keeps the front position promotion just gave it. It is on `queue` because
+            // `accept()` is, so the precondition `requestMacEndpoints` asserts holds without
+            // weakening. The answer is adopted in `apply`'s `.macEndpoints` arm; nothing
+            // here needs the value, and a `.disconnected` from a consumer that tore down
+            // inside `report` above is a no-op into the empty closure.
+            requestMacEndpoints { _ in }
         }
         guard client === winner else { return }
         apply(frame)
@@ -444,11 +469,9 @@ public final class FleetConnector: @unchecked Sendable {
         case .snapshot(let seq, let snapshot, _):
             fleet = snapshot
             adopt(seq)
-            // **Every snapshot, which is every connect.** Addresses have no push path — the
-            // network emits no fleet events — so this is the moment they get refreshed, the
-            // same hook the New Session menu hangs off on the phone. The answer is adopted in
-            // the reply arm below; nothing here needs the value.
-            requestMacEndpoints { _ in }
+            // No endpoint refresh here. It is fired from `accept()` the moment `.connected`
+            // is reported, which covers a replayed resume as well as a snapshot — see the
+            // comment there for why a snapshot is not every connect.
         case .event(let seq, let event):
             fleet.apply(event)
             advance(to: seq)
