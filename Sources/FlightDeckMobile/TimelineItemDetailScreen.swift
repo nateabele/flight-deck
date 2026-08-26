@@ -282,16 +282,30 @@ struct TimelineBodyBlock: View {
     ///
     /// It copies `body.text` in both modes, and that is the point — what a reader wants on the
     /// clipboard is the JSON the Mac sent, not a transcript of the rows currently open.
+    ///
+    /// **A task notification is the one exception, and it has to be.** Its `body.text` is the
+    /// tag soup this screen now renders as structure, so copying it verbatim would hand back
+    /// the exact wall of markup the feature exists to remove — from a button sitting beside the
+    /// readable version of the same thing. The rule above still holds for every other item:
+    /// what is copied is what the Mac sent, and for a notification what the Mac sent is a
+    /// format, not a message.
+    private var copyText: String {
+        guard let notification = TimelineStyle.taskNotification(for: item) else {
+            return item.body.text
+        }
+        return TaskNotificationFormat.spoken(notification)
+    }
+
     private var copyButton: some View {
         Button {
-            UIPasteboard.general.string = item.body.text
+            UIPasteboard.general.string = copyText
         } label: {
             Label("Copy", systemImage: "doc.on.doc")
                 .font(.caption2)
                 .labelStyle(.titleAndIcon)
         }
         .buttonStyle(.borderless)
-        .disabled(item.body.text.isEmpty)
+        .disabled(copyText.isEmpty)
     }
 
     /// Says both numbers, because "truncated" alone does not tell a reader whether they are

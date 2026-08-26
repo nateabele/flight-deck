@@ -31,28 +31,22 @@ struct TaskNotificationBody: View {
         }
     }
 
-    /// The outcome, and the status beside it.
+    /// The outcome, as a sentence.
     ///
-    /// `<summary>` is the one field that already reads as a sentence — "Agent "…" finished" —
-    /// so it leads. The status sits at the trailing edge rather than inline, because it is the
-    /// answer to a different question ("did it work?") and a reader scanning a column of these
-    /// looks down the same edge for it.
+    /// `<summary>` is the one field that already reads as one — "Agent "…" finished" — so it
+    /// leads.
+    ///
+    /// **The status is NOT here**, and that is the correction rather than an omission: the
+    /// approved layout puts it at the trailing edge of the heading row, beside "Task
+    /// notification", so it is drawn by `TimelineRow.header` (and by the detail screen's own
+    /// header). A reader scanning a column of these looks down one edge for "did it work?", and
+    /// a status indented under each summary is not on that edge.
     @ViewBuilder
     private var headline: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            if let summary = notification.summary, !summary.isEmpty {
-                Text(summary).fontWeight(.medium)
-            }
-            if let status = notification.status, !status.isEmpty {
-                Spacer(minLength: 4)
-                Text(status)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color(.secondarySystemBackground)))
-                    .fixedSize()
-            }
+        if let summary = notification.summary, !summary.isEmpty {
+            Text(summary)
+                .fontWeight(.medium)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -66,15 +60,19 @@ struct TaskNotificationBody: View {
             ForEach(Array(notification.fields.enumerated()), id: \.offset) { _, field in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(TaskNotificationFormat.label(for: field.label))
+                        .font(.caption)
                         .frame(width: 58, alignment: .leading)
                         .foregroundStyle(.secondary)
+                    // Monospaced on the VALUE alone. These are ids and paths, where a column
+                    // that lines up is the difference between comparing two of them and
+                    // reading two of them; a label is a word and reads better as one.
                     Text(TaskNotificationFormat.displayValue(for: field))
+                        .font(.caption.monospaced())
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
             }
         }
-        .font(.caption.monospaced())
     }
 
     /// The agent's own report, which is markdown and is drawn by the same renderer every other
@@ -89,31 +87,8 @@ struct TaskNotificationBody: View {
         let clamped = TaskNotificationFormat.clampedResult(result, expanded: expanded)
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(clamped.segments.enumerated()), id: \.offset) { _, segment in
-                segmentView(segment)
+                TimelineSegmentView(segment: segment, onReply: onReply)
             }
-        }
-    }
-
-    /// The same three-way split `TimelineRow.segmentView` makes, and for the same reasons —
-    /// see its comments, which are the authority on why a code block goes back through
-    /// MarkdownUI as source rather than being re-styled by hand.
-    @ViewBuilder
-    private func segmentView(_ segment: TimelineSegment) -> some View {
-        switch segment {
-        case .prose(let text):
-            if let onReply {
-                SelectableProseView(markdown: text, onReply: onReply)
-            } else {
-                Markdown(text).markdownTheme(TimelineMarkdown.theme)
-            }
-        case .code(let language, let text):
-            Markdown(TimelineSegment.fenced(language: language, text))
-                .markdownTheme(TimelineMarkdown.theme)
-                .modifier(CopyAction(text: text))
-        case .richBlock(let text):
-            Markdown(text)
-                .markdownTheme(TimelineMarkdown.theme)
-                .modifier(CopyAction(text: text))
         }
     }
 }
@@ -194,6 +169,22 @@ enum TaskNotificationFormat {
     /// Thousands separators, from the reader's own locale rather than a hard-coded comma.
     static func grouped(_ value: Int) -> String {
         value.formatted(.number.grouping(.automatic))
+    }
+
+    /// A notification as one spoken sentence, in the order the row draws it.
+    ///
+    /// The markup is the whole reason this exists: `body.text` read aloud is
+    /// "less-than task-id greater-than acff…", which is the defect the row was fixed for,
+    /// surviving in the one modality a reader cannot skim past.
+    static func spoken(_ notification: TaskNotification) -> String {
+        var parts: [String] = []
+        if let summary = notification.summary, !summary.isEmpty { parts.append(summary) }
+        if let status = notification.status, !status.isEmpty { parts.append(status) }
+        for field in notification.fields {
+            parts.append("\(label(for: field.label)): \(displayValue(for: field))")
+        }
+        if let result = notification.result, !result.isEmpty { parts.append(result) }
+        return parts.joined(separator: ". ")
     }
 
     /// The result's segments, clamped for a collapsed row and whole for an expanded one.
