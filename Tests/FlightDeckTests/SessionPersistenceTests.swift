@@ -145,7 +145,7 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
         XCTAssertEqual(
             provider.configs.first?.initialInput,
-            ClaudeSession.resumeCommand(sessionID: a, title: "one")
+            ClaudeSession.resumeCommand(sessionID: a)
         )
     }
 

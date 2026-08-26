@@ -22,10 +22,20 @@ public struct TaskNotification: Equatable, Sendable {
     public struct Field: Equatable, Sendable {
         public let label: String
         public let value: String
+        /// One level of `<label>value</label>` pairs found *inside* `value`, when `value` is
+        /// nothing else — `usage`'s body is `<subagent_tokens>…</subagent_tokens><tool_uses>…
+        /// </tool_uses><duration_ms>…</duration_ms>` and a renderer needs those three as their
+        /// own rows under `usage`, not as a wall of tags in `usage`'s own row.
+        ///
+        /// Empty for a leaf, which is most fields. `value` is never cleared when this is
+        /// populated: a renderer that never looks at `children` still has the raw text and
+        /// loses nothing by ignoring this.
+        public let children: [Field]
 
-        public init(label: String, value: String) {
+        public init(label: String, value: String, children: [Field] = []) {
             self.label = label
             self.value = value
+            self.children = children
         }
     }
 
@@ -67,20 +77,73 @@ public struct TaskNotification: Equatable, Sendable {
     ///
     /// Only a bare `<label>` is recognised — no attributes, no self-closing slash — because
     /// that is the entire grammar a task-notification body uses. A `<` that does not resolve
-    /// to one (no matching `>`, or something other than a label between them) is not
-    /// "the closest thing to a tag": it is not a tag, and scanning must not stop there.
+    /// to one (no matching `>`, or something other than a label between them) is not "the
+    /// closest thing to a tag": it is not a tag, so this keeps searching **past that `<`**
+    /// for the next one rather than giving up the whole scan on the first character that
+    /// merely resembles an opening bracket.
     private static func tagOpen(
         in text: Substring, after index: Substring.Index
     ) -> (label: String, range: Range<Substring.Index>)? {
-        guard let open = text[index...].firstIndex(of: "<") else { return nil }
-        let labelStart = text.index(after: open)
-        guard labelStart < text.endIndex, let close = text[labelStart...].firstIndex(of: ">")
-        else { return nil }
-        let label = text[labelStart..<close]
-        guard !label.isEmpty, label.unicodeScalars.allSatisfy(labelCharacters.contains) else {
-            return nil
+        var searchStart = index
+        while let open = text[searchStart...].firstIndex(of: "<") {
+            let labelStart = text.index(after: open)
+            guard labelStart < text.endIndex, let close = text[labelStart...].firstIndex(of: ">")
+            else {
+                // No `>` anywhere in the rest of the string, so no `<` from here on could
+                // close either — there is nothing left to find, not just nothing at THIS `<`.
+                return nil
+            }
+            let label = text[labelStart..<close]
+            if !label.isEmpty, label.unicodeScalars.allSatisfy(labelCharacters.contains) {
+                return (String(label), open..<text.index(after: close))
+            }
+            // This `<` opens nothing — a stray comparison, an unrelated bracket, prose the
+            // harness inserted between fields. Resume just past IT, not past the `>` that
+            // failed to pair with it: that `>` may belong to a different, later, genuine tag.
+            searchStart = text.index(after: open)
         }
-        return (String(label), open..<text.index(after: close))
+        return nil
+    }
+
+    /// The one level of `<label>value</label>` pairs inside a field's own value, or `nil`
+    /// when the value is not ENTIRELY that — `usage`'s only, so far.
+    ///
+    /// Deliberately stricter than `tagOpen`/`parse` above: no skipping past junk to find the
+    /// next tag, and an unclosed tag fails the whole thing rather than taking the remainder.
+    /// `<result>` is markdown, routinely holding a stray `<` or `>` (a generic type, "a < b"),
+    /// and the leniency that lets the TOP level shrug off surrounding noise is exactly what
+    /// would make a `<result>` full of prose-with-angle-brackets look like a nested field by
+    /// accident. A value only earns `children` by being *nothing but* tags, start to finish.
+    private static func nestedFields(in value: Substring) -> [Field]? {
+        var index = value.startIndex
+        var fields: [Field] = []
+        while true {
+            while index < value.endIndex, value[index].isWhitespace {
+                index = value.index(after: index)
+            }
+            if index == value.endIndex { break }
+            guard value[index] == "<" else { return nil }
+
+            let labelStart = value.index(after: index)
+            guard labelStart < value.endIndex,
+                  let closeAngle = value[labelStart...].firstIndex(of: ">")
+            else { return nil }
+            let label = value[labelStart..<closeAngle]
+            guard !label.isEmpty, label.unicodeScalars.allSatisfy(labelCharacters.contains)
+            else { return nil }
+
+            let contentStart = value.index(after: closeAngle)
+            guard let closeRange = value.range(
+                of: "</\(label)>", range: contentStart..<value.endIndex
+            ) else { return nil }  // unclosed: not this shape when nested
+
+            let fieldValue = value[contentStart..<closeRange.lowerBound]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            fields.append(Field(label: String(label), value: fieldValue))
+            index = closeRange.upperBound
+        }
+        // Whitespace alone is not "a run of pairs" — there has to be at least one.
+        return fields.isEmpty ? nil : fields
     }
 
     /// Reads a task-notification body: the inner text of `<task-notification>…</…>`, already
@@ -144,7 +207,9 @@ public struct TaskNotification: Equatable, Sendable {
             // time this agent stops…") — it says nothing about THIS task, so it is dropped
             // rather than shown as a fourth unlabelled field nobody asked for.
             case "note": continue
-            default: notification.fields.append(field)
+            default:
+                let children = nestedFields(in: Substring(field.value)) ?? []
+                notification.fields.append(Field(label: field.label, value: field.value, children: children))
             }
         }
 

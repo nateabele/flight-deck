@@ -44,7 +44,7 @@ final class ClaudeAdapterTests: XCTestCase {
         let binding = try await adapter.prepare(for: s, options: .claude(flags))
         XCTAssertEqual(
             adapter.resumeCommand(binding, s, .claude(flags)),
-            ClaudeSession.resumeCommand(sessionID: s.id, title: "my tab", flags: flags)
+            ClaudeSession.resumeCommand(sessionID: s.id, flags: flags)
         )
     }
 }

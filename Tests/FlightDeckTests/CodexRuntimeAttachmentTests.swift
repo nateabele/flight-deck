@@ -43,7 +43,7 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         let runtime = CodexRuntime(indexURL: index)
 
         var seen: [AgentEvent] = []
-        runtime.attach(AgentBinding(conversationID: id, transcriptURL: url)) { seen.append($0) }
+        _ = runtime.attach(AgentBinding(conversationID: id, transcriptURL: url), for: UUID()) { seen.append($0) }
         runtime.drainForTesting() // prime both watchers
 
         try append(turn, to: url)
@@ -60,8 +60,8 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         let runtime = CodexRuntime(indexURL: index)
 
         var mineSeen: [AgentEvent] = [], theirsSeen: [AgentEvent] = []
-        runtime.attach(AgentBinding(conversationID: mine, transcriptURL: mineURL)) { mineSeen.append($0) }
-        runtime.attach(AgentBinding(conversationID: theirs, transcriptURL: theirsURL)) { theirsSeen.append($0) }
+        _ = runtime.attach(AgentBinding(conversationID: mine, transcriptURL: mineURL), for: UUID()) { mineSeen.append($0) }
+        _ = runtime.attach(AgentBinding(conversationID: theirs, transcriptURL: theirsURL), for: UUID()) { theirsSeen.append($0) }
         runtime.drainForTesting()
 
         try append(turn, to: mineURL)
@@ -79,9 +79,9 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
 
         var seen: [AgentEvent] = []
         let binding = AgentBinding(conversationID: id, transcriptURL: url)
-        runtime.attach(binding) { seen.append($0) }
+        let token = runtime.attach(binding, for: UUID()) { seen.append($0) }
         runtime.drainForTesting()
-        runtime.detach(binding)
+        runtime.detach(token)
 
         try append(turn, to: url)
         try append(indexLine(id, "after detach"), to: index)
@@ -100,7 +100,7 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
 
         var seen: [AgentEvent] = []
         let runtime = CodexRuntime(indexURL: index)
-        runtime.attach(AgentBinding(conversationID: id, transcriptURL: url)) { seen.append($0) }
+        _ = runtime.attach(AgentBinding(conversationID: id, transcriptURL: url), for: UUID()) { seen.append($0) }
         runtime.drainForTesting()
 
         XCTAssertEqual(seen, [])
@@ -111,12 +111,67 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         let runtime = CodexRuntime(indexURL: index)
 
         var seen: [AgentEvent] = []
-        runtime.attach(AgentBinding(conversationID: id, transcriptURL: nil)) { seen.append($0) }
+        _ = runtime.attach(AgentBinding(conversationID: id, transcriptURL: nil), for: UUID()) { seen.append($0) }
         runtime.drainForTesting()
 
         try append(indexLine(id, "still named"), to: index)
         runtime.drainForTesting()
 
         XCTAssertEqual(seen, [.title("still named")])
+    }
+
+    func testTwoTabsOnOneThreadBothReceiveNameEvents() throws {
+        let id = UUID()
+        let runtime = CodexRuntime(indexURL: index)
+
+        var first: [AgentEvent] = []
+        var second: [AgentEvent] = []
+        let binding = AgentBinding(conversationID: id, transcriptURL: nil)
+        _ = runtime.attach(binding, for: UUID()) { first.append($0) }
+        _ = runtime.attach(binding, for: UUID()) { second.append($0) }
+        runtime.drainForTesting() // prime
+
+        try append(indexLine(id, "renamed"), to: index)
+        runtime.drainForTesting()
+
+        XCTAssertEqual(first, [.title("renamed")], "the second attach must not replace the first's registration")
+        XCTAssertEqual(second, [.title("renamed")])
+    }
+
+    func testDetachingOneOfTwoLeavesTheOtherWatching() throws {
+        let id = UUID()
+        let runtime = CodexRuntime(indexURL: index)
+
+        var first: [AgentEvent] = []
+        var second: [AgentEvent] = []
+        let binding = AgentBinding(conversationID: id, transcriptURL: nil)
+        let a = runtime.attach(binding, for: UUID()) { first.append($0) }
+        _ = runtime.attach(binding, for: UUID()) { second.append($0) }
+        runtime.drainForTesting() // prime
+
+        runtime.detach(a)
+        try append(indexLine(id, "after"), to: index)
+        runtime.drainForTesting()
+
+        XCTAssertTrue(first.isEmpty, "a detached subscriber must receive nothing")
+        XCTAssertEqual(second, [.title("after")], "the surviving subscriber must keep its watcher")
+    }
+
+    func testDetachingTheLastSubscriberUnregistersTheThread() throws {
+        let id = UUID()
+        let runtime = CodexRuntime(indexURL: index)
+        var seen: [AgentEvent] = []
+        let binding = AgentBinding(conversationID: id, transcriptURL: nil)
+        let a = runtime.attach(binding, for: UUID()) { seen.append($0) }
+        let b = runtime.attach(binding, for: UUID()) { seen.append($0) }
+        runtime.drainForTesting() // prime
+
+        runtime.detach(a)
+        runtime.detach(b)
+
+        try append(indexLine(id, "late"), to: index)
+        runtime.drainForTesting()
+
+        XCTAssertTrue(seen.isEmpty, "no subscriber remains, so nothing may be delivered")
     }
 }

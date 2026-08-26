@@ -43,13 +43,32 @@ Apple Silicon only. The build is ad-hoc signed rather than notarised, so the fir
 launch needs a right-click → Open before macOS will let it start. Latest build is on
 the [releases page](../../releases/latest).
 
-There's also an iPhone companion, earlier than everything above. It builds, installs on
-an iOS Simulator, and pairs with a Mac over the local network to show the same fleet —
-renamed and marked read from either side. It has never run on real hardware, and the
-camera path in particular has only been exercised by typing the pairing code rather than
-scanning it, because a simulator has no camera. Installing it on a phone needs your own
-Apple developer signing, since nobody else's team id belongs in this repo.
-[docs/MOBILE.md](docs/MOBILE.md) has the checklist of what a device still has to prove.
+There's also an iPhone companion. It pairs with a Mac over the local network — scan the QR
+or type the twelve-character code — and shows the same fleet: one section per project, one
+row per session, renamed, marked read and closed from either side, with the conversation
+readable and answerable from the phone. It runs on real hardware as well as the simulator.
+The camera path is the one piece a simulator cannot exercise, since it has no camera.
+Installing it on a phone needs your own Apple developer signing, since nobody else's team id
+belongs in this repo. [docs/MOBILE.md](docs/MOBILE.md) has the checklist of what a device
+still has to prove.
+
+## Related work
+
+Other people building in the same neighbourhood — agent harnesses, orchestration
+surfaces, and the plumbing underneath them. Descriptions are their own.
+
+- [XHawk](https://xhawk.ai/) — multiplayer AI for human-agent work.
+- [qm](https://github.com/yc-software/qm) — a multiplayer agent harness for work.
+- [Agent Flywheel: the complete guide](https://agent-flywheel.com/complete-guide) —
+  planning, beads and agent swarms.
+- [activepieces](https://github.com/activepieces/activepieces) — AI workflow
+  automation, and roughly 400 MCP servers for agents to call.
+- [clawcodex](https://github.com/agentforce314/clawcodex) — a Claude Code rebuild in
+  Python, aimed at token efficiency.
+- [Plan for the CASS memory system](https://github.com/Dicklesworthstone/cass_memory_system/blob/main/docs/planning/PLAN_FOR_CASS_MEMORY_SYSTEM.md)
+  — a worked design doc for agent memory.
+- [local.ai](https://local.ai/nateabele)
+- [Grok Bot](https://x.ai/bot) — a new kind of colleague.
 
 ## License
 

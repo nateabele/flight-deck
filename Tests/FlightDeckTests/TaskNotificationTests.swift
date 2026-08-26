@@ -75,6 +75,58 @@ final class TaskNotificationTests: XCTestCase {
         XCTAssertEqual(notification.result, "Compare `List<Item>` and `a < b`, then `c > d`.")
     }
 
+    /// `usage`'s own value is a complete run of tags — `<subagent_tokens>…</subagent_tokens>
+    /// <tool_uses>…</tool_uses><duration_ms>…</duration_ms>` — with nothing outside them, so
+    /// it is parsed one level deeper rather than shown to a reader as a wall of raw markup
+    /// under a single `usage` row.
+    func testUsageInTheRealRecordYieldsThreeChildrenWithTheirLabelsAndValues() {
+        guard let notification = TaskNotification.parse(Self.realRecord) else {
+            return XCTFail("this is exactly the shape a task-notification body takes")
+        }
+
+        guard let usage = notification.fields.first(where: { $0.label == "usage" }) else {
+            return XCTFail("usage is one of the real record's fields")
+        }
+        XCTAssertEqual(
+            usage.children,
+            [
+                TaskNotification.Field(label: "subagent_tokens", value: "65202"),
+                TaskNotification.Field(label: "tool_uses", value: "36"),
+                TaskNotification.Field(label: "duration_ms", value: "232625"),
+            ]
+        )
+    }
+
+    /// The case Finding 2 calls out as most likely to break: `<result>`-style markdown
+    /// routinely contains a stray `<` or `>` (a generic type, a comparison) but is not itself
+    /// a run of complete tags, and must stay a leaf — `children` empty — rather than a false
+    /// positive nested field. `result` itself never reaches `Field.children` at all (it is
+    /// extracted to a plain `String?`), so this pins the rule on an unrecognised field, which
+    /// is the one code path that DOES build a `Field` and could show the bug.
+    func testMarkdownWithAngleBracketsInAFieldValueYieldsNoChildren() {
+        let body = "<queue-depth>Compare `List<Item>` and `a < b`.</queue-depth>"
+
+        guard let notification = TaskNotification.parse(body) else {
+            return XCTFail("a closed tag wrapping markdown is still this shape")
+        }
+
+        XCTAssertEqual(notification.fields.first?.children, [])
+    }
+
+    /// Finding 1: `tagOpen` failing to resolve one `<` must not end the whole scan — a stray
+    /// angle bracket between two real fields is not the end of the document, it is noise to
+    /// skip past on the way to the next `<label>`.
+    func testAStrayAngleBracketBetweenFieldsIsSkippedRatherThanEndingTheScan() {
+        let body = "<status>completed</status>weird < mid <task-id>abc</task-id>"
+
+        guard let notification = TaskNotification.parse(body) else {
+            return XCTFail("two closed fields either side of stray text is still this shape")
+        }
+
+        XCTAssertEqual(notification.status, "completed")
+        XCTAssertEqual(notification.fields, [TaskNotification.Field(label: "task-id", value: "abc")])
+    }
+
     func testOrdinaryProseWithNoTagsReturnsNil() {
         let body = "Your session is being continued from a previous conversation that ran out of context."
 

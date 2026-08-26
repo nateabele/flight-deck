@@ -162,12 +162,14 @@ final class SessionStore: ObservableObject {
     private struct TabAttachment {
         let instance: AgentInstance
         let binding: AgentBinding
+        let token: AttachmentToken
     }
 
     /// One agent attachment per tab, torn down with the tab. Replaces the per-session
     /// `TranscriptWatcher` this used to hold: the watcher now lives inside `ClaudeRuntime`,
-    /// and what the store keeps is the binding it attached — which is also what tells it
-    /// which tabs a conversation's report belongs to.
+    /// and what the store keeps here is keyed by tab only. Nothing scans this table to
+    /// decide which tabs an event belongs to — that routing is decided entirely by the
+    /// `AttachmentToken` the runtime hands back from `attach`, which names the tab directly.
     private var attachments: [UUID: TabAttachment] = [:]
 
     /// The agent integrations, one per `AgentInstance` — an agent *as an account*, not per
@@ -531,9 +533,7 @@ final class SessionStore: ObservableObject {
     /// A builder rather than a stored literal now that there is one per account, but the
     /// wiring is the point: a bare `ClaudeAdapter()` carries neither this account's
     /// transcripts root — a test would then derive transcript paths under the developer's real
-    /// `~/.claude/projects`, and a second login would read the first login's transcripts —
-    /// nor the route a title claude reports takes back to the tabs following that
-    /// conversation.
+    /// `~/.claude/projects`, and a second login would read the first login's transcripts.
     ///
     /// The account is captured as an id and resolved on every derivation, not baked into a
     /// URL here: `projectsRoot` is a closure precisely so a home that moves (a relocated
@@ -544,14 +544,6 @@ final class SessionStore: ObservableObject {
             projectsRoot: { [weak self] in
                 guard let self else { return ClaudeSession.defaultProjectsRoot }
                 return self.transcriptsRoot(forAccount: account)
-            },
-            injectRename: { [weak self] conversationID, title in
-                // The adapter speaks conversation ids; `pendingRenames` is keyed by tab, and
-                // two tabs can follow one conversation. See `tabs(following:)`.
-                guard let self else { return }
-                for tab in self.tabs(following: conversationID) {
-                    self.injectPendingRename(tab, title)
-                }
             }
         )
     }
@@ -1282,8 +1274,9 @@ final class SessionStore: ObservableObject {
         // InputBar, and this tab is a bare shell that has not even started the agent yet. The
         // registry scan retries it until the agent is up, or the deadline passes.
         //
-        // Deliberately NOT routed through `ClaudeAdapter.injectRename`, which is what this
-        // used to do: that is the *rename* channel, and it typed `/rename /login` at the tab.
+        // Deliberately NOT routed through claude's rename channel, which is what this used
+        // to do via `ClaudeAdapter.injectRename` (deleted as dead code once nothing reached
+        // it): that channel typed `/rename /login` at the tab, and login is not a rename.
         if let inject = invocation.inject {
             pendingPrompts[created.id] = DeferredPrompt(
                 text: inject, deadline: now().addingTimeInterval(Self.resumePromptWindow)
@@ -2786,9 +2779,8 @@ final class SessionStore: ObservableObject {
         let session = repos[at.repo].sessions[at.session]
         switch session.agent {
         case .claude:
-            // Byte-identical to what every tab did before this dispatch existed. Not routed
-            // through `ClaudeAdapter.rename` only because that route is `async`; it lands on
-            // this same method, and `AgentRoutingTests` covers that it does.
+            // Inline, not through `adapter.rename` — see this method's doc comment above for
+            // why claude's leg stays synchronous.
             injectPendingRename(id, name)
         case .codex:
             let adapter = adapter(for: instance(for: session))
@@ -2805,11 +2797,10 @@ final class SessionStore: ObservableObject {
         return true
     }
 
-    /// Queues a rename for `claude` and tries it at once. The one route into `pendingRenames`
-    /// — `SessionStore.rename` above and `ClaudeAdapter.rename` (which is how an agent that
-    /// owns its own conversation name reaches the same behaviour) both land here, so
-    /// `inject`'s `injecting` guard stays the single place a second injection into a busy tab
-    /// can be refused.
+    /// Queues a rename for `claude` and tries it at once. `SessionStore.rename` above is the
+    /// only route into `pendingRenames` — `ClaudeAdapter.rename` never reaches here; see its
+    /// doc comment for why claude's leg stays inline instead — so `inject`'s `injecting`
+    /// guard stays the single place a second injection into a busy tab can be refused.
     ///
     /// Sanitized *here*, not only in `rename`: what this queues becomes text typed into a
     /// pty, and an adapter's caller arrives with whatever its agent was handed. `rename` runs
@@ -4062,38 +4053,25 @@ final class SessionStore: ObservableObject {
         // runtime tails its transcript, and its account's registry is where the status glyph
         // comes from. A no-op for every account that already has one, and for codex, whose
         // tabs have no registry behind them at all.
+        // `hasStatusRegistry` rather than `== .claude`: the property is the adapter's own
+        // answer and codex's is false, so a third agent with a registry starts being watched
+        // by declaring it rather than by someone remembering to widen a comparison here.
         if instance.agent.hasStatusRegistry { startStatusWatching(account: instance.account) }
-        // Recorded before the attach, because the fan-out closure below reads it.
-        attachments[tabID] = TabAttachment(instance: instance, binding: binding)
-        runtime(for: instance).attach(binding) { [weak self] event in
-            guard let self else { return }
-            // Fanned out here rather than in the runtime because a runtime keys its one
-            // source by conversation, and two tabs can follow the same conversation — a user
-            // resuming it twice, which `conflictedSessionIDs` already flags. Both tabs used
-            // to hold their own watcher on that one transcript and both used to rename; this
-            // is what keeps that true with a single attachment behind them.
-            for tab in self.tabs(following: binding.conversationID) {
-                self.apply(event, to: tab)
-            }
+        // The token is the routing identity: the closure below names its tab directly, so
+        // nothing scans `attachments` to decide who an event belongs to. Two tabs following
+        // one conversation are two subscribers on one source inside the runtime, which is
+        // where that multiplexing now lives.
+        let token = runtime(for: instance).attach(binding, for: tabID) { [weak self] event in
+            self?.apply(event, to: tabID)
         }
+        attachments[tabID] = TabAttachment(instance: instance, binding: binding, token: token)
     }
 
-    /// Drops a tab's attachment, and the runtime's only when this was the last tab on it.
-    ///
-    /// That guard is the other half of the fan-out above: the runtime is keyed by
-    /// conversation, so detaching for one of two tabs sharing one would silently stop the
-    /// other tab's observation too.
+    /// Drops a tab's subscription. The runtime tears its source down when the last
+    /// subscriber leaves, so the store no longer has to ask whether anyone else is following.
     private func stopWatching(_ tabID: UUID) {
         guard let attachment = attachments.removeValue(forKey: tabID) else { return }
-        guard tabs(following: attachment.binding.conversationID).isEmpty else { return }
-        runtime(for: attachment.instance).detach(attachment.binding)
-    }
-
-    /// Which tabs are currently attached to a conversation. Usually one.
-    private func tabs(following conversationID: UUID) -> [UUID] {
-        attachments
-            .filter { $0.value.binding.conversationID == conversationID }
-            .map(\.key)
+        runtime(for: attachment.instance).detach(attachment.token)
     }
 
     /// One place where an agent's report becomes tab state, whichever agent reported it.

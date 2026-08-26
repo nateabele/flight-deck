@@ -121,6 +121,17 @@ reader doesn't re-derive them.
   `List(selection:)` binds `selectedSessionID` directly, and persistence now hangs off that
   property's `didSet`. The method is still exercised by `SessionStoreTests`; left in place
   rather than deleted, but it is dead weight if nothing adopts it.
+- **No automated test covers a background launch, which is where the input monitors broke.**
+  `SidebarInputMonitor` and `ToolOverlayInputMonitor` used to latch
+  `NSApp.keyWindow ?? NSApp.mainWindow` at startup; both are nil for as long as the app is
+  inactive, so an app relaunched behind a terminal — every `scripts/swap-release.sh` release —
+  ran with double-click-to-rename, Return-to-rename and the tool-cluster fade-in dead, while
+  context-menu rename kept working and hid it. Fixed by asking `SessionWindow` per event, and
+  `SessionWindowTests` measures the nil-while-inactive fact that caused it. What is *not*
+  covered is the end-to-end path: `XCUIApplication.launch()` always activates the app, so the
+  smoke suite cannot enter the broken state and never could have caught this. Any future
+  monitor that captures a window at startup will reintroduce it silently — verify such changes
+  by relaunching the real app in the background, not by a green suite.
 - **If a sidebar rename ever intermittently fails to submit, add a small delay before the
   Return.** `SessionStore.rename` sends the command text (a paste, via `sendText`) and then
   Return (a key event, via `sendReturn`) back to back. Ordering is preserved through

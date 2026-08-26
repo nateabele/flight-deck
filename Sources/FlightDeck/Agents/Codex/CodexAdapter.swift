@@ -142,6 +142,16 @@ struct CodexAdapter: AgentAdapter {
 
         // Commit. A failure here must propagate: a bound-but-uncommitted thread is worse
         // than no tab, because it looks fine until the terminal reports it cannot resume.
+        //
+        // Cross-agent audit (spec rule: no failure or recovery path may rename a
+        // conversation): codex is compliant. `prepare` is reached only from a user action
+        // (`newSession`) or from `rebind`'s thread-gone recovery branch below — and in both
+        // cases this `thread/name/set` names a BRAND-NEW thread, not the user's real one;
+        // codex simply cannot persist a thread without naming it. So on the recovery path the
+        // user's real conversation is never renamed — it is gone, and a fresh, separately
+        // named thread takes its place. One residual asymmetry versus claude: claude's
+        // recovery path (the `AgentAdapter.rebind` default) writes no name at all, while
+        // codex's writes `session.title` onto the new thread.
         _ = try await rpc.request("thread/name/set", ["threadId": raw, "name": session.title])
 
         // Release the writer lock `thread/start` just took, or `codex resume <id>` — what

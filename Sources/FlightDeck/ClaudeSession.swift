@@ -122,21 +122,25 @@ enum ClaudeSession {
     }
 
     /// The command for a session restored from a previous app launch. Reattaches to the
-    /// existing conversation, falling back to a fresh session with the same id and name
-    /// when the transcript has been deleted or pruned (`--resume` exits 1 in that case).
+    /// existing conversation, falling back to a fresh session with the same id when the
+    /// transcript has been deleted or pruned (`--resume` exits 1 in that case).
+    ///
+    /// **The fallback deliberately does not pass `--name`.** A failed resume is a failure
+    /// path, and no failure path may rename a conversation: on 2026-08-23 this branch
+    /// stamped a wrong stored title into 24 transcripts in three seconds, and re-stamped
+    /// them on every launch afterwards. The fresh session is left to name itself, and that
+    /// name flows back through the tab's own `.title` event like any other rename.
     ///
     /// Flags are applied to **both** branches: the fallback is a real session launch, and
     /// leaving it unconfigured would silently drop every preference the moment a
     /// transcript is pruned.
     static func resumeCommand(
-        sessionID: UUID, title: String, flags: FlagSet = FlagSet()
+        sessionID: UUID, flags: FlagSet = FlagSet()
     ) -> String {
         let id = sessionID.uuidString.lowercased()
-        let name = sanitizedName(title) ?? "session"
         let tail = ClaudeFlagSerializer.serialize(launchable(flags))
         let suffix = tail.isEmpty ? "" : " \(tail)"
-        return "claude --resume \(id)\(suffix) "
-            + "|| claude --session-id \(id) --name \(shellQuoted(name))\(suffix)\n"
+        return "claude --resume \(id)\(suffix) || claude --session-id \(id)\(suffix)\n"
     }
 
     /// One state-bearing thing that happened in the transcript.
