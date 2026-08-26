@@ -244,6 +244,33 @@ public enum FleetTLS {
         )
 
         let parameters = NWParameters(tls: tls)
+
+        // **Keepalive, because a fleet connection can die without either end being told.**
+        //
+        // Nothing above this line detected that. A peer that goes away without a FIN or an RST
+        // — the Mac's Wi-Fi renegotiating when the screensaver takes the display, a router
+        // dropping an idle NAT entry, an interface changing underneath — leaves `NWConnection`
+        // sitting in `.ready` forever. No state change reaches `FleetClient`, so
+        // `FleetConnector` never calls `scheduleRetry()`, and a phone in the foreground has no
+        // other trigger: its only other recovery path is the redial on returning from the
+        // background, which cannot help an app that never left it. The reported symptom was a
+        // phone that had to be force-quit to reconnect, every time.
+        //
+        // The probes are what turn that silence into a `.failed` the existing retry machinery
+        // already knows how to handle. ~25s to notice: idle 10s, then three probes 5s apart.
+        // Deliberately brisk — this is a LAN, and the cost of a false positive is one
+        // handshake, against a session that otherwise never comes back.
+        //
+        // Not a substitute for the foreground redial and not made redundant by it: a suspended
+        // iOS process runs no probes at all, so the two cover different halves and both are
+        // needed.
+        if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcp.enableKeepalive = true
+            tcp.keepaliveIdle = 10
+            tcp.keepaliveInterval = 5
+            tcp.keepaliveCount = 3
+        }
+
         // NO `multipathServiceType` HERE. It was `.handover` — so an established connection
         // would survive the phone changing networks, which is most of what made roaming (§3)
         // feel like nothing happened — and it made the Mac unreachable from the phone

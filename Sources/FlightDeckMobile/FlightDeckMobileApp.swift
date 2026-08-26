@@ -4,6 +4,9 @@ import SwiftUI
 struct FlightDeckMobileApp: App {
     @State private var model = FleetModel()
     @Environment(\.scenePhase) private var scenePhase
+    /// Remembers whether the app was actually suspended. See `RedialOnReturn` — reading it off
+    /// a single transition is the version that shipped and never fired.
+    @State private var redial = RedialOnReturn()
 
     var body: some Scene {
         WindowGroup {
@@ -27,11 +30,12 @@ struct FlightDeckMobileApp: App {
         // rebuilds the connector and re-runs discovery — so the cost of a redundant call is
         // one handshake, against a session that otherwise never comes back.
         //
-        // Keyed on `.background` → `.active`, not on `.active` alone: a notification banner or
-        // the app switcher passes through `.inactive` without ever suspending, and redialling
-        // on those would churn the socket every time a banner appeared.
-        .onChange(of: scenePhase) { previous, phase in
-            guard phase == .active, previous == .background, model.mac != nil else { return }
+        // Fed every transition, because the decision cannot be made from one of them: iOS
+        // returns from the background through `.inactive`, so `.active` never arrives with
+        // `.background` behind it. `RedialOnReturn` carries the whole argument, including the
+        // banner case this still deliberately ignores.
+        .onChange(of: scenePhase) { _, phase in
+            guard redial.phaseChanged(to: phase), model.mac != nil else { return }
             model.reconnect()
         }
     }
