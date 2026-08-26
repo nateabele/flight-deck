@@ -444,6 +444,23 @@ page.
     scenario that produced the defect the ranked endpoint list and the two-endpoint pairing code
     exist to fix (see [NETWORKING.md](NETWORKING.md), "Discovery and reconnection") — a phone
     that never leaves the LAN cannot exercise it, so no single machine can automate this one.
+62. **Let the Mac's screensaver come on with the phone app open in front of you.** The
+    reported failure: the connection stops working and only a force-quit brings it back. What
+    should happen now is that the phone's TCP keepalive notices within about twenty-five
+    seconds and the connector retries on its own — the fleet list goes stale, says it is
+    reconnecting, and comes back. Nothing about this is reachable from a test: it needs a real
+    screensaver, a real Wi-Fi interface and a peer that stops answering without saying so.
+63. **Background the phone app for a few minutes, then come back to it.** It must
+    reconnect without being force-quit. This is the path that never once worked — the redial
+    was keyed on `.background → .active`, and iOS returns through `.inactive`, so the
+    predicate was false every time. Verified against a simulator and the live Mac by watching
+    the source port change on return; verify it on the handset, where the socket is genuinely
+    destroyed rather than merely idle.
+64. **Leave the phone connected and idle for an hour, untouched.** The keepalive
+    probes every ten seconds of idleness, which is brisk for a LAN and is meant to be. What
+    this item is looking for is the opposite failure from the one above: a connection that
+    keeps *dropping* and redialling because something on the path objects to the probes, or a
+    measurable battery cost from a socket that never goes quiet.
 
 ## A second checklist: the iOS plumbing
 
