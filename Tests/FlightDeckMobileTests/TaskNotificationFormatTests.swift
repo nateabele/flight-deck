@@ -100,6 +100,55 @@ final class TaskNotificationFormatTests: XCTestCase {
         XCTAssertFalse(TaskNotificationFormat.clampedResult(short, expanded: false).hasMore)
     }
 
+    // MARK: What a listener hears, and what lands on the clipboard
+
+    /// **The same defect, in the modality a reader cannot skim past.** `spoken` exists because
+    /// `TimelineStyle.spoken` fell through to `body.text` for a `.systemNotice`, so VoiceOver
+    /// announced "less-than task-id greater-than acff…" — the row was fixed and the
+    /// announcement was not. It is also what the detail screen's Copy button puts on the
+    /// clipboard, for the same reason: a button beside the readable version must not hand back
+    /// the markup.
+    func testWhatIsSpokenAndCopiedCarriesNoMarkup() {
+        let notification = TaskNotification(
+            summary: "Agent \"Filter events\" finished",
+            status: "completed",
+            result: "Status: Complete.",
+            fields: [
+                .init(label: "task-id", value: "acff27d277cceb622"),
+                .init(
+                    label: "usage",
+                    value: "<subagent_tokens>65202</subagent_tokens>",
+                    children: [.init(label: "subagent_tokens", value: "65202")]
+                ),
+            ]
+        )
+
+        let spoken = TaskNotificationFormat.spoken(notification)
+
+        XCTAssertFalse(spoken.contains("<"), "a listener must not hear a tag")
+        XCTAssertFalse(spoken.contains(">"))
+        XCTAssertTrue(spoken.contains("Agent \"Filter events\" finished"))
+        XCTAssertTrue(spoken.contains("completed"), "including whether it worked")
+        XCTAssertTrue(spoken.contains("Status: Complete."), "and the report itself")
+        XCTAssertTrue(spoken.contains("tokens"), "nested values speak as words, not markup")
+    }
+
+    /// The row's own announcement goes through the same function, so the two cannot drift.
+    func testTheRowsAccessibleTextUsesTheParseRatherThanTheRawBody() {
+        let item = TimelineItem(
+            id: "1000#0", kind: .systemNotice, status: .complete,
+            body: TimelineItem.Body(
+                text: "<status>completed</status>\n<summary>Agent finished</summary>",
+                tool: "task-notification"
+            )
+        )
+
+        let spoken = TimelineStyle.spoken(item)
+
+        XCTAssertFalse(spoken.contains("<status>"), "the raw body must not reach a listener")
+        XCTAssertTrue(spoken.contains("Agent finished"))
+    }
+
     // MARK: The gate
 
     /// A `system-reminder` is ordinary prose under a wrapper, not a run of fields. It must take

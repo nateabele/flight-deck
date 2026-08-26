@@ -250,6 +250,13 @@ enum TimelineStyle {
     /// Machine text is returned untouched, for the reason `rendersMarkdown(_:)` gives: a diff
     /// read aloud with its `-` markers stripped is a diff that says the opposite of what it is.
     static func spoken(_ item: TimelineItem) -> String {
+        // A task notification's `body.text` is markup, so the fallback below would read
+        // "less-than task-id greater-than" at a listener — the same defect the row was just
+        // fixed for, in the one modality where it is least escapable. Spoken from the parse
+        // instead, in the order the row draws it.
+        if let notification = taskNotification(for: item) {
+            return TaskNotificationFormat.spoken(notification)
+        }
         guard rendersMarkdown(item) else { return item.body.text }
         let plain = MarkdownContent(item.body.text).renderPlainText()
         // cmark returns the empty string for a document it could make nothing of. The raw text

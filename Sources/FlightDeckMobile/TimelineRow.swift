@@ -125,6 +125,18 @@ struct TimelineRow: View {
                 .foregroundStyle(headingColor)
             if isFailed { errorChip }
             Spacer(minLength: 8)
+            // The approved layout for a task notification puts its outcome here, on the
+            // heading row's trailing edge — a reader scanning a column of these looks down one
+            // edge for "did it work?", and a status indented under each summary is not on it.
+            if let status = TimelineStyle.taskNotification(for: item)?.status, !status.isEmpty {
+                Text(status)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color(.secondarySystemBackground)))
+                    .fixedSize()
+            }
             if let time = TimelineStyle.time(item.at) {
                 Text(time)
                     .font(.caption2.monospacedDigit())
@@ -210,11 +222,13 @@ struct TimelineRow: View {
     /// `TimelineStyle.proseText`.
     @ViewBuilder
     private var proseBody: some View {
-        // **Before the markdown branch, and it has to be.** `rendersMarkdown` gates on the
-        // KIND, so admitting `.systemNotice` there would send a `system-reminder`'s ordinary
-        // prose through the markdown parser too. A notification is recognised by its CONTENT
-        // instead — `parse` answers nil for every notice that is not a run of fields, and each
-        // of those falls through to the branches below exactly as it always did.
+        // **Recognised by CONTENT, where every other branch here gates on KIND.** That is the
+        // load-bearing part, not this branch's position: `rendersMarkdown` is a switch over
+        // kinds, so teaching it `.systemNotice` would push a `system-reminder`'s ordinary prose
+        // through the markdown parser as well. `parse` answers nil for every notice that is not
+        // a run of fields, so each of those falls through below exactly as it always did.
+        // (Order is not what saves us — `rendersMarkdown` is already false for `.systemNotice`
+        // — but reading the specific case first is how this stays legible.)
         if let notification = TimelineStyle.taskNotification(for: item) {
             TaskNotificationBody(notification: notification, expanded: isExpanded, onReply: onReply)
                 .foregroundStyle(proseColor)
@@ -264,26 +278,7 @@ struct TimelineRow: View {
     /// text by a different route.
     @ViewBuilder
     private func segmentView(_ segment: TimelineSegment) -> some View {
-        switch segment {
-        case .prose(let text):
-            if let onReply {
-                SelectableProseView(markdown: text, onReply: onReply)
-            } else {
-                // No composer behind this row, so nothing to reply into. MarkdownUI draws it,
-                // which is also the renderer the offscreen harnesses have always compared
-                // against.
-                Markdown(text)
-                    .markdownTheme(TimelineMarkdown.theme)
-            }
-        case .code(let language, let text):
-            Markdown(TimelineSegment.fenced(language: language, text))
-                .markdownTheme(TimelineMarkdown.theme)
-                .modifier(CopyAction(text: text))
-        case .richBlock(let text):
-            Markdown(text)
-                .markdownTheme(TimelineMarkdown.theme)
-                .modifier(CopyAction(text: text))
-        }
+        TimelineSegmentView(segment: segment, onReply: onReply)
     }
 
     private var proseFont: Font {
@@ -458,9 +453,43 @@ private struct ExpandAction: ViewModifier {
 /// `@ViewBuilder` around the whole row would erase them on every row in the list. `nil` is
 /// "this row leads somewhere that has a Copy button already", or "there is nothing to copy" —
 /// that function decides both, so there is no second emptiness test here.
-/// Internal rather than file-private: `TaskNotificationBody` draws the same three segment
-/// kinds and must offer the same Copy on a fenced block, and two copies of one gesture is how
-/// they drift apart.
+/// One segment, drawn by whichever renderer can honour it.
+///
+/// **Its own view rather than a method on the row, because it has two callers.**
+/// `TaskNotificationBody` draws the same three kinds inside an agent's report, and a second
+/// copy of this switch is exactly the drift `CopyAction`'s own note warns about — a fenced
+/// block that grew a Copy in one place and not the other.
+struct TimelineSegmentView: View {
+    let segment: TimelineSegment
+    var onReply: ((String) -> Void)?
+
+    @ViewBuilder
+    var body: some View {
+        switch segment {
+        case .prose(let text):
+            if let onReply {
+                SelectableProseView(markdown: text, onReply: onReply)
+            } else {
+                // No composer behind this row, so nothing to reply into. MarkdownUI draws it,
+                // which is also the renderer the offscreen harnesses have always compared
+                // against.
+                Markdown(text)
+                    .markdownTheme(TimelineMarkdown.theme)
+            }
+        case .code(let language, let text):
+            Markdown(TimelineSegment.fenced(language: language, text))
+                .markdownTheme(TimelineMarkdown.theme)
+                .modifier(CopyAction(text: text))
+        case .richBlock(let text):
+            Markdown(text)
+                .markdownTheme(TimelineMarkdown.theme)
+                .modifier(CopyAction(text: text))
+        }
+    }
+}
+
+/// Internal rather than file-private: `TimelineSegmentView` above is used from
+/// `TaskNotificationBody` too, so this travels with it.
 struct CopyAction: ViewModifier {
     let text: String?
 
