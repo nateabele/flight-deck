@@ -48,7 +48,8 @@ final class FleetEventApplicationTests: XCTestCase {
     func testActivityCarriesItsWholeTripleTogether() {
         let after = base().applying([
             .activityChanged(id: sessionID, activity: "waiting",
-                             waitingFor: "permission prompt", subagentCount: 4)
+                             waitingFor: "permission prompt", subagentCount: 4,
+                             hasBackgroundWork: false)
         ])
         XCTAssertEqual(after.projects[0].sessions[0].activity, "waiting")
         XCTAssertEqual(after.projects[0].sessions[0].waitingFor, "permission prompt")
@@ -57,14 +58,26 @@ final class FleetEventApplicationTests: XCTestCase {
         XCTAssertEqual(after.projects[0].sessions[0].subagentCount, 4)
     }
 
+    /// The fold's other consumer of this event: a client applying `activityChanged` off a
+    /// resumed replay has to land the flag too, not just a live snapshot fetch.
+    func testActivityChangedCarriesBackgroundWorkThroughTheFold() {
+        let after = base().applying([
+            .activityChanged(id: sessionID, activity: "idle", waitingFor: nil,
+                             subagentCount: 0, hasBackgroundWork: true)
+        ])
+        XCTAssertTrue(after.projects[0].sessions[0].hasBackgroundWork)
+    }
+
     /// Statuslessness is a real state and has to be reachable by an event, or a tab whose
     /// agent exited would keep rendering the status it had when it died.
     func testActivityCanReturnToNil() {
         var snapshot = base().applying([
-            .activityChanged(id: sessionID, activity: "busy", waitingFor: nil, subagentCount: 3)
+            .activityChanged(id: sessionID, activity: "busy", waitingFor: nil, subagentCount: 3,
+                             hasBackgroundWork: false)
         ])
         snapshot = snapshot.applying([
-            .activityChanged(id: sessionID, activity: nil, waitingFor: nil, subagentCount: 0)
+            .activityChanged(id: sessionID, activity: nil, waitingFor: nil, subagentCount: 0,
+                             hasBackgroundWork: false)
         ])
         XCTAssertNil(snapshot.projects[0].sessions[0].activity)
         XCTAssertEqual(snapshot.projects[0].sessions[0].subagentCount, 0)
@@ -155,7 +168,8 @@ final class FleetEventApplicationTests: XCTestCase {
         let inert: [FleetEvent] = [
             .sessionRemoved(id: ghost),
             .renamed(id: ghost, title: "x", origin: .agent),
-            .activityChanged(id: ghost, activity: "busy", waitingFor: nil, subagentCount: 0),
+            .activityChanged(id: ghost, activity: "busy", waitingFor: nil, subagentCount: 0,
+                             hasBackgroundWork: false),
             .unreadChanged(id: ghost, isUnread: true),
             .sessionMoved(id: ghost, project: projectID, at: 0),
             .sessionAdded(session(UUID(), "x"), project: ghost, at: 0),

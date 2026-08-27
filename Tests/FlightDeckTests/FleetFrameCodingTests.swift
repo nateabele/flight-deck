@@ -24,7 +24,8 @@ final class FleetFrameCodingTests: XCTestCase {
 
     func testAnActivityChangeEncodesItsWholeTriple() throws {
         let encoded = try fields(of: FleetEvent.activityChanged(
-            id: UUID(), activity: "waiting", waitingFor: "permission prompt", subagentCount: 3
+            id: UUID(), activity: "waiting", waitingFor: "permission prompt", subagentCount: 3,
+            hasBackgroundWork: false
         ))
         XCTAssertEqual(encoded["t"] as? String, "session.activity")
         XCTAssertEqual(encoded["activity"] as? String, "waiting")
@@ -45,7 +46,8 @@ final class FleetFrameCodingTests: XCTestCase {
             .sessionMoved(id: UUID(), project: project.id, at: 2),
             .sessionsReordered(project: project.id, order: [UUID()]),
             .renamed(id: UUID(), title: "t", origin: .user),
-            .activityChanged(id: UUID(), activity: nil, waitingFor: nil, subagentCount: 0),
+            .activityChanged(id: UUID(), activity: nil, waitingFor: nil, subagentCount: 0,
+                             hasBackgroundWork: true),
             .unreadChanged(id: UUID(), isUnread: true)
         ]
         for event in cases {

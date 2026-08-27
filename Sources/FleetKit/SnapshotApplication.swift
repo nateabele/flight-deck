@@ -56,11 +56,13 @@ extension FleetSnapshot {
         case .renamed(let id, let title, _):
             mutate(id) { $0.title = title }
 
-        case .activityChanged(let id, let activity, let waitingFor, let subagentCount):
+        case .activityChanged(let id, let activity, let waitingFor, let subagentCount,
+                              let hasBackgroundWork):
             mutate(id) {
                 $0.activity = activity
                 $0.waitingFor = waitingFor
                 $0.subagentCount = subagentCount
+                $0.hasBackgroundWork = hasBackgroundWork
             }
 
         case .unreadChanged(let id, let isUnread):

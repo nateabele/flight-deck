@@ -56,11 +56,16 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     public var waitingFor: String?
     public var subagentCount: Int
     public var isUnread: Bool
+    /// A background task is running under this tab's agent. Orthogonal to `activity`, not a
+    /// value of it: the Mac reports `activity: "idle"` and this together for a tab sitting at
+    /// its prompt with a dev server up.
+    public var hasBackgroundWork: Bool
 
     public init(
         id: UUID, title: String, agent: String,
         activity: String? = nil, waitingFor: String? = nil,
-        subagentCount: Int = 0, isUnread: Bool = false
+        subagentCount: Int = 0, isUnread: Bool = false,
+        hasBackgroundWork: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -69,5 +74,19 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         self.waitingFor = waitingFor
         self.subagentCount = subagentCount
         self.isUnread = isUnread
+        self.hasBackgroundWork = hasBackgroundWork
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        agent = try c.decode(String.self, forKey: .agent)
+        activity = try c.decodeIfPresent(String.self, forKey: .activity)
+        waitingFor = try c.decodeIfPresent(String.self, forKey: .waitingFor)
+        subagentCount = try c.decode(Int.self, forKey: .subagentCount)
+        isUnread = try c.decode(Bool.self, forKey: .isUnread)
+        // Absent from an older Mac's snapshot, and that is a meaningful value, not an error.
+        hasBackgroundWork = try c.decodeIfPresent(Bool.self, forKey: .hasBackgroundWork) ?? false
     }
 }

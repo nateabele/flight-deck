@@ -821,7 +821,10 @@ final class SessionStore: ObservableObject {
 
     /// The wire form of a session as it stands right now.
     private func wire(_ session: Session) -> WireSession {
-        FleetProjection.project(session, status: statuses[session.id], unread: unreadIdle)
+        FleetProjection.project(
+            session, status: statuses[session.id], unread: unreadIdle,
+            hasBackgroundWork: backgroundWorkSessions.contains(session.id)
+        )
     }
 
     /// How a refused session creation reaches the user. Defaulted rather than injected
@@ -1562,7 +1565,10 @@ final class SessionStore: ObservableObject {
             // Emitted here, before the session goes in, so a client never receives a
             // `sessionAdded` naming a project it has not been told about.
             emit(.projectAdded(
-                FleetProjection.project(repos[repoIndex], statuses: statuses, unread: unreadIdle),
+                FleetProjection.project(
+                    repos[repoIndex], statuses: statuses, unread: unreadIdle,
+                    backgroundWork: backgroundWorkSessions
+                ),
                 at: repoIndex
             ))
         }
@@ -2454,7 +2460,10 @@ final class SessionStore: ObservableObject {
                 let at = min(max(closed.indexInSidebar, 0), repos.count)
                 repos.insert(repo, at: at)
                 emit(.projectAdded(
-                    FleetProjection.project(repo, statuses: statuses, unread: unreadIdle), at: at
+                    FleetProjection.project(
+                        repo, statuses: statuses, unread: unreadIdle,
+                        backgroundWork: backgroundWorkSessions
+                    ), at: at
                 ))
             }
             for child in closed.sessions {
@@ -3861,7 +3870,8 @@ final class SessionStore: ObservableObject {
                 // render differently.
                 activity: transition.new?.activity.rawValue,
                 waitingFor: transition.new?.waitingFor,
-                subagentCount: transition.new?.subagentCount ?? 0
+                subagentCount: transition.new?.subagentCount ?? 0,
+                hasBackgroundWork: backgroundWorkSessions.contains(transition.id)
             )
         })
     }
@@ -3931,7 +3941,8 @@ final class SessionStore: ObservableObject {
         statuses[id] = status
         emit(.activityChanged(
             id: id, activity: status.activity.rawValue,
-            waitingFor: status.waitingFor, subagentCount: status.subagentCount
+            waitingFor: status.waitingFor, subagentCount: status.subagentCount,
+            hasBackgroundWork: backgroundWorkSessions.contains(id)
         ))
     }
 
@@ -4078,7 +4089,10 @@ final class SessionStore: ObservableObject {
             repos.append(Repo(url: target))
             destination = repos.count - 1
             emit(.projectAdded(
-                FleetProjection.project(repos[destination], statuses: statuses, unread: unreadIdle),
+                FleetProjection.project(
+                    repos[destination], statuses: statuses, unread: unreadIdle,
+                    backgroundWork: backgroundWorkSessions
+                ),
                 at: destination
             ))
         }
