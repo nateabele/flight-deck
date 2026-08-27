@@ -60,6 +60,21 @@ final class SessionStatusGlyphTests: XCTestCase {
             SessionStatusGlyph.label(for: session(activity: "idle")),
             "Idle"
         )
+        // The two compositions above only ever exercised the plain forms of `baseLabel`; these
+        // pin the clause against the unread override and against a real subagent count too,
+        // matching `SessionStatusTests.testTooltipComposesBackgroundWork` on macOS.
+        XCTAssertEqual(
+            SessionStatusGlyph.label(
+                for: session(activity: "idle", isUnread: true, hasBackgroundWork: true)
+            ),
+            "Finished — not yet viewed — background command running"
+        )
+        XCTAssertEqual(
+            SessionStatusGlyph.label(
+                for: session(activity: "busy", subagentCount: 2, hasBackgroundWork: true)
+            ),
+            "Working — 2 subagents — background command running"
+        )
     }
 
     /// `nil` still means no accessibility element at all — a dead tab must not be a VoiceOver
