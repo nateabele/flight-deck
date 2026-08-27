@@ -3791,11 +3791,14 @@ final class SessionStore: ObservableObject {
         }
         let previous = statuses
         let previousBackgroundWork = backgroundWorkSessions
+        // Also `emitActivity`'s second axis, below: a tick can move this set alone, with
+        // every `SessionStatus` unchanged, and that tick still has to reach the wire.
+        let backgroundWorkChanged = previousBackgroundWork.symmetricDifference(backgroundWork)
         statuses = next
         backgroundWorkSessions = backgroundWork
         let touched = Set(previous.keys)
             .union(next.keys)
-            .union(previousBackgroundWork.symmetricDifference(backgroundWork))
+            .union(backgroundWorkChanged)
         let transitions = touched.map {
             StatusTransition(id: $0, old: previous[$0], new: next[$0])
         }
@@ -3807,7 +3810,7 @@ final class SessionStore: ObservableObject {
         // activity having changed with no event on the wire for it yet, which is real
         // drift, just not a bug: the fix is recording activity first, not silencing the
         // check.
-        emitActivity(transitions)
+        emitActivity(transitions, backgroundWorkChanged: backgroundWorkChanged)
         applyReadState(transitions)
         deliverNotifications(transitions)
         cancelSupersededPrompts(transitions)
@@ -3858,11 +3861,20 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// The fourth consumer of a tick's transitions. Reads off the same diff the other three
-    /// do, so a status a client sees is by construction the status that drove the sidebar,
-    /// the notification and the prompt cancellation.
-    private func emitActivity(_ transitions: [StatusTransition]) {
-        let changed = transitions.filter { $0.old != $0.new }
+    /// The fourth consumer of a tick's transitions, and the only one of the four that also
+    /// answers to `backgroundWorkChanged`: `SessionStatus` equality is silent about the
+    /// background flag, so a tick that moves only that set produces transitions with
+    /// `old == new` throughout. Filtering on `old != new` alone would drop it — the sidebar
+    /// (Task 5) would still update, because it reads `backgroundWorkSessions` directly, but a
+    /// connected phone would hear nothing until some other field on that session happened to
+    /// change too. `changed` is therefore two axes, not one: it does not read off quite the
+    /// same diff `applyReadState`, `deliverNotifications` and `cancelSupersededPrompts` do.
+    private func emitActivity(
+        _ transitions: [StatusTransition], backgroundWorkChanged: Set<UUID>
+    ) {
+        let changed = transitions.filter {
+            $0.old != $0.new || backgroundWorkChanged.contains($0.id)
+        }
         emit(changed.map { transition in
             .activityChanged(
                 id: transition.id,

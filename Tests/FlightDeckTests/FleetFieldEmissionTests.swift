@@ -82,6 +82,30 @@ final class FleetFieldEmissionTests: XCTestCase {
         )))
     }
 
+    /// `commitStatuses`'s guard lets a background-only tick through — Task 2 widened it to
+    /// `next != statuses || backgroundWork != backgroundWorkSessions` on purpose, so a task
+    /// starting or ending under an otherwise-idle tab is not swallowed. `emitActivity` has to
+    /// meet that halfway: a tick where `activity` never moves must still be announced when
+    /// only the background flag did, or the widened guard buys nothing for a connected phone.
+    func testABackgroundWorkOnlyChangeIsAnnounced() {
+        let store = store()
+        let session = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+        store.applyRegistry([1: .init(
+            pid: 1, sessionID: session.pinnedConversationID, activity: .idle, waitingFor: nil,
+            startedAt: 1, cwd: "/w/alpha", procStart: "a", reportsBackgroundWork: false)])
+        let replicator = attachedReplicator(to: store)
+
+        // Same activity, same everything else — only `reportsBackgroundWork` flips.
+        store.applyRegistry([1: .init(
+            pid: 1, sessionID: session.pinnedConversationID, activity: .idle, waitingFor: nil,
+            startedAt: 1, cwd: "/w/alpha", procStart: "a", reportsBackgroundWork: true)])
+
+        XCTAssertTrue(replicator.recorded.contains(.activityChanged(
+            id: session.id, activity: "idle", waitingFor: nil, subagentCount: 0,
+            hasBackgroundWork: true
+        )))
+    }
+
     func testMarkingUnreadAndReadingItAgainAreBothAnnounced() {
         let store = store()
         let a = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
