@@ -74,4 +74,13 @@ struct SessionStatus: Equatable {
         guard unread, activity == .idle else { return tooltip }
         return "Finished — not yet viewed"
     }
+
+    /// The background clause is appended, never substituted, and always last. Every string
+    /// this produced before the flag existed is unchanged when `backgroundWork` is false —
+    /// which is what lets `SessionStatusGlyph.label(for:)` on iOS pin the same literals.
+    func tooltip(unread: Bool, backgroundWork: Bool = false) -> String {
+        let base = unread && activity == .idle ? "Finished — not yet viewed" : tooltip
+        guard backgroundWork else { return base }
+        return base + " — background command running"
+    }
 }

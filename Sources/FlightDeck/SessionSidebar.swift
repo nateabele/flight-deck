@@ -50,6 +50,23 @@ private struct PhonePresenceBadge: View {
     }
 }
 
+/// A background task is running under this tab's agent.
+///
+/// Static, deliberately, where `PhonePresenceBadge` pulses: presence is someone *watching*
+/// and wants the eye, whereas this is a fact about the tab that is true for hours at a time.
+/// A second pulsing glyph in the same row would turn the sidebar into a christmas tree.
+private struct BackgroundWorkBadge: View {
+    var body: some View {
+        Image(systemName: "terminal.fill")
+            .font(.caption2.weight(.semibold))
+            // The same green the status glyph used for `.shell` before this became a
+            // decoration, so nothing about the sidebar's vocabulary changed — only what the
+            // colour is attached to.
+            .foregroundStyle(.green)
+            .accessibilityHidden(true)   // the row's status label already says it
+    }
+}
+
 /// One sidebar row. Owns only its transient edit state; the title itself lives in the Store.
 private struct SessionRow: View {
     @ObservedObject var store: SessionStore
@@ -62,6 +79,9 @@ private struct SessionRow: View {
     /// A phone currently has this conversation open. Presence, not state — see
     /// `FleetService.phoneActiveSessions`.
     var isPhoneActive: Bool = false
+    /// A background task is running under this tab's agent. A decoration, not a state — see
+    /// `SessionStore.backgroundWorkSessions`.
+    var hasBackgroundWork: Bool = false
 
     @State private var isEditing = false
     @State private var draft = ""
@@ -94,7 +114,8 @@ private struct SessionRow: View {
                 Color.clear.frame(width: 16, height: 0)
                 SessionStatusIcon(
                     status: store.status(for: session.id),
-                    unread: store.unreadIdle.contains(session.id)
+                    unread: store.unreadIdle.contains(session.id),
+                    hasBackgroundWork: store.backgroundWorkSessions.contains(session.id)
                 )
             }
 
@@ -139,6 +160,10 @@ private struct SessionRow: View {
                                 .combined(with: .opacity)
                                 .combined(with: .scale(scale: 0.4, anchor: .leading))
                         )
+                }
+                if hasBackgroundWork {
+                    BackgroundWorkBadge()
+                        .transition(.opacity.combined(with: .scale(scale: 0.6)))
                 }
                 Text(session.title)
                     .accessibilityIdentifier("session-row-title")
@@ -356,7 +381,8 @@ struct SessionSidebar: View {
                             session: session,
                             isConflicted: conflicted.contains(session.id),
                             isAccountMismatched: mismatched.contains(session.id),
-                            isPhoneActive: phoneActiveSessions.contains(session.id)
+                            isPhoneActive: phoneActiveSessions.contains(session.id),
+                            hasBackgroundWork: store.backgroundWorkSessions.contains(session.id)
                         )
                         .tag(session.id)
                         // Animated HERE, on the container, not inside the badge: the badge is
@@ -364,6 +390,8 @@ struct SessionSidebar: View {
                         // arrival — only something that outlives the change can.
                         .animation(.spring(response: 0.35, dampingFraction: 0.75),
                                    value: phoneActiveSessions.contains(session.id))
+                        .animation(.spring(response: 0.35, dampingFraction: 0.75),
+                                   value: store.backgroundWorkSessions.contains(session.id))
                     }
 
                 case .empty:
