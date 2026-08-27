@@ -339,7 +339,10 @@ final class SessionAutoResumeTests: XCTestCase {
     }
 
     /// Every `sessions.json` written before this change stores `"shell"`. Reading one back must
-    /// not lose the status — `SessionActivity(rawValue: "shell")` is nil now.
+    /// not lose the status. `SessionActivity` still has a `.shell` case until Task 8 deletes it,
+    /// so `SessionActivity(rawValue: "shell")` would actually succeed today — the migration
+    /// matters anyway, because `restoredActivity` intercepts the raw string before the enum
+    /// ever sees it, which is what keeps this correct both before and after that deletion.
     func testLegacyShellInSnapshotRestoresAsIdleWithBackgroundWork() {
         let restored = SessionStore.restoredActivity(fromPersisted: "shell")
         XCTAssertEqual(restored.activity, .idle)
@@ -350,5 +353,62 @@ final class SessionAutoResumeTests: XCTestCase {
         XCTAssertFalse(plain.hasBackgroundWork)
 
         XCTAssertNil(SessionStore.restoredActivity(fromPersisted: nil).activity)
+    }
+
+    /// A snapshot entry carrying `hasBackgroundWork` explicitly, bypassing the
+    /// `activities:` helper above so a test can set the new field independently of the
+    /// legacy `activity` string.
+    private func entry(
+        activity: String?, hasBackgroundWork: Bool? = nil
+    ) -> (SessionSnapshot.Entry, UUID) {
+        let id = UUID()
+        return (
+            .init(
+                id: id, title: "s", workingDirectory: "/w", activity: activity,
+                hasBackgroundWork: hasBackgroundWork
+            ),
+            id
+        )
+    }
+
+    /// `restore()` must reach the same conclusion the resume prompt does: a tab that comes
+    /// back from a legacy `"shell"` string belongs in `backgroundWorkSessions`, so the sidebar
+    /// badge survives the relaunch rather than waiting for the next registry tick.
+    func testRestoreSeedsBackgroundWorkFromLegacyShell() {
+        let (record, id) = entry(activity: "shell")
+        let snap = SessionSnapshot(sessions: [record], selectedSessionID: nil, sessionCounter: 1)
+        let store = makeStore(snap, autoResume: true)
+
+        store.restore(directoryExists: allDirsExist)
+
+        XCTAssertTrue(store.backgroundWorkSessions.contains(id))
+    }
+
+    /// Same, but via the new explicit field rather than the legacy string — the shape every
+    /// snapshot written after this change actually takes.
+    func testRestoreSeedsBackgroundWorkFromExplicitField() {
+        let (record, id) = entry(activity: "busy", hasBackgroundWork: true)
+        let snap = SessionSnapshot(sessions: [record], selectedSessionID: nil, sessionCounter: 1)
+        let store = makeStore(snap, autoResume: true)
+
+        store.restore(directoryExists: allDirsExist)
+
+        XCTAssertTrue(store.backgroundWorkSessions.contains(id))
+    }
+
+    /// The preference itself: `"idle"` alone implies `hasBackgroundWork: false`, but an
+    /// explicit `true` on the same entry must win — proving the restore gate reads
+    /// `entry.hasBackgroundWork ?? restored.hasBackgroundWork` rather than only the string.
+    func testExplicitBackgroundWorkFieldWinsOverWhatTheStringImplies() {
+        let (record, id) = entry(activity: "idle", hasBackgroundWork: true)
+        let snap = SessionSnapshot(sessions: [record], selectedSessionID: nil, sessionCounter: 1)
+        let store = makeStore(snap, autoResume: true)
+
+        store.restore(directoryExists: allDirsExist)
+
+        XCTAssertTrue(
+            store.backgroundWorkSessions.contains(id),
+            "an explicit hasBackgroundWork: true must not be overridden by \"idle\" implying false"
+        )
     }
 }
