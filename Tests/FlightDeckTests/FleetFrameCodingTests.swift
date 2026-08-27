@@ -25,12 +25,16 @@ final class FleetFrameCodingTests: XCTestCase {
     func testAnActivityChangeEncodesItsWholeTriple() throws {
         let encoded = try fields(of: FleetEvent.activityChanged(
             id: UUID(), activity: "waiting", waitingFor: "permission prompt", subagentCount: 3,
-            hasBackgroundWork: false
+            hasBackgroundWork: true
         ))
         XCTAssertEqual(encoded["t"] as? String, "session.activity")
         XCTAssertEqual(encoded["activity"] as? String, "waiting")
         XCTAssertEqual(encoded["waitingFor"] as? String, "permission prompt")
         XCTAssertEqual(encoded["subagentCount"] as? Int, 3)
+        // Asserted by literal key name, like every other field here: an in-repo rename of
+        // the `CodingKeys` case would stay green on a round trip alone and only break a
+        // separately-built client, which is exactly what this file exists to catch.
+        XCTAssertEqual(encoded["hasBackgroundWork"] as? Bool, true)
     }
 
     func testEveryEventCaseRoundTrips() throws {

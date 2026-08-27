@@ -64,4 +64,21 @@ final class FleetWireTests: XCTestCase {
         let decoded = try JSONDecoder().decode(FleetEvent.self, from: data)
         XCTAssertEqual(decoded, event)
     }
+
+    /// The other half of the compatibility contract: an older Mac's *incremental* frame, not
+    /// just its snapshot. `testWireSessionDecodesWithoutBackgroundWorkKey` above proves
+    /// `WireSession` tolerates the missing key; this proves the `activityChanged` decode arm
+    /// in `WireCoding.swift` does too — it has its own `decodeIfPresent(...) ?? false`, wired
+    /// up separately, and nothing exercised it.
+    func testActivityChangedDecodesWithoutBackgroundWorkKey() throws {
+        let id = UUID()
+        let json = Data("""
+        {"t":"session.activity","id":"\(id.uuidString)","activity":"idle","subagentCount":0}
+        """.utf8)
+        let event = try JSONDecoder().decode(FleetEvent.self, from: json)
+        guard case .activityChanged(_, _, _, _, let hasBackgroundWork) = event else {
+            return XCTFail("expected .activityChanged, got \(event)")
+        }
+        XCTAssertFalse(hasBackgroundWork)
+    }
 }

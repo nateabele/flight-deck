@@ -214,10 +214,12 @@ final class FleetReplicatorTests: XCTestCase {
         XCTAssertEqual(replicator.snapshot().fleet, truth)
     }
 
-    /// The oracle: folding `activityChanged` must land on the same `WireSession` the projection
-    /// builds. A field added to one side and not the other fails here, by design.
+    /// Not the fold — `testActivityChangedCarriesBackgroundWorkThroughTheFold` in
+    /// `FleetEventApplicationTests.swift` is that test. This one is the other leg: a registry
+    /// observation reaching the *live* projection `FleetProjection.snapshot(of:)` builds,
+    /// with no event or replicator involved.
     @MainActor
-    func testBackgroundWorkSurvivesTheFold() throws {
+    func testBackgroundWorkFromTheRegistryReachesTheLiveProjection() throws {
         let store = SessionStore(provider: nil, persistence: nil)
         let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
         store.applyRegistry([1: .init(
