@@ -29,6 +29,18 @@ final class SessionStore: ObservableObject {
     /// A session with no entry is absent from the map — that renders no icon, which is
     /// deliberately distinct from `.idle`.
     @Published private(set) var statuses: [UUID: SessionStatus] = [:]
+    /// Tabs with a background task running under their agent.
+    ///
+    /// A **decoration**, orthogonal to `statuses` — the same shape and lifetime as
+    /// `FleetService.phoneActiveSessions`, and for the same reason: it is a fact *about* a
+    /// tab, not a state the tab is in. Kept beside `statuses` rather than inside
+    /// `SessionStatus` so that no consumer has to switch on it, and so the activity enum
+    /// stays a total ordering of one axis.
+    ///
+    /// Latched. Upstream reports this only while idle (see `ClaudeStatusFile.Entry
+    /// .reportsBackgroundWork`), so a `busy` tick carries the last known value forward and
+    /// only a plain `idle` — or a vanished agent — clears it.
+    @Published private(set) var backgroundWorkSessions: Set<UUID> = []
     /// `didSet` persists every change, including one made through `SessionSidebar`'s
     /// `List(selection:)` binding — the only way selection actually changes in
     /// production, since that binding writes here directly rather than through
@@ -2597,7 +2609,7 @@ final class SessionStore: ObservableObject {
     /// and replication would make every test built on it exercise a path production never
     /// takes.
     func applyRegistryForTesting(_ next: [UUID: SessionStatus]) {
-        commitStatuses(next)
+        commitStatuses(next, backgroundWork: backgroundWorkSessions)
     }
 
     /// Test seams. Production drives both from `applyRegistry`; a test that only cares about
@@ -3685,6 +3697,7 @@ final class SessionStore: ObservableObject {
         }
 
         var next: [UUID: SessionStatus] = [:]
+        var nextBackgroundWork: Set<UUID> = []
         for session in repos.flatMap(\.sessions) {
             // A tab on an agent that has no claude status registry behind it keeps whatever
             // its runtime last reported. This scan can neither confirm nor refute a codex
@@ -3704,9 +3717,16 @@ final class SessionStore: ObservableObject {
                 waitingFor: entry.waitingFor,
                 subagentCount: subagentCounts[session.id] ?? 0
             )
+            // Latched, not rebuilt: `false` from the registry means "not reported", and only
+            // an idle tick is proof the task ended. See `backgroundWorkSessions`.
+            if entry.reportsBackgroundWork {
+                nextBackgroundWork.insert(session.id)
+            } else if entry.activity != .idle, backgroundWorkSessions.contains(session.id) {
+                nextBackgroundWork.insert(session.id)
+            }
         }
 
-        commitStatuses(next)
+        commitStatuses(next, backgroundWork: nextBackgroundWork)
     }
 
     /// The single writer of `statuses`, and the one place a status change turns into its
@@ -3718,8 +3738,11 @@ final class SessionStore: ObservableObject {
     /// `statuses` directly instead would skip all of it — and worse, its value would become
     /// the `previous` snapshot the next tick diffs against, so a later tick could fabricate
     /// or swallow an edge that never happened.
-    private func commitStatuses(_ next: [UUID: SessionStatus]) {
-        guard next != statuses else { return }
+    private func commitStatuses(_ next: [UUID: SessionStatus], backgroundWork: Set<UUID>) {
+        // BOTH, not just `statuses`. A task starting or ending under an otherwise-idle tab
+        // moves this set and nothing else — guarding on `statuses` alone swallowed that tick
+        // entirely, so the badge never lit and no event ever reached the phone.
+        guard next != statuses || backgroundWork != backgroundWorkSessions else { return }
         // A session that HAD a status and no longer does means its `claude` exited.
         // Drop its sub-agent count too, so a later process reusing the same session
         // UUID does not inherit a count from the dead one. Counts for sessions that
@@ -3729,8 +3752,13 @@ final class SessionStore: ObservableObject {
             subagentCounts.removeValue(forKey: id)
         }
         let previous = statuses
+        let previousBackgroundWork = backgroundWorkSessions
         statuses = next
-        let transitions = Set(previous.keys).union(next.keys).map {
+        backgroundWorkSessions = backgroundWork
+        let touched = Set(previous.keys)
+            .union(next.keys)
+            .union(previousBackgroundWork.symmetricDifference(backgroundWork))
+        let transitions = touched.map {
             StatusTransition(id: $0, old: previous[$0], new: next[$0])
         }
         // Emitted first, ahead of `applyReadState`: `statuses` above is already mutated for
@@ -4122,7 +4150,7 @@ final class SessionStore: ObservableObject {
             waitingFor: nil,
             subagentCount: subagentCounts[tabID] ?? 0
         )
-        commitStatuses(next)
+        commitStatuses(next, backgroundWork: backgroundWorkSessions)
     }
 
     /// An agent finished a turn.
