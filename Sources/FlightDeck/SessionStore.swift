@@ -1771,6 +1771,14 @@ final class SessionStore: ObservableObject {
             // `didSet` clears the mark for the tab you land on, which is correct.
             if entry.unread == true { setUnread(entry.id, true) }
 
+            // Migrates the pre-decomposition `"shell"` string, and prefers the explicit new
+            // field when the file has one — see `restoredActivity` and `isResumable`.
+            let restored = Self.restoredActivity(fromPersisted: entry.activity)
+            let hasBackgroundWork = entry.hasBackgroundWork ?? restored.hasBackgroundWork
+            // Seeded here rather than waiting for the next registry tick, so the sidebar
+            // badge survives a relaunch — same reasoning as `setUnread` just above.
+            if hasBackgroundWork { backgroundWorkSessions.insert(entry.id) }
+
             // `!orphaned`: offering to continue a tab that cannot be launched at all would
             // put the wrong-login resume one click behind a prompt the app raised itself.
             //
@@ -1786,8 +1794,8 @@ final class SessionStore: ObservableObject {
             // After `!orphaned` on purpose: the ordering costs an orphaned codex tab nothing,
             // and it keeps this gate from being the thing that first asks about an agent.
             if autoResume, !orphaned, session.agent.textChannel != nil,
-               let activity = entry.activity.flatMap(SessionActivity.init(rawValue:)),
-               Self.resumableActivities.contains(activity) {
+               let activity = restored.activity,
+               Self.isResumable(activity: activity, hasBackgroundWork: hasBackgroundWork) {
                 pendingPrompts[entry.id] = DeferredPrompt(
                     text: Self.resumePrompt, deadline: promptDeadline
                 )
@@ -1959,6 +1967,9 @@ final class SessionStore: ObservableObject {
                     // `nil` rather than a sentinel when no `claude` is registered: restore
                     // has to distinguish "was not running" from "was running and idle".
                     activity: statuses[$0.id]?.activity.rawValue,
+                    // `nil` rather than `false` so the common case adds no noise, matching
+                    // `unread` directly below.
+                    hasBackgroundWork: backgroundWorkSessions.contains($0.id) ? true : nil,
                     // `nil` rather than `false` so the common case adds no noise to a file
                     // that is meant to stay readable.
                     unread: unreadIdle.contains($0.id) ? true : nil,
@@ -2300,9 +2311,27 @@ final class SessionStore: ObservableObject {
     /// session the user has long since been working in.
     static let resumePromptWindow: TimeInterval = 120
 
-    /// The activities that mean "this session was working when we went away". `waiting` is
-    /// excluded: what it was blocked on does not survive the restart.
-    static let resumableActivities: Set<SessionActivity> = [.busy, .shell]
+    /// Whether a restored tab was working when we went away.
+    ///
+    /// `waiting` is excluded: what it was blocked on does not survive the restart. Background
+    /// work counts even at `.idle`, and that is not a special case — it is the same rule as
+    /// before, now that `shell` is decomposed. A tab with a dev server up *was* working.
+    static func isResumable(activity: SessionActivity, hasBackgroundWork: Bool) -> Bool {
+        activity != .waiting && (activity == .busy || hasBackgroundWork)
+    }
+
+    /// Reads a persisted `activity` string, migrating the pre-decomposition `"shell"`.
+    ///
+    /// Permanent, not transitional: every `sessions.json` on every machine holds `"shell"`
+    /// today, and `SessionActivity(rawValue:)` returns nil for it now. Dropping this read
+    /// would blank the status of every backgrounded tab on first launch after the upgrade.
+    static func restoredActivity(
+        fromPersisted raw: String?
+    ) -> (activity: SessionActivity?, hasBackgroundWork: Bool) {
+        guard let raw else { return (nil, false) }
+        if raw == "shell" { return (.idle, true) }
+        return (SessionActivity(rawValue: raw), false)
+    }
 
     /// Reap every live session concurrently, returning when they are all done or the budget
     /// expires — whichever comes first. Survivors are left for the next launch's sweep: each
