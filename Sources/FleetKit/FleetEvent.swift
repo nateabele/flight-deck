@@ -31,7 +31,8 @@ public enum FleetEvent: Equatable, Sendable {
     /// The whole status triple at once, never one field of it. `SessionStatus` is committed
     /// as a unit by `commitStatuses`, and splitting it here would let a client render a
     /// `waitingFor` string against an activity that had already moved on.
-    case activityChanged(id: UUID, activity: String?, waitingFor: String?, subagentCount: Int)
+    case activityChanged(id: UUID, activity: String?, waitingFor: String?,
+                         subagentCount: Int, hasBackgroundWork: Bool)
     case unreadChanged(id: UUID, isUnread: Bool)
 
     /// A prompt this Mac accepted from a phone, and then never typed.
@@ -56,7 +57,7 @@ extension FleetEvent {
         switch self {
         case .sessionAdded(let s, _, _): return s.id
         case .sessionRemoved(let id), .sessionMoved(let id, _, _),
-             .renamed(let id, _, _), .activityChanged(let id, _, _, _),
+             .renamed(let id, _, _), .activityChanged(let id, _, _, _, _),
              .unreadChanged(let id, _), .promptExpired(let id, _):
             return id
         case .projectAdded, .projectRemoved, .projectCollapsed,

@@ -13,26 +13,35 @@ enum FleetProjection {
     @MainActor
     static func snapshot(of store: SessionStore) -> FleetSnapshot {
         FleetSnapshot(projects: store.repos.map {
-            project($0, statuses: store.statuses, unread: store.unreadIdle)
+            project(
+                $0, statuses: store.statuses, unread: store.unreadIdle,
+                backgroundWork: store.backgroundWorkSessions
+            )
         })
     }
 
     @MainActor
     static func project(
-        _ repo: Repo, statuses: [UUID: SessionStatus], unread: Set<UUID>
+        _ repo: Repo, statuses: [UUID: SessionStatus], unread: Set<UUID>,
+        backgroundWork: Set<UUID>
     ) -> WireProject {
         WireProject(
             id: repo.id,
             name: repo.displayName,
             path: repo.url.path,
             isCollapsed: repo.isCollapsed,
-            sessions: repo.sessions.map { project($0, status: statuses[$0.id], unread: unread) }
+            sessions: repo.sessions.map {
+                project(
+                    $0, status: statuses[$0.id], unread: unread,
+                    hasBackgroundWork: backgroundWork.contains($0.id)
+                )
+            }
         )
     }
 
     @MainActor
     static func project(
-        _ session: Session, status: SessionStatus?, unread: Set<UUID>
+        _ session: Session, status: SessionStatus?, unread: Set<UUID>, hasBackgroundWork: Bool
     ) -> WireSession {
         WireSession(
             id: session.id,
@@ -43,7 +52,8 @@ enum FleetProjection {
             activity: status?.activity.rawValue,
             waitingFor: status?.waitingFor,
             subagentCount: status?.subagentCount ?? 0,
-            isUnread: unread.contains(session.id)
+            isUnread: unread.contains(session.id),
+            hasBackgroundWork: hasBackgroundWork
         )
     }
 }

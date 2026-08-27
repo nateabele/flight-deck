@@ -45,10 +45,12 @@ final class FleetFieldEmissionTests: XCTestCase {
             b.id: SessionStatus(activity: .waiting, waitingFor: "input needed")
         ])
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
-            id: a.id, activity: "busy", waitingFor: nil, subagentCount: 3
+            id: a.id, activity: "busy", waitingFor: nil, subagentCount: 3,
+            hasBackgroundWork: false
         )))
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
-            id: b.id, activity: "waiting", waitingFor: "input needed", subagentCount: 0
+            id: b.id, activity: "waiting", waitingFor: "input needed", subagentCount: 0,
+            hasBackgroundWork: false
         )))
     }
 
@@ -61,7 +63,8 @@ final class FleetFieldEmissionTests: XCTestCase {
         let replicator = attachedReplicator(to: store)
         store.applyRegistryForTesting([:])
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
-            id: session.id, activity: nil, waitingFor: nil, subagentCount: 0
+            id: session.id, activity: nil, waitingFor: nil, subagentCount: 0,
+            hasBackgroundWork: false
         )))
     }
 
@@ -74,7 +77,8 @@ final class FleetFieldEmissionTests: XCTestCase {
         let replicator = attachedReplicator(to: store)
         store.applySubagentCount(session.id, 4)
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
-            id: session.id, activity: "busy", waitingFor: nil, subagentCount: 4
+            id: session.id, activity: "busy", waitingFor: nil, subagentCount: 4,
+            hasBackgroundWork: false
         )))
     }
 

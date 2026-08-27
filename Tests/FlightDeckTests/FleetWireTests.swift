@@ -43,4 +43,25 @@ final class FleetWireTests: XCTestCase {
         """.utf8)
         XCTAssertEqual(try JSONDecoder().decode(WireSession.self, from: json).agent, "gemini")
     }
+
+    /// An older Mac sends no such key. The phone must decode that as `false`, not throw — a
+    /// throw here takes the entire snapshot down, not one field.
+    func testWireSessionDecodesWithoutBackgroundWorkKey() throws {
+        let json = """
+        {"id":"A4C9067B-9CAF-43CB-8B75-88A145249058","title":"frontend-state",
+         "agent":"claude","activity":"idle","subagentCount":0,"isUnread":false}
+        """.data(using: .utf8)!
+        let session = try JSONDecoder().decode(WireSession.self, from: json)
+        XCTAssertFalse(session.hasBackgroundWork)
+    }
+
+    func testActivityChangedRoundTripsBackgroundWork() throws {
+        let event = FleetEvent.activityChanged(
+            id: UUID(), activity: "idle", waitingFor: nil,
+            subagentCount: 0, hasBackgroundWork: true
+        )
+        let data = try JSONEncoder().encode(event)
+        let decoded = try JSONDecoder().decode(FleetEvent.self, from: data)
+        XCTAssertEqual(decoded, event)
+    }
 }
