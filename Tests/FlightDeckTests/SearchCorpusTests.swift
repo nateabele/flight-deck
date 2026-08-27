@@ -92,4 +92,34 @@ final class SearchCorpusTests: XCTestCase {
 
         XCTAssertEqual(entries.count, 1)
     }
+
+    /// The trap this type exists to avoid, asserted directly in the matching logic.
+    /// `/w/flight-deck` encodes to `-w-flight-deck`, which is a genuine prefix of
+    /// `/w/flight-deck-old`'s encoding. If `directories()` were to accept candidates
+    /// by prefix match, a hybrid implementation (correct exact-match encoding PLUS
+    /// prefix-matched names from the listing) would silently fold a sibling project's
+    /// entire history into this one's results, invisibly and permanently. Only exact
+    /// matches must be accepted.
+    func testDirectoriesUsesExactMatchNotPrefixMatch() {
+        let projectsRoot = URL(fileURLWithPath: "/root", isDirectory: true)
+        let entries = SearchCorpus.directories(
+            forProjects: ["/w/flight-deck"],
+            projectsRoot: projectsRoot,
+            listing: { path in
+                // The projects root lists both the project and its sibling.
+                if path == "/root" {
+                    return ["-w-flight-deck", "-w-flight-deck-old"]
+                }
+                // Worktree roots are empty.
+                return []
+            },
+            exists: { _ in true }  // everything exists, nothing is filtered out
+        )
+
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries[0].projectPath, "/w/flight-deck")
+        XCTAssertEqual(entries[0].directory, projectsRoot.appendingPathComponent("-w-flight-deck", isDirectory: true))
+        // Assert that the sibling is NOT included, not just that the count is right.
+        XCTAssertFalse(entries.contains { $0.directory.lastPathComponent == "-w-flight-deck-old" })
+    }
 }
