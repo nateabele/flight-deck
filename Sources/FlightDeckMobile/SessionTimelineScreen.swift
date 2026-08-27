@@ -249,24 +249,25 @@ struct SessionTimelineScreen: View {
                 model.loadNewer()
             }
         }
-        // **A retry, not a poll**, and it exists for one race. The status file and the
-        // transcript are written by independent paths in claude, so a fetch fired the instant
-        // `waiting` arrives can beat the record to disk — leaving a session the phone knows is
-        // blocked with nothing in the feed to say on what. One deferred fetch closes it.
+        // **The chase for what this session is blocked ON**, and it exists for one race: the
+        // status file and the transcript are written by independent paths in claude, so
+        // `waiting` can reach the phone before the record that names the dialog.
         //
-        // Deliberately NOT a loop. A `waiting` session can sit for an hour, and a screen that
-        // polled through it would spend a battery to re-read a file that changes when the
-        // human moves. If the manual checklist finds this flaky, the fix is a SECOND retry at
-        // a longer delay, not a `while`.
+        // This was a single deferred fetch, and the checklist did find it flaky — exactly as
+        // the comment here used to predict. One shot was not enough, because losing it is
+        // terminal: a waiting session emits no further activity change, the busy poll below
+        // runs only while `busy`, and nothing else ever asks again. The session sat saying
+        // "Waiting for you" with no card under it. The answer is a bounded, backing-off chase
+        // that stops the moment the card can be drawn — see `chaseBlockedPrompt`, which is
+        // where the reasoning and the bound live, and which is on the model so it can be
+        // tested rather than eyeballed.
         //
         // A separate `.task(id:)` from the busy poll above rather than a branch inside it: two
         // modifiers with the same id both run, and merging them would tie two different
-        // cadences — a 1.5s follow and a one-shot catch-up — to one decision.
+        // cadences — a 1.5s follow and this — to one decision.
         .task(id: session?.activity) {
             guard session?.activity == "waiting" else { return }
-            try? await Task.sleep(for: .milliseconds(900))
-            guard !Task.isCancelled else { return }
-            model.loadNewer()
+            await model.chaseBlockedPrompt(agent: session?.agent, activity: session?.activity)
         }
     }
 

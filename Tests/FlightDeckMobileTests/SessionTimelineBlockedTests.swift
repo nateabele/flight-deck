@@ -48,6 +48,25 @@ private final class StubPager: TimelinePaging, PromptSending, PromptAnswering, P
         pendingPages.removeFirst()(result)
     }
 
+    /// Spins the main actor until a page request is outstanding, then answers it.
+    ///
+    /// The chase sleeps between attempts, so a test driving it cannot know when the next
+    /// request will exist — `answer(_:)` fired too early finds nothing and fails the test for
+    /// a timing reason rather than a behavioural one. This waits for the request the chase is
+    /// about to make, which is the thing the test actually means.
+    func answerWhenAsked(
+        _ result: Result<TimelinePage, FleetRequestError>, line: UInt = #line
+    ) async {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while pendingPages.isEmpty {
+            guard ContinuousClock.now < deadline else {
+                return XCTFail("no page was ever asked for", line: line)
+            }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        pendingPages.removeFirst()(result)
+    }
+
     /// Held rather than answered, so a test can assert what happens WHILE one is outstanding.
     func answerCommand(_ result: Result<Void, FleetRequestError>) {
         let completion = answerCompletion
@@ -257,5 +276,67 @@ final class SessionTimelineBlockedTests: XCTestCase {
         guard let look = copy.range(of: "terminal"), let again = copy.range(of: "again")
         else { return XCTFail("the copy must send the reader to the terminal before a retry") }
         XCTAssertLessThan(look.lowerBound, again.lowerBound)
+    }
+
+    // MARK: The card that never arrived
+
+    /// **The race this closes, and why one retry was not enough.** claude writes its status
+    /// file and its transcript by independent paths, so `waiting` can arrive before the record
+    /// that says what the session is waiting ON. The screen used to cover that with a single
+    /// deferred fetch — and when that one lost, nothing fired again: a waiting session emits no
+    /// further activity change, the busy poll runs only while busy, and the card never came.
+    /// The session sat saying "Waiting for you" with nothing to answer, for as long as it was
+    /// blocked. Intermittent by construction, which is why it read as "sometimes".
+    func testAPromptThatLandsLateIsStillFoundRatherThanWaitedOnForever() async {
+        let (model, stub) = makeModel()
+        model.promptRetries = Array(repeating: .milliseconds(30), count: 5)
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+        XCTAssertNil(model.blocked(agent: "claude", activity: "waiting"), "the premise: no card")
+
+        async let chase: Void = model.chaseBlockedPrompt(agent: "claude", activity: "waiting")
+        // The record lands on the second look, the way a transcript written a beat late does.
+        await stub.answerWhenAsked(.success(page([], session: model.sessionID)))
+        await stub.answerWhenAsked(
+            .success(page([askItem(callID: "toolu_late")], session: model.sessionID))
+        )
+        await chase
+
+        XCTAssertNotNil(model.blocked(agent: "claude", activity: "waiting"),
+                        "the card is there once the record is")
+    }
+
+    /// **It must cost nothing in the ordinary case.** Most of the time the record is already in
+    /// the feed when `waiting` arrives, and a screen that fetched anyway would spend a round
+    /// trip per blocked session for no reason.
+    func testAPromptAlreadyOnScreenIsNeverChasedAtAll() async {
+        let (model, stub) = makeModel()
+        model.promptRetries = Array(repeating: .milliseconds(30), count: 5)
+        model.loadLatest()
+        stub.answer(.success(page([askItem(callID: "toolu_here")], session: model.sessionID)))
+        let asked = stub.requests.count
+
+        await model.chaseBlockedPrompt(agent: "claude", activity: "waiting")
+
+        XCTAssertEqual(stub.requests.count, asked, "nothing was asked for")
+    }
+
+    /// **And it gives up.** A blocked session can sit for an hour, so the chase is capped: a
+    /// record that never arrives — a codex tab, a body this build cannot parse — must not turn
+    /// into a poll that runs for the life of the screen. This is the objection the one-shot
+    /// version was written to avoid, answered with a bound rather than with a single try.
+    func testAChaseThatNeverFindsAnythingStopsRatherThanPollingForever() async {
+        let (model, stub) = makeModel()
+        model.promptRetries = Array(repeating: .milliseconds(30), count: 3)
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+        let before = stub.requests.count
+
+        async let chase: Void = model.chaseBlockedPrompt(agent: "claude", activity: "waiting")
+        for _ in 0..<3 { await stub.answerWhenAsked(.success(page([], session: model.sessionID))) }
+        await chase
+
+        XCTAssertEqual(stub.requests.count - before, 3, "three attempts, then it stops")
+        XCTAssertNil(model.blocked(agent: "claude", activity: "waiting"))
     }
 }

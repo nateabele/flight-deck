@@ -415,6 +415,44 @@ final class SessionTimelineModel {
         }
     }
 
+    /// How long a blocked screen waits between asking again for the record that says what it
+    /// is blocked ON, and how many times.
+    ///
+    /// Backs off, and is bounded. A `var` only so a test can shorten it — nothing in the app
+    /// assigns it.
+    @ObservationIgnored var promptRetries: [Duration] = [
+        .milliseconds(900), .milliseconds(1_500), .seconds(3), .seconds(5), .seconds(8),
+    ]
+
+    /// Keep asking, while a blocked session has nothing to show for it.
+    ///
+    /// **The race, and why one retry was not enough.** claude writes its status file and its
+    /// transcript by independent paths, so `waiting` can reach the phone before the record
+    /// naming what it is waiting on. The screen used to cover that with a single deferred
+    /// fetch — and when that one lost, nothing fired again: a waiting session emits no further
+    /// activity change, the busy poll runs only while `busy`, and `.onChange(of:activity)`
+    /// needs a change that never comes. The session sat saying "Waiting for you" with no card
+    /// under it for as long as it stayed blocked. Intermittent by construction, which is why
+    /// it was reported as "sometimes".
+    ///
+    /// **The condition is the card, not a count**, and that is what keeps this cheap. Most of
+    /// the time the record is already in the feed when `waiting` arrives, and this returns
+    /// having asked for nothing at all. When it is not, this stops the moment the card can be
+    /// drawn rather than running its schedule out.
+    ///
+    /// **And it gives up.** A blocked session can sit for an hour, so a record that never
+    /// arrives — a codex tab, a body this build cannot parse — must not become a poll that
+    /// runs for the life of the screen. That objection is why the original was a single shot;
+    /// the answer is a bound, not one attempt.
+    func chaseBlockedPrompt(agent: String?, activity: String?) async {
+        for delay in promptRetries {
+            guard blocked(agent: agent, activity: activity) == nil else { return }
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            loadNewer()
+        }
+    }
+
     /// The reader has read a failure and wants the row gone.
     func dismiss(_ id: UUID) { outbox.dismiss(id) }
 
