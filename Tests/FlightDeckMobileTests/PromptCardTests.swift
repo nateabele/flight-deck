@@ -7,10 +7,10 @@ import XCTest
 @MainActor
 final class PromptCardTests: XCTestCase {
     private func question(unanswerable: String? = nil) -> OpenPrompt {
-        .question(callID: "toolu_A", PromptQuestion(
+        .question(callID: "toolu_A", [PromptQuestion(
             header: "Pick", question: "Which?",
             options: [.init(label: "Yes"), .init(label: "No")], unanswerable: unanswerable
-        ))
+        )])
     }
 
     private let permission = OpenPrompt.permission(
@@ -148,5 +148,50 @@ final class PromptCardTests: XCTestCase {
         let body = #"{"questions":[{"question":"Which?","options":[{"label":"a"}]}]}"#
         XCTAssertEqual(try XCTUnwrap(PromptQuestion(toolInput: body)).question, "Which?")
         XCTAssertNil(PromptQuestion(toolInput: String(body.prefix(20))))
+    }
+
+    // MARK: A call that asks several questions
+
+    private func twoQuestions(multiSelectFirst: Bool = false) -> OpenPrompt {
+        .question(callID: "toolu_SET", [
+            PromptQuestion(header: "Language", question: "Which language?",
+                           options: [.init(label: "Rust"), .init(label: "Go")],
+                           unanswerable: multiSelectFirst
+                               ? PromptQuestion.multiSelectReason : nil),
+            PromptQuestion(header: "Editor", question: "Which editor?",
+                           options: [.init(label: "Vim"), .init(label: "Emacs")]),
+        ])
+    }
+
+    /// **The title stops being question one's words.** A set of two used to render as its first
+    /// question, read-only, with the other one nowhere on screen — so a reader could not see
+    /// what they were being sent to their Mac to answer, or even how much of it there was.
+    func testASetOfQuestionsIsTitledByItsCountRatherThanByItsFirstQuestion() {
+        let title = PromptCard.title(for: twoQuestions(), agent: "claude")
+        XCTAssertEqual(title, "2 questions")
+        XCTAssertNotEqual(title, "Which language?", "question one is not the whole prompt")
+    }
+
+    /// A single question is untouched by any of this.
+    func testASingleQuestionStillTitlesItselfWithItsOwnWords() {
+        XCTAssertEqual(PromptCard.title(for: question(), agent: "claude"), "Which?")
+    }
+
+    /// **Read-only until something can drive it**, and this is the assertion that keeps a tap
+    /// from answering the wrong question. `.option` names an index into ONE question's options;
+    /// a set has several lists and the terminal is showing whichever claude has advanced to.
+    func testASetsControlsAreOffUntilAMacCanDriveOne() {
+        XCTAssertFalse(PromptCard.showsControls(for: twoQuestions(), state: .idle))
+        XCTAssertEqual(PromptCard.footnote(for: twoQuestions(), state: .idle),
+                       PromptQuestion.multiQuestionReason)
+    }
+
+    /// Several questions outranks "one of these takes several answers": it is the more
+    /// surprising fact, and the one that explains why nothing can be tapped.
+    func testSeveralQuestionsIsTheReasonGivenEvenWhenOneIsAlsoMultiSelect() {
+        XCTAssertEqual(
+            PromptCard.footnote(for: twoQuestions(multiSelectFirst: true), state: .idle),
+            PromptQuestion.multiQuestionReason
+        )
     }
 }

@@ -42,7 +42,13 @@ struct PromptCard: View {
     ) -> Bool {
         if let pending = state.call, pending == open.callID { return false }
         switch open {
-        case .question(_, let question): return question.isAnswerable
+        // **One question, and answerable.** A set is answered as a unit and nothing on this
+        // Mac can drive one yet, so its controls stay off — a tap would send an option index
+        // against whichever question the terminal happens to be showing, which is a wrong
+        // answer typed into someone's session rather than a missing feature. This is the line
+        // that flips when the multi-question driver lands.
+        case .question(_, let questions):
+            return questions.count == 1 && questions[0].isAnswerable
         // Allow and Deny are intents, not payload, so there is nothing to be unanswerable
         // about.
         case .permission: return true
@@ -66,7 +72,13 @@ struct PromptCard: View {
         }
         // A shape this Mac will not drive says so in the Mac's own words, so a newer Mac that
         // learns to drive one simply stops producing the sentence.
-        if case .question(_, let question) = open { return question.unanswerable }
+        // A set says the set's reason; a single question says its own. Order matters: several
+        // questions is the more surprising fact, so it wins over "one of these takes several
+        // answers".
+        if case .question(_, let questions) = open {
+            if questions.count > 1 { return PromptQuestion.multiQuestionReason }
+            return questions.first?.unanswerable
+        }
         return nil
     }
 
@@ -84,7 +96,14 @@ struct PromptCard: View {
     /// widened for an agent that becomes answerable the copy is already honest.
     static func title(for open: OpenPrompt, agent: String?) -> String {
         switch open {
-        case .question(_, let question): return question.question
+        case .question(_, let questions):
+            // A set gets a count, not its first question's words — putting question one in the
+            // title is what made a set of three look like a single question the phone had
+            // decided to refuse.
+            guard questions.count == 1, let only = questions.first else {
+                return "\(questions.count) questions"
+            }
+            return only.question
         case .permission(_, let tool, _):
             let name = TimelineStyle.agentName(agent)
             guard let tool, !tool.isEmpty else {
@@ -105,8 +124,10 @@ struct PromptCard: View {
     var body: some View {
         if let open {
             VStack(alignment: .leading, spacing: 10) {
-                if case .question(_, let question) = open, let header = question.header,
-                   !header.isEmpty {
+                // Only a single question's header sits up here; in a set each question draws
+                // its own beside its options, where it says which question it belongs to.
+                if case .question(_, let questions) = open, questions.count == 1,
+                   let header = questions[0].header, !header.isEmpty {
                     Text(header.uppercased())
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.orange)
@@ -153,7 +174,25 @@ struct PromptCard: View {
     private func controls(for open: OpenPrompt) -> some View {
         let enabled = Self.showsControls(for: open, state: state)
         switch open {
-        case .question(let call, let question):
+        case .question(let call, let questions):
+            // One block per question. A set draws every one of them — the whole point of the
+            // change: a reader sent to their Mac to answer three questions could previously
+            // see only the first, which told them neither what was being asked nor how much.
+            ForEach(Array(questions.enumerated()), id: \.offset) { questionIndex, question in
+            if questions.count > 1 {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let header = question.header, !header.isEmpty {
+                        Text(header.uppercased())
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.orange)
+                    }
+                    Text(question.question)
+                        .font(.footnote.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, questionIndex == 0 ? 0 : 6)
+            }
             ForEach(Array(question.options.enumerated()), id: \.offset) { index, option in
                 Button {
                     model.answer(.option(index: index, label: option.label), to: call)
@@ -184,6 +223,7 @@ struct PromptCard: View {
                 .buttonStyle(.plain)
                 .disabled(!enabled)
                 .opacity(enabled ? 1 : 0.5)
+            }
             }
         case .permission(let call, _, _):
             HStack(spacing: 8) {

@@ -3190,7 +3190,15 @@ final class SessionStore: ObservableObject {
             // `option` indexes an `AskUserQuestion`'s own options, so a permission dialog —
             // which has no options this build can enumerate — has no list for the index to
             // mean anything in.
-            guard case .question(_, let question) = open else { return .unreadableScreen }
+            guard case .question(_, let questions) = open else { return .unreadableScreen }
+            // **One question, and this refusal is the guard rail.** `.option` names an index
+            // into ONE question's options; a set has several lists and a screen showing
+            // whichever of them claude has advanced to, so the index would be counted against
+            // the wrong question. Nothing drives a set yet, and refusing here is what keeps a
+            // client that tries anyway from typing an answer into the wrong dialog.
+            guard questions.count == 1, let question = questions.first else {
+                return .unanswerable
+            }
             guard question.isAnswerable else { return .unanswerable }
             // The client's label against the Mac's own copy, before any screen is consulted.
             // A phone naming words this transcript never carried is a reader looking at

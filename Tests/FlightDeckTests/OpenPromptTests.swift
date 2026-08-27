@@ -137,12 +137,13 @@ final class OpenPromptTests: XCTestCase {
         let items = [call("toolu_A", tool: "AskUserQuestion", kind: .prompt,
                           text: try Self.capturedInput("question-single.captured"), offset: 0)]
         let open = OpenPrompt.find(in: items, agent: "claude", activity: "waiting")
-        guard case .question("toolu_A", let question)? = open else {
+        guard case .question("toolu_A", let questions)? = open else {
             return XCTFail("expected a question, got \(String(describing: open))")
         }
         XCTAssertEqual(open?.callID, "toolu_A")
-        XCTAssertEqual(question.header, "Language")
-        XCTAssertEqual(question.options.count, 3)
+        XCTAssertEqual(questions.count, 1, "this fixture asks one question")
+        XCTAssertEqual(questions[0].header, "Language")
+        XCTAssertEqual(questions[0].options.count, 3)
     }
 
     /// **The pairing rule, and the fixture that distinguishes it.** Two calls, the newer one
@@ -292,21 +293,36 @@ final class OpenPromptTests: XCTestCase {
         XCTAssertEqual(question.unanswerable, PromptQuestion.multiSelectReason)
     }
 
-    /// Two real questions in one `questions` array — **assembled**, because no capture has one:
-    /// `dialogs.captured.provenance.json` lists "an AskUserQuestion with more than one question"
-    /// under `notCaptured`. Both members are captured records; only their juxtaposition is not.
+    /// Two real questions in one `questions` array — **from a real capture now**. This used to
+    /// be assembled from two separate captures because no recording had the shape; it is
+    /// recorded at 2.1.247 as `question-two.captured`, so the test reads what claude actually
+    /// wrote rather than a juxtaposition we invented.
     ///
-    /// The multi-select one is put FIRST on purpose, so both reasons apply at once and the
-    /// assertion says which wins: several questions is the more surprising fact.
-    func testACallCarryingTwoQuestionsIsNotAnswerable() throws {
-        let both = try Self.serialized(
-            try Self.capturedQuestions("question-multi.captured")
-                + Self.capturedQuestions("question-single.captured")
-        )
-        let question = try XCTUnwrap(PromptQuestion(toolInput: both))
-        XCTAssertEqual(question.question, "Which snacks would you want on a long flight?")
-        XCTAssertFalse(question.isAnswerable)
-        XCTAssertEqual(question.unanswerable, PromptQuestion.multiQuestionReason)
+    /// **Every question comes back, and each answers only for itself.** Reading the first and
+    /// stamping it with the set's reason is what hid questions two onward from the reader
+    /// entirely — the defect this replaces. Whether a SET can be answered is a judgement about
+    /// the set, and it belongs to the card and to `SessionStore.answerPrompt`, not to a
+    /// question that is perfectly answerable on its own.
+    func testACallCarryingTwoQuestionsReadsBothOfThem() throws {
+        let input = try Self.capturedInput("question-two.captured")
+
+        let questions = PromptQuestion.all(toolInput: input)
+
+        XCTAssertEqual(questions.count, 2, "both, not just the first")
+        XCTAssertEqual(questions.map(\.header), ["Language", "Editor"])
+        XCTAssertEqual(questions[0].question, "Which language would you use for a CLI?")
+        XCTAssertEqual(questions[1].question, "Which editor do you prefer?")
+        XCTAssertTrue(questions.allSatisfy(\.isAnswerable),
+                      "each is a plain single-select question; the SET is what cannot be "
+                          + "answered from here yet, and that is not this type's judgement")
+    }
+
+    /// The set-level refusal, where it actually lives.
+    func testAMultiSelectQuestionStillAnswersOnlyForItself() throws {
+        let input = try Self.capturedInput("question-multi.captured")
+        let questions = PromptQuestion.all(toolInput: input)
+        XCTAssertEqual(questions.count, 1)
+        XCTAssertEqual(questions[0].unanswerable, PromptQuestion.multiSelectReason)
     }
 
     /// A body cut at `TimelineLimits.maxItemBytes` is the ordinary state of a large tool input,

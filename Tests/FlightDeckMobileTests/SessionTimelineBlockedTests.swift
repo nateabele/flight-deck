@@ -139,10 +139,11 @@ final class SessionTimelineBlockedTests: XCTestCase {
         let (model, stub) = makeModel()
         model.loadLatest()
         stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
-        guard case .question("toolu_A", let question)? =
+        guard case .question("toolu_A", let questions)? =
             model.blocked(agent: "claude", activity: "waiting")
         else { return XCTFail("expected a question") }
-        XCTAssertEqual(question.options.map(\.label), ["Yes", "No"])
+        XCTAssertEqual(questions.count, 1, "this fixture asks one")
+        XCTAssertEqual(questions[0].options.map(\.label), ["Yes", "No"])
     }
 
     /// **No card for an agent nothing can answer for.** The feed here is claude-shaped and
