@@ -41,9 +41,11 @@ final class ClaudeOpenCallTests: XCTestCase {
     }
 
     func testAnOpenAskIsAQuestion() throws {
-        guard case .question("toolu_A", let question)? =
+        guard case .question("toolu_A", let questions)? =
             ClaudeOpenCall.find(in: [line(0, ask("toolu_A"))], activity: .waiting)
         else { return XCTFail("expected a question") }
+        // The payload is the whole set now; these cases each assert one question.
+        let question = questions[0]
         XCTAssertEqual(question.question, "Which?")
         XCTAssertEqual(question.options.map(\.label), ["a", "b"])
     }
@@ -170,9 +172,11 @@ final class ClaudeOpenCallTests: XCTestCase {
             TimelineFixtureTests.lines("question-single.captured", in: "Claude").first,
             "question-single.captured.jsonl is empty"
         )
-        guard case .question(let id, let question)? =
+        guard case .question(let id, let questions)? =
             ClaudeOpenCall.find(in: [line(0, record)], activity: .waiting)
         else { return XCTFail("expected a question") }
+        // The payload is the whole set now; these cases each assert one question.
+        let question = questions[0]
         XCTAssertEqual(id, "toolu_01AoVBuWGeEn98vozn3y2XH4")
         XCTAssertEqual(question.header, "Language")
         XCTAssertEqual(question.options.map(\.label), ["Rust", "Go", "Swift"])
@@ -187,9 +191,11 @@ final class ClaudeOpenCallTests: XCTestCase {
             TimelineFixtureTests.lines("question-multi.captured", in: "Claude").first,
             "question-multi.captured.jsonl is empty"
         )
-        guard case .question(_, let question)? =
+        guard case .question(_, let questions)? =
             ClaudeOpenCall.find(in: [line(0, record)], activity: .waiting)
         else { return XCTFail("expected a question") }
+        // The payload is the whole set now; these cases each assert one question.
+        let question = questions[0]
         XCTAssertEqual(question.unanswerable, PromptQuestion.multiSelectReason)
         XCTAssertFalse(question.isAnswerable)
     }

@@ -250,10 +250,10 @@
     "than being elided with '\u2026', so no ellipsis appears anywhere in any capture.",
     "",
     "",
-    "An AskUserQuestion with more than one question in the `questions` array.",
     "",
     "The 'Other' free-text row in its expanded state; it appears here only as the collapsed",
-    "'Type something.' row."
+    "'Type something.' row.",
+    "An AskUserQuestion with more than one question WAS uncaptured; it is captured now, at 2.1.247, as question-two.captured.{txt,jsonl} plus the -answered and -review screens."
   ],
   "claudeVersionByBatch": {
     "2.1.241 (Claude Code)": {

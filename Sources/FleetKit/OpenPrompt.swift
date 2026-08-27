@@ -91,15 +91,54 @@ public struct PromptQuestion: Equatable, Hashable, Sendable {
         var header: String?
         if case .string(let raw)? = first.member("header"), !raw.isEmpty { header = raw }
 
-        // Order decides only which sentence is shown; several questions is the more surprising
-        // fact, so it wins.
+        // **Only this question's own answerability**, never the set's. Whether there are
+        // several questions is a fact about the PROMPT, and it used to be recorded here — on
+        // question one — which is why a set of three showed its first question wearing a
+        // reason that belonged to all of them, and hid the other two entirely. `all(toolInput:)`
+        // returns the set; what the card can do with it is the card's judgement.
         var unanswerable: String?
-        if questions.count > 1 {
-            unanswerable = Self.multiQuestionReason
-        } else if case .bool(true)? = first.member("multiSelect") {
+        if case .bool(true)? = first.member("multiSelect") { unanswerable = Self.multiSelectReason }
+
+        self.init(header: header, question: text, options: options, unanswerable: unanswerable)
+    }
+
+    /// Every question in one `AskUserQuestion` input, in the order it asks them.
+    ///
+    /// **Reading only the first was the bug.** 16% of real `AskUserQuestion` calls carry more
+    /// than one question (measured over 374 records), and for every one of them the phone drew
+    /// question one, read-only, and simply did not draw the rest — so a reader could not even
+    /// see what they were being asked to go and answer somewhere else.
+    ///
+    /// Empty rather than nil for a body that is not this shape, so the one caller can treat
+    /// "not a question" and "no questions" as the same thing, which they are.
+    public static func all(toolInput: String) -> [PromptQuestion] {
+        guard let root = JSONValue.parse(toolInput),
+              case .array(let questions)? = root.member("questions")
+        else { return [] }
+        return questions.compactMap { PromptQuestion(question: $0) }
+    }
+
+    /// One element of the `questions` array. Split out of `init?(toolInput:)` so the set and
+    /// the single case cannot read a question two different ways.
+    init?(question: JSONValue) {
+        guard case .string(let text)? = question.member("question"),
+              case .array(let rawOptions)? = question.member("options")
+        else { return nil }
+        let options: [Option] = rawOptions.compactMap { option in
+            guard case .string(let label)? = option.member("label"), !label.isEmpty
+            else { return nil }
+            if case .string(let detail)? = option.member("description"), !detail.isEmpty {
+                return Option(label: label, detail: detail)
+            }
+            return Option(label: label)
+        }
+        guard !options.isEmpty else { return nil }
+        var header: String?
+        if case .string(let raw)? = question.member("header"), !raw.isEmpty { header = raw }
+        var unanswerable: String?
+        if case .bool(true)? = question.member("multiSelect") {
             unanswerable = Self.multiSelectReason
         }
-
         self.init(header: header, question: text, options: options, unanswerable: unanswerable)
     }
 }
@@ -107,7 +146,9 @@ public struct PromptQuestion: Equatable, Hashable, Sendable {
 /// What a session is blocked on, derived rather than transmitted.
 public enum OpenPrompt: Equatable, Sendable {
     /// An `AskUserQuestion`. Structured, exact, with descriptions.
-    case question(callID: String, PromptQuestion)
+    /// Every question the call asks, in order. A set of one is the ordinary case; a set of
+    /// several is 16% of them, and used to be shown as its first question alone.
+    case question(callID: String, [PromptQuestion])
     /// Any other tool awaiting approval. **There is no structured payload for this case and
     /// there is nowhere to get one**: the `tool_use` record is byte-identical to one for a
     /// tool that is merely running, and the dialog's own wording ("Yes, and don't ask again
@@ -182,8 +223,9 @@ public enum OpenPrompt: Equatable, Sendable {
                 // A body that will not parse is NOT downgraded to a permission card: that
                 // would draw Allow/Deny for a dialog whose first row is "Rust". Nor does it
                 // fall through to an older call — that is not what the terminal is showing.
-                guard let question = PromptQuestion(toolInput: item.body.text) else { return nil }
-                return .question(callID: id, question)
+                let questions = PromptQuestion.all(toolInput: item.body.text)
+                guard !questions.isEmpty else { return nil }
+                return .question(callID: id, questions)
             case .toolCall:
                 return .permission(callID: id, tool: item.body.tool, summary: item.body.summary)
             default:

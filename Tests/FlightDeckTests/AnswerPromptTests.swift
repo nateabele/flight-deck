@@ -96,10 +96,10 @@ final class AnswerPromptTests: XCTestCase {
     }
 
     private func question(labels: [String], unanswerable: String? = nil) -> OpenPrompt {
-        .question(callID: "toolu_A", PromptQuestion(
+        .question(callID: "toolu_A", [PromptQuestion(
             header: "Pick", question: "Which?",
             options: labels.map { .init(label: $0) }, unanswerable: unanswerable
-        ))
+        )])
     }
 
     private var permission: OpenPrompt {
