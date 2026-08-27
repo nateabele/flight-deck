@@ -7,9 +7,9 @@ import SwiftUI
 /// an omission. Both agents are read from files they write and neither writes token deltas —
 /// see `TimelineItem.Status`, whose `.streaming` case nothing in this codebase emits. So
 /// there is no caret, no fading last row and no typing animation. What the screen does show
-/// is the truth it has: when the session's `activity` is `busy`, a footer says the agent is
-/// working. That is a claim about the SESSION, which is live, rather than about the last row,
-/// which is finished.
+/// is the truth it has: when the session's `activity` is `busy` or `waiting`, or it is `idle`
+/// with `hasBackgroundWork`, a footer says so. That is a claim about the SESSION, which is
+/// live, rather than about the last row, which is finished.
 ///
 /// **It follows a live session and opens on the newest message**, which the first version did
 /// neither of. A `List` renders oldest-first, so a screen that simply drew the `.latest` page
@@ -662,38 +662,45 @@ struct SessionTimelineScreen: View {
     enum Activity: Equatable {
         case working(String)
         case waiting(String)
+        /// `idle` with `hasBackgroundWork` — a turn that finished with a task still running
+        /// underneath it. Its symbol and tint match the fleet list's badge, not `working`'s
+        /// spinner: nothing is running the model turn, only the background task is.
+        case background(String)
     }
 
     /// What the session itself is doing, said the way the Mac says it.
     ///
-    /// **`subagentSummary`, never `subagentCount`.** It is `nil` for codex at any count, and
-    /// a codex tab's `0` means *unknown* rather than *none* — see that property, which is the
-    /// one place this rule lives so the status glyph and this footer cannot disagree about
-    /// the same session. Rendering "0 subagents" here would assert something nobody has
-    /// grounds to say.
+    /// **The text is `SessionStatusGlyph.label(for:)`'s, not recomputed here.** An earlier
+    /// version of this function reimplemented the subagent-count and waiting-reason
+    /// formatting independently — the same values, worded by two functions instead of one —
+    /// which is exactly how the background-work clause first shipped on the fleet list here
+    /// but not here: a second implementation is a second place to forget to update it. Calling
+    /// through means every clause `label(for:)` composes, including the background one,
+    /// reaches this footer for free.
     ///
-    /// The reason for `waiting` is dropped when it is EMPTY as well as when it is absent,
-    /// matching `SessionStatusGlyph.label(for:)`: an agent that sent `""` would otherwise
-    /// leave the row reading "Waiting for you — " with the sentence cut off after the dash.
+    /// `idle` only produces a footer when `hasBackgroundWork` is set: a quiet idle session has
+    /// nothing live to say at the foot of a conversation, but "idle with a background command
+    /// still running" is the one state this whole feature exists to surface, and staying
+    /// silent about it here after showing a badge in the fleet list would tell a reader two
+    /// different stories about the same session two taps apart.
     static func activityFooter(for session: WireSession?) -> Activity? {
-        switch session?.activity {
+        guard let session, let label = SessionStatusGlyph.label(for: session) else { return nil }
+        switch session.activity {
         case "busy":
-            guard let summary = session?.subagentSummary else { return .working("Working") }
-            return .working("Working — \(summary)")
+            return .working(label)
         case "waiting":
-            guard let waitingFor = session?.waitingFor, !waitingFor.isEmpty else {
-                return .waiting("Waiting for you")
-            }
-            return .waiting("Waiting for you — \(waitingFor)")
+            return .waiting(label)
+        case "idle":
+            return session.hasBackgroundWork ? .background(label) : nil
         default:
-            // Including `nil` twice over — no agent process registered, and no session in the
-            // fleet at all — and including an activity this build has never heard of. None of
-            // them is something live to announce at the foot of a conversation.
+            // An activity this build has never heard of still gets a label (see `label(for:)`'s
+            // own fallback), but it is not something live to announce at the foot of a
+            // conversation.
             return nil
         }
     }
 
-    /// Same symbol and same tint as the fleet list's glyph for the same two states, because
+    /// Same symbol and same tint as the fleet list's glyph for the same three states, because
     /// a reader arrives here from that row and the two screens describing one session
     /// differently is the disagreement `SessionStatusGlyph`'s comment exists to prevent.
     @ViewBuilder
@@ -713,6 +720,14 @@ struct SessionTimelineScreen: View {
             Label(text, systemImage: "questionmark.circle.fill")
                 .font(.footnote)
                 .foregroundStyle(.orange)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .listRowInsets(Self.rowInsets)
+                .listRowSeparator(.hidden)
+        case .background(let text):
+            Label(text, systemImage: "terminal.fill")
+                .font(.footnote)
+                .foregroundStyle(.green)
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .listRowInsets(Self.rowInsets)

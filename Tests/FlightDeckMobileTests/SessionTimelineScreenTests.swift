@@ -208,6 +208,45 @@ final class SessionTimelineScreenTests: XCTestCase {
         XCTAssertNil(SessionTimelineScreen.activityFooter(for: nil))
     }
 
+    /// The footer's text comes from `SessionStatusGlyph.label(for:)`, so the background
+    /// clause reaches it automatically — the same string a reader saw on the fleet list row
+    /// they tapped to get here, character for character.
+    func testWorkingAndWaitingCarryTheBackgroundClauseTheSameWayTheFleetListDoes() {
+        XCTAssertEqual(
+            SessionTimelineScreen.activityFooter(
+                for: session(activity: "busy", subagentCount: 2, hasBackgroundWork: true)
+            ),
+            .working("Working — 2 subagents — background command running")
+        )
+        XCTAssertEqual(
+            SessionTimelineScreen.activityFooter(
+                for: session(
+                    activity: "waiting", waitingFor: "permission prompt",
+                    hasBackgroundWork: true
+                )
+            ),
+            .waiting("Waiting for you — permission prompt — background command running")
+        )
+    }
+
+    /// The one case this footer used to have nothing to say about: a turn that finished
+    /// (`idle`) with a background task still running underneath it. Showing a badge on the
+    /// fleet list row and nothing here would tell a reader two different stories about the
+    /// same session two taps apart — see `activityFooter`'s own comment.
+    func testIdleWithBackgroundWorkGetsAFooterWherePlainIdleGetsNone() {
+        XCTAssertEqual(
+            SessionTimelineScreen.activityFooter(
+                for: session(activity: "idle", hasBackgroundWork: true)
+            ),
+            .background("Idle — background command running")
+        )
+        XCTAssertNil(
+            SessionTimelineScreen.activityFooter(
+                for: session(activity: "idle", hasBackgroundWork: false)
+            )
+        )
+    }
+
     // MARK: One row per thing that happened
 
     /// **A command and its output are one thing, and the feed carries them as two records.**
@@ -433,11 +472,12 @@ final class SessionTimelineScreenTests: XCTestCase {
 
     private func session(
         agent: String = "claude", activity: String?, waitingFor: String? = nil,
-        subagentCount: Int = 0
+        subagentCount: Int = 0, hasBackgroundWork: Bool = false
     ) -> WireSession {
         WireSession(
             id: UUID(), title: "flight-deck", agent: agent,
-            activity: activity, waitingFor: waitingFor, subagentCount: subagentCount
+            activity: activity, waitingFor: waitingFor, subagentCount: subagentCount,
+            hasBackgroundWork: hasBackgroundWork
         )
     }
 }
