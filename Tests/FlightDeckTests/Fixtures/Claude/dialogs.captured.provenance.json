@@ -13,7 +13,12 @@
     "busy-echo-only.captured.txt",
     "busy-draft-below-echo.captured.txt",
     "busy-streaming-no-box.captured.txt",
-    "busy-streaming-no-marker.captured.txt"
+    "busy-streaming-no-marker.captured.txt",
+    "question-two.captured.txt",
+    "question-two-answered.captured.txt",
+    "question-two-review.captured.txt",
+    "question-two.captured.jsonl",
+    "question-single-247.captured.txt"
   ],
   "isVerbatimCapturedOutput": true,
   "claudeVersion": "2.1.241 (Claude Code)",
@@ -32,7 +37,12 @@
     "busy-echo-only.captured.txt": "f4f53c41b69ec3261585582bae6e7ba3fe9c715a1f2c8e7c0f707ee88bdf27cd",
     "busy-draft-below-echo.captured.txt": "b8530ead2d64ca4889de1b19bc7c03d2a7a6e18cf729b75305a36bf6b0a4b851",
     "busy-streaming-no-box.captured.txt": "190798f2c9aa65580712753b77489c92a9fdd40bc0b56df1fce4e044c4ada1a0",
-    "busy-streaming-no-marker.captured.txt": "70e7845cd058bd48223186f01c245bb6b0a2b019d218199f3ea649835495b2eb"
+    "busy-streaming-no-marker.captured.txt": "70e7845cd058bd48223186f01c245bb6b0a2b019d218199f3ea649835495b2eb",
+    "question-two.captured.txt": "53be533575e3d43f89140656ef47e458dcfa78de6d50c69003a0925ce3209a40",
+    "question-two-answered.captured.txt": "66e594c31aaae3906dcedab44a862da7d26db477cbad2a92057172281a8ef346",
+    "question-two-review.captured.txt": "01e374c4f74f26bbd7be4175ce701210eba6959707f01484a76505de22b23e7c",
+    "question-two.captured.jsonl": "8e9c999a9c12f4000e501bec338946638bdab46c61afa37234df51edc4a01b73",
+    "question-single-247.captured.txt": "e4e56574415f138e2b0c78b296fb70d93f42a511f69b8b5fea5059f4bd7a3a1d"
   },
   "whatTheseAre": [
     "The terminal SCREEN a blocked claude session shows, as plain text on a fixed-width grid \u2014",
@@ -244,5 +254,37 @@
     "",
     "The 'Other' free-text row in its expanded state; it appears here only as the collapsed",
     "'Type something.' row."
-  ]
+  ],
+  "claudeVersionByBatch": {
+    "2.1.241 (Claude Code)": {
+      "capturedOn": "2026-08-23",
+      "files": [
+        "permission-bash.captured.txt",
+        "permission-write.captured.txt",
+        "permission-write-60col.captured.txt",
+        "question-single.captured.txt",
+        "question-single.captured.jsonl",
+        "question-multi.captured.txt",
+        "question-multi.captured.jsonl",
+        "workspace-trust.captured.txt",
+        "permission-write-row2.captured.txt",
+        "idle-empty-box.captured.txt",
+        "busy-echo-only.captured.txt",
+        "busy-draft-below-echo.captured.txt",
+        "busy-streaming-no-box.captured.txt",
+        "busy-streaming-no-marker.captured.txt"
+      ]
+    },
+    "2.1.247 (Claude Code)": {
+      "capturedOn": "2026-08-27",
+      "files": [
+        "question-two.captured.txt",
+        "question-two-answered.captured.txt",
+        "question-two-review.captured.txt",
+        "question-two.captured.jsonl",
+        "question-single-247.captured.txt"
+      ],
+      "note": "Captured by driving a real claude in a 136x34 pty and rendering the stream through a terminal emulator, so these are what a terminal DISPLAYS \u2014 the same thing TextInjecting.readViewport hands the driver. question-single-247 exists to compare against question-single (2.1.241): the option grammar and the 'Enter to select - up/down to navigate' hint are unchanged, so the shipping single-question driver's assumptions still hold at 2.1.247."
+    }
+  }
 }
