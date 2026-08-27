@@ -428,6 +428,59 @@ final class SessionTimelineModelTests: XCTestCase {
                        "and the moment the runway is done it goes out, from the newest cursor")
     }
 
+    // MARK: A session that has not started
+
+    /// **A brand-new session is not a broken one.** The Mac answers `unreadable` for a tab
+    /// whose agent has not written a transcript yet — which is every session between being
+    /// created and taking its first turn — and routing that into `.failed` put a warning and
+    /// a "Try again" button on a screen where nothing had gone wrong and retrying fixes
+    /// nothing. What clears this state is the agent taking a turn, not the reader pressing
+    /// a button.
+    func testASessionThatHasNotTakenATurnIsNotAFailure() {
+        let pager = StubPager()
+        let model = model(pager)
+
+        model.loadLatest()
+        pager.answer(.failure(.server(code: "unreadable")))
+
+        XCTAssertEqual(model.phase, .notStarted)
+    }
+
+    /// The recovery is the ordinary one and must still work: the reader sends a message, the
+    /// agent takes its turn, the next fetch finds a transcript. Nothing about `.notStarted`
+    /// may latch.
+    func testASessionThatStartsLaterFillsInLikeAnyOther() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.loadLatest()
+        pager.answer(.failure(.server(code: "unreadable")))
+        XCTAssertEqual(model.phase, .notStarted, "the premise")
+
+        model.loadLatest()
+        pager.answer(tail())
+
+        XCTAssertEqual(model.phase, .idle)
+        XCTAssertEqual(model.feed.items.map(\.body.text), ["first", "second"])
+    }
+
+    /// **Only on an empty screen.** `unreadable` arriving over a conversation the phone has
+    /// already read means something different — a transcript that was there and cannot be read
+    /// now — and quietly calling that "not started yet" would tell the reader their session
+    /// never began while its own history sits above the message.
+    func testUnreadableOverAConversationAlreadyOnScreenIsStillAFailure() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.loadLatest()
+        pager.answer(tail())
+
+        model.loadLatest()
+        pager.answer(.failure(.server(code: "unreadable")))
+
+        guard case .failed = model.phase else {
+            return XCTFail("expected a failure, got \(model.phase)")
+        }
+    }
+
     // MARK: Failure
 
     func testEachRefusalGetsCopyThatSaysWhatToDoAboutIt() {
@@ -435,7 +488,6 @@ final class SessionTimelineModelTests: XCTestCase {
             FleetRequestError.disconnected,
             .server(code: "unknown_session"),
             .server(code: "no_transcript"),
-            .server(code: "unreadable"),
             .server(code: "wedged"),
         ].map { error -> String in
             let pager = StubPager()
@@ -453,11 +505,15 @@ final class SessionTimelineModelTests: XCTestCase {
         XCTAssertEqual(messages[1], "This session is no longer open on your Mac.")
         XCTAssertEqual(messages[2],
                        "This agent doesn't keep a transcript, so there's nothing to show.")
-        XCTAssertEqual(messages[3],
-                       "Nothing here yet — this session hasn't taken its first turn.")
-        XCTAssertEqual(messages[4], "Your Mac couldn't read this session (wedged).",
+        XCTAssertEqual(
+            SessionTimelineModel.message(for: .server(code: "unreadable")),
+            "Nothing here yet — this session hasn't taken its first turn.",
+            "the copy still exists; what changed is that it is no longer reached through "
+                + "`phase`, because it never described a failure"
+        )
+        XCTAssertEqual(messages[3], "Your Mac couldn't read this session (wedged).",
                        "an unrecognised code must carry the code, not become a shrug")
-        XCTAssertEqual(Set(messages).count, 5, "two refusals share one message: \(messages)")
+        XCTAssertEqual(Set(messages).count, 4, "each refusal gets its own words: \(messages)")
     }
 
     /// A background poll that fails must not replace a screen full of conversation with an

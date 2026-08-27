@@ -97,6 +97,16 @@ final class SessionTimelineModel {
     enum Phase: Equatable {
         case idle
         case loading
+        /// The Mac answered, and there is nothing to show **yet**.
+        ///
+        /// **Not a failure, and keeping it out of `.failed` is the whole point of the case.**
+        /// A tab between being created and taking its first turn has no transcript, so the Mac
+        /// answers `unreadable` — the honest answer to "what is in this file" when the file
+        /// does not exist. Routed into `.failed`, that drew a warning and a "Try again" button
+        /// over a session where nothing had gone wrong and where retrying fixes nothing: what
+        /// ends this state is the agent taking a turn. Every new session passes through here,
+        /// so it is the first thing a reader sees on a tab they just made.
+        case notStarted
         case failed(String)
     }
 
@@ -555,7 +565,7 @@ final class SessionTimelineModel {
                     self.olderFailure = Self.message(for: error)
                     self.wantsOlder = false
                 } else if !quiet {
-                    self.phase = .failed(Self.message(for: error))
+                    self.phase = Self.phase(for: error, hasItems: !self.feed.items.isEmpty)
                 }
                 self.drain()
             }
@@ -634,6 +644,22 @@ final class SessionTimelineModel {
         guard olderRun < Self.prefetchPages, feed.hasOlder, let anchor = feed.olderAnchor
         else { return wantsOlder = false }
         fetch(anchor: anchor, older: true, quiet: true)
+    }
+
+    /// Which screen a refusal puts up.
+    ///
+    /// **`unreadable` on an empty screen is the one that is not a failure.** It is what the Mac
+    /// answers for a transcript that does not exist yet, which is every session from the moment
+    /// it is created until its agent takes a first turn — so it needs an empty state, not a
+    /// warning and a retry.
+    ///
+    /// **With a conversation already on screen the same code means the opposite** and stays a
+    /// failure: a transcript the phone has already read cannot un-exist, so `unreadable` there
+    /// is a file that has become unreadable, and calling that "not started yet" would tell the
+    /// reader their session never began while its own history sits above the message.
+    static func phase(for error: FleetRequestError, hasItems: Bool) -> Phase {
+        if case .server(let code) = error, code == "unreadable", !hasItems { return .notStarted }
+        return .failed(message(for: error))
     }
 
     /// Copy, not a code. Each of these is a different thing for the reader to do about it,
