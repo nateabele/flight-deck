@@ -327,4 +327,28 @@ final class SessionAutoResumeTests: XCTestCase {
         )
         XCTAssertEqual(persisted?.unread, true)
     }
+
+    /// A tab that went away with a dev server running was working, and must still be resumed
+    /// now that `shell` decodes as `idle`.
+    func testIdleWithBackgroundWorkIsResumable() {
+        XCTAssertTrue(SessionStore.isResumable(activity: .idle, hasBackgroundWork: true))
+        XCTAssertTrue(SessionStore.isResumable(activity: .busy, hasBackgroundWork: false))
+        XCTAssertFalse(SessionStore.isResumable(activity: .idle, hasBackgroundWork: false))
+        // Unchanged: what a waiting tab was blocked on does not survive the restart.
+        XCTAssertFalse(SessionStore.isResumable(activity: .waiting, hasBackgroundWork: true))
+    }
+
+    /// Every `sessions.json` written before this change stores `"shell"`. Reading one back must
+    /// not lose the status — `SessionActivity(rawValue: "shell")` is nil now.
+    func testLegacyShellInSnapshotRestoresAsIdleWithBackgroundWork() {
+        let restored = SessionStore.restoredActivity(fromPersisted: "shell")
+        XCTAssertEqual(restored.activity, .idle)
+        XCTAssertTrue(restored.hasBackgroundWork)
+
+        let plain = SessionStore.restoredActivity(fromPersisted: "idle")
+        XCTAssertEqual(plain.activity, .idle)
+        XCTAssertFalse(plain.hasBackgroundWork)
+
+        XCTAssertNil(SessionStore.restoredActivity(fromPersisted: nil).activity)
+    }
 }

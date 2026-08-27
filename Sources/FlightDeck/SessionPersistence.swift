@@ -35,6 +35,10 @@ struct SessionSnapshot: Codable, Equatable {
         ///
         /// Optional for the same load-bearing reason as `pinnedConversationID` above.
         var activity: String?
+        /// Whether a background task was running under this agent when the snapshot was
+        /// written. Optional, and `nil` rather than `false` for the common case, so the file
+        /// stays readable — the same reason `unread` is optional.
+        var hasBackgroundWork: Bool?
         /// Whether this session finished while the user was looking elsewhere. Absent
         /// reads as false. Optional for the same reason as `activity`.
         var unread: Bool?
@@ -57,6 +61,7 @@ struct SessionSnapshot: Codable, Equatable {
             transcriptDirectory: String? = nil,
             pinnedConversationID: UUID? = nil,
             activity: String? = nil,
+            hasBackgroundWork: Bool? = nil,
             unread: Bool? = nil,
             agent: AgentID? = nil,
             accountID: UUID? = nil,
@@ -68,6 +73,7 @@ struct SessionSnapshot: Codable, Equatable {
             self.transcriptDirectory = transcriptDirectory
             self.pinnedConversationID = pinnedConversationID
             self.activity = activity
+            self.hasBackgroundWork = hasBackgroundWork
             self.unread = unread
             self.agent = agent
             self.accountID = accountID
