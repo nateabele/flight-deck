@@ -26,6 +26,13 @@ enum ClaudeStatusFile {
         /// `pid` it identifies one *process*: macOS recycles pids, so a row with a familiar
         /// pid and an unfamiliar `procStart` is a different process, not a resume.
         let procStart: String
+        /// Whether the registry reported a background task running under this agent.
+        ///
+        /// The **observation**, not a conclusion. Claude Code can only report this while the
+        /// session is idle — it writes `"shell"` for `idle && hasBackgroundTasks` and plain
+        /// `busy`/`waiting` otherwise — so `false` here means *not reported*, never *known
+        /// absent*. `SessionStore` owns turning these observations into durable state.
+        let reportsBackgroundWork: Bool
 
         /// `cwd` and `procStart` default to empty purely so existing test call sites that
         /// predate them keep compiling. Production values always come from `decode`, which
@@ -37,7 +44,8 @@ enum ClaudeStatusFile {
             waitingFor: String?,
             startedAt: Double,
             cwd: String = "",
-            procStart: String = ""
+            procStart: String = "",
+            reportsBackgroundWork: Bool = false
         ) {
             self.pid = pid
             self.sessionID = sessionID
@@ -46,6 +54,7 @@ enum ClaudeStatusFile {
             self.startedAt = startedAt
             self.cwd = cwd
             self.procStart = procStart
+            self.reportsBackgroundWork = reportsBackgroundWork
         }
     }
 
@@ -67,10 +76,25 @@ enum ClaudeStatusFile {
               let rawSession = obj["sessionId"] as? String,
               let sessionID = UUID(uuidString: rawSession),
               let rawStatus = obj["status"] as? String,
-              let activity = SessionActivity(rawValue: rawStatus),
               let cwd = obj["cwd"] as? String,
               let procStart = obj["procStart"] as? String
         else { return nil }
+
+        // `"shell"` is not a fourth activity: Claude Code writes it for `idle &&
+        // hasBackgroundTasks` and reports the two facts through one field. Split here so
+        // nothing downstream has to know the encoding — and note the asymmetry, which is
+        // upstream's and not ours: during a turn it reports `busy` and drops the background
+        // fact entirely, so `false` below is "not reported", not "no background work".
+        let activity: SessionActivity
+        let reportsBackgroundWork: Bool
+        if rawStatus == "shell" {
+            activity = .idle
+            reportsBackgroundWork = true
+        } else {
+            guard let parsed = SessionActivity(rawValue: rawStatus) else { return nil }
+            activity = parsed
+            reportsBackgroundWork = false
+        }
 
         return Entry(
             pid: expectedPID,
@@ -79,7 +103,8 @@ enum ClaudeStatusFile {
             waitingFor: obj["waitingFor"] as? String,
             startedAt: (obj["startedAt"] as? Double) ?? 0,
             cwd: cwd,
-            procStart: procStart
+            procStart: procStart,
+            reportsBackgroundWork: reportsBackgroundWork
         )
     }
 }

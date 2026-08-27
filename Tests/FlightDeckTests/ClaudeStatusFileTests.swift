@@ -24,8 +24,10 @@ final class ClaudeStatusFileTests: XCTestCase {
     }
 
     func testDecodesEachStatus() {
+        // "shell" decodes to `.idle` plus `reportsBackgroundWork`, not a fourth activity —
+        // see `testShellDecodesAsIdlePlusBackgroundWork` below.
         for (raw, expected): (String, SessionActivity) in [
-            ("idle", .idle), ("busy", .busy), ("waiting", .waiting), ("shell", .shell),
+            ("idle", .idle), ("busy", .busy), ("waiting", .waiting), ("shell", .idle),
         ] {
             let entry = ClaudeStatusFile.decode(json(status: raw), expectedPID: 4242)
             XCTAssertEqual(entry?.activity, expected, "status \(raw)")
@@ -110,5 +112,37 @@ final class ClaudeStatusFileTests: XCTestCase {
         "cwd":"/Users/nate"}
         """
         XCTAssertNil(ClaudeStatusFile.decode(Data(json.utf8), expectedPID: 42))
+    }
+
+    /// `"shell"` is not a fourth activity. Claude Code writes it as `idle && hasBackgroundTasks`
+    /// (`mb = rm === "idle" && db ? "shell" : rm`), so it decodes into both facts, not one.
+    func testShellDecodesAsIdlePlusBackgroundWork() throws {
+        let json = """
+        {"pid":2786,"sessionId":"A4C9067B-9CAF-43CB-8B75-88A145249058",
+         "status":"shell","cwd":"/tmp","procStart":"Wed Aug 26 03:26:16 2026","startedAt":1}
+        """.data(using: .utf8)!
+        let entry = try XCTUnwrap(ClaudeStatusFile.decode(json, expectedPID: 2786))
+        XCTAssertEqual(entry.activity, .idle)
+        XCTAssertTrue(entry.reportsBackgroundWork)
+    }
+
+    /// A plain `idle` reports nothing, which is distinct from reporting absence.
+    func testIdleReportsNoBackgroundWork() throws {
+        let json = """
+        {"pid":2497,"sessionId":"3BF6A1C7-00FC-4ABF-92F5-49163B5B4FAB",
+         "status":"idle","cwd":"/tmp","procStart":"Wed Aug 26 03:26:15 2026","startedAt":1}
+        """.data(using: .utf8)!
+        let entry = try XCTUnwrap(ClaudeStatusFile.decode(json, expectedPID: 2497))
+        XCTAssertEqual(entry.activity, .idle)
+        XCTAssertFalse(entry.reportsBackgroundWork)
+    }
+
+    /// Unchanged: an unrecognised status still fails closed.
+    func testUnknownStatusStillDecodesToNil() {
+        let json = """
+        {"pid":1,"sessionId":"3BF6A1C7-00FC-4ABF-92F5-49163B5B4FAB",
+         "status":"teleporting","cwd":"/tmp","procStart":"x","startedAt":1}
+        """.data(using: .utf8)!
+        XCTAssertNil(ClaudeStatusFile.decode(json, expectedPID: 1))
     }
 }
