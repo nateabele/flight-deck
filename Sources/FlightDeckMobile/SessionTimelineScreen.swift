@@ -535,6 +535,10 @@ struct SessionTimelineScreen: View {
         /// running** — an empty state that appears during a fetch claims a session has no
         /// history when the page simply has not landed.
         case empty
+        /// The session has been created and its agent has not taken a turn yet. Separate from
+        /// `empty` because they are true at different moments and only one of them ends by
+        /// itself, and separate from `failed` because nothing has gone wrong.
+        case notStarted
         case failed(String)
     }
 
@@ -571,6 +575,8 @@ struct SessionTimelineScreen: View {
         switch phase {
         case .loading:
             return .loading
+        case .notStarted:
+            return .notStarted
         case .failed(let message):
             return .failed(message)
         case .idle:
@@ -597,6 +603,20 @@ struct SessionTimelineScreen: View {
                 "No messages yet",
                 systemImage: "bubble.left.and.bubble.right",
                 description: Text("This session hasn't said anything your Mac can read yet.")
+            )
+            .listRowInsets(Self.rowInsets)
+            .listRowSeparator(.hidden)
+        case .notStarted:
+            // **No Try again here, and that absence is the fix.** This is what every session
+            // looks like between being created and taking its first turn, and it used to draw
+            // the failure notice — a warning triangle and a retry button, over a session where
+            // nothing had gone wrong and where the button re-asked a question the Mac had
+            // already answered correctly. What ends this state is the agent taking a turn, and
+            // the composer for that is directly below.
+            ContentUnavailableView(
+                "Nothing here yet",
+                systemImage: "bubble.left",
+                description: Text("This session hasn't taken its first turn.")
             )
             .listRowInsets(Self.rowInsets)
             .listRowSeparator(.hidden)
