@@ -45,8 +45,27 @@ final class SessionStatusGlyphTests: XCTestCase {
         XCTAssertEqual(label(activity: "waiting", waitingFor: ""), "Waiting for you")
     }
 
-    func testShellMatchesTheMacsTooltip() {
-        XCTAssertEqual(label(activity: "shell"), "Background command running")
+    /// Must equal `SessionStatus.tooltip(unread:backgroundWork:)` on macOS, character for
+    /// character. `SessionStatusTests.testTooltipComposesBackgroundWork` is the other end.
+    func testLabelComposesBackgroundWork() {
+        XCTAssertEqual(
+            SessionStatusGlyph.label(for: session(activity: "idle", hasBackgroundWork: true)),
+            "Idle — background command running"
+        )
+        XCTAssertEqual(
+            SessionStatusGlyph.label(for: session(activity: "busy", hasBackgroundWork: true)),
+            "Working — background command running"
+        )
+        XCTAssertEqual(
+            SessionStatusGlyph.label(for: session(activity: "idle")),
+            "Idle"
+        )
+    }
+
+    /// `nil` still means no accessibility element at all — a dead tab must not be a VoiceOver
+    /// stop, and a background flag cannot resurrect one.
+    func testNoAgentStillHasNoLabel() {
+        XCTAssertNil(SessionStatusGlyph.label(for: session(activity: nil, hasBackgroundWork: true)))
     }
 
     /// `nil` is not `"idle"`. A tab with no agent process registered renders nothing and
@@ -74,12 +93,14 @@ final class SessionStatusGlyphTests: XCTestCase {
 
     private func session(
         activity: String?, waitingFor: String? = nil,
-        subagentCount: Int = 0, isUnread: Bool = false
+        subagentCount: Int = 0, isUnread: Bool = false,
+        hasBackgroundWork: Bool = false
     ) -> WireSession {
         WireSession(
             id: UUID(), title: "flight-deck", agent: "claude",
             activity: activity, waitingFor: waitingFor,
-            subagentCount: subagentCount, isUnread: isUnread
+            subagentCount: subagentCount, isUnread: isUnread,
+            hasBackgroundWork: hasBackgroundWork
         )
     }
 }
