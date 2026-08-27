@@ -9,13 +9,16 @@ import SwiftUI
 ///
 /// Every branch must mean the same thing it means on the Mac — see
 /// `Sources/FlightDeck/SessionStatusIcon.swift` — because two devices disagreeing about a
-/// glyph is worse than the phone having no glyph at all. `waiting` and `shell` therefore use
-/// the Mac's exact symbol *and* tint (`questionmark.circle.fill` orange,
-/// `terminal.fill` green), and the "this build doesn't recognise this state" fallback uses a
-/// symbol neither the Mac nor any other branch here ever draws
-/// (`circle.dotted`) — `questionmark.circle` was reused for both `waiting` and "unknown" in
-/// an earlier draft of this file, which is exactly the kind of collision this comment exists
-/// to prevent.
+/// glyph is worse than the phone having no glyph at all. `waiting` therefore uses the Mac's
+/// exact symbol *and* tint (`questionmark.circle.fill` orange), and the "this build doesn't
+/// recognise this state" fallback uses a symbol neither the Mac nor any other branch here ever
+/// draws (`circle.dotted`) — `questionmark.circle` was reused for both `waiting` and "unknown"
+/// in an earlier draft of this file, which is exactly the kind of collision this comment
+/// exists to prevent.
+///
+/// `"shell"` no longer reaches the phone as an activity value at all: the Mac decomposes it
+/// into `activity: "idle"` plus the orthogonal `WireSession.hasBackgroundWork`, which the
+/// caller renders as a `terminal.fill` badge beside this glyph rather than a branch of it.
 ///
 /// The accessibility labels mirror `SessionStatus.tooltip`/`tooltip(unread:)` in
 /// `Sources/FlightDeck/SessionStatus.swift` verbatim, string for string, including the
@@ -65,11 +68,6 @@ struct SessionStatusGlyph: View {
                 },
                 label: label
             )
-        case "shell":
-            glyph(
-                Image(systemName: "terminal.fill").font(.caption).foregroundStyle(.green),
-                label: label
-            )
         case "waiting":
             glyph(
                 Image(systemName: "questionmark.circle.fill").font(.caption)
@@ -95,14 +93,16 @@ struct SessionStatusGlyph: View {
     ///
     /// `nil` means *no accessibility element*, which is not the same as an empty label: a tab
     /// with no agent process registered has nothing to announce, and giving it a label would
-    /// make VoiceOver stop on every dead row in the list.
+    /// make VoiceOver stop on every dead row in the list. A background flag cannot resurrect
+    /// one — `label(for:)` below only appends its clause once `baseLabel` has returned
+    /// something to append it to.
     ///
     /// Every string here must equal what `SessionStatus.tooltip`/`tooltip(unread:)` produces
     /// for the identical state on the Mac (`Sources/FlightDeck/SessionStatus.swift`). That
     /// invariant is checked from both ends: `SessionStatusGlyphTests` on iOS pins these
     /// strings, and `SessionStatusTests`/`SessionReadPolicyTests` on macOS pin the same
     /// literals against `tooltip`. Either side drifting fails its own suite.
-    static func label(for session: WireSession) -> String? {
+    private static func baseLabel(for session: WireSession) -> String? {
         switch session.activity {
         case nil:
             return nil
@@ -115,8 +115,6 @@ struct SessionStatusGlyph: View {
             // `subagentSummary`, which is nil for codex at any count — see that property.
             guard let summary = session.subagentSummary else { return "Working" }
             return "Working — \(summary)"
-        case "shell":
-            return "Background command running"
         case "waiting":
             // `SessionStatus.tooltip`'s `.waiting` branch: the reason, when `claude` gave one.
             guard let waitingFor = session.waitingFor, !waitingFor.isEmpty else {
@@ -127,6 +125,15 @@ struct SessionStatusGlyph: View {
             // An activity this build does not know about, matching `body`'s own fallback.
             return "Unrecognized status"
         }
+    }
+
+    /// Appends `SessionStatus.tooltip(unread:backgroundWork:)`'s background clause, verbatim
+    /// and always last, so every label `baseLabel` produced before the flag existed is
+    /// byte-identical when it is false.
+    static func label(for session: WireSession) -> String? {
+        guard let base = baseLabel(for: session) else { return nil }
+        guard session.hasBackgroundWork else { return base }
+        return base + " — background command running"
     }
 
     /// Fixes every glyph's column at the same width — `Color.clear`, a 6pt dot, an SF Symbol

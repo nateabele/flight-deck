@@ -424,6 +424,12 @@ struct FleetListScreen: View {
     private func row(_ session: WireSession) -> some View {
         HStack(spacing: 8) {
             SessionStatusGlyph(session: session)
+            if session.hasBackgroundWork {
+                Image(systemName: "terminal.fill")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.green)
+                    .accessibilityHidden(true)   // `SessionStatusGlyph.label` already says it
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.title)
                     .font(.system(.body, design: .monospaced))
