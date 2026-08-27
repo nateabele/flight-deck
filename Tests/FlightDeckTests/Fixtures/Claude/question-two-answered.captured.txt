@@ -1,0 +1,25 @@
+ ▐▛███▛█   Claude Code v2.1.247                                                                                                         
+▝▜██████▀  Opus 5 (1M context) · Claude Max                                                                                             
+  ▝▝ ▝▝    /…/-Users-nate-Projects-Protos-n-Tools-flight-deck/020c217b-d41c-4d19-9f72-efe84f546ebb/scratchpad/capture-workspace         
+                                                                                                                                        
+                                                                                                                                        
+❯ Use the AskUserQuestion tool to ask me TWO questions in one call: first, which language I would use for a CLI (Rust, Go, Swift);      
+  second, which editor I prefer (Vim, Emacs, VS Code). Give each option a one sentence description. Do nothing else, just ask.          
+                                                                                                                                        
+⏺ I'll ask both questions in one call.                                                                                                  
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Language  ☐ Editor  ✔ Submit  →                                                                                                    
+                                                                                                                                        
+Which editor do you prefer?                                                                                                             
+                                                                                                                                        
+❯ 1. Vim                                                                                                                                
+     Modal, keyboard-driven editing that runs anywhere a terminal does, with a huge plugin ecosystem.                                   
+  2. Emacs                                                                                                                              
+     Deeply extensible Lisp environment where the editor doubles as a whole computing workspace.                                        
+  3. VS Code                                                                                                                            
+     Graphical editor with rich language support, integrated debugging, and a large extension marketplace.                              
+  4. Type something.                                                                                                                    
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this                                                                                                                    
+                                                                                                                                        
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
