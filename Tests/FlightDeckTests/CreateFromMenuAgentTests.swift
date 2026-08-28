@@ -72,7 +72,7 @@ final class CreateFromMenuAgentTests: XCTestCase {
     /// survives its last session leaving, so ⌘N still lands there rather than prompting.
     func testCreateFromMenuAgentTargetsTheLastActiveProjectEvenWhenItIsEmpty() async {
         let store = SessionStore(provider: nil, persistence: nil)
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         let a = store.newSession(in: URL(fileURLWithPath: "/a", isDirectory: true))
         store.closeSession(a.id)
         store.selectedSessionID = nil
@@ -98,7 +98,7 @@ final class CreateFromMenuAgentTests: XCTestCase {
             sessionCounter: 0
         )
         let store = SessionStore(provider: nil, persistence: persistence)
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         XCTAssertTrue(store.restore(directoryExists: { _ in true }))
         XCTAssertNil(store.lastActiveProjectURL, "no session was ever selected yet")
 

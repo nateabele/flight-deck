@@ -16,6 +16,11 @@ public final class FleetClient: @unchecked Sendable {
     public var onDisconnect: ((Error?) -> Void)?
 
     private let key: FleetDeviceKey
+    /// What this client calls itself in `hello`, so the Mac can list it as something other
+    /// than a placeholder. Injected rather than read here: FleetKit imports Foundation,
+    /// Network and Security only — `UIDevice` is not reachable from this module, and the
+    /// `FleetKitiOS` target exists to keep it that way.
+    private let deviceName: String?
     private let queue: DispatchQueue
     private var connection: NWConnection?
     private var nextCID = 1
@@ -36,8 +41,12 @@ public final class FleetClient: @unchecked Sendable {
     /// the thing we just chose to stop talking to.
     private var hasEnded = false
 
-    public init(key: FleetDeviceKey, queue: DispatchQueue = .main) {
+    /// `deviceName` defaults to `nil` — "claims nothing" — because that is a real wire state
+    /// the server has to handle anyway (every phone built before `hello` carried a name is
+    /// in it), not a convenience for callers.
+    public init(key: FleetDeviceKey, deviceName: String? = nil, queue: DispatchQueue = .main) {
         self.key = key
+        self.deviceName = deviceName
         self.queue = queue
     }
 
@@ -49,7 +58,7 @@ public final class FleetClient: @unchecked Sendable {
         let parameters = FleetSocket.webSocketParameters(
             FleetTLS.clientParameters(key: key)
         )
-        let connection = NWConnection(to: Self.webSocketEndpoint(for: endpoint), using: parameters)
+        let connection = NWConnection(to: FleetSocket.webSocketEndpoint(for: endpoint), using: parameters)
         self.connection = connection
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
@@ -57,7 +66,10 @@ public final class FleetClient: @unchecked Sendable {
             case .ready:
                 // `hello` goes out the instant the socket is usable. TLS-PSK has already
                 // established who we are, so this is a resume point, not a credential.
-                FleetSocket.send(ClientFrame.hello(lastSeq: lastSeq), over: connection)
+                FleetSocket.send(
+                    ClientFrame.hello(lastSeq: lastSeq, device: self.deviceName),
+                    over: connection
+                )
                 self.onReady?()
             case .failed(let error):
                 self.end(error)
@@ -67,35 +79,21 @@ public final class FleetClient: @unchecked Sendable {
                 break
             }
         }
+        // `onFrame` is gated on `!hasEnded` the same way `onDisconnect` already is via
+        // `end()`. Network.framework has already hopped this receive completion onto `queue`
+        // by the time `disconnect()` runs — `cancel()` cannot recall an in-flight block — so
+        // without this guard a frame from a connection this client has already been told to
+        // abandon can still arrive and be handled as though it were live. `onDisconnect` was
+        // the only one gated before this; that asymmetry was a trap for every consumer, not
+        // just `FleetConnector`, whose own `accept()` needed a second, independent guard
+        // against exactly this frame arriving after a `teardown()`.
         FleetSocket.receive(ServerFrame.self, from: connection) { [weak self] frame in
-            self?.onFrame?(frame)
+            guard let self, !self.hasEnded else { return }
+            self.onFrame?(frame)
         } onEnd: { [weak self] error in
             self?.end(error)
         }
         connection.start(queue: queue)
-    }
-
-    /// `NWProtocolWebSocket`'s automatic HTTP-upgrade handshake needs a URL to build its
-    /// Upgrade request from. Handed a bare `.hostPort` endpoint instead — what every caller
-    /// here passes — it aborts the connection (`ECONNABORTED`, silently, before `.ready`)
-    /// rather than falling back to something host/port alone could satisfy; a plain TLS-PSK
-    /// connection built from the identical parameters, minus the WebSocket layer, completes
-    /// in single-digit milliseconds, which is what isolates this to the WebSocket handshake
-    /// rather than to TLS-PSK or to loopback itself. So `.hostPort` is translated to a `wss`
-    /// URL here rather than pushing the workaround onto every call site.
-    private static func webSocketEndpoint(for endpoint: NWEndpoint) -> NWEndpoint {
-        guard case .hostPort(let host, let port) = endpoint else { return endpoint }
-        // IPv6 literals need bracketing to be valid inside a URL authority; every other
-        // host form's description is already URL-safe as-is.
-        let hostText: String
-        switch host {
-        case .ipv6:
-            hostText = "[\(host)]"
-        default:
-            hostText = "\(host)"
-        }
-        guard let url = URL(string: "wss://\(hostText):\(port.rawValue)/") else { return endpoint }
-        return .url(url)
     }
 
     /// Reports the connection ending, exactly once. See `hasEnded`.
@@ -124,6 +122,20 @@ public final class FleetClient: @unchecked Sendable {
         let cid = nextCID
         nextCID += 1
         FleetSocket.send(ClientFrame.cmd(cid: cid, command), over: connection)
+        return cid
+    }
+
+    /// Returns the correlation id the `page` — or the `err` — will carry.
+    ///
+    /// Drawn from the same `nextCID` a command is, deliberately: the two travel one socket
+    /// and are answered on one `cid` space, so a request and a command sharing a number
+    /// would let a client match a page to a `markRead`.
+    @discardableResult
+    public func send(_ request: FleetRequest) -> Int {
+        guard let connection else { return 0 }
+        let cid = nextCID
+        nextCID += 1
+        FleetSocket.send(ClientFrame.req(cid: cid, request), over: connection)
         return cid
     }
 }

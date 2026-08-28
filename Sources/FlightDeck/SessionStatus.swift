@@ -1,12 +1,11 @@
 import Foundation
 
-/// What a Claude session is doing. Raw values match the `status` field written by
-/// `claude` to `~/.claude/sessions/<pid>.json`.
-///
-/// `shell` is the non-obvious one: the model turn has finished but a backgrounded
-/// Bash task is still running, so the session is neither working nor done.
+/// What a Claude session is doing. Raw values match the `status` field written by `claude`
+/// to `~/.claude/sessions/<pid>.json` — except `shell`, which is not an activity at all:
+/// `claude` writes it for `idle && hasBackgroundTasks`, and `ClaudeStatusFile.decode` splits
+/// it into `.idle` plus `Entry.reportsBackgroundWork`. See `SessionStore.backgroundWorkSessions`.
 enum SessionActivity: String, Equatable {
-    case idle, busy, waiting, shell
+    case idle, busy, waiting
 }
 
 extension SessionActivity {
@@ -14,14 +13,13 @@ extension SessionActivity {
     /// Higher wins. Idle sits at the bottom and is filtered out before this is consulted,
     /// but it is ranked anyway so the ordering is total and the tests can state it.
     ///
-    /// The order is by how much the state wants you: a blocked prompt outranks a
-    /// background command, which outranks work that is simply in progress.
+    /// The order is by how much the state wants you: a blocked prompt outranks work that
+    /// is simply in progress.
     var summaryRank: Int {
         switch self {
         case .idle: return 0
         case .busy: return 1
-        case .shell: return 2
-        case .waiting: return 3
+        case .waiting: return 2
         }
     }
 }
@@ -56,12 +54,11 @@ struct SessionStatus: Equatable {
         case .waiting:
             guard let waitingFor, !waitingFor.isEmpty else { return "Waiting for you" }
             return "Waiting for you — \(waitingFor)"
-        case .shell:
-            return "Background command running"
         }
     }
 
-    /// Tooltip and accessibility label for a row that may carry the unread dot.
+    /// Tooltip and accessibility label for a row that may carry the unread dot, and
+    /// optionally the background-work badge.
     ///
     /// The unread state is drawn with colour alone (a filled dot in the accent colour rather
     /// than grey), so this string is what carries the same distinction for VoiceOver and for
@@ -70,8 +67,17 @@ struct SessionStatus: Equatable {
     ///
     /// Additive rather than a change to `tooltip`: notification bodies use that one and have
     /// no notion of read state.
-    func tooltip(unread: Bool) -> String {
-        guard unread, activity == .idle else { return tooltip }
-        return "Finished — not yet viewed"
+    ///
+    /// `backgroundWork` defaults to `false` rather than existing as a separate one-parameter
+    /// overload, so every call site written as `tooltip(unread:)` before the flag existed
+    /// still compiles AND still runs through this one implementation — a duplicate overload
+    /// here previously let such a call site silently bind to dead code instead.
+    /// The background clause it appends is never substituted, and always last. Every string
+    /// this produced before the flag existed is unchanged when `backgroundWork` is false —
+    /// which is what lets `SessionStatusGlyph.label(for:)` on iOS pin the same literals.
+    func tooltip(unread: Bool, backgroundWork: Bool = false) -> String {
+        let base = unread && activity == .idle ? "Finished — not yet viewed" : tooltip
+        guard backgroundWork else { return base }
+        return base + " — background command running"
     }
 }

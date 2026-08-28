@@ -23,6 +23,7 @@ import SwiftUI
 struct SessionStatusIcon: View {
     let status: SessionStatus?
     var unread: Bool = false
+    var hasBackgroundWork: Bool = false
 
     var body: some View {
         if let status {
@@ -35,9 +36,9 @@ struct SessionStatusIcon: View {
                         .foregroundStyle(.tint)
                 }
             }
-            .help(status.tooltip(unread: unread))
+            .help(status.tooltip(unread: unread, backgroundWork: hasBackgroundWork))
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(status.tooltip(unread: unread))
+            .accessibilityLabel(status.tooltip(unread: unread, backgroundWork: hasBackgroundWork))
             .accessibilityIdentifier("session-status")
         } else if unread {
             // No `SessionStatus` to ask for a tooltip — `tooltip(unread:)` is an instance
@@ -80,8 +81,6 @@ struct SessionStatusIcon: View {
                 .controlSize(.mini)
         case .waiting:
             symbol("questionmark.circle.fill").foregroundStyle(.orange)
-        case .shell:
-            symbol("terminal.fill").foregroundStyle(.green)
         }
     }
 

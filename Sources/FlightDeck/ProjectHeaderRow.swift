@@ -57,6 +57,13 @@ struct ProjectHeaderRow: View {
                 // Reused rather than reimplemented so the collapsed and expanded renderings
                 // of the same state cannot drift apart.
                 SessionStatusIcon(status: store.collapsedStatus(forProjectAt: repo.id))
+                // Independent of the icon above: `collapsedStatus` filters out idle children,
+                // so a project whose only active tab is idle-with-background-work would
+                // otherwise go completely silent when collapsed — the same badge a session
+                // row draws beside its own (visible) idle dot.
+                if store.projectHasBackgroundWork(forProjectAt: repo.id) {
+                    BackgroundWorkBadge()
+                }
             }
 
             if isHovered {
@@ -121,8 +128,15 @@ struct ProjectHeaderRow: View {
         var parts = [repo.displayName]
         parts.append(repo.sessions.count == 1 ? "1 session" : "\(repo.sessions.count) sessions")
         parts.append(repo.isCollapsed ? "collapsed" : "expanded")
-        if repo.isCollapsed, let status = store.collapsedStatus(forProjectAt: repo.id) {
-            parts.append(status.tooltip)
+        if repo.isCollapsed {
+            if let status = store.collapsedStatus(forProjectAt: repo.id) {
+                parts.append(status.tooltip)
+            }
+            // Independent of `collapsedStatus`, and appended regardless of whether it found
+            // anything — this is the one fact that survives every tab going idle.
+            if store.projectHasBackgroundWork(forProjectAt: repo.id) {
+                parts.append("background command running")
+            }
         }
         return parts.joined(separator: ", ")
     }

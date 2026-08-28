@@ -8,13 +8,16 @@ struct RootView: View {
     /// Only the sidebar's project-close confirmation reads this; passed rather than
     /// re-created so it is the same instance the Settings scene edits.
     var preferences: PreferencesStore?
+    /// Sessions a paired phone has open; only the sidebar reads it.
+    var phoneActiveSessions: Set<UUID> = []
 
     @StateObject private var overlayModel = ToolOverlayModel()
     @StateObject private var overlayMonitor = ToolOverlayInputMonitorBox()
 
     var body: some View {
         NavigationSplitView {
-            SessionSidebar(store: store, preferences: preferences)
+            SessionSidebar(store: store, preferences: preferences,
+                           phoneActiveSessions: phoneActiveSessions)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
         } detail: {
             if let surface = store.selectedSessionID.flatMap({ store.surface(for: $0) }) {

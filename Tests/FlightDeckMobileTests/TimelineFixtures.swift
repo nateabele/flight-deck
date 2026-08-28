@@ -1,0 +1,635 @@
+import FleetKit
+import Foundation
+
+/// A conversation with every shape the screen has to survive, at the sizes they really arrive
+/// at. **Not three short rows** — that is precisely the fixture that made the first version of
+/// this screen look finished, and it was rejected the moment a real session was opened on it.
+///
+/// Shared by the render harness and by the row/entry tests, so what is asserted and what is
+/// looked at are the same conversation.
+enum TimelineFixtures {
+
+    /// Ten records: a long prompt, a long answer, a thinking block, a `Bash` call paired with
+    /// multi-line output, a `Read` whose 64 KB result was cut, a failing call, a `.prompt`, and
+    /// a kind this build has never heard of. The two tool calls are **interleaved** — b2's
+    /// result lands before a1's — so anything that pairs by position gets both wrong.
+    static var conversation: [TimelineItem] { [
+        userTurn, assistantAnswer, thinking,
+        bashCall, readCall, bashResult, readResult,
+        failingCall, failingResult,
+        prompt, unknown,
+    ] }
+
+    static let userTurn = TimelineItem(
+        id: "10240#0", kind: .userTurn, status: .complete,
+        body: .init(text: """
+            The timeline screen needs to keep an open session current — right now it shows \
+            whatever it fetched when you opened it and never follows along. Check whether \
+            there's a hasNewer on the wire before you add a poll.
+            """),
+        at: "2026-08-23T09:14:02.117Z"
+    )
+
+    static let assistantAnswer = TimelineItem(
+        id: "10930#0", kind: .assistantText, status: .complete,
+        body: .init(text: """
+            There is no `hasNewer`, and there shouldn't be. Forwards, `hasMore` is a fact \
+            about the instant the file was read, so a screen that stopped polling on it would \
+            stop following a live agent the moment the reader caught up.
+
+            So the screen needs two triggers, not one: the fleet event for this session \
+            (which catches busy → idle, when a turn's last records land) and a timer while \
+            the session is busy (which covers the four minutes in the middle, where \
+            emitActivity emits nothing at all).
+            """),
+        at: "2026-08-23T09:14:19.882Z"
+    )
+
+    static let thinking = TimelineItem(
+        id: "11884#0", kind: .thinking, status: .complete,
+        body: .init(text: """
+            The poll interval matters less than the cancellation. If .task doesn't cancel on \
+            disappear, every session the user has ever opened keeps polling for the life of \
+            the process.
+            """),
+        at: "2026-08-23T09:14:20.004Z"
+    )
+
+    static let bashCall = TimelineItem(
+        id: "12401#0", kind: .toolCall, status: .complete,
+        body: .init(
+            text: """
+                {
+                  "command": "rg -n 'hasNewer|hasMore' Sources/FleetKit Sources/FlightDeckMobile",
+                  "description": "Look for a forwards-more flag on the wire"
+                }
+                """,
+            summary: "rg -n 'hasNewer|hasMore' Sources/FleetKit Sources/FlightDeckMobile",
+            tool: "Bash", callID: "toolu_01BashRipgrep"
+        ),
+        at: "2026-08-23T09:14:21.500Z"
+    )
+
+    static let readCall = TimelineItem(
+        id: "12980#0", kind: .toolCall, status: .complete,
+        body: .init(
+            text: """
+                {
+                  "file_path": "/Users/nate/Projects/flight-deck/Sources/FleetKit/TranscriptPager.swift"
+                }
+                """,
+            summary: "Sources/FleetKit/TranscriptPager.swift",
+            tool: "Read", callID: "toolu_02ReadPager"
+        ),
+        at: "2026-08-23T09:14:21.640Z"
+    )
+
+    /// Lands AFTER the second call was issued — two tools in flight, answered out of order.
+    static let bashResult = TimelineItem(
+        id: "13655#0", kind: .toolResult, status: .complete,
+        body: .init(
+            text: """
+                Sources/FleetKit/TimelinePage.swift:37:    public var hasMore: Bool
+                Sources/FleetKit/TranscriptPager.swift:112:        hasMore: end < size,
+                Sources/FleetKit/TranscriptPager.swift:148:        hasMore: start > 0,
+                Sources/FlightDeckMobile/SessionTimelineModel.swift:104:    /// There is no `hasNewer` to gate this on and there must not be: forwards, `hasMore` is a
+                Sources/FlightDeckMobile/SessionTimelineModel.swift:201:        guard case .after(let cursor) = anchor, page.hasMore, page.end > cursor else { return }
+                """,
+            tool: "Bash", callID: "toolu_01BashRipgrep"
+        ),
+        at: "2026-08-23T09:14:22.310Z"
+    )
+
+    /// A whole 64 KB item, cut. `truncatedBytes` is what the Mac dropped at the per-item cap.
+    static let readResult = TimelineItem(
+        id: "14002#0", kind: .toolResult, status: .complete,
+        body: .init(
+            text: """
+                     1  import Foundation
+                     2
+                     3  /// Hands out one page of a transcript at a time, forwards or backwards, and never
+                     4  /// splits a record across a page boundary.
+                     5  ///
+                     6  /// The cursor is a byte offset into the file, which is what makes a page stable
+                     7  /// across a re-read: an append-only file gives every line exactly one offset for
+                     8  /// its whole life. A transcript REPLACED rather than appended to is the one case
+                     9  /// that breaks it, and `reset` is how a client is told that happened.
+                    10  struct TranscriptPager {
+                    11      let url: URL
+                    12      let limits: TimelineLimits
+                    """,
+            tool: "Read", callID: "toolu_02ReadPager", truncatedBytes: 68_412
+        ),
+        at: "2026-08-23T09:14:22.980Z"
+    )
+
+    static let failingCall = TimelineItem(
+        id: "14780#0", kind: .toolCall, status: .complete,
+        body: .init(
+            text: """
+                {
+                  "command": "./scripts/test-ios.sh"
+                }
+                """,
+            summary: "./scripts/test-ios.sh", tool: "Bash", callID: "toolu_03BashTests"
+        ),
+        at: "2026-08-23T09:15:44.120Z"
+    )
+
+    static let failingResult = TimelineItem(
+        id: "15220#0", kind: .toolResult, status: .complete,
+        body: .init(
+            text: """
+                error: no iPhone simulator device type found. Install an iOS platform:
+                       xcodebuild -downloadPlatform iOS
+                ** TEST FAILED **
+                """,
+            tool: "Bash", callID: "toolu_03BashTests", isError: true
+        ),
+        at: "2026-08-23T09:16:02.470Z"
+    )
+
+    static let prompt = TimelineItem(
+        id: "15990#0", kind: .prompt, status: .complete,
+        body: .init(text: "Allow Bash to run `git push origin screen-s5`?"),
+        at: "2026-08-23T09:16:10.000Z"
+    )
+
+    /// A kind this build has never heard of, from a newer Mac. It must render as *something*.
+    static let unknown = TimelineItem(
+        id: "16410#0", kind: .unknown, status: .unknown,
+        body: .init(text: "{\"type\":\"checkpoint\",\"label\":\"pre-merge\",\"files\":41}"),
+        at: "2026-08-23T09:16:31.900Z"
+    )
+
+    /// A call whose result has not arrived — the tool is still running, or its output fell the
+    /// other side of a page boundary.
+    static let unansweredCall = TimelineItem(
+        id: "16880#0", kind: .toolCall, status: .complete,
+        body: .init(
+            text: "{\n  \"command\": \"./scripts/build.sh\"\n}",
+            summary: "./scripts/build.sh", tool: "Bash", callID: "toolu_04BashBuild"
+        ),
+        at: "2026-08-23T09:16:40.000Z"
+    )
+
+    /// A tool call the Mac sent no summary for, whose pretty-printed body opens on a bare `{`.
+    static let callWithoutSummary = TimelineItem(
+        id: "17220#0", kind: .toolCall, status: .complete,
+        body: .init(
+            text: "{\n  \"pattern\": \"TimelineFeed\",\n  \"path\": \"Sources\"\n}",
+            tool: "Grep", callID: "toolu_05Grep"
+        ),
+        at: "2026-08-23T09:16:50.000Z"
+    )
+
+    // MARK: JSON bodies — real records, for the tree
+
+    /// A real `AskUserQuestion` input, pretty-printed the way `ClaudeTimelineMapper.pretty`
+    /// sends it (`.sortedKeys`). Taken from
+    /// `~/.claude/projects/-Users-nate/8261151b-…jsonl`.
+    ///
+    /// **`summary` is nil, and that is not laziness in the fixture.** `ToolInputSummary`'s
+    /// preview table looks for `command`, `file_path`, `path`, `pattern`, `query`, `url`,
+    /// `prompt` or `description` at the TOP level, and this input has one key: `questions`. So
+    /// the Mac sends no preview, `TimelineStyle.commandLine` falls through to the first line of
+    /// the body that is not a bare delimiter — `"questions": [` — and the row reads as JSON
+    /// punctuation. This is the item that prompted the tree.
+    static let askUserQuestionCall = TimelineItem(
+        id: "31402#1", kind: .toolCall, status: .complete,
+        body: .init(
+            text: """
+                {
+                  "questions": [
+                    {
+                      "header": "Lifecycle",
+                      "multiSelect": false,
+                      "options": [
+                        {
+                          "description": "TranscriptReady fires → assemble context → run workflows → produce drafts/reminders/notes. Single trigger, single code path. Everything you described explicitly, nothing more. Fastest to something you actually use daily.",
+                          "label": "Post-meeting only (Recommended)"
+                        },
+                        {
+                          "description": "Adds a scheduler that watches the calendar and produces a pre-meeting brief (who they are, recent mail/Slack, last meeting's open action items) ahead of each meeting. Doubles the trigger surface — needs a scheduler, not just an event listener — but pre-brief is where Contio claims the real value is.",
+                          "label": "Pre + post lifecycle"
+                        },
+                        {
+                          "description": "Post-meeting workflows plus non-meeting triggers — inbound email, Slack mention, a reminder coming due. Makes it a general personal automation engine that happens to be meeting-aware, rather than a meeting system.",
+                          "label": "Post-meeting + ambient"
+                        }
+                      ],
+                      "question": "Which part of the meeting lifecycle should this cover?"
+                    }
+                  ]
+                }
+                """,
+            tool: "AskUserQuestion", callID: "toolu_01AskLifecycle"
+        ),
+        at: "2026-08-22T11:04:18.220Z"
+    )
+
+    /// The same input as it arrives when the Mac cut it: mid-`description`, mid-string,
+    /// mid-word. **This is the case the fallback exists for** — it is not parseable JSON and
+    /// never will be, so the block must show the text and say what was dropped.
+    static let askUserQuestionTruncated = TimelineItem(
+        id: "31402#2", kind: .toolCall, status: .complete,
+        body: .init(
+            text: """
+                {
+                  "questions": [
+                    {
+                      "header": "Lifecycle",
+                      "multiSelect": false,
+                      "options": [
+                        {
+                          "description": "TranscriptReady fires → assemble context → run workflows → produce drafts/reminders/notes. Single trigger, single code path. Everything you described explicitly, nothing more. Fastest to something you actually use daily.",
+                          "label": "Post-meeting only (Recommended)"
+                        },
+                        {
+                          "description": "Adds a scheduler that watches the calendar and produces a pre-meeting brief (who they are, recent mail/Slack, last meeting's open action items) ahead of each meeting. Doubles the trigger sur
+                """,
+            tool: "AskUserQuestion", callID: "toolu_02AskCut", truncatedBytes: 573
+        ),
+        at: "2026-08-22T11:06:02.910Z"
+    )
+
+    /// An array of objects, nested five deep, with real integers and an array of numbers in
+    /// it. A real `mcp__claude-in-chrome__browser_batch` call — an MCP tool, so its name
+    /// arrives namespaced and its input looks nothing like a `Bash` command line.
+    static let browserBatchCall = TimelineItem(
+        id: "33110#0", kind: .toolCall, status: .complete,
+        body: .init(
+            text: """
+                {
+                  "actions": [
+                    {
+                      "input": {
+                        "action": "left_click",
+                        "coordinate": [
+                          600,
+                          114
+                        ],
+                        "tabId": 576557143
+                      },
+                      "name": "computer"
+                    },
+                    {
+                      "input": {
+                        "action": "type",
+                        "tabId": 576557143,
+                        "text": "agreement"
+                      },
+                      "name": "computer"
+                    },
+                    {
+                      "input": {
+                        "action": "wait",
+                        "duration": 6,
+                        "tabId": 576557143
+                      },
+                      "name": "computer"
+                    },
+                    {
+                      "input": {
+                        "action": "screenshot",
+                        "tabId": 576557143
+                      },
+                      "name": "computer"
+                    }
+                  ]
+                }
+                """,
+            tool: "mcp__claude-in-chrome__browser_batch",
+            callID: "toolu_01F4eQkYZ79S4T6TRHuejgo5"
+        ),
+        at: "2026-08-22T11:07:41.030Z"
+    )
+
+    /// A tool RESULT that is JSON — the shape an async `Agent` dispatch answers with. Results
+    /// are usually `ls` output or a stack trace; this is the minority that is a document, and
+    /// it is the reason the tree is offered on the output panel too and not only on the input.
+    static let agentLaunchResult = TimelineItem(
+        id: "33940#0", kind: .toolResult, status: .complete,
+        body: .init(
+            text: """
+                {
+                  "agentId": "aacde7ffb946715f8",
+                  "canReadOutputFile": true,
+                  "description": "Contio.ai public web presence",
+                  "isAsync": true,
+                  "outputFile": "/private/tmp/claude-501/-Users-nate/8261151b-4ced-40a8-9082-5dc558ee55e2/tasks/aacde7ffb946715f8.output",
+                  "resolvedModel": "claude-opus-5[1m]",
+                  "status": "async_launched"
+                }
+                """,
+            tool: "Agent", callID: "toolu_014eALeS8w1k7jd7atJQnHJB"
+        ),
+        at: "2026-08-22T11:07:41.660Z"
+    )
+
+    // MARK: Markdown, as the agents really write it
+
+    /// **Four real assistant messages, off this machine's own transcripts**, one per shape the
+    /// renderer has to survive. Not invented: a survey of 7,944 assistant text blocks across
+    /// 301 `.jsonl` files is what said which four shapes matter, and these are drawn from that
+    /// same corpus verbatim — `#"""…"""#` so not one backtick or asterisk is escaped away by
+    /// the fixture that is supposed to contain them.
+    ///
+    /// Shared by `TimelineMarkdownTests` and by the offscreen render harness, for the reason
+    /// `conversation` is: what is asserted and what is looked at must be the same text.
+    static var markdownConversation: [TimelineItem] {
+        [assistantHeadingAndList, assistantFencedCode,
+         assistantInlineCodeAndBold, assistantLongParagraph]
+    }
+
+    /// A heading, a bulleted list, bold, inline code and a link-free tail — the single most
+    /// common shape a real answer takes. Verbatim from a flight-deck transcript.
+    static let assistantHeadingAndList = TimelineItem(
+        id: "10930#1", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                Done — merged and verified.
+
+                ## Result
+
+                **`feat/session-status-indicators` is merged into `master`.**
+                - Merge commit `749b242` (`--no-ff`), no conflicts — `docs/BUILD.md` auto-merged, 25 files, +3563 lines.
+                - **All tests pass** against the new master base: `All tests passed` — **146 tests, 0 failures, 1 pre-existing skip**. So the two master commits it hadn't seen (the "Flight Deck" rename + app icon) didn't break anything.
+
+                I skipped the GUI smoke suite (it steals focus for ~40s and reads your keystrokes as failures) — the session had already reported smoke 9/9 on this exact tree, and the unit build+run confirms it still compiles and passes post-merge.
+
+                ## Two loose ends the session flagged, still open
+                - **Full-row hover shortfall** — the close-button reveal only triggers over the row's content, not the title→icon gap. Deliberately left that way (full-row hover broke rename 4/5 runs); logged in `docs/FOLLOWUPS.md`.
+                - **Repo hazard worth acting on:** `CLAUDE.md`'s qartez-mutator guidance is unsafe in worktrees — the mutators write to the *parent* checkout regardless of cwd, and it caused a subagent to edit another session's tree. Might be worth a note/guard in `CLAUDE.md` before the next worktree run.
+
+                Nothing to push unless you want it on the remote — want me to `git push`, or leave master local?
+                """#),
+        at: "2026-08-11T23:08:11.708Z"
+    )
+
+    /// A fenced block with no info string, between two paragraphs, followed by a bulleted list.
+    /// 4.1% of real assistant messages carry one of these, and every one of them renders as
+    /// three literal backticks without a parser.
+    static let assistantFencedCode = TimelineItem(
+        id: "11210#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                Merged. `master` is at `dfc54bc`, fast-forward, and 370 tests pass on it.
+
+                ```
+                master  dfc54bc  perf: cut main-thread file work and idle timer wakeups
+                        c6b9151  fix: submit a pending prompt draft before injecting /rename
+                ```
+
+                The checkout is back on `master`, so any other session sharing it is where it expects to be.
+
+                Two loose ends:
+
+                - **`perf/main-thread-and-wakeups` still exists**, now fully merged. `git branch -d perf/main-thread-and-wakeups` cleans it up — I left it since you have four other feature branches around and I don't know which you keep deliberately.
+                - **`.claude/` is still untracked**, as before. Offer stands to gitignore it.
+                """#),
+        at: "2026-08-13T08:58:53.520Z"
+    )
+
+    /// One paragraph, five code spans and one bold run — the 51.6%/36.5% case, and the only
+    /// shape `AttributedString(markdown:)` would have handled.
+    static let assistantInlineCodeAndBold = TimelineItem(
+        id: "11480#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                Confirmed — these are `NSAccessibility` overrides, and AX calls are **synchronous on the main thread**. Note `accessibilityNumberOfCharacters()` calls `content.count` (Swift `String.count` is O(n) grapheme walking, not O(1)), and `accessibilityLine(for:)` does `prefix(index)` + `components(separatedBy:)`. Let me measure these at realistic scrollback sizes.
+                """#),
+        at: "2026-08-12T18:52:16.846Z"
+    )
+
+    /// A single long paragraph with one bold run and one code span, and no block structure at
+    /// all. The row's height clamp has to look deliberate on this as well as on the ones above.
+    static let assistantLongParagraph = TimelineItem(
+        id: "11740#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                The fix wave is running. Worth stating plainly why the Critical is interesting: **every task's tests passed, and the bug is invisible to all of them.** Task 4 modelled the account migration on the two that came before it, and those are genuinely safe to re-run — their output carries no identity that another file references. Accounts are the first migration whose output is pointed at by `sessions.json`, and no single task's brief owned the question "does the migrated blob actually reach disk." Only a whole-branch view asks that.
+                """#),
+        at: "2026-08-20T03:05:05.173Z"
+    )
+
+    /// A real four-sentence answer — bold, inline code, one paragraph — off
+    /// `~/.claude/projects/-Users-nate/ed0a7d6a-…jsonl`. **The median case, and the one the
+    /// clamp was hurting most**: 4 wrapped lines against a 14-line clamp, so nothing was ever
+    /// cut, and the row still carried a chevron into a screen with the identical text on it.
+    static let assistantShortReply = TimelineItem(
+        id: "11980#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                **Found the loop**: `loginwindow` has logged **154,072** "Unable to get PID for context ... status -600" errors in 6 hours (~7/sec), and WindowServer + syspolicyd are each burning ~45% CPU. Let me find when this started and what triggered it.
+                """#),
+        at: "2026-08-06T15:44:07.934Z"
+    )
+
+    /// **The ceiling's two sides, one line apart, both real.** These are the pair the More link
+    /// is argued from: `assistantJustUnderTheCeiling` measures 119 lines in the row's
+    /// 42-character column and `assistantJustOverTheCeiling` 134, against a ceiling of 120. The
+    /// first must draw whole with no link at all; the second must cut and offer one.
+    ///
+    /// Verbatim from `~/.claude/projects/-Users-nate/1a9f4e0b-…jsonl`, one conversation, half an
+    /// hour apart — a boundary chosen against invented text is a boundary nobody has seen.
+    static let assistantJustUnderTheCeiling = TimelineItem(
+        id: "12480#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                Everything is in **`~/Downloads/li-video/master/`**.
+
+                ## Corrections to what I told you earlier
+
+                Your source changed three of my conclusions, and I'd rather flag them than quietly move on:
+
+                1. **The source is 720×1280, not 1080p.** So "upload 1080×1920 to unlock a 1080p rung" doesn't apply — there's no 1080p detail to unlock.
+                2. **LinkedIn's video transcode was far less destructive than I claimed.** Measured against your actual source: **VMAF 86.7, SSIM 0.98, PSNR 40.6 dB.** I called it "bitrate-starved" off the 445 kbps number alone; that was the wrong read. Your footage is soft, and soft footage compresses efficiently.
+                3. **"Denoise before upload" was wrong for this file.** It's a clean HEVC original with the iPhone's NR already applied — room tone measured **−87 dB**. Denoising would only soften it. I've made that opt-in rather than default in the script.
+
+                ## What held up
+
+                The audio diagnosis, completely — and now proven rather than inferred. Your source measures **−37.35 LUFS**; LinkedIn delivered **−37.32**. They applied *zero* loudness normalization. That was a capture problem end to end, and it's the entire win here.
+
+                ## The files
+
+                | File | Video | Audio | Size |
+                |---|---|---|---|
+                | **01_faithful_hevc** | HEVC **stream-copied — bit-identical** | fixed | 12M |
+                | **02_upload_720p** | H.264 CRF 16, no grade — **VMAF 96.7** | fixed | 10M |
+                | **03_upload_720p_graded** | + backlight grade | fixed | 16M |
+                | **04_upload_1080p_graded** | upscaled 1080×1920 | fixed | 24M |
+
+                All four: **−14.59 LUFS / −1.50 dBTP / LRA 3.6.** `compare_grade.jpg` shows source vs graded.
+
+                Two notes on the numbers. **VMAF 85 on the graded version isn't a quality drop** — VMAF measures fidelity to the ungraded source, and the grade deliberately changes the image, so it scores itself down. Ignore it there. And **LRA 3.6 vs your source's 8.8** is intentional: reaching −14 LUFS from −37 needs 33 dB of gain, which requires real compression. LRA 3.6 is normal for spoken word (broadcast speech targets 4–6); most of that original 8.8 was pauses between phrases, not expressive dynamics.
+
+                ## What I'd do
+
+                **Use 03 for anything new.** The grade is subtle and it fixes the backlight, which is a genuine flaw in the original.
+
+                **File 04 is an experiment, not a recommendation.** The theory is that uploading 1080p lands you on a higher rung of LinkedIn's bitrate ladder, so their CRF 28 pass gets more bits even though no real detail was added. That's a known tactic on resolution-keyed ladders, but I can't verify it without a test upload — and I'm not going to publish anything to your account. Worth trying on a future post if you're curious.
+
+                **On reposting this one:** LinkedIn won't let you swap the video on an existing post, so re-uploading means a new post and losing the 48 reactions and 6 reposts. Given the video was already at VMAF 86.7, the only real gain is the audio. That's a big gain — but it's your call whether it beats the engagement.
+
+                ## Script
+
+                `~/bin/li-master`, rewritten with corrected defaults (native res, no denoise, no grade) and tested against your file:
+
+                ```bash
+                li-master input.mov                    # faithful
+                li-master --grade input.mov            # + backlight lift
+                li-master --grade --1080 input.mov     # + tier experiment
+                li-master --denoise input.mov          # only for genuinely grainy sources
+                ```
+
+                It prints source and output loudness both times so you can confirm before uploading.
+
+                One last thing, since it's the root cause: **your mic gain was ~20 dB too low at the shoot.** Everything above is recovery. A test recording checked at the top of the session costs thirty seconds and beats all of it.
+                """#),
+        at: "2026-08-20T17:58:53.016Z"
+    )
+
+    /// The other side of it — 134 lines, so a collapsed row shows 120 and the last fourteen
+    /// arrive when the reader taps More. See `assistantJustUnderTheCeiling`.
+    static let assistantJustOverTheCeiling = TimelineItem(
+        id: "12720#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                Everything is in **`~/Downloads/li-video/`**. I pulled the 720p progressive MP4 from LinkedIn's embed endpoint (not the AV1 HLS stream — the progressive rendition is the same quality and far easier to work with), then built four cleanup variants so you can A/B them.
+
+                ## Diagnosis
+
+                **The audio is the real problem, and it's not noise — it's level.**
+
+                | | Measured | Should be |
+                |---|---|---|
+                | Integrated loudness | **−37.3 LUFS** | −14 LUFS |
+                | True peak | −17.1 dBTP | −1.5 dBTP |
+                | Loudness range | 9.0 LU | ~7–11 LU |
+
+                That's **23 dB below** the social-media standard — people are cranking their phone to hear it. Meanwhile there's 17 dB of unused headroom, so the fix is nearly free.
+
+                Critically, I checked the noise floor before reaching for denoisers: energy above 8 kHz is −74 dB (no hiss) and below 300 Hz is −49 dB (no rumble). **The recording is clean.** `afftdn`/`arnndn` would only smear the speech here — I left them out deliberately.
+
+                **Video is bitrate-starved, and that's a hard ceiling.** 720×1280 @ 30fps at **445 kbps** (~0.016 bpp) — LinkedIn crushed it. No filter recovers detail that isn't there. The realistic wins are cosmetic: de-block, de-band the flat wall, and lift the shadows since you're backlit by the window. Anything more aggressive starts looking waxy.
+
+                ## The options
+
+                | File | What it does | Size |
+                |---|---|---|
+                | **A_audio-only** | Loudness fix + 80 Hz rumble filter. Video **stream-copied — bit-identical**, zero generational loss. | 2.0M |
+                | **B_audio-polished** | A + speech EQ (−2 dB mud at 250 Hz, +3 dB presence at 3 kHz), de-esser, gentle 3:1 compression. Video still untouched. | 2.0M |
+                | **C_full-720p** | B's audio + video cleanup, re-encoded at native res, CRF 19. | 5.3M |
+                | **D_full-1080p** | C, upscaled to 1080×1920 (lanczos). | 9.2M |
+                | **E_audio-loud** | Hits −14.8 LUFS for max phone-speaker punch. Video copied. | 2.0M |
+
+                Verified output: A–D land at **−15.8 LUFS / −1.45 dBTP**, E at **−14.8**.
+
+                Two honest caveats:
+
+                - **A–D land at −15.8, not the −14 I targeted.** Linear gain hit the true-peak ceiling first. That's still a perfectly good broadcast level and it preserves natural dynamics. E gets to −14.8, but only by squashing LRA from 9.0 → 3.8 — punchier on a phone speaker, noticeably flatter on headphones.
+                - **D's upscale adds no detail.** It's purely for platforms that bias toward higher-resolution uploads. If that's not a concern, C is the honest version.
+
+                `compare_face.jpg` is a side-by-side (original left, C right) — shadows lifted, shirt pattern and window frame slightly crisper. Real but modest, which is the most 445 kbps will give you.
+
+                ## My recommendation
+
+                **Ship B.** The audio fix is 95% of the perceived improvement, and it keeps your video stream bit-identical — no second-generation loss on an already-fragile encode. Reach for C only if the wall banding actually bothers you on a full-size screen.
+
+                The commands, if you want to rerun on other clips (note the two-pass `measured_*` values are specific to *this* file — re-measure with `-af loudnorm=print_format=json -f null -` for anything else):
+
+                ```bash
+                # B — audio polish, video untouched
+                LN="loudnorm=I=-14:TP=-1.5:LRA=11:measured_I=-37.32:measured_TP=-17.08:\
+                measured_LRA=9.00:measured_thresh=-49.09:linear=true"
+
+                ffmpeg -i original.mp4 -c:v copy \
+                  -af "highpass=f=85,equalizer=f=250:t=q:w=1.2:g=-2,equalizer=f=3000:t=q:w=1.4:g=3,\
+                deesser=i=0.3,acompressor=threshold=-20dB:ratio=3:attack=8:release=180:makeup=1,$LN" \
+                  -c:a aac -b:a 192k -ar 48000 out.mp4
+
+                # C — adds video cleanup
+                -vf "hqdn3d=1.5:1.2:6:6,gradfun=strength=0.9:radius=16,\
+                curves=master='0/0 0.25/0.31 0.75/0.78 1/1',eq=saturation=1.06,cas=0.4" \
+                -c:v libx264 -preset slow -crf 19 -pix_fmt yuv420p -movflags +faststart
+                ```
+
+                One thing worth flagging for next time: this was recovered from LinkedIn's re-encode, so we're cleaning up a copy. If you still have the camera original, running the same audio chain on that would beat any of these outright — and the 445 kbps video ceiling disappears entirely.
+                """#),
+        at: "2026-08-20T17:31:08.152Z"
+    )
+
+    /// A real 6,775-character answer with four `##` headings, three horizontal rules, nested
+    /// `###` sections and eleven bold runs — **201 lines** in the row's 42-character column,
+    /// past the 99th percentile of the 7,987 assistant messages on this machine, and 4,067pt
+    /// tall when nothing bounds it: six screenfuls of phone.
+    ///
+    /// **This is the body the ceiling is argued from.** Verbatim from
+    /// `~/.claude/projects/-Users-nate/8261151b-…jsonl`, because a ceiling chosen against
+    /// invented text is a number somebody picked.
+    static let assistantVeryLongAnswer = TimelineItem(
+        id: "12240#0", kind: .assistantText, status: .complete,
+        body: .init(text: #"""
+                All four agents are in. Here's the consolidated picture.
+
+                ## What Contio is
+
+                **Contio Inc.** — Boise/Eagle, Idaho. Founder/CEO Aaron Klein (founding CEO of Riskalyze → Nitrogen). ~$5.5M seed closed Dec 2024, ~10 people, public launch Jan 28 2026. Product is **MeetingOS**: a native desktop app that processes meeting audio in real time without a bot joining the call, targeted first at financial advisors. Notably, **Precept is one of their 12 named launch partners** — flagging in case that's the angle here.
+
+                ---
+
+                ## Architecture estimate
+
+                ### Client tier
+                **Tauri** (Rust shell, not Electron), shipping v0.61.0 — still pre-1.0. Universal macOS `.pkg` and Windows x64 installer from `files.contio.ai`. Inside it, a **React + Vite + TypeScript SPA** that appears to be shared across desktop, web, and iOS/Android webviews. Stack from the chunk manifest and bundle: TanStack Query, Radix UI, Tailwind, Zustand, React Router, TipTap, date-fns, lucide.
+
+                Collaboration is the interesting part: **Yjs/Yrs CRDTs** over the **Hocuspocus** wire protocol, against hosted **TipTap Collaboration Cloud**. The `YrsFFI` repo ships **Swift and Kotlin** bindings — so they built one Rust collaboration core and are targeting native mobile with it, not just webviews. Auth is **AWS Cognito** plus a custom passwordless OTP flow layered on top.
+
+                ### Backend tier
+                A **Go monolith, internal codename `rome`**, almost certainly **Gin** — `api.contio.ai` returns an exactly-18-byte `404 page not found`, which is Gin's signature rather than stdlib's 19-byte version. This is corroborated independently by leaked package paths in the OpenAPI schema keys (`rome_api_controllers_external_v1_oauth.*`), which also reveal the internal layout as `controllers/external/{v1,partner}` and confirm specs are swaggo-generated from code.
+
+                The User API and Partner API are **one deployment with two routing surfaces**, not separate services — they share error types and generic `ListResponse` shapes on the same host. Data layer is **Postgres with read replicas**: the health endpoint returns distinct `writer_pool` and `reader_pool` status. The MCP gateway is the one non-Go piece — `mcp.contio.ai` reports `x-powered-by: Express`, so Node.
+
+                They run their **own OAuth2/OIDC provider** (JWKS, authorize/token/introspect/revoke/userinfo, Dynamic Client Registration), which is a meaningful build-vs-buy choice at this size.
+
+                ### Audio / AI tier
+                **Deepgram for ASR**, consumed from Rust via a forked SDK — this is hard evidence, not inference. The speech tier is deliberately split onto **GCP**: `stt.contio.ai` → `rome-glb-prod` behind a Google load balancer fronted by **Caddy**, while everything else is AWS. The status page lists **Transcription A and B** as separate services, suggesting redundancy or dual providers.
+
+                Model hosting per the privacy policy: **AWS Bedrock, Google Vertex, and Azure Foundry**, running **Anthropic (Opus/Sonnet/Haiku), Gemini, and Deepgram**.
+
+                ### Infrastructure
+                **AWS us-east-1 is the primary plane** (account `223021964315`, leaked via a KMS ARN in response headers). ALB + CloudFront + S3 with KMS encryption; bucket `rome-workspace-prod-us-east-1`. **Four full environment tiers** — dev/beta/stage/prod — each with its own dedicated ALB. **Terraform** for IaC, including a hand-rolled custom provider for **Nango**, which brokers all third-party OAuth. Cloudflare for DNS (mostly DNS-only, not proxied). Framer for marketing, MkDocs Material for docs, self-hosted status page.
+
+                SaaS layer, essentially a complete inventory from the app's CSP: **PostHog** (analytics, feature flags, *and* error capture — they use `captureException` instead of Sentry), **Intercom**, **ProductFruits**, **Nango**, **LaunchList over SendGrid**, plus GTM/GA and a full B2B ad-retargeting suite. **No Stripe anywhere**, which fits sales-led billing rather than self-serve.
+
+                ---
+
+                ## Assessment
+
+                **The engineering maturity is well ahead of the company's size and age.** Four environment tiers, IaC with a custom provider, their own OIDC provider with DCR, idempotency keys, per-principal rate limiting, SOC 2 Type II, a hosted MCP server with proper protected-resource metadata, and no exposed source maps — from ~10 people, ~6 months post-launch. That's a small senior team (principal engineers ex-Intuit, ex-Duetto, ex-Kount; no CTO, no job postings anywhere, hiring purely by founder network) making deliberate infrastructure choices rather than defaults.
+
+                **The Partner API is roughly twice the User API** — 124 operations vs 59 — and contains an entire layer the marketing site never mentions: toolkits with versioning and installations, workflow runs and steps, automations, sessions with turns, partner IdP with SSO. Read plainly, the meeting product is the wedge and the actual bet is an embeddable agent-execution platform.
+
+                **Rough edges worth knowing**: specs are **Swagger 2.0** in 2026 (no `oneOf`/`anyOf`; 184 partner schemas will be painful to evolve), pagination is **offset-based** over a mutating corpus — their own docs warn items shift between pages under concurrent writes. Their AWS account ID is exposed on every `app` response, and the full internal topology including codenames is enumerable from certificate transparency. None of these are vulnerabilities, just more surface than intended.
+
+                ---
+
+                ## Confidence
+
+                **Hard evidence** (fetched directly): Go/Gin backend, `rome` codename and internal package layout, Postgres with read replicas, AWS/GCP split, four env tiers, Tauri + React/Vite client, Yjs/Yrs + Hocuspocus + TipTap Cloud, Deepgram via Rust, Nango + Terraform, Cognito, the full SaaS list, all API design details.
+
+                **Inferred but strong**: the Partner-API-as-real-product reading; Transcription A/B as redundancy.
+
+                **Genuinely unresolved**: `phoenix.contio.ai` and `vista.contio.ai` are named production services behind the ALB that return 403 — purpose unknown. I specifically checked the bundle for Arize/Phoenix/OTel strings and found only false positives, so I'm *not* claiming observability tooling. And the **model mix is contradictory**: trade press quoted Klein naming self-hosted Llama and DeepSeek, while the privacy policy names Anthropic and Gemini via Bedrock/Vertex/Foundry. These reconcile if open-weight models do STT/summarization on the GCP tier and commercial APIs do reasoning, but that's a guess — Contio has never published an architecture write-up.
+
+                One notable absence given the SOC 2 Type II claim: **no subprocessor list exists anywhere** — no trust center, no `/subprocessors`, no `/security.txt`. The privacy policy is the only vendor disclosure they've published.
+
+                Want me to turn this into a diagram of the service topology, or dig deeper into any one tier — the Partner API surface being the most substantive remaining target?
+                """#),
+        at: "2026-08-07T22:40:29.136Z"
+    )
+
+    static func session(
+        title: String = "screen-s5 — session timeline", agent: String = "claude",
+        activity: String? = "busy", waitingFor: String? = nil, subagentCount: Int = 2
+    ) -> WireSession {
+        WireSession(
+            id: UUID(), title: title, agent: agent,
+            activity: activity, waitingFor: waitingFor, subagentCount: subagentCount
+        )
+    }
+}

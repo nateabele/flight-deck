@@ -1,3 +1,4 @@
+import FleetKit
 import XCTest
 @testable import FlightDeck
 
@@ -98,6 +99,28 @@ final class ToolContextTests: XCTestCase {
     /// mean the store asked the adapter.
     private struct RelocatingAdapter: AgentAdapter {
         static let id: AgentID = .claude
+        /// Claude's answers, because this stands in for claude — the store reads both
+        /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
+        /// does not exist.
+        static let textChannel: AgentTextChannel? = ClaudeTextChannel()
+        static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
+        static let negotiatesIdentity = false
+        static let needsRuntimeStart = false
+        static let hasStatusRegistry = true
+        nonisolated static func sanitizedTitle(_ raw: String) -> String? {
+            ClaudeAdapter.sanitizedTitle(raw)
+        }
+        nonisolated static func title(fromTranscriptAt url: URL) -> String? {
+            ClaudeAdapter.title(fromTranscriptAt: url)
+        }
+        nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+            ClaudeAdapter.timelineItems(inLine: line, at: offset)
+        }
+        nonisolated static let homeMarkerFile = ClaudeAdapter.homeMarkerFile
+        nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
+            ClaudeAdapter.identity(fromHomeData: data)
+        }
+        static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
         static let pinned = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

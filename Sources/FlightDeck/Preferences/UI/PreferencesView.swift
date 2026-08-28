@@ -3,6 +3,7 @@ import SwiftUI
 struct PreferencesView: View {
     @ObservedObject var preferences: PreferencesStore
     @ObservedObject var sessions: SessionStore
+    @ObservedObject var fleet: FleetService
 
     var body: some View {
         // Bound rather than unbound, and every pane tagged: without a selection binding there
@@ -28,6 +29,11 @@ struct PreferencesView: View {
                 .tabItem { Label("Tools", systemImage: "wrench.and.screwdriver") }
                 .accessibilityIdentifier("prefs-tools")
                 .tag(PreferencesTab.tools)
+
+            DevicesSettingsTab(preferences: preferences, service: fleet)
+                .tabItem { Label("Devices", systemImage: "iphone.and.arrow.forward") }
+                .accessibilityIdentifier("prefs-devices")
+                .tag(PreferencesTab.devices)
         }
         .frame(width: 720, height: 560)
     }

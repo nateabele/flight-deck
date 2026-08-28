@@ -93,6 +93,21 @@ Log: `~/Library/Logs/flight-deck-swap.log`. Rollback is printed at the end of ev
 - `test-unit.sh` runs the app-hosted bundle in-process via `xcrun xctest` (symlinking the host
   dylib) because `xcodebuild test` would try to *launch* the app and dies with
   `DVTAssertions: Assertion failed: childPID > 0` outside a GUI login session.
+- **To run one test class, use the DOT spelling — `-XCTest FlightDeckTests.SomeClass`, never
+  `FlightDeckTests/SomeClass`.** The slash is `xcodebuild -only-testing:`'s spelling and the one
+  a hand reaches for, and under `xctest` it **runs zero tests and reports success**. Measured
+  here on the same bundle in the same second:
+
+  ```
+  -XCTest FlightDeckTests/ChoiceDialogTests    Executed 0 tests   ("Selected tests" passed)
+  -XCTest FlightDeckTests.ChoiceDialogTests    Executed 21 tests, with 0 failures
+  ```
+
+  That matters most when mutating: a mutation "verified" through the slash spelling produces no
+  failures and looks proven, when nothing ran at all. **Report the executed count beside every
+  mutation result**, and read a zero as a broken filter rather than as a clean suite. Run it the
+  way `test-unit.sh` does — the same `DYLD_FRAMEWORK_PATH` and the resolved `xcrun --find
+  xctest` binary — or the bundle fails to load for an unrelated reason.
 - **Do not loop `smoke.sh`.** It seizes the foreground for ~70s and fires key events into
   whatever holds focus, so the user's typing lands in the test and shows up as phantom
   failures. `scripts/throttle.sh` caps it at one run per 120s

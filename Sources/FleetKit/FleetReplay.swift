@@ -105,7 +105,7 @@ public enum FleetReplay {
 
     private static func key(_ event: FleetEvent) -> FoldKey? {
         switch event {
-        case .activityChanged(let id, _, _, _): return .activity(id)
+        case .activityChanged(let id, _, _, _, _): return .activity(id)
         case .renamed(let id, _, _): return .rename(id)
         case .unreadChanged(let id, _): return .unread(id)
         case .projectCollapsed(let id, _): return .collapsed(id)

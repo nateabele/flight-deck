@@ -14,4 +14,5 @@ enum PreferencesTab: Hashable, CaseIterable {
     case projects
     case shell
     case tools
+    case devices
 }

@@ -9,16 +9,32 @@ import FleetKit
 final class FleetSocketLoopbackTests: XCTestCase {
     private var server: FleetSocketServer?
     private var client: FleetClient?
+    private var relay: SlowHandshakeRelay?
 
-    override func tearDown() {
+    override func tearDown() async throws {
         client?.disconnect()
-        server?.stop()
+        if let server { try await onMain { server.stop() } }
         client = nil
         server = nil
-        super.tearDown()
+        relay?.stop()
+        relay = nil
     }
 
     private let sessionID = UUID()
+
+    /// `FleetSocketServer.start`/`stop`/`broadcast` each assert
+    /// `dispatchPrecondition(.onQueue(.main))` (see that class's doc comment) — deliberately,
+    /// so nothing touches the state those calls mutate from any queue but the one
+    /// `NWListener`/`NWConnection` deliver their own callbacks on. This class is deliberately
+    /// NOT `@MainActor` itself: its tests block with `wait(for:)`, and blocking the main
+    /// actor's own executor would starve the very callbacks the wait is waiting on — the same
+    /// hazard documented on the `@MainActor` test classes that use `await fulfillment(of:)`
+    /// instead. Hopping only the one call that needs to prove it is on `.main`, rather than
+    /// the whole test method, keeps both promises intact.
+    @MainActor
+    private func onMain<T>(_ body: @MainActor () async throws -> T) async throws -> T {
+        try await body()
+    }
 
     private func fleet(_ title: String) -> FleetSnapshot {
         FleetSnapshot(projects: [
@@ -32,14 +48,14 @@ final class FleetSocketLoopbackTests: XCTestCase {
     @discardableResult
     private func startServer(
         key: FleetDeviceKey,
-        hello: @escaping (UUID, Int) -> [ServerFrame],
-        command: @escaping (UUID, Int, FleetCommand) -> ServerFrame = { _, cid, _ in .ack(cid: cid) }
+        hello: @escaping (FleetAttachment, Int) -> [ServerFrame],
+        command: @escaping (FleetAttachment, Int, FleetCommand) -> ServerFrame = { _, cid, _ in .ack(cid: cid) }
     ) async throws -> NWEndpoint.Port {
         let server = FleetSocketServer()
         server.onHello = hello
         server.onCommand = command
         self.server = server
-        return try await server.start(keys: [key], port: nil)
+        return try await onMain { try await server.start(keys: [key], port: nil) }
     }
 
     private func connect(key: FleetDeviceKey, port: NWEndpoint.Port, lastSeq: Int = 0) -> FleetClient {
@@ -82,9 +98,11 @@ final class FleetSocketLoopbackTests: XCTestCase {
         // Broadcast only after the client is attached, or the frame has nowhere to go —
         // the server holds no queue for a client that has not connected yet.
         let attached = expectation(description: "attached")
-        server?.onAttachedCountChanged = { if $0 == 1 { attached.fulfill() } }
+        server?.onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
         wait(for: [attached], timeout: 10)
-        server?.broadcast(.event(seq: 2, .renamed(id: sessionID, title: "two", origin: .user)))
+        if let server {
+            try await onMain { server.broadcast(.event(seq: 2, .renamed(id: sessionID, title: "two", origin: .user))) }
+        }
         wait(for: [sawEvent], timeout: 10)
     }
 
@@ -152,7 +170,7 @@ final class FleetSocketLoopbackTests: XCTestCase {
             return []
         }
         self.server = server
-        let port = try await server.start(keys: [], port: nil)
+        let port = try await onMain { try await server.start(keys: [], port: nil) }
 
         let client = FleetClient(key: .mint())
         self.client = client
@@ -174,13 +192,13 @@ final class FleetSocketLoopbackTests: XCTestCase {
         })
         let client = connect(key: key, port: port)
         let attached = expectation(description: "attached")
-        server?.onAttachedCountChanged = { if $0 == 1 { attached.fulfill() } }
+        server?.onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
         wait(for: [attached], timeout: 10)
 
         var endings = 0
         client.onDisconnect = { _ in endings += 1 }
         // Drop the socket from the far end, which is what a Mac going away looks like.
-        server?.stop()
+        if let server { try await onMain { server.stop() } }
 
         let settled = expectation(description: "settled")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { settled.fulfill() }
@@ -198,7 +216,7 @@ final class FleetSocketLoopbackTests: XCTestCase {
         })
         let client = connect(key: key, port: port)
         let attached = expectation(description: "attached")
-        server?.onAttachedCountChanged = { if $0 == 1 { attached.fulfill() } }
+        server?.onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
         wait(for: [attached], timeout: 10)
 
         var endings = 0
@@ -214,28 +232,130 @@ final class FleetSocketLoopbackTests: XCTestCase {
     /// A peer that completes a handshake and then says nothing must not hold a slot open
     /// forever — that is a resource leak reachable by anyone holding a revoked-but-not-yet-
     /// deleted key.
+    ///
+    /// The peer speaks WebSocket for real, and that is load-bearing rather than incidental:
+    /// `authDeadline` is armed from the connection's `.ready`, which on this listener means
+    /// the TLS-PSK handshake *and* the WebSocket upgrade have both finished. The raw-TLS
+    /// connection this test used to open never reached `.ready` at all, so after the deadline
+    /// split it would have been proving `handshakeDeadline` under `authDeadline`'s name.
+    ///
+    /// `handshakeDeadline` is pinned long for the same reason, so the only thing that can
+    /// close this connection is silence after `.ready` — a single deadline of any length, or
+    /// one still armed at `accept`, would pass a version of this test that did not say so.
     func testASilentClientIsDroppedAfterTheAuthDeadline() async throws {
         let key = FleetDeviceKey.mint()
         let server = FleetSocketServer()
         server.authDeadline = 0.5
-        server.onHello = { _, _ in [] }
+        server.handshakeDeadline = 60
+        server.onHello = { _, _ in XCTFail("the silent peer must never have said hello"); return [] }
         self.server = server
-        let port = try await server.start(keys: [key], port: nil)
+        let port = try await onMain { try await server.start(keys: [key], port: nil) }
 
-        // A raw TLS connection that never speaks WebSocket-frames-with-a-hello, so it never
-        // reaches `attached` and `onAttachedCountChanged` never fires for it — that callback
-        // only reports peers the server actually let in. The proof the server dropped it is
-        // a pending `receiveMessage` completing: Network.framework does not surface a peer's
-        // close through `stateUpdateHandler` on this side, only through a receive that was
-        // already waiting when the drop happened.
-        let dropped = expectation(description: "dropped")
+        // Hand-rolled WebSocket, the same two building blocks `FleetSocket` uses internally,
+        // because `FleetClient` cannot be told to stay quiet: it sends `hello` from `.ready`.
+        // It never reaches `attached`, so `onAttachedSlotsChanged` never fires for it — that
+        // callback only reports peers the server actually let in. The proof the server dropped
+        // it is a pending `receiveMessage` completing: Network.framework does not surface a
+        // peer's close through `stateUpdateHandler` on this side, only through a receive that
+        // was already waiting when the drop happened.
+        let options = NWProtocolWebSocket.Options()
+        options.autoReplyPing = true
+        let parameters = FleetTLS.clientParameters(key: key)
+        parameters.defaultProtocolStack.applicationProtocols.insert(options, at: 0)
         let silent = NWConnection(
-            host: "127.0.0.1", port: port, using: FleetTLS.clientParameters(key: key)
+            to: .url(URL(string: "wss://127.0.0.1:\(port.rawValue)/")!), using: parameters
         )
+
+        let dropped = expectation(description: "dropped")
         silent.receiveMessage { _, _, _, _ in dropped.fulfill() }
         silent.start(queue: .main)
         wait(for: [dropped], timeout: 10)
         silent.cancel()
+    }
+
+    /// The regression the deadline split exists for, and it was the Mac's fault rather than
+    /// the phone's: `accept` fires when TCP connects, so an `authDeadline` armed there is spent
+    /// on a TLS-PSK handshake and a WebSocket upgrade the peer cannot hurry and during which it
+    /// has no socket to say `hello` on. The twin of this on the pairing listener was measured
+    /// against a booted simulator as `flow:failed_connect @5.273s` — five seconds of handshake
+    /// against a five-second deadline. Here it is worse to diagnose, not better: a phone that
+    /// pairs fine and then cannot attach, with nothing logged at either end, because the Mac
+    /// just hangs up.
+    ///
+    /// The handshake is made slow by `SlowHandshakeRelay` rather than by the client, because no
+    /// client can do it: `NWConnection` starts its handshake the instant its transport is up.
+    /// The relay's TCP connection reaches the Mac at t=0 and its first TLS byte four
+    /// `authDeadline`s later, which is the exact shape of the field failure and deterministic
+    /// to the millisecond rather than dependent on a slow link.
+    ///
+    /// It attaches for real rather than asserting "was not dropped": `FleetClient` sends
+    /// `hello` from `.ready` with nothing in between, which is what the short deadline is
+    /// entitled to expect of it and what makes five seconds *after* `.ready` generous.
+    func testAPeerWhoseHandshakeOutlastsTheAuthDeadlineStillAttaches() async throws {
+        let key = FleetDeviceKey.mint()
+        let server = FleetSocketServer()
+        server.authDeadline = 0.5
+        server.onHello = { _, _ in [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)] }
+        self.server = server
+        let port = try await onMain { try await server.start(keys: [key], port: nil) }
+
+        let relay = SlowHandshakeRelay(upstream: port, holdingTheFirstBytesFor: 2)
+        self.relay = relay
+        let relayPort = try await relay.start()
+
+        let attached = expectation(description: "attached")
+        server.onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
+
+        var handshakeTook: TimeInterval = 0
+        let dialled = Date()
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onReady = { handshakeTook = Date().timeIntervalSince(dialled) }
+        client.onDisconnect = { _ in
+            XCTFail("the Mac hung up on a peer that was still handshaking")
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: relayPort), lastSeq: 0)
+
+        wait(for: [attached], timeout: 15)
+        // Without this the test could pass having proved nothing: a relay that failed to hold
+        // the bytes produces an ordinary fast handshake, which the unfixed server attaches
+        // perfectly well.
+        XCTAssertGreaterThan(
+            handshakeTook, server.authDeadline,
+            "the handshake was not actually held past the deadline it has to outlast"
+        )
+    }
+
+    /// The hole the split would otherwise open. If `authDeadline` only starts at `.ready`, a
+    /// peer that opens a TCP connection and never sends a byte of TLS reaches `.ready` never —
+    /// so with nothing armed at `accept` it would hold one of the sixteen pending slots until
+    /// the app quit, which is exactly the leak `authDeadline` was added to close.
+    ///
+    /// `authDeadline` is pinned long so the only thing that can close this connection is the
+    /// accept-time bound. Plain TCP with no TLS options at all, because that is the peer shape
+    /// in question: it completes a connection the Mac accepts and then does nothing that a
+    /// handshake could ever finish.
+    func testAPeerThatOpensASocketAndNeverHandshakesIsDropped() async throws {
+        let key = FleetDeviceKey.mint()
+        let server = FleetSocketServer()
+        server.handshakeDeadline = 0.5
+        server.authDeadline = 60
+        server.onHello = { _, _ in [] }
+        self.server = server
+        let port = try await onMain { try await server.start(keys: [key], port: nil) }
+
+        let dropped = expectation(description: "the un-handshaken socket was dropped")
+        // A close arrives as EOF or as a reset depending on how far the stack got, and either
+        // one can also surface on the state handler; over-fulfilment is not a failure here.
+        dropped.assertForOverFulfill = false
+        let squatter = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+        squatter.start(queue: .main)
+        squatter.receive(minimumIncompleteLength: 1, maximumLength: 1) { _, _, isComplete, error in
+            if isComplete || error != nil { dropped.fulfill() }
+        }
+        defer { squatter.cancel() }
+
+        wait(for: [dropped], timeout: 10)
     }
 
     /// A connection that completed its handshake but has not said `hello` yet is not
@@ -245,10 +365,12 @@ final class FleetSocketLoopbackTests: XCTestCase {
     func testStoppingCancelsAConnectionThatNeverAttached() async throws {
         let key = FleetDeviceKey.mint()
         let server = FleetSocketServer()
-        server.authDeadline = 60          // long, so the deadline cannot be what closes it
+        // Both long, so no deadline can be what closes it — `stop()` has to be.
+        server.authDeadline = 60
+        server.handshakeDeadline = 60
         server.onHello = { _, _ in [] }
         self.server = server
-        let port = try await server.start(keys: [key], port: nil)
+        let port = try await onMain { try await server.start(keys: [key], port: nil) }
 
         let silent = NWConnection(
             host: "127.0.0.1", port: port, using: FleetTLS.clientParameters(key: key)
@@ -262,7 +384,7 @@ final class FleetSocketLoopbackTests: XCTestCase {
         silent.receiveMessage { _, _, isComplete, error in
             if isComplete || error != nil { closed.fulfill() }
         }
-        server.stop()
+        try await onMain { server.stop() }
         wait(for: [closed], timeout: 10)
         silent.cancel()
     }
@@ -314,5 +436,136 @@ final class FleetSocketLoopbackTests: XCTestCase {
         connection.start(queue: .main)
         wait(for: [closed], timeout: 10)
         connection.cancel()
+    }
+
+    /// `cancelConnections()` — walked on every listener restart, which every arm, expiry and
+    /// revocation performs — must fire `onAttachedSlotsChanged` with an empty set for a
+    /// still-attached phone it is dropping, not skip the callback entirely. Skipping it left a
+    /// stale "Connected" badge on screen until the next successful attach happened to
+    /// overwrite the set, which on a restart with nothing yet reconnected never comes.
+    func testAListenerRestartFiresAnEmptySlotSetForAStillAttachedClient() async throws {
+        let key = FleetDeviceKey.mint()
+        let port = try await startServer(key: key, hello: { _, _ in
+            [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)]
+        })
+        let client = connect(key: key, port: port)
+        let attached = expectation(description: "attached")
+        server?.onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
+        wait(for: [attached], timeout: 10)
+
+        let clearedWithEmptySet = expectation(description: "cleared")
+        var firedWith: Set<UUID>?
+        server?.onAttachedSlotsChanged = { slots in
+            firedWith = slots
+            clearedWithEmptySet.fulfill()
+        }
+        // A restart on the same port — the same operation `reloadKeys()` performs on every
+        // arm, expiry and revocation.
+        if let server {
+            _ = try await onMain { try await server.start(keys: [key], port: port) }
+        }
+        wait(for: [clearedWithEmptySet], timeout: 10)
+        XCTAssertEqual(
+            firedWith, Set<UUID>(),
+            "a listener restart must fire the drop, not skip it because nothing sent a frame to notice"
+        )
+
+        client.disconnect()
+    }
+
+    // MARK: The receive cap
+
+    /// Builds a `page` frame whose JSON is `bytes` long, near enough. One item's `text` is the
+    /// only field big enough to steer, and JSON escaping does not touch `a` — which is the
+    /// point for steering the size and the reason this cannot speak to escaping inflation.
+    /// `testAWorstCasePageClearsTheCapEvenAfterEscaping` covers that separately.
+    private func page(ofRoughly bytes: Int) -> ServerFrame {
+        .page(cid: 1, TimelinePage(
+            session: sessionID,
+            items: [TimelineItem(id: "0#0", kind: .assistantText, status: .complete,
+                                 body: .init(text: String(repeating: "a", count: bytes)))],
+            start: 0, end: bytes, hasMore: false, reset: false
+        ))
+    }
+
+    /// The receive cap, tested through the socket rather than by reading the option back.
+    ///
+    /// **Reading it back does not work and cannot be made to:**
+    /// `NWParameters.defaultProtocolStack.applicationProtocols` hands out a fresh *copy* of
+    /// each options object on every access — `first === first` is false — and the copy carries
+    /// none of what was set on the original. Measured on this SDK: after setting
+    /// `autoReplyPing = true` and `maximumMessageSize = 4_194_304`, the object read back from
+    /// the stack reports `false` and `0`. An assertion on that value fails against correct
+    /// code and passes against nothing, so the only honest check is what the socket does.
+    ///
+    /// What it does, measured: the oversize message is never delivered and the connection
+    /// ends. Without the cap the same frame arrives whole, which is the unbounded allocation
+    /// on a phone that setting it exists to prevent (`ws_options.h`: "A maximum message size
+    /// of 0 means there is no receive limit").
+    func testAFrameAboveTheReceiveCapIsRefusedRatherThanBuffered() async throws {
+        let key = FleetDeviceKey.mint()
+        let port = try await startServer(key: key, hello: { _, _ in
+            [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)]
+        })
+
+        let arrived = expectation(description: "the oversize page reached application code")
+        arrived.isInverted = true
+        let ended = expectation(description: "the connection ended")
+        let client = connect(key: key, port: port)
+        client.onFrame = { if case .page = $0 { arrived.fulfill() } }
+        client.onDisconnect = { _ in ended.fulfill() }
+
+        let attached = expectation(description: "attached")
+        server?.onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
+        wait(for: [attached], timeout: 10)
+        if let server {
+            let frame = page(ofRoughly: TimelineLimits.maximumMessageSize + 65_536)
+            try await onMain { server.broadcast(frame) }
+        }
+        // The inverted expectation is waited on separately and briefly: once the connection
+        // has ended there is nothing left to deliver the frame, and an inverted expectation
+        // always burns its whole timeout.
+        wait(for: [ended], timeout: 10)
+        wait(for: [arrived], timeout: 1)
+    }
+
+    /// The headroom, which is arithmetic over two constants and never needed the accessor
+    /// that made the rest of this untestable in-process. `maxPageBytes` is a budget of *source*
+    /// bytes; what crosses the wire is that text JSON-escaped, and a body of control characters
+    /// inflates roughly six-fold (`\u0000`). The socket tests below cannot see this — they
+    /// steer the frame size with `a`, which escapes to itself — so a cap of 200_000 would pass
+    /// both of them while refusing a legitimate worst-case page.
+    func testAWorstCasePageClearsTheCapEvenAfterEscaping() {
+        XCTAssertGreaterThan(
+            TimelineLimits.maximumMessageSize, TimelineLimits.maxPageBytes * 2,
+            "the cap must clear a worst-case page after JSON escaping"
+        )
+    }
+
+    /// The other side of the same number, because a cap that refuses a legitimate page would
+    /// pass the test above perfectly. A worst-case page — `maxPageBytes` of body, before JSON
+    /// escaping has had its way with it — has to cross this socket intact.
+    func testAWorstCasePageIsUnderTheReceiveCap() async throws {
+        let key = FleetDeviceKey.mint()
+        let port = try await startServer(key: key, hello: { _, _ in
+            [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)]
+        })
+
+        let arrived = expectation(description: "the page reached application code")
+        let client = connect(key: key, port: port)
+        client.onFrame = { frame in
+            guard case .page(1, let page) = frame else { return }
+            XCTAssertEqual(page.items.first?.body.text.count, TimelineLimits.maxPageBytes)
+            arrived.fulfill()
+        }
+
+        let attached = expectation(description: "attached")
+        server?.onAttachedSlotsChanged = { if $0.count == 1 { attached.fulfill() } }
+        wait(for: [attached], timeout: 10)
+        if let server {
+            let frame = page(ofRoughly: TimelineLimits.maxPageBytes)
+            try await onMain { server.broadcast(frame) }
+        }
+        wait(for: [arrived], timeout: 10)
     }
 }

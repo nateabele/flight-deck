@@ -343,7 +343,7 @@ final class SessionPersistenceTests: XCTestCase {
 
         store.applyRegistryForTesting([
             a.id: SessionStatus(activity: .busy),
-            b.id: SessionStatus(activity: .shell),
+            b.id: SessionStatus(activity: .waiting),
         ])
         // `applyRegistryForTesting` routes through `commitStatuses`, which already calls
         // `persist()` itself on a real transition — the line below is not forcing a save,
@@ -352,7 +352,7 @@ final class SessionPersistenceTests: XCTestCase {
 
         let stored = persistence.stored?.sessions ?? []
         XCTAssertEqual(stored.first(where: { $0.id == a.id })?.activity, "busy")
-        XCTAssertEqual(stored.first(where: { $0.id == b.id })?.activity, "shell")
+        XCTAssertEqual(stored.first(where: { $0.id == b.id })?.activity, "waiting")
     }
 
     /// A tab with no `claude` registered records no activity. Absent is not the same as
@@ -487,6 +487,29 @@ final class SessionPersistenceTests: XCTestCase {
         let stored = persistence.stored?.sessions ?? []
         XCTAssertEqual(stored.first(where: { $0.id == marked.id })?.unread, true)
         XCTAssertNil(stored.first(where: { $0.id == clean.id })?.unread)
+    }
+
+    /// The write side of the round trip for `hasBackgroundWork`, mirroring
+    /// `testPersistRecordsUnreadAsTrueOrAbsent` just above. Every migration/restore test
+    /// covering this field (`BackgroundWorkLatchTests`, `SessionAutoResumeTests`) hand-builds
+    /// a `SessionSnapshot.Entry` directly rather than driving `persist()` itself, so without
+    /// this the write in `SessionStore.swift` —
+    /// `hasBackgroundWork: backgroundWorkSessions.contains($0.id) ? true : nil` — could be
+    /// deleted or inverted and every other test would stay green.
+    func testPersistRecordsHasBackgroundWorkAsTrueOrAbsent() {
+        let persistence = FakePersistence()
+        let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        let marked = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        let clean = store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
+
+        store.applyRegistry([1: .init(
+            pid: 1, sessionID: marked.pinnedConversationID, activity: .idle, waitingFor: nil,
+            startedAt: 1, cwd: "/work/foo", procStart: "start-a", reportsBackgroundWork: true
+        )])
+
+        let stored = persistence.stored?.sessions ?? []
+        XCTAssertEqual(stored.first(where: { $0.id == marked.id })?.hasBackgroundWork, true)
+        XCTAssertNil(stored.first(where: { $0.id == clean.id })?.hasBackgroundWork)
     }
 
     /// The production entry point, not the `markUnreadForTesting` seam above: `markUnread`

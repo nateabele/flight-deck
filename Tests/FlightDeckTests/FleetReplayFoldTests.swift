@@ -33,7 +33,7 @@ final class FleetReplayFoldTests: XCTestCase {
     func testRepeatedActivityCollapsesToTheLast() {
         let flaps: [FleetEvent] = (0..<50).map { i in
             .activityChanged(id: a, activity: i.isMultiple(of: 2) ? "busy" : "idle",
-                             waitingFor: nil, subagentCount: 0)
+                             waitingFor: nil, subagentCount: 0, hasBackgroundWork: false)
         }
         XCTAssertEqual(FleetReplay.fold(flaps).count, 1)
         assertFoldPreservesOutcome(flaps)
@@ -50,9 +50,12 @@ final class FleetReplayFoldTests: XCTestCase {
     /// silently loses one of them.
     func testCollapsingIsPerSession() {
         let events: [FleetEvent] = [
-            .activityChanged(id: a, activity: "busy", waitingFor: nil, subagentCount: 0),
-            .activityChanged(id: b, activity: "busy", waitingFor: nil, subagentCount: 0),
-            .activityChanged(id: a, activity: "idle", waitingFor: nil, subagentCount: 0)
+            .activityChanged(id: a, activity: "busy", waitingFor: nil, subagentCount: 0,
+                             hasBackgroundWork: false),
+            .activityChanged(id: b, activity: "busy", waitingFor: nil, subagentCount: 0,
+                             hasBackgroundWork: false),
+            .activityChanged(id: a, activity: "idle", waitingFor: nil, subagentCount: 0,
+                             hasBackgroundWork: false)
         ]
         XCTAssertEqual(FleetReplay.fold(events).count, 2)
         assertFoldPreservesOutcome(events)
@@ -61,7 +64,8 @@ final class FleetReplayFoldTests: XCTestCase {
     func testASessionRemovedInTheGapKeepsOnlyItsRemoval() {
         let events: [FleetEvent] = [
             .renamed(id: a, title: "x", origin: .user),
-            .activityChanged(id: a, activity: "busy", waitingFor: nil, subagentCount: 4),
+            .activityChanged(id: a, activity: "busy", waitingFor: nil, subagentCount: 4,
+                             hasBackgroundWork: false),
             .unreadChanged(id: a, isUnread: true),
             .sessionRemoved(id: a)
         ]
@@ -77,7 +81,8 @@ final class FleetReplayFoldTests: XCTestCase {
         let ghost = UUID()
         let events: [FleetEvent] = [
             .sessionAdded(session(ghost, "ghost"), project: projectID, at: 0),
-            .activityChanged(id: ghost, activity: "busy", waitingFor: nil, subagentCount: 0),
+            .activityChanged(id: ghost, activity: "busy", waitingFor: nil, subagentCount: 0,
+                             hasBackgroundWork: false),
             .sessionRemoved(id: ghost)
         ]
         XCTAssertEqual(FleetReplay.fold(events), [.sessionRemoved(id: ghost)])

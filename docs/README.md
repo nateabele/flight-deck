@@ -11,6 +11,8 @@ Start with **[HANDOFF.md](HANDOFF.md)** — the entry point for picking this pro
 | [AGENT-OPERATIONS.md](AGENT-OPERATIONS.md) | Runtime hazards and rituals: the release swap, running inside the app you're editing, process hygiene, state storage, worktrees, test discipline. |
 | [CONVENTIONS.md](CONVENTIONS.md) | Code, comment, commit, test, and workflow conventions. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | The code as built — the spine, the `GhosttyEmbed/` reuse boundary, linkage/build config, runtime model. |
+| [MOBILE-UI.md](MOBILE-UI.md) | Working on the phone's screens: why the decisions live in pure functions, the three ways to actually see a change, and the SwiftUI traps this codebase has already paid for. |
+| [NETWORKING.md](NETWORKING.md) | Working on the wire, pairing and discovery: pushed state vs pulled answers, the two invariants that break the naive implementation, adding a command or a request, and what a cross-process pairing run does not prove. |
 | [BUILD.md](BUILD.md) | How to build, run, and test (from a fresh clone) + troubleshooting. |
 | [TOOLING.md](TOOLING.md) | Toolchain versions and the Zig/macOS-SDK linker workaround (why the build is unusual). |
 | [FOLLOWUPS.md](FOLLOWUPS.md) | Known limitations and prioritized next fixes, plus a resolved-items trail. Audited against the tree. |

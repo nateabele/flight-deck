@@ -68,6 +68,10 @@ final class PairingPayloadTests: XCTestCase {
     /// The code is deliberately not a URL: nothing in the system should offer to "open" it,
     /// because opening it means the secret has travelled through a URL handler and,
     /// eventually, a log.
+    /// Nothing in the system should offer to "open" this, because opening it means the
+    /// secret has travelled through a URL handler and, eventually, a log. Note `URL(string:)`
+    /// does return non-nil for an opaque `scheme:body` URI — the protection is the absence of
+    /// an authority component and a query string, not the absence of a `URL` value.
     func testTheCodeIsNotAURL() {
         let encoded = payload().encoded()
         XCTAssertTrue(encoded.hasPrefix("flightdeck1:"))
@@ -76,6 +80,23 @@ final class PairingPayloadTests: XCTestCase {
         XCTAssertNil(URL(string: encoded)?.host)
     }
 
+    /// The base64url transform, duplicated locally on purpose. `FleetKit`'s own helper is
+    /// `internal`, and widening it to `public` just so one negative assertion could reach it
+    /// would put a `Data` extension into every consumer's namespace — a permanent collision
+    /// risk bought for a single test. The transform is three lines of RFC 4648 §5, and this
+    /// assertion only needs a string to look for rather than production's exact code path;
+    /// the round-trip test above already exercises the real implementation.
+    private func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    /// Checks both alphabets. The implementation encodes the secret as base64url *inside*
+    /// the JSON before the whole body is encoded again, so only the standard-alphabet form
+    /// being absent would leave the likelier bug — a body that skipped the outer wrap —
+    /// undetected.
     func testTheSecretIsNotReadableFromTheCodeAsText() {
         let key = FleetDeviceKey.mint()
         let encoded = PairingPayload(
@@ -83,13 +104,20 @@ final class PairingPayloadTests: XCTestCase {
         ).encoded()
         XCTAssertFalse(encoded.contains(key.secret.base64EncodedString()),
                        "the body is base64url of JSON; a raw base64 secret would mean it is not")
+        XCTAssertFalse(encoded.contains(base64URL(key.secret)),
+                       "the inner base64url secret must not survive into the outer encoding")
     }
 
     func testAnArbitraryStringIsRejectedRatherThanPartlyParsed() {
         XCTAssertThrowsError(try PairingPayload(decoding: "https://example.com")) { error in
             XCTAssertEqual(error as? PairingPayloadError, .notAPairingCode)
         }
-        XCTAssertThrowsError(try PairingPayload(decoding: "flightdeck1:not-base64!!"))
+        // Asserting the specific case, not merely that something threw: the phone shows
+        // different copy per case, so collapsing two of them into one is a real defect that a
+        // bare `XCTAssertThrowsError` would wave through.
+        XCTAssertThrowsError(try PairingPayload(decoding: "flightdeck1:not-base64!!")) { error in
+            XCTAssertEqual(error as? PairingPayloadError, .malformed)
+        }
     }
 
     /// A phone older than the Mac must say so rather than mis-parsing a newer payload into
@@ -99,6 +127,28 @@ final class PairingPayloadTests: XCTestCase {
         original.version = 99
         XCTAssertThrowsError(try PairingPayload(decoding: original.encoded())) { error in
             XCTAssertEqual(error as? PairingPayloadError, .unsupportedVersion(99))
+        }
+    }
+
+    /// The case the previous test cannot reach, and the one that actually matters: a future
+    /// payload whose *shape* differs. Decoding it under this version's schema fails, so a
+    /// version check that ran after the decode would report it as damaged — sending the user
+    /// to show a fresh code when the app is what needs updating. The version therefore has to
+    /// be read from the prefix, before any decoding.
+    func testAFutureShapeIsRejectedAsTooNewNotAsDamaged() throws {
+        let alienBody = Data(#"{"v":2,"slotId":"nope","secret":"nope"}"#.utf8)
+        let code = "flightdeck2:" + base64URL(alienBody)
+        XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
+            XCTAssertEqual(error as? PairingPayloadError, .unsupportedVersion(2))
+        }
+    }
+
+    /// A prefix version that disagrees with the body's is a hand-edited code, not a newer one.
+    func testAPrefixVersionDisagreeingWithTheBodyIsMalformed() throws {
+        let body = Data(#"{"v":7,"slot":"00000000-0000-0000-0000-000000000000","psk":"AAAA","name":"m","svc":"s","eps":[]}"#.utf8)
+        let code = "flightdeck1:" + base64URL(body)
+        XCTAssertThrowsError(try PairingPayload(decoding: code)) { error in
+            XCTAssertEqual(error as? PairingPayloadError, .malformed)
         }
     }
 
@@ -134,11 +184,18 @@ public enum PairingPayloadError: Error, Equatable {
 /// the two devices out of band.
 ///
 /// `flightdeck1:` + base64url of a small JSON object. Not a URL, deliberately — see the
-/// plan's Task 1. The prefix carries the version too, so a phone can reject a code it does
-/// not understand before decoding a byte of it.
+/// plan's Task 1. The digits in the prefix are the version, and they are checked before any
+/// base64 or JSON decoding happens, so a code from a newer Mac is refused *as* too-new rather
+/// than as damaged.
 public struct PairingPayload: Equatable, Sendable {
     public static let currentVersion = 1
-    private static let prefix = "flightdeck1:"
+    /// The scheme half of the code. The version is spelled into the prefix — `flightdeck1:` —
+    /// and that is load-bearing, not cosmetic: a payload from a newer Mac may rename or retype
+    /// fields, so decoding it under this version's schema would fail as *damaged*. The phone
+    /// shows different copy for damaged ("show a new code on your Mac") and too-new ("update
+    /// the app"), which send the user in opposite directions — so the version has to be
+    /// readable without decoding anything.
+    private static let scheme = "flightdeck"
 
     public var version: Int
     public var key: FleetDeviceKey
@@ -179,19 +236,40 @@ public struct PairingPayload: Equatable, Sendable {
         // `try!` is honest here: `Body` is all `Codable` primitives with no custom encoding,
         // so a throw would be a compiler bug rather than a runtime condition to handle.
         let json = try! JSONEncoder().encode(body)
-        return Self.prefix + json.base64URLEncodedString()
+        return "\(Self.scheme)\(version):" + json.base64URLEncodedString()
     }
 
     public init(decoding code: String) throws {
         let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix(Self.prefix) else { throw PairingPayloadError.notAPairingCode }
-        guard let json = Data(base64URLEncoded: String(trimmed.dropFirst(Self.prefix.count))),
+        guard trimmed.hasPrefix(Self.scheme), let colon = trimmed.firstIndex(of: ":")
+        else { throw PairingPayloadError.notAPairingCode }
+
+        let digits = trimmed[
+            trimmed.index(trimmed.startIndex, offsetBy: Self.scheme.count)..<colon
+        ]
+        // Digits only, not merely `Int`-parseable: `Int` accepts a leading `-` or `+`, so
+        // without this `flightdeck+1:` would sail past the gate as version 1, and
+        // `flightdeck-1:` would be reported as an unsupported version rather than as not a
+        // pairing code at all. `encoded()` never emits either, so both are malformed input.
+        guard !digits.isEmpty,
+              digits.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let version = Int(digits)
+        else { throw PairingPayloadError.notAPairingCode }
+        // Before a byte is decoded. A future payload may not parse under this schema at all,
+        // and failing it as "damaged" would send the user to show a fresh code when what they
+        // actually need is to update the app.
+        guard version == Self.currentVersion else {
+            throw PairingPayloadError.unsupportedVersion(version)
+        }
+
+        guard let json = Data(base64URLEncoded: String(trimmed[trimmed.index(after: colon)...])),
               let body = try? JSONDecoder().decode(Body.self, from: json),
               let secret = Data(base64URLEncoded: body.psk)
         else { throw PairingPayloadError.malformed }
-        guard body.v == Self.currentVersion else {
-            throw PairingPayloadError.unsupportedVersion(body.v)
-        }
+        // The body repeats the version so a hand-edited prefix cannot walk a mismatched body
+        // past the gate above.
+        guard body.v == version else { throw PairingPayloadError.malformed }
+
         self.init(
             version: body.v,
             key: FleetDeviceKey(slot: body.slot, secret: secret),
@@ -315,6 +393,20 @@ final class PairingArmerTests: XCTestCase {
         XCTAssertFalse(armer.claim(slot: payload.key.slot))
     }
 
+    /// The exact edge, which the tests either side of it do not touch. `claim` accepts at
+    /// `now == armedUntil` and `expire` drops only strictly past it, so the two boundaries
+    /// are complementary — there is no instant where one calls the window gone and the other
+    /// still honours it. Pinned because this file exists to enforce a boundary, and a later
+    /// edit tightening `<=` to `<` would otherwise pass every test here.
+    func testAClaimAtTheExactExpiryInstantIsStillHonoured() {
+        let armer = armer()
+        let payload = arm(armer)
+        now += PairingArmer.window
+        armer.expire()
+        XCTAssertNotNil(armer.pending, "expire must not drop a window at the instant it ends")
+        XCTAssertTrue(armer.claim(slot: payload.key.slot))
+    }
+
     func testAClaimForADifferentSlotIsRefused() {
         let armer = armer()
         _ = arm(armer)
@@ -388,6 +480,18 @@ struct PairedDevice: Codable, Equatable, Identifiable {
     var id: UUID { slot }
     var isProvisional: Bool { pairedAt == nil }
 
+    /// Whether this device's key should still be honoured.
+    ///
+    /// A paired device carries no `armedUntil` and is live until revoked. A *provisional* one
+    /// is live only until its window closes — and this is what makes that durable. Expiry used
+    /// to be enforced solely by whoever remembered to call `expire()`, which meant a pairing
+    /// sheet dismissed early left its key live indefinitely, across relaunches, contradicting
+    /// the "expires in 2 minutes" the user was shown.
+    func isLive(at now: Date) -> Bool {
+        guard let armedUntil else { return true }
+        return now <= armedUntil
+    }
+
     func key() -> FleetDeviceKey { FleetDeviceKey(slot: slot, secret: secret) }
 }
 ```
@@ -433,6 +537,15 @@ final class PairingArmer {
 
     func cancel() { pending = nil }
 
+    /// The armer's notion of now, exposed so everything that judges a window's liveness uses
+    /// one clock.
+    ///
+    /// Filtering `deviceKeys(at:)` against real `Date()` while the armer runs on an injected
+    /// one is not a test-only wrinkle: it makes the key set disagree with the state machine
+    /// that issued the key. Under a test clock a freshly-armed window is judged already
+    /// expired and the handshake fails outright — which is exactly how this was found.
+    var currentTime: Date { now() }
+
     /// A device completed a handshake on `slot`. Returns whether that closes the window —
     /// i.e. whether this is the device the user just armed for.
     func claim(slot: UUID) -> Bool {
@@ -475,8 +588,36 @@ Where the list lives, and how a device is revoked. Follows the existing `Prefere
 
 **Files:**
 - Modify: `Sources/FlightDeck/Preferences/Preferences.swift`
-- Modify: `Sources/FlightDeck/Preferences/PreferencesStore.swift`
+- Modify: `Sources/FlightDeck/Preferences/PreferencesStore.swift` (including its `init`)
 - Test: `Tests/FlightDeckTests/PairedDeviceStoreTests.swift`
+
+**The `init` change is load-bearing and easy to get wrong.** Swift property observers do **not**
+fire during initialization, so minting `installID` into the loaded value and assigning it to
+`self.preferences` would never reach disk — every launch would mint a fresh suffix and Bonjour
+rediscovery would fail in exactly the case the suffix exists for. The mint must therefore be
+followed by an explicit save:
+
+```swift
+    init(persistence: PreferencesPersisting?) {
+        self.persistence = persistence
+        var loaded = persistence?.load() ?? Preferences()
+        loaded.migrateAgentsIfNeeded()
+
+        // Minted here rather than on first read of `installSuffix`, so that stays a pure read
+        // — see its doc comment.
+        let mintedNow = loaded.installID == nil
+        if mintedNow { loaded.installID = UUID() }
+        self.installSuffix = String(
+            (loaded.installID ?? UUID()).uuidString.prefix(4)
+        ).lowercased()
+        self.preferences = loaded
+
+        // Explicit, because `preferences`'s `didSet` does not fire during `init`. Without
+        // this a freshly minted id never reaches disk and the next launch mints a different
+        // one, which is the one failure this identifier exists to prevent.
+        if mintedNow { persistence?.save(loaded) }
+    }
+```
 
 **Interfaces:**
 - Consumes: `PairedDevice` (Task 2).
@@ -565,11 +706,15 @@ final class PairedDeviceStoreTests: XCTestCase {
     }
 
     /// The Bonjour instance name has to survive a relaunch, or a phone that remembers which
-    /// Mac it paired with stops recognising it after a restart.
+    /// Mac it paired with stops recognising it after a restart. The second store is a stand-in
+    /// for that relaunch: it reads the same persistence and must see the same suffix, which
+    /// only holds if the first store actually wrote the minted id to disk.
     func testTheInstallSuffixIsMintedOnceAndThenStable() {
         let persistence = MemoryPersistence()
         let first = PreferencesStore(persistence: persistence).installSuffix
         XCTAssertEqual(first.count, 4)
+        XCTAssertNotNil(persistence.stored?.installID,
+                        "a minted id that never reached disk would remint on the next launch")
         XCTAssertEqual(PreferencesStore(persistence: persistence).installSuffix, first)
     }
 
@@ -618,22 +763,28 @@ In `PreferencesStore`, in a `// MARK: Paired devices` section:
 ```swift
     var pairedDevices: [PairedDevice] { preferences.pairedDevices ?? [] }
 
-    /// Four hex characters disambiguating this Mac's advertised service name. Minted on
-    /// first read and written back, so the name a phone remembers keeps resolving after a
-    /// relaunch — a suffix regenerated each launch would make Bonjour rediscovery fail in
-    /// exactly the case it exists for.
-    var installSuffix: String {
-        if let existing = preferences.installID {
-            return String(existing.uuidString.prefix(4)).lowercased()
-        }
-        let minted = UUID()
-        preferences.installID = minted
-        return String(minted.uuidString.prefix(4)).lowercased()
-    }
+    /// Four hex characters disambiguating this Mac's advertised Bonjour name, so a phone that
+    /// remembers which Mac it paired with keeps resolving it after a relaunch. A suffix
+    /// regenerated per launch would break rediscovery in exactly the case it exists for.
+    ///
+    /// Computed once in `init` rather than minted on first read. It is displayed in the
+    /// pairing UI, and a getter that minted-and-persisted would mutate `@Published` state
+    /// during a SwiftUI `body` evaluation — the "Modifying state during view update" hazard.
+    /// Making it a stored `let` means the read is pure by construction rather than by
+    /// convention about who is allowed to call it.
+    let installSuffix: String
 
     /// What `FleetService` starts its listener with. A revoked device is absent here, which
-    /// is the entirety of what revocation means.
-    func deviceKeys() -> [FleetDeviceKey] { pairedDevices.map { $0.key() } }
+    /// is the entirety of what revocation means — and so is a provisional device whose window
+    /// has closed.
+    ///
+    /// That second filter is why expiry is a property of the data rather than of whoever
+    /// remembers to call `expire()`. Without it, a pairing sheet dismissed before its deadline
+    /// left a live key in the accepted set forever, surviving relaunch, while the user had been
+    /// told it expires in two minutes.
+    func deviceKeys(at now: Date = Date()) -> [FleetDeviceKey] {
+        pairedDevices.filter { $0.isLive(at: now) }.map { $0.key() }
+    }
 
     func upsert(_ device: PairedDevice) {
         var devices = pairedDevices
@@ -807,6 +958,44 @@ final class FleetPairingFlowTests: XCTestCase {
         _ = XCTWaiter().await fulfillment(of: [refused], timeout: 8)
     }
 
+    /// Cancelling must take the provisional key out of the accepted set, not merely stop
+    /// drawing the sheet. An armed code whose window was closed in the UI but whose key is
+    /// still live is the same hole as one that never expired.
+    func testCancellingArmingRevokesTheProvisionalKey() async throws {
+        let (_, preferences, service) = try await standUp()
+        let payload = try await service.arm()
+        try await service.cancelArming()
+
+        XCTAssertTrue(preferences.pairedDevices.isEmpty)
+        XCTAssertFalse(preferences.deviceKeys().contains { $0.slot == payload.key.slot })
+
+        let refused = expectation(description: "refused")
+        let client = FleetClient(key: payload.key)
+        self.client = client
+        client.onFrame = { _ in XCTFail("a cancelled code must not reach application code") }
+        client.onDisconnect = { _ in refused.fulfill() }
+        client.connect(to: try service.loopbackEndpoint(), lastSeq: 0)
+        _ = XCTWaiter().wait(for: [refused], timeout: 8)
+    }
+
+    /// The hole this closes: expiry used to be enforced only by the pairing sheet's timer,
+    /// which dies with the sheet. Dismissing it early left the key live in the accepted set
+    /// indefinitely — across relaunch — while the user had been told it expires in two minutes.
+    /// Now the data itself refuses an expired key, so nothing has to remember to prune it.
+    func testAnExpiredProvisionalKeyIsRefusedEvenIfNothingPrunedIt() async throws {
+        let (_, preferences, service) = try await standUp()
+        let payload = try await service.arm()
+
+        // The device is still in the list — nobody has called expire — but its window has run
+        // out, and that alone must take it out of what the listener would accept.
+        let afterExpiry = Date().addingTimeInterval(PairingArmer.window + 1)
+        XCTAssertFalse(preferences.pairedDevices.isEmpty)
+        XCTAssertFalse(
+            preferences.deviceKeys(at: afterExpiry).contains { $0.slot == payload.key.slot },
+            "an expired window must not still be a key"
+        )
+    }
+
     func testArmingTwiceLeavesOnlyTheNewestCodeLive() async throws {
         let (_, preferences, service) = try standUp()
         let first = try await service.arm()
@@ -926,6 +1115,9 @@ Replace the `keys:` closure with the preferences store and the armer, and add th
     private(set) var boundPort: NWEndpoint.Port?
     @Published private(set) var attachedSlots: Set<UUID> = []
 
+    /// Fires the arming window's expiry independently of any UI. See `scheduleExpiry(at:)`.
+    private var expiryTask: Task<Void, Never>?
+
     /// The Bonjour instance name this Mac advertises under, and the name the phone stores so
     /// it can prefer the Mac it paired with.
     ///
@@ -1008,21 +1200,49 @@ Replace the `keys:` closure with the preferences store and the armer, and add th
             .filter(\.isProvisional)
             .forEach { preferences.revokeDevice(slot: $0.slot) }
 
-        let port = boundPort?.rawValue ?? 0
+        // A code built before the listener bound would carry `host:0` endpoints — the phone
+        // would race candidates that can never connect, and the failure would look like a
+        // network problem rather than a Mac that was not listening yet. Refuse instead.
+        guard let boundPort else { throw FleetSocketError.didNotBind }
+        let port = boundPort.rawValue
         let payload = armer.arm(
             macName: Host.current().localizedName ?? "Mac",
             serviceName: serviceName,
             endpoints: LocalEndpoints.current(port: port)
         )
-        if let pending = armer.pending { preferences.upsert(pending) }
+        if let pending = armer.pending {
+            preferences.upsert(pending)
+            if let armedUntil = pending.armedUntil { scheduleExpiry(at: armedUntil) }
+        }
         try await reloadKeys()
         return payload
     }
 
     func cancelArming() async throws {
+        expiryTask?.cancel()
+        expiryTask = nil
         if let pending = armer.pending { preferences.revokeDevice(slot: pending.slot) }
         armer.cancel()
         try await reloadKeys()
+    }
+
+    /// Schedules the window's own expiry, so a code stops being a key on time whether or not
+    /// anything is still on screen.
+    ///
+    /// The pairing sheet also calls `expireArming()` on a timer, but that timer dies with the
+    /// sheet: dismissing it early — ⌘W, clicking away, quitting — used to leave the key live
+    /// indefinitely. `deviceKeys(at:)` already refuses an expired key, so this is belt to that
+    /// braces: it makes the *listener* drop it promptly rather than at the next reload.
+    private func scheduleExpiry(at deadline: Date) {
+        expiryTask?.cancel()
+        expiryTask = Task { [weak self] in
+            let seconds = deadline.timeIntervalSinceNow
+            if seconds > 0 {
+                try? await Task.sleep(for: .seconds(seconds))
+            }
+            guard !Task.isCancelled else { return }
+            try? await self?.expireArming()
+        }
     }
 
     /// Drops a window that ran out. Called on a timer by the pairing sheet, and again before
@@ -1075,6 +1295,9 @@ completes:
         attachedSlots.insert(slot)
         let now = Date()
         if armer.claim(slot: slot), var device = preferences.pairedDevices.first(where: { $0.slot == slot }) {
+            // Claimed, so the window is closed and its expiry no longer has anything to do.
+            expiryTask?.cancel()
+            expiryTask = nil
             device.pairedAt = now
             device.armedUntil = nil
             device.lastSeenAt = now
@@ -1114,6 +1337,60 @@ handler. **Re-derive resume-exactly-once afterwards** against all four interleav
 (timer-then-ready, ready-then-timer, failed-then-timer, timer-then-failed) — the guard still
 carries the correctness; cancellation only stops the retention. Both closures run on the same
 serial `queue`, which is what makes the flag safe, and that must stay true.
+
+**(a2) Whatever you do about (a), the release path needs the same bound.**
+
+`reloadKeys()` rebinds the *same port*, so stopping and restarting races Network.framework's
+asynchronous port release — the symptom is an intermittent `EADDRINUSE` on a path that now runs
+on every arm, expiry and revocation. Awaiting a confirmed `.cancelled`/`.failed` before
+rebinding is the right fix, **but an unbounded await there is the exact bug this file already
+had once** (see the bind timeout above, and `git log` for "bound the async bind"). If the
+listener never reports a terminal state, `start()` — and therefore every pairing action —
+wedges forever on the main actor.
+
+Bound it the same way, with one deliberate difference: on timeout it **resumes rather than
+throws**. The point of the wait is to give the port a moment to come free; if that confirmation
+never arrives, attempting the bind anyway is strictly better than hanging, and the bind has its
+own timeout to fail cleanly if the port really is still held.
+
+```swift
+    /// Cancels the listener and waits for the OS to confirm it, so a rebind on the same port
+    /// does not race the release. `reloadKeys()` makes that race routine rather than exotic.
+    ///
+    /// Bounded, and the bound is not decoration: an unbounded continuation here would wedge
+    /// every arm, expiry and revocation on the main actor if a terminal state never arrived.
+    /// On timeout it resumes rather than throwing — proceeding to a bind that has its own
+    /// timeout beats hanging, and a port that is genuinely still held will surface there as a
+    /// clean error instead of as a frozen UI.
+    private func releaseListener() async {
+        guard let listener else { return }
+        self.listener = nil
+        await withCheckedContinuation { continuation in
+            var resumed = false
+            let timeout = DispatchWorkItem {
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume()
+            }
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .cancelled, .failed:
+                    guard !resumed else { return }
+                    resumed = true
+                    timeout.cancel()
+                    continuation.resume()
+                default:
+                    break
+                }
+            }
+            queue.asyncAfter(deadline: .now() + 2, execute: timeout)
+            listener.cancel()
+        }
+    }
+```
+
+Both closures run on `queue`, which is what makes the `resumed` flag safe without further
+synchronisation — the same argument as the bind path, and it must stay true.
 
 **(b) Nothing caps concurrent unauthenticated connections.** Each peer that completes a
 handshake holds a `pending` slot for `authDeadline` before being dropped. Bounded in time,
@@ -1870,6 +2147,55 @@ final class FleetConnectorTests: XCTestCase {
         XCTAssertEqual(store.load()?.endpoints.first, winner)
     }
 
+    /// The regression this guards, and why it is staged so carefully: a race's timeout used
+    /// to outlive the race that scheduled it. When every candidate failed fast, the retry was
+    /// already pending by the time the dead race's timer fired — and it scheduled a SECOND
+    /// retry. Two races then ran against each other, the later tearing down whatever the
+    /// earlier had connected. The visible effect is a connection that drops seconds after
+    /// coming up, for no reason on the wire, which reads as a flaky network.
+    ///
+    /// The first race must FAIL for this to be exercised at all: if it connects, the existing
+    /// `winner == nil` guard suppresses the timer and the test proves nothing. So the server
+    /// is down for the first race and back on the same port — the same instance, so
+    /// `start()`'s own release-then-rebind handles the port coming free — before the second.
+    func testAStaleRaceTimeoutDoesNotRetireTheRaceThatReplacedIt() async throws {
+        let key = FleetDeviceKey.mint()
+        let expected = fleet("one")
+        let server = FleetSocketServer()
+        server.onHello = { _, _ in [.snapshot(seq: 1, fleet: expected, reason: .initial)] }
+        servers.append(server)
+        let port = try await server.start(keys: [key], port: nil)
+        server.stop()
+
+        let connector = connector(key: key, endpoints: ["127.0.0.1:\(port.rawValue)"])
+        // The timeout has to land inside the backoff window — after the first race has
+        // already failed and scheduled its retry, and before that retry runs.
+        connector.raceTimeout = 1
+        connector.retryDelays = [1.5]
+
+        var states: [FleetConnector.State] = []
+        let connected = expectation(description: "connected")
+        connector.onState = { states.append($0) }
+        connector.onFleet = { _ in connected.fulfill() }
+        connector.start()
+
+        try await Task.sleep(for: .milliseconds(600))
+        _ = try await server.start(keys: [key], port: port)
+        await fulfillment(of: [connected], timeout: 20)
+
+        // Long enough for the stale timeout, and any retry it wrongly scheduled, to fire.
+        try await Task.sleep(for: .seconds(3))
+
+        let firstConnected = states.firstIndex {
+            if case .connected = $0 { return true } else { return false }
+        }
+        let after = states[((firstConnected ?? states.count - 1) + 1)...]
+        XCTAssertTrue(
+            after.allSatisfy { if case .connected = $0 { return true } else { return false } },
+            "a live connection must not be retired by a timer from an earlier race: \(states)"
+        )
+    }
+
     func testTheAppliedSequenceIsRememberedSoARelaunchResumes() async throws {
         let key = FleetDeviceKey.mint()
         let port = try await startServer(key: key, fleet: fleet("one"))
@@ -1948,7 +2274,17 @@ import Foundation
 import Network
 
 /// Finds the paired Mac and keeps a fleet in sync with it.
-public final class FleetConnector {
+///
+/// `@unchecked Sendable` for the same reason `FleetClient` is, and it is not optional here:
+/// FleetKit builds in Swift 6 language mode, and this class hands `[weak self]` closures to
+/// `DispatchQueue.asyncAfter` and `NWBrowser.browseResultsChangedHandler`, both of which are
+/// typed `@Sendable`. Without the conformance those captures are a compile error. Every
+/// mutation below happens on `queue` — the dials, the callbacks, the timers, the teardown —
+/// so the state is confined to one queue rather than protected by locks, which is the same
+/// idiom the rest of this module uses. Do not "fix" a concurrency diagnostic here by
+/// sprinkling `nonisolated(unsafe)`; if something needs to touch this off `queue`, that is a
+/// design change, not an annotation.
+public final class FleetConnector: @unchecked Sendable {
     public enum State: Equatable {
         case idle
         case searching
@@ -1984,6 +2320,19 @@ public final class FleetConnector {
     private var fleet = FleetSnapshot.empty
     private var attempt = 0
     private var running = false
+    /// Invalidates outstanding deferred work. `DispatchQueue.asyncAfter` cannot be
+    /// cancelled, so every timer here has to recognise that it is stale rather than be
+    /// stopped — it captures the generation current when it was scheduled and does nothing
+    /// if the connector has moved on since. Bumped by EVERY transition, not just `race()`:
+    /// a race timeout that fires during a backoff window would otherwise see an unchanged
+    /// generation and retry on top of the retry already pending.
+    private var generation = 0
+
+    @discardableResult
+    private func invalidateDeferredWork() -> Int {
+        generation += 1
+        return generation
+    }
 
     public init(
         mac: PairedMac, store: any PairedMacStoring,
@@ -2003,6 +2352,7 @@ public final class FleetConnector {
 
     public func stop() {
         running = false
+        invalidateDeferredWork()
         teardown()
         report(.idle)
     }
@@ -2022,10 +2372,19 @@ public final class FleetConnector {
         guard running else { return }
         teardown()
         report(.searching)
+        let generation = invalidateDeferredWork()
         for candidate in remembered() { dial(candidate) }
         if browse { startBrowsing() }
+        // Without the generation guard: a race whose candidates all fail in 100ms retries at
+        // ~1s, and THIS race's 8s timer later fires anyway, sees no winner, and schedules a
+        // second retry on top of the pending one. Two races then run against each other, the
+        // later one tearing down whatever the earlier one connected, and `attempt` advances
+        // twice as fast as `retryDelays` says. The symptom is a phone that gets harder to
+        // connect the longer it tries, which reads as a flaky network rather than a bug.
         queue.asyncAfter(deadline: .now() + raceTimeout) { [weak self] in
-            guard let self, self.running, self.winner == nil else { return }
+            guard let self, self.running, self.winner == nil,
+                  generation == self.generation
+            else { return }
             self.scheduleRetry()
         }
     }
@@ -2145,10 +2504,17 @@ public final class FleetConnector {
     private func scheduleRetry() {
         guard running else { return }
         teardown()
+        // Bumping here is what makes a timeout that fires DURING the backoff window
+        // harmless — at that moment no new race has started, so a generation bumped only by
+        // `race()` would still match and the retry would double.
+        let generation = invalidateDeferredWork()
         let delay = retryDelays[min(attempt, retryDelays.count - 1)]
         attempt += 1
         report(.lost(retryingIn: delay))
-        queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.race() }
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, generation == self.generation else { return }
+            self.race()
+        }
     }
 
     private func teardown() {
@@ -2268,8 +2634,22 @@ final class FleetModel {
     private func connect() {
         guard let mac else { return }
         let connector = FleetConnector(mac: mac, store: store)
-        connector.onFleet = { [weak self] in self?.fleet = $0 }
-        connector.onState = { [weak self] in self?.state = $0 }
+        // `MainActor.assumeIsolated`, not `Task { @MainActor in }`. FlightDeckMobile builds in
+        // Swift 6, and these callbacks are plain non-isolated closures, so assigning
+        // main-actor state from one is an error the compiler cannot see past on its own. But
+        // `FleetConnector`'s queue defaults to `.main`, so the closure genuinely IS on the
+        // main queue — `assumeIsolated` states a fact rather than hiding a hazard. A `Task`
+        // hop would instead add a real frame of latency to every fleet update and let two
+        // updates land out of order, which is a live bug in exchange for a tidier diagnostic.
+        //
+        // This is only true while the connector runs on `.main`. If it is ever given its own
+        // queue, these must become hops and this comment must go.
+        connector.onFleet = { [weak self] fleet in
+            MainActor.assumeIsolated { self?.fleet = fleet }
+        }
+        connector.onState = { [weak self] state in
+            MainActor.assumeIsolated { self?.state = state }
+        }
         self.connector = connector
         connector.start()
     }
@@ -2537,7 +2917,9 @@ Covering, in the house voice:
 - **Running it at all**: install an iOS Simulator runtime *or* set `DEVELOPMENT_TEAM` and a bundle id you own, then `xcodebuild -target FlightDeckMobile -sdk iphoneos`. Say plainly that neither is configured in the repo and why (no profile on the build machine; a hard-coded team is a merge conflict waiting to happen).
 - **The manual checklist**, each item stated as an observable outcome:
   1. Pair by scanning; the Mac's Devices tab shows the phone as Connected.
-  2. Pair by typing the code; same outcome. (The simulator path.)
+  2. Pair by typing the code instead of scanning; same outcome. This is not a lesser path —
+     it is what a user falls back to when they decline the camera, and it is the only pairing
+     route that works at all on a simulator.
   3. Rename a session on the Mac — the phone's row changes within a second.
   4. Let a session finish while looking elsewhere — the unread dot appears on both.
   5. Tap the row on the phone — the dot clears on the Mac. Unread is one fleet-wide fact (§8).
@@ -2547,6 +2929,50 @@ Covering, in the house voice:
   9. Leave the phone off the network for ten minutes, then return — it resumes rather than re-downloading (check the Mac's log for a replay rather than a snapshot).
   10. Revoke the device on the Mac — the phone disconnects and cannot reconnect.
   11. Let a pairing code expire unscanned, then scan it — it is refused.
+- **A second checklist: the iOS plumbing.** The eleven items above test the *feature* — that
+  pairing, replication, resume and revocation behave. These test the *app*, and they are
+  separated because they have a different character: each one was identified during review as
+  something no amount of reading or type-checking on the build machine could settle, and each
+  has a specific observable outcome rather than "check it looks right". Everything reviewers
+  *could* settle by reading has already been settled and is deliberately absent here — a
+  checklist that lists the answerable alongside the unanswerable is one nobody finishes.
+
+  1. **Dismiss the pairing screen and watch the camera indicator go out.** The definitive test
+     for the teardown path, and the single highest-value item here: that path took three review
+     rounds to get right, and every round found a real defect the previous one had introduced or
+     missed. If the orange dot stays lit, the chain `dismantleUIView` →
+     `QRScannerContainerView.teardown()` → `QRScannerController.stop()` → `stopRunning()` is
+     broken somewhere along its length.
+  2. **Confirm `QRScannerController.deinit` actually runs** — a breakpoint or a print in a debug
+     build. `AVCaptureMetadataOutput` may retain its delegate (its header declares the property
+     with no ownership qualifier, so this is genuinely unknown), which would mean the controller
+     never deallocates and the camera runs for the life of the process. Clearing the delegate in
+     `stop()` is what is supposed to prevent that; this is how you find out whether it did.
+     Note the fallback in `deinit` was itself inert for one round — it captured `[weak self]`,
+     which is always nil by the time a deinit-scheduled block runs — so this is checking a
+     mechanism that has already been wrong once in exactly this way.
+  3. **Time the pairing screen's first appearance.** `startRunning()` now runs off the main
+     thread; the check is that there is no visible hitch, especially on a cold launch while the
+     camera warms.
+  4. **The first-launch camera prompt**: it appears over the pairing screen, and granting it
+     transitions to a live preview without needing a relaunch.
+  5. **Scan a real code from a real Mac screen**, at the distance someone would actually hold a
+     phone. Nothing on the build machine can test this — a simulator has no camera — so the
+     decode, the dedup-by-last-string, and the preview layer's sizing are all unexercised until
+     this runs.
+  6. **Watch the keychain write on the first successful scan.** `KeychainPairedMacStore.save`
+     traps via `assertionFailure` on any unexpected status, and a debug build on hardware
+     without the right keychain entitlement will hit that the instant pairing succeeds. It is
+     the first thing that runs after a scan, so it is the first thing that can fail.
+  7. **Adopt and unpair, and watch the root view re-route both ways.** Reading `@Observable`
+     state in a `Scene`'s content closure is a known-fragile spot; this is the one item flagged
+     in review as plausible-but-unproven rather than merely unverified.
+  8. **Look at the layout.** The status glyph column lining up down the list, a ~200-character
+     base64 code in the manual-entry field, failure copy wrapping rather than truncating, and
+     the toolbar button and confirmation dialog landing sensibly.
+  9. **Background and foreground the pairing screen.** AVFoundation's interruption handling is
+     untested here and interacts with the teardown path above.
+
 - **The trust model**, restated in one paragraph for whoever reads this doc first: a QR on an unlocked Mac, a 2-minute window, single use, and a paired phone is fully privileged until revoked.
 
 - [ ] **Step 2: Update the other docs**
@@ -2560,6 +2986,20 @@ Covering, in the house voice:
   - **Bonjour resolution, roaming and off-LAN reachability are manually verified only** — there is no automated coverage and there cannot be on one machine.
   - **No relay**, so off-LAN needs a VPN. Designed for as a further candidate endpoint (§3), not built.
   - Whichever fallbacks were taken in spine Task 6 or this plan's Task 4, if any.
+  - **`FleetSocketServer` does not guard its public entry points the way `FleetConnector` now
+    does.** Both are `@unchecked Sendable` with state confined to `queue`; the connector asserts
+    `dispatchPrecondition` on `start`/`stop`/`send`, the server asserts only that its own
+    callbacks land on `queue` and catches a bad `queue:` argument at the first connection
+    instead. Both are honest today because every caller is `@MainActor` and every `queue`
+    defaults to `.main` — which is a property of the callers, not of the types. Worth deciding
+    deliberately rather than leaving the two inconsistent.
+  - **The phone persists `lastSeq` on every applied frame**, deliberately: with the keychain
+    item updated in place there is no write window, and the event rate is bounded by the Mac's
+    activity filter and poll interval to roughly two per second per session. The cost that is
+    real and unmeasured is that each write is a synchronous `securityd` round-trip on the
+    connector's queue — which defaults to `.main`, the thread drawing the fleet list. If this
+    ever shows up as scroll hitching, the fix is moving the write off the main queue, not
+    throttling it.
 
 - [ ] **Step 3: Final verification**
 
@@ -2581,7 +3021,13 @@ git commit -m "docs: describe pairing, the phone, and what only a device can pro
 ## Done when
 
 - `./scripts/test-unit.sh` passes, including the pairing flow tests: a device pairs on its first handshake inside an armed window, a revoked device cannot reconnect, an unclaimed code expires out of the accepted keys, and a connector finds its Mac by racing dead endpoints alongside a live one.
-- `./scripts/build-ios.sh` builds `FleetKitiOS` and `FlightDeckMobile`.
+- `./scripts/build-ios.sh` builds `FleetKitiOS`. It does **not** build `FlightDeckMobile` on a
+  machine with no iOS platform installed — an app target cannot resolve a destination without
+  one — so the script says so loudly and falls back to type-checking the app's sources against
+  the framework. That fallback is a real check (it fails the script on a genuine compile error)
+  and a narrow one: it proves the source compiles, and nothing about layout, navigation,
+  lifecycle, or whether the app launches. Install the platform and the script covers the app
+  target too.
 - The Mac's Preferences has a Devices tab that arms pairing, lists paired devices, shows which are connected, and revokes.
 - `docs/MOBILE.md` carries the eleven-item manual checklist, unrun, for the user to work through when they set up signing.
 

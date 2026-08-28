@@ -8,6 +8,38 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
+    # Where `import BoringSSLShim` resolves: the directory holding the module.modulemap that
+    # names it (Sources/FleetKit/SPAKE2/module.modulemap). A path alone would only let clang
+    # FIND the header — Swift cannot import a bare header, so the modulemap beside it is what
+    # makes this work. Hoisted here rather than duplicated per target because it is identical
+    # everywhere it appears: Swift's explicit module build resolves a linked framework's full
+    # dependency graph, not just its public interface, so every target that builds FleetKit's
+    # sources directly, links FleetKit/FleetKitiOS, or links the BoringSSL xcframework itself
+    # needs it — including FlightDeck and FlightDeckMobile, which never `import BoringSSLShim`
+    # themselves. HEADER_SEARCH_PATHS stays duplicated per target instead of joining this: on
+    # FlightDeck it appends to an existing GhosttyEmbed path rather than replacing it, and
+    # that ordering is not safe to disturb by folding it into a single project-wide value.
+    SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources/FleetKit/SPAKE2
+
+# The first Swift package in this repo — everything else vendored here is an xcframework built
+# out of a submodule, and this is not, because there is nothing to build: MarkdownUI is Swift
+# and SwiftUI all the way down.
+#
+# `exactVersion`, not `from`. `*.xcodeproj` is gitignored (see .gitignore), so the
+# `Package.resolved` xcodebuild writes inside it is gitignored too — there is no committed
+# lockfile anywhere in this tree. A range would therefore let two clones of the same commit
+# resolve two different versions of a UI library, which is exactly the class of difference the
+# offscreen renders are supposed to be sensitive to. The pin is the lockfile.
+#
+# Attached to FlightDeckMobile ALONE, deliberately. FleetKit's whole point is that it imports
+# Foundation, Network, Security and CryptoKit and nothing else — that is what FleetKitiOS
+# enforces by compiling the same sources for a second platform — and Markdown rendering is a
+# view concern that has no business crossing that line. See Sources/FlightDeckMobile/
+# TimelineMarkdown.swift for what it is used for and why the theme is the shape it is.
+packages:
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui
+    exactVersion: 2.4.1
 targets:
   FlightDeck:
     type: application
@@ -35,11 +67,37 @@ targets:
         PRODUCT_NAME: Flight Deck
         PRODUCT_MODULE_NAME: FlightDeck
         CODE_SIGN_ENTITLEMENTS: Sources/FlightDeck/FlightDeck.entitlements
+        # Signed with a real identity rather than left to "Sign to Run Locally", and this
+        # is not cosmetic. An ad-hoc signature has no team and no stable identifier, so
+        # macOS derives the bundle's DESIGNATED REQUIREMENT from a hash of the binary
+        # itself — literally `designated => cdhash H"2b05ca2c…"`. Every rebuild changes
+        # that hash, so to TCC, the Application Firewall and the macOS 15+ local-network
+        # gate each build is a brand-new application that has never been granted anything,
+        # and every grant attached to the previous hash is silently dead.
+        #
+        # That is not theoretical: it is what stopped a paired iPhone from reaching this
+        # Mac after a release swap. The phone's SYN arrived on en0 (confirmed by tcpdump,
+        # which taps below the filters) and was dropped before it reached a listening,
+        # dual-stack socket that accepted the identical connection over loopback — while
+        # `socketfilterfw --listapps` still cheerfully reported the app as allowed, because
+        # the entry it was reporting on described a binary that no longer existed.
+        #
+        # With a team identity the requirement becomes identifier + anchor + leaf OU, which
+        # is stable across rebuilds, so a permission granted once stays granted. Every
+        # `scripts/swap-release.sh` run before this change reset them all.
+        DEVELOPMENT_TEAM: 2T9E3N27J8
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
         INFOPLIST_KEY_CFBundleDisplayName: Flight Deck
+        # macOS 15+ gates local-network access behind a user prompt, and an app with no
+        # usage description never gets to show it — the listener binds, advertises, and is
+        # simply never discovered. The failure is silent, which is why this is here rather
+        # than added when someone reports "my phone can't find my Mac".
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Flight Deck uses the local network to let your paired iPhone see your sessions.
         GENERATE_INFOPLIST_FILE: "YES"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/FlightDeck/BridgingHeader.h
-        HEADER_SEARCH_PATHS: $(SRCROOT)/Sources/FlightDeck/GhosttyEmbed
+        HEADER_SEARCH_PATHS: $(SRCROOT)/Sources/FlightDeck/GhosttyEmbed $(SRCROOT)/vendor/boringssl-artifacts/include
         # libghostty (GhosttyKit) statically bundles C++ (glslang); link the C++
         # stdlib so its std::* symbols resolve. Matches Ghostty's own project.
         OTHER_LDFLAGS: -lstdc++
@@ -64,8 +122,22 @@ targets:
       # one that loads at runtime. See the DYLD_FRAMEWORK_PATH note in scripts/test-unit.sh.
       - target: FleetKit
         embed: false
+      # Linked here as well as in FleetKit, and it has to be: libcrypto is a STATIC archive,
+      # so the linker pulls in only the objects something references. FleetKit's own Swift
+      # sources do not call SPAKE2 yet, so FleetKit.framework contains none of it, and a test
+      # that reached the symbols "through" FleetKit would fail to link rather than prove
+      # anything. Once FleetKit wraps SPAKE2 both binaries carry their own copy of those few
+      # objects — harmless duplication, and the price of the link test being a real link test.
+      - framework: vendor/boringssl-artifacts/BoringSSL.xcframework
+        embed: false
     settings:
-      base: { GENERATE_INFOPLIST_FILE: "YES" }
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+        # Where the shim's `#include <openssl/curve25519.h>` resolves — the test bundle
+        # reaches the vendored SPAKE2 symbols directly, and BoringSSLLinkTests is the one
+        # place that proves the xcframework is linked and callable at all. SWIFT_INCLUDE_PATHS
+        # (the module search path itself) is set project-wide, above.
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
   FlightDeckUITests:
     type: bundle.ui-testing
     platform: macOS
@@ -77,17 +149,43 @@ targets:
   FleetKit:
     type: framework
     platform: macOS
-    sources: [Sources/FleetKit]
+    sources: &fleetKitSources
+      # SPAKE2/ holds Swift sources like any other folder here, so it is NOT excluded
+      # wholesale — only its two C-interop files are. `module.modulemap` is a build input,
+      # not framework content, and xcodegen makes a stray `.h` a PUBLIC header: BoringSSLShim.h
+      # would be copied into FleetKit.framework/Headers while still `#include`-ing
+      # <openssl/curve25519.h>, which is not shipped inside the framework. That is a public
+      # header that cannot be parsed by anyone who imports FleetKit. Both files are reached
+      # through SWIFT_INCLUDE_PATHS (project-wide, top of file), which needs no target
+      # membership at all.
+      - path: Sources/FleetKit
+        excludes:
+          - "SPAKE2/BoringSSLShim.h"
+          - "SPAKE2/module.modulemap"
+    dependencies:
+      # SPAKE2, for the short pairing code. Not embedded, same as Ghostty: it is a static
+      # library, so there is nothing to embed. And handled the same way end to end — upstream
+      # is the `vendor/boringssl` submodule, scripts/build-boringssl.sh builds this artifact
+      # out of it, and the artifact itself is git-ignored. Run that script after a fresh clone.
+      - framework: vendor/boringssl-artifacts/BoringSSL.xcframework
+        embed: false
     settings:
       base:
         # Swift 6 here, Swift 5 project-wide. The project-wide floor exists for vendored
-        # Ghostty (not Swift-6 clean); FleetKit vendors nothing and carries the wire types
-        # that cross a thread boundary on every frame, which is exactly the code that wants
-        # `Sendable` checked rather than assumed. A Swift 6 module imports cleanly into a
-        # Swift 5 target, so nothing else has to move.
+        # Ghostty (not Swift-6 clean); FleetKit carries the wire types that cross a thread
+        # boundary on every frame, which is exactly the code that wants `Sendable` checked
+        # rather than assumed. A Swift 6 module imports cleanly into a Swift 5 target, so
+        # nothing else has to move.
         SWIFT_VERSION: "6.0"
         PRODUCT_MODULE_NAME: FleetKit
         GENERATE_INFOPLIST_FILE: "YES"
+        # Where the shim's `#include <openssl/curve25519.h>` resolves. These headers are
+        # deliberately NOT inside the xcframework: Xcode resolves a library xcframework's
+        # headers by copying them into BUILT_PRODUCTS_DIR/include, which is libghostty's
+        # directory, and GhosttyKit's umbrella header claims everything in it. See the long
+        # note in scripts/build-boringssl.sh — this is the setting that keeps them apart.
+        # SWIFT_INCLUDE_PATHS (the module search path itself) is set project-wide, above.
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
 
   # Same sources, iOS slice. This target ships nothing on its own — it is the enforcement
   # mechanism for "FleetKit imports Foundation and Network only". An `import AppKit` that
@@ -96,20 +194,162 @@ targets:
   FleetKitiOS:
     type: framework
     platform: iOS
-    sources: [Sources/FleetKit]
+    sources: *fleetKitSources
+    dependencies:
+      - framework: vendor/boringssl-artifacts/BoringSSL.xcframework
+        embed: false
     settings:
       base:
         SWIFT_VERSION: "6.0"
+        # Where the shim's `#include <openssl/curve25519.h>` resolves; SWIFT_INCLUDE_PATHS
+        # (the module search path itself) is set project-wide, above.
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
+        # Both names, and they have to agree. PRODUCT_MODULE_NAME alone gave a
+        # `FleetKitiOS.framework` whose module was `FleetKit`, and `-F` search resolves
+        # imports by *framework* name — so `import FleetKit` from FlightDeckMobile failed
+        # with "no such module" no matter how many framework search paths it was given. The
+        # macOS `FleetKit` target also builds a `FleetKit.framework`, but into `Debug/`
+        # while this one lands in `Debug-iphonesimulator/`, so the two never collide.
+        PRODUCT_NAME: FleetKit
         PRODUCT_MODULE_NAME: FleetKit
         GENERATE_INFOPLIST_FILE: "YES"
         CODE_SIGNING_ALLOWED: "NO"
 
-# FleetKitiOS needs a persisted shared scheme, not xcodebuild's own implicit synthesis for
-# a buildable target — that synthesis is unpersisted, undocumented, and exactly what
-# scripts/build-ios.sh's `-scheme` (over `-target`) is meant not to depend on. See the
-# comment there for why `-scheme` is required at all on this Xcode version.
+  # The iOS companion app: pairing (QR scan or typed code) and the live fleet list, both on
+  # top of `FleetKitiOS` above. Built by scripts/build-ios.sh and runnable in a simulator —
+  # docs/MOBILE.md has the boot/install/pair sequence and what it can and cannot prove.
+  FlightDeckMobile:
+    type: application
+    platform: iOS
+    productName: Flight Deck
+    sources: [Sources/FlightDeckMobile]
+    dependencies:
+      - target: FleetKitiOS
+        embed: true
+      # Markdown rendering for the timeline's prose rows and the detail screen. Declared here
+      # and nowhere else: FleetKit must not gain a UI dependency (see the `packages:` block).
+      - package: MarkdownUI
+        product: MarkdownUI
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        PRODUCT_MODULE_NAME: FlightDeckMobile
+        PRODUCT_BUNDLE_IDENTIFIER: dev.flightdeck.FlightDeckMobile
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # The source art is a full-bleed square with no alpha, deliberately. iOS applies its
+        # own superellipse mask at roughly 22% of the icon's width, which is far deeper than
+        # the ~5.5% rounding the supplied artwork had baked in — so shipping that as-is would
+        # have masked away the corners AND severed the icon's own bright rim, leaving a border
+        # that stops abruptly near each corner. `Assets.xcassets`'s icon is cropped just inside
+        # that rim so the field runs to the edge and the mask has only field to cut.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        # **Two identities, chosen per SDK, and the split is deliberate.**
+        #
+        # Ad-hoc for the simulator, rather than unsigned. "The simulator does not need signing"
+        # was true right up until the app touched the Keychain: an unsigned app has no keychain
+        # access group, so `SecItemUpdate`/`SecItemAdd` fail with `errSecMissingEntitlement`
+        # (-34018) the instant pairing tries to save. The pairing record IS a Keychain item, so
+        # an app that cannot reach the Keychain cannot pair at all, and the first person to run
+        # this found out by watching it die. Ad-hoc ("-") gives the simulator build an identity
+        # and an access group without needing a team or a profile.
+        #
+        # A real identity for a device, because ad-hoc will not install on one. `DEVELOPMENT_TEAM`
+        # is scoped to `iphoneos` for the reason the old comment gave for omitting it entirely:
+        # pinned unconditionally it drags the simulator build onto a provisioning profile too,
+        # so a profile problem would take out both destinations at once instead of one.
+        DEVELOPMENT_TEAM[sdk=iphoneos*]: 2T9E3N27J8
+        CODE_SIGN_IDENTITY[sdk=iphonesimulator*]: "-"
+        CODE_SIGN_IDENTITY[sdk=iphoneos*]: Apple Development
+        CODE_SIGNING_REQUIRED: "YES"
+        CODE_SIGNING_ALLOWED: "YES"
+        # Same reason as FlightDeck (macOS) above: FleetKitiOS's swiftmodule now depends on
+        # BoringSSLShim (SPAKE2Session), and resolving that dependency graph is required even
+        # though FlightDeckMobile itself never imports it directly. SWIFT_INCLUDE_PATHS (the
+        # module search path itself) is set project-wide; this is the other half, so the
+        # module it declares (which #includes openssl/curve25519.h) actually compiles.
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
+    info:
+      path: Sources/FlightDeckMobile/Info.plist
+      properties:
+        CFBundleDisplayName: Flight Deck
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # The camera is for one thing only, and the string says so — a vague reason is what
+        # gets an app rejected and, worse, what makes a user decline.
+        NSCameraUsageDescription: Flight Deck scans the pairing code shown on your Mac.
+        NSLocalNetworkUsageDescription: Flight Deck connects to your Mac over the local network to show your sessions.
+        # Required to browse at all on iOS 14+. A missing entry here does not error — the
+        # browser simply never returns a result, which reads as "my Mac isn't on the network".
+        NSBonjourServices:
+          - _flightdeck._tcp
+          - _flightdeck-pair._tcp
+
+  # The phone app's unit suite, and the first thing on this side that RUNS rather than merely
+  # compiling. Hosted by `FlightDeckMobile` because the properties worth guarding live in the
+  # app module (`TypedCodeField`, `FleetModel`, `SessionStatusGlyph.label`), and `@testable
+  # import FlightDeckMobile` needs a host to import. Run it with scripts/test-ios.sh — that
+  # script owns its own simulator device on purpose, so a run never installs over whatever is
+  # on the one you are using.
+  FlightDeckMobileTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests/FlightDeckMobileTests]
+    dependencies:
+      - target: FlightDeckMobile
+      # Linked, not embedded: the copy inside "Flight Deck.app/Frameworks" is the one that
+      # loads at runtime, same arrangement as FlightDeckTests and FleetKit on macOS.
+      - target: FleetKitiOS
+        embed: false
+    settings:
+      base:
+        # Matches the target under test. A Swift 5 test bundle would import a Swift 6 module
+        # fine, but it would also let a test express a concurrency shape the app itself
+        # cannot — and these tests drive a `@MainActor` model.
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: "YES"
+        # Named explicitly, and it has to be. `FlightDeckMobile` declares
+        # `productName: Flight Deck`, which renames the product *reference* only — the bundle
+        # the build system actually writes is named from PRODUCT_NAME, which that target
+        # leaves at its own name. xcodegen derives TEST_HOST from the reference, so it lands
+        # on `Flight Deck.app/Flight Deck`: a path nothing builds. The failure is a linker
+        # error ("library ... not found") plus "Unable to find a target which creates the host
+        # product", neither of which names the real cause. The macOS FlightDeck target settles
+        # the same disagreement by pinning PRODUCT_NAME (see its comment there); doing that
+        # here would rename the phone's bundle on disk, which nothing asked for. If
+        # FlightDeckMobile ever does gain a PRODUCT_NAME, these two lines move with it.
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/FlightDeckMobile.app/FlightDeckMobile
+        BUNDLE_LOADER: $(TEST_HOST)
+        # Ad-hoc signed for the same reason the host is, and it has to match: the bundle is
+        # copied into the host's PlugIns and signed as part of it, so an unsigned test bundle
+        # invalidates the host's signature — and the host's signature is what gives it the
+        # keychain access group that made pairing work at all. See FlightDeckMobile above.
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: "YES"
+        CODE_SIGNING_ALLOWED: "YES"
+        # Same reason as every other target that links FleetKit: resolving FleetKit's module
+        # dependency graph reaches BoringSSLShim, which #includes <openssl/curve25519.h>.
+        # SWIFT_INCLUDE_PATHS (the module search path itself) is set project-wide, at the top.
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
+
+# FleetKitiOS and FlightDeckMobile both need a persisted shared scheme, not xcodebuild's
+# own implicit synthesis for a buildable target — that synthesis is unpersisted,
+# undocumented, and exactly what scripts/build-ios.sh's `-scheme` (over `-target`) is
+# meant not to depend on. See the comment there for why `-scheme` is required at all on
+# this Xcode version.
 schemes:
   FleetKitiOS:
     build:
       targets:
         FleetKitiOS: [run]
+  FlightDeckMobile:
+    build:
+      targets:
+        FlightDeckMobile: [run]
+        # `[test]` rather than `[run]`: the bundle is built for the test action (and so by
+        # `build-for-testing`, which is what scripts/build-ios.sh runs) but not by a plain
+        # `build`, which stays the app-only check it has always been.
+        FlightDeckMobileTests: [test]
+    test:
+      targets: [FlightDeckMobileTests]

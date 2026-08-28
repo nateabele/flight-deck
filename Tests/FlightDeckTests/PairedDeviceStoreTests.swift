@@ -1,0 +1,145 @@
+import XCTest
+import FleetKit
+@testable import FlightDeck
+
+@MainActor
+final class PairedDeviceStoreTests: XCTestCase {
+    private final class MemoryPersistence: PreferencesPersisting {
+        var stored: Preferences?
+        func load() -> Preferences? { stored }
+        func save(_ preferences: Preferences) { stored = preferences }
+    }
+
+    private func device(_ name: String) -> PairedDevice {
+        let key = FleetDeviceKey.mint()
+        return PairedDevice(
+            slot: key.slot, name: name, secret: key.secret,
+            pairedAt: Date(), lastSeenAt: nil, armedUntil: nil
+        )
+    }
+
+    func testADeviceSurvivesASaveAndReload() {
+        let persistence = MemoryPersistence()
+        let store = PreferencesStore(persistence: persistence)
+        let phone = device("Nate's iPhone")
+        store.upsert(phone)
+
+        let reloaded = PreferencesStore(persistence: persistence)
+        XCTAssertEqual(reloaded.pairedDevices, [phone])
+    }
+
+    /// Revocation is deleting the secret, and this is the assertion that says so: the key is
+    /// gone from what the listener will be started with, not merely hidden from a list.
+    func testRevokingRemovesTheKeyTheListenerWouldAccept() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        let phone = device("phone")
+        let tablet = device("tablet")
+        store.upsert(phone)
+        store.upsert(tablet)
+        store.revokeDevice(slot: phone.slot)
+        XCTAssertEqual(store.deviceKeys().map(\.slot), [tablet.slot])
+    }
+
+    func testUpsertingTheSameSlotReplacesRatherThanDuplicates() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        var phone = device("phone")
+        store.upsert(phone)
+        phone.name = "renamed"
+        store.upsert(phone)
+        XCTAssertEqual(store.pairedDevices.count, 1)
+        XCTAssertEqual(store.pairedDevices.first?.name, "renamed")
+    }
+
+    func testRenamingAndNotingASightingDoNotDisturbTheSecret() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        let phone = device("phone")
+        store.upsert(phone)
+        store.renameDevice(slot: phone.slot, to: "Nate's iPhone")
+        let seen = Date(timeIntervalSince1970: 2_000_000)
+        store.noteDeviceSeen(slot: phone.slot, at: seen)
+        XCTAssertEqual(store.pairedDevices.first?.name, "Nate's iPhone")
+        XCTAssertEqual(store.pairedDevices.first?.lastSeenAt, seen)
+        XCTAssertEqual(store.pairedDevices.first?.secret, phone.secret)
+    }
+
+    /// The rule every field in `Preferences` obeys: a blob written before this feature
+    /// existed must still decode, or the first launch after an upgrade silently resets every
+    /// flag, override and shell setting the user has.
+    ///
+    /// The brief's literal JSON used `"globalFlags":{"flags":[]}`, which does not match
+    /// `FlagSet`'s actual `Codable` shape (`values`/`passthrough`) and would fail to decode
+    /// for a reason unrelated to this test's point. Built from an encoded empty
+    /// `Preferences()` instead, so the fixture always tracks the real wire shape.
+    ///
+    /// The `removeValue(forKey: "pairedDevices")` below is defensive rather than load-bearing:
+    /// Swift's synthesized `Encodable` omits `nil` Optionals entirely rather than emitting
+    /// `"pairedDevices": null`, so an empty `Preferences()` never has the key to begin with.
+    /// Left in as cheap insurance against a future encoder change.
+    func testAPreferencesBlobWithNoPairedDevicesKeyStillDecodes() throws {
+        var object = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(Preferences())
+        ) as! [String: Any]
+        object.removeValue(forKey: "pairedDevices")
+        let json = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(Preferences.self, from: json)
+        XCTAssertNil(decoded.pairedDevices)
+    }
+
+    /// The same rule, one level down, for the field that records a user rename: a
+    /// `PairedDevice` written before `storedUserNamed` existed must still decode. It is
+    /// nested inside `pairedDevices`, so a throw here does not degrade one row — it fails
+    /// the whole `preferences.v1` blob and silently resets every flag, override and shell
+    /// setting the user has, along with every paired device's key.
+    func testADeviceBlobWithNoUserNamedKeyStillDecodes() throws {
+        let phone = device("phone")
+        var object = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(phone)
+        ) as! [String: Any]
+        object.removeValue(forKey: "storedUserNamed")
+        let json = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(PairedDevice.self, from: json)
+        XCTAssertEqual(decoded, phone)
+        XCTAssertFalse(decoded.isUserNamed, "never renamed reads as not user-named")
+    }
+
+    /// Renaming on the Mac is sticky, and this is the flag that makes it so: without it the
+    /// next `hello` puts the phone's own name straight back over the user's choice.
+    func testRenamingMarksTheDeviceUserNamedAndAClaimedNameThenLoses() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        let phone = device("iPhone")
+        store.upsert(phone)
+
+        store.adoptClaimedName(slot: phone.slot, "iPhone 17")
+        XCTAssertEqual(store.pairedDevices.first?.name, "iPhone 17",
+                       "a device the user has not named adopts what it claims")
+
+        store.renameDevice(slot: phone.slot, to: "Work phone")
+        store.adoptClaimedName(slot: phone.slot, "iPhone 17")
+        XCTAssertEqual(store.pairedDevices.first?.name, "Work phone")
+        XCTAssertEqual(store.pairedDevices.first?.isUserNamed, true)
+    }
+
+    func testNoDevicesMeansNoKeysRatherThanACrash() {
+        XCTAssertTrue(PreferencesStore(persistence: MemoryPersistence()).deviceKeys().isEmpty)
+    }
+
+    /// The Bonjour instance name has to survive a relaunch, or a phone that remembers which
+    /// Mac it paired with stops recognising it after a restart. The second store is a stand-in
+    /// for that relaunch: it reads the same persistence and must see the same suffix, which
+    /// only holds if the first store actually wrote the minted id to disk.
+    func testTheInstallSuffixIsMintedOnceAndThenStable() {
+        let persistence = MemoryPersistence()
+        let first = PreferencesStore(persistence: persistence).installSuffix
+        XCTAssertEqual(first.count, 4)
+        XCTAssertNotNil(persistence.stored?.installID,
+                        "a minted id that never reached disk would remint on the next launch")
+        XCTAssertEqual(PreferencesStore(persistence: persistence).installSuffix, first)
+    }
+
+    func testTwoInstallsDoNotShareASuffix() {
+        XCTAssertNotEqual(
+            PreferencesStore(persistence: MemoryPersistence()).installSuffix,
+            PreferencesStore(persistence: MemoryPersistence()).installSuffix
+        )
+    }
+}

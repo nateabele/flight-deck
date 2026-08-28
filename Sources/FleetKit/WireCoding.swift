@@ -15,13 +15,14 @@ enum FleetEventTag: String, Codable {
     case renamed = "session.renamed"
     case activityChanged = "session.activity"
     case unreadChanged = "session.unread"
+    case promptExpired = "prompt.expired"
 }
 
 extension FleetEvent: Codable {
     enum CodingKeys: String, CodingKey {
-        case t, id, at, order, title, origin
+        case t, id, at, order, title, origin, token
         case project, session, projectId
-        case activity, waitingFor, subagentCount, isUnread, isCollapsed
+        case activity, waitingFor, subagentCount, isUnread, isCollapsed, hasBackgroundWork
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -63,7 +64,8 @@ extension FleetEvent: Codable {
             try c.encode(id, forKey: .id)
             try c.encode(title, forKey: .title)
             try c.encode(origin, forKey: .origin)
-        case .activityChanged(let id, let activity, let waitingFor, let subagentCount):
+        case .activityChanged(let id, let activity, let waitingFor, let subagentCount,
+                              let hasBackgroundWork):
             try c.encode(FleetEventTag.activityChanged, forKey: .t)
             try c.encode(id, forKey: .id)
             // `encode` not `encodeIfPresent`: an absent key and an explicit null are the
@@ -73,10 +75,15 @@ extension FleetEvent: Codable {
             try c.encode(activity, forKey: .activity)
             try c.encodeIfPresent(waitingFor, forKey: .waitingFor)
             try c.encode(subagentCount, forKey: .subagentCount)
+            try c.encode(hasBackgroundWork, forKey: .hasBackgroundWork)
         case .unreadChanged(let id, let isUnread):
             try c.encode(FleetEventTag.unreadChanged, forKey: .t)
             try c.encode(id, forKey: .id)
             try c.encode(isUnread, forKey: .isUnread)
+        case .promptExpired(let id, let token):
+            try c.encode(FleetEventTag.promptExpired, forKey: .t)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
         }
     }
 
@@ -115,11 +122,16 @@ extension FleetEvent: Codable {
                 id: try c.decode(UUID.self, forKey: .id),
                 activity: try c.decodeIfPresent(String.self, forKey: .activity),
                 waitingFor: try c.decodeIfPresent(String.self, forKey: .waitingFor),
-                subagentCount: try c.decode(Int.self, forKey: .subagentCount)
+                subagentCount: try c.decode(Int.self, forKey: .subagentCount),
+                hasBackgroundWork: try c.decodeIfPresent(
+                    Bool.self, forKey: .hasBackgroundWork) ?? false
             )
         case .unreadChanged:
             self = .unreadChanged(id: try c.decode(UUID.self, forKey: .id),
                                   isUnread: try c.decode(Bool.self, forKey: .isUnread))
+        case .promptExpired:
+            self = .promptExpired(id: try c.decode(UUID.self, forKey: .id),
+                                  token: try c.decode(UUID.self, forKey: .token))
         }
     }
 }

@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 import SwiftUI
 
@@ -85,6 +86,18 @@ final class PreferencesStore: ObservableObject {
         // on the launch that first runs it rather than leaving it to repeat until the user's
         // first edit.
         migrated.migrateToolsIfNeeded(terminalCommand: DefaultTerminalResolver.command())
+
+        // Minted here rather than on first read of `installSuffix`, so that stays a pure read
+        // — see its doc comment. Mutating `migrated` is also what persists it: the comparison
+        // below sees a value that differs from what `load()` returned, so a freshly minted id
+        // reaches disk on the same launch that minted it. That is the whole point of the
+        // identifier — a suffix re-minted every launch breaks Bonjour rediscovery in exactly
+        // the case it exists for, and property observers do not fire during `init`.
+        if migrated.installID == nil { migrated.installID = UUID() }
+        self.installSuffix = String(
+            (migrated.installID ?? UUID()).uuidString.prefix(4)
+        ).lowercased()
+
         self.preferences = migrated
         // Migration has to reach disk *here*. Assigning `preferences` inside `init` does not
         // fire the `didSet` above — Swift skips property observers on an initializing
@@ -328,5 +341,94 @@ final class PreferencesStore: ObservableObject {
     var tools: [ToolDefinition] {
         get { preferences.tools }
         set { preferences.tools = newValue }
+    }
+
+    // MARK: Paired devices
+
+    var pairedDevices: [PairedDevice] { preferences.pairedDevices ?? [] }
+
+    /// Four hex characters disambiguating this Mac's advertised Bonjour name, so a phone that
+    /// remembers which Mac it paired with keeps resolving it after a relaunch. A suffix
+    /// regenerated per launch would break rediscovery in exactly the case it exists for.
+    ///
+    /// Computed once in `init` rather than minted on first read. It is displayed in the
+    /// pairing UI, and a getter that minted-and-persisted would mutate `@Published` state
+    /// during a SwiftUI `body` evaluation — the "Modifying state during view update" hazard.
+    /// Making it a stored `let` means the read is pure by construction rather than by
+    /// convention about who is allowed to call it.
+    let installSuffix: String
+
+    /// What `FleetService` starts its listener with. A revoked device is absent here, which
+    /// is the entirety of what revocation means — and an expired provisional one is filtered
+    /// here too, so an unclaimed pairing window stops being a key the instant anything asks
+    /// for the accepted set, rather than only once whoever is watching the clock remembers to
+    /// prune it. `at` defaults to `Date()` and is a parameter only so a test can pin "after
+    /// the window closed" without a real sleep.
+    func deviceKeys(at now: Date = Date()) -> [FleetDeviceKey] {
+        pairedDevices.filter { $0.isLive(at: now) }.map { $0.key() }
+    }
+
+    func upsert(_ device: PairedDevice) {
+        var devices = pairedDevices
+        if let at = devices.firstIndex(where: { $0.slot == device.slot }) {
+            devices[at] = device
+        } else {
+            devices.append(device)
+        }
+        preferences.pairedDevices = devices
+    }
+
+    func revokeDevice(slot: UUID) {
+        preferences.pairedDevices = pairedDevices.filter { $0.slot != slot }
+    }
+
+    /// The user naming a device on this Mac. Sticky: it marks the device user-named, so the
+    /// name the phone claims in every `hello` stops overwriting it — see `adoptClaimedName`.
+    func renameDevice(slot: UUID, to name: String) {
+        mutateDevice(slot) {
+            $0.name = name
+            $0.storedUserNamed = true
+        }
+    }
+
+    /// The device saying what it calls itself. Adopted on every attach, so renaming the
+    /// phone shows up here too — but never over a name the user typed, which is the whole
+    /// point of `PairedDevice.isUserNamed`.
+    func adoptClaimedName(slot: UUID, _ name: String) {
+        mutateDevice(slot) {
+            guard !$0.isUserNamed else { return }
+            $0.name = name
+        }
+    }
+
+    func noteDeviceSeen(slot: UUID, at date: Date) {
+        mutateDevice(slot) { $0.lastSeenAt = date }
+    }
+
+    private func mutateDevice(_ slot: UUID, _ body: (inout PairedDevice) -> Void) {
+        var devices = pairedDevices
+        guard let at = devices.firstIndex(where: { $0.slot == slot }) else { return }
+        body(&devices[at])
+        preferences.pairedDevices = devices
+    }
+
+    // MARK: Fleet listener
+
+    /// The port to ask for at launch — what the listener bound to last time, or nil if it has
+    /// never bound. See `Preferences.fleetPort` for why a paired phone depends on this.
+    var fleetPort: UInt16? { preferences.fleetPort }
+
+    /// Records the port the listener actually bound to, including one the OS chose after the
+    /// remembered port turned out to be taken — the fallback has to be remembered too, or the
+    /// next launch keeps asking for a port that is not coming back.
+    ///
+    /// Guarded on a real change so the steady state touches no defaults key: `reloadKeys()`
+    /// runs on every arm, expiry and revocation, and each of those rebinds the same port and
+    /// lands here. Unlike `installID` this is minted well after `init`, from
+    /// `FleetService.start`, so the `didSet` on `preferences` does fire and no explicit
+    /// `persistence.save` is needed to get it to disk.
+    func rememberFleetPort(_ port: UInt16) {
+        guard preferences.fleetPort != port else { return }
+        preferences.fleetPort = port
     }
 }

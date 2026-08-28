@@ -29,6 +29,18 @@ final class SessionStore: ObservableObject {
     /// A session with no entry is absent from the map — that renders no icon, which is
     /// deliberately distinct from `.idle`.
     @Published private(set) var statuses: [UUID: SessionStatus] = [:]
+    /// Tabs with a background task running under their agent.
+    ///
+    /// A **decoration**, orthogonal to `statuses` — the same shape and lifetime as
+    /// `FleetService.phoneActiveSessions`, and for the same reason: it is a fact *about* a
+    /// tab, not a state the tab is in. Kept beside `statuses` rather than inside
+    /// `SessionStatus` so that no consumer has to switch on it, and so the activity enum
+    /// stays a total ordering of one axis.
+    ///
+    /// Latched. Upstream reports this only while idle (see `ClaudeStatusFile.Entry
+    /// .reportsBackgroundWork`), so a `busy` tick carries the last known value forward and
+    /// only a plain `idle` — or a vanished agent — clears it.
+    @Published private(set) var backgroundWorkSessions: Set<UUID> = []
     /// `didSet` persists every change, including one made through `SessionSidebar`'s
     /// `List(selection:)` binding — the only way selection actually changes in
     /// production, since that binding writes here directly rather than through
@@ -809,7 +821,10 @@ final class SessionStore: ObservableObject {
 
     /// The wire form of a session as it stands right now.
     private func wire(_ session: Session) -> WireSession {
-        FleetProjection.project(session, status: statuses[session.id], unread: unreadIdle)
+        FleetProjection.project(
+            session, status: statuses[session.id], unread: unreadIdle,
+            hasBackgroundWork: backgroundWorkSessions.contains(session.id)
+        )
     }
 
     /// How a refused session creation reaches the user. Defaulted rather than injected
@@ -1170,7 +1185,9 @@ final class SessionStore: ObservableObject {
             launchFailureReporter.report(error)
             return .failure(error)
         }
-        guard agent != .claude else {
+        // An agent that mints its own conversation id has nothing to negotiate, so it takes
+        // the synchronous path and never touches anything this method builds below.
+        guard agent.negotiatesIdentity else {
             return .success(newSession(in: url, at: index, account: explicit).id)
         }
 
@@ -1339,9 +1356,9 @@ final class SessionStore: ObservableObject {
         // Counted before the override check, deliberately: what the tests need to assert is
         // that a path *asked* for a running app-server, and a test that let it actually start
         // one would spawn `codex`. One ask is one account's — two logins asking is two.
-        if instance.agent == .codex { codexServerRequestsForTesting += 1 }
+        if instance.agent.needsRuntimeStart { codexServerRequestsForTesting += 1 }
         if let registered = adapters[instance] { return registered }
-        guard instance.agent == .codex else { return adapter(for: instance) }
+        guard instance.agent.needsRuntimeStart else { return adapter(for: instance) }
         try await startCodex(account: instance.account)
         return makeCodexStackIfNeeded(account: instance.account).adapter
     }
@@ -1548,7 +1565,10 @@ final class SessionStore: ObservableObject {
             // Emitted here, before the session goes in, so a client never receives a
             // `sessionAdded` naming a project it has not been told about.
             emit(.projectAdded(
-                FleetProjection.project(repos[repoIndex], statuses: statuses, unread: unreadIdle),
+                FleetProjection.project(
+                    repos[repoIndex], statuses: statuses, unread: unreadIdle,
+                    backgroundWork: backgroundWorkSessions
+                ),
                 at: repoIndex
             ))
         }
@@ -1726,7 +1746,7 @@ final class SessionStore: ObservableObject {
             //
             // An orphaned codex tab is left out of that list rather than deferred into it:
             // settling it would spawn an app-server for a login that no longer exists.
-            let deferred = session.agent == .codex
+            let deferred = session.agent.negotiatesIdentity
             if deferred, !orphaned { deferredCodexResumes.append(session.id) }
             let initialInput: String
             if orphaned || deferred {
@@ -1757,11 +1777,36 @@ final class SessionStore: ObservableObject {
             // `didSet` clears the mark for the tab you land on, which is correct.
             if entry.unread == true { setUnread(entry.id, true) }
 
+            // Migrates the pre-decomposition `"shell"` string, and prefers the explicit new
+            // field when the file has one — see `restoredActivity` and `isResumable`.
+            let restored = Self.restoredActivity(fromPersisted: entry.activity)
+            let hasBackgroundWork = entry.hasBackgroundWork ?? restored.hasBackgroundWork
+            // Seeded here rather than waiting for the next registry tick, so the sidebar
+            // badge survives a relaunch — but NOT for `setUnread`'s reason just above. This
+            // insert emits nothing and self-corrects nothing; it is safe only because
+            // `emit()` early-returns while `replicator == nil`, and `FleetService` attaches
+            // the replicator after `SessionStore.init` — and therefore after this whole
+            // `restore()` — has already run. Moving this insert to run after that wiring
+            // would need it to emit like `setUnread` does.
+            if hasBackgroundWork { backgroundWorkSessions.insert(entry.id) }
+
             // `!orphaned`: offering to continue a tab that cannot be launched at all would
             // put the wrong-login resume one click behind a prompt the app raised itself.
-            if autoResume, !orphaned,
-               let activity = entry.activity.flatMap(SessionActivity.init(rawValue:)),
-               Self.resumableActivities.contains(activity) {
+            //
+            // `textChannel`: this queue ends at `inject`, which types into a live TUI, so a
+            // tab whose terminal this build cannot read must never get an entry in it. That is
+            // the same failure `rename` records as the near-miss which justifies the codex
+            // caution everywhere else — text queued against a pty, retried every registry
+            // tick, waiting to match something and paste itself into a live session — and this
+            // path simply predates the caution. It is reachable, not theoretical: codex emits
+            // `.busy` on `task_started` and `.idle` on `task_complete`, and the 120-second
+            // window is driven by the claude registry tick.
+            //
+            // After `!orphaned` on purpose: the ordering costs an orphaned codex tab nothing,
+            // and it keeps this gate from being the thing that first asks about an agent.
+            if autoResume, !orphaned, session.agent.textChannel != nil,
+               let activity = restored.activity,
+               Self.isResumable(activity: activity, hasBackgroundWork: hasBackgroundWork) {
                 pendingPrompts[entry.id] = DeferredPrompt(
                     text: Self.resumePrompt, deadline: promptDeadline
                 )
@@ -1933,6 +1978,9 @@ final class SessionStore: ObservableObject {
                     // `nil` rather than a sentinel when no `claude` is registered: restore
                     // has to distinguish "was not running" from "was running and idle".
                     activity: statuses[$0.id]?.activity.rawValue,
+                    // `nil` rather than `false` so the common case adds no noise, matching
+                    // `unread` directly below.
+                    hasBackgroundWork: backgroundWorkSessions.contains($0.id) ? true : nil,
                     // `nil` rather than `false` so the common case adds no noise to a file
                     // that is meant to stay readable.
                     unread: unreadIdle.contains($0.id) ? true : nil,
@@ -2099,6 +2147,13 @@ final class SessionStore: ObservableObject {
         stopStatusWatchingIfUnused(account: closed.account)
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
+        // A queued prompt for a tab that no longer exists is the most literal case of "text
+        // that will never be typed", and its tokens go with it: `acceptedPromptTokens` is
+        // keyed by tab, so a reopened tab reusing this id starts with a clean dedupe window
+        // rather than inheriting one from a session that is over.
+        promptQueue.removeValue(forKey: id)
+        acceptedPromptTokens.removeValue(forKey: id)
+        answeredPromptTokens.removeValue(forKey: id)
         anchors.removeValue(forKey: id)
         // `applyReadState` no longer clears a mark when a session's status disappears — a
         // mark now outlives its process. But closing a tab removes its id from `repos`
@@ -2267,9 +2322,27 @@ final class SessionStore: ObservableObject {
     /// session the user has long since been working in.
     static let resumePromptWindow: TimeInterval = 120
 
-    /// The activities that mean "this session was working when we went away". `waiting` is
-    /// excluded: what it was blocked on does not survive the restart.
-    static let resumableActivities: Set<SessionActivity> = [.busy, .shell]
+    /// Whether a restored tab was working when we went away.
+    ///
+    /// `waiting` is excluded: what it was blocked on does not survive the restart. Background
+    /// work counts even at `.idle`, and that is not a special case — it is the same rule as
+    /// before, now that `shell` is decomposed. A tab with a dev server up *was* working.
+    static func isResumable(activity: SessionActivity, hasBackgroundWork: Bool) -> Bool {
+        activity != .waiting && (activity == .busy || hasBackgroundWork)
+    }
+
+    /// Reads a persisted `activity` string, migrating the pre-decomposition `"shell"`.
+    ///
+    /// Permanent, not transitional: every `sessions.json` on every machine holds `"shell"`
+    /// today, and `SessionActivity(rawValue:)` returns nil for it now. Dropping this read
+    /// would blank the status of every backgrounded tab on first launch after the upgrade.
+    static func restoredActivity(
+        fromPersisted raw: String?
+    ) -> (activity: SessionActivity?, hasBackgroundWork: Bool) {
+        guard let raw else { return (nil, false) }
+        if raw == "shell" { return (.idle, true) }
+        return (SessionActivity(rawValue: raw), false)
+    }
 
     /// Reap every live session concurrently, returning when they are all done or the budget
     /// expires — whichever comes first. Survivors are left for the next launch's sweep: each
@@ -2392,7 +2465,10 @@ final class SessionStore: ObservableObject {
                 let at = min(max(closed.indexInSidebar, 0), repos.count)
                 repos.insert(repo, at: at)
                 emit(.projectAdded(
-                    FleetProjection.project(repo, statuses: statuses, unread: unreadIdle), at: at
+                    FleetProjection.project(
+                        repo, statuses: statuses, unread: unreadIdle,
+                        backgroundWork: backgroundWorkSessions
+                    ), at: at
                 ))
             }
             for child in closed.sessions {
@@ -2435,7 +2511,7 @@ final class SessionStore: ObservableObject {
         }
 
         let orphaned = accountIsMissing(for: session)
-        let deferred = session.agent == .codex
+        let deferred = session.agent.negotiatesIdentity
         let initialInput: String
         if orphaned || deferred {
             initialInput = ""
@@ -2498,6 +2574,20 @@ final class SessionStore: ObservableObject {
     /// drift from `repos`; it is cheap, and `repos` is already `@Published`.
     var sidebarRows: [SidebarRow] { SidebarRow.rows(for: repos) }
 
+    /// Open a new session in a project named by id rather than by URL.
+    ///
+    /// The wire has only the id — a phone has no business knowing a path on this machine, and
+    /// a path arriving from off-box would be a directory this process opens on a client's say
+    /// so. Resolving it here also means the project's own defaults are applied by the one
+    /// method that already knows them.
+    ///
+    /// `nil` when the project is gone, which a phone holding a stale snapshot can ask about.
+    @discardableResult
+    func newSession(inProject id: Repo.ID) -> Session? {
+        guard let index = repos.firstIndex(where: { $0.id == id }) else { return nil }
+        return newSession(in: repos[index].url)
+    }
+
     func setCollapsed(_ isCollapsed: Bool, forProjectAt id: Repo.ID) {
         guard let index = repos.firstIndex(where: { $0.id == id }),
               repos[index].isCollapsed != isCollapsed else { return }
@@ -2539,6 +2629,12 @@ final class SessionStore: ObservableObject {
     /// is doing. Idle and unstatused children contribute nothing, so a quiet project shows
     /// no glyph at all — the same "renders nothing" that an unstatused session row gets.
     ///
+    /// Background work is deliberately NOT folded in here: it is a decoration on a
+    /// *session*, not a value `SessionActivity` can rank, and a project whose only active
+    /// tab is idle-with-background-work still has to surface that even though it loses this
+    /// filter. `ProjectHeaderRow` reads `projectHasBackgroundWork` alongside this, exactly as
+    /// a session row reads `backgroundWorkSessions` alongside `status(for:)`.
+    ///
     /// The subagent count is deliberately dropped. `SessionStatusIcon` draws it beside the
     /// spinner, and the collapsed header already carries a number (the session count); two
     /// adjacent numerals read as two counts of the same thing.
@@ -2553,6 +2649,15 @@ final class SessionStore: ObservableObject {
         return best
     }
 
+    /// Whether any session in this project is running a background task — the collapsed
+    /// header's counterpart to a session row's own `backgroundWorkSessions.contains(id)`.
+    /// Independent of `collapsedStatus`: a project whose only active tab is idle still
+    /// answers `true` here, which is exactly the case `collapsedStatus`'s idle filter drops.
+    func projectHasBackgroundWork(forProjectAt id: Repo.ID) -> Bool {
+        guard let repo = repos.first(where: { $0.id == id }) else { return false }
+        return repo.sessions.contains { backgroundWorkSessions.contains($0.id) }
+    }
+
     /// Test seam. Production statuses arrive through `applyRegistry`, which takes registry
     /// rows keyed by pid; a test that only cares about the sidebar's reading of a status
     /// should not have to fabricate those.
@@ -2562,7 +2667,7 @@ final class SessionStore: ObservableObject {
     /// and replication would make every test built on it exercise a path production never
     /// takes.
     func applyRegistryForTesting(_ next: [UUID: SessionStatus]) {
-        commitStatuses(next)
+        commitStatuses(next, backgroundWork: backgroundWorkSessions)
     }
 
     /// Test seams. Production drives both from `applyRegistry`; a test that only cares about
@@ -2571,6 +2676,30 @@ final class SessionStore: ObservableObject {
     func cancelSupersededPromptsForTesting(_ transitions: [StatusTransition]) {
         cancelSupersededPrompts(transitions)
     }
+
+    /// Marks a tab as mid-injection so a test can assert the shared gate refuses a second
+    /// driver. There is no production caller and there must not be one.
+    func holdInjectionForTesting(_ id: UUID) { injecting.insert(id) }
+
+    /// Seeds the deferred-prompt queue directly, in the same charter as
+    /// `holdInjectionForTesting`: no production caller, and there must not be one.
+    ///
+    /// It exists because `restore`'s gate now stops the production path from ever queuing for
+    /// an agent with no text channel, and `inject`'s own refusal has to be provable *on its
+    /// own*. A test that could only reach the injector through that queue would be green
+    /// because of the gate above it rather than because of the guard it names — and the two
+    /// are the difference between "nothing was queued" and "nothing was typed", which is what
+    /// this bug needs asserted separately.
+    func queuePendingPromptForTesting(_ text: String, for id: UUID) {
+        pendingPrompts[id] = DeferredPrompt(
+            text: text, deadline: now().addingTimeInterval(Self.resumePromptWindow)
+        )
+    }
+
+    /// Test seam, in the style of `flushPendingResumePromptsForTesting`. The registry tick is
+    /// the production driver, and a test that wants a second pass without fabricating another
+    /// registry scan says so here.
+    func flushPromptQueueForTesting() { flushPromptQueue() }
 
     /// Test seam. Production marks come from `applyReadState` and from restore; a test that
     /// only cares about how a mark is *pruned* should not have to script an edge to create it.
@@ -2585,10 +2714,16 @@ final class SessionStore: ObservableObject {
     /// actor and calls back on it; tests substitute a synchronous closure so they need no
     /// expectations. The read is one-shot per resume and can touch a multi-megabyte file,
     /// which is why it does not run inline.
-    var titleResolver: @MainActor (URL, @escaping @MainActor (String?) -> Void) -> Void = {
-        url, done in
+    ///
+    /// **It carries the agent, and that is the fix rather than a tidy-up.** The default used
+    /// to be `ConversationTitle.resolve` — a claude JSONL parser — reached from `repin`
+    /// through an agent-blind `binding(for:).transcriptURL`, so a repointed codex tab would
+    /// have had its rollout parsed as a claude transcript. `AgentAdapter.title(fromTranscriptAt:)`
+    /// answers `nil` for an agent whose names do not live in its transcript.
+    var titleResolver: @MainActor (AgentID, URL, @escaping @MainActor (String?) -> Void) -> Void = {
+        agent, url, done in
         Task.detached(priority: .userInitiated) {
-            let title = ConversationTitle.resolve(transcriptAt: url)
+            let title = agent.title(fromTranscriptAt: url)
             await done(title)
         }
     }
@@ -2608,9 +2743,50 @@ final class SessionStore: ObservableObject {
     /// pre-repin path, which is the failure both of those paths exist to prevent.
     func watchedTranscriptURL(of id: UUID) -> URL? { attachments[id]?.binding.transcriptURL }
 
+    /// Which agent a tab runs, and which file its conversation is read from.
+    ///
+    /// Three answers rather than an optional, because a phone renders them differently: a tab
+    /// that is gone is a stale row, a tab whose agent reports no transcript can never have
+    /// one, and a transcript that is simply not on disk yet is the ordinary state of a claude
+    /// session before its first turn (`TimelineReader` reports that one, not this).
+    ///
+    /// Keyed on the tab `id`, never `conversationID`: the latter is not stable across a
+    /// re-pin, and for codex it differs from the tab id from birth.
+    ///
+    /// The live attachment first, then the adapter: an attached tab is being tailed right now
+    /// and its binding is settled, while a tab with no agent process still has a conversation
+    /// worth reading. Everything agent-shaped goes through `AgentAdapter.binding(for:)` and
+    /// never through `Session.transcriptDirectory` or `ClaudeSession` — same rule
+    /// `toolContext()` follows, so that claude deriving its path from a cwd does not become a
+    /// rule every future agent inherits.
+    ///
+    /// A read, and only a read. It changes no fleet state, so it adds no mutation site for
+    /// `FleetReplicator`'s DEBUG drift check to miss and needed no `FleetEvent` case.
+    func timelineSource(of id: UUID) -> TimelineSource {
+        guard let at = locate(id) else { return .unknownSession }
+        let session = repos[at.repo].sessions[at.session]
+        let url = attachments[id]?.binding.transcriptURL
+            ?? adapter(for: instance(for: session)).binding(for: session).transcriptURL
+        guard let url else { return .noTranscript }
+        return .file(agent: session.agent, url: url)
+    }
+
     func title(of id: UUID) -> String? {
         guard let at = locate(id) else { return nil }
         return repos[at.repo].sessions[at.session].title
+    }
+
+    /// Which agent a tab runs, for a caller that has to ask a *capability* about it — today
+    /// `PromptService`, so its refusal can be `AgentAdapter.dialogDriver` rather than a
+    /// second name check of its own. `nil` for a tab that is gone, which every caller already
+    /// has to handle.
+    ///
+    /// Deliberately not derived from `timelineSource(of:)`: that answers `.noTranscript`
+    /// without naming an agent, so a caller reading the agent off it would silently lose the
+    /// question for exactly the tabs least able to answer it.
+    func agent(of id: UUID) -> AgentID? {
+        guard let at = locate(id) else { return nil }
+        return repos[at.repo].sessions[at.session].agent
     }
 
     /// Sidebar → the agent. Updates the title immediately, then tells the agent, by whatever
@@ -2634,12 +2810,37 @@ final class SessionStore: ObservableObject {
     /// later turn of the run loop — which is exactly the guarantee the injection contract is
     /// built on (`inject` decides *now* whether the bar is busy, and defers only if it is).
     /// Codex has no such constraint: its rename is a request, and nothing waits on it.
-    func rename(_ id: UUID, to newTitle: String) {
+    /// `@discardableResult` because every existing caller is a local UI action that has
+    /// already validated its own field; the Bool exists for the fleet command, which has to
+    /// answer a phone that sent a title this agent cannot use.
+    @discardableResult
+    func rename(_ id: UUID, to newTitle: String) -> Bool {
         guard let at = locate(id),
-              // Sanitized for both agents, not just claude's: it is what the sidebar shows,
-              // and the whole point below is that codex's thread name matches the sidebar.
-              let name = ClaudeSession.sanitizedName(newTitle)
-        else { return }
+              // Sanitized by THIS agent's rule, not by claude's for everyone. It is what the
+              // sidebar shows and what the rename below sends, and those two must agree —
+              // but which characters are legal is a property of the channel the name travels
+              // down, and codex's is JSON-RPC. See `AgentAdapter.sanitizedTitle`.
+              let name = agent(of: id)?.sanitizedTitle(newTitle)
+        else { return false }
+
+        // **Already called that, so stop here.** Everything below this line is observable: a
+        // `.renamed` event to every paired phone, a `persist()`, and — for claude — a rename
+        // TYPED INTO THE LIVE PTY. Re-sending the current name is not merely wasted work, it
+        // interrupts a running agent to tell it something it already knows, and the injector
+        // may defer it behind a busy turn or a multi-row draft first.
+        //
+        // Reached by the ordinary gesture rather than by a corner case: both editors seed
+        // themselves with the CURRENT title — `SessionSidebar.beginRename` and the phone's
+        // rename alert — so opening one and pressing Return without typing lands exactly here.
+        //
+        // Compared AFTER sanitising, so a title differing only by what this agent's own rule
+        // strips is the same title. Comparing the raw string would disagree with the person
+        // who typed a trailing space, and then type at the pty to prove the point.
+        //
+        // `true`, not `false`: false is this method's "that title is unusable" answer, which
+        // `FleetService` turns into a `rejected_title` error on the phone. The session has
+        // exactly the name the caller asked for, which is acceptance by any reading.
+        guard repos[at.repo].sessions[at.session].title != name else { return true }
 
         repos[at.repo].sessions[at.session].title = name
         emit(.renamed(id: id, title: name, origin: .user))
@@ -2659,6 +2860,11 @@ final class SessionStore: ObservableObject {
             // pop an alert over a cosmetic failure.
             Task { try? await adapter.rename(binding, to: name) }
         }
+        // True means the name was ACCEPTED and the local title changed — not that the agent
+        // has been told. The codex arm above is deliberately fire-and-forget and the claude
+        // arm queues, so "renamed" here is the same ack-means-dispatched promise every other
+        // fleet command makes.
+        return true
     }
 
     /// Queues a rename for `claude` and tries it at once. `SessionStore.rename` above is the
@@ -2675,9 +2881,474 @@ final class SessionStore: ObservableObject {
     /// One pending rename per tab, replaced rather than queued: renaming twice before the
     /// injection lands should type the second name once, not both names in turn.
     private func injectPendingRename(_ id: UUID, _ title: String) {
-        guard let name = ClaudeSession.sanitizedName(title) else { return }
+        // Claude's rule by name, not by lookup: what this queues is text typed at claude's
+        // pty, so it is claude's channel whatever tab asked for it. `pendingRenames` has no
+        // other producer — `AgentAdapter.rename` for an agent that renames over a wire never
+        // reaches here.
+        guard let name = ClaudeAdapter.sanitizedTitle(title) else { return }
         pendingRenames[id] = name
         flushPendingRename(id)
+    }
+
+    // MARK: - A prompt from a paired phone
+
+    /// What a client's prompt did.
+    ///
+    /// Three cases ack and four refuse. The refusals are distinguished on the wire because
+    /// each sends the reader somewhere different: `unsupportedAgent` means never on this tab,
+    /// `notRunning` means not until something starts, and a `rejected` means edit the text.
+    /// One code for all four would leave someone retyping a message the Mac will never take.
+    enum PromptDispatch: Equatable {
+        /// Accepted, and the injection has started. `ack`.
+        case sent
+        /// Accepted and queued — the bar was busy, or claude has not finished booting. `ack`.
+        case queued
+        /// This token has already been accepted for this tab; nothing was queued a second
+        /// time. `ack`, because from the client's side a retry that lands is a send that
+        /// landed. See `acceptedPromptTokens`.
+        case duplicate
+        case rejected(PromptText.Rejection)
+        /// No such tab.
+        case unknownSession
+        /// This tab's agent has no route for a prompt. See `submitPrompt`.
+        case unsupportedAgent
+        /// Nothing to type into: no surface, no status, or a bare shell.
+        case notRunning
+
+        /// The wire spelling — `err`'s `code` — or `nil` for the three that ack. Computed
+        /// here rather than in `FleetService` so the mapping lives beside the decision.
+        var errorCode: String? {
+            switch self {
+            case .sent, .queued, .duplicate: return nil
+            case .rejected(let reason): return reason.rawValue
+            case .unknownSession: return "unknown_session"
+            case .unsupportedAgent: return "unsupported_agent"
+            case .notRunning: return "not_running"
+            }
+        }
+    }
+
+    /// One phone-sent prompt waiting for a moment when it can be typed.
+    ///
+    /// **Deliberately NOT `DeferredPrompt`/`pendingPrompts`**, which is one-per-tab with
+    /// REPLACE semantics and is cancelled the instant a session goes busy or waiting. Both
+    /// are right for what that queue holds — a restore's "Keep going" and a sign-in's
+    /// `/login`, where a second request supersedes the first and an agent that started
+    /// working on its own has already done the thing — and both are wrong here. Two messages
+    /// typed on a phone are two messages, in order. And a prompt arriving mid-turn is the
+    /// ORDINARY case rather than the edge one: mid-turn is when a person reaches for their
+    /// phone. Reusing that queue would have silently dropped the first of two prompts and
+    /// then cancelled the survivor at the next status change.
+    struct QueuedPrompt: Equatable {
+        let text: String
+        /// The client's idempotency key, kept so a flush can identify the entry it retires
+        /// without comparing text — two identical messages are two messages.
+        let token: UUID
+        /// When it stops being worth typing. See `phonePromptWindow`.
+        let deadline: Date
+    }
+
+    /// FIFO per tab. Internal rather than private so tests can watch a deferral stay
+    /// deferred, in the same style as `pendingPrompts`; nothing outside this type writes it.
+    private(set) var promptQueue: [UUID: [QueuedPrompt]] = [:]
+
+    /// How long a phone-sent prompt stays worth typing.
+    ///
+    /// Fifteen minutes against `resumePromptWindow`'s two, and the gap is the whole point.
+    /// That one is a restore's "Keep going", which stops making sense within a couple of
+    /// minutes of the restore. This one waits out a claude turn, and a turn running a test
+    /// suite is routinely longer than two minutes. Bounded at all for the reason that window
+    /// is bounded, and the reason is stronger here: this text is the user's own words rather
+    /// than two fixed ones, so a prompt surfacing hours later in a conversation that has
+    /// moved on is a stranger thing to read.
+    static let phonePromptWindow: TimeInterval = 900
+
+    /// Tokens this store has already accepted, oldest first, per tab.
+    ///
+    /// **This is the whole answer to "what if the phone retries".** The socket can drop
+    /// between a prompt being queued and its `ack` being read, and nothing below the phone's
+    /// screen model runs a liveness timer — a half-open socket reports nothing until the TCP
+    /// retransmit horizon, which is minutes. So the phone genuinely cannot tell "the Mac
+    /// never got it" from "the Mac got it and I never heard". Without a key the only safe
+    /// client behaviour is never to retry, which makes a lost prompt lost silently; with one,
+    /// a retry is free — the same token acks and queues nothing.
+    ///
+    /// Bounded, and per-tab, because the window in which a retry happens is one screen's
+    /// session rather than a day, and an unbounded list keyed on a tab left open for a week
+    /// is a leak with a client on the other end of it. Cleared with the tab in
+    /// `closeSession`.
+    private var acceptedPromptTokens: [UUID: [UUID]] = [:]
+    static let maxRememberedPromptTokens = 16
+
+    /// A client asked for text to be typed into a live agent and submitted.
+    ///
+    /// **Only an agent with a text channel, and that question is asked of the agent rather
+    /// than re-decided here.** `AgentAdapter.textChannel` holds the refusal and its evidence,
+    /// and a `nil` there IS the refusal; this is one of the three places that consult it —
+    /// `inject` and `restore`'s auto-resume gate are the others — so no two of them can come
+    /// to different conclusions about one agent. Claude's route is the one `rename`
+    /// already takes: type into the pty through `inject`, the single funnel where an idle
+    /// status, a readable one-row `InputBar` and the kill-and-yank draft dance are all
+    /// decided. Guessing at a second TUI's input box with the user's own words is a worse
+    /// version of a bug this codebase has already paid for — see `rename`, which is the
+    /// reason that dispatch exists at all.
+    ///
+    /// **The order of the checks is load-bearing twice.** The capability test comes before
+    /// the status test, so a codex tab is told `unsupportedAgent` — never on this tab — rather
+    /// than `notRunning`, which would invite a retry that can never succeed. And the token
+    /// test comes before the text is validated, so a retry of something already accepted is
+    /// idempotent even if the two sends disagreed about the text; they cannot, since a token
+    /// is minted per composed message, and if they ever did the first send is the one the
+    /// user watched land.
+    ///
+    /// Changes no fleet state and emits no `FleetEvent`, deliberately: what a phone typed
+    /// becomes visible through the transcript the agent writes, not through a mirrored field,
+    /// so this feature adds no mutation site for `FleetReplicator`'s drift check to police.
+    @discardableResult
+    func submitPrompt(_ raw: String, token: UUID, to id: UUID) -> PromptDispatch {
+        guard let at = locate(id) else { return .unknownSession }
+        guard repos[at.repo].sessions[at.session].agent.textChannel != nil else {
+            return .unsupportedAgent
+        }
+        if acceptedPromptTokens[id, default: []].contains(token) { return .duplicate }
+        guard let text = PromptText(raw) else {
+            // `rejection(for:)` and `init?` are the same predicate; this call is only to
+            // recover the reason. `.empty` is unreachable and is a safe default rather
+            // than a force-unwrap.
+            return .rejected(PromptText.rejection(for: raw) ?? .empty)
+        }
+        // A tab with no status and no surface has nothing to type into. That is now the only
+        // reason to refuse: `.shell` used to be refused here as "a bare prompt where the text
+        // would be RUN rather than read", which was simply wrong — Claude Code writes it for
+        // `idle && hasBackgroundTasks`, so it meant the turn had *finished*. Background work
+        // is a decoration now and is deliberately not consulted.
+        guard status(for: id)?.activity != nil, injector(for: id) != nil
+        else { return .notRunning }
+
+        remember(token, for: id)
+        // `text.value`, never `raw`: `PromptText` normalises before it measures, so the
+        // stripped string is the one the length and control-character guarantees actually
+        // cover — and a trailing newline typed into the box would insert a blank line rather
+        // than submit anything. It is also what the phone's outbox looks for verbatim in a
+        // transcript page before it calls the send confirmed.
+        promptQueue[id, default: []].append(
+            QueuedPrompt(
+                text: text.value, token: token,
+                deadline: now().addingTimeInterval(Self.phonePromptWindow)
+            )
+        )
+        // Tried at once rather than left for the next registry tick, so an idle tab feels
+        // immediate. `flushPromptQueue(_:)` is exactly what the tick runs; this is only
+        // earlier, the same relationship `injectPendingRename` has with `flushPendingRenames`.
+        flushPromptQueue(id)
+        // Still queued means the injection was deferred. `inject` decides *now* whether the
+        // bar is busy, and its `onSent` runs inside the settle — synchronous under a test's
+        // substituted `injectionSettle`, one turn later in production — so by the time this
+        // line runs the entry is either gone or genuinely waiting.
+        return promptQueue[id]?.contains { $0.token == token } == true ? .queued : .sent
+    }
+
+    /// Files a token against a tab, oldest evicted first. See `acceptedPromptTokens`.
+    private func remember(_ token: UUID, for id: UUID) {
+        var tokens = acceptedPromptTokens[id, default: []]
+        tokens.append(token)
+        if tokens.count > Self.maxRememberedPromptTokens {
+            tokens.removeFirst(tokens.count - Self.maxRememberedPromptTokens)
+        }
+        acceptedPromptTokens[id] = tokens
+    }
+
+    /// Types the head of every tab's queue that is finally ready for it.
+    ///
+    /// Driven by the registry scan for the reason `flushPendingPrompts` is: what a queued
+    /// prompt waits on — a turn ending, a draft being cleared, claude finishing its boot — is
+    /// often not a status change at all, so gating the retry on one would strand it.
+    private func flushPromptQueue() {
+        for id in promptQueue.keys { flushPromptQueue(id) }
+    }
+
+    /// One tab's turn at the input box.
+    ///
+    /// **The head only, never the whole queue.** `inject` submits with a Return, so a second
+    /// entry in the same pass would be typed into a bar that has just started a turn.
+    /// `inject`'s idle gate would refuse it — but only after the settle, by which point the
+    /// entry looks flushed to everything upstream. One per pass, and the next pass is a
+    /// registry tick away.
+    private func flushPromptQueue(_ id: UUID) {
+        // Expiry first, and it runs whether or not this tab can be typed into: a queue that
+        // is never drained because its tab lost its surface must still empty itself.
+        let currentTime = now()
+        // Captured before the filter drops them, because a phone is waiting on each one. The
+        // window expiring is not an error on anyone's part — the tab was busy longer than the
+        // message stayed worth typing — but it IS the end of that message, and the only place
+        // that fact exists. Dropping these silently left the phone's outbox row saying
+        // "Waiting for your Mac to type this" about a prompt that no longer existed anywhere,
+        // with the `.queued` ack as the last thing it had ever been told.
+        let expired = promptQueue[id]?.filter { currentTime >= $0.deadline } ?? []
+        promptQueue[id] = promptQueue[id]?.filter { currentTime < $0.deadline }
+        if promptQueue[id]?.isEmpty == true { promptQueue.removeValue(forKey: id) }
+        if !expired.isEmpty {
+            emit(expired.map { .promptExpired(id: id, token: $0.token) })
+        }
+        guard let head = promptQueue[id]?.first else { return }
+        // Both other users of this input box go first, and neither costs anything to wait
+        // for: a rename is a direct user action that clears within a tick or two, and the
+        // resume queue holds text that stops making sense in two minutes. This queue has
+        // fifteen.
+        guard pendingRenames[id] == nil, pendingPrompts[id] == nil else { return }
+        inject(
+            head.text,
+            into: id,
+            allowMidTurn: true,
+            // Re-checked after the settle: the tab can be closed, or the entry can expire,
+            // while claude repaints. Matched on the TOKEN and not on the text, because two
+            // identical messages are two messages and retiring the wrong one loses the other.
+            stillWanted: { [weak self] in self?.promptQueue[id]?.first?.token == head.token },
+            onSent: { [weak self] in
+                guard let self, self.promptQueue[id]?.first?.token == head.token else { return }
+                self.promptQueue[id]?.removeFirst()
+                if self.promptQueue[id]?.isEmpty == true {
+                    self.promptQueue.removeValue(forKey: id)
+                }
+            }
+        )
+    }
+
+    // MARK: - Answering a dialog from a paired phone
+
+    /// What a client's answer did.
+    ///
+    /// **`dispatched` is the ceiling, and that is honest rather than lazy.** The option and
+    /// allow paths act across `injectionSettle` — move, wait for claude to repaint, re-read,
+    /// then Return — so whether the answer LANDED is not knowable when this returns. §4's rule
+    /// is the same one: `ack` means dispatched, and the observable effect arrives separately.
+    /// Here it arrives twice over — the session stops being `waiting`, which the phone is
+    /// pushed, and the transcript grows a `tool_result`, which the phone's next fetch reads.
+    ///
+    /// Everything knowable BEFORE the settle is a distinct refusal, because each sends the
+    /// reader somewhere different.
+    enum AnswerDispatch: Equatable {
+        /// Accepted, and the driver has started. `ack`.
+        case dispatched
+        /// This token has already been answered for this tab. `ack`, because from the client's
+        /// side a retry that lands is an answer that landed.
+        case duplicate
+        case unknownSession
+        /// This tab's agent has no dialog Flight Deck can drive. Codex, and anything newer.
+        case unsupportedAgent
+        /// Nothing is blocked on this tab right now.
+        case notWaiting
+        /// A shape this build will not drive — see `PromptQuestion.unanswerable`.
+        case unanswerable
+        /// The terminal could not be read, the dialog was not on it, the answer named a
+        /// different kind of dialog than the one derived, the index or the label named
+        /// nothing, or another injection is already resolving for this tab.
+        ///
+        /// **One code for six states deliberately.** Every one means "not right now, and the
+        /// phone should look again", and splitting them would invite a client to treat some as
+        /// permanent and stop asking. The distinctions are worth a log line, not a wire code.
+        case unreadableScreen
+
+        var errorCode: String? {
+            switch self {
+            case .dispatched, .duplicate: return nil
+            case .unknownSession: return "unknown_session"
+            case .unsupportedAgent: return "unsupported_agent"
+            case .notWaiting: return "not_waiting"
+            case .unanswerable: return "unanswerable"
+            case .unreadableScreen: return "unreadable_screen"
+            }
+        }
+    }
+
+    /// Tokens this store has already answered with, per tab. Same shape, same bound and same
+    /// reasoning as `acceptedPromptTokens` — see it for why a retry has to be free. A separate
+    /// list, because a typed prompt's token and an answer's token are minted by different taps
+    /// and a shared list would let one silence the other.
+    private var answeredPromptTokens: [UUID: [UUID]] = [:]
+
+    /// A client answered the dialog tab `id` is blocked on.
+    ///
+    /// `open` is the Mac's **own** derivation, from `PromptService`, never the client's claim.
+    /// The command from the phone contributes a tab, a call id (already checked against this
+    /// derivation by the caller), an intent, and a token. Nothing a phone sends becomes a label
+    /// matched on screen. That is the difference between a remote control and a remote keyboard.
+    ///
+    /// **The order of the checks is load-bearing twice**, as `submitPrompt`'s is. The
+    /// capability test — `AgentAdapter.dialogDriver`, and a `nil` there is the refusal —
+    /// precedes the status test, so a tab that happens to be `waiting` on an agent whose
+    /// dialogs this build has never read is told `unsupportedAgent` — never on this tab —
+    /// rather than being let through to that terminal. And the token test precedes anything
+    /// being typed, so a retry types nothing even if the screen has moved on.
+    ///
+    /// **A different question from `submitPrompt`'s, deliberately.** That one asks for a text
+    /// channel; this asks for a dialog driver, and an agent can have the second without the
+    /// first — driving a dialog needs no input box and no kill ring, only a screen grammar
+    /// and arrows. Collapsing the two back into one capability would make an agent's dialogs
+    /// undrivable for a reason that is about its composer.
+    ///
+    /// Changes no fleet state and emits no `FleetEvent`: what the phone answered becomes
+    /// visible through the status the agent writes and the transcript it appends.
+    @discardableResult
+    func answerPrompt(
+        _ open: OpenPrompt, with answer: PromptAnswer, in id: UUID, token: UUID
+    ) -> AnswerDispatch {
+        guard let at = locate(id) else { return .unknownSession }
+        guard let driver = repos[at.repo].sessions[at.session].agent.dialogDriver else {
+            return .unsupportedAgent
+        }
+        if answeredPromptTokens[id, default: []].contains(token) { return .duplicate }
+        // `inject`'s gate, inverted. A session that is not `waiting` has no dialog up, and a
+        // Return there submits whatever is in the input bar — the exact failure `inject`'s own
+        // comment describes from the other side. Escape is gated too: a stray Escape into a
+        // live TUI is not free either.
+        guard statuses[id]?.activity == .waiting else { return .notWaiting }
+        guard let injector = injector(for: id) else { return .unreadableScreen }
+        // The same set the other two users of this terminal hold, so a rename or a queued
+        // phone prompt mid-settle cannot interleave with a dialog being driven.
+        guard !injecting.contains(id) else { return .unreadableScreen }
+
+        switch answer {
+        case .deny:
+            // **One key event, and nothing is read.** No viewport, no marker, no row
+            // arithmetic, no settle, no confirmation pass. This is the path a worried person
+            // reaches for, and it is deliberately the one that cannot be wrong about which row
+            // it is on. It is also therefore the only answer that works on a screen this build
+            // cannot parse at all. Escape is a real denial and not a dismissal: the transcript
+            // closes the call `is_error=True "The user doesn't want to proceed with this tool
+            // use. The tool use was rejected"`, measured against claude 2.1.241 in Task 3.
+            //
+            // Routing this through the interlock below for symmetry would be a regression, not
+            // a tidy-up: it would make the refusal depend on a parse, so a screen that could
+            // not be read would leave a person unable to say no from their phone.
+            remember(answered: token, for: id)
+            driver.deny(injector)
+            return .dispatched
+
+        case .allow:
+            // **The approval row, and only ever the approval row.** Both shipped agents order
+            // a permission dialog plain-yes / DURABLE GRANT / deny, so the target is
+            // `driver.allowRow` and there is no `PromptAnswer` case that names another row
+            // and no arithmetic here that can reach one. See `PromptAnswer`'s own comment,
+            // and `AgentDialogDriver.allowRow` for why that number has no default: an agent
+            // that inherited claude's would be one release away from granting "and don't ask
+            // again" from a pocket.
+            //
+            // The ordering claim is checked against each agent's own captures — claude's by
+            // `ChoiceDialogTests.testEveryRealDialogOpensWithTheCursorOnItsFirstRow`, codex's
+            // by `CodexDialogDriverTests`. If a future build reorders the dialog, those
+            // fixtures fail first — and the driver must be rewritten, not the fixtures.
+            //
+            // **This interlock is STRUCTURALLY WEAKER than `.option`'s for claude, and saying
+            // so is the point.** A claude permission dialog's wording is assembled in the TUI
+            // at display time from the live permission rule set, so it exists nowhere Flight
+            // Deck can read: no transcript record carries it, and there is therefore no label
+            // to confirm the row against. All that can be required after the move is that the
+            // marker is ON that row. A screen that renumbered its rows would satisfy that.
+            // The two paths are not equally verified and must not be read as if they were.
+            guard case .permission = open else { return .unreadableScreen }
+            guard let viewport = injector.readViewport(),
+                  let current = driver.focusedRow(inViewport: viewport)
+            else { return .unreadableScreen }
+            return drive(
+                from: current, to: driver.allowRow,
+                confirm: { driver.focusedRow(inViewport: $0) == driver.allowRow },
+                injector: injector, id: id, token: token
+            )
+
+        case .option(let index, let label):
+            // `option` indexes an `AskUserQuestion`'s own options, so a permission dialog —
+            // which has no options this build can enumerate — has no list for the index to
+            // mean anything in.
+            guard case .question(_, let questions) = open else { return .unreadableScreen }
+            // **One question, and this refusal is the guard rail.** `.option` names an index
+            // into ONE question's options; a set has several lists and a screen showing
+            // whichever of them claude has advanced to, so the index would be counted against
+            // the wrong question. Nothing drives a set yet, and refusing here is what keeps a
+            // client that tries anyway from typing an answer into the wrong dialog.
+            guard questions.count == 1, let question = questions.first else {
+                return .unanswerable
+            }
+            guard question.isAnswerable else { return .unanswerable }
+            // The client's label against the Mac's own copy, before any screen is consulted.
+            // A phone naming words this transcript never carried is a reader looking at
+            // something else, and its index is not to be trusted either.
+            guard question.options.indices.contains(index),
+                  question.options[index].label == label
+            else { return .unreadableScreen }
+            guard let viewport = injector.readViewport(),
+                  let current = driver.focusedRow(inViewport: viewport),
+                  // The pre-flight half of the interlock: before counting arrows across a
+                  // list, confirm the row the cursor is already on says what this question
+                  // says it should. Without it a dialog that has been answered and replaced
+                  // would be moved through — two keystrokes into someone else's cursor —
+                  // and only the re-read would catch it, too late to have sent nothing.
+                  //
+                  // A cursor outside the transcript's options is refused rather than counted
+                  // from: claude appends rows at display time (`Type something.`, `Chat about
+                  // this`) that appear in no transcript, so there is no label to confirm.
+                  question.options.indices.contains(current),
+                  driver.row(current, reads: question.options[current].label,
+                             inViewport: viewport)
+            else { return .unreadableScreen }
+            return drive(
+                from: current, to: index,
+                confirm: {
+                    driver.focusedRow(inViewport: $0) == index
+                        && driver.row(index, reads: label, inViewport: $0)
+                },
+                injector: injector, id: id, token: token
+            )
+        }
+    }
+
+    /// Move the selection, wait for the repaint, re-read, and only then submit.
+    ///
+    /// **Measured, not assumed, and the re-read is the whole safety property.** Arrows are
+    /// relative: a miscounted, dropped or late-repainted keystroke leaves the marker somewhere
+    /// this code cannot know about without looking again. `inject` kills first and compares
+    /// because the screen cannot be trusted to say whether the buffer was empty; this moves
+    /// first and confirms because the screen cannot be trusted to say whether the keystroke
+    /// arrived. Same idiom, same reason, and the consequence of skipping it is a Return on a
+    /// row nobody chose.
+    ///
+    /// A failed confirmation sends nothing further and reports nothing: the answer is already
+    /// `dispatched` to the client, the cursor has moved, and a moved cursor is recoverable by
+    /// the person at the keyboard in a way a wrong Return is not.
+    private func drive(
+        from current: Int,
+        to target: Int,
+        confirm: @escaping (String) -> Bool,
+        injector: TextInjecting,
+        id: UUID,
+        token: UUID
+    ) -> AnswerDispatch {
+        remember(answered: token, for: id)
+        injecting.insert(id)
+
+        let steps = target - current
+        for _ in 0..<abs(steps) {
+            if steps > 0 { injector.sendArrowDown() } else { injector.sendArrowUp() }
+        }
+
+        // Claude Code repaints asynchronously — the same seam, and the same 120ms in
+        // production, that a kill waits out.
+        injectionSettle { [weak self] in
+            defer { self?.injecting.remove(id) }
+            guard let screen = injector.readViewport(), confirm(screen) else { return }
+            injector.sendReturn()
+        }
+        return .dispatched
+    }
+
+    /// Files an answered token against a tab, oldest evicted first. See `answeredPromptTokens`.
+    private func remember(answered token: UUID, for id: UUID) {
+        var tokens = answeredPromptTokens[id, default: []]
+        tokens.append(token)
+        if tokens.count > Self.maxRememberedPromptTokens {
+            tokens.removeFirst(tokens.count - Self.maxRememberedPromptTokens)
+        }
+        answeredPromptTokens[id] = tokens
     }
 
     /// Types `text` into a session's input box and submits it, preserving whatever draft was
@@ -2686,61 +3357,91 @@ final class SessionStore: ObservableObject {
     ///
     /// The gates, and why each one:
     ///
+    /// - **An agent with a text channel only.** What gets typed, and how, is *the agent's* —
+    ///   claude's is `InputBar`'s one-row box and a kill-and-yank dance that works only
+    ///   because Claude Code keeps a deleted-text ring — and this is reached from callers
+    ///   that carry no agent at all: `flushPendingPrompts` drains a queue seeded by
+    ///   `restore`, and `flushPendingRename` drains one seeded by a keystroke. This is the
+    ///   single funnel both pass through, so it is the one place that can refuse a terminal
+    ///   this build cannot read, and `AgentID.textChannel` is the question it asks — a `nil`
+    ///   there is the whole refusal.
+    ///
+    ///   **Widening this back out is not the cautious move.** Nothing codex has goes through
+    ///   here: `sendToShell` types resume commands and `initialInput` directly at the pty and
+    ///   never touches this funnel, and `CodexAdapter.loginInvocation` has `inject: nil`, so
+    ///   no codex sign-in text is ever queued either. What passes through today is claude's
+    ///   `/login`, claude's `/rename`, a restore's "Keep going" and a phone's message — all
+    ///   of them claude's, all of them typed into a box only claude's grammar can find.
     /// - **Idle only.** While `busy` the text queues behind the running turn; while
     ///   `waiting` a Return answers a permission prompt or dialog instead of submitting;
-    ///   `shell` means no `claude` is running at all, so the text would hit a bare shell.
-    /// - **One row only.** Ctrl+U kills a single logical line and yank-pop *replaces* rather
-    ///   than appends, so a draft spanning rows cannot be taken apart and put back.
+    ///   `shell` was `idle` plus a background task — the turn had already finished, so the
+    ///   text was always safe to type — and no longer exists as an activity at all.
     ///
-    /// The kill happens *before* we know whether there was anything to kill, because that is
-    /// the only way to find out: Claude Code renders its placeholder hint in exactly the same
-    /// shape as a real draft (see `InputBar`), so the screen cannot be trusted to say whether
-    /// the buffer is empty. Killing and then comparing measures the effect instead. A kill
-    /// that changed nothing means the line was empty and there is nothing to restore —
-    /// yanking there would paste the user's *previous* kill into the bar.
-    ///
-    /// The yank comes after the Return, so a wrong guess can only leave text sitting in the
-    /// bar, never submit it. `sendText` and `sendReturn` are separate because a paste is not
-    /// typing — see `TextInjecting.sendReturn()`.
+    /// Everything past those two gates — finding the input box, the kill, the settle, the
+    /// before/after comparison and the yank — is `AgentTextChannel.submit`'s, and the reasons
+    /// each step is shaped the way it is live with it in `ClaudeTextChannel`.
     ///
     /// `stillWanted` is re-checked after the settle delay, because the request can be
-    /// replaced or cancelled while Claude Code repaints. `onSent` runs once the text has been
+    /// replaced or cancelled while the agent repaints. `onSent` runs once the text has been
     /// submitted, and is where the caller retires its pending entry.
     @discardableResult
     private func inject(
         _ text: String,
         into id: UUID,
+        allowMidTurn: Bool = false,
         stillWanted: @escaping @MainActor () -> Bool,
         onSent: @escaping @MainActor () -> Void
     ) -> Bool {
-        guard statuses[id]?.activity == .idle,
-              let injector = injector(for: id),
-              let viewport = injector.readViewport(),
-              let bar = InputBar.read(fromViewport: viewport),
-              bar.rows.count == 1
+        // **`.busy` is allowed, into an empty box only.** This required `.idle`, and that is
+        // why a prompt sent from the phone could be accepted and then quietly die: the queue
+        // drained only when the tab reached idle, so a tab running back-to-back turns never
+        // drained it and the entry expired at `phonePromptWindow` having never been typed —
+        // while the same text typed at the Mac worked, because the agent queues mid-turn.
+        //
+        // The empty-box condition is the whole safety story for typing into a running turn.
+        // `submit`'s kill-and-yank can restore a draft when the screen is settled; mid-turn it
+        // is reading a screen that is repainting, so a draft is deferred rather than risked.
+        //
+        // `.waiting` stays refused, and that is why this is a whitelist rather than `!= .idle`.
+        // A waiting tab has a select-list dialog up: text typed there goes to the dialog and
+        // the Return after it PICKS AN OPTION. Answering a dialog is `answerPrompt`'s job,
+        // behind an interlock that reads the screen before committing — a prompt must never
+        // become an answer by arriving at the wrong moment.
+        guard let channel = session(for: id)?.agent.textChannel,
+              let activity = statuses[id]?.activity,
+              activity == .idle || activity == .busy,
+              let injector = injector(for: id)
         else { return false }
+        // Mid-turn is for PROMPTS, not for everything that types. A rename is `/rename x`,
+        // a slash command whose effect the user is watching for, and queueing it behind a
+        // running turn to land minutes later is worse than waiting for the box. A prompt is
+        // the opposite: it is a message to the agent, and landing in its queue is exactly
+        // where the sender wanted it.
+        if activity == .busy {
+            guard allowMidTurn, channel.isComposerEmpty(injector) else { return false }
+        }
         // See `injecting`'s doc comment: this is the one place both callers funnel through,
         // so it is the one place that can refuse a second injection for a tab that already
         // has one resolving.
         guard !injecting.contains(id) else { return false }
 
+        // Marked before the channel is asked, and cleared again if it refuses: the channel's
+        // contract is that it settles exactly once iff it returns true (see
+        // `AgentTextChannel.submit`), so the mark is retired either here or inside that
+        // settle and never both.
         injecting.insert(id)
-        let before = bar.content
-        injector.sendKillLine()
-        // Claude Code needs a moment to repaint before the screen reflects the kill.
-        injectionSettle { [weak self] in
-            defer { self?.injecting.remove(id) }
-            guard stillWanted() else { return }
-            let after = injector.readViewport().flatMap(InputBar.read(fromViewport:))?.content
-            injector.sendText(text)
-            injector.sendReturn()
-            // Restore only on a *confirmed* change. If the screen went unreadable we do not
-            // know, and the draft is one Ctrl+Y away in Claude's own ring — better than
-            // pasting text the user never typed into a bar that was empty.
-            if let after, after != before { injector.sendYank() }
-            onSent()
-        }
-        return true
+        let started = channel.submit(
+            text, into: injector,
+            settle: { [weak self] work in
+                self?.injectionSettle {
+                    defer { self?.injecting.remove(id) }
+                    work()
+                }
+            },
+            stillWanted: stillWanted, onSent: onSent
+        )
+        if !started { injecting.remove(id) }
+        return started
     }
 
     /// Types a pending rename into a session, or leaves it pending if this is a bad moment.
@@ -2770,6 +3471,12 @@ final class SessionStore: ObservableObject {
     /// Driven by the registry scan because a queued prompt usually waits on an agent that has
     /// not finished booting — which is not a status change, so gating the retry on one would
     /// strand it.
+    ///
+    /// No agent test of its own: `inject`'s first gate is the one that refuses a terminal
+    /// this build cannot type into, and it is deliberately there rather than here so
+    /// `flushPendingRename` is covered by the same guard. An entry that cannot be typed sits
+    /// until its deadline and is dropped unsent, which is what this loop already does with
+    /// one that never becomes injectable.
     private func flushPendingPrompts() {
         let currentTime = now()
         for (id, prompt) in pendingPrompts {
@@ -2805,7 +3512,7 @@ final class SessionStore: ObservableObject {
             switch transition.new?.activity {
             case .busy, .waiting:
                 pendingPrompts.removeValue(forKey: transition.id)
-            case .idle, .shell, nil:
+            case .idle, nil:
                 continue
             }
         }
@@ -2816,7 +3523,7 @@ final class SessionStore: ObservableObject {
     /// `rename` matches the title we already set and stops here.
     func applyExternalTitle(_ id: UUID, _ title: String) {
         guard let at = locate(id),
-              let name = ClaudeSession.sanitizedName(title),
+              let name = repos[at.repo].sessions[at.session].agent.sanitizedTitle(title),
               repos[at.repo].sessions[at.session].title != name
         else { return }
 
@@ -2865,7 +3572,24 @@ final class SessionStore: ObservableObject {
 
     func status(for id: UUID) -> SessionStatus? { statuses[id] }
 
+    /// The tab's terminal screen, or nil when there is no surface or it cannot be read.
+    ///
+    /// A read and only a read: it changes no fleet state and adds no mutation site for
+    /// `FleetReplicator`'s DEBUG drift check.
+    func viewport(of id: UUID) -> String? { injector(for: id)?.readViewport() }
+
     func sessionExists(_ id: UUID) -> Bool { locate(id) != nil }
+
+    /// The project half of `sessionExists`, for the commands whose only precondition is that
+    /// their target still exists. A phone can hold a snapshot older than a project's removal.
+    func projectExists(_ id: Repo.ID) -> Bool { repos.contains { $0.id == id } }
+
+    /// Where project `id` lives, or nil if there is no such project. The path is what the
+    /// preference lookups are keyed on — agent order and resolved accounts are both per
+    /// project directory — so a caller holding only an id needs this to ask them anything.
+    func projectPath(_ id: Repo.ID) -> String? {
+        repos.first { $0.id == id }?.url.path
+    }
 
     /// Switches registry polling on and covers the tabs that already exist. Called from the
     /// production convenience init only, so tests using `init(provider:persistence:)` never
@@ -2876,7 +3600,7 @@ final class SessionStore: ObservableObject {
     /// after this point are picked up by `startWatching(tabID:)`.
     func startStatusWatching() {
         isStatusWatchingEnabled = true
-        for session in repos.flatMap(\.sessions) where session.agent == .claude {
+        for session in repos.flatMap(\.sessions) where session.agent.hasStatusRegistry {
             startStatusWatching(account: instance(for: session).account)
         }
     }
@@ -2911,8 +3635,9 @@ final class SessionStore: ObservableObject {
     /// last scan into every later tick, and pids get reused.
     private func stopStatusWatchingIfUnused(account: UUID?) {
         guard let watcher = statusWatchers[account] else { return }
-        let live = AgentInstance(agent: .claude, account: account)
-        guard !repos.flatMap(\.sessions).contains(where: { instance(for: $0) == live }) else { return }
+        guard !repos.flatMap(\.sessions).contains(where: {
+            $0.agent.hasStatusRegistry && instance(for: $0).account == account
+        }) else { return }
         watcher.stop()
         statusWatchers[account] = nil
         registryRows[account] = nil
@@ -2946,13 +3671,27 @@ final class SessionStore: ObservableObject {
             // waits on a `claude` that has not finished booting — which is not a status
             // change, so gating the retry on one would strand it.
             flushPendingPrompts()
+            // And the phone's queue, for the same reason and one more: what a phone-sent
+            // prompt waits on is usually a turn ENDING, and the tick is where that is seen.
+            flushPromptQueue()
         }
 
         // Resolve against a snapshot of the list before touching anything. Later tasks
         // apply repins and project moves here, and those mutate `repos` — iterating it
         // while it changes would resolve some tabs against a stale view.
+        //
+        // **Filtered by the same capability as the status rebuild below, and that closes a
+        // drift rather than changing an outcome.** These rows are a scan of `claude`
+        // processes, so a tab on an agent with no such registry has nothing here that could
+        // describe it: the match is `sessionID == pinnedConversationID`, and a claude
+        // conversation UUID colliding with a codex thread UUID is not a thing. So codex
+        // always resolved `unchanged` and all three branches below found nothing to do —
+        // safe by UUID improbability rather than by a guard, while the loop sixty lines down
+        // *was* guarded. Two loops over one list, one gated and one not, is how they come
+        // apart; and were this one ever to fire, `repin` would hand a codex rollout to
+        // `ConversationTitle.resolve`, which is a claude JSONL parser.
         let resolutions: [(tab: UUID, resolution: ConversationPin.Resolution)] =
-            repos.flatMap(\.sessions).map { session in
+            repos.flatMap(\.sessions).filter(\.agent.hasStatusRegistry).map { session in
                 (session.id, ConversationPin.resolve(
                     conversationID: session.pinnedConversationID,
                     // The transcript directory, not the project: this is the value echoed
@@ -3016,6 +3755,7 @@ final class SessionStore: ObservableObject {
         }
 
         var next: [UUID: SessionStatus] = [:]
+        var nextBackgroundWork: Set<UUID> = []
         for session in repos.flatMap(\.sessions) {
             // A tab on an agent that has no claude status registry behind it keeps whatever
             // its runtime last reported. This scan can neither confirm nor refute a codex
@@ -3023,7 +3763,7 @@ final class SessionStore: ObservableObject {
             // codex tab's status on every tick and hand the diff below a fabricated
             // `busy → gone` edge, marking it unread and withdrawing its banner on no
             // evidence at all.
-            guard session.agent == .claude else {
+            guard session.agent.hasStatusRegistry else {
                 next[session.id] = statuses[session.id]
                 continue
             }
@@ -3035,9 +3775,16 @@ final class SessionStore: ObservableObject {
                 waitingFor: entry.waitingFor,
                 subagentCount: subagentCounts[session.id] ?? 0
             )
+            // Latched, not rebuilt: `false` from the registry means "not reported", and only
+            // an idle tick is proof the task ended. See `backgroundWorkSessions`.
+            if entry.reportsBackgroundWork {
+                nextBackgroundWork.insert(session.id)
+            } else if entry.activity != .idle, backgroundWorkSessions.contains(session.id) {
+                nextBackgroundWork.insert(session.id)
+            }
         }
 
-        commitStatuses(next)
+        commitStatuses(next, backgroundWork: nextBackgroundWork)
     }
 
     /// The single writer of `statuses`, and the one place a status change turns into its
@@ -3049,8 +3796,11 @@ final class SessionStore: ObservableObject {
     /// `statuses` directly instead would skip all of it — and worse, its value would become
     /// the `previous` snapshot the next tick diffs against, so a later tick could fabricate
     /// or swallow an edge that never happened.
-    private func commitStatuses(_ next: [UUID: SessionStatus]) {
-        guard next != statuses else { return }
+    private func commitStatuses(_ next: [UUID: SessionStatus], backgroundWork: Set<UUID>) {
+        // BOTH, not just `statuses`. A task starting or ending under an otherwise-idle tab
+        // moves this set and nothing else — guarding on `statuses` alone swallowed that tick
+        // entirely, so the badge never lit and no event ever reached the phone.
+        guard next != statuses || backgroundWork != backgroundWorkSessions else { return }
         // A session that HAD a status and no longer does means its `claude` exited.
         // Drop its sub-agent count too, so a later process reusing the same session
         // UUID does not inherit a count from the dead one. Counts for sessions that
@@ -3060,8 +3810,16 @@ final class SessionStore: ObservableObject {
             subagentCounts.removeValue(forKey: id)
         }
         let previous = statuses
+        let previousBackgroundWork = backgroundWorkSessions
+        // Also `emitActivity`'s second axis, below: a tick can move this set alone, with
+        // every `SessionStatus` unchanged, and that tick still has to reach the wire.
+        let backgroundWorkChanged = previousBackgroundWork.symmetricDifference(backgroundWork)
         statuses = next
-        let transitions = Set(previous.keys).union(next.keys).map {
+        backgroundWorkSessions = backgroundWork
+        let touched = Set(previous.keys)
+            .union(next.keys)
+            .union(backgroundWorkChanged)
+        let transitions = touched.map {
             StatusTransition(id: $0, old: previous[$0], new: next[$0])
         }
         // Emitted first, ahead of `applyReadState`: `statuses` above is already mutated for
@@ -3072,12 +3830,13 @@ final class SessionStore: ObservableObject {
         // activity having changed with no event on the wire for it yet, which is real
         // drift, just not a bug: the fix is recording activity first, not silencing the
         // check.
-        emitActivity(transitions)
+        emitActivity(transitions, backgroundWorkChanged: backgroundWorkChanged)
         applyReadState(transitions)
         deliverNotifications(transitions)
         cancelSupersededPrompts(transitions)
-        // Below the `guard next != statuses` above, so this writes only on a real
-        // transition — a handful of small atomic writes a minute, not one per poll.
+        // Below the `guard next != statuses || backgroundWork != backgroundWorkSessions`
+        // above, so this writes only on a real transition — a handful of small atomic
+        // writes a minute, not one per poll.
         // Recording activity here rather than at quit is what covers a SIGKILL (which is
         // how scripts/swap-release.sh stops the app) and a panic, and an unplanned exit is
         // the case auto-resume is most wanted for.
@@ -3123,11 +3882,20 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// The fourth consumer of a tick's transitions. Reads off the same diff the other three
-    /// do, so a status a client sees is by construction the status that drove the sidebar,
-    /// the notification and the prompt cancellation.
-    private func emitActivity(_ transitions: [StatusTransition]) {
-        let changed = transitions.filter { $0.old != $0.new }
+    /// The fourth consumer of a tick's transitions, and the only one of the four that also
+    /// answers to `backgroundWorkChanged`: `SessionStatus` equality is silent about the
+    /// background flag, so a tick that moves only that set produces transitions with
+    /// `old == new` throughout. Filtering on `old != new` alone would drop it — the sidebar
+    /// (Task 5) would still update, because it reads `backgroundWorkSessions` directly, but a
+    /// connected phone would hear nothing until some other field on that session happened to
+    /// change too. `changed` is therefore two axes, not one: it does not read off quite the
+    /// same diff `applyReadState`, `deliverNotifications` and `cancelSupersededPrompts` do.
+    private func emitActivity(
+        _ transitions: [StatusTransition], backgroundWorkChanged: Set<UUID>
+    ) {
+        let changed = transitions.filter {
+            $0.old != $0.new || backgroundWorkChanged.contains($0.id)
+        }
         emit(changed.map { transition in
             .activityChanged(
                 id: transition.id,
@@ -3135,7 +3903,8 @@ final class SessionStore: ObservableObject {
                 // render differently.
                 activity: transition.new?.activity.rawValue,
                 waitingFor: transition.new?.waitingFor,
-                subagentCount: transition.new?.subagentCount ?? 0
+                subagentCount: transition.new?.subagentCount ?? 0,
+                hasBackgroundWork: backgroundWorkSessions.contains(transition.id)
             )
         })
     }
@@ -3205,7 +3974,8 @@ final class SessionStore: ObservableObject {
         statuses[id] = status
         emit(.activityChanged(
             id: id, activity: status.activity.rawValue,
-            waitingFor: status.waitingFor, subagentCount: status.subagentCount
+            waitingFor: status.waitingFor, subagentCount: status.subagentCount,
+            hasBackgroundWork: backgroundWorkSessions.contains(id)
         ))
     }
 
@@ -3262,7 +4032,7 @@ final class SessionStore: ObservableObject {
             persist()
             return
         }
-        titleResolver(url) { [weak self] title in
+        titleResolver(updated.agent, url) { [weak self] title in
             // Two things can happen during a read that is a whole-file load: the tab can
             // close, and the tab can be repinned again (a second resume, or a fork).
             // `pinnedConversationID(of:)` covers both — it is nil for a closed tab, whose
@@ -3352,7 +4122,10 @@ final class SessionStore: ObservableObject {
             repos.append(Repo(url: target))
             destination = repos.count - 1
             emit(.projectAdded(
-                FleetProjection.project(repos[destination], statuses: statuses, unread: unreadIdle),
+                FleetProjection.project(
+                    repos[destination], statuses: statuses, unread: unreadIdle,
+                    backgroundWork: backgroundWorkSessions
+                ),
                 at: destination
             ))
         }
@@ -3392,7 +4165,10 @@ final class SessionStore: ObservableObject {
         // runtime tails its transcript, and its account's registry is where the status glyph
         // comes from. A no-op for every account that already has one, and for codex, whose
         // tabs have no registry behind them at all.
-        if instance.agent == .claude { startStatusWatching(account: instance.account) }
+        // `hasStatusRegistry` rather than `== .claude`: the property is the adapter's own
+        // answer and codex's is false, so a third agent with a registry starts being watched
+        // by declaring it rather than by someone remembering to widen a comparison here.
+        if instance.agent.hasStatusRegistry { startStatusWatching(account: instance.account) }
         // The token is the routing identity: the closure below names its tab directly, so
         // nothing scans `attachments` to decide who an event belongs to. Two tabs following
         // one conversation are two subscribers on one source inside the runtime, which is
@@ -3450,7 +4226,7 @@ final class SessionStore: ObservableObject {
             waitingFor: nil,
             subagentCount: subagentCounts[tabID] ?? 0
         )
-        commitStatuses(next)
+        commitStatuses(next, backgroundWork: backgroundWorkSessions)
     }
 
     /// An agent finished a turn.
