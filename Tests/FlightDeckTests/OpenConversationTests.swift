@@ -44,6 +44,16 @@ final class OpenConversationTests: XCTestCase {
         return AgentAccount(agent: .claude, displayName: name, home: home)
     }
 
+    /// A fresh scratch directory, torn down after the test — for the two `resolvedTranscriptDirectory`
+    /// fixtures below, which write real transcript files rather than merely asserting on paths.
+    private func makeTempDir() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OpenConversationTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return root
+    }
+
     // MARK: - Item 5: the in-store already-open guard
 
     /// The guard `openConversation` keeps for itself, not only the one inside
@@ -202,5 +212,91 @@ final class OpenConversationTests: XCTestCase {
         ), directoryExists: { _ in true })
 
         XCTAssertEqual(store.repos.first?.sessions.first?.title, conversation.uuidString)
+    }
+
+    // MARK: - Item 3: worktree transcript-directory resolution
+
+    /// The wiring, not the algorithm: with fixture paths like `projectA` that exist nowhere on
+    /// disk, `resolvedTranscriptDirectory`'s real default always degenerates to its
+    /// single-candidate fallback — so a regression that dropped the closure's result on the
+    /// floor and hardcoded `transcriptDirectory: projectPath` would pass every other test in
+    /// this file. Injecting a sentinel here is what would catch that: it can only appear on the
+    /// filed session if `openConversation` actually plumbs the closure's return value through.
+    /// Capturing the arguments the closure is called with is what would catch a *different*
+    /// regression — the same wiring silently reading `openConversation`'s own `projectPath`
+    /// against, say, the tab's `id` instead of `pinned`.
+    func testOpeningWiresTheResolvedTranscriptDirectoryThroughToTheSession() {
+        let store = makeStore()
+        let conversation = UUID()
+        let sentinel = "/sentinel/worktree"
+        var seenArguments: (projectPath: String, conversationID: UUID)?
+
+        store.openConversation(.resume(
+            conversationID: conversation.uuidString, projectPath: projectA.path,
+            title: "Chat", transcriptDirectory: projectA.path
+        ), directoryExists: { _ in true }, resolveTranscriptDirectory: { projectPath, conversationID in
+            seenArguments = (projectPath, conversationID)
+            return sentinel
+        })
+
+        XCTAssertEqual(store.repos.first?.sessions.first?.transcriptDirectory, sentinel)
+        XCTAssertEqual(seenArguments?.projectPath, projectA.path)
+        XCTAssertEqual(seenArguments?.conversationID, conversation)
+    }
+
+    /// The algorithm itself, against a real `~/.claude/projects`-shaped fixture built through
+    /// the same `ClaudeSession` functions production uses — never a hand-written encoded path,
+    /// which could drift silently from the encoding this test exists to exercise.
+    func testResolvedTranscriptDirectoryFindsTheWorktreeThatOwnsTheConversation() throws {
+        let root = try makeTempDir()
+        let projectsRoot = root.appendingPathComponent("claude-projects", isDirectory: true)
+        let projectPath = root.appendingPathComponent("proj", isDirectory: true).path
+        let worktreePath = (projectPath as NSString)
+            .appendingPathComponent(".claude/worktrees/feature")
+        try FileManager.default.createDirectory(
+            atPath: worktreePath, withIntermediateDirectories: true
+        )
+        let conversation = UUID()
+        try write(conversation, workingDirectory: worktreePath, under: projectsRoot)
+
+        let resolved = SessionStore.resolvedTranscriptDirectory(
+            projectPath: projectPath, conversationID: conversation, projectsRoot: projectsRoot
+        )
+
+        XCTAssertEqual(resolved, worktreePath)
+    }
+
+    /// The negative case: a conversation that ran in the project itself, not any worktree, must
+    /// resolve to the project path even when a worktree directory exists alongside it.
+    func testResolvedTranscriptDirectoryPrefersTheProjectWhenThatIsWhereTheConversationRan() throws {
+        let root = try makeTempDir()
+        let projectsRoot = root.appendingPathComponent("claude-projects", isDirectory: true)
+        let projectPath = root.appendingPathComponent("proj", isDirectory: true).path
+        let worktreePath = (projectPath as NSString)
+            .appendingPathComponent(".claude/worktrees/feature")
+        try FileManager.default.createDirectory(
+            atPath: worktreePath, withIntermediateDirectories: true
+        )
+        let conversation = UUID()
+        try write(conversation, workingDirectory: projectPath, under: projectsRoot)
+
+        let resolved = SessionStore.resolvedTranscriptDirectory(
+            projectPath: projectPath, conversationID: conversation, projectsRoot: projectsRoot
+        )
+
+        XCTAssertEqual(resolved, projectPath)
+    }
+
+    /// Writes an empty transcript at exactly the path `ClaudeSession.transcriptURL` derives for
+    /// `workingDirectory` — the same function `resolvedTranscriptDirectory` itself calls — so
+    /// the fixture cannot drift from the encoding rule it is meant to exercise.
+    private func write(_ conversation: UUID, workingDirectory: String, under projectsRoot: URL) throws {
+        let url = ClaudeSession.transcriptURL(
+            sessionID: conversation, workingDirectory: workingDirectory, projectsRoot: projectsRoot
+        )
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try Data().write(to: url)
     }
 }
