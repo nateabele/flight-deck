@@ -26,6 +26,7 @@ targets:
         embed: false
       - target: FleetKit
         embed: true
+      - sdk: libsqlite3.tbd
     settings:
       base:
         # `productName:` above only renames the product *reference* (and the
