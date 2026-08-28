@@ -34,6 +34,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Settings window. Torn down implicitly on dealloc, same as any other `AnyCancellable`.
     private var toolsObserver: AnyCancellable?
 
+    /// The search index, its backfill, and the overlay panel.
+    ///
+    /// Owned here rather than by `RootView` because the panel is a window, the backfill
+    /// outlives any view, and the index file must be opened exactly once per launch.
+    private var searchIndex: SQLiteSearchIndex?
+    private var searchModel: SearchModel?
+    private var searchPanel: SearchPanel?
+    private var searchBuildTask: Task<Void, Never>?
+
+    /// Beside `sessions.json`, and honouring `-FlightDeckStateDir` for the same reason that
+    /// flag exists: a debug instance pointed at a copy of a real deck must not also write
+    /// into the real index.
+    @MainActor
+    private static func searchIndexURL() -> URL {
+        (FlightDeckApp.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
+            .appendingPathComponent("search-index.sqlite")
+    }
+
     /// Registered before launch completes, which is required for the delegate to
     /// receive a click that launched or foregrounded the app. The store-ready observer is
     /// registered here rather than in `applicationDidFinishLaunching` for the same reason: a
@@ -48,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // The store can arrive after `applicationDidFinishLaunching` already tried
                 // and bailed out for lack of one, so installation is retried from here too.
                 self?.installToolsMenu()
+                if let store = note.object as? SessionStore { self?.startSearch(store: store) }
             }
         }
     }
@@ -102,6 +121,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let mainMenu = NSApp.mainMenu { toolsMenu.install(in: mainMenu) }
+    }
+
+    @MainActor
+    private func startSearch(store: SessionStore) {
+        guard let index = try? SQLiteSearchIndex(at: Self.searchIndexURL()) else { return }
+        let model = SearchModel(index: index, projects: { store.repos.map(\.url.path) })
+        let panel = SearchPanel(model: model) { [weak store] result in
+            guard let store else { return }
+            let open = store.repos.flatMap(\.sessions).map {
+                SearchActivation.ActiveSession(
+                    id: $0.id, conversationID: $0.pinnedConversationID
+                )
+            }
+            store.openConversation(SearchActivation.plan(
+                for: result, openSessions: open, projects: store.repos.map(\.url.path)
+            ))
+        }
+
+        searchIndex = index
+        searchModel = model
+        searchPanel = panel
+
+        // Set before `restore()` attaches this launch's sessions: `restore()` runs later in
+        // the same `init` chain that just posted `.flightDeckStoreReady`, which is what this
+        // method is responding to. `SessionStore.runtime(for:)` reads `searchIndex` live
+        // rather than latching it at construction (see `ClaudeRuntime.init`), so the ordering
+        // here is a nicety, not a requirement — but every session watched from launch
+        // reporting into the index from its first message, rather than only sessions
+        // attached after this line, is worth not leaving to that safety net.
+        store.searchIndex = index
+
+        NotificationCenter.default.addObserver(
+            forName: .flightDeckOpenSearch, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.presentSearch() }
+        }
+
+        // Deferred off the launch path: a backfill parsing hundreds of megabytes must not
+        // compete with restoring the deck and resuming its agents. Name search works from
+        // the first keystroke regardless.
+        let builder = SearchIndexBuilder(index: index)
+        searchBuildTask = Task { [weak model] in
+            try? await Task.sleep(for: .seconds(3))
+            let entries = SearchCorpus.directories(
+                forProjects: store.repos.map(\.url.path),
+                projectsRoot: ClaudeSession.defaultProjectsRoot,
+                listing: SearchCorpus.defaultListing,
+                exists: { FileManager.default.fileExists(atPath: $0) }
+            )
+            await builder.build(entries) { progress in
+                Task { @MainActor in model?.indexingProgressChanged(progress) }
+            }
+            await MainActor.run { model?.indexingProgressChanged(nil) }
+        }
+    }
+
+    @MainActor
+    private func presentSearch() {
+        guard let panel = searchPanel, let model = searchModel, let store = SessionStore.current,
+              let host = SessionWindow.main
+        else { return }
+        model.candidatesChanged(SearchCandidates.build(
+            repos: store.repos,
+            conversations: (try? searchIndex?.conversationNames()) ?? [:],
+            modified: { url in
+                (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+            }
+        ))
+        panel.present(over: host)
     }
 
     /// Quitting used to kill nothing: the app just exited and left the kernel to SIGHUP each

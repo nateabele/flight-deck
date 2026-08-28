@@ -186,6 +186,7 @@ struct FlightDeckApp: App {
                 SessionCommands(store: store, preferences: preferences)
                 EditCommands()
                 TabNavigationCommands(store: store)
+                SearchCommands()
             }
 
         // A `Settings` scene gives ⌘, and the standard Preferences window for free.

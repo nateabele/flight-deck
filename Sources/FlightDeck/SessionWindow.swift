@@ -49,6 +49,15 @@ enum SessionWindow {
     /// `performClose(nil)`, which no-ops on nil.
     static var isKey: Bool { isSessionWindow(NSApp.keyWindow) }
 
+    /// The session window itself, for callers that need to parent something to it.
+    ///
+    /// Searched per call rather than latched, for the reason this whole type exists: the
+    /// obvious shortcuts (`NSApp.keyWindow`, `NSApp.mainWindow`) are both nil for as long as
+    /// the app is inactive, even with the window fully on screen. `NSApp.windows` is not.
+    static var main: NSWindow? {
+        NSApp.windows.first { isSessionWindow($0) }
+    }
+
     /// The view a mouse event landed on, or nil when it did not land in the session window.
     ///
     /// This is the entire scope check for the passive monitors. It exists as one function so
