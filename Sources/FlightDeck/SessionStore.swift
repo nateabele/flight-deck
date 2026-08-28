@@ -2776,6 +2776,13 @@ final class SessionStore: ObservableObject {
         return repos[at.repo].sessions[at.session].title
     }
 
+    /// A tab's title together with the project it sits under — what a notification needs, and
+    /// what `title(of:)` alone cannot answer without a second `locate` on the same id.
+    func titleAndProject(of id: UUID) -> (title: String, project: String)? {
+        guard let at = locate(id) else { return nil }
+        return (repos[at.repo].sessions[at.session].title, repos[at.repo].displayName)
+    }
+
     /// Which agent a tab runs, for a caller that has to ask a *capability* about it — today
     /// `PromptService`, so its refusal can be `AgentAdapter.dialogDriver` rather than a
     /// second name check of its own. `nil` for a tab that is gone, which every caller already
@@ -3873,9 +3880,12 @@ final class SessionStore: ObservableObject {
             case .none:
                 continue
             case .notify:
-                guard let status = transition.new, let title = title(of: transition.id)
+                guard let status = transition.new, let named = titleAndProject(of: transition.id)
                 else { continue }
-                notifier.notify(sessionID: transition.id, title: title, body: status.tooltip)
+                notifier.notify(
+                    sessionID: transition.id, title: named.title,
+                    subtitle: named.project, body: status.tooltip
+                )
             case .withdraw:
                 notifier.withdraw(sessionID: transition.id)
             }

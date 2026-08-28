@@ -69,7 +69,7 @@ final class CodexStatusRoutingTests: XCTestCase {
         var notified: [UUID] = []
         var withdrawn: [UUID] = []
         func requestAuthorization() {}
-        func notify(sessionID: UUID, title: String, body: String) { notified.append(sessionID) }
+        func notify(sessionID: UUID, title: String, subtitle: String, body: String) { notified.append(sessionID) }
         func withdraw(sessionID: UUID) { withdrawn.append(sessionID) }
     }
 

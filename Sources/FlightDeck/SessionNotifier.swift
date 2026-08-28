@@ -16,7 +16,7 @@ extension Notification.Name {
 /// unit-test bundle. Nothing reachable from a test may touch it.
 protocol Notifying: AnyObject {
     func requestAuthorization()
-    func notify(sessionID: UUID, title: String, body: String)
+    func notify(sessionID: UUID, title: String, subtitle: String, body: String)
     func withdraw(sessionID: UUID)
 }
 
@@ -31,9 +31,14 @@ final class SessionNotifier: Notifying {
 
     /// The request identifier is the session UUID, so a second prompt for the same
     /// session replaces its banner instead of stacking, and `withdraw` targets exactly one.
-    func notify(sessionID: UUID, title: String, body: String) {
+    ///
+    /// The project name rides in `subtitle` rather than folded into `title`: session titles
+    /// are already long enough to truncate on their own, and a banner from a fleet spanning
+    /// several checkouts is unreadable without knowing which one is asking.
+    func notify(sessionID: UUID, title: String, subtitle: String, body: String) {
         let content = UNMutableNotificationContent()
         content.title = title
+        content.subtitle = subtitle
         content.body = body
         content.userInfo = ["sessionID": sessionID.uuidString]
         center.add(

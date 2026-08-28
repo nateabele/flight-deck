@@ -161,11 +161,11 @@ final class SessionStatusStoreTests: XCTestCase {
     }
 
     private final class SpyNotifier: Notifying {
-        var notified: [(UUID, String, String)] = []
+        var notified: [(UUID, String, String, String)] = []
         var withdrawn: [UUID] = []
         func requestAuthorization() {}
-        func notify(sessionID: UUID, title: String, body: String) {
-            notified.append((sessionID, title, body))
+        func notify(sessionID: UUID, title: String, subtitle: String, body: String) {
+            notified.append((sessionID, title, subtitle, body))
         }
         func withdraw(sessionID: UUID) { withdrawn.append(sessionID) }
     }
@@ -184,7 +184,22 @@ final class SessionStatusStoreTests: XCTestCase {
 
         XCTAssertEqual(spy.notified.count, 1)
         XCTAssertEqual(spy.notified.first?.0, session.id)
-        XCTAssertEqual(spy.notified.first?.2, "Waiting for you — permission prompt")
+        XCTAssertEqual(spy.notified.first?.3, "Waiting for you — permission prompt")
+    }
+
+    /// A fleet spans several checkouts, so the banner has to say which one is asking —
+    /// the project name rides in the subtitle, under the tab's own title.
+    func testNotificationCarriesTheProjectNameAsItsSubtitle() {
+        let store = makeStore()
+        let spy = SpyNotifier()
+        store.notifier = spy
+        store.appIsActive = { false }
+        let session = store.newSession(in: tmp)
+
+        store.applyRegistry([1: entry(session.id, .busy, cwd: tmp.path)])
+        store.applyRegistry([1: entry(session.id, .waiting, cwd: tmp.path)])
+
+        XCTAssertEqual(spy.notified.first?.2, tmp.lastPathComponent)
     }
 
     func testDoesNotNotifyWhileAppIsFrontmost() {
