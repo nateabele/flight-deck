@@ -56,13 +56,28 @@ actor SearchIndexBuilder {
 
     /// One transcript: everything appended since the offset the index remembers.
     private func index(_ file: Transcript) {
-        var offset = index.readOffset(for: file.url)
+        let startOffset = index.readOffset(for: file.url)
         // `hasChosenStart: true` is deliberate and is the opposite of what a live watcher
         // wants. `TailReader`'s default for a first look is to skip to the end of an
         // existing file, because a watcher attaching to a running session does not want its
         // backlog. A backfill wants exactly that backlog — it *is* the backlog.
-        let read = TailReader.read(url: file.url, offset: offset, hasChosenStart: true)
+        let read = TailReader.read(url: file.url, offset: startOffset, hasChosenStart: true)
         guard !read.lines.isEmpty else { return }
+
+        // Drop whatever this source already holds, once, before inserting anything new. Two
+        // cases reach here: a source never seen before (the delete is a no-op) and one whose
+        // file shrank and was therefore re-read from the top — `TailReader` resets its own
+        // position on a shrink but cannot tell us directly, so a read that ended BEFORE where
+        // we thought we already were is the signal. Without the second case a replaced
+        // transcript's old rows would merge with its replacement instead of being superseded.
+        //
+        // Firing this here, once, rather than letting an intra-loop batch commit carry
+        // `offset: 0` is what stops one batch deleting the batch before it: `offset: 0` means
+        // "restart" to the index, so every intra-loop commit passing it would leave only the
+        // last batch standing.
+        if startOffset == 0 || read.offset < startOffset {
+            try? index.ingest([], from: file.url, projectPath: file.projectPath, offset: 0)
+        }
 
         var batch: [IndexedMessage] = []
 
@@ -70,31 +85,59 @@ actor SearchIndexBuilder {
             batch += TranscriptExtractor.messages(inLine: line, conversationID: file.conversationID)
 
             if batch.count >= Self.batchSize {
-                // The offset committed with a partial batch is the file's *previous*
-                // position, not the read's end: the remaining lines are not stored yet, and
-                // an interruption here must re-read them rather than skip them.
-                try? index.ingest(
-                    batch, from: file.url, projectPath: file.projectPath, offset: offset
-                )
+                // `nil`: add these rows without moving the read position. The read position
+                // only advances once, at the very end of this file's pass (below), so an
+                // interruption between here and there re-reads these lines rather than
+                // skipping them — and no intra-loop commit can be mistaken for the restart
+                // handled above, because only `offset: 0` means that and `nil` never does.
+                try? index.ingest(batch, from: file.url, projectPath: file.projectPath, offset: nil)
                 batch.removeAll(keepingCapacity: true)
             }
         }
 
-        offset = read.offset
-        try? index.ingest(batch, from: file.url, projectPath: file.projectPath, offset: offset)
+        try? index.ingest(batch, from: file.url, projectPath: file.projectPath, offset: read.offset)
 
-        // Resolved once over the whole batch of lines, not line-by-line: `resolve`'s own
+        // Resolved once over the whole pass's lines, not line-by-line: `resolve`'s own
         // priority — a rename beats the first user message regardless of which comes first
         // in the file — only holds within a single call. Feeding it one line at a time would
         // lose that priority the moment a rename line is followed by a later user line,
         // silently replacing a real name with the first message's text.
-        //
-        // `setConversationName` is a `SearchIndex` protocol member (Task 6 delta), so this
-        // calls straight through it rather than downcasting to `SQLiteSearchIndex` — a
-        // downcast here would silently no-op against any other conformer, including an
-        // in-memory stub used by another task's tests.
         if let name = ConversationTitle.resolve(lines: read.lines) {
-            try? index.setConversationName(name, projectPath: file.projectPath, for: file.conversationID)
+            // A later pass sees only this pass's newly appended lines, not the whole file, so
+            // it has no way to know an earlier pass already found a real rename. Overwriting
+            // unconditionally would let a plain user message — resolved here only as a
+            // fallback, since this pass's own lines contain no rename — replace a good name
+            // on every later pass, with nothing to self-heal it. So a later pass may only
+            // write when it actually saw a rename record, or when nothing is stored yet.
+            //
+            // `setConversationName` is a `SearchIndex` protocol member (Task 6 delta), so
+            // this calls straight through it rather than downcasting to `SQLiteSearchIndex`
+            // — a downcast here would silently no-op against any other conformer, including
+            // an in-memory stub used by another task's tests.
+            if Self.containsRename(read.lines)
+                || (try? index.conversationNames())?[file.conversationID] == nil {
+                try? index.setConversationName(
+                    name, projectPath: file.projectPath, for: file.conversationID
+                )
+            }
+        }
+    }
+
+    /// Whether any line in `lines` is a rename record `ConversationTitle.resolve` would
+    /// treat as authoritative. Mirrors its own two cases, including that a bare `"type"`
+    /// match with no name field is not a rename — matching what `resolve` itself requires
+    /// before it lets a record override a fallback name.
+    private static func containsRename(_ lines: [String]) -> Bool {
+        lines.contains { line in
+            guard let data = line.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let type = object["type"] as? String
+            else { return false }
+            switch type {
+            case "agent-name": return (object["agentName"] as? String) != nil
+            case "custom-title": return (object["customTitle"] as? String) != nil
+            default: return false
+            }
         }
     }
 
