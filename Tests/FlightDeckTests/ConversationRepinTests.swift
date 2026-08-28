@@ -225,7 +225,7 @@ final class ConversationRepinTests: XCTestCase {
     final class SpyNotifier: Notifying {
         var withdrawn: [UUID] = []
         func requestAuthorization() {}
-        func notify(sessionID: UUID, title: String, body: String) {}
+        func notify(sessionID: UUID, title: String, subtitle: String, body: String) {}
         func withdraw(sessionID: UUID) { withdrawn.append(sessionID) }
     }
 }
