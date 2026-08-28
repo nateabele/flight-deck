@@ -77,18 +77,25 @@ final class SQLiteSearchIndexTests: XCTestCase {
     }
 
     /// The corpus is bounded by the sidebar. A project closed since the last prune must not
-    /// leak its conversations into results.
+    /// leak its conversations into results — and the filter has to live in SQL rather than be
+    /// applied to the results afterwards, or enough out-of-scope rows can fill the LIMIT before
+    /// the filter ever runs and silently shrink what an in-scope search returns. `limit + 1`
+    /// out-of-scope rows against `limit: 1` is what makes that distinction bite: with the
+    /// filter applied after LIMIT, a single-slot query has nowhere left for the in-scope hit.
     func testResultsAreConfinedToTheNamedProjects() throws {
+        let limit = 1
+        for n in 0...limit {
+            try index.ingest(
+                [message("rename", conversation: "out-\(n)")],
+                from: source("out-\(n).jsonl"), projectPath: "/w/other", offset: 1
+            )
+        }
         try index.ingest(
             [message("rename", conversation: "c1")],
             from: source("a.jsonl"), projectPath: "/w/fd", offset: 1
         )
-        try index.ingest(
-            [message("rename", conversation: "c2")],
-            from: source("b.jsonl"), projectPath: "/w/other", offset: 1
-        )
 
-        let hits = try index.search(#""rename"*"#, projects: ["/w/fd"], limit: 10)
+        let hits = try index.search(#""rename"*"#, projects: ["/w/fd"], limit: limit)
 
         XCTAssertEqual(hits.map(\.conversationID), ["c1"])
     }
@@ -128,6 +135,32 @@ final class SQLiteSearchIndexTests: XCTestCase {
         let hits = try index.search(#""rename"*"#, projects: ["/w/fd", "/w/gone"], limit: 10)
         XCTAssertEqual(hits.map(\.conversationID), ["c1"])
         XCTAssertEqual(index.readOffset(for: source("drop.jsonl")), 0)
+    }
+
+    /// Guards the order `deleteRows` runs its two deletes in. Deleting `message` before
+    /// `message_fts` leaves an orphaned FTS posting behind — SQLite reuses the freed rowid for
+    /// the next inserted message, so the orphaned posting for the deleted term keeps matching,
+    /// and search returns the *new, unrelated* message's conversation and snippet for a query
+    /// that should hit nothing. Checking for an empty `snippet()`, the brief's own hint for
+    /// this bug, does not catch it: the failure is a wrong result, not an empty one, and only
+    /// shows up by checking which conversation actually came back.
+    func testDeletingASourceDoesNotLeakItsFreedRowidToAnUnrelatedMessage() throws {
+        try index.ingest(
+            [message("alpha-unique term", conversation: "cA")],
+            from: source("a.jsonl"), projectPath: "/w/fd", offset: 1
+        )
+
+        // Drops source A's row entirely, freeing its rowid for reuse.
+        try index.prune(keepingSources: [], projects: [])
+
+        // A different message, on a different source, with unrelated text — the next insert
+        // after the table went empty lands on the freed rowid.
+        try index.ingest(
+            [message("totally different content", conversation: "cB")],
+            from: source("b.jsonl"), projectPath: "/w/fd", offset: 1
+        )
+
+        XCTAssertEqual(try index.search(#""alpha"*"#, projects: ["/w/fd"], limit: 10), [])
     }
 
     /// Re-ingesting a file from offset 0 — a transcript replaced under the same path, which
