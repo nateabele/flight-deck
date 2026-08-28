@@ -2496,7 +2496,12 @@ final class SessionStore: ObservableObject {
     /// argument, which is evaluated at the call site and is not itself actor-isolated even
     /// though `SessionStore` is — and the function touches no actor state anyway, only its
     /// own injected closures.
-    private nonisolated static func resolvedTranscriptDirectory(
+    ///
+    /// Internal rather than `private` so `OpenConversationTests` can drive the resolution
+    /// algorithm directly against a real temp-directory fixture, independent of whether
+    /// `openConversation`'s default argument still calls it at all — that second question is
+    /// what the wiring test asserts instead.
+    nonisolated static func resolvedTranscriptDirectory(
         projectPath: String,
         conversationID: UUID,
         listing: (String) -> [String] = SearchCorpus.defaultListing,
