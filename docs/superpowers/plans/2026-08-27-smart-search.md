@@ -3933,7 +3933,7 @@ enum SearchCandidates {
             guard let store else { return }
             let open = store.repos.flatMap(\.sessions).map {
                 SearchActivation.ActiveSession(
-                    id: $0.id, conversationID: $0.pinnedConversationID.uuidString.lowercased()
+                    id: $0.id, conversationID: $0.pinnedConversationID
                 )
             }
             store.openConversation(SearchActivation.plan(
