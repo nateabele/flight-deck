@@ -2576,7 +2576,7 @@ final class SearchModelTests: XCTestCase {
             conversationID: "c1", projectPath: "/w/fd", conversationName: "mobile-ui",
             snippet: "x", timestamp: Date(timeIntervalSince1970: 1)
         )]
-        model.query = "e"                     // matches two names by prefix/fuzzy
+        model.query = "nme"                   // fuzzy-matches two of the three names
         model.moveSelection(by: 1)
         let held = model.selectedID
 
@@ -2586,7 +2586,7 @@ final class SearchModelTests: XCTestCase {
     }
 
     func testSelectionResetsToTheTopWhenTheQueryChanges() {
-        model.query = "e"
+        model.query = "nme"
         model.moveSelection(by: 1)
         model.query = "rename"
 
