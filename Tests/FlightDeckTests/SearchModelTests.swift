@@ -150,11 +150,18 @@ final class SearchModelTests: XCTestCase {
     }
 
     /// An empty query has nothing for FTS5 to match, so it must not reach the index at all.
+    /// Types a real query first and lets its debounce fire — recording a query the empty
+    /// one must not add to — so clearing back to empty is the change under test rather than
+    /// a query that was already empty going nowhere.
     func testAnEmptyQueryNeverHitsTheIndex() async throws {
+        model.query = "rename"
+        try await Task.sleep(for: SearchModel.transcriptDebounce * 3)
+        XCTAssertEqual(index.queries.count, 1, "sanity: the real query reached the index")
+
         model.query = ""
         try await Task.sleep(for: SearchModel.transcriptDebounce * 3)
 
-        XCTAssertTrue(index.queries.isEmpty)
+        XCTAssertEqual(index.queries.count, 1, "the empty query must not add a second call")
         XCTAssertEqual(model.results.count, 3)
     }
 
