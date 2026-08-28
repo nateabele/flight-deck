@@ -165,9 +165,19 @@ enum ClaudeSession {
     /// `subagents/agent-*.jsonl` file, so only top-level agents are ever seen here.
     static func events(inLine line: String, sessionID: UUID) -> [TranscriptEvent] {
         guard let data = line.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let type = obj["type"] as? String
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return [] }
+        return events(inObject: obj, sessionID: sessionID)
+    }
+
+    /// The same rule against an already-decoded record.
+    ///
+    /// Split out for the same reason as `customTitle(inObject:)` above: `TranscriptWatcher`
+    /// also wants `TranscriptExtractor.messages(inObject:)` from this record when a search
+    /// index is subscribed, and parsing a transcript line twice per poll would be the most
+    /// expensive thing in the app (see `TranscriptExtractor`'s doc comment).
+    static func events(inObject obj: [String: Any], sessionID: UUID) -> [TranscriptEvent] {
+        guard let type = obj["type"] as? String else { return [] }
 
         switch type {
         case "custom-title":

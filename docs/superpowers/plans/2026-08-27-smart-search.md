@@ -1000,14 +1000,14 @@ final class SearchRankerTests: XCTestCase {
     func testTierBeatsRecency() {
         let results = SearchRanker.rank(
             names: [
-                session("rnm-brk", activity: 60),          // fuzzy, one minute old
+                session("re-name-me", activity: 60),       // fuzzy, one minute old
                 session("rename", activity: 60 * 60 * 24 * 30), // exact, a month old
             ],
             query: "rename",
             transcripts: []
         )
 
-        XCTAssertEqual(results.map(\.title), ["rename", "rnm-brk"])
+        XCTAssertEqual(results.map(\.title), ["rename", "re-name-me"])
     }
 
     /// The rule the user chose: within one tier, the thing touched most recently wins.
@@ -1028,12 +1028,12 @@ final class SearchRankerTests: XCTestCase {
     /// hit, however fresh or however well it matches, may outrank any name match.
     func testNoTranscriptHitOutranksAnyNameMatch() {
         let results = SearchRanker.rank(
-            names: [session("rnm", activity: 60 * 60 * 24 * 365)],  // fuzzy, a year old
+            names: [session("re-name-me", activity: 60 * 60 * 24 * 365)],  // fuzzy, a year old
             query: "rename",
             transcripts: [hit("mobile-ui", snippet: "the rename bug", activity: 1)]
         )
 
-        XCTAssertEqual(results.first?.title, "rnm")
+        XCTAssertEqual(results.first?.title, "re-name-me")
         XCTAssertEqual(results.last?.kind, .conversation("mobile-ui"))
     }
 
@@ -2497,9 +2497,10 @@ private final class StubSearchIndex: SearchIndex {
     var hits: [TranscriptHit] = []
     private(set) var queries: [String] = []
 
-    func ingest(_: [IndexedMessage], from: URL, projectPath: String, offset: UInt64) throws {}
+    func ingest(_: [IndexedMessage], from: URL, projectPath: String, offset: UInt64?) throws {}
     func readOffset(for: URL) -> UInt64 { 0 }
     func conversationNames() throws -> [String: IndexedConversation] { [:] }
+    func setConversationName(_: String, projectPath: String, for: String) throws {}
     func prune(keepingSources: Set<URL>, projects: Set<String>) throws {}
     func messageCount(forConversation: String) throws -> Int { 0 }
 
@@ -2576,7 +2577,7 @@ final class SearchModelTests: XCTestCase {
             conversationID: "c1", projectPath: "/w/fd", conversationName: "mobile-ui",
             snippet: "x", timestamp: Date(timeIntervalSince1970: 1)
         )]
-        model.query = "e"                     // matches two names by prefix/fuzzy
+        model.query = "nme"                   // fuzzy-matches two of the three names
         model.moveSelection(by: 1)
         let held = model.selectedID
 
@@ -2586,7 +2587,7 @@ final class SearchModelTests: XCTestCase {
     }
 
     func testSelectionResetsToTheTopWhenTheQueryChanges() {
-        model.query = "e"
+        model.query = "nme"
         model.moveSelection(by: 1)
         model.query = "rename"
 
@@ -3932,7 +3933,7 @@ enum SearchCandidates {
             guard let store else { return }
             let open = store.repos.flatMap(\.sessions).map {
                 SearchActivation.ActiveSession(
-                    id: $0.id, conversationID: $0.pinnedConversationID.uuidString.lowercased()
+                    id: $0.id, conversationID: $0.pinnedConversationID
                 )
             }
             store.openConversation(SearchActivation.plan(

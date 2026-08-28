@@ -58,6 +58,7 @@ targets:
         embed: false
       - target: FleetKit
         embed: true
+      - sdk: libsqlite3.tbd
     settings:
       base:
         # `productName:` above only renames the product *reference* (and the
@@ -115,6 +116,13 @@ targets:
           - "Fixtures/**"
       - path: Tests/FlightDeckTests/Fixtures
         type: folder
+        buildPhase: resources
+      # `GhosttyDefaultsTests` reads this straight out of the test bundle rather than the
+      # app's — `scripts/test-unit.sh` runs the bundle with `xctest` directly, never through
+      # a host-app launch, so `Bundle.main` there is the xctest tool's own bundle, not
+      # "Flight Deck.app". Without this entry the resource lookup fails and the test asserts
+      # nothing, which would defeat its entire purpose.
+      - path: Sources/FlightDeck/GhosttyDefaults.conf
         buildPhase: resources
     dependencies:
       - target: FlightDeck
