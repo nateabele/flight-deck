@@ -9,8 +9,12 @@ import XCTest
 /// grows — which stays in `docs/MOBILE.md`'s checklist, per this suite's own rule.
 @MainActor
 final class PromptComposerTests: XCTestCase {
-    private func session(agent: String = "claude", activity: String? = "idle") -> WireSession {
-        WireSession(id: UUID(), title: "t", agent: agent, activity: activity)
+    private func session(
+        agent: String = "claude", activity: String? = "idle", hasBackgroundWork: Bool = false
+    ) -> WireSession {
+        WireSession(
+            id: UUID(), title: "t", agent: agent, activity: activity,
+            hasBackgroundWork: hasBackgroundWork)
     }
 
     /// Refused on the phone as well as on the Mac, and the two are not redundant: the Mac's
@@ -30,13 +34,15 @@ final class PromptComposerTests: XCTestCase {
         XCTAssertNotNil(PromptComposer.unavailable(for: session(agent: "gemini")))
     }
 
-    /// Two fixtures, because `nil` and `"shell"` are different values and a check handling
-    /// only one of them would pass a single-fixture test.
-    func testAShellTabAndAStatuslessTabAreBothUnavailable() {
-        XCTAssertEqual(
-            PromptComposer.unavailable(for: session(activity: "shell")),
-            "There's no agent running in this tab right now."
-        )
+    /// The phone's early refusal must agree with the Mac's late one. Both used to reject a live
+    /// idle agent because `"shell"` was read as "a bare prompt".
+    func testIdleWithBackgroundWorkIsSendable() {
+        XCTAssertNil(PromptComposer.unavailable(
+            for: session(activity: "idle", hasBackgroundWork: true)))
+    }
+
+    /// Still refused, and this is the only remaining reason: no agent process at all.
+    func testNoAgentIsStillRefused() {
         XCTAssertEqual(
             PromptComposer.unavailable(for: session(activity: nil)),
             "There's no agent running in this tab right now."

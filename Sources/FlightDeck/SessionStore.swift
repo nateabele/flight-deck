@@ -2997,12 +2997,12 @@ final class SessionStore: ObservableObject {
             // than a force-unwrap.
             return .rejected(PromptText.rejection(for: raw) ?? .empty)
         }
-        // A tab with no status and no surface has nothing to type into, and a `.shell` one is
-        // at a bare prompt where the text would be RUN rather than read. Refused rather than
-        // queued, because neither state resolves itself: a closed tab never gets a surface
-        // again, and a shell does not become claude by waiting.
-        guard let activity = status(for: id)?.activity, activity != .shell,
-              injector(for: id) != nil
+        // A tab with no status and no surface has nothing to type into. That is now the only
+        // reason to refuse: `.shell` used to be refused here as "a bare prompt where the text
+        // would be RUN rather than read", which was simply wrong — Claude Code writes it for
+        // `idle && hasBackgroundTasks`, so it meant the turn had *finished*. Background work
+        // is a decoration now and is deliberately not consulted.
+        guard status(for: id)?.activity != nil, injector(for: id) != nil
         else { return .notRunning }
 
         remember(token, for: id)
@@ -3385,8 +3385,7 @@ final class SessionStore: ObservableObject {
         // A waiting tab has a select-list dialog up: text typed there goes to the dialog and
         // the Return after it PICKS AN OPTION. Answering a dialog is `answerPrompt`'s job,
         // behind an interlock that reads the screen before committing — a prompt must never
-        // become an answer by arriving at the wrong moment. `.shell` is refused for its own
-        // reason: a bare prompt would RUN the text rather than read it.
+        // become an answer by arriving at the wrong moment.
         guard let channel = session(for: id)?.agent.textChannel,
               let activity = statuses[id]?.activity,
               activity == .idle || activity == .busy,
