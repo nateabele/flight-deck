@@ -161,7 +161,7 @@ final class SQLiteSearchIndex: SearchIndex {
         // 200 and silently shrink what the user sees.
         let placeholders = Array(repeating: "?", count: projects.count).joined(separator: ", ")
         let statement = try prepare("""
-            SELECT m.conversation_id, m.project_path, m.timestamp,
+            SELECT m.id, m.conversation_id, m.project_path, m.timestamp,
                    snippet(message_fts, 0, char(2), char(3), '…', 24)
             FROM message_fts
             JOIN message m ON m.id = message_fts.rowid
@@ -180,15 +180,16 @@ final class SQLiteSearchIndex: SearchIndex {
         let names = try conversationNames()
         var hits: [TranscriptHit] = []
         while sqlite3_step(statement) == SQLITE_ROW {
-            let conversation = text(statement, 0)
+            let conversation = text(statement, 1)
             hits.append(TranscriptHit(
+                rowID: sqlite3_column_int64(statement, 0),
                 conversationID: conversation,
-                projectPath: text(statement, 1),
+                projectPath: text(statement, 2),
                 // Falls back to the conversation id's leading segment, which is what the
                 // sidebar shows for an unnamed conversation too.
                 conversationName: names[conversation]?.name ?? String(conversation.prefix(8)),
-                snippet: text(statement, 3),
-                timestamp: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
+                snippet: text(statement, 4),
+                timestamp: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
             ))
         }
         return hits

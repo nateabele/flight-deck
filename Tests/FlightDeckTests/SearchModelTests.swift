@@ -56,7 +56,7 @@ final class SearchModelTests: XCTestCase {
 
     func testTranscriptResultsArriveAfterTheDebounce() async throws {
         index.hits = [TranscriptHit(
-            conversationID: "c1", projectPath: "/w/fd", conversationName: "mobile-ui",
+            rowID: 1, conversationID: "c1", projectPath: "/w/fd", conversationName: "mobile-ui",
             snippet: "don't fire a \u{2}rename\u{3}", timestamp: Date(timeIntervalSince1970: 1)
         )]
 
@@ -84,7 +84,7 @@ final class SearchModelTests: XCTestCase {
     /// the name results, so whatever the user had highlighted stays highlighted.
     func testLateTranscriptResultsDoNotMoveTheSelection() async throws {
         index.hits = [TranscriptHit(
-            conversationID: "c1", projectPath: "/w/fd", conversationName: "mobile-ui",
+            rowID: 1, conversationID: "c1", projectPath: "/w/fd", conversationName: "mobile-ui",
             snippet: "x", timestamp: Date(timeIntervalSince1970: 1)
         )]
         model.query = "nme"                   // fuzzy-matches two of the three names
@@ -136,7 +136,7 @@ final class SearchModelTests: XCTestCase {
     /// even when that new query still has results (so the list is not simply empty).
     func testChangingTheQueryDropsAPreviousQuerysSnippet() async throws {
         index.hits = [TranscriptHit(
-            conversationID: "c1", projectPath: "/w/fd", conversationName: "mobile-ui",
+            rowID: 1, conversationID: "c1", projectPath: "/w/fd", conversationName: "mobile-ui",
             snippet: "x", timestamp: Date(timeIntervalSince1970: 1)
         )]
         model.query = "rename"

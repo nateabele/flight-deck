@@ -208,6 +208,32 @@ final class SQLiteSearchIndexTests: XCTestCase {
         XCTAssertEqual(try index.search(#""rename"*"#, projects: ["/w/fd"], limit: 10).count, 1)
     }
 
+    /// One transcript record can carry two `text` blocks written with the same timestamp,
+    /// so `(conversationID, timestamp)` is not unique — before `TranscriptHit.rowID` existed,
+    /// `SearchRanker` built the result id from that pair, both of these rows collapsed to the
+    /// same id, and `SearchModel.moveSelection(by:)`'s `firstIndex(id:)` could never advance
+    /// past the first one: the selection wedged. Ranking against real duplicate rows out of
+    /// SQLite (rather than hand-built `TranscriptHit`s) is what makes this catch a collision
+    /// in `rowID` itself, not just in the id string built from it.
+    func testDuplicateConversationAndTimestampProduceDistinctResultIDs() throws {
+        try index.ingest(
+            [
+                message("alpha shared-term", conversation: "c1"),
+                message("beta shared-term", conversation: "c1"),
+            ],
+            from: source("a.jsonl"), projectPath: "/w/fd", offset: 1
+        )
+
+        let hits = try index.search(#""shared"*"#, projects: ["/w/fd"], limit: 10)
+        XCTAssertEqual(hits.count, 2, "sanity: both messages matched")
+
+        let results = SearchRanker.rank(names: [], query: "shared", transcripts: hits)
+        XCTAssertEqual(
+            Set(results.map(\.id)).count, 2,
+            "two distinct messages must not collapse to the same result id"
+        )
+    }
+
     /// A live ingest must not move the read position, or the backfill would resume from it and
     /// skip everything before — which for an open session is its entire history.
     func testLiveIngestDoesNotAdvanceTheReadOffset() throws {

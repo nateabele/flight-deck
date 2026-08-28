@@ -37,7 +37,10 @@ enum SearchRanker {
 
         results += transcripts.map { hit in
             SearchResult(
-                id: "\(hit.conversationID)#\(hit.timestamp.timeIntervalSince1970)",
+                // `hit.rowID` is `message.id`, unique per row unlike `(conversationID,
+                // timestamp)` — see the `TranscriptHit.rowID` doc comment for why that
+                // pair collides.
+                id: "\(hit.conversationID)#\(hit.rowID)",
                 kind: .conversation(hit.conversationID),
                 title: hit.conversationName,
                 projectName: URL(fileURLWithPath: hit.projectPath).lastPathComponent,
