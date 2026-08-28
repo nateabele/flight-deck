@@ -304,25 +304,75 @@ final class TerminalSmokeTests: XCTestCase {
         app.terminate()
     }
 
-    func testTheWholeShellInOneSession() {
+    /// Launches the app on an isolated slate and returns it once its window exists.
+    ///
+    /// Extracted so a behaviour that does NOT depend on the shared sequence can live in its own
+    /// test function and be run alone with `-only-testing:`. The giant
+    /// `testTheWholeShellInOneSession` shape exists because most of its groups mutate state the
+    /// next one reads; a group needing none of that should not inherit the property that any
+    /// earlier failure stops it running at all.
+    ///
+    /// - `-ApplePersistenceIgnoreState`: XCUITest spawns the app via a raw exec, not
+    ///   LaunchServices, so the macOS window-restoration handshake that normally creates the
+    ///   initial window never completes and no window is made. Bypassing restoration matches
+    ///   real-user launch semantics and changes no shipped behavior.
+    /// - `-FlightDeckResetState`: start from a known seeded slate rather than whatever a previous
+    ///   run persisted. This is the only thing isolating the test from real session state —
+    ///   `smoke.sh` no longer deletes it, because doing so destroyed the developer's own sessions
+    ///   on every run.
+    /// - `-FlightDeckStateDir`: `-FlightDeckResetState` covers sessions and preferences but NOT
+    ///   the search index, whose path is derived independently in `AppDelegate`. Without it a run
+    ///   opens the developer's real `search-index.sqlite` and starts a backfill over their whole
+    ///   transcript corpus mid-test.
+    @discardableResult
+    private func launchIsolated(_ extraArguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        // - `-ApplePersistenceIgnoreState`: XCUITest spawns the app via a raw exec, not
-        //   LaunchServices, so the macOS window-restoration handshake that normally creates
-        //   the initial window never completes and no window is made. Bypassing restoration
-        //   matches real-user launch semantics and changes no shipped behavior.
-        // - `-FlightDeckResetState`: start from a known seeded slate rather than whatever a
-        //   previous run persisted. This is now the *only* thing isolating the test from real
-        //   session state — `smoke.sh` no longer deletes it, because doing so destroyed the
-        //   developer's own sessions on every run.
         app.launchArguments += [
             "-ApplePersistenceIgnoreState", "YES",
             "-FlightDeckResetState", "YES",
-        ]
+            "-FlightDeckStateDir", NSTemporaryDirectory() + "fd-smoke-state",
+        ] + extraArguments
         app.launch()
         app.activate()
+        XCTAssertTrue(
+            app.windows.firstMatch.waitForExistence(timeout: 15), "no window appeared"
+        )
+        return app
+    }
 
+    /// ⌘K opens the search overlay while a terminal has focus.
+    ///
+    /// The one regression no unit test can catch. Ghostty binds `super+k` to `clear_screen` as a
+    /// `performable` binding, and `MenuKeyEquivalents.shouldOfferToMenu` withholds performable
+    /// bindings from the main menu — so without the `super+k=unbind` line in
+    /// `GhosttyDefaults.conf`, the menu item renders perfectly and never fires whenever a
+    /// terminal has focus, which is essentially always. `GhosttyDefaultsTests` asserts that line
+    /// is present, but reads the TEST bundle's copy of the file, so it cannot catch the app
+    /// target dropping the resource. Only a real focused surface shows that.
+    ///
+    /// Its own function rather than a group inside `testTheWholeShellInOneSession`: it depends on
+    /// nothing the other groups set up, and as a group it could not run at all whenever an
+    /// earlier, unrelated group failed — which is exactly what happened on its first run.
+    func testCommandKOpensTheSearchOverlayOverAFocusedTerminal() {
+        let app = launchIsolated()
+
+        app.typeKey("k", modifierFlags: .command)
+        let field = app.textFields["Search sessions and conversations"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "⌘K did not open the overlay")
+
+        field.typeText("session")
+        // TODO: assert a result row actually appeared. `app.staticTexts.count > 0` was here
+        // before and asserted nothing — the sidebar always has static text on screen, filtered
+        // or not. Doing this properly needs an accessibility identifier on the result rows in
+        // `SearchOverlayView` to query against.
+
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(field.waitForNonExistence(timeout: 2), "Esc did not close the overlay")
+    }
+
+    func testTheWholeShellInOneSession() {
+        let app = launchIsolated()
         let window = app.windows.firstMatch
-        XCTAssertTrue(window.waitForExistence(timeout: 15), "no window appeared")
 
         let rows = app.staticTexts.matching(identifier: "session-row-title")
 
@@ -1067,6 +1117,13 @@ final class TerminalSmokeTests: XCTestCase {
             )
         }
 
+        // The regression this exists for is not the search UI itself — it's ⌘K reaching the
+        // menu at all while a terminal has focus. Ghostty binds ⌘K to `clear_screen` and
+        // marks it `performable`, and `MenuKeyEquivalents.shouldOfferToMenu` withholds
+        // performable bindings from the main menu — so a missing `keybind = super+k=unbind`
+        // in `GhosttyDefaults.conf` leaves the menu item rendering perfectly and never firing.
+        // A unit test asserts that line is present in the test bundle's copy of the file, but
+        // only a real focused surface like this one can catch the app target dropping it.
         // Strictly last: it terminates the app.
         //
         // AppKit gives a view's `performKeyEquivalent` first refusal, ahead of the main menu,
