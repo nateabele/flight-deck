@@ -72,10 +72,11 @@ struct PromptComposer: View {
         guard session.agent == "claude" else {
             return "Flight Deck can only type into a Claude session from here."
         }
-        // `nil` is "no agent process registered" and is NOT `idle`; `"shell"` is a bare
-        // prompt where the text would be RUN rather than read. Neither resolves itself by
-        // waiting, so neither is queued on the Mac and neither is offered here.
-        guard let activity = session.activity, activity != "shell" else {
+        // `nil` is "no agent process registered" and is NOT `idle` — a statusless tab has no
+        // input box. `"shell"` used to be refused alongside it on the theory that it was a
+        // bare prompt; it is not, and never was: it is `idle` with a background task, which
+        // is a tab at its prompt waiting for exactly this.
+        guard session.activity != nil else {
             return "There's no agent running in this tab right now."
         }
         return nil

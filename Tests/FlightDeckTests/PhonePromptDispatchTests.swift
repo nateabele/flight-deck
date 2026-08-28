@@ -46,15 +46,15 @@ final class PhonePromptDispatchTests: XCTestCase {
         try? FileManager.default.removeItem(at: projectsRoot)
     }
 
-    private func entry(_ sid: UUID, _ activity: SessionActivity, cwd: String)
+    private func entry(_ sid: UUID, _ activity: SessionActivity, cwd: String, background: Bool = false)
         -> ClaudeStatusFile.Entry {
         .init(pid: 1, sessionID: sid, activity: activity, waitingFor: nil,
-              startedAt: 1, cwd: cwd, procStart: "start-a")
+              startedAt: 1, cwd: cwd, procStart: "start-a", reportsBackgroundWork: background)
     }
 
     /// An idle claude tab whose injection settles synchronously, so the tests read as
     /// straight-line code. Same shape as `SessionRenameTests.makeStore`.
-    private func makeStore(activity: SessionActivity = .idle)
+    private func makeStore(activity: SessionActivity = .idle, background: Bool = false)
         -> (SessionStore, SpyInjector, UUID) {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
         store.transcriptsRootOverride = projectsRoot
@@ -63,7 +63,9 @@ final class PhonePromptDispatchTests: XCTestCase {
         store.injectorOverride = spy
         store.injectionSettle = { $0() }
         let session = store.newSession(in: tmp)
-        store.applyRegistry([1: entry(session.pinnedConversationID, activity, cwd: tmp.path)])
+        store.applyRegistry([
+            1: entry(session.pinnedConversationID, activity, cwd: tmp.path, background: background)
+        ])
         spy.events.removeAll()
         return (store, spy, session.id)
     }
@@ -72,6 +74,22 @@ final class PhonePromptDispatchTests: XCTestCase {
         let (store, spy, id) = makeStore()
         XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .sent)
         XCTAssertEqual(spy.events, [.killLine, .text("ship it"), .ret])
+    }
+
+    /// The regression. `shell` means the model turn has FINISHED with a background task still
+    /// running — the readiest state there is — and it was the one state we refused.
+    func testIdleTabWithBackgroundWorkAcceptsAPrompt() {
+        let (store, spy, id) = makeStore(activity: .idle, background: true)
+        XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .sent)
+        XCTAssertEqual(spy.events, [.killLine, .text("ship it"), .ret])
+    }
+
+    /// Still refused, and now this is the only reason: no agent process at all.
+    func testATabWithNoStatusIsStillRefused() {
+        let (store, _, id) = makeStore()
+        store.applyRegistry([:])
+        XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .notRunning)
+        XCTAssertEqual(SessionStore.PromptDispatch.notRunning.errorCode, "not_running")
     }
 
     /// A prompt goes through `inject`, not through `sendToShell`: the kill-and-yank is what
@@ -164,13 +182,16 @@ final class PhonePromptDispatchTests: XCTestCase {
         XCTAssertTrue(spy.events.isEmpty)
     }
 
-    /// The one refusal where a wrong answer is arbitrary code execution rather than a stray
-    /// message: at a bare shell the text is a command.
-    func testATabAtABareShellIsRefusedRatherThanQueued() {
+    /// The top-level guard no longer summarily refuses `.shell` — it was wrong to, per the
+    /// regression this task exists to fix. This raw enum case never reaches here in
+    /// production: `ClaudeStatusFile.decode` already turns it into `.idle` plus
+    /// `reportsBackgroundWork` before `SessionStore` ever sees it. Directly constructed,
+    /// as here, it clears the top-level guard and queues — `inject`'s own `.idle || .busy`
+    /// whitelist is untouched by this task and is what leaves it queued rather than typed.
+    func testATabAtRawShellActivityClearsTheTopLevelGuard() {
         let (store, spy, id) = makeStore(activity: .shell)
-        XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .notRunning)
+        XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .queued)
         XCTAssertTrue(spy.events.isEmpty)
-        XCTAssertNil(store.promptQueue[id], "a shell does not become claude by waiting")
     }
 
     func testATabWithNoAgentAtAllIsRefused() {
