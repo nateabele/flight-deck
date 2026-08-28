@@ -20,13 +20,7 @@ enum FTS5Query {
         guard !tokens.isEmpty else { return nil }
 
         let quoted = tokens.map { token in
-            let escaped = token.replacingOccurrences(of: "\"", with: "\"\"")
-            if escaped.first == "\"" {
-                // The opening quote for the FTS5 literal is already there from escaping.
-                return escaped + "\""
-            } else {
-                return "\"" + escaped + "\""
-            }
+            "\"" + token.replacingOccurrences(of: "\"", with: "\"\"") + "\""
         }
         // Only the last token is a prefix. Starring the earlier ones would match far more
         // than the user typed — "fi" would hit "file", "finish", "fix" — and the earlier
