@@ -40,7 +40,7 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 
 ```bash
 ./scripts/build-libghostty.sh   # once, ~10 min — builds GhosttyKit.xcframework
-./scripts/build-boringssl.sh    # once — builds BoringSSL.xcframework (SPAKE2, for pairing)
+./scripts/build-boringssl.sh    # once, BEFORE ANY BUILD — see below
 ./scripts/build.sh              # xcodegen generate + xcodebuild → Debug "Flight Deck.app"
 ./scripts/test-unit.sh          # headless unit suite — your normal TDD loop
 ./scripts/smoke.sh              # GUI UITest, ends "SMOKE PASS" (see rule 4)
@@ -51,7 +51,21 @@ TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.s
 
 ./scripts/build-ios.sh          # builds FleetKitiOS + FlightDeckMobile + its test bundle — run after touching Sources/FleetKit or Sources/FlightDeckMobile
 ./scripts/test-ios.sh           # runs FlightDeckMobileTests on a simulator this script creates and deletes
+./scripts/deploy-phone.sh       # builds, installs and RELAUNCHES on a real device; --release for an optimised build, --no-build to install what is already there
 ```
+
+**`build-boringssl.sh` is a prerequisite for *every* target, not just the iOS ones.** The
+name reads like it only matters for pairing, and the macOS app is where that costs you: `FleetKit`
+links `BoringSSL.xcframework` (SPAKE2), so a checkout without it fails **both** the macOS Debug and
+Release builds with `There is no XCFramework found at vendor/boringssl-artifacts/BoringSSL.xcframework`,
+from a target whose name says nothing about pairing. `vendor/boringssl-artifacts/` is gitignored build
+output and `vendor/boringssl` is a submodule, so a fresh clone — and any *worktree*, which gets its own
+working directory — starts without it.
+
+**If you build before the artifact exists, fix the artifact AND clear the build description.**
+Xcode caches the resolution: once one build has failed this way, later builds keep reporting the
+xcframework missing even after it is in place, and re-running `xcodegen generate` does not clear it.
+`rm -rf DerivedData/Build/Intermediates.noindex/XCBuildData` does.
 
 `test-ios.sh` is `xcodebuild test` rather than `test-unit.sh`'s hand-rolled loader, because the
 thing that script routes around (an AppKit host cannot be launched without a GUI login session)
