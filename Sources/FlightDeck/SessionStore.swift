@@ -191,6 +191,12 @@ final class SessionStore: ObservableObject {
     /// standing for two homes. See `AgentRuntime`.
     private var runtimes: [AgentInstance: any AgentRuntime] = [:]
 
+    /// Reports live conversation text to ⌘K search as it streams in, so a session need not
+    /// wait for the next backfill to become searchable. Set by `AppDelegate` once the index
+    /// exists — nil in every test and for the very start of a real launch, so a `ClaudeRuntime`
+    /// built before then, or in any test, carries no dependency on search at all.
+    var searchIndex: SearchIndex?
+
     /// The settings payload that goes with an agent, chosen from the same `AgentID` the
     /// adapter is. Pairing them here — rather than letting a call site pass whichever it
     /// happens to hold — is what makes handing `ClaudeAdapter` a `.codex` payload (which it
@@ -591,7 +597,18 @@ final class SessionStore: ObservableObject {
         if instance.agent == .codex {
             return makeCodexStackIfNeeded(account: instance.account).runtime
         }
-        let runtime = ClaudeRuntime(clock: clock)
+        // `searchIndex` and `projectPath` are closures, re-read on every message batch rather
+        // than resolved once here — see `ClaudeRuntime.init` — so a runtime built before
+        // `AppDelegate` wires up search (or in any test, where it is never wired up at all)
+        // still gets live indexing the moment it is. `projectPath` looks the session up by
+        // its pinned conversation id rather than closing over one path, because a tab can be
+        // moved to another project while its watcher is still running, and a project moved
+        // out from under a stale closure would keep crediting the project it left.
+        let runtime = ClaudeRuntime(clock: clock, searchIndex: { [weak self] in self?.searchIndex },
+            projectPath: { [weak self] conversationID in
+                self?.repos.flatMap(\.sessions)
+                    .first { $0.pinnedConversationID == conversationID }?.workingDirectory
+            })
         runtimes[instance] = runtime
         return runtime
     }

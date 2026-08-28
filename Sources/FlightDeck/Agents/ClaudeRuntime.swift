@@ -12,9 +12,27 @@ final class ClaudeRuntime: AgentRuntime {
 
     private var sources: [UUID: Source] = [:]
     private let clock: WatchClock?
+    /// Where a conversation's text goes for ⌘K search. A closure rather than a stored
+    /// reference, and re-read on every message batch rather than once at `attach` time: the
+    /// index does not exist yet for the first few seconds of a real launch — `AppDelegate`
+    /// wires it in after this runtime may already have been built and started watching — and
+    /// nil in every test, where nothing ever wires it in at all.
+    private let searchIndex: () -> SearchIndex?
+    /// Which project a conversation currently belongs to, for the same `ingest(_:from:
+    /// projectPath:offset:)` call. Looked up live rather than captured at `attach` time so a
+    /// tab moved to another project mid-life (`SessionStore.moveSession`) keeps crediting the
+    /// project it actually belongs to now, not the one it was filed under when its watcher
+    /// started.
+    private let projectPath: (UUID) -> String?
 
-    init(clock: WatchClock? = nil) {
+    init(
+        clock: WatchClock? = nil,
+        searchIndex: @escaping () -> SearchIndex? = { nil },
+        projectPath: @escaping (UUID) -> String? = { _ in nil }
+    ) {
         self.clock = clock
+        self.searchIndex = searchIndex
+        self.projectPath = projectPath
     }
 
     /// Subscribes `tab` to `binding`'s conversation, starting a watcher if this is the first
@@ -47,7 +65,17 @@ final class ClaudeRuntime: AgentRuntime {
                 url: url,
                 clock: clock,
                 onTitle: { subscribers.emit(.title($0)) },
-                onSubagentCount: { subscribers.emit(.subagentCount($0)) }
+                onSubagentCount: { subscribers.emit(.subagentCount($0)) },
+                onMessages: { [weak self] messages in
+                    guard let self, let index = self.searchIndex(), let path = self.projectPath(id)
+                    else { return }
+                    // `offset: nil` — see `SearchIndex.ingest`'s doc comment. This watcher
+                    // starts at end-of-file (it exists to catch titles, not backlog), so its
+                    // own read position is never the right number to record as indexing
+                    // progress: doing so would make the backfill resume from there and
+                    // silently never index this conversation's history.
+                    try? index.ingest(messages, from: url, projectPath: path, offset: nil)
+                }
             )
             watcher?.start()
         }
