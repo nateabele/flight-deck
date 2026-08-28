@@ -2497,9 +2497,10 @@ private final class StubSearchIndex: SearchIndex {
     var hits: [TranscriptHit] = []
     private(set) var queries: [String] = []
 
-    func ingest(_: [IndexedMessage], from: URL, projectPath: String, offset: UInt64) throws {}
+    func ingest(_: [IndexedMessage], from: URL, projectPath: String, offset: UInt64?) throws {}
     func readOffset(for: URL) -> UInt64 { 0 }
     func conversationNames() throws -> [String: IndexedConversation] { [:] }
+    func setConversationName(_: String, projectPath: String, for: String) throws {}
     func prune(keepingSources: Set<URL>, projects: Set<String>) throws {}
     func messageCount(forConversation: String) throws -> Int { 0 }
 
