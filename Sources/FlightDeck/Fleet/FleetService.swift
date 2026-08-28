@@ -629,8 +629,29 @@ final class FleetService: ObservableObject {
                 }
                 break
             }
+            // **`createSession(agent:in:…)`, not `createFromMenu`.** The latter is the *menu
+            // bar's* entry point and it chooses the directory itself — the active tab's, else
+            // the last active project, else the first repo — because a menu click carries no
+            // project with it. A tap on the phone does: it names the project it was made on,
+            // and routing it through the menu's chooser created the tab in whichever project
+            // happened to be selected on the Mac instead. It also swallowed the launch result,
+            // so a login that could not start still produced a tab — one with no agent behind
+            // it, which the phone correctly draws with no composer at all ("There's no agent
+            // running in this tab right now") and which is indistinguishable from a bug in the
+            // composer. That is the report this comment exists for.
             Task { @MainActor in
-                await self.store.createFromMenu(agent: picked, chooseFolder: { nil }, account: account)
+                let created = await self.store.createSession(
+                    agent: picked, in: path, account: account
+                )
+                if case .failure(let error) = created {
+                    // The `ack` for this command has already gone — a create is dispatched,
+                    // like every other command (§4). Logged rather than dropped so a login
+                    // that cannot launch leaves a trace on the Mac rather than only a silent
+                    // tab on the phone.
+                    Self.logger.error(
+                        "new session from phone failed to launch: \(String(describing: error), privacy: .public)"
+                    )
+                }
             }
         case .prompt(let id, let token, let text):
             // Every refusal, "no such tab" included, is the store's to make: it is the only
