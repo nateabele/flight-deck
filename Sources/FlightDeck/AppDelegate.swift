@@ -77,6 +77,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the real work.
     func applicationDidFinishLaunching(_ notification: Notification) {
         installToolsMenu()
+        // Same order-independent retry `installToolsMenu` gets, and for the same reason: the
+        // store can be constructed either side of this delegate registering its
+        // `.flightDeckStoreReady` observer, so neither hop alone is guaranteed to see it.
+        //
+        // Search shipped without this and ⌘K was dead on arrival — silently, which is the whole
+        // problem. `startSearch` is what registers the `.flightDeckOpenSearch` observer, so when
+        // it never runs the menu item still renders, still shows its shortcut, and does nothing
+        // at all. No unit test could catch it: every component was correct in isolation and the
+        // only symptom is a key that does nothing in a launched app.
+        //
+        // `startSearch` guards on `searchIndex == nil`, so whichever hop arrives second is a
+        // no-op rather than a second index handle and a doubled backfill.
+        if let store = store ?? SessionStore.current { startSearch(store: store) }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -125,13 +138,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Unlike `installToolsMenu`, not naturally idempotent: it opens a file handle, builds a
     /// panel, and registers a `.flightDeckOpenSearch` observer, none of which tolerate being
-    /// done twice. Only one `.flightDeckStoreReady` is posted per launch today (`SessionStore`
-    /// posts it once, from its own designated `init`), so nothing currently calls this twice —
-    /// but that is exactly the kind of assumption `installToolsMenu`'s own doc comment
-    /// declines to make about itself, so this does not make it either. A second call would
-    /// otherwise leak the first index's `sqlite3*` handle (see `deinit`'s `_v2` comment for
-    /// why a leaked-but-unclosed handle is only survivable, not free), double the backfill,
-    /// and stack a second `.flightDeckOpenSearch` observer that would double-present the panel.
+    /// done twice. The `searchIndex == nil` guard is therefore load-bearing rather than
+    /// defensive — this is called from BOTH the `.flightDeckStoreReady` observer and
+    /// `applicationDidFinishLaunching`, because the store can be built either side of the
+    /// observer being registered and neither hop alone is guaranteed to see it. Whichever
+    /// arrives second must be a no-op: without the guard it would leak the first index's
+    /// `sqlite3*` handle (see `deinit`'s `_v2` comment for why a leaked-but-unclosed handle is
+    /// only survivable, not free), double the backfill, and stack a second
+    /// `.flightDeckOpenSearch` observer that would present the panel twice per ⌘K.
     @MainActor
     private func startSearch(store: SessionStore) {
         guard searchIndex == nil else { return }
