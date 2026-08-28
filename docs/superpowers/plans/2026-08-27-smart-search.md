@@ -1000,14 +1000,14 @@ final class SearchRankerTests: XCTestCase {
     func testTierBeatsRecency() {
         let results = SearchRanker.rank(
             names: [
-                session("rnm-brk", activity: 60),          // fuzzy, one minute old
+                session("re-name-me", activity: 60),       // fuzzy, one minute old
                 session("rename", activity: 60 * 60 * 24 * 30), // exact, a month old
             ],
             query: "rename",
             transcripts: []
         )
 
-        XCTAssertEqual(results.map(\.title), ["rename", "rnm-brk"])
+        XCTAssertEqual(results.map(\.title), ["rename", "re-name-me"])
     }
 
     /// The rule the user chose: within one tier, the thing touched most recently wins.
@@ -1028,12 +1028,12 @@ final class SearchRankerTests: XCTestCase {
     /// hit, however fresh or however well it matches, may outrank any name match.
     func testNoTranscriptHitOutranksAnyNameMatch() {
         let results = SearchRanker.rank(
-            names: [session("rnm", activity: 60 * 60 * 24 * 365)],  // fuzzy, a year old
+            names: [session("re-name-me", activity: 60 * 60 * 24 * 365)],  // fuzzy, a year old
             query: "rename",
             transcripts: [hit("mobile-ui", snippet: "the rename bug", activity: 1)]
         )
 
-        XCTAssertEqual(results.first?.title, "rnm")
+        XCTAssertEqual(results.first?.title, "re-name-me")
         XCTAssertEqual(results.last?.kind, .conversation("mobile-ui"))
     }
 
