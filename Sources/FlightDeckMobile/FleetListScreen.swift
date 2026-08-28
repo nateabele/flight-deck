@@ -424,7 +424,12 @@ struct FleetListScreen: View {
     private func row(_ session: WireSession) -> some View {
         HStack(spacing: 8) {
             SessionStatusGlyph(session: session)
-            if session.hasBackgroundWork {
+            // Gated on `activity` existing, not just on the flag: a fresh pairing (or a
+            // relaunch) can seed `hasBackgroundWork` from the Mac's snapshot before the first
+            // registry tick reports an `activity`, and a badge beside an empty status column
+            // would claim something about a tab this build cannot yet vouch for — the same
+            // reasoning `SessionStatusGlyph`'s own `nil` branch is built on.
+            if session.hasBackgroundWork, session.activity != nil {
                 Image(systemName: "terminal.fill")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.green)

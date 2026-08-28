@@ -57,7 +57,8 @@ struct SessionStatus: Equatable {
         }
     }
 
-    /// Tooltip and accessibility label for a row that may carry the unread dot.
+    /// Tooltip and accessibility label for a row that may carry the unread dot, and
+    /// optionally the background-work badge.
     ///
     /// The unread state is drawn with colour alone (a filled dot in the accent colour rather
     /// than grey), so this string is what carries the same distinction for VoiceOver and for
@@ -66,12 +67,12 @@ struct SessionStatus: Equatable {
     ///
     /// Additive rather than a change to `tooltip`: notification bodies use that one and have
     /// no notion of read state.
-    func tooltip(unread: Bool) -> String {
-        guard unread, activity == .idle else { return tooltip }
-        return "Finished — not yet viewed"
-    }
-
-    /// The background clause is appended, never substituted, and always last. Every string
+    ///
+    /// `backgroundWork` defaults to `false` rather than existing as a separate one-parameter
+    /// overload, so every call site written as `tooltip(unread:)` before the flag existed
+    /// still compiles AND still runs through this one implementation — a duplicate overload
+    /// here previously let such a call site silently bind to dead code instead.
+    /// The background clause it appends is never substituted, and always last. Every string
     /// this produced before the flag existed is unchanged when `backgroundWork` is false —
     /// which is what lets `SessionStatusGlyph.label(for:)` on iOS pin the same literals.
     func tooltip(unread: Bool, backgroundWork: Bool = false) -> String {

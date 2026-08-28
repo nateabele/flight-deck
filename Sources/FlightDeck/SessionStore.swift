@@ -1782,7 +1782,12 @@ final class SessionStore: ObservableObject {
             let restored = Self.restoredActivity(fromPersisted: entry.activity)
             let hasBackgroundWork = entry.hasBackgroundWork ?? restored.hasBackgroundWork
             // Seeded here rather than waiting for the next registry tick, so the sidebar
-            // badge survives a relaunch — same reasoning as `setUnread` just above.
+            // badge survives a relaunch — but NOT for `setUnread`'s reason just above. This
+            // insert emits nothing and self-corrects nothing; it is safe only because
+            // `emit()` early-returns while `replicator == nil`, and `FleetService` attaches
+            // the replicator after `SessionStore.init` — and therefore after this whole
+            // `restore()` — has already run. Moving this insert to run after that wiring
+            // would need it to emit like `setUnread` does.
             if hasBackgroundWork { backgroundWorkSessions.insert(entry.id) }
 
             // `!orphaned`: offering to continue a tab that cannot be launched at all would
@@ -2624,6 +2629,12 @@ final class SessionStore: ObservableObject {
     /// is doing. Idle and unstatused children contribute nothing, so a quiet project shows
     /// no glyph at all — the same "renders nothing" that an unstatused session row gets.
     ///
+    /// Background work is deliberately NOT folded in here: it is a decoration on a
+    /// *session*, not a value `SessionActivity` can rank, and a project whose only active
+    /// tab is idle-with-background-work still has to surface that even though it loses this
+    /// filter. `ProjectHeaderRow` reads `projectHasBackgroundWork` alongside this, exactly as
+    /// a session row reads `backgroundWorkSessions` alongside `status(for:)`.
+    ///
     /// The subagent count is deliberately dropped. `SessionStatusIcon` draws it beside the
     /// spinner, and the collapsed header already carries a number (the session count); two
     /// adjacent numerals read as two counts of the same thing.
@@ -2636,6 +2647,15 @@ final class SessionStore: ObservableObject {
         else { return nil }
         best.subagentCount = 0
         return best
+    }
+
+    /// Whether any session in this project is running a background task — the collapsed
+    /// header's counterpart to a session row's own `backgroundWorkSessions.contains(id)`.
+    /// Independent of `collapsedStatus`: a project whose only active tab is idle still
+    /// answers `true` here, which is exactly the case `collapsedStatus`'s idle filter drops.
+    func projectHasBackgroundWork(forProjectAt id: Repo.ID) -> Bool {
+        guard let repo = repos.first(where: { $0.id == id }) else { return false }
+        return repo.sessions.contains { backgroundWorkSessions.contains($0.id) }
     }
 
     /// Test seam. Production statuses arrive through `applyRegistry`, which takes registry
@@ -3354,7 +3374,8 @@ final class SessionStore: ObservableObject {
     ///   of them claude's, all of them typed into a box only claude's grammar can find.
     /// - **Idle only.** While `busy` the text queues behind the running turn; while
     ///   `waiting` a Return answers a permission prompt or dialog instead of submitting;
-    ///   `shell` means no `claude` is running at all, so the text would hit a bare shell.
+    ///   `shell` was `idle` plus a background task — the turn had already finished, so the
+    ///   text was always safe to type — and no longer exists as an activity at all.
     ///
     /// Everything past those two gates — finding the input box, the kill, the settle, the
     /// before/after comparison and the yank — is `AgentTextChannel.submit`'s, and the reasons

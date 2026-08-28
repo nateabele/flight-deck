@@ -68,6 +68,20 @@ final class FleetEventApplicationTests: XCTestCase {
         XCTAssertTrue(after.projects[0].sessions[0].hasBackgroundWork)
     }
 
+    /// An older Mac's incremental update, not just its snapshot — `WireSession.init(from:)`
+    /// isn't in play here at all, since `apply` mutates an already-decoded `WireSession` in
+    /// place. Without its own mapping this event would land the pre-decomposition `"shell"`
+    /// string straight into `activity` and reach `SessionStatusGlyph`'s "Unrecognized
+    /// status" fallback.
+    func testActivityChangedMapsLegacyShellToIdlePlusBackgroundWork() {
+        let after = base().applying([
+            .activityChanged(id: sessionID, activity: "shell", waitingFor: nil,
+                             subagentCount: 0, hasBackgroundWork: false)
+        ])
+        XCTAssertEqual(after.projects[0].sessions[0].activity, "idle")
+        XCTAssertTrue(after.projects[0].sessions[0].hasBackgroundWork)
+    }
+
     /// Statuslessness is a real state and has to be reachable by an event, or a tab whose
     /// agent exited would keep rendering the status it had when it died.
     func testActivityCanReturnToNil() {

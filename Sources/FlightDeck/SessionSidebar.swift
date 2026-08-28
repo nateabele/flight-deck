@@ -55,7 +55,11 @@ private struct PhonePresenceBadge: View {
 /// Static, deliberately, where `PhonePresenceBadge` pulses: presence is someone *watching*
 /// and wants the eye, whereas this is a fact about the tab that is true for hours at a time.
 /// A second pulsing glyph in the same row would turn the sidebar into a christmas tree.
-private struct BackgroundWorkBadge: View {
+///
+/// Not `private`: `ProjectHeaderRow` draws the same badge on a collapsed project whose only
+/// active tab is idle-with-background-work, so the two renderings of this one fact cannot
+/// drift apart.
+struct BackgroundWorkBadge: View {
     var body: some View {
         Image(systemName: "terminal.fill")
             .font(.caption2.weight(.semibold))
@@ -161,7 +165,12 @@ private struct SessionRow: View {
                                 .combined(with: .scale(scale: 0.4, anchor: .leading))
                         )
                 }
-                if hasBackgroundWork {
+                // Gated on a status existing, not just on the flag: `restore()` seeds
+                // `backgroundWorkSessions` before the first registry tick populates
+                // `statuses`, and a badge with no status glyph beside it would be claiming
+                // something about a tab this app cannot yet vouch for. The badge catches up
+                // at the first tick, same as everything else keyed off `statuses`.
+                if hasBackgroundWork, store.status(for: session.id) != nil {
                     BackgroundWorkBadge()
                         .transition(.opacity.combined(with: .scale(scale: 0.6)))
                 }
