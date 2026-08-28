@@ -1080,7 +1080,10 @@ final class TerminalSmokeTests: XCTestCase {
             XCTAssertTrue(field.waitForExistence(timeout: 5), "⌘K did not open the overlay")
 
             field.typeText("session")
-            XCTAssertTrue(app.staticTexts.count > 0)
+            // TODO: assert a result row actually appeared. `app.staticTexts.count > 0` was
+            // here before and asserted nothing — the sidebar always has static text on
+            // screen, filtered or not. Doing this properly needs an accessibility
+            // identifier on the result rows in `SearchOverlayView` to query against.
 
             app.typeKey(.escape, modifierFlags: [])
             XCTAssertTrue(
