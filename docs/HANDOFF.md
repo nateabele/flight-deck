@@ -4,6 +4,17 @@
 
 Start here if you're picking up Flight Deck fresh. This is the map; the linked docs have the detail.
 
+> **✅ ⌘K Search (2026-08-27) — merged.**
+> `⌘K` opens a fleet-wide search overlay: type a session or project name to jump straight to
+> it, or a phrase you remember saying to search full transcript history — ranked by match
+> quality, recency breaking ties within a tier. First launch backfills that transcript
+> history in the background (newest conversations first), so name search works immediately
+> and transcript hits fill in as the backfill catches up. A running session's own transcript
+> indexes live as it streams, so it needs no backfill of its own. Ghostty claims `⌘K` for
+> `clear_screen` by default and had to be unbound (`GhosttyDefaults.conf`), the same way
+> `⌘⇧T` was for Reopen Closed Session below.
+> - **Spec:** [superpowers/specs/2026-08-26-smart-search-design.md](superpowers/specs/2026-08-26-smart-search-design.md) · **Details:** [ARCHITECTURE.md](ARCHITECTURE.md), "Search" section.
+
 > **▶ Agent Adapters (2026-08-19) — in progress, one decided step remaining.**
 > Any tab can now run **claude or codex**. Claude's half is complete and unchanged; codex
 > creates, resumes and renames, but its observation half (title sync, status, sub-agent

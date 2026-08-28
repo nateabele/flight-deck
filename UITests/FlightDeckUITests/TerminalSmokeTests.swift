@@ -1067,6 +1067,28 @@ final class TerminalSmokeTests: XCTestCase {
             )
         }
 
+        // The regression this exists for is not the search UI itself — it's ⌘K reaching the
+        // menu at all while a terminal has focus. Ghostty binds ⌘K to `clear_screen` and
+        // marks it `performable`, and `MenuKeyEquivalents.shouldOfferToMenu` withholds
+        // performable bindings from the main menu — so a missing `keybind = super+k=unbind`
+        // in `GhosttyDefaults.conf` leaves the menu item rendering perfectly and never firing.
+        // A unit test asserts that line is present in the test bundle's copy of the file, but
+        // only a real focused surface like this one can catch the app target dropping it.
+        XCTContext.runActivity(named: "⌘K search opens, filters, and closes") { _ in
+            app.typeKey("k", modifierFlags: .command)
+            let field = app.textFields["Search sessions and conversations"]
+            XCTAssertTrue(field.waitForExistence(timeout: 5), "⌘K did not open the overlay")
+
+            field.typeText("session")
+            XCTAssertTrue(app.staticTexts.count > 0)
+
+            app.typeKey(.escape, modifierFlags: [])
+            XCTAssertTrue(
+                field.waitForNonExistence(timeout: 2),
+                "Esc did not close the overlay"
+            )
+        }
+
         // Strictly last: it terminates the app.
         //
         // AppKit gives a view's `performKeyEquivalent` first refusal, ahead of the main menu,

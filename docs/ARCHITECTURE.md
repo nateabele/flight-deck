@@ -369,6 +369,78 @@ several devices' keys at once and picks the right one per connection from the PS
 this was the plan's central open question, now verified, so revoking one device (delete its
 slot's key, restart the listener) does not disturb any other paired device.
 
+## Search (`⌘K`, `Sources/FlightDeck/Search/`)
+
+`⌘K` opens a floating overlay (`SearchPanel`, an `NSPanel` added as a child window over the
+deck) that ranks open sessions, open projects, and past conversations against one query.
+Full design: [specs/2026-08-26-smart-search-design.md](superpowers/specs/2026-08-26-smart-search-design.md).
+
+**The corpus (spec §5): the sidebar's projects, plus their worktrees — nothing else.**
+`SearchCorpus` enumerates each open project's own `.claude/worktrees` and
+`.superpowers/worktrees` children, encodes each real path with
+`ClaudeSession.encodedProjectDirName`, and accepts only an exact match against a directory
+name under `~/.claude/projects`. Never a prefix match: the encoding is lossy (every
+non-alphanumeric run collapses to `-`), so `/w/flight-deck` and `/w/flight-deck-old` produce
+one encoded name that is a genuine prefix of the other — a prefix rule would fold a
+neighbouring project's whole history into this one's results.
+
+**What gets indexed, and why the measurement decided the architecture.** Only conversation
+text — user and assistant text blocks, never tool input/output, envelope fields, or images.
+A 97 MB, 60-transcript sample at spec time put that at 5.0% of transcript bytes (the rest:
+54.5% JSON envelope, 19.9% `tool_result`, 8.9% `tool_use`, the remainder images and other
+block types). That number is what justified skipping incremental/streaming complexity: at
+~5%, extracting and indexing the *whole* visible corpus up front is cheap enough to just do.
+The real corpus confirmed it — 362 transcripts, 361 MB read, 14.5 MB of conversation kept
+(4.0%, consistent with the sampled estimate), in 7.0 seconds. A `withTaskGroup`-based
+concurrent walk was the planned fallback if that number came back too slow; it wasn't needed
+and isn't built.
+
+**Two clocks, not one.** Live sessions need no separate mechanism: `ClaudeRuntime` already
+runs one `TranscriptWatcher` per attached tab on the shared `WatchClock` (for titles and
+sub-agent counts), and that watcher's `onMessages` hook now also extracts conversation text
+and calls `SearchIndex.ingest(_:from:projectPath:offset: nil)` — the `nil` offset marks a
+live-ingest row rather than a backfill read position, since the watcher tails from
+end-of-file and has no notion of "how much of this file's history is indexed." Everything
+that watcher does not cover — every conversation's history up to the moment the app
+launched — is `SearchIndexBuilder`'s job: an `actor`, off the main actor, walking transcripts
+newest-first (the conversation you want is overwhelmingly a recent one, so search becomes
+useful long before the walk finishes), yielding between files, committing each file's byte
+offset before starting the next so a killed build only ever loses the file it was mid-read
+on. It starts 3 seconds after launch, deliberately after `SessionStore` has restored and
+resumed every session, so a hundreds-of-megabytes parse never competes with the deck coming
+back up.
+
+**The index is a disposable cache, never a source of truth.** `SQLiteSearchIndex` lives
+beside `sessions.json` (`search-index.sqlite` in Application Support, honouring
+`-FlightDeckStateDir` for the same reason that flag exists — a debug instance must not write
+into a real deck's index) and holds nothing that is not re-derivable from transcripts on
+disk. A `schemaVersion` mismatch, or a file that fails to open at all (corrupt, truncated,
+from an older build), is handled the same way: delete it and rebuild from scratch. Losing it
+costs one backfill, never data.
+
+**Ranking is tiers, not a blended score.** `SearchRanker` orders by match-quality tier first
+(exact / prefix / fuzzy name match, then FTS5 transcript hit), and only breaks ties within a
+tier by recency — deliberately not a single score, since BM25 (transcript relevance) and the
+fuzzy-subsequence score (name matching) are not on a common scale, and any constant that
+mixed them would be undefendable. Transcript hits are always the last tier: BM25 still
+governs which 200 candidate hits FTS5 returns (`LIMIT 200 ORDER BY bm25(...)`), but within
+the overlay they are ordered by recency and drawn only below every name match. That ordering
+is what lets the debounced transcript query's slower results append below an already-visible,
+already-selected row instead of reordering the list out from under the user's finger.
+
+**⌘K had to be taken back from Ghostty first**, the same problem `⌘⇧T` (Tab navigation,
+above) already had to solve. libghostty binds `super+k` to `clear_screen` on macOS and marks
+it `performable`, and `MenuKeyEquivalents.shouldOfferToMenu` deliberately withholds
+performable bindings from the main menu so they still reach the terminal when a menu item
+shares the chord — so as long as libghostty claimed the key, `SurfaceView.performKeyEquivalent`
+swallowed it before the Search menu item ever saw it, and it failed *silently*: the menu item
+rendered correctly and simply never fired. `GhosttyDefaults.conf` now carries
+`keybind = super+k=unbind`, loaded before the user's own Ghostty config, so anyone who wants
+`clear_screen` back on `⌘K` can rebind it there. A unit test pins that line's presence in the
+test bundle's copy of the file, but cannot catch the *app* target's copy going missing — only
+a real, terminal-focused UI test can, which is what the `⌘K search opens, filters, and closes`
+smoke group exists for.
+
 ## Not yet built (design, not code)
 
 Harness adapters, the shared code index, the context engine, and the sidebar are **design only** so far — see the [spec](superpowers/specs/2026-07-09-flight-deck-design.md) §1–§9. Nothing in the current codebase implements them.
