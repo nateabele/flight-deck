@@ -82,11 +82,26 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         id = try c.decode(UUID.self, forKey: .id)
         title = try c.decode(String.self, forKey: .title)
         agent = try c.decode(String.self, forKey: .agent)
-        activity = try c.decodeIfPresent(String.self, forKey: .activity)
+        let decodedActivity = try c.decodeIfPresent(String.self, forKey: .activity)
         waitingFor = try c.decodeIfPresent(String.self, forKey: .waitingFor)
         subagentCount = try c.decode(Int.self, forKey: .subagentCount)
         isUnread = try c.decode(Bool.self, forKey: .isUnread)
         // Absent from an older Mac's snapshot, and that is a meaningful value, not an error.
-        hasBackgroundWork = try c.decodeIfPresent(Bool.self, forKey: .hasBackgroundWork) ?? false
+        let decodedBackgroundWork = try c.decodeIfPresent(
+            Bool.self, forKey: .hasBackgroundWork
+        ) ?? false
+        // The wire version was deliberately not bumped for the `hasBackgroundWork` split, so
+        // an older Mac can still send the pre-decomposition `"shell"` string here. That is
+        // this skew's other direction from the `hasBackgroundWork` key being absent above:
+        // rather than an error state, `"shell"` decodes to exactly what a newer Mac would
+        // have sent for the same fact — `activity: "idle"` plus the flag — so an old Mac and
+        // a new one render identically on this build.
+        if decodedActivity == "shell" {
+            activity = "idle"
+            hasBackgroundWork = true
+        } else {
+            activity = decodedActivity
+            hasBackgroundWork = decodedBackgroundWork
+        }
     }
 }

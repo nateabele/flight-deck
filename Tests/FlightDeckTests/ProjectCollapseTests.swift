@@ -58,6 +58,43 @@ final class ProjectCollapseTests: XCTestCase {
         XCTAssertEqual(store.collapsedStatus(forProjectAt: project)?.waitingFor, "permission prompt")
     }
 
+    /// The regression this branch's decomposition of `.shell` introduced: before it, a tab
+    /// reporting `shell` had `activity == .shell`, survived `collapsedStatus`'s filter, and
+    /// drew a badge on the collapsed header. Now that tab is `.idle` and is filtered OUT by
+    /// `collapsedStatus`, so a collapsed project whose only active tab is idle-with-
+    /// background-work must not go silent — `projectHasBackgroundWork` has to carry the fact
+    /// `collapsedStatus` alone can no longer show.
+    func testCollapsedProjectWithOnlyIdleBackgroundWorkStillSurfacesTheFlag() {
+        let persistence = SessionPersistenceTests.FakePersistence()
+        let id = UUID()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(
+                id: id, title: "a", workingDirectory: "/w/a",
+                activity: "idle", hasBackgroundWork: true
+            )],
+            projects: [.init(path: "/w/a", isCollapsed: true)],
+            sessionCounter: 1
+        )
+        let store = SessionStore(provider: nil, persistence: persistence)
+
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        let project = store.repos[0].id
+
+        // The old signal is gone — this is the part that regressed.
+        XCTAssertNil(store.collapsedStatus(forProjectAt: project))
+        // The new one has to stand in for it.
+        XCTAssertTrue(store.projectHasBackgroundWork(forProjectAt: project))
+    }
+
+    func testProjectHasBackgroundWorkIsFalseWithNoBackgroundSessions() {
+        let (store, _) = makeStore()
+        let a = store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))
+        let project = store.repos[0].id
+        store.applyRegistryForTesting([a.id: .init(activity: .busy)])
+
+        XCTAssertFalse(store.projectHasBackgroundWork(forProjectAt: project))
+    }
+
     func testCollapsedStatusDropsTheSubagentCount() {
         let (store, _) = makeStore()
         let a = store.newSession(in: URL(fileURLWithPath: "/w/a", isDirectory: true))

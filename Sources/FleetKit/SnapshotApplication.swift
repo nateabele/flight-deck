@@ -58,11 +58,18 @@ extension FleetSnapshot {
 
         case .activityChanged(let id, let activity, let waitingFor, let subagentCount,
                               let hasBackgroundWork):
+            // The wire version was deliberately not bumped for the `hasBackgroundWork`
+            // split, so an older Mac can still send the pre-decomposition `"shell"` string
+            // here, on the incremental path rather than a fresh snapshot. Same
+            // normalization `WireSession.init(from:)` applies on decode, so an old Mac's
+            // live update renders identically to its full snapshot rather than falling
+            // through to "Unrecognized status".
+            let isLegacyShell = activity == "shell"
             mutate(id) {
-                $0.activity = activity
+                $0.activity = isLegacyShell ? "idle" : activity
                 $0.waitingFor = waitingFor
                 $0.subagentCount = subagentCount
-                $0.hasBackgroundWork = hasBackgroundWork
+                $0.hasBackgroundWork = isLegacyShell ? true : hasBackgroundWork
             }
 
         case .unreadChanged(let id, let isUnread):

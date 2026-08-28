@@ -55,6 +55,21 @@ final class FleetWireTests: XCTestCase {
         XCTAssertFalse(session.hasBackgroundWork)
     }
 
+    /// The wire version was deliberately not bumped for the `hasBackgroundWork` split, so an
+    /// older Mac can still send the pre-decomposition `"shell"` string as `activity`. That
+    /// must decode as exactly what a newer Mac would have sent for the same fact —
+    /// `activity: "idle"` plus the flag — rather than reaching `SessionStatusGlyph`'s
+    /// "Unrecognized status" fallback.
+    func testWireSessionDecodesLegacyShellAsIdlePlusBackgroundWork() throws {
+        let json = """
+        {"id":"\(UUID().uuidString)","title":"t","agent":"claude","activity":"shell",
+         "subagentCount":0,"isUnread":false}
+        """.data(using: .utf8)!
+        let session = try JSONDecoder().decode(WireSession.self, from: json)
+        XCTAssertEqual(session.activity, "idle")
+        XCTAssertTrue(session.hasBackgroundWork)
+    }
+
     func testActivityChangedRoundTripsBackgroundWork() throws {
         let event = FleetEvent.activityChanged(
             id: UUID(), activity: "idle", waitingFor: nil,
