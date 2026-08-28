@@ -27,7 +27,7 @@ final class FTS5QueryTests: XCTestCase {
     /// The crash case. A bare double quote terminates the quoted string and leaves FTS5
     /// parsing the remainder as syntax; doubling it is FTS5's own escape.
     func testEmbeddedQuotesAreDoubledRatherThanTerminatingTheToken() {
-        XCTAssertEqual(FTS5Query.match(for: #"say "hi""#), #""say" ""hi"""*"#)
+        XCTAssertEqual(FTS5Query.match(for: #"say "hi""#), #""say" """hi"""*"#)
     }
 
     /// Reserved words are only reserved when bare. Quoted, they are the words the user
