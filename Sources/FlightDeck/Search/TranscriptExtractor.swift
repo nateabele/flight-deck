@@ -31,8 +31,18 @@ enum TranscriptExtractor {
 
     static func messages(inLine line: String, conversationID: String) -> [IndexedMessage] {
         guard let data = line.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let role = IndexedMessage.Role(rawValue: object["type"] as? String ?? "")
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [] }
+        return messages(inObject: object, conversationID: conversationID)
+    }
+
+    /// The same rule against an already-decoded record.
+    ///
+    /// `TranscriptWatcher` decodes every line anyway to find titles and subagent counts
+    /// (`ClaudeSession.events(inObject:)`); handing back the already-parsed object here is
+    /// what keeps that second, expensive `JSONSerialization` pass from happening at all.
+    static func messages(inObject object: [String: Any], conversationID: String) -> [IndexedMessage] {
+        guard let role = IndexedMessage.Role(rawValue: object["type"] as? String ?? "")
         else { return [] }
 
         // The harness talking to itself rather than a person talking to an agent. Matches
