@@ -128,6 +128,24 @@ final class SearchModelTests: XCTestCase {
         model.close()
 
         XCTAssertTrue(model.query.isEmpty)
+        XCTAssertTrue(model.results.isEmpty)
+    }
+
+    /// The property `testClosingClearsTheQueryAndResults` cannot actually exercise: a
+    /// transcript snippet from an old query must not survive into a new query's results,
+    /// even when that new query still has results (so the list is not simply empty).
+    func testChangingTheQueryDropsAPreviousQuerysSnippet() async throws {
+        index.hits = [TranscriptHit(
+            conversationID: "c1", projectPath: "/w/fd", conversationName: "mobile-ui",
+            snippet: "x", timestamp: Date(timeIntervalSince1970: 1)
+        )]
+        model.query = "rename"
+        try await Task.sleep(for: SearchModel.transcriptDebounce * 3)
+        XCTAssertEqual(model.results.count, 2, "sanity: the transcript hit arrived")
+
+        index.hits = []
+        model.query = "wifi"
+
         XCTAssertTrue(model.results.allSatisfy { $0.snippet == nil })
     }
 
@@ -138,5 +156,19 @@ final class SearchModelTests: XCTestCase {
 
         XCTAssertTrue(index.queries.isEmpty)
         XCTAssertEqual(model.results.count, 3)
+    }
+
+    /// `moveSelection` against a query that matches nothing must hold `nil` rather than trap
+    /// walking an empty `results` array. "xyz" is not a subsequence of any of the three
+    /// fixture names, so it clears the prefix, exact, and fuzzy tiers alike.
+    func testMovingSelectionWithNoResultsStaysNil() {
+        model.query = "xyz"
+        XCTAssertTrue(model.results.isEmpty, "sanity: the query really matches nothing")
+
+        model.moveSelection(by: 1)
+        XCTAssertNil(model.selectedID)
+
+        model.moveSelection(by: -1)
+        XCTAssertNil(model.selectedID)
     }
 }
