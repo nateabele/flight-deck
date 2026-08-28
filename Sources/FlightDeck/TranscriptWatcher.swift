@@ -28,9 +28,12 @@ final class TranscriptWatcher {
     let url: URL
     private let onTitle: (String) -> Void
     private let onSubagentCount: (Int) -> Void
-    /// Reports conversation text to the search index. Optional and defaulted: title-only
-    /// call sites are unaffected, and a watcher built without it does no extra work.
-    private let onMessages: ([IndexedMessage]) -> Void
+    /// Reports conversation text to the search index. A genuine optional, not a defaulted
+    /// no-op: `Scan.read` checks `onMessages != nil` and skips
+    /// `TranscriptExtractor.messages(inObject:)` entirely when nothing is subscribed, so a
+    /// watcher built without it truly does no extra work rather than building an array
+    /// nobody reads.
+    private let onMessages: (([IndexedMessage]) -> Void)?
 
     /// Outstanding top-level `Agent` tool_use ids. Cleared at every turn boundary, which
     /// is what makes a miscount from attaching mid-turn self-correcting rather than
@@ -47,13 +50,15 @@ final class TranscriptWatcher {
     private var isPolling = false
 
     /// `onSubagentCount` defaults to a no-op so title-only call sites are unaffected.
+    /// `onMessages` defaults to nil rather than a no-op closure — see the property above —
+    /// so its absence is something `Scan.read` can observe and act on.
     init(
         sessionID: UUID,
         url: URL,
         clock: WatchClock? = nil,
         onTitle: @escaping (String) -> Void,
         onSubagentCount: @escaping (Int) -> Void = { _ in },
-        onMessages: @escaping ([IndexedMessage]) -> Void = { _ in }
+        onMessages: (([IndexedMessage]) -> Void)? = nil
     ) {
         self.sessionID = sessionID
         self.url = url
@@ -85,6 +90,7 @@ final class TranscriptWatcher {
         let sessionID = self.sessionID
         let offset = self.offset
         let hasChosenStart = self.hasChosenStart
+        let wantsMessages = onMessages != nil
 
         Task { [weak self] in
             let scan = await Task.detached(priority: .utility) {
@@ -92,7 +98,8 @@ final class TranscriptWatcher {
                     url: url,
                     offset: offset,
                     hasChosenStart: hasChosenStart,
-                    sessionID: sessionID
+                    sessionID: sessionID,
+                    wantsMessages: wantsMessages
                 )
             }.value
 
@@ -110,7 +117,8 @@ final class TranscriptWatcher {
                 url: url,
                 offset: offset,
                 hasChosenStart: hasChosenStart,
-                sessionID: sessionID
+                sessionID: sessionID,
+                wantsMessages: onMessages != nil
             )
         )
     }
@@ -142,7 +150,7 @@ final class TranscriptWatcher {
 
         if let lastTitle { onTitle(lastTitle) }
         if countChanged { onSubagentCount(outstandingAgents.count) }
-        if !scan.messages.isEmpty { onMessages(scan.messages) }
+        if !scan.messages.isEmpty { onMessages?(scan.messages) }
     }
 }
 
@@ -168,19 +176,33 @@ struct Scan: Sendable {
     /// Returns the caller's own position unchanged when there is nothing to do (no new
     /// bytes, no complete line), which makes "no change" a cheap no-op rather than a
     /// special case at the call site.
+    ///
+    /// `wantsMessages` gates `TranscriptExtractor.messages(inObject:)`, not just whether
+    /// `messages` ends up read: without the gate a watcher with no `onMessages` subscriber
+    /// would still pay for extraction on every line, for nothing. Each line is JSON-decoded
+    /// exactly once regardless — `ClaudeSession.events(inObject:)` and
+    /// `TranscriptExtractor.messages(inObject:)` both take the same already-parsed object,
+    /// rather than each re-parsing the line themselves.
     static func read(
         url: URL,
         offset: UInt64,
         hasChosenStart: Bool,
-        sessionID: UUID
+        sessionID: UUID,
+        wantsMessages: Bool
     ) -> Scan {
         let tail = TailReader.read(url: url, offset: offset, hasChosenStart: hasChosenStart)
         var result = Scan(offset: tail.offset, hasChosenStart: tail.hasChosenStart)
         for line in tail.lines {
-            result.events += ClaudeSession.events(inLine: line, sessionID: sessionID)
-            result.messages += TranscriptExtractor.messages(
-                inLine: line, conversationID: sessionID.uuidString.lowercased()
-            )
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+
+            result.events += ClaudeSession.events(inObject: obj, sessionID: sessionID)
+            if wantsMessages {
+                result.messages += TranscriptExtractor.messages(
+                    inObject: obj, conversationID: sessionID.uuidString.lowercased()
+                )
+            }
         }
         return result
     }

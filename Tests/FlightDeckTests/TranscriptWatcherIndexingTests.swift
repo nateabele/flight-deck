@@ -66,4 +66,22 @@ final class TranscriptWatcherIndexingTests: XCTestCase {
 
         XCTAssertEqual(title, "rename-break")
     }
+
+    /// Catches the failure `testAWatcherWithNoIndexingHookStillReportsTitles` cannot: that
+    /// test only proves titles still arrive, not that extraction was skipped. `Scan.read` is
+    /// what actually decides whether to pay for `TranscriptExtractor.messages(inObject:)`, so
+    /// assert directly against it — `wantsMessages: false` must come back with `messages`
+    /// empty even for a line that plainly contains indexable text.
+    func testScanReadSkipsExtractionWhenNoIndexingHookIsWanted() throws {
+        let sessionID = UUID()
+        let url = directory.appendingPathComponent("\(sessionID.uuidString.lowercased()).jsonl")
+        let line = #"{"type":"user","timestamp":"2026-08-26T21:57:19.490Z","message":{"content":"the rename bug"}}"#
+        try Data((line + "\n").utf8).write(to: url)
+
+        let scan = Scan.read(
+            url: url, offset: 0, hasChosenStart: true, sessionID: sessionID, wantsMessages: false
+        )
+
+        XCTAssertTrue(scan.messages.isEmpty)
+    }
 }
