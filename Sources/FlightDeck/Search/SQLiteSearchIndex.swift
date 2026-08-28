@@ -281,7 +281,12 @@ final class SQLiteSearchIndex: SearchIndex {
     }
 
     private func close() {
-        if db != nil { sqlite3_close(db); db = nil }
+        // `_v2`: a plain `sqlite3_close` fails outright on SQLITE_BUSY (an outstanding
+        // finalized-but-not-yet-reclaimed statement), which would leak the handle here and
+        // leave the file locked while `init` goes on to delete and reopen it. `_v2` instead
+        // defers the actual close until every statement finalizes, and always succeeds from
+        // the caller's point of view — so `db` is always safe to nil out immediately after.
+        if db != nil { sqlite3_close_v2(db); db = nil }
     }
 
     private func isCurrentSchema() throws -> Bool {
