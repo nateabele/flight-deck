@@ -10,12 +10,25 @@ import SwiftUI
 /// that becomes key takes first-responder status off the surface entirely, and the text
 /// field simply has focus.
 ///
-/// **Why a child window.** Added to the deck window with `addChildWindow(_:ordered:)`, so it
-/// tracks the host's moves, resizes and miniaturisation without observing anything.
+/// **Why a child window.** Added to the deck window with `addChildWindow(_:ordered:)`, which
+/// synchronises this panel's moves, ordering and miniaturisation with the host automatically.
+/// Resize is NOT part of that — AppKit does not resize a child window when its parent
+/// resizes — so `present(over:)` observes the host's resize explicitly and re-applies its
+/// frame; without that, resizing the deck window while the overlay is open would leave the
+/// scrim not covering the window and the card (positioned as a fraction of the panel's own
+/// geometry) drifting off it.
 @MainActor
 final class SearchPanel: NSPanel {
     private let model: SearchModel
     private weak var host: NSWindow?
+    /// Guards `present`/`dismiss` against being called out of turn: a second `present` before
+    /// a matching `dismiss` would re-register this panel as the host's child window, and Esc
+    /// can reach `dismiss` twice for one keypress (`cancelOperation` and SwiftUI's
+    /// `.onExitCommand` can both fire, depending on where first responder lands), which
+    /// without this would repeat the whole teardown for no reason.
+    private var isPresented = false
+    private var resizeObserver: NSObjectProtocol?
+    private var deactivationObserver: NSObjectProtocol?
 
     init(model: SearchModel, onActivate: @escaping (SearchResult) -> Void) {
         self.model = model
@@ -32,9 +45,15 @@ final class SearchPanel: NSPanel {
         hasShadow = false          // the card draws its own; the scrim must not have one
         level = .floating
         isMovable = false
-        // Closing the deck window must take this with it rather than leaving an orphan
-        // floating over other apps.
-        hidesOnDeactivate = true
+        // `hidesOnDeactivate` is deliberately left at its default `false`. That flag would
+        // hide the panel behind AppKit's back on app deactivation, leaving `model` still
+        // believing it is open and `host` still holding it as a child window — so the next
+        // ⌘K would call `present(over:)` on an already-parented panel. Deactivation is
+        // instead observed explicitly in `present(over:)` and routed through `dismiss()`,
+        // which keeps the model, the host's child-window list and the screen from diverging.
+        // A search overlay left open behind another app is not something the user is still
+        // using, so dismissing outright — rather than hiding and restoring on reactivation —
+        // is the simpler, and simply correct, choice here.
 
         let root = SearchOverlayRoot(
             model: model,
@@ -48,14 +67,42 @@ final class SearchPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 
     func present(over host: NSWindow) {
+        // Without this, a stray second call before a matching `dismiss` would call
+        // `host.addChildWindow` on this panel twice, corrupting the host's child-window list.
+        guard !isPresented else { return }
+        isPresented = true
         self.host = host
         setFrame(host.frame, display: false)
         host.addChildWindow(self, ordered: .above)
         model.open()
         makeKeyAndOrderFront(nil)
+
+        // `addChildWindow` does not keep this panel's frame in sync with the host's — see the
+        // class doc. Re-applies the host's frame on every resize while presented.
+        resizeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification, object: host, queue: .main
+        ) { [weak self] _ in
+            guard let self, let host = self.host else { return }
+            self.setFrame(host.frame, display: true)
+        }
+
+        // See the `hidesOnDeactivate` comment in `init` for why this dismisses outright
+        // rather than merely hiding.
+        deactivationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.dismiss() }
     }
 
     func dismiss() {
+        guard isPresented else { return }
+        isPresented = false
+        // Symmetric with what `present(over:)` adds: an observation left running past
+        // dismissal would keep reacting to a host the panel is no longer attached to.
+        if let resizeObserver { NotificationCenter.default.removeObserver(resizeObserver) }
+        if let deactivationObserver { NotificationCenter.default.removeObserver(deactivationObserver) }
+        resizeObserver = nil
+        deactivationObserver = nil
+
         model.close()
         host?.removeChildWindow(self)
         orderOut(nil)
