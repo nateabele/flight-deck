@@ -89,17 +89,35 @@ final class SearchCandidatesTests: XCTestCase {
     /// anywhere in the model, and the file already records exactly this — a live session
     /// appends to it constantly — so adding one would duplicate a fact that could then
     /// disagree with itself.
+    ///
+    /// Two sessions, not one: with a single session, that session's own candidate and its
+    /// project's candidate (`lastActivity` is the project's newest session, see
+    /// `SearchCandidates.build`) always carry the same stamp, so asserting on `.first` would
+    /// pass whichever of the two `.first` happened to return — including the project one,
+    /// which is not what this test is named for. A second, more recent session gives the
+    /// project a `lastActivity` that actually differs from the target session's own, so only
+    /// the session candidate can satisfy the assertion below.
     func testRecencyComesFromTheTranscriptModificationDate() {
+        let target = Session(title: "rename-break", workingDirectory: "/w/fd")
+        let other = Session(title: "other", workingDirectory: "/w/fd")
         let stamp = now.addingTimeInterval(-500)
+        let stamps = [
+            ClaudeSession.transcriptURL(
+                sessionID: target.pinnedConversationID, workingDirectory: "/w/fd"
+            ): stamp,
+            ClaudeSession.transcriptURL(
+                sessionID: other.pinnedConversationID, workingDirectory: "/w/fd"
+            ): now,
+        ]
+
         let candidates = SearchCandidates.build(
-            repos: [repo("/w/fd", sessions: [
-                Session(title: "rename-break", workingDirectory: "/w/fd"),
-            ])],
+            repos: [repo("/w/fd", sessions: [target, other])],
             conversations: [:],
-            modified: { _ in stamp }
+            modified: { stamps[$0] ?? .distantPast }
         )
 
-        XCTAssertEqual(candidates.first?.lastActivity, stamp)
+        let session = candidates.first { $0.kind == .session(target.id) }
+        XCTAssertEqual(session?.lastActivity, stamp)
     }
 
     /// A project is as recent as its liveliest session, so an active project outranks a

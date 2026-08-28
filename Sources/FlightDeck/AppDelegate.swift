@@ -123,8 +123,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let mainMenu = NSApp.mainMenu { toolsMenu.install(in: mainMenu) }
     }
 
+    /// Unlike `installToolsMenu`, not naturally idempotent: it opens a file handle, builds a
+    /// panel, and registers a `.flightDeckOpenSearch` observer, none of which tolerate being
+    /// done twice. Only one `.flightDeckStoreReady` is posted per launch today (`SessionStore`
+    /// posts it once, from its own designated `init`), so nothing currently calls this twice —
+    /// but that is exactly the kind of assumption `installToolsMenu`'s own doc comment
+    /// declines to make about itself, so this does not make it either. A second call would
+    /// otherwise leak the first index's `sqlite3*` handle (see `deinit`'s `_v2` comment for
+    /// why a leaked-but-unclosed handle is only survivable, not free), double the backfill,
+    /// and stack a second `.flightDeckOpenSearch` observer that would double-present the panel.
     @MainActor
     private func startSearch(store: SessionStore) {
+        guard searchIndex == nil else { return }
         guard let index = try? SQLiteSearchIndex(at: Self.searchIndexURL()) else { return }
         let model = SearchModel(index: index, projects: { store.repos.map(\.url.path) })
         let panel = SearchPanel(model: model) { [weak store] result in
