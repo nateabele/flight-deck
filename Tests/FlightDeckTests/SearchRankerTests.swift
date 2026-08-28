@@ -28,9 +28,11 @@ final class SearchRankerTests: XCTestCase {
         )
     }
 
-    private func hit(_ conversation: String, snippet: String, activity: TimeInterval) -> TranscriptHit {
+    private func hit(
+        _ conversation: String, snippet: String, activity: TimeInterval, rowID: Int64 = 1
+    ) -> TranscriptHit {
         TranscriptHit(
-            conversationID: conversation, projectPath: "/w/flight-deck",
+            rowID: rowID, conversationID: conversation, projectPath: "/w/flight-deck",
             conversationName: conversation, snippet: snippet, timestamp: ago(activity)
         )
     }

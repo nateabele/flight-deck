@@ -16,6 +16,10 @@ enum SearchResultKind: Equatable, Sendable {
 /// an `AttributedString`. Keeping them as markers rather than as ranges means the index does
 /// not have to reason about `String.Index` across a SQLite boundary.
 struct TranscriptHit: Equatable, Sendable {
+    /// `message.id` — the FTS table's `content_rowid`. Two messages in the same
+    /// conversation can share a timestamp (or carry none at all), so this, not
+    /// `(conversationID, timestamp)`, is what the result id is built from.
+    let rowID: Int64
     let conversationID: String
     let projectPath: String
     let conversationName: String
