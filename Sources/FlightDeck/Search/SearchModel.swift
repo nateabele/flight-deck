@@ -96,11 +96,21 @@ final class SearchModel: ObservableObject {
 
         debounceTask = Task { [weak self, index] in
             try? await Task.sleep(for: Self.transcriptDebounce)
+            // The common case: superseded while still waiting out the debounce. Caught here,
+            // this query never reaches SQLite at all — which is what actually keeps a fast
+            // typist's six keystrokes down to one query, not the cancellation below.
             guard !Task.isCancelled else { return }
 
             // Off the main actor: the query itself is sub-millisecond on a warm index, but
             // it can contend with a backfill's writer, and blocking the main actor there
-            // would stutter the panel's height animation.
+            // would stutter the panel's height animation. `Task.detached` does NOT inherit
+            // this task's cancellation, so a query that is already running past this point
+            // runs to completion in SQLite regardless of what is typed next — there is no
+            // clean Swift 5 equivalent for synchronous work that would abort it. The guard
+            // below only stops a stale result from being *applied*; it cannot stop the
+            // search itself. That is still enough: a stale result can never overwrite the
+            // screen, so the highlighted row can never be shoved out from under someone
+            // reaching for Return, even though a superseded-mid-query search is not aborted.
             let hits = await Task.detached(priority: .userInitiated) {
                 (try? index.search(match, projects: projects, limit: limit)) ?? []
             }.value
