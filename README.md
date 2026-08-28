@@ -28,9 +28,9 @@ through a dozen terminal windows you can't tell apart.
   closes the session rather than the window. ⌘⇧T reopens what you just closed, the way a
   browser reopens a tab — back on its own conversation, in its old row. Keep pressing to
   walk further back; closing a whole project undoes in one press.
-- ⌘K searches everything at once: session and project names, and full transcript history
-  across every conversation you've had, matched terms shown in context. Return jumps to a
-  live session, or resumes an older conversation into a new tab.
+- ⌘K searches everything at once: session and project names, and transcript history for
+  the projects currently in the sidebar (and their worktrees), matched terms shown in
+  context. Return jumps to a live session, or resumes an older conversation into a new tab.
 - Agent flags are set globally and overridden per project, from real controls instead
   of a half-remembered command line.
 - Editors, terminals and git clients open on whatever the selected session is working on —
