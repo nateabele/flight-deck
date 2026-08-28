@@ -3491,7 +3491,7 @@ final class SessionStore: ObservableObject {
             switch transition.new?.activity {
             case .busy, .waiting:
                 pendingPrompts.removeValue(forKey: transition.id)
-            case .idle, .shell, nil:
+            case .idle, nil:
                 continue
             }
         }
@@ -3813,8 +3813,9 @@ final class SessionStore: ObservableObject {
         applyReadState(transitions)
         deliverNotifications(transitions)
         cancelSupersededPrompts(transitions)
-        // Below the `guard next != statuses` above, so this writes only on a real
-        // transition — a handful of small atomic writes a minute, not one per poll.
+        // Below the `guard next != statuses || backgroundWork != backgroundWorkSessions`
+        // above, so this writes only on a real transition — a handful of small atomic
+        // writes a minute, not one per poll.
         // Recording activity here rather than at quit is what covers a SIGKILL (which is
         // how scripts/swap-release.sh stops the app) and a panic, and an unplanned exit is
         // the case auto-resume is most wanted for.

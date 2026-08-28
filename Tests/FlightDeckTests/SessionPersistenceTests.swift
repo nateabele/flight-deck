@@ -343,7 +343,7 @@ final class SessionPersistenceTests: XCTestCase {
 
         store.applyRegistryForTesting([
             a.id: SessionStatus(activity: .busy),
-            b.id: SessionStatus(activity: .shell),
+            b.id: SessionStatus(activity: .waiting),
         ])
         // `applyRegistryForTesting` routes through `commitStatuses`, which already calls
         // `persist()` itself on a real transition — the line below is not forcing a save,
@@ -352,7 +352,7 @@ final class SessionPersistenceTests: XCTestCase {
 
         let stored = persistence.stored?.sessions ?? []
         XCTAssertEqual(stored.first(where: { $0.id == a.id })?.activity, "busy")
-        XCTAssertEqual(stored.first(where: { $0.id == b.id })?.activity, "shell")
+        XCTAssertEqual(stored.first(where: { $0.id == b.id })?.activity, "waiting")
     }
 
     /// A tab with no `claude` registered records no activity. Absent is not the same as

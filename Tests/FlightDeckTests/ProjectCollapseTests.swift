@@ -8,9 +8,8 @@ final class ProjectCollapseTests: XCTestCase {
         return (SessionStore(provider: nil, persistence: persistence), persistence)
     }
 
-    func testSummaryRankOrdersWaitingAboveShellAboveBusyAboveIdle() {
-        XCTAssertGreaterThan(SessionActivity.waiting.summaryRank, SessionActivity.shell.summaryRank)
-        XCTAssertGreaterThan(SessionActivity.shell.summaryRank, SessionActivity.busy.summaryRank)
+    func testSummaryRankOrdersWaitingAboveBusyAboveIdle() {
+        XCTAssertGreaterThan(SessionActivity.waiting.summaryRank, SessionActivity.busy.summaryRank)
         XCTAssertGreaterThan(SessionActivity.busy.summaryRank, SessionActivity.idle.summaryRank)
     }
 

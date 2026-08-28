@@ -339,10 +339,9 @@ final class SessionAutoResumeTests: XCTestCase {
     }
 
     /// Every `sessions.json` written before this change stores `"shell"`. Reading one back must
-    /// not lose the status. `SessionActivity` still has a `.shell` case until Task 8 deletes it,
-    /// so `SessionActivity(rawValue: "shell")` would actually succeed today — the migration
-    /// matters anyway, because `restoredActivity` intercepts the raw string before the enum
-    /// ever sees it, which is what keeps this correct both before and after that deletion.
+    /// not lose the status. `SessionActivity` no longer has a `.shell` case, so
+    /// `SessionActivity(rawValue: "shell")` would fail — the migration is what keeps this
+    /// correct: `restoredActivity` intercepts the raw string before the enum ever sees it.
     func testLegacyShellInSnapshotRestoresAsIdleWithBackgroundWork() {
         let restored = SessionStore.restoredActivity(fromPersisted: "shell")
         XCTAssertEqual(restored.activity, .idle)

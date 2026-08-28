@@ -114,7 +114,7 @@ final class ClaudeOpenCallTests: XCTestCase {
     /// session is a command that is running, and answering "Allow" at it would press Return
     /// into a live input bar.
     func testAnOpenCallOnANonWaitingSessionIsNotOpen() {
-        for activity: SessionActivity? in [.idle, .busy, .shell, nil] {
+        for activity: SessionActivity? in [.idle, .busy, nil] {
             XCTAssertNil(
                 ClaudeOpenCall.find(in: [line(0, bash("toolu_B"))], activity: activity),
                 "\(String(describing: activity)) must not produce an open call"

@@ -405,7 +405,7 @@ final class AnswerPromptTests: XCTestCase {
     /// **`inject`'s gate, inverted, and the inversion is the point.** An idle session has no
     /// dialog up, and a Return there submits whatever is in the input bar.
     func testANonWaitingSessionIsRefused() {
-        for activity in [SessionActivity.idle, .busy, .shell] {
+        for activity in [SessionActivity.idle, .busy] {
             let (store, spy, id) = makeStore(activity: activity)
             spy.showOptions(["Yes"], selected: 0)
             XCTAssertEqual(
