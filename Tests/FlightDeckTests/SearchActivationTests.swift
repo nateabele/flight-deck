@@ -30,10 +30,38 @@ final class SearchActivationTests: XCTestCase {
     /// the app's pid-keyed registry cannot survive.
     func testAConversationThatAlreadyHasATabSelectsItRatherThanResuming() {
         let tab = UUID()
+        let conversation = UUID()
         let activation = SearchActivation.plan(
-            for: result(kind: .conversation("c1"), conversation: "c1"),
-            openSessions: [SearchActivation.ActiveSession(id: tab, conversationID: "c1")],
+            for: result(kind: .conversation(conversation.uuidString.lowercased()),
+                        conversation: conversation.uuidString.lowercased()),
+            openSessions: [SearchActivation.ActiveSession(id: tab, conversationID: conversation)],
             projects: ["/w/fd"]
+        )
+
+        XCTAssertEqual(activation, .select(tab))
+    }
+
+    /// The bug this guards: `UUID.uuidString` is uppercase, and a `SearchResult`'s
+    /// conversation id is a lowercase transcript filename stem. A caller filling
+    /// `ActiveSession` straight from `pinnedConversationID.uuidString` (no `.lowercased()`)
+    /// must still match — comparing as `UUID` rather than as a raw string is what makes that
+    /// true no matter which case either side started from.
+    func testAConversationThatAlreadyHasATabMatchesRegardlessOfUUIDStringCase() {
+        let tab = UUID()
+        let conversation = UUID()
+        // Built from the uppercase string, exactly as a caller filling `ActiveSession`
+        // straight from `session.pinnedConversationID.uuidString` would, with no
+        // `.lowercased()` anywhere.
+        let openSession = SearchActivation.ActiveSession(
+            id: tab, conversationID: UUID(uuidString: conversation.uuidString.uppercased())!
+        )
+
+        let activation = SearchActivation.plan(
+            // The lowercase transcript filename stem `SearchResult.conversationID` actually
+            // carries.
+            for: result(kind: .conversation(conversation.uuidString.lowercased()),
+                        conversation: conversation.uuidString.lowercased()),
+            openSessions: [openSession], projects: ["/w/fd"]
         )
 
         XCTAssertEqual(activation, .select(tab))
@@ -46,7 +74,7 @@ final class SearchActivationTests: XCTestCase {
         )
 
         XCTAssertEqual(activation, .resume(
-            conversationID: "c1", projectPath: "/w/fd", transcriptDirectory: "/w/fd"
+            conversationID: "c1", projectPath: "/w/fd", title: "t", transcriptDirectory: "/w/fd"
         ))
     }
 
@@ -59,15 +87,17 @@ final class SearchActivationTests: XCTestCase {
         )
 
         XCTAssertEqual(activation, .addProjectThenResume(
-            projectPath: "/w/gone", conversationID: "c1", transcriptDirectory: "/w/gone"
+            projectPath: "/w/gone", conversationID: "c1", title: "t", transcriptDirectory: "/w/gone"
         ))
     }
 
-    /// A worktree conversation must resume where claude actually wrote it. Resuming it in
-    /// the project root would point the tab's watcher at a transcript nothing writes to,
-    /// silently losing title sync and subagent counts — the failure `Session.transcriptDirectory`
-    /// exists to prevent.
-    func testAWorktreeConversationResumesInItsWorktreeDirectory() {
+    /// `plan` passes `transcriptDirectory` straight through when given one; it is not, on
+    /// its own, proof that a worktree conversation resumes correctly in production, since
+    /// production wiring has no way to compute this value and always leaves it `nil` — see
+    /// `SessionStore`'s `resolvedTranscriptDirectory`, which is where the real answer comes
+    /// from. This only pins the pass-through shape `plan` promises to a caller that does
+    /// have one, e.g. a test.
+    func testAKnownTranscriptDirectoryPassesThroughUnchanged() {
         var worktree = result(kind: .conversation("c1"), conversation: "c1")
         worktree = SearchResult(
             id: worktree.id, kind: worktree.kind, title: worktree.title,
@@ -82,7 +112,7 @@ final class SearchActivationTests: XCTestCase {
         )
 
         XCTAssertEqual(activation, .resume(
-            conversationID: "c1", projectPath: "/w/fd",
+            conversationID: "c1", projectPath: "/w/fd", title: "t",
             transcriptDirectory: "/w/fd/.claude/worktrees/fleet-pairing"
         ))
     }

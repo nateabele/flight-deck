@@ -26,9 +26,11 @@ enum SearchCorpus {
     /// `.claude/worktrees`, and the superpowers skills use `.superpowers/worktrees`.
     private static let worktreeRoots = [".claude/worktrees", ".superpowers/worktrees"]
 
-    /// The encoded directory names this project owns: itself, plus one per existing
-    /// worktree. Exact names — never prefixes.
-    static func transcriptDirectoryNames(
+    /// The literal directories this project owns: itself, plus one per existing worktree.
+    /// Kept separate from `transcriptDirectoryNames` because encoding is one-way — see this
+    /// type's doc comment — so a caller that needs the literal path *back* (not just whether
+    /// an encoded name matches something) has to start from here rather than decode a name.
+    static func candidateWorkingDirectories(
         forProjectAt path: String,
         listing: (String) -> [String]
     ) -> [String] {
@@ -39,7 +41,17 @@ enum SearchCorpus {
                 paths.append((rootPath as NSString).appendingPathComponent(child))
             }
         }
-        return paths.map(ClaudeSession.encodedProjectDirName(for:))
+        return paths
+    }
+
+    /// The encoded directory names this project owns: itself, plus one per existing
+    /// worktree. Exact names — never prefixes.
+    static func transcriptDirectoryNames(
+        forProjectAt path: String,
+        listing: (String) -> [String]
+    ) -> [String] {
+        candidateWorkingDirectories(forProjectAt: path, listing: listing)
+            .map(ClaudeSession.encodedProjectDirName(for:))
     }
 
     /// Every in-scope transcript directory across `paths`, each tagged with its project.
