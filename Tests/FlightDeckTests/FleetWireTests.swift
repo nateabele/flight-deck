@@ -43,4 +43,57 @@ final class FleetWireTests: XCTestCase {
         """.utf8)
         XCTAssertEqual(try JSONDecoder().decode(WireSession.self, from: json).agent, "gemini")
     }
+
+    /// An older Mac sends no such key. The phone must decode that as `false`, not throw — a
+    /// throw here takes the entire snapshot down, not one field.
+    func testWireSessionDecodesWithoutBackgroundWorkKey() throws {
+        let json = """
+        {"id":"A4C9067B-9CAF-43CB-8B75-88A145249058","title":"frontend-state",
+         "agent":"claude","activity":"idle","subagentCount":0,"isUnread":false}
+        """.data(using: .utf8)!
+        let session = try JSONDecoder().decode(WireSession.self, from: json)
+        XCTAssertFalse(session.hasBackgroundWork)
+    }
+
+    /// The wire version was deliberately not bumped for the `hasBackgroundWork` split, so an
+    /// older Mac can still send the pre-decomposition `"shell"` string as `activity`. That
+    /// must decode as exactly what a newer Mac would have sent for the same fact —
+    /// `activity: "idle"` plus the flag — rather than reaching `SessionStatusGlyph`'s
+    /// "Unrecognized status" fallback.
+    func testWireSessionDecodesLegacyShellAsIdlePlusBackgroundWork() throws {
+        let json = """
+        {"id":"\(UUID().uuidString)","title":"t","agent":"claude","activity":"shell",
+         "subagentCount":0,"isUnread":false}
+        """.data(using: .utf8)!
+        let session = try JSONDecoder().decode(WireSession.self, from: json)
+        XCTAssertEqual(session.activity, "idle")
+        XCTAssertTrue(session.hasBackgroundWork)
+    }
+
+    func testActivityChangedRoundTripsBackgroundWork() throws {
+        let event = FleetEvent.activityChanged(
+            id: UUID(), activity: "idle", waitingFor: nil,
+            subagentCount: 0, hasBackgroundWork: true
+        )
+        let data = try JSONEncoder().encode(event)
+        let decoded = try JSONDecoder().decode(FleetEvent.self, from: data)
+        XCTAssertEqual(decoded, event)
+    }
+
+    /// The other half of the compatibility contract: an older Mac's *incremental* frame, not
+    /// just its snapshot. `testWireSessionDecodesWithoutBackgroundWorkKey` above proves
+    /// `WireSession` tolerates the missing key; this proves the `activityChanged` decode arm
+    /// in `WireCoding.swift` does too — it has its own `decodeIfPresent(...) ?? false`, wired
+    /// up separately, and nothing exercised it.
+    func testActivityChangedDecodesWithoutBackgroundWorkKey() throws {
+        let id = UUID()
+        let json = Data("""
+        {"t":"session.activity","id":"\(id.uuidString)","activity":"idle","subagentCount":0}
+        """.utf8)
+        let event = try JSONDecoder().decode(FleetEvent.self, from: json)
+        guard case .activityChanged(_, _, _, _, let hasBackgroundWork) = event else {
+            return XCTFail("expected .activityChanged, got \(event)")
+        }
+        XCTAssertFalse(hasBackgroundWork)
+    }
 }

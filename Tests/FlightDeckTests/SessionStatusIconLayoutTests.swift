@@ -47,10 +47,6 @@ final class SessionStatusIconLayoutTests: XCTestCase {
             "waiting shifted the title"
         )
         XCTAssertEqual(
-            titleOffset(SessionStatus(activity: .shell)), idle, accuracy: 0.5,
-            "shell shifted the title"
-        )
-        XCTAssertEqual(
             titleOffset(SessionStatus(activity: .busy)), idle, accuracy: 0.5,
             "busy shifted the title"
         )
@@ -64,7 +60,6 @@ final class SessionStatusIconLayoutTests: XCTestCase {
             ("busy", columnWidth(SessionStatus(activity: .busy))),
             ("busy+3", columnWidth(SessionStatus(activity: .busy, subagentCount: 3))),
             ("waiting", columnWidth(SessionStatus(activity: .waiting))),
-            ("shell", columnWidth(SessionStatus(activity: .shell))),
         ]
 
         for (name, width) in states {

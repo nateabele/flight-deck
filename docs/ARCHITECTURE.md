@@ -1,7 +1,22 @@
 # Flight Deck — Architecture (as built)
 
-This describes the code **as it exists today** (the walking skeleton). For the intended
-full design and the reasoning, see the [design spec](superpowers/specs/2026-07-09-flight-deck-design.md).
+This describes the code **as it exists today**. For the intended full design and the reasoning,
+see the [design spec](superpowers/specs/2026-07-09-flight-deck-design.md); for what is still
+unbuilt, see the last section here.
+
+It began as a walking skeleton and is well past one: two agents behind a common adapter, a
+preferences core, external tools, transcript history, and a fleet replicated to a phone that
+runs on real hardware. Sections below are ordered roughly as that grew.
+
+**If you are about to change something, there is probably a working document for it.**
+This file says what the pieces *are*; those say how to change one without breaking what is
+holding it up.
+
+| Changing | Read |
+|---|---|
+| The phone's screens | [MOBILE-UI.md](MOBILE-UI.md), then [MOBILE.md](MOBILE.md)'s checklist |
+| The wire, pairing, discovery | [NETWORKING.md](NETWORKING.md) |
+| Anything, at runtime, on this machine | [AGENT-OPERATIONS.md](AGENT-OPERATIONS.md) |
 
 ## The spine
 
@@ -43,7 +58,7 @@ Net: **~97% of `GhosttyEmbed/` is reused Ghostty code**; the Flight-Deck-authore
 ## Linkage & build config (`project.yml`, XcodeGen)
 
 - **`GhosttyKit.xcframework`** (the built `libghostty`, a static-lib xcframework) is linked via `dependencies: [{ framework: vendor/ghostty-artifacts/GhosttyKit.xcframework, embed: false }]`. The reused Swift files `import GhosttyKit`. **Not** a raw `-lghostty` + header-search-path setup.
-- **`SWIFT_VERSION: "5.0"`** (Swift 5 language mode under the Swift 6.3 compiler) — required so the vendored Ghostty code compiles without Swift-6 strict-concurrency breakage. Deliberate; see FOLLOWUPS.
+- **`SWIFT_VERSION: "5.0"` on the app target only** (Swift 5 language mode under the Swift 6.3 compiler) — required so the vendored Ghostty code compiles without Swift-6 strict-concurrency breakage. Deliberate; see FOLLOWUPS. Everything added since is Swift 6: `FleetKit`, its iOS twin, `FlightDeckMobile` and the test targets all set `SWIFT_VERSION: "6.0"`, which is why FleetKit's queue-confined classes carry explicit `@unchecked Sendable` conformances rather than inheriting a laxer default.
 - **`OTHER_LDFLAGS: -lstdc++`** — `libghostty` statically bundles C++ (glslang); matches Ghostty's own project.
 - **`SWIFT_OBJC_BRIDGING_HEADER: Sources/FlightDeck/BridgingHeader.h`** — imports the two owned ObjC headers (`ObjCExceptionCatcher.h`, `VibrantLayer.h`), which transitively expose Foundation/QuartzCore target-wide (Ghostty relies on this implicit-Foundation trick). `HEADER_SEARCH_PATHS` points at `GhosttyEmbed/`.
 - **Entitlements** (`FlightDeck.entitlements`) are the non-sandboxed subset (no `app-sandbox`, `disable-library-validation` on) — required to link a non-notarized static `libghostty`.
@@ -105,6 +120,10 @@ rejected, so a `claude` release that adds a flag does not make the field lossy.
 - `vendor/ghostty-artifacts/GhosttyKit.xcframework` — build output of `scripts/build-libghostty.sh`.
 - `vendor/.zig-toolchain/` — Zig 0.15.2 (auto-downloaded by the build script).
 - `vendor/.build-shim/` — the `xcrun` SDK shim (recreated by the build script).
+- `vendor/boringssl` — submodule, pinned to tag **0.20250114.0**, pristine (never modified).
+- `vendor/boringssl-artifacts/BoringSSL.xcframework` — build output of
+  `scripts/build-boringssl.sh`; same shape as `ghostty-artifacts`, built from the submodule
+  rather than committed after an earlier attempt (54 MB) was reverted — see docs/FOLLOWUPS.md.
 
 ## Sidebar structure
 
@@ -144,7 +163,10 @@ to session-encounter order with every project expanded.
 
 ## Session status pipeline
 
-Sidebar rows show what each Claude session is doing. Two sources feed one map:
+Sidebar rows show what each session is doing. **This section describes the claude path**, which
+is the one with the polled registry; codex reports its state over JSON-RPC and through
+`CodexRolloutWatcher` instead, and both arrive as the same `SessionStatus` through the agent's
+`AgentRuntime` (see "Agents" below). Two sources feed one map:
 
 ```
 <account home>/sessions/<pid>.json ──> SessionStatusWatcher ──┐
@@ -295,19 +317,48 @@ make a failed-but-verbose launch read identical to a successful one. A non-zero 
 a 2-second grace window is reported through `ToolLaunchFailureReporting`; still running past
 that window counts as success.
 
-## Fleet replication (`FleetKit` / `Sources/FlightDeck/Fleet/`)
+## Fleet replication, pairing, and the phone (`FleetKit` / `Sources/FlightDeck/Fleet/` / `Sources/FlightDeckMobile/`)
 
-The spine a mobile companion replicates the fleet over — not wired to any UI yet (Plan 2:
-`docs/superpowers/plans/2026-08-19-fleet-pairing-and-ios.md`), but live end to end: a real
-client over a real TLS-PSK WebSocket can already receive a snapshot of a running
-`SessionStore`, follow its mutations, and mark a session read. Two modules:
+The spine is live end to end and proven that way: a real client completes a TLS-PSK handshake
+against a real listener, takes a snapshot of a live `SessionStore`, follows its mutations,
+resumes after a drop and marks a session read — all inside `./scripts/test-unit.sh`.
+
+**The phone runs.** It takes a code off the Mac's screen — scanned, or twelve characters typed —
+finds the Mac over Bonjour or by racing remembered addresses, and shows the running fleet in the
+terminal's own idiom: one project section per open project, one row per session, renamed, marked
+read and closed from either side, with the conversation itself readable and answerable. It has
+paired against a real Mac from both a simulator and a real handset, and
+`./scripts/deploy-phone.sh` installs and relaunches it on the device.
+
+What that does and does not settle is worth being precise about, because this paragraph used to
+say "has never been run" and the correction is not "so it is proven now":
+
+- **Its logic is tested.** `FlightDeckMobileTests` is an app-hosted suite on a simulator
+  covering the phone's decision-making — the typed-code field, `FleetModel`'s orderings, the
+  status vocabulary, how a body is split into segments, what a quotation puts in the composer.
+- **Its appearance is not, and cannot be.** That process has no window: nothing there lays out,
+  draws or taps a view. See [MOBILE-UI.md](MOBILE-UI.md) for what follows from that and how to
+  look at a change anyway.
+- **Everything below the UI is covered by the macOS suite**, because it deliberately lives in
+  `FleetKit` — including real sockets, a real handshake and real loopback runs.
+
+`docs/MOBILE.md` carries the checklist of what only a device on a real network can confirm and
+says plainly which parts are least proven. Plan 2 built the phone and the pairing
+UI on top of the spine Plan 1 built (Plan 1:
+`docs/superpowers/plans/2026-08-19-fleet-replication-spine.md`; Plan 2:
+`docs/superpowers/plans/2026-08-19-fleet-pairing-and-ios.md`). The manual checklist for what
+only a real device on a real network can prove is [docs/MOBILE.md](MOBILE.md). Three modules:
 
 - **`Sources/FleetKit/`** — the wire types (`FleetSnapshot`, `WireProject`, `WireSession`), the
   delta vocabulary (`FleetEvent`), snapshot application, the replay fold, a hand-written frame
-  codec, the TLS pre-shared-key parameters, and both socket halves (`FleetSocketServer`,
-  `FleetClient`). It imports only `Foundation`, `Network`, and `Security` — never `AppKit` —
-  and that boundary is enforced mechanically, not by convention: the same source directory is
-  also compiled as an iOS target (`FleetKitiOS` in `project.yml`, checked by
+  codec, the TLS pre-shared-key parameters, both socket halves (`FleetSocketServer`,
+  `FleetClient`), the pairing payload (`PairingPayload`) that the QR encodes, the typed code
+  (`PairingCode`) and the pairing channel that carries it (`Pairing/`, over the SPAKE2 wrapper
+  in `SPAKE2/`), and the phone's Keychain-backed pairing store (`KeychainPairedMacStore`) and
+  network-discovery connector (`FleetConnector`). It imports only `Foundation`, `Network`, and
+  `Security` — never `AppKit` — and that boundary is enforced mechanically, not by convention:
+  the same source directory
+  is also compiled as an iOS target (`FleetKitiOS` in `project.yml`, checked by
   `scripts/build-ios.sh`), so a stray `import AppKit` fails that build immediately rather than
   surfacing later as a phone-side compile error nobody is watching for.
 - **`Sources/FlightDeck/Fleet/`** — the desktop side. `FleetProjection` is a pure read of
@@ -315,7 +366,17 @@ client over a real TLS-PSK WebSocket can already receive a snapshot of a running
   event log and holds a bounded ring for replaying across a reconnect. `FleetService` is the
   only type that knows both a `SessionStore` and a socket — deliberately: `FleetSocketServer`
   stays testable with no store, `SessionStore` stays testable with no network, and everything
-  that needs both is here where it can be read at once.
+  that needs both is here where it can be read at once. `PairingArmer` is a pure state machine
+  over an injected clock holding the one-slot-at-a-time arming window; the Devices tab
+  (`Sources/FlightDeck/Preferences/UI/DevicesSettingsTab.swift`) is the only place a user can
+  arm pairing, see who is attached, or revoke a device.
+- **`Sources/FlightDeckMobile/`** — the phone app. `FleetModel` owns a `PairedMacStoring` and a
+  `FleetConnector` and is the only thing either screen talks to; `PairingScreen` scans a QR (or
+  takes a typed code, the only route that works on a simulator) and adopts it, `FleetListScreen`
+  renders the replicated fleet. Most of `PairingScreen.swift` is its QR scanner
+  (`AVCaptureSession` wrapped in a `UIViewRepresentable`), whose teardown path — stop the
+  session, clear the delegate, let `deinit` run — took three review rounds to get right; see
+  [docs/MOBILE.md](MOBILE.md) for what that history means for the manual checklist.
 
 **The event log, and the drift assertion standing in for encapsulating it.** `SessionStore`
 emits a `FleetEvent` for every change to `repos`, `statuses`, or `unreadIdle` (`unreadIdle` now
@@ -331,6 +392,58 @@ deferred:
 fresh, and assert the two agree. It is an interim measure, not the design, but it is not
 decorative either: it caught five real defects during this plan's own execution. It must not be
 removed before the encapsulation replaces it.
+
+**Conversation history is pulled, not pushed, and it does not ride the event log.** Fleet state
+is pushed because it is small and every client wants all of it; a transcript is bulk that only
+the one client looking at that session wants. So a phone *asks*: `ClientFrame.req` carries a
+`FleetRequest.timeline` with a `TimelineAnchor` (`latest` / `before(cursor)` / `after(cursor)`)
+and a record limit, and `ServerFrame.page` answers with the mapped items on the same `cid` —
+deliberately carrying no `seq`, because a history fetch must not move the resume point a client
+hands back on its next `hello`. Scrolling up through an hour of transcript therefore cannot
+change where a reconnect resumes. Cursors are byte offsets at line boundaries in the agent's own
+transcript, opaque to the client, which only ever echoes back a `start` or an `end` it was
+given. `TimelinePage.reset` is the file-level analogue of the wire's `seq_too_old`
+re-snapshot: the transcript that cursor came from was replaced, so every item id the client
+holds — ids *are* offsets — now names a different record, and it must discard and re-fetch.
+The path is `TranscriptPager` (which bytes), the per-agent mapper (`ClaudeTimelineMapper`,
+`CodexTimelineMapper`, turning lines into `TimelineItem`s), `TimelineReader` (composing them
+under a page byte budget), and `TimelineService`, which resolves a tab id through `SessionStore`
+and runs the read off the main actor — a page is file I/O, and parsing it on the main thread
+while an agent is producing output is a visible stall in the Mac's own UI. `FleetService` wires
+that to the socket in `wireHandlers()`, answering from a `Task` so the reply lands back on the
+socket's queue after the read. **Nothing in that path writes to the store**, which is why the
+timeline needed no `FleetEvent`, no broadcast, and left the drift check above with nothing new
+to guard. `TimelineLoopbackTests` is the end-to-end proof: a real service over a real socket
+answering a real client out of a real file on disk, including the second page fetched from the
+first page's cursor.
+
+**The phone talks back, and what it sends is held until the Mac confirms it.** A prompt typed
+on the phone goes as `FleetCommand.prompt` carrying a client-minted token; `SessionStore`
+dedupes on that token and queues the text until the agent's input box is free, so sending
+mid-turn — which is when someone reaches for their phone — is the ordinary case rather than a
+refusal. Until the Mac echoes the turn back as a `FleetEvent`, the message sits in
+`PromptOutbox` above the composer, dimmed: it is not in the conversation, because the
+conversation is what the agent has actually written. **Nothing is set optimistically anywhere on
+this screen** — the same rule covers marking a session unread — because a row that appears and
+then vanishes when the Mac disagrees is worse than one that takes a moment. `ack` means
+dispatched, and the outbox retires a row on exact string equality with the turn that comes back,
+so anything that rewrites a draft on its way out would strand it. `AskUserQuestion` is the same
+shape in the other direction: an open question replicates as `OpenPrompt`, the phone draws it as
+a card with one button per option, and `FleetCommand.answerPrompt` sends the choice.
+`PhonePromptLoopbackTests` and `AnswerLoopbackTests` are the end-to-end proofs.
+
+**Requests carry the things that are not state at all.** The pulled channel described above is
+not only for history. The phone's New Session menu is the other user of it: its rows come from
+`NewSessionAffordance.menu` — the same function the desktop sidebar draws from, so the two
+cannot disagree about which agents appear, in what order, or which account is ticked — and they
+are answered on a `cid` rather than replicated. They have to be. Menu rows derive from
+preferences, preferences emit no `FleetEvent`, and a snapshot field built from them changes the
+fleet with nothing recorded, which is exactly what the drift assertion above catches; an earlier
+implementation put them in `WireProject` and failed three Mac tests for that reason. Rows are
+identified by agent plus **position** among that agent's accounts, never by an account id, for
+the reason the next paragraph gives, and the Mac re-resolves that position — validating the
+agent — when a row comes back. [NETWORKING.md](NETWORKING.md) has the full recipe for adding a
+command or a request, including both of those traps.
 
 **Accounts are deliberately not fleet state.** An account *is* a config directory —
 `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, where that login's credentials live — so `WireSession`
@@ -369,6 +482,116 @@ several devices' keys at once and picks the right one per connection from the PS
 this was the plan's central open question, now verified, so revoking one device (delete its
 slot's key, restart the listener) does not disturb any other paired device.
 
+**Pairing is two paths onto one 2-minute window.** `PairingArmer.arm` mints a fresh
+`FleetDeviceKey`, opens a 120-second window, and hands back a single `ArmedPairing` carrying
+both presentations of it — a `PairingPayload` for the QR and a `PairingCode` for typing — as one
+value, so a sheet cannot draw one window's code beside another window's QR. The QR is `FD2-`
+plus Crockford base32 of a packed byte record: version, slot, the 32-byte key, one IPv4
+endpoint, and the Bonjour instance name and display name length-prefixed. That is 98 bytes and
+161 characters where v1's `flightdeck1:` base64url JSON was ~270, which measures as 45 QR
+modules against 65 — the packing is what paid, not the alphabet. Both names stayed in it
+because the phone learns neither anywhere else: `FleetSnapshot` carries no Mac identity at all,
+and `FleetConnector` re-finds its Mac by matching Bonjour results against exactly that instance
+name. The version digits are checked before any byte is decoded, so a code from a newer Mac is
+refused as *too-new* rather than as *damaged* — the two failures send the user in opposite
+directions. The window is enforced by the armer itself, not by the UI:
+`PairingArmer.claim(slot:)` re-checks `armedUntil` against its own clock, so a code that expires
+unscanned stays refused even if the sheet displaying it is still on screen.
+
+**The window closes in exactly one place, and that is a rule with a scar behind it.**
+`PairingArmer.clearPending()` is the only writer that nils `pending`, and it fires
+`onWindowClosed`; `FleetService` hangs the pairing listener's teardown off that, which makes
+"the listener's lifetime is the window's" mechanical rather than a convention. The enumerated
+version — a teardown call beside every route that ends a window — shipped first and missed the
+QR path, because that route clears `pending` inside an `if` whose second condition can fail
+independently. A completed QR pairing left its listener up, and its code a live key, for the
+rest of the window. The Mac advertises `_flightdeck._tcp` over Bonjour
+(`NSBonjourServices`, `NSCameraUsageDescription`, and `NSLocalNetworkUsageDescription` are all
+declared in `project.yml` — macOS 15+ and iOS both gate their respective access behind a user
+prompt, and an app with no usage description never gets to show it, so the failure is silent
+rather than a crash); the phone's `FleetConnector` finds the Mac by racing Bonjour resolution
+alongside every endpoint the payload carried, live or dead, and keeps whichever answers first —
+which is what roaming across Wi-Fi and cellular falls out of, with no stable hostname assumed
+anywhere.
+
+**Paired-device state is deliberately not the same shape on both sides.** The Mac keeps
+`[PairedDevice]` — including a device's key — in `Preferences`, persisted as JSON in
+`UserDefaults` alongside every other preference; the phone keeps one `PairedMac` in a single
+Keychain item (`KeychainPairedMacStore`), updated in place rather than deleted-and-re-added so
+there is never a window with no pairing on disk (`PairedMacStore.swift` has the reasoning
+comment on why that shape was tried first and rejected). The Mac's copy is not Keychain-grade;
+see docs/FOLLOWUPS.md.
+
+**The typed code is that second path, and it has its own socket.** `FleetKit` links a vendored
+BoringSSL, for exactly one function: SPAKE2, a password-authenticated key exchange CryptoKit
+does not have. Hand-rolling one is not on the
+table — the ways a PAKE goes wrong (point validation, transcript binding, non-constant-time
+comparison) do not announce themselves in tests, and BoringSSL's implementation is the one
+Chrome and Android ship. `vendor/boringssl` is a submodule, built by
+`scripts/build-boringssl.sh` into the git-ignored `vendor/boringssl-artifacts/` — the same
+arrangement `vendor/ghostty` already uses; see "Vendored layout" below.
+`Sources/FleetKit/SPAKE2/BoringSSLShim.h` and its `module.modulemap` expose only SPAKE2 to
+Swift, because importing `curve25519.h` directly would drop the whole of BoringSSL's namespace
+into `FleetKit`, none of it reviewed for use here.
+
+SPAKE2 itself produces keying material and **nothing else** — BoringSSL performs no key
+confirmation, and a wrong password does not fail: it silently derives a different key.
+`PairingSecrets` (`Sources/FleetKit/SPAKE2/PairingSecrets.swift`) exists to close exactly that
+gap — an HKDF-derived confirmation value and sealing key, both bound to the transcript so a
+proof or a sealed device key captured from one pairing window cannot be replayed into another —
+and until both sides' confirmations match, nothing derived from the exchange may be trusted or
+acted on. That is also what gives a three-attempt budget something to count: without an
+explicit confirmation step, the Mac has no way to tell a typo from a correct pairing.
+
+The code itself (`PairingCode`, `Sources/FleetKit/PairingCode.swift`) carries 55 bits of
+entropy, and **that is not the security boundary — the attempt limit is.** Three online
+guesses against 55 bits is roughly 1 in 10¹⁶ per window; SPAKE2 is what makes that the *only*
+path available, by denying an offline one. Without it, a code this short used directly as a
+transport credential would be recoverable offline by anyone who captured the handshake, with
+unlimited time and no attempt limit to bound the search. `PairingCode` is deliberately not
+derived from or mixed into any other secret on the wire — see the reasoning comment on its
+`secret` property — so shortening it costs nothing else.
+
+**The socket it runs on is deliberately not the fleet listener.** A PAKE runs *before* any
+shared secret exists, so carrying it on the fleet listener would mean accepting unauthenticated
+handshakes there — letting anyone on the LAN consume that listener's pending pool during every
+window, and turning "a bootstrap connection must never send `hello`" into a check somebody has
+to remember to write. `PairingListener` (`Sources/FleetKit/Pairing/`) exists only while a window
+is armed, advertises `_flightdeck-pair._tcp` so its presence *is* the announcement that a Mac is
+pairable, and speaks a vocabulary with no `hello` and no `cmd` in it: application code is not
+reachable from it because it is not there. Its TLS-PSK is a **public bootstrap key compiled into
+both binaries**, which buys no confidentiality and is not meant to — the device key crossing it
+is sealed under the SPAKE2-derived key and would be equally safe in the clear. What the PSK buys
+is that no unauthenticated frame parser sits on the wire in plaintext. Deriving that PSK from
+the typed code is the obvious-looking improvement and would destroy the design: it would hand a
+passive observer an offline attack on the 55 bits SPAKE2 is there to protect.
+
+The budget that makes 55 bits safe is **three guesses, per Mac, per window**
+(`PairingListener.maxAttempts`), and only a mismatched confirmation spends one: a frame that is
+not a curve point at all, a confirmation with no exchange behind it, and a code that fails its
+checksum on the phone all cost nothing. Per-Mac rather than global is load-bearing —
+`PairingRunner` walks discovered Macs one at a time, so a user with two on the LAN must not
+exhaust the budget on the right one by trying the wrong one first. The phone's half is
+`PairingBrowser`, `PairingRunner` and `PairingInitiator`; the whole exchange is covered against
+real sockets on macOS, and **has now run on iOS** — a typed-code pairing from a simulator and
+from a handset, against a real Mac. The QR path still has no simulator coverage for the obvious
+reason that a simulator has no camera. See [docs/MOBILE.md](MOBILE.md) for the checklist, and
+[NETWORKING.md](NETWORKING.md) for what a cross-process run does and does not prove — the
+distinction matters here more than anywhere else in the codebase.
+
 ## Not yet built (design, not code)
 
-Harness adapters, the shared code index, the context engine, and the sidebar are **design only** so far — see the [spec](superpowers/specs/2026-07-09-flight-deck-design.md) §1–§9. Nothing in the current codebase implements them.
+**The shared code index and the context engine** are design only — see the
+[spec](superpowers/specs/2026-07-09-flight-deck-design.md) §1–§9. Nothing in the codebase
+implements either, and no file below `Sources/` mentions them.
+
+Two items that used to be on this list are not any more, and are described above instead:
+**harness adapters** (`Sources/FlightDeck/Agents/`, a protocol with two implementations —
+`ClaudeAdapter` and `CodexAdapter`, each with its own runtime, dialog driver and timeline
+mapper) and **the sidebar** ("Sidebar structure").
+
+Also designed and deliberately deferred rather than unbuilt: encapsulating `SessionStore`'s
+fleet state behind a type whose every mutator records its own event
+([spec](superpowers/specs/2026-08-18-fleet-state-encapsulation-design.md)). The `#if DEBUG`
+drift assertion described above is the interim measure standing in for it, and must not be
+removed before it lands.

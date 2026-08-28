@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// Codex conformance, driven over `codex app-server` JSON-RPC rather than by typing at a pty.
@@ -8,6 +9,109 @@ import Foundation
 @MainActor
 struct CodexAdapter: AgentAdapter {
     static let id: AgentID = .codex
+
+    /// **Not yet — and this is a capability answer, not a permanent verdict.** Whoever makes
+    /// codex typeable writes the channel and returns it here; nothing else in `SessionStore`
+    /// or `PromptService` re-decides it by name.
+    ///
+    /// Two halves, and they no longer have the same status:
+    ///
+    /// - **Typing a turn is foreclosed on the app-server route, permanently.** A codex tab is
+    ///   a `codex resume <id>` TUI holding the thread's writer lock, and `prepare`'s own probe
+    ///   recorded the answer: `thread/resume failed: thread <id> already has an active writer
+    ///   (code -32600)`. Metadata survives that lock — which is why `thread/name/set` renames
+    ///   work — but a turn does not.
+    /// - **Typing at the pty is unbuilt, not impossible.** A capture against codex-cli 0.148.0
+    ///   settles what the shipped refusal assumed: codex's input marker is `›` (U+203A) and
+    ///   claude's is `❯` (U+276F), and `InputBar.read` keys on `❯` as the first
+    ///   character — so it matches *nothing at all* on a codex screen. The near-miss
+    ///   `SessionStore.rename` records was never "InputBar found codex's box"; it was
+    ///   "InputBar keys on a glyph a bare shell prompt also draws" — a risk about the shell,
+    ///   and unchanged. What is still missing is a reader that accepts codex's composer and
+    ///   rejects a shell prompt, and an answer to `inject`'s draft dance: Ctrl-Y restores
+    ///   only because Claude Code keeps a deleted-text ring, and codex has not been shown to.
+    static let textChannel: AgentTextChannel? = nil
+
+    /// **The closer of the two, and now a separate question.** Driving a dialog needs no
+    /// input box and no kill ring, so everything blocking `textChannel` above is irrelevant
+    /// to it: codex's approval list is nearer `ChoiceDialog`'s model than claude's own —
+    /// contiguous numbering, one marker on the focused row, blank-line termination, a stable
+    /// footer, and an echoed prompt that carries the marker with no number — so
+    /// marker-and-number-and-neighbour is the right defence there too.
+    ///
+    /// What does NOT transfer is the row ordering: codex's row 1 is a durable grant (`Yes,
+    /// and don't ask again for commands that start with …`) and row 2 is deny, so "the first
+    /// row, and only ever the first row" is exactly as load-bearing for codex as
+    /// `SessionStore.answerPrompt` says it is for claude, and must be proved from a capture
+    /// rather than inherited — which is why `AgentDialogDriver.allowRow` has no default, and
+    /// why `CodexDialogDriver.allowRow` states codex's own from codex's own screen.
+    ///
+    /// **What this does and does not turn on.** It makes `answerPrompt` willing to drive a
+    /// codex dialog; it does not make one reachable from a phone, because
+    /// `openPrompt(inTranscriptTail:)` below is `nil` and a codex tab never reports `waiting`
+    /// in the first place. Both of those are features nobody has built, stated as `nil`
+    /// rather than hidden inside a name check.
+    static let dialogDriver: AgentDialogDriver? = CodexDialogDriver()
+
+    /// Codex assigns thread ids itself, so identity is *returned* rather than minted — and
+    /// the round trip can come back saying the thread is gone, which is why a restored codex
+    /// tab has its resume text deferred until `rebind` has settled it.
+    static let negotiatesIdentity = true
+
+    /// A probed binary, a spawned `codex app-server` and a completed handshake, before
+    /// `prepare` or `rebind` can be called at all. See `SessionStore.startCodex`, which owns
+    /// the per-account memoization this predicate gates.
+    static let needsRuntimeStart = true
+
+    /// Codex has no per-account status directory: it reports through its app-server, and
+    /// `CodexRuntime` is what turns that into a status. A `claude` registry scan can neither
+    /// confirm nor refute a codex thread.
+    static let hasStatusRegistry = false
+
+    /// **Trim, control-strip and cap — and NO shell-metacharacter strip, which is a
+    /// deliberate change to shipped behaviour.**
+    ///
+    /// `SessionStore.rename` used to run every agent's title through
+    /// `ClaudeSession.sanitizedName`, whose metacharacter strip exists because claude's
+    /// rename is *typed at a pty that may be a bare shell*. Codex's rename is
+    /// `thread/name/set` over JSON-RPC: no shell, no pty, no quoting, at any point on the
+    /// path. The strip therefore bought nothing and cost the user their punctuation —
+    /// `fix build (part 2)` became `fix build part 2` in codex's own thread list, in
+    /// `session_index.jsonl`, and in the sidebar.
+    ///
+    /// Control characters are still stripped, and that is not the shell rule under another
+    /// name: a newline in a title breaks a sidebar row whatever the channel. See `AgentTitle`.
+    nonisolated static func sanitizedTitle(_ raw: String) -> String? {
+        AgentTitle.sanitized(raw, removing: CharacterSet())
+    }
+
+    /// **`nil`, and that is an answer rather than a gap.** A codex thread's name lives in
+    /// `session_index.jsonl` and reaches the store through `CodexNameWatcher`; the rollout
+    /// carries conversation content, not a name. Returning claude's parser here would hand a
+    /// codex rollout to a claude JSONL parser, which is exactly what the store's default did.
+    nonisolated static func title(fromTranscriptAt url: URL) -> String? { nil }
+
+    nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+        CodexTimelineMapper.items(inRolloutLine: line, at: offset)
+    }
+
+    /// `<home>/auth.json` → the `email` claim of `tokens.id_token`.
+    nonisolated static let homeMarkerFile = "auth.json"
+
+    nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
+        AccountDirectory.codexIdentity(from: data)
+    }
+
+    /// **`nil`, and this is the half of the answer path codex does not have.** Codex writes
+    /// nothing to its rollout when an approval prompt goes up — verified with a prompt live
+    /// on screen, recorded in `CodexEventMapper` — so there is no record to find and no call
+    /// id to compare a phone's tap against. `dialogDriver` above can drive the dialog; this
+    /// is what would tell it *which* dialog, and it does not exist yet.
+    ///
+    /// The buildable route is `thread/read`'s `activeFlags`, which
+    /// `CodexThreadStatus.activity` already maps to `.waiting` and nothing polls. That is a
+    /// feature, not a refusal — see the audit's §3.2 part 1.
+    static let openPromptReader: AgentOpenPromptReader? = nil
 
     let rpc: CodexRPC
 

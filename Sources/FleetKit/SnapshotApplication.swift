@@ -41,6 +41,14 @@ extension FleetSnapshot {
             let clamped = min(max(at, 0), projects[destination].sessions.count)
             projects[destination].sessions.insert(session, at: clamped)
 
+        case .promptExpired:
+            // Nothing. The snapshot describes the fleet — projects, sessions, their status —
+            // and a prompt that timed out changes none of that. It is addressed to one
+            // screen's outbox, which is not snapshot state and is deliberately not replayed:
+            // a reconnect that re-folded this would re-fail a row the reader had already
+            // dismissed, or one whose message they had since re-sent successfully.
+            return
+
         case .sessionsReordered(let project, let order):
             guard let p = projects.firstIndex(where: { $0.id == project }) else { return }
             projects[p].sessions = Self.reorder(projects[p].sessions, by: order)
@@ -48,11 +56,20 @@ extension FleetSnapshot {
         case .renamed(let id, let title, _):
             mutate(id) { $0.title = title }
 
-        case .activityChanged(let id, let activity, let waitingFor, let subagentCount):
+        case .activityChanged(let id, let activity, let waitingFor, let subagentCount,
+                              let hasBackgroundWork):
+            // The wire version was deliberately not bumped for the `hasBackgroundWork`
+            // split, so an older Mac can still send the pre-decomposition `"shell"` string
+            // here, on the incremental path rather than a fresh snapshot. Same
+            // normalization `WireSession.init(from:)` applies on decode, so an old Mac's
+            // live update renders identically to its full snapshot rather than falling
+            // through to "Unrecognized status".
+            let isLegacyShell = activity == "shell"
             mutate(id) {
-                $0.activity = activity
+                $0.activity = isLegacyShell ? "idle" : activity
                 $0.waitingFor = waitingFor
                 $0.subagentCount = subagentCount
+                $0.hasBackgroundWork = isLegacyShell ? true : hasBackgroundWork
             }
 
         case .unreadChanged(let id, let isUnread):

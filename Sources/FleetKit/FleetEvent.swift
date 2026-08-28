@@ -31,8 +31,23 @@ public enum FleetEvent: Equatable, Sendable {
     /// The whole status triple at once, never one field of it. `SessionStatus` is committed
     /// as a unit by `commitStatuses`, and splitting it here would let a client render a
     /// `waitingFor` string against an activity that had already moved on.
-    case activityChanged(id: UUID, activity: String?, waitingFor: String?, subagentCount: Int)
+    case activityChanged(id: UUID, activity: String?, waitingFor: String?,
+                         subagentCount: Int, hasBackgroundWork: Bool)
     case unreadChanged(id: UUID, isUnread: Bool)
+
+    /// A prompt this Mac accepted from a phone, and then never typed.
+    ///
+    /// `submitPrompt` answers `.queued` when the tab's input box is busy, and the queue is
+    /// bounded — `phonePromptWindow` — because a message surfacing hours later in a
+    /// conversation that has moved on is worse than one that did not arrive. That bound is
+    /// deliberate. What was missing is this event: the entry was dropped by a filter with
+    /// nobody told, so the phone's outbox row sat at "Waiting for your Mac to type this"
+    /// forever, for a message that no longer existed anywhere. The ack said queued and
+    /// nothing ever contradicted it.
+    ///
+    /// Carries the token rather than the text, because the token is what the outbox is keyed
+    /// on and the text is already on the phone.
+    case promptExpired(id: UUID, token: UUID)
 }
 
 extension FleetEvent {
@@ -42,8 +57,8 @@ extension FleetEvent {
         switch self {
         case .sessionAdded(let s, _, _): return s.id
         case .sessionRemoved(let id), .sessionMoved(let id, _, _),
-             .renamed(let id, _, _), .activityChanged(let id, _, _, _),
-             .unreadChanged(let id, _):
+             .renamed(let id, _, _), .activityChanged(let id, _, _, _, _),
+             .unreadChanged(let id, _), .promptExpired(let id, _):
             return id
         case .projectAdded, .projectRemoved, .projectCollapsed,
              .projectsReordered, .sessionsReordered:
@@ -59,7 +74,7 @@ extension FleetEvent {
              .sessionsReordered(let id, _):
             return id
         case .sessionAdded, .sessionRemoved, .sessionMoved, .projectsReordered,
-             .renamed, .activityChanged, .unreadChanged:
+             .renamed, .activityChanged, .unreadChanged, .promptExpired:
             return nil
         }
     }

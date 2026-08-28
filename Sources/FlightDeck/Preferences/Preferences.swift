@@ -87,6 +87,32 @@ struct Preferences: Codable, Equatable {
     /// Keyed by standardized project path, replacing `projectFlags`. Optional for the same
     /// reason; `migrateProjectSettingsIfNeeded` folds the old field in.
     var storedProjectSettings: [String: ProjectSettings]?
+    /// Phones paired to this Mac, each holding the secret its TLS handshake is authenticated
+    /// with. Optional for exactly the reason `confirmations` is — see that property's
+    /// comment; a non-optional field here would fail to decode every existing
+    /// `preferences.v1` blob.
+    ///
+    /// These are secrets in `UserDefaults`, which is a plist readable by anything running as
+    /// this user. That is the same exposure as `sessions.json` and as the agents' own
+    /// credentials, and it matches the trust model in the mobile companion spec §3 — but it
+    /// is deliberately not Keychain-grade, and it is recorded in docs/FOLLOWUPS.md rather
+    /// than left to be discovered.
+    var pairedDevices: [PairedDevice]?
+    /// Minted once per install, and used only to make this Mac's Bonjour instance name
+    /// unique. Optional for the same reason as everything else here — see `confirmations`.
+    var installID: UUID?
+    /// The port the fleet listener last successfully bound to, so the next launch can ask for
+    /// it again. Optional for the same reason as everything else here — see `confirmations` —
+    /// and `nil` means "never bound", which asks the OS for any free port.
+    ///
+    /// Persisted for the reason `installID` is: a phone remembers this Mac as `host:port`
+    /// strings (`PairedMac.endpoints`, seeded from the pairing payload), so a port re-drawn
+    /// from the ephemeral range on every launch invalidates every endpoint every paired device
+    /// holds the moment the Mac restarts — leaving Bonjour as the only way back, and anything
+    /// that breaks Bonjour as a permanent stranding. A hint, never a guarantee: nothing
+    /// reserves this port while Flight Deck is not running, so `FleetService.start` treats a
+    /// port it cannot rebind as a preference to abandon, not a reason to have no listener.
+    var fleetPort: UInt16?
 
     init(
         globalFlags: FlagSet = FlagSet(),
@@ -97,7 +123,10 @@ struct Preferences: Codable, Equatable {
         storedAgents: [AgentSettings]? = nil,
         storedTools: [ToolDefinition]? = nil,
         storedAccounts: [AgentAccount]? = nil,
-        storedProjectSettings: [String: ProjectSettings]? = nil
+        storedProjectSettings: [String: ProjectSettings]? = nil,
+        pairedDevices: [PairedDevice]? = nil,
+        installID: UUID? = nil,
+        fleetPort: UInt16? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
@@ -108,6 +137,9 @@ struct Preferences: Codable, Equatable {
         self.storedTools = storedTools
         self.storedAccounts = storedAccounts
         self.storedProjectSettings = storedProjectSettings
+        self.pairedDevices = pairedDevices
+        self.installID = installID
+        self.fleetPort = fleetPort
     }
 
     /// Falls back to claude-then-codex so a `Preferences` that has never been migrated

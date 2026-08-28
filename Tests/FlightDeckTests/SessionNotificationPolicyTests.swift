@@ -40,7 +40,7 @@ final class SessionNotificationPolicyTests: XCTestCase {
         XCTAssertEqual(Policy.action(old: busy, new: busy, appActive: false), .none)
         XCTAssertEqual(
             Policy.action(old: SessionStatus(activity: .idle),
-                          new: SessionStatus(activity: .shell), appActive: false),
+                          new: SessionStatus(activity: .busy), appActive: false),
             .none
         )
         XCTAssertEqual(Policy.action(old: nil, new: nil, appActive: false), .none)

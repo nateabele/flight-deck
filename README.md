@@ -43,6 +43,15 @@ Apple Silicon only. The build is ad-hoc signed rather than notarised, so the fir
 launch needs a right-click → Open before macOS will let it start. Latest build is on
 the [releases page](../../releases/latest).
 
+There's also an iPhone companion. It pairs with a Mac over the local network — scan the QR
+or type the twelve-character code — and shows the same fleet: one section per project, one
+row per session, renamed, marked read and closed from either side, with the conversation
+readable and answerable from the phone. It runs on real hardware as well as the simulator.
+The camera path is the one piece a simulator cannot exercise, since it has no camera.
+Installing it on a phone needs your own Apple developer signing, since nobody else's team id
+belongs in this repo. [docs/MOBILE.md](docs/MOBILE.md) has the checklist of what a device
+still has to prove.
+
 ## Related work
 
 Other people building in the same neighbourhood — agent harnesses, orchestration

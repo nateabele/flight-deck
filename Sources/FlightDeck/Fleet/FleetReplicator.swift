@@ -104,6 +104,12 @@ final class FleetReplicator: FleetRecording {
     /// the old sequence must not be told "you are current" when the entire fleet was just
     /// replaced underneath it. Bumping past it, with an empty ring, is what routes that
     /// client to `.resnapshot` instead.
+    ///
+    /// Does **not** notify anyone attached right now — only a client that reconnects (and so
+    /// asks `resume(from:)` again) sees the bump. Unreachable today (`restore()` runs inside
+    /// `SessionStore.init`, before any service exists to be attached to), but a caller that
+    /// invokes this while clients are attached must broadcast a fresh snapshot itself, or
+    /// they stay silently stale until they happen to drop.
     func reset() {
         mirror = project()
         ring.removeAll()

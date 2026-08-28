@@ -15,7 +15,7 @@ final class CloseSelectedSessionTests: XCTestCase {
 
     private func makeStore() -> SessionStore {
         let store = SessionStore(provider: nil, persistence: nil)
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         return store
     }
 

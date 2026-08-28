@@ -48,12 +48,47 @@ carried forward on trust.
 
 ## Deliberate choices worth remembering (not defects)
 
+- **Paired-device secrets (`Preferences.pairedDevices`) live in `UserDefaults`, not the
+  Keychain.** That is a plist in the user's home directory, readable by anything running as
+  them — the same exposure `sessions.json` and the agents' own credentials already have, and
+  it is consistent with the mobile companion spec §3's trust model ("a QR on an unlocked Mac
+  is seen only by someone who could already use the Mac"), not an oversight. What it does and
+  does not expose: reading the plist gets you every paired device's 32-byte PSK, which is
+  enough to connect to this Mac's fleet listener as that device until it is revoked; it does
+  not get you anything already on disk elsewhere (session content, agent credentials) that a
+  local attacker with plist-reading access could not already reach some other way. The
+  phone's own copy is Keychain-backed (`KeychainPairedMacStore`) precisely because the phone
+  is the side that leaves the building. It is not Keychain-grade on the Mac side, and someone
+  will eventually ask why. Revisit if paired devices ever need to survive a `defaults delete`,
+  or if the trust model changes to assume a less-trusted local user.
 - **`SWIFT_VERSION: "5.0"`** in `project.yml` (Swift 5 language mode under the Swift 6.3
   compiler) — chosen to compile the vendored Ghostty code without Swift-6 strict-concurrency
   breakage. Diverges from the plan's `6.0`/spec's "Swift 6"; revisit only if Flight Deck's own
   code is later isolated into a Swift-6 module separate from the adapted Ghostty sources.
 - **Non-sandboxed entitlements** (no `app-sandbox`, `disable-library-validation` on) — required
   for a terminal linking a non-notarized static `libghostty`.
+- **The packed QR keeps the Mac's display name and Bonjour service name, where the
+  short-pairing-code spec's §8 said it could drop both.** §8's reasoning does not hold against
+  the shipped code: `FleetSnapshot` (`Sources/FleetKit/Wire.swift`) carries no Mac identity at
+  all, so the display name does *not* "arrive with the first snapshot"; and
+  `FleetService.serviceName` is `<sanitised host>-<install suffix>`, stable per Mac and not
+  derivable from a slot — `FleetConnector.startBrowsing` matches Bonjour results against
+  exactly that string, so a phone without it cannot rediscover its Mac after either moved.
+  Carrying both, length-prefixed, costs 43 bytes of a 98-byte payload. The measured QR
+  improvement is in `PairingCodeImageTests.testThePackedPayloadProducesAMateriallySmallerQR`;
+  read the numbers in its failure message rather than trusting §8's predicted QR version,
+  which assumed a ~55-byte payload. **The cheaper route, if the density ever matters more:**
+  add `macName` and `serviceName` to `FleetSnapshot` (decoded with `decodeIfPresent`, so
+  already-paired phones are unaffected), then drop both from the payload and make §8's claim
+  true. That is a wire change and wants its own slice.
+- **A typed pairing stores no remembered endpoints.**
+  `FleetModel.adopt(key:serviceName:macName:)` writes `PairedMac(endpoints: [])` on purpose: the
+  seal carries the key and the Mac's name and nothing else, and off-LAN typed pairing is
+  explicitly out of scope (spec §11). The phone finds its Mac by browsing `_flightdeck._tcp` for
+  the service name it paired under, which is what `FleetConnector` does anyway. A phone paired
+  by *QR* still gets one endpoint, from the code. If typed pairing ever needs to survive leaving
+  the LAN, the fix is the phone recording the address it actually connected on — not widening
+  the seal.
 
 ## Minor cleanups (safe to defer; optional wrap-up commit)
 
@@ -472,8 +507,8 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
 - **`FleetSocketServer`'s safety rests on its queue being serial, which `init(queue:)` does not
   enforce.** Every current caller passes the `.main` default. A concurrent queue would compile
   without complaint and break two things that both assume single-queue confinement: the
-  `resumed` guard in `start()`, a plain `Bool` read and written from the listener's
-  `stateUpdateHandler` with no lock, and `FleetService`'s `onAttachedCountChanged` handler,
+  `resumed` guard in `start()`'s `bind` helper, a plain `Bool` read and written from the
+  listener's `stateUpdateHandler` with no lock, and `FleetService`'s `onAttachedSlotsChanged` handler,
   which reaches into `MainActor.assumeIsolated` on the strength of that same assumption (see the
   comment at that call site). Nothing catches a non-serial queue at compile time; passing one
   would surface only at runtime, as either a data race or a trap.
@@ -488,6 +523,173 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
   non-`@MainActor`-isolated test class is unaffected by any of this, which is what makes the
   failure confusing the first time it is hit.
 
+## From pairing and the phone (2026-08-19)
+
+Plan 2 (`docs/superpowers/plans/2026-08-19-fleet-pairing-and-ios.md`) built pairing, Bonjour
+discovery, and `FlightDeckMobile` on top of the spine above. What its own reviews found and
+did not fix:
+
+- **Paired secrets live in `UserDefaults` on the Mac** (`Preferences.pairedDevices`, added in
+  Task 3) — recorded under "Deliberate choices worth remembering" above, which this entry
+  does not repeat.
+
+- **A key change restarts the listener**, dropping every attached client for the length of a
+  reconnect — recorded in the section directly above this one (`FleetService.reloadKeys`),
+  which this entry does not repeat.
+
+- **Bonjour resolution, roaming and off-LAN reachability are manually verified only.** There is
+  no automated coverage and there cannot be on one machine with one network interface — the
+  twelve-item checklist in [docs/MOBILE.md](MOBILE.md) is what stands in for it.
+
+- **No relay**, so reaching the Mac from off-LAN still needs a VPN — that half is unchanged.
+  What changed, per `docs/superpowers/specs/2026-08-25-off-lan-endpoint-discovery.md`: the VPN
+  address is no longer merely a candidate designed for. It is packed as a second endpoint in the
+  pairing code alongside the LAN one, and refreshed on every connect over `mac.endpoints` — see
+  [docs/NETWORKING.md](NETWORKING.md), "The endpoint refresh" and "Two endpoints, not more" —
+  so a code scanned once keeps working after the tailnet address underneath it moves.
+
+- **"Neither documented fallback was needed" — WRONG, corrected 2026-08-20.** This entry
+  originally claimed `sec_protocol_metadata_access_pre_shared_keys` "genuinely yields" the
+  PSK identity that actually negotiated a given connection, "verified by test." It does not,
+  and whatever verified it was not exercising the case that matters: with two or more keys
+  registered on one listener (i.e. two or more paired devices), the closure fires once per
+  *configured* key on every connection, overwriting a local variable each time, so
+  `FleetSocketServer.slot(of:)` returns whichever key was registered **last** — for every
+  connection, regardless of which device actually shook hands. `attachedSlots()` (a `Set`)
+  then collapses two genuinely distinct attached phones into one slot. Full writeup, repro,
+  and status in "PSK slot misattribution with 2+ paired devices" below — this bullet is kept,
+  corrected in place, so nobody re-reads the old claim as settled.
+
+- **`FleetSocketServer.start()` cannot assert `dispatchPrecondition(.onQueue(queue))` as a
+  first line the way `stop()`/`broadcast()` and `FleetConnector`'s entry points do.** Tried
+  during the final review pass, and it trapped every time, `@MainActor` callers included:
+  `start()` is a plain `nonisolated async` method, and Swift's concurrency runtime schedules a
+  bare `await` call to one of those onto the default global executor regardless of the caller's
+  queue — and, less obviously, resuming a `withCheckedContinuation` from inside `queue.async`
+  does not make the *rest* of the async function's body keep running on `queue` either, since
+  that resumption is scheduled by the task, not by whichever GCD queue happened to call
+  `resume()`. The fix that landed: `start()` now dispatches its own body onto `queue` via
+  `queue.async`, bridged back to `async`/`await` by one outer continuation, rather than
+  asserting the caller already put it there — see the doc comments on `start()` and `bind(...)`.
+  `stop()` and `broadcast()` are synchronous and unaffected by any of this; they keep the
+  literal `FleetConnector`-style assertion as their first line.
+
+- **The phone persists `lastSeq` on every applied frame**, deliberately: with the keychain item
+  updated in place there is no write window, and the event rate is bounded by the Mac's
+  activity filter and poll interval to roughly two per second per session. The cost that is
+  real and unmeasured is that each write is a synchronous `securityd` round-trip on the
+  connector's queue — which defaults to `.main`, the thread drawing the fleet list. If this
+  ever shows up as scroll hitching, the fix is moving the write off the main queue, not
+  throttling it.
+
+## From closing the review gaps (2026-08-20)
+
+Two small gaps left by the final review of the pairing branch: a missing regression test for
+`onAttachedSlotsChanged`, and a false "zero diagnostics" claim about the iOS build. Closing the
+first surfaced a third, unrelated finding serious enough to record here rather than only in a
+commit message.
+
+- **`FleetSocket.swift` has five real Swift 6 concurrency warnings — verified, not
+  hypothetical.** `Sources/FleetKit/FleetSocket.swift:34,47,58,58,68` — "capture of \<param\>
+  with non-Sendable type ... in a '@Sendable' closure" at 34 (`onError`), 47 (`onEnd`), 58
+  (`onFrame`), 68 (`type`), plus a second, distinct warning also at 58 ("capture of
+  non-Sendable type 'Frame.Type' in an isolated closure"). Confirmed by forcing a recompile of
+  just that file (`touch` + `xcodebuild -scheme FleetKit build` / `-scheme FleetKitiOS -sdk
+  iphonesimulator build`) — both targets emit the identical five warnings at the identical
+  lines. Not a regression from this branch: `FleetSocket.swift`'s last commit is an ancestor of
+  master, and type-checking it at `c590087` and `ba78b7e` gives byte-identical output.
+
+  Why nobody noticed: `./scripts/build.sh` and `./scripts/build-ios.sh`, run normally, see
+  these targets already up to date in DerivedData, so the compile task for this file is
+  skipped — "the build is clean" was never a claim either script could actually support as
+  normally invoked, only an artifact of incremental builds. `touch` the file, or clear
+  DerivedData, to see them.
+
+  Not urgent: `FleetSocket` is queue-confined the same way `FleetClient`/`FleetSocketServer`/
+  `FleetConnector` are (`@unchecked Sendable`, every touch on one queue), so these are
+  compiler noise about a real discipline the code already has, not a live data race. The shape
+  that resolves them is already in the tree: `QRScannerController` in
+  `Sources/FlightDeckMobile/PairingScreen.swift` moves the non-Sendable capture state
+  (`AVCaptureSession`/`AVCaptureMetadataOutput`) onto its own private `@unchecked Sendable`
+  reference type (`CaptureResources`) and captures *that* — a `Sendable` value — across the
+  `@Sendable` boundary instead of the non-Sendable types directly. `FleetSocket.send`/
+  `.receive` would need the same move for `onError`/`onEnd`/`onFrame`/`type` before any of the
+  four callers'-worth of closures would type-check clean.
+
+- **PSK slot misattribution with 2+ paired devices — FIXED (2026-08-20), writeup kept for the
+  reasoning trail.** Found while writing the `onAttachedSlotsChanged` two-device regression test
+  the review asked for. Corrects the "Neither documented fallback was needed" bullet directly
+  above (2026-08-19 section); this is the full writeup that bullet points to. What the fix
+  turned out to be is at the end of this entry.
+
+  `FleetSocketServer.slot(of:)` reads a connection's PSK identity via
+  `sec_protocol_metadata_access_pre_shared_keys`. That call's own header doc says it returns
+  "the PSKs supported by the local instance" — verified here to mean *every* PSK configured on
+  the *listener*, not the one a given peer's handshake actually negotiated. With one key
+  registered (every shipped test, and the common case of one paired device) that distinction is
+  invisible: there is only one PSK to enumerate. With two or more, the closure fires once per
+  configured key for every connection and overwrites a local variable each time, so
+  `slot(of:)` returns whichever key was registered **last**, for every connection, regardless
+  of which device actually shook hands. `attachedSlots()` (a `Set`) then collapses two
+  genuinely distinct attached phones into one slot.
+
+  Reproduced cleanly: two keys registered on one listener, two real `FleetClient`s connecting
+  **sequentially** — after only the first client (`firstKey`) attaches, the server's reported
+  slot set already reads `[secondKey.slot]`, not `[firstKey.slot]`. The handshake's
+  cryptography itself is unaffected — each client authenticates against its own secret
+  correctly; only the server's readback of *which* key negotiated is wrong.
+
+  Not a regression from this branch: `FleetTLS`'s use of
+  `sec_protocol_metadata_access_pre_shared_keys` predates the `onAttachedSlotsChanged` fix
+  under test, introduced in `45f1221`. It is a real production concern, not a test-only
+  artifact — `FleetService.start()` passes every currently-paired device's key to
+  `server.start(keys:)`, so any Mac with 2+ paired phones is affected today: the Devices tab
+  cannot reliably tell two attached phones apart, and a disconnect can update or clear the
+  wrong slot's badge.
+
+  **The fix, and the API that turned out to do the job.** The second of the two sketched
+  directions was right, and the doubt attached to it here ("a client-hint API, so this
+  direction is unconfirmed") was wrong.
+  `sec_protocol_options_set_pre_shared_key_selection_block` is documented from the client's
+  point of view (`SecProtocolOptions.h:406-420`, "when the client must choose a PSK identity
+  given a hint from its peer"), but installed on *listener* options it fires once per incoming
+  connection with the hint carrying the identity the **client** offered — measured against a
+  real two-key listener, not inferred. The `sec_protocol_metadata_t` it is handed is the same
+  object the connection later exposes as `NWProtocolTLS.Metadata.securityProtocolMetadata`
+  (pointer-identical, also measured), so the recorded identity can be looked up per connection.
+  `FleetPSKIdentities` in `Sources/FleetKit/FleetTLS.swift` is that record;
+  `FleetSocketServer.slot(of:id:)` reads it and caches the answer per connection.
+  `sec_protocol_metadata_access_pre_shared_keys` is no longer used for attribution. The client
+  never names its own slot, so the other sketched fallback — a nonce/HMAC round trip in `hello`
+  — was not needed, and neither was any protocol change.
+
+  Authorization is untouched, and that was checked rather than assumed: with the selection block
+  installed, a *paired* identity presented with the wrong secret is still refused (`bad MAC`,
+  -9846) and an unregistered identity is still refused (`unknown PSK identity`, -9864). The
+  identity is a claim; the PSK remains the credential. Guarded by
+  `Tests/FlightDeckTests/FleetSlotAttributionTests.swift` (two keys, two real `FleetClient`s),
+  which fails against the old implementation on all three tests.
+
+  **The test-host `SIGABRT`: investigated, and the evidence says it is not ours.** A fuller
+  version of the reproduction above — two clients, one disconnecting after both are attached —
+  twice produced a `SIGABRT` ("freed pointer was not the last allocation") during XCTest's
+  tearDown, crashing the whole `xctest` process (reports under
+  `~/Library/Logs/DiagnosticReports/xctest-2026-08-20-1450*.ips`). Re-examined 2026-08-20:
+  the faulting stack is `_swift_task_dealloc_specific` ->
+  `XCTSwiftErrorObservation._observeErrors(in:)` -> `-[XCTestCase
+  _performTearDownSequenceWithSelector:]`, entirely inside XCTest's async-tearDown machinery.
+  **No FleetKit, FlightDeckTests or Network.framework frame appears on the faulting thread or
+  on any other thread in either report**, and the assertion is the Swift *task* allocator's
+  LIFO check, not a heap free — memory sockets never touch. Attempts to reproduce it: the
+  two-client attach/attach/disconnect scenario run 25x in isolation, 10x alongside every other
+  socket test class in one process, and in four further shapes (a red assertion, a timed-out
+  expectation, tearDown racing the drop, stopping the server with both attached) — against both
+  the fixed and the *unfixed* server, ~90 test processes in all. Zero aborts; no new crash
+  report was written. So it is treated as an XCTest harness artifact, not a use-after-free in
+  `FleetSocket`/`FleetClient`, and the two-device disconnect test is now checked in
+  (`testDroppingOneDeviceLeavesTheOtherOnItsOwnSlot`). Not *proven* absent — an intermittent
+  harness bug that has not recurred cannot be — so if it ever resurfaces, the thing to capture
+  is the fresh `.ips`: a FleetKit frame appearing in one would overturn this reading.
 ## Agent accounts (2026-08-19) — what the work left behind
 
 Spec: [superpowers/specs/2026-08-19-agent-accounts-design.md](superpowers/specs/2026-08-19-agent-accounts-design.md).
@@ -549,3 +751,302 @@ the account a session runs as. Three things this deliberately did not build:
   `applyRegistry(_:)` that `applyRegistryForTesting` does, which *is* covered, so the emission
   itself is pinned; what is not pinned is the merge deciding *which* rows reach it. A seam for
   the per-account entry point would close that.
+
+## Pairing crypto foundation (2026-08-21)
+
+- **`SPAKE2SessionTests` has no fixed test vector, and there is no specification for one to
+  conform to — this vendored BoringSSL SPAKE2 is not CFRG SPAKE2.** Three divergences, all
+  read from `vendor/boringssl/crypto/curve25519/spake25519.cc`: its `M`/`N` points are
+  BoringSSL's own generated constants (line 47, "These points and their precomputation tables
+  are generated with..."), not RFC 9382's published ones; `disable_password_scalar_hack`
+  (checked at line 400) is a unilateral fix for a BoringSSL bug that is baked into the wire
+  format, not an interop option; and the transcript hashes `password_hash` (SHA-512 of the
+  password, line 374) rather than the derived scalar `w`, with cofactor multiplication folded
+  in — see `update_with_length_prefix` and the final `SHA512_Final` around lines 451-518.
+  SPAKE2+ (RFC 9383, which does ship test vectors) is not in this submodule pin either.
+  Separately, `vendor/boringssl/crypto/curve25519/spake25519_test.cc` line 29 confirms no
+  vector was ever added upstream ("TODO(agl): add tests with fixed vectors once SPAKE2 is
+  nailed down"), and `SPAKE2_generate_msg`'s public API gives no way to fix the ephemeral
+  scalar from outside, so even a hypothetical vector would not be drivable through
+  `SPAKE2Session`.
+
+  This means a fixed vector would not be validation — a *conforming* implementation would not
+  interoperate with BoringSSL's SPAKE2, and a vector conforming to BoringSSL's variant would
+  not check anything against a specification, because there is no specification for this
+  variant. The property that matters here is **agreement, not conformance**: both ends of a
+  pairing exchange run this same BoringSSL, so what needs proving is that this wrapper's two
+  ends agree with each other, which `SPAKE2SessionTests` already does.
+
+  The genuine residual risk is narrower than "is the algorithm right" and sits in this
+  wrapper's marshalling, not BoringSSL's math: a bug that swapped `.initiator`/`.responder`, or
+  the two name arguments to `SPAKE2_CTX_new`, would be wrong identically on both sides and pass
+  every round-trip test. **This entry previously said a cross-process macOS-against-iOS exchange
+  was what would close that. That was wrong.** Both ends compile the same `FleetKit`, so a
+  consistent swap is applied on both sides of the wire and survives a cross-process test exactly
+  as it survives an in-process one. Demonstrated rather than argued: two mutants — roles
+  swapped, and names passed swapped — each pass all 17 SPAKE2 and `PairingSecrets` tests.
+
+  What closes it is a second implementation of the *caller*, not a second process.
+  `testTheWrapperAgreesWithTheRawCAPIAboutRoleAndNameOrder` drives one side through the raw C
+  API with a literal `spake2_role_alice` and the argument order `curve25519.h` declares, the
+  other through `SPAKE2Session`, and asserts the derived keys agree. The raw side is written
+  from the header rather than from the wrapper, so agreement pins the wrapper's mapping to
+  BoringSSL's own convention. Both mutants fail it. **Closed, in process.**
+
+  Worth recording what a swap would actually have cost, because it is less than the original
+  wording implied: a *consistent* role or name swap is pure relabelling. Both names still reach
+  the transcript, still in a fixed order, still distinguishing one device from another — so such
+  a wrapper would be unconventional, not insecure. The residual risk here was smaller than we
+  said, and is now pinned anyway.
+
+  A cross-process macOS-against-iOS exchange still belongs in the plan that wires pairing to a
+  socket, but for **caller-side asymmetry** — the two ends disagreeing about which is the
+  initiator, about the names they pass, or about how they assemble the transcript — which is the
+  thing that plan can genuinely get wrong and which no single-process test constructs.
+
+  Revisit if either upstream BoringSSL lands fixed vectors, or the vendored submodule moves to
+  a version carrying SPAKE2+ (RFC 9383).
+
+- **The spec's test-vector requirement is now amended, not silently dropped.**
+  `docs/superpowers/specs/2026-08-21-short-pairing-code-design.md` §5 originally required
+  validation "against published test vectors, not round-trips," on the sound reasoning that a
+  round-trip only proves the two ends agree with each other, not with the specification. The
+  finding above is that the requirement was never satisfiable for the reason just given — there
+  is no specification this variant conforms to — so §5 now carries the finding inline as an
+  amendment rather than having the sentence quietly disappear for a later reader to wonder
+  about.
+
+- **Swift-side key buffers are not scrubbed.** `SPAKE2Session` reads key material into a Swift
+  `[UInt8]` and returns it as `Data`; `PairingSecrets` holds two `SymmetricKey`s and a
+  transcript. None of that is zeroed on the way out — Swift has no reliable way to, since the
+  compiler is free to copy a value anywhere and eliding a final write to memory that is about to
+  be freed is a legal optimisation. BoringSSL's own side is clean (`SPAKE2_CTX_free` cleanses
+  before `OPENSSL_free`), so this is the Swift half only. It matters if the process is core-
+  dumped or swapped between a pairing exchange and its next collection, which for a foreground
+  Mac app during a 2-minute window is a narrow target. Revisit if pairing material ever
+  outlives a window, or if key handling moves anywhere long-lived; `CryptoKit`'s
+  `SymmetricKey` already zeroes its own backing store, so the exposure is the intermediate
+  `Data`/`[UInt8]` buffers rather than the keys themselves.
+
+- **BoringSSL is pinned to a tag and updated by hand; nothing watches upstream for security
+  fixes.** `BORINGSSL_TAG` in `scripts/build-boringssl.sh` names `0.20250114.0`, and the script
+  refuses to build if the submodule has drifted off it — but moving the pin forward, including
+  for a CVE, is a human noticing and doing it deliberately. This is the same standing
+  obligation `vendor/ghostty`'s pin already carries; it is worth saying plainly here rather than
+  leaving it to be rediscovered the day a BoringSSL advisory lands.
+
+- **The vendoring is a submodule, not a committed artifact — a committed `BoringSSL.xcframework`
+  was tried first, at 54 MB, and reverted the same day** (fda5c22, then 8f36b33). The tradeoff
+  a committed artifact bought was one less local build step; what it cost was 54 MB of binary in
+  every clone and a second vendoring pattern next to `vendor/ghostty`'s submodule-plus-build-
+  script one, for no reason other than that BoringSSL's build happened to be written second.
+  `vendor/boringssl` is now a submodule pinned to the tag above, and
+  `scripts/build-boringssl.sh` builds it into the git-ignored `vendor/boringssl-artifacts/` —
+  the same shape `scripts/build-libghostty.sh` already uses, so there is one build pattern to
+  know instead of two, and upstream stays a live submodule rather than a snapshot nobody
+  re-pulls.
+
+- **A fresh clone now needs a second submodule-and-build pair before anything builds.** Same
+  shape as libghostty, one more of them: `git submodule update --init vendor/boringssl` then
+  `./scripts/build-boringssl.sh`, in addition to the existing `vendor/ghostty` /
+  `build-libghostty.sh` pair. `docs/BUILD.md`'s "From a fresh clone" section and its
+  "Worktrees" section (a new worktree has neither artifacts directory populated, for the same
+  git-ignored reason) both now say so.
+
+## From the typed pairing code (2026-08-22)
+
+Two plans — `docs/superpowers/plans/2026-08-21-pairing-channel.md` and
+`docs/superpowers/plans/2026-08-21-pairing-ui.md` — turned the SPAKE2 foundation above into a
+twelve-character code a user can type, over a listener that exists only while a window is open.
+What they left behind, deliberately unfixed:
+
+- **The QR payload has no integrity check, so a corrupted one decodes to a *wrong key* rather
+  than being refused.** `PairingPayload.init(decoding:)` validates the record's shape — the
+  `FD2-` prefix, digits-only version, the version byte repeated inside the body, both name
+  lengths, and `cursor == bytes.count` — and none of that reaches the 32 bytes of secret in the
+  middle. A single flipped bit in those 32 decodes cleanly into a different, well-formed key.
+  The phone stores it, dials the fleet listener, and the handshake is refused *by silence*
+  (Apple drops a mismatched PSK identity rather than sending an alert), so the phone reports
+  something that looks like a network problem and the Mac logs nothing at all. Diagnosable from
+  neither end.
+
+  This is not new — v1's base64url'd JSON had exactly the same property — and it is not what a
+  QR actually fails at: correction level `M` either reconstructs a camera misread or refuses to
+  decode, so landing a corrupted-but-well-formed record on the phone takes deliberate
+  corruption or a generator/scanner bug, not glare. That is why it has never bitten, and why
+  this is recorded rather than fixed. **A one-byte checksum over the record is the only thing
+  that closes it** — computed across every preceding byte, checked before any field is read,
+  reported as `.malformed`, which the phone already renders as "That code is damaged. Show a
+  new one on your Mac." It costs two base32 symbols and a version bump, and a version bump is
+  cheap here because codes live 120 seconds: there is no installed base of QRs to migrate.
+  Nothing weaker closes it, because shape validation cannot see into a secret by definition.
+
+- **A peer that speaks holds one of four pairing slots for 30 seconds, and no deadline value
+  eliminates that.** `PairingListener.maxPending` is 4; `exchangeDeadline` is 30s. The *silent*
+  peer is already handled — `firstFrameDeadline` evicts a connection that has said nothing in 5
+  seconds *after its socket became usable*, and `handshakeDeadline` gives it 10 to get that far,
+  which is what makes the long deadline reachable only by a peer that spoke. What
+  remains is the peer that speaks: one valid `pake` frame is a curve25519 point, which anyone
+  can generate against any password, and it earns the full 30 seconds. Four of those, renewed,
+  keep the legitimate phone refused at `accept`'s cap guard for the length of a window.
+
+  It is worth being exact about how little that buys. It costs the attacker no attempts (only a
+  mismatched `confirm` charges the three-guess budget) and yields no information (SPAKE2 gives
+  one online guess per exchange and no offline path). So this is **availability only, LAN-local,
+  and it denies only the typed path** — a phone pairing by QR never touches this socket at all;
+  it dials the fleet listener with the key the code carried, out of that listener's own 16-slot
+  pool. The user's way out is the QR, which is one of the reasons the typed path is documented
+  as the fallback rather than the primary. Lowering `exchangeDeadline` narrows each slot but
+  cannot remove a slot reachable by legitimate-looking work, and dropping it below
+  `PairingInitiator.exchangeTimeout` (8s) would make the Mac the side that gives up first on a
+  slow-but-live phone. What would actually close it is per-source accounting — a cap per peer
+  address rather than per listener — and that is a different mechanism, worth its own slice only
+  if anyone ever sees this happen.
+
+- **Two code comments are now known to be wrong, both found by mutating the thing they
+  describe.** Recorded so nobody re-derives them; neither is corrected in the source yet, and
+  each is a one-line fix.
+  - `FleetModel.connect()` says that assigning main-actor state from a `FleetConnector` (or
+    `PairingRunner`) callback "is an error the compiler cannot see past on its own". It is not:
+    removing `MainActor.assumeIsolated` from `pair(code:)`'s `onProgress` still **builds** under
+    Swift 6, with the build log confirming `FleetModel.swift` was recompiled under
+    `-swift-version 6`. A non-`@Sendable` closure literal formed in a `@MainActor` context
+    inherits that isolation, so the compiler never needed the assumption. The annotation is a
+    **runtime tripwire, not a compile-time necessity** — it traps loudly rather than corrupting
+    state if either type is ever handed a queue other than `.main` — which is a good reason to
+    keep it and not the reason the comment gives.
+  - `PairingCodeView`'s typed-code comment says uppercase "buys nothing in the QR, where `FD`
+    and `fd` measure the same 39 modules". Both numbers are stale: 39 was a CoreImage *extent*
+    read as a module count, and re-measured on the same payload `FD2-<body>` is **45** modules
+    against **53** for the same body lowercased behind `fd2-`. The case is worth 8 modules after
+    all. The conclusion the sentence supports — uppercase is kept for the *reader*, because
+    Crockford base32 is only unambiguous in one case — is unaffected, which is why no code
+    changed; `PairingPayload.prefix`'s doc comment carries the corrected measurements.
+
+- **`FleetSocketServer`'s sixteen pending slots are not all authenticated, and the comment
+  claiming they were is now corrected rather than made true.** `maxPending` read "each has
+  completed a TLS-PSK handshake — it cannot be a stranger". That holds for the entries past
+  `.ready` and not for the rest: `pending` is filed in `accept`, which fires when TCP connects,
+  so anyone who can open a socket to the Mac takes a slot for `handshakeDeadline` — 10 seconds
+  since the deadline split, up from the 5 `authDeadline` used to give them. Sixteen sockets at
+  1.6 connections a second is what it takes to keep a real phone refused at `accept`'s cap
+  guard.
+
+  Same shape as the pairing pool above and the same verdict: **availability only, LAN-local**,
+  it costs the attacker nothing and yields nothing, and the deadline cannot be shortened past
+  `FleetConnector.raceTimeout` (8s) without making the Mac the side that hangs up on a
+  slow-but-live phone — which is the bug the split exists to fix. It is also milder here than
+  there: the pairing pool is 4 and closes a window the user is watching, this one is 16 and only
+  delays a reconnect that retries on its own backoff. What closes it is the same thing —
+  per-source accounting, a cap per peer address rather than per listener — and it is worth
+  building once, for both listeners, if either is ever seen to happen.
+
+- **The Mac's pairing sheet says the same thing three times.** The warning paragraph ends "It
+  expires in 2 minutes.", the countdown under it reads "Expires in 1:47", and the typed-code
+  block ends "Only works on this Wi-Fi network." Every line shipped for its own reason and none
+  of them is wrong; together they read as a sheet that does not trust the user to have read the
+  line above. An editing pass, not a defect — and the right time to do it is alongside the
+  596pt-sheet-on-a-560pt-window question in [docs/MOBILE.md](MOBILE.md), since cutting a line is
+  also the cheapest way to lose the 36pt overhang.
+
+## From the session timeline screen (2026-08-23)
+
+- **A timeline item is capped at 64 KB and a page at 128 KB.** A file read larger than the item
+  cap is truncated, with the shortfall stated on the row (a `scissors` chip) and in full on the
+  detail screen ("Showing the first 584 bytes of 69 KB"). The alternative — a second round trip
+  fetching one item whole — needs an offset index the transcript readers do not build, and
+  64 KB covers essentially every command output. Revisit if "open it on your Mac" turns out to
+  be a common answer rather than a rare one.
+
+- **An open session screen polls at 1.5s while the session is busy.** History is pulled, not
+  pushed (spec §6), and the Mac emits activity events only on genuine transitions, so a long
+  busy turn signals nothing in the middle of it. A push channel would need per-connection
+  subscription state in `FleetSocketServer` and a northbound frame outside the `seq` space;
+  that is a real design, not a tweak, and the poll is cheap enough that it has not earned one
+  yet.
+
+- **"Is the reader at the live edge" is inferred from a 1pt sentinel row.** `follow` needs to
+  know whether the end of the conversation is on screen, and on iOS 17 there is no scroll
+  geometry to ask — `onScrollGeometryChange` and `defaultScrollAnchor` on a `List` are both 18+.
+  So a zero-height trailing row's `onAppear`/`onDisappear` carries it. It is a real signal and
+  it is coarse: a row taller than the screen between the reader and the sentinel reads as "not
+  at the bottom" even when the reader is following along. Worth replacing with scroll geometry
+  the moment the deployment target moves to 18.
+
+- **A tool card shows six lines of output and three of input, and the numbers are taste.** They
+  were chosen by rendering a real conversation and looking — enough to recognise a result,
+  little enough that one `Read` does not bury the turn around it — not measured against
+  anything. If a reader ends up tapping through on every row, they are too small.
+
+- **`layer.render(in:)` cannot see a programmatic scroll.** Recorded in
+  [docs/MOBILE.md](MOBILE.md) beside the technique itself, because the failure looks exactly
+  like the `drawHierarchy` trap it replaced: several different screens coming back as one
+  identical blank PNG. Anything that has to be verified *after* a scroll needs
+  `xcrun simctl io <udid> screenshot` and a window attached to the app's own `UIWindowScene`.
+
+## Answering prompts from the phone (2026-08-24) — three gaps, accepted on purpose
+
+From `docs/superpowers/plans/2026-08-24-answering-prompts-from-the-phone.md`. All three are
+scope decisions, recorded so that **disagreeing with one is a change to a decision rather than
+the discovery of a bug**. Each is argued rather than apologised for, because each was reached
+by ruling out the alternative and not by running out of time.
+
+- **A paired phone can approve a tool in a tab nobody is looking at.** The only Mac-side signal
+  that it happened is the terminal moving — the selection travelling to a row and a Return
+  landing on it. There is no per-tab opt-in ("this session may be answered remotely"), no
+  notification, and no allow-list of which tools may be approved from a pocket. That is
+  deliberate, and the reasoning is that a companion which must be confirmed on the Mac is not a
+  companion: the whole case for the feature is the person who is not at the desk. What
+  *changed* here is not the blast radius but **who decided** — a typed message is a request the
+  agent may refuse, and everything dangerous it leads to still stops at a permission prompt,
+  whereas a permission decision **is** the stopping point and there is no layer under it. The
+  control the spec names is the only one shipped, and it is the right shape for this: **pairing
+  is all-or-nothing and revocation is immediate**, with Settings → Devices showing which device
+  is attached while it does this. If per-tab consent is ever wanted, it is a new mechanism with
+  its own state, not a flag on this one.
+
+- **The permission card cannot show the dialog's own wording, and shows the tool call
+  instead.** Claude assembles a permission dialog's text in its TUI at display time, out of the
+  live permission rule set — it exists in no file, no transcript record and no hook payload, so
+  there is nothing for Flight Deck to read and nothing to put on the wire. The card is built
+  from the tool call itself, which the phone already has **whole** from the history channel:
+  the tool's name, and its entire input. So a Bash approval on the phone shows the full command
+  where the terminal shows a one-line summary — the card is arguably *more* legible than the
+  dialog it is standing in for, not less. What it costs is exactness: the card cannot promise
+  that the words on the phone are the words on the Mac. The two are derived from the same call
+  by different renderers, and if claude ever adds a warning to its own wording, the phone will
+  not carry it. That is the trade, and it is the reason Deny leads on the card.
+
+- **There is no case for "Yes, and don't ask again for X in Y", and that is a security
+  property rather than a missing feature.** Claude's dialogs can put a durable grant in their
+  middle rows — a rule that outlives the tap, written from a pocket, off a label a fixed-width
+  terminal has wrapped. **It is structurally unreachable from the phone, twice over.**
+  `PromptAnswer` has no case that names one, so there is no index a client could send and no
+  button the card could draw; and the Mac never offers one, because `SessionStore.answerPrompt`'s
+  `.allow` arm targets the dialog's first row and confirms it is there before pressing Return.
+  A phone cannot widen its own future authority — the property is that, stated once.
+
+  Worth recording honestly: **the captured Bash dialog in claude 2.1.241 has only two options
+  and no such row at all** (`Yes` / `No`; the three-option shape exists on `Write`, whose middle
+  row is accept-edits mode rather than a durable per-directory grant). So this property
+  currently guards a case that did not arise in the dialogs anyone has looked at. It is kept
+  because the ones that do arise are exactly the ones nobody will notice arriving: a claude
+  release that adds a grant row to Bash needs no change here to be safe, and a design that had
+  merely *avoided* the row by index would have silently started approving it.
+
+These three are what the feature deliberately does **not** do. What it does do, and what no
+automated test can watch it doing, is checked by hand: [docs/MOBILE.md](MOBILE.md) items 42-50,
+which are the only cover the three untestable parts have — a key event reaching a real surface,
+`.allow` finding the first row, and the status-file/transcript write race.
+
+**Two things this work discovered that outlive it**, both about verification rather than about
+the feature, and both written up where someone will hit them rather than here:
+
+- **`xctest -XCTest FlightDeckTests/SomeClass` runs zero tests and reports success**, so a
+  mutation "verified" through it is not verified at all. The working spelling and the measured
+  0-versus-21 are in [docs/AGENT-OPERATIONS.md](AGENT-OPERATIONS.md) §5.
+- **`layer.render(in:)` returns a blank image for a `List` that has scrolled** — hit a second
+  time here, by the whole-screen render of the prompt card, and a longer settle changed nothing.
+  The entry above this one records the rule; the working route (a window on the app's own
+  `UIWindowScene` held across an `xcrun simctl io … screenshot`, with the two-file handshake
+  that makes it possible) is in [docs/MOBILE.md](MOBILE.md) beside the technique.

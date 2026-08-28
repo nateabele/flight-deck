@@ -1,3 +1,4 @@
+import FleetKit
 import XCTest
 @testable import FlightDeck
 
@@ -16,6 +17,28 @@ final class CodexStatusRoutingTests: XCTestCase {
     /// tab that comes back is pinned to it. No transport, so nothing here can spawn or hang.
     private struct StubCodexAdapter: AgentAdapter {
         static let id: AgentID = .codex
+        /// Codex's answers, because this stands in for codex. The store reads both
+        /// capabilities off `AgentID`, not off the injected adapter, so a stub that said
+        /// otherwise would be describing an agent that does not exist.
+        static let textChannel: AgentTextChannel? = nil
+        static let dialogDriver: AgentDialogDriver? = nil
+        static let negotiatesIdentity = true
+        static let needsRuntimeStart = true
+        static let hasStatusRegistry = false
+        nonisolated static func sanitizedTitle(_ raw: String) -> String? {
+            CodexAdapter.sanitizedTitle(raw)
+        }
+        nonisolated static func title(fromTranscriptAt url: URL) -> String? {
+            CodexAdapter.title(fromTranscriptAt: url)
+        }
+        nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+            CodexAdapter.timelineItems(inLine: line, at: offset)
+        }
+        nonisolated static let homeMarkerFile = CodexAdapter.homeMarkerFile
+        nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
+            CodexAdapter.identity(fromHomeData: data)
+        }
+        static let openPromptReader: AgentOpenPromptReader? = CodexAdapter.openPromptReader
         let thread: UUID
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
@@ -76,7 +99,7 @@ final class CodexStatusRoutingTests: XCTestCase {
         // Deterministic rather than whatever `NSApp` reports under `xctest`: read state and
         // notification delivery both branch on it.
         store.appIsActive = { false }
-        store.titleResolver = { _, done in done(nil) }
+        store.titleResolver = { _, _, done in done(nil) }
         return store
     }
 
@@ -186,6 +209,39 @@ final class CodexStatusRoutingTests: XCTestCase {
         runtime.emit(.activity(.busy), for: thread)
 
         XCTAssertEqual(store.status(for: claudeTab.id)?.activity, .waiting)
+    }
+
+    /// **The other loop over the same list, which was never gated (audit §4.7).**
+    ///
+    /// `applyRegistry` walks `repos` twice: once to reconcile each tab's `ConversationPin`
+    /// against the scan, and once sixty lines later to rebuild `statuses`. The second loop
+    /// has always refused a tab with no status registry behind it — that is
+    /// `testAClaudeRegistryTickLeavesACodexStatusAlone` above. The first refused nothing, and
+    /// was safe only because the match is `sessionID == pinnedConversationID` and a claude
+    /// conversation UUID colliding with a codex thread UUID is not a thing. Safe by
+    /// improbability rather than by a guard, next to a loop that has one, is how the two come
+    /// apart.
+    ///
+    /// This forces the collision the improbability was standing in for: a claude row naming
+    /// the codex tab's own thread id, reporting a directory that is not the tab's. Without
+    /// the guard the tab is retargeted — a codex tab's transcript watcher moved onto a path
+    /// `claude` reported — and `repin` would hand a codex rollout to `ConversationTitle`, a
+    /// claude JSONL parser.
+    func testAClaudeRowNamingACodexThreadRetargetsNothing() async throws {
+        let store = makeStore()
+        let (codexTab, _) = try await makeCodexTab(in: store)
+        let elsewhere = projectsRoot.appendingPathComponent("elsewhere", isDirectory: true).path
+
+        store.applyRegistry([7: .init(
+            pid: 7, sessionID: thread, activity: .busy, waitingFor: nil,
+            startedAt: 1, cwd: elsewhere, procStart: "start-a"
+        )])
+
+        XCTAssertEqual(
+            store.repos.flatMap(\.sessions).first { $0.id == codexTab }?.transcriptDirectory,
+            tmp.path,
+            "a scan of `claude` processes may not move a codex tab's transcript"
+        )
     }
 
     /// Closing a codex tab drops its status the same way a claude tab's is dropped, and a

@@ -7,6 +7,10 @@ import FleetKit
 /// This is the test that says slice 1a's spine works.
 @MainActor
 final class FleetServiceTests: XCTestCase {
+    /// Held for the length of the test, not just for `standUp()`: it owns the preferences
+    /// store the service reads its keys back out of, and a harness released here would take
+    /// that with it.
+    private var harness: FleetTestHarness?
     private var service: FleetService?
     private var client: FleetClient?
 
@@ -15,14 +19,33 @@ final class FleetServiceTests: XCTestCase {
         service?.stop()
         client = nil
         service = nil
+        harness = nil
     }
 
+    /// The stand-up itself lives in `FleetTestHarness` — the timeline's loopback test needs
+    /// exactly this fleet, and two ways to stand one up is how the two halves drift. The
+    /// tuple stays so none of the tests below change.
     private func standUp() async throws -> (SessionStore, FleetDeviceKey, NWEndpoint.Port) {
-        let store = SessionStore(provider: nil, persistence: nil)
-        let key = FleetDeviceKey.mint()
-        let service = FleetService(store: store, keys: { [key] })
-        self.service = service
-        return (store, key, try await service.start(port: nil))
+        let harness = FleetTestHarness()
+        self.harness = harness
+        self.service = harness.service
+        return (harness.store, harness.key, try await harness.start())
+    }
+
+    /// The same, plus the live claude login a New Session menu row needs to resolve against.
+    /// Without one `NewSessionOptionsProjection.account` answers nil and the handler falls back
+    /// to the project's default — the path that was never broken — so a test that skips this
+    /// exercises everything except the line it means to.
+    private func standUpWithALogin() async throws
+        -> (SessionStore, PreferencesStore, FleetDeviceKey, NWEndpoint.Port) {
+        let harness = FleetTestHarness()
+        self.harness = harness
+        self.service = harness.service
+        harness.preferences.preferences.storedAccounts = [
+            AgentAccount(agent: .claude, displayName: "Work",
+                         home: URL(fileURLWithPath: "/w/home-work"))
+        ]
+        return (harness.store, harness.preferences, harness.key, try await harness.start())
     }
 
     func testAConnectingClientIsHandedTheLiveFleet() async throws {
@@ -68,10 +91,10 @@ final class FleetServiceTests: XCTestCase {
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
 
         let attached = expectation(description: "attached")
-        // Poll rather than sleep: `attachedDeviceCount` is the service's own published fact.
+        // Poll rather than sleep: `attachedSlots` is the service's own published fact.
         let observer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
             MainActor.assumeIsolated {
-                if self.service?.attachedDeviceCount == 1 { attached.fulfill() }
+                if self.service?.attachedSlots.count == 1 { attached.fulfill() }
             }
         }
         // See the comment on the first test: `await fulfillment`, not `wait(for:)`, so the
@@ -104,6 +127,53 @@ final class FleetServiceTests: XCTestCase {
         // Unread is one fleet-wide fact, not a per-device one (§8): reading on the phone
         // clears the dot on the Mac, which is what the mark means.
         XCTAssertFalse(store.unreadIdle.contains(a.id))
+    }
+
+    /// **A new session lands in the project the phone tapped, not the one the Mac has
+    /// selected.** The regression this pins shipped and was reported from a phone within the
+    /// hour: the handler routed through `SessionStore.createFromMenu`, which is the menu bar's
+    /// entry point and chooses a directory itself — the active tab's, else the last active
+    /// project — because a menu click carries no project with it. A tap on the phone does
+    /// carry one, and it was being thrown away.
+    ///
+    /// Asserted through the socket rather than against the store directly, because the
+    /// discarded argument was in the wire handler and a store-level test could not have seen
+    /// it: `createFromMenu` did exactly what it says on its own tin.
+    func testANewSessionFromThePhoneLandsInTheProjectItNamed() async throws {
+        let (store, _, key, port) = try await standUpWithALogin()
+        // Two projects, and the Mac's selection deliberately parked in the WRONG one — which
+        // is the state that made the bug visible and the state a phone is normally used in.
+        let elsewhere = store.newSession(in: URL(fileURLWithPath: "/w/elsewhere"))
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/target"))
+        store.selectSession(elsewhere.id)
+
+        let target = try XCTUnwrap(
+            store.repos.first { $0.url.path == "/w/target" },
+            "the project the phone will name"
+        )
+        let before = target.sessions.count
+
+        let acked = expectation(description: "ack")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            // **Agent and account index, not a bare project.** Both nil takes the default
+            // path, which was never broken — the discarded project was on the menu-row path,
+            // so a test that sends nothing here passes without touching the fix.
+            if case .snapshot = frame {
+                _ = client.send(.newSession(project: target.id, agent: "claude", accountIndex: 0))
+            }
+            if case .ack = frame { acked.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [acked], timeout: 10)
+
+        let after = try XCTUnwrap(store.repos.first { $0.url.path == "/w/target" })
+        XCTAssertEqual(after.sessions.count, before + 1, "the tab belongs to the project tapped")
+        XCTAssertEqual(
+            store.repos.first { $0.url.path == "/w/elsewhere" }?.sessions.count, 1,
+            "and not to whichever project the Mac happened to have selected"
+        )
     }
 
     func testACommandNamingASessionThatIsGoneIsRefusedNotIgnored() async throws {

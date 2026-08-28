@@ -1,6 +1,76 @@
 import AppKit
 import SwiftUI
 
+/// A phone is on this conversation right now.
+///
+/// **A phone, pulsing rather than blinking.** It began as a plain dot on the argument that the
+/// row already carries a status glyph, a conflict marker and an account marker, so a fourth
+/// symbol would read as a fourth warning. A dot is also ambiguous in exactly the way this
+/// badge must not be — it says "something", where the whole point is to say "your phone". The
+/// handset names itself, and the pulse is what keeps it reading as presence rather than as
+/// one more state flag.
+///
+/// The glow is a shadow in the glyph's own colour rather than a blur layer: it stays put under
+/// the row's `transition`, where a separately-animated blur would slide at its own rate and
+/// arrive after the phone.
+private struct PhonePresenceBadge: View {
+    /// Driven from `onAppear` rather than a `TimelineView`, so the animation costs nothing
+    /// when no phone is attached — which is almost always. A `TimelineView` here would re-run
+    /// the whole sidebar row on a display-linked schedule for a badge that is usually absent.
+    @State private var pulsing = false
+
+    /// Green, not the accent colour. The accent is whatever the user picked and is already
+    /// spoken by selection and by links, so a badge wearing it reads as "selected" at a
+    /// glance. Green is the one colour in this sidebar that means *live* — the same thing the
+    /// status glyph uses for a running tab — and presence is exactly that claim.
+    private static let live = Color.green
+
+    var body: some View {
+        Image(systemName: "iphone.gen3")
+            // `.caption2` and a semibold weight: at sidebar-row size a phone outline is mostly
+            // its bezel, and a lighter stroke reads as a smudge rather than a handset.
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(Self.live)
+            .shadow(color: Self.live.opacity(pulsing ? 0.9 : 0.25), radius: pulsing ? 4 : 1)
+            // A shallower scale range than a dot wants. A glyph with recognisable silhouette
+            // has to stay readable AS that glyph through the whole cycle; pulsing it from 0.72
+            // turns the phone into a speck at the bottom of every beat.
+            .scaleEffect(pulsing ? 1.0 : 0.88)
+            .opacity(pulsing ? 1.0 : 0.55)
+            .animation(
+                // `autoreverses` rather than two keyframes: the ease has to be symmetric or the
+                // dot appears to snap at one end of the cycle.
+                .easeInOut(duration: 0.9).repeatForever(autoreverses: true),
+                value: pulsing
+            )
+            .onAppear { pulsing = true }
+            .accessibilityLabel("A phone is viewing this session")
+            .accessibilityIdentifier("session-phone-presence")
+            .help("A paired phone has this session open")
+    }
+}
+
+/// A background task is running under this tab's agent.
+///
+/// Static, deliberately, where `PhonePresenceBadge` pulses: presence is someone *watching*
+/// and wants the eye, whereas this is a fact about the tab that is true for hours at a time.
+/// A second pulsing glyph in the same row would turn the sidebar into a christmas tree.
+///
+/// Not `private`: `ProjectHeaderRow` draws the same badge on a collapsed project whose only
+/// active tab is idle-with-background-work, so the two renderings of this one fact cannot
+/// drift apart.
+struct BackgroundWorkBadge: View {
+    var body: some View {
+        Image(systemName: "terminal.fill")
+            .font(.caption2.weight(.semibold))
+            // The same green the status glyph used for `.shell` before this became a
+            // decoration, so nothing about the sidebar's vocabulary changed — only what the
+            // colour is attached to.
+            .foregroundStyle(.green)
+            .accessibilityHidden(true)   // the row's status label already says it
+    }
+}
+
 /// One sidebar row. Owns only its transient edit state; the title itself lives in the Store.
 private struct SessionRow: View {
     @ObservedObject var store: SessionStore
@@ -10,6 +80,12 @@ private struct SessionRow: View {
     /// today — see `SidebarRow.accountMismatched`. A work session left open in a personal
     /// repo shows up here rather than silently running as the wrong login.
     let isAccountMismatched: Bool
+    /// A phone currently has this conversation open. Presence, not state — see
+    /// `FleetService.phoneActiveSessions`.
+    var isPhoneActive: Bool = false
+    /// A background task is running under this tab's agent. A decoration, not a state — see
+    /// `SessionStore.backgroundWorkSessions`.
+    var hasBackgroundWork: Bool = false
 
     @State private var isEditing = false
     @State private var draft = ""
@@ -42,7 +118,8 @@ private struct SessionRow: View {
                 Color.clear.frame(width: 16, height: 0)
                 SessionStatusIcon(
                     status: store.status(for: session.id),
-                    unread: store.unreadIdle.contains(session.id)
+                    unread: store.unreadIdle.contains(session.id),
+                    hasBackgroundWork: store.backgroundWorkSessions.contains(session.id)
                 )
             }
 
@@ -78,6 +155,25 @@ private struct SessionRow: View {
                 // recognizer on the table view never fires, because the synthetic double-click
                 // delivers no mouse-ups. Rename is also reachable from the context menu and
                 // from Return.
+                if isPhoneActive {
+                    PhonePresenceBadge()
+                        // Slides out of the leading edge and takes the title with it, rather
+                        // than popping and shoving the row sideways in one frame.
+                        .transition(
+                            .move(edge: .leading)
+                                .combined(with: .opacity)
+                                .combined(with: .scale(scale: 0.4, anchor: .leading))
+                        )
+                }
+                // Gated on a status existing, not just on the flag: `restore()` seeds
+                // `backgroundWorkSessions` before the first registry tick populates
+                // `statuses`, and a badge with no status glyph beside it would be claiming
+                // something about a tab this app cannot yet vouch for. The badge catches up
+                // at the first tick, same as everything else keyed off `statuses`.
+                if hasBackgroundWork, store.status(for: session.id) != nil {
+                    BackgroundWorkBadge()
+                        .transition(.opacity.combined(with: .scale(scale: 0.6)))
+                }
                 Text(session.title)
                     .accessibilityIdentifier("session-row-title")
             }
@@ -228,6 +324,10 @@ private struct SessionRow: View {
 struct SessionSidebar: View {
     @ObservedObject var store: SessionStore
     var preferences: PreferencesStore?
+    /// Sessions a paired phone currently has open. Passed in rather than read from a service
+    /// here: this view renders and holds no state of its own, and the fleet is not its
+    /// dependency — `RootView` already owns both.
+    var phoneActiveSessions: Set<UUID> = []
     /// Injectable so a future test can drive the close flow without a panel; production
     /// always gets the real alert.
     var confirmer: ProjectCloseConfirming = NSAlertProjectCloseConfirmer()
@@ -289,9 +389,18 @@ struct SessionSidebar: View {
                             store: store,
                             session: session,
                             isConflicted: conflicted.contains(session.id),
-                            isAccountMismatched: mismatched.contains(session.id)
+                            isAccountMismatched: mismatched.contains(session.id),
+                            isPhoneActive: phoneActiveSessions.contains(session.id),
+                            hasBackgroundWork: store.backgroundWorkSessions.contains(session.id)
                         )
                         .tag(session.id)
+                        // Animated HERE, on the container, not inside the badge: the badge is
+                        // created and destroyed by the `if`, so it cannot animate its own
+                        // arrival — only something that outlives the change can.
+                        .animation(.spring(response: 0.35, dampingFraction: 0.75),
+                                   value: phoneActiveSessions.contains(session.id))
+                        .animation(.spring(response: 0.35, dampingFraction: 0.75),
+                                   value: store.backgroundWorkSessions.contains(session.id))
                     }
 
                 case .empty:

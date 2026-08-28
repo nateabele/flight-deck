@@ -1,0 +1,8 @@
+// Swift cannot import a bare header. `SWIFT_INCLUDE_PATHS` alone only lets the compiler
+// FIND BoringSSLShim.h; this is what makes it a module something can say `import
+// BoringSSLShim` about. Both FleetKit (which wraps SPAKE2) and FlightDeckTests (which
+// proves the library is linked at all) point SWIFT_INCLUDE_PATHS at this directory.
+module BoringSSLShim {
+    header "BoringSSLShim.h"
+    export *
+}

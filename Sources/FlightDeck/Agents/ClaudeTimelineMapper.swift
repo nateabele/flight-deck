@@ -1,0 +1,331 @@
+import FleetKit
+import Foundation
+
+/// Turns one line of a claude transcript into timeline rows.
+///
+/// Pure and static so every mapping is testable from a captured line with no process, no
+/// socket and no timing — the same reason `ClaudeSession.events(inLine:sessionID:)` and
+/// `CodexEventMapper.events(inRolloutLine:)` are.
+///
+/// **Why this is a second parser and not an extension of `TranscriptWatcher`.** Spec §6 asks
+/// claude's mapping to extend the existing watcher path rather than add a second reader.
+/// `TranscriptWatcher` is a forward-only tail — one `offset`, never seeking backwards — and
+/// backwards pagination over an arbitrary byte range is not something a tail can do. What §6
+/// is protecting against is two parses of the same file disagreeing, and that is prevented
+/// structurally instead: this is the only place a transcript line is read as *content*, there
+/// is still exactly one poll loop per tab, and nothing here touches the watcher's title or
+/// sub-agent state. See the plan's findings §4.
+///
+/// **Two rules here are about what must NOT go on the wire**, and both are silent when
+/// broken: a pasted screenshot's base64 (roughly a megabyte per block) and a thinking block's
+/// `signature` (a few hundred opaque bytes per block, hundreds of blocks per conversation).
+enum ClaudeTimelineMapper {
+    /// `offset` is the byte offset of this line in the transcript, and it is what makes an
+    /// item addressable — see `TimelineItem.id`.
+    static func items(inLine line: String, at offset: Int) -> [TimelineItem] {
+        guard let data = line.data(using: .utf8),
+              let record = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let type = record["type"] as? String
+        else { return [] }
+
+        // Claude talking to itself: "Continue from where you left off.", the image-geometry
+        // note that accompanies a paste. Rendering these as user turns puts words in the
+        // user's mouth.
+        guard record["isMeta"] as? Bool != true else { return [] }
+        // A `/compact` writes its summary of the conversation so far as a `user` record
+        // marked `isCompactSummary`. It is several paragraphs of claude's own prose under the
+        // user's name — the same harm as `isMeta` on a record long enough to be believed.
+        // `ConversationTitle.resolve` already skips both keys together, and the resumed-
+        // conversation spec (§9) specifies them as one rule.
+        guard record["isCompactSummary"] as? Bool != true else { return [] }
+        // Sub-agent records belong in `<conversationId>/subagents/agent-*.jsonl`, which
+        // nothing reads. One in the main transcript means claude moved them, and mapping it
+        // would interleave a sub-agent's conversation into its parent's.
+        guard record["isSidechain"] as? Bool != true else { return [] }
+
+        let at = record["timestamp"] as? String
+        guard let message = record["message"] as? [String: Any] else { return [] }
+
+        switch type {
+        case "user":
+            if let text = message["content"] as? String {
+                return normalized(text, offset: offset, at: at)
+            }
+            return blocks(message).enumerated().compactMap { index, block in
+                userItem(block, offset: offset, index: index, at: at)
+            }
+        case "assistant":
+            return blocks(message).enumerated().compactMap { index, block in
+                assistantItem(block, offset: offset, index: index, at: at)
+            }
+        default:
+            return []
+        }
+    }
+
+    /// Wrappers Claude Code injects into a `user` record that are not the user talking.
+    ///
+    /// Deliberately a fixed list rather than "anything that looks like a tag": a message that
+    /// genuinely opens with `<div>` is the user's own words and must stay theirs. Everything
+    /// here was observed in a real transcript; the counts in one 20MB session were
+    /// task-notification 132, bash-input 8, bash-stdout 8, local-command-caveat 4,
+    /// command-name 2, local-command-stdout 2, system-reminder 1.
+    static let harnessWrappers: Set<String> = [
+        "task-notification", "system-reminder",
+        "local-command-stdout", "local-command-caveat",
+        "bash-input", "bash-stdout", "bash-stderr",
+        "command-name", "command-message", "command-args",
+    ]
+
+    /// One `user` record's string content, split into what the harness said and what the
+    /// person said.
+    ///
+    /// A record can be both: a slash command echoes `<command-name>` and `<command-message>`
+    /// back to back, and a `!` command's `<bash-stdout>` is followed by `<bash-stderr>`. Each
+    /// wrapper becomes its own `.systemNotice`, tagged with the wrapper's own name so a client
+    /// can label it without re-parsing; anything left outside them stays a `.userTurn`. Order
+    /// is document order, so a real message that arrived alongside a reminder still reads in
+    /// the position it was written.
+    static func normalized(_ text: String, offset: Int, at: String?) -> [TimelineItem] {
+        var items: [TimelineItem] = []
+        var rest = Substring(text)
+
+        func emit(_ tag: String?, _ body: Substring) {
+            let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+            // An empty wrapper — `<bash-stderr></bash-stderr>` is the common one — is a row
+            // that would say nothing, so it is dropped rather than drawn blank.
+            guard !trimmed.isEmpty else { return }
+            items.append(
+                TimelineItem(
+                    id: TimelineItem.identifier(offset: offset, index: items.count),
+                    kind: tag == nil ? .userTurn : .systemNotice, status: .complete,
+                    body: TimelineItem.Body(text: trimmed, tool: tag), at: at
+                )
+            )
+        }
+
+        while let open = nextWrapper(in: rest) {
+            emit(nil, rest[rest.startIndex..<open.range.lowerBound])
+            let afterOpen = open.range.upperBound
+            if let close = rest.range(of: "</\(open.tag)>", range: afterOpen..<rest.endIndex) {
+                emit(open.tag, rest[afterOpen..<close.lowerBound])
+                rest = rest[close.upperBound...]
+            } else {
+                // Unclosed: take the remainder as the wrapper's body rather than leaving it
+                // to fall through as user prose, which is the failure being fixed.
+                emit(open.tag, rest[afterOpen...])
+                return items
+            }
+        }
+        emit(nil, rest)
+        return items
+    }
+
+    /// The earliest recognised opening tag in `text`, or `nil`.
+    private static func nextWrapper(
+        in text: Substring
+    ) -> (tag: String, range: Range<Substring.Index>)? {
+        var best: (tag: String, range: Range<Substring.Index>)?
+        for tag in harnessWrappers {
+            guard let r = text.range(of: "<\(tag)>") else { continue }
+            if best == nil || r.lowerBound < best!.range.lowerBound { best = (tag, r) }
+        }
+        return best
+    }
+
+    private static func blocks(_ message: [String: Any]) -> [[String: Any]] {
+        message["content"] as? [[String: Any]] ?? []
+    }
+
+    private static func userItem(
+        _ block: [String: Any], offset: Int, index: Int, at: String?
+    ) -> TimelineItem? {
+        let id = TimelineItem.identifier(offset: offset, index: index)
+        switch block["type"] as? String {
+        case "text":
+            guard let text = block["text"] as? String, !text.isEmpty else { return nil }
+            return TimelineItem(id: id, kind: .userTurn, status: .complete,
+                                body: TimelineItem.Body(text: text), at: at)
+        case "image":
+            // A placeholder, never the payload. One pasted screenshot is about a megabyte of
+            // base64; two in a page is a multi-megabyte frame over a possibly-cellular link,
+            // to carry a picture the phone does not draw.
+            return TimelineItem(id: id, kind: .userTurn, status: .complete,
+                                body: TimelineItem.Body(text: "[image]"), at: at)
+        case "tool_result":
+            return TimelineItem(
+                id: id, kind: .toolResult, status: .complete,
+                body: TimelineItem.Body(
+                    text: resultText(block["content"]),
+                    callID: block["tool_use_id"] as? String,
+                    isError: block["is_error"] as? Bool == true
+                ),
+                at: at
+            )
+        default:
+            // Anything else, and one shape worth naming: a `document` block, which is what a
+            // Read of a PDF attaches — the whole file as base64 under `source.data`, exactly
+            // like an image. In the captured transcript claude also marks that record
+            // `isMeta`, so the guard above catches it first and this arm is the second line of
+            // defence. There is no row for a document in this vocabulary yet, so it is dropped
+            // rather than approximated.
+            return nil
+        }
+    }
+
+    private static func assistantItem(
+        _ block: [String: Any], offset: Int, index: Int, at: String?
+    ) -> TimelineItem? {
+        let id = TimelineItem.identifier(offset: offset, index: index)
+        switch block["type"] as? String {
+        case "text":
+            guard let text = block["text"] as? String, !text.isEmpty else { return nil }
+            return TimelineItem(id: id, kind: .assistantText, status: .complete,
+                                body: TimelineItem.Body(text: text), at: at)
+        case "thinking":
+            // `signature` is deliberately not read. An empty `thinking` with a signature is
+            // what a redacted block looks like, and there are hundreds of them in a long
+            // conversation — emitting each as a blank row is the failure this guard prevents.
+            guard let text = block["thinking"] as? String, !text.isEmpty else { return nil }
+            return TimelineItem(id: id, kind: .thinking, status: .complete,
+                                body: TimelineItem.Body(text: text), at: at)
+        case "tool_use":
+            let input = block["input"] as? [String: Any]
+            let tool = block["name"] as? String
+            // **The one tool whose call is a question rather than a command**, and the only
+            // place `TimelineItem.Kind.prompt` is emitted anywhere. The case has been in the
+            // wire vocabulary since the timeline shipped and has been reached by nothing: it
+            // was reserved for this, not for a typed message, which is a `.userTurn` on both
+            // mappers.
+            //
+            // Everything else about the row stays a tool call's — same tool name, same
+            // `callID` so `SessionTimelineScreen.entries(from:)` still folds the answering
+            // `tool_result` into it, same whole input in `text` so both ends can rebuild the
+            // question from the row itself. Only the kind moves, and it does two jobs: it
+            // stops a question a person answered from rendering as a JSON tree of
+            // `{"questions":[…]}`, and it is what tells the phone this is a question rather
+            // than a permission request.
+            let isQuestion = tool == "AskUserQuestion"
+            return TimelineItem(
+                id: id, kind: isQuestion ? .prompt : .toolCall, status: .complete,
+                body: TimelineItem.Body(
+                    text: ToolInputSummary.pretty(input),
+                    // `ToolInputSummary`'s key table reaches no question — an
+                    // `AskUserQuestion` input's only top-level key is `questions`, and the
+                    // text lives two levels down inside `questions[0]` — so without this a
+                    // prompt row previews as nothing at all.
+                    summary: (isQuestion ? questionPreview(input) : nil)
+                        ?? input.flatMap(ToolInputSummary.text(for:)),
+                    tool: tool,
+                    callID: block["id"] as? String
+                ),
+                at: at
+            )
+        default:
+            return nil
+        }
+    }
+
+    /// The first question's text, for a row preview. Nil for any shape that is not the one
+    /// `AskUserQuestion` writes, which falls back to the ordinary key table rather than to
+    /// nothing.
+    ///
+    /// Bounded by the same `ToolInputSummary.preview(of:)` as every other preview, because
+    /// that cap is the ONLY bound `summary` gets anywhere: `TimelineReader.capped` rewrites
+    /// `body.text` and never touches this field, so a question carried through raw would
+    /// escape `TimelineLimits.maxItemBytes` entirely.
+    private static func questionPreview(_ input: [String: Any]?) -> String? {
+        guard let questions = input?["questions"] as? [[String: Any]],
+              let text = questions.first?["question"] as? String
+        else { return nil }
+        return ToolInputSummary.preview(of: text)
+    }
+
+    /// A tool result's `content` is a String for most tools and a block array for some. Both
+    /// shapes are real; handling only the first silently drops the second's whole output.
+    ///
+    /// Only `text` is read out of the array, which is also what keeps an image-returning tool
+    /// (a screenshot, `Read` on a `.png`) from putting its base64 on the wire. The cost is
+    /// that such a result renders as an empty row rather than as `[image]`; see the task
+    /// report.
+    private static func resultText(_ content: Any?) -> String {
+        if let text = content as? String { return text }
+        guard let blocks = content as? [[String: Any]] else { return "" }
+        return blocks.compactMap { $0["text"] as? String }.joined(separator: "\n")
+    }
+}
+
+/// Shared by both mappers, because a tool call looks the same on a phone whichever agent made
+/// it: a name, a one-line preview, and the whole input a tap away.
+enum ToolInputSummary {
+    /// The keys a preview is drawn from, most specific first. A table rather than "the first
+    /// String value", which would pick whichever key the JSON happened to order first and
+    /// give a `Bash` row its `description` on one call and its `command` on the next.
+    private static let previewKeys = [
+        "command", "file_path", "path", "pattern", "query", "url", "prompt", "description",
+    ]
+
+    /// What a row can show. A list row is one line high and about sixty characters wide, so
+    /// this is generous rather than tight.
+    ///
+    /// **It is the only PER-ITEM bound `summary` gets anywhere.** `TimelineReader.capped`
+    /// truncates `body.text` and never touches `summary`, so an unbounded preview would escape
+    /// `TimelineLimits.maxItemBytes` entirely — and `prompt` is in the table above, where an
+    /// `Agent` dispatch's first paragraph runs to kilobytes with no newline in it, so the
+    /// first-line rule alone bounds nothing.
+    ///
+    /// The page budget is the one thing that does see it: `TimelineReader.cost(of:)` sums
+    /// `text` AND `summary`, on the rule that every `Body` field whose length a source record
+    /// decides is counted. A preview added on a new path still needs this cap — 200 previews
+    /// to a page is 40 KB — but it will not slip past `maxPageBytes` unmeasured.
+    static let maxSummaryBytes = 200
+
+    /// A one-line row preview, or nil when nothing in the input makes one. Nil is fine: the
+    /// row still has `Body.tool` to render.
+    static func text(for input: [String: Any]) -> String? {
+        for key in previewKeys {
+            guard let value = input[key] as? String else { continue }
+            if let preview = preview(of: value) { return preview }
+        }
+        return nil
+    }
+
+    /// The same rule — first line, trimmed, capped — applied to a value that came from no
+    /// keyed input at all. Codex's `custom_tool_call` carries a bare patch or a bare program
+    /// in `input`, with no JSON object to draw a key from, and its preview still has to be
+    /// bounded: `maxSummaryBytes` is the ONLY bound `summary` gets on either agent's path, so
+    /// a second copy of this logic that forgot `capped` would quietly unbound half of them.
+    static func preview(of text: String) -> String? {
+        let line = text.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? text
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : capped(trimmed)
+    }
+
+    /// Cut on a `Character` boundary so a multi-byte scalar is never halved. No ellipsis is
+    /// added: the cap is a transport bound, and how a row elides is the client's business.
+    private static func capped(_ line: String) -> String {
+        guard line.utf8.count > maxSummaryBytes else { return line }
+        var kept = ""
+        var bytes = 0
+        for character in line {
+            let width = String(character).utf8.count
+            if bytes + width > maxSummaryBytes { break }
+            kept.append(character)
+            bytes += width
+        }
+        return kept
+    }
+
+    /// The whole input, for the detail screen. `sortedKeys` so the same call renders the same
+    /// way every time it is fetched — an unstable key order would make a re-fetched page look
+    /// like a changed one to anything comparing bodies.
+    static func pretty(_ input: Any?) -> String {
+        guard let input,
+              JSONSerialization.isValidJSONObject(input),
+              let data = try? JSONSerialization.data(
+                  withJSONObject: input, options: [.prettyPrinted, .sortedKeys]
+              )
+        else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+}

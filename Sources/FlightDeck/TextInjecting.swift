@@ -24,6 +24,28 @@ protocol TextInjecting: AnyObject {
     /// Ctrl+Y: paste back the most recently killed text.
     func sendYank()
 
+    /// Move a full-screen TUI's option list down one row, as a real key event.
+    ///
+    /// A key event and not text, for exactly the reason `sendReturn()` is one: `sendText` is a
+    /// paste, ghostty wraps a paste in bracketed-paste markers, and an escape sequence inside
+    /// those markers is inserted as literal *content* rather than acted on. An arrow written
+    /// as `ESC [ B` through `sendText` would put five visible characters into a dialog.
+    func sendArrowDown()
+
+    /// The same, upwards. Both directions exist because a list's cursor can start below the
+    /// target — Claude Code focuses a "(Recommended)" option when it has one — so a driver
+    /// that could only go down would wrap or stall.
+    func sendArrowUp()
+
+    /// Escape: refuse the dialog outright.
+    ///
+    /// **This is the whole delivery mechanism for a denial, and it reads nothing.** No
+    /// viewport parse, no marker, no row arithmetic, no confirmation pass — one key event.
+    /// It is the path a worried person reaches for from a pocket, and it is deliberately the
+    /// one path in this feature that cannot be wrong about which row it is on, because it is
+    /// not on a row. See `PromptAnswer.deny`.
+    func sendEscape()
+
     /// The terminal's visible screen, or nil when it cannot be read. Plain text only —
     /// libghostty exposes no cell attributes, which is why `InputBar` cannot tell a
     /// placeholder hint from a real draft.
@@ -59,6 +81,33 @@ extension Ghostty.SurfaceView: TextInjecting {
 
     func sendYank() {
         sendControl(.y, byte: "\u{19}")
+    }
+
+    func sendArrowDown() { sendBareKey(.arrowDown) }
+    func sendArrowUp() { sendBareKey(.arrowUp) }
+    func sendEscape() { sendBareKey(.escape) }
+
+    /// No `text:`, deliberately: none of these has a textual form, and ghostty's own key
+    /// encoder is what turns the keycode into whatever the running program expects — which
+    /// differs by keyboard protocol and is not this file's business to reproduce. Contrast
+    /// `sendControl`, which states its byte because there the mapping is the thing worth
+    /// reading beside the key.
+    ///
+    /// Press *and* release, matching `sendReturn` and `sendControl` — and the release is
+    /// stated to be redundant rather than left looking load-bearing. It was measured: a build
+    /// sending only `.press` moved a real claude permission dialog on a real surface exactly
+    /// as the pair does, because libghostty encodes on press under the legacy keyboard
+    /// protocol. It stays because the Kitty keyboard protocol lets a program subscribe to
+    /// release events too, and such a program is entitled to sit waiting for the other half
+    /// of a keystroke that never arrives.
+    ///
+    /// **No test can catch its removal.** Nothing under XCTest stands on a real surface, so
+    /// deleting the second line breaks nothing in the suite and would be noticed only against
+    /// a running terminal.
+    private func sendBareKey(_ key: Ghostty.Input.Key) {
+        guard let surfaceModel else { return }
+        surfaceModel.sendKeyEvent(.init(key: key, action: .press))
+        surfaceModel.sendKeyEvent(.init(key: key, action: .release))
     }
 
     /// Control keys go the same route as Return, and for the same reason — a control byte

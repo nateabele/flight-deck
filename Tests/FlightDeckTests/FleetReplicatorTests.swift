@@ -108,7 +108,7 @@ final class FleetReplicatorTests: XCTestCase {
             // only, and does not also trip the drift check it is not testing.
             let event = FleetEvent.activityChanged(
                 id: sessionID, activity: i.isMultiple(of: 2) ? "busy" : "idle",
-                waitingFor: nil, subagentCount: 0
+                waitingFor: nil, subagentCount: 0, hasBackgroundWork: false
             )
             truth.apply(event)
             replicator.record([event])
@@ -212,5 +212,25 @@ final class FleetReplicatorTests: XCTestCase {
         truth = fleet(titled: "actual")
         replicator.record([.unreadChanged(id: sessionID, isUnread: true)])
         XCTAssertEqual(replicator.snapshot().fleet, truth)
+    }
+
+    /// Not the fold — `testActivityChangedCarriesBackgroundWorkThroughTheFold` in
+    /// `FleetEventApplicationTests.swift` is that test. This one is the other leg: a registry
+    /// observation reaching the *live* projection `FleetProjection.snapshot(of:)` builds,
+    /// with no event or replicator involved.
+    @MainActor
+    func testBackgroundWorkFromTheRegistryReachesTheLiveProjection() throws {
+        let store = SessionStore(provider: nil, persistence: nil)
+        let session = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory()))
+        store.applyRegistry([1: .init(
+            pid: 1, sessionID: session.pinnedConversationID, activity: .idle, waitingFor: nil,
+            startedAt: 1, cwd: NSTemporaryDirectory(), procStart: "a",
+            reportsBackgroundWork: true)])
+
+        let projected = FleetProjection.snapshot(of: store)
+        let wire = try XCTUnwrap(projected.projects.flatMap(\.sessions)
+            .first { $0.id == session.id })
+        XCTAssertTrue(wire.hasBackgroundWork)
+        XCTAssertEqual(wire.activity, "idle")
     }
 }
