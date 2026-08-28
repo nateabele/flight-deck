@@ -2416,20 +2416,23 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// Rebuilds one recorded tab. Returns true when it is a codex tab whose resume text still
-    /// has to be settled against the app-server and typed afterwards.
+    /// Rebuilds one tab onto an existing conversation and starts it resuming.
     ///
-    /// Every rule here is `restore`'s, and the doc comments there are the explanation:
-    /// a transcript directory that has since gone (a deleted worktree, usually) falls back to
-    /// the project directory so `--resume` runs where claude actually wrote; a tab whose login
-    /// has been deleted is rebuilt but never launched; and codex is typed at only after
-    /// `resumeRestoredCodex` has confirmed its thread still exists.
+    /// Extracted from `reinsertClosed` so ⌘⇧T and ⌘K search share one implementation. Every
+    /// rule here is `restore`'s and is documented there: a transcript directory that has
+    /// gone (a deleted worktree, usually) falls back to the project so `--resume` runs where
+    /// claude actually wrote; a tab whose login was deleted is rebuilt but never launched;
+    /// codex is typed at only after `resumeRestoredCodex` confirms its thread still exists.
+    ///
+    /// Returns true when it is a codex tab whose resume text still has to be settled.
     @discardableResult
-    private func reinsertClosed(
-        _ closed: ClosedSessionHistory.ClosedSession,
+    private func resumeExisting(
+        _ session: Session,
+        inProjectAt projectPath: String,
+        at index: Int?,
         directoryExists: (String) -> Bool
     ) -> Bool {
-        var session = closed.session
+        var session = session
         if !directoryExists(session.transcriptDirectory) {
             session.transcriptDirectory = session.workingDirectory
         }
@@ -2455,11 +2458,94 @@ final class SessionStore: ObservableObject {
 
         insertSession(
             session,
-            in: URL(fileURLWithPath: closed.projectPath, isDirectory: true),
+            in: URL(fileURLWithPath: projectPath, isDirectory: true),
             initialInput: initialInput,
-            at: closed.indexInProject
+            at: index
         )
         return deferred && !orphaned
+    }
+
+    /// Rebuilds one recorded tab. Returns true when it is a codex tab whose resume text still
+    /// has to be settled against the app-server and typed afterwards.
+    ///
+    /// Every rule here is `restore`'s, and the doc comments there are the explanation:
+    /// a transcript directory that has since gone (a deleted worktree, usually) falls back to
+    /// the project directory so `--resume` runs where claude actually wrote; a tab whose login
+    /// has been deleted is rebuilt but never launched; and codex is typed at only after
+    /// `resumeRestoredCodex` has confirmed its thread still exists.
+    @discardableResult
+    private func reinsertClosed(
+        _ closed: ClosedSessionHistory.ClosedSession,
+        directoryExists: (String) -> Bool
+    ) -> Bool {
+        resumeExisting(
+            closed.session,
+            inProjectAt: closed.projectPath,
+            at: closed.indexInProject,
+            directoryExists: directoryExists
+        )
+    }
+
+    /// ⌘K activation. Selects an open tab, or rebuilds one onto a past conversation.
+    ///
+    /// The project is added back when it has left the sidebar, and un-collapsed either way:
+    /// a tab resumed into a collapsed project would come back invisible, since
+    /// `SidebarRow.rows` renders only the header for a collapsed repo. Same reasoning as
+    /// `reopenLastClosed`, which un-collapses for the same reason.
+    func openConversation(
+        _ activation: SearchActivation.Activation,
+        directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) {
+        let projectPath: String
+        let conversationID: String
+        let transcriptDirectory: String
+
+        switch activation {
+        case .select(let id):
+            selectSession(id)
+            return
+        case .resume(let conversation, let project, let directory):
+            projectPath = project; conversationID = conversation; transcriptDirectory = directory
+        case .addProjectThenResume(let project, let conversation, let directory):
+            projectPath = project; conversationID = conversation; transcriptDirectory = directory
+        }
+
+        let url = URL(fileURLWithPath: projectPath, isDirectory: true)
+        // A project row, or a result whose conversation id we never learned: there is
+        // nothing to resume, so land on the project instead of launching a nameless agent.
+        guard let pinned = UUID(uuidString: conversationID) else {
+            if let existing = indexOfRepo(for: url) {
+                repos[existing].isCollapsed = false
+                emit(.projectCollapsed(id: repos[existing].id, isCollapsed: false))
+                if let first = repos[existing].sessions.first { selectedSessionID = first.id }
+            } else {
+                addProject(at: url)
+            }
+            persist()
+            return
+        }
+
+        let session = Session(
+            title: ClaudeSession.sanitizedName(conversationID) ?? "session",
+            workingDirectory: projectPath,
+            transcriptDirectory: transcriptDirectory,
+            pinnedConversationID: pinned
+        )
+        let deferred = resumeExisting(
+            session, inProjectAt: projectPath, at: nil, directoryExists: directoryExists
+        )
+        if let target = indexOfRepo(for: url), repos[target].isCollapsed {
+            repos[target].isCollapsed = false
+            emit(.projectCollapsed(id: repos[target].id, isCollapsed: false))
+        }
+        selectedSessionID = session.id
+        persist()
+
+        if deferred {
+            codexRestoreTask = Task { [weak self] in
+                await self?.resumeRestoredCodex([session.id])
+            }
+        }
     }
     func closeProject(_ id: Repo.ID) {
         guard let index = repos.firstIndex(where: { $0.id == id }) else { return }
