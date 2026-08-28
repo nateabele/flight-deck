@@ -45,15 +45,17 @@ final class SearchPanel: NSPanel {
         hasShadow = false          // the card draws its own; the scrim must not have one
         level = .floating
         isMovable = false
-        // `hidesOnDeactivate` is deliberately left at its default `false`. That flag would
-        // hide the panel behind AppKit's back on app deactivation, leaving `model` still
-        // believing it is open and `host` still holding it as a child window — so the next
-        // ⌘K would call `present(over:)` on an already-parented panel. Deactivation is
-        // instead observed explicitly in `present(over:)` and routed through `dismiss()`,
-        // which keeps the model, the host's child-window list and the screen from diverging.
-        // A search overlay left open behind another app is not something the user is still
-        // using, so dismissing outright — rather than hiding and restoring on reactivation —
-        // is the simpler, and simply correct, choice here.
+        // `NSPanel` defaults `hidesOnDeactivate` to `true` (unlike `NSWindow`, which
+        // defaults it to `false`), so it must be turned off explicitly here. Left at the
+        // default, AppKit would hide the panel behind our back on app deactivation while
+        // `model` still believes it is open and `host` still holds it as a child window —
+        // so the next ⌘K would call `present(over:)` on an already-parented panel — and
+        // AppKit re-orders a hidden-on-deactivate window to the front on reactivation,
+        // which would raise the panel over whatever app the user switched to. Routing
+        // deactivation through the explicit observer below and `dismiss()` instead keeps
+        // this the single teardown path every other exit uses, so the model, the host's
+        // child-window list and the screen can never disagree about whether it is open.
+        hidesOnDeactivate = false
 
         let root = SearchOverlayRoot(
             model: model,
