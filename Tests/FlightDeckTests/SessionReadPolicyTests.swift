@@ -72,7 +72,7 @@ final class SessionReadPolicyTests: XCTestCase {
     /// The guard is "we saw it working", not merely "it is idle now" — so a real completion
     /// still marks even though the launch case above does not.
     func testRealCompletionStillMarksAfterTheLaunchFix() {
-        for from in [SessionActivity.busy, .waiting, .shell] {
+        for from in [SessionActivity.busy, .waiting] {
             XCTAssertEqual(
                 SessionReadPolicy.change(old: status(from), new: status(.idle), isViewed: false),
                 .mark,

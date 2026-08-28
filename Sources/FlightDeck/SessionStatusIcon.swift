@@ -81,8 +81,6 @@ struct SessionStatusIcon: View {
                 .controlSize(.mini)
         case .waiting:
             symbol("questionmark.circle.fill").foregroundStyle(.orange)
-        case .shell:
-            symbol("terminal.fill").foregroundStyle(.green)
         }
     }
 

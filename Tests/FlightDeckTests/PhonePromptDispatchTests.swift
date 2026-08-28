@@ -182,18 +182,6 @@ final class PhonePromptDispatchTests: XCTestCase {
         XCTAssertTrue(spy.events.isEmpty)
     }
 
-    /// The top-level guard no longer summarily refuses `.shell` — it was wrong to, per the
-    /// regression this task exists to fix. This raw enum case never reaches here in
-    /// production: `ClaudeStatusFile.decode` already turns it into `.idle` plus
-    /// `reportsBackgroundWork` before `SessionStore` ever sees it. Directly constructed,
-    /// as here, it clears the top-level guard and queues — `inject`'s own `.idle || .busy`
-    /// whitelist is untouched by this task and is what leaves it queued rather than typed.
-    func testATabAtRawShellActivityClearsTheTopLevelGuard() {
-        let (store, spy, id) = makeStore(activity: .shell)
-        XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .queued)
-        XCTAssertTrue(spy.events.isEmpty)
-    }
-
     func testATabWithNoAgentAtAllIsRefused() {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
         store.transcriptsRootOverride = projectsRoot
