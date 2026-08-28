@@ -8,10 +8,10 @@ extension Notification.Name {
 
 /// The ⌘K menu item.
 ///
-/// In the File menu's `.textEditing` group rather than a menu of its own: it is a find, and
-/// this is where a find belongs. It carries no `.disabled(...)` — a disabled `NSMenuItem`
-/// does not fire its key equivalent, which would silently kill the shortcut, exactly as
-/// `EditCommands` documents.
+/// In the Edit menu's `.textEditing` group (Find/Spelling) rather than a menu of its own: it
+/// is a find, and this is where a find belongs. It carries no `.disabled(...)` — a disabled
+/// `NSMenuItem` does not fire its key equivalent, which would silently kill the shortcut,
+/// exactly as `EditCommands` documents.
 struct SearchCommands: Commands {
     var body: some Commands {
         CommandGroup(after: .textEditing) {

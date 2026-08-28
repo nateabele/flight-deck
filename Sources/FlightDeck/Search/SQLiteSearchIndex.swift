@@ -29,6 +29,21 @@ final class SQLiteSearchIndex: SearchIndex {
 
     private var db: OpaquePointer?
 
+    /// Serialises the transaction-bearing calls (`ingest`, `prune`) on this connection.
+    ///
+    /// Two writers reach this class now: `SearchIndexBuilder`, backfilling from its own
+    /// actor, and `ClaudeRuntime`'s live `onMessages` hook, ingesting from the main actor as
+    /// a session streams. `SQLITE_OPEN_FULLMUTEX` (see `open`) makes any *one* sqlite3 API
+    /// call safe to issue from either thread, but `BEGIN IMMEDIATE ... COMMIT` below is many
+    /// calls treated as one unit — without this lock, one writer's `BEGIN IMMEDIATE` landing
+    /// while the other's transaction is still open fails with "cannot start a transaction
+    /// within a transaction", which the `try?` at both call sites swallows. That is silent
+    /// loss, not corruption: SQLite still has exactly one open transaction on the handle,
+    /// belonging to whichever writer got there first, and the failed writer's entire batch —
+    /// none of it, since the failure is at `BEGIN` itself, before any row is written — never
+    /// lands. See `testConcurrentIngestsDoNotLoseEachOthersMessages`.
+    private let transactionLock = NSLock()
+
     struct Failure: Error { let message: String }
 
     init(at url: URL) throws {
@@ -54,6 +69,8 @@ final class SQLiteSearchIndex: SearchIndex {
     func ingest(
         _ messages: [IndexedMessage], from source: URL, projectPath: String, offset: UInt64?
     ) throws {
+        transactionLock.lock()
+        defer { transactionLock.unlock() }
         try exec("BEGIN IMMEDIATE")
         do {
             // A restart from byte 0 means the transcript was replaced under the same path.
@@ -235,6 +252,8 @@ final class SQLiteSearchIndex: SearchIndex {
         sqlite3_finalize(orphans)
 
         guard !doomed.isEmpty else { return }
+        transactionLock.lock()
+        defer { transactionLock.unlock() }
         try exec("BEGIN IMMEDIATE")
         do {
             for path in doomed { try deleteRows(forSource: URL(fileURLWithPath: path)) }

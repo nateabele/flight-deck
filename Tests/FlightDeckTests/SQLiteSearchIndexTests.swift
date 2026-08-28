@@ -216,4 +216,33 @@ final class SQLiteSearchIndexTests: XCTestCase {
 
         XCTAssertEqual(index.readOffset(for: source("a.jsonl")), 4096)
     }
+
+    /// Two writers reach this index in the real app: `SearchIndexBuilder` backfilling from
+    /// its own actor, and `ClaudeRuntime`'s live `onMessages` hook ingesting from the main
+    /// actor as a session streams. Without `transactionLock`, one writer's `BEGIN IMMEDIATE`
+    /// landing while the other's transaction is still open fails with "cannot start a
+    /// transaction within a transaction" — silently, because both `ingest` call sites use
+    /// `try?` — and the failed writer's entire batch is lost, not partially written, because
+    /// the failure is at `BEGIN` itself, before any row is inserted.
+    ///
+    /// One writer runs detached, the other on the calling thread, each pushing a batch large
+    /// enough (many separate prepare/step/reset calls per row) that its transaction stays
+    /// open long enough for the other's `BEGIN` to have a real chance of landing inside it.
+    func testConcurrentIngestsDoNotLoseEachOthersMessages() async throws {
+        let count = 2000
+        let detachedBatch = (0..<count).map { message("alpha-\($0)", conversation: "cA") }
+        let callerBatch = (0..<count).map { message("beta-\($0)", conversation: "cB") }
+        let index = self.index!
+
+        async let detached: Void = Task.detached {
+            try? index.ingest(
+                detachedBatch, from: self.source("a.jsonl"), projectPath: "/w/fd", offset: nil
+            )
+        }.value
+        try? index.ingest(callerBatch, from: source("b.jsonl"), projectPath: "/w/fd", offset: nil)
+        await detached
+
+        XCTAssertEqual(try index.messageCount(forConversation: "cA"), count)
+        XCTAssertEqual(try index.messageCount(forConversation: "cB"), count)
+    }
 }

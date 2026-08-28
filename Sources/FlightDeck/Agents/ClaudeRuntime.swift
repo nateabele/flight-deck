@@ -66,6 +66,25 @@ final class ClaudeRuntime: AgentRuntime {
                 clock: clock,
                 onTitle: { subscribers.emit(.title($0)) },
                 onSubagentCount: { subscribers.emit(.subagentCount($0)) },
+                // `onMessages` is passed unconditionally, never `nil` — so `wantsMessages` (see
+                // `Scan.read`'s doc comment, which the gate was written to serve) is
+                // permanently true for every Claude session, including in tests and for a
+                // launch whose `SQLiteSearchIndex.init` failed and will never have an index.
+                // Deciding at attach time whether to omit this closure would need to know now
+                // whether `searchIndex()` will EVER return non-nil, which it cannot: nil here
+                // means "not wired up yet" far more often than "never will be" (see the
+                // property comment above), and gating on today's answer would reintroduce the
+                // exact ordering dependency that reading it live was meant to avoid — a
+                // session attached before `AppDelegate.startSearch` runs would silently never
+                // become searchable, forever, not just late.
+                //
+                // The cost of leaving it open is bounded, though: `TranscriptWatcher` decodes
+                // every line's JSON regardless (for titles and subagent counts), so
+                // `TranscriptExtractor.messages(inObject:)` never re-parses — it only does a
+                // few dictionary lookups, a timestamp format, and a trim per line, then the
+                // closure's own guard drops the result for free when `searchIndex()` is nil.
+                // Not the "six hundred lines of tokenizer" cost this feature exists to avoid
+                // elsewhere.
                 onMessages: { [weak self] messages in
                     guard let self, let index = self.searchIndex(), let path = self.projectPath(id)
                     else { return }
