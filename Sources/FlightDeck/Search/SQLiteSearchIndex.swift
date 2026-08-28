@@ -29,7 +29,14 @@ final class SQLiteSearchIndex: SearchIndex {
 
     private var db: OpaquePointer?
 
-    /// Serialises the transaction-bearing calls (`ingest`, `prune`) on this connection.
+    /// Serialises exactly the `BEGIN IMMEDIATE ... COMMIT` spans: the body of `ingest` and
+    /// the delete loop in `prune`. Nothing else takes it — `setConversationName` writes
+    /// outside it, and `prune`'s two `SELECT`s that build `doomed` run outside it too, so a
+    /// concurrent `ingest` can change what they're computed against. Neither is a lock gap
+    /// to close: `setConversationName` is a single autocommit statement SQLite already
+    /// serialises internally, and a `doomed` set computed a moment stale just self-heals on
+    /// the next `prune` pass. Widening the lock to cover them would be solving a problem
+    /// that does not exist; if a future write here stops self-healing, it needs the lock too.
     ///
     /// Two writers reach this class now: `SearchIndexBuilder`, backfilling from its own
     /// actor, and `ClaudeRuntime`'s live `onMessages` hook, ingesting from the main actor as
