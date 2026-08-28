@@ -89,8 +89,11 @@ enum NameMatcher {
                 needleIndex = needle.index(after: needleIndex)
             }
             hayIndex = haystack.index(after: hayIndex)
-            // Guarded because `original` can run out before `haystack` if lowercasing
-            // lengthened the string (ß → ss); the ranges built so far stay valid.
+            // The walk advances two indices in lockstep over a string and its lowercased copy,
+            // on the assumption that both have the same Character count. The guard is what makes
+            // a violated assumption cost the remaining highlight rather than a trap: index(after:)
+            // past endIndex is a crash, and returning the ranges built so far degrades to a
+            // partial underline on a match that is still correct.
             guard originalIndex < original.endIndex else { break }
             originalIndex = original.index(after: originalIndex)
         }

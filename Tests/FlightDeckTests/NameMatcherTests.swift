@@ -66,5 +66,15 @@ final class NameMatcherTests: XCTestCase {
     func testASingleCharacterQueryOnlyMatchesAsAPrefix() {
         XCTAssertEqual(NameMatcher.score("rename-break", against: "r")?.tier, .prefix)
         XCTAssertNil(NameMatcher.score("session-menu", against: "r"))
+        // 'e' occurs in "session-menu" and is not its first character, so it would fuzzy-match
+        // if the floor were removed — which is what makes this assertion a guard on the floor
+        // rather than on the subsequence walk.
+        XCTAssertNil(NameMatcher.score("session-menu", against: "e"))
+    }
+
+    func testTheFuzzyFloorRejectsTwoCharactersAndAcceptsThree() {
+        // Both occur as in-order subsequences of "session-menu"; only the length differs.
+        XCTAssertNil(NameMatcher.score("session-menu", against: "sn"))
+        XCTAssertEqual(NameMatcher.score("session-menu", against: "ssn")?.tier, .fuzzy)
     }
 }
