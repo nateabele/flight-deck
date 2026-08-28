@@ -87,13 +87,26 @@ final class SearchPanel: NSPanel {
         }
 
         // See the `hidesOnDeactivate` comment in `init` for why this dismisses outright
-        // rather than merely hiding.
+        // rather than merely hiding. `restoringFocus: false` — see `dismiss(restoringFocus:)`
+        // — because the whole app is going away here, not just this panel.
         deactivationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.dismiss() }
+        ) { [weak self] _ in self?.dismiss(restoringFocus: false) }
     }
 
-    func dismiss() {
+    /// Esc, the scrim, and activating a result all restore focus to the terminal — this is
+    /// the only public entry point, and it always does.
+    func dismiss() { dismiss(restoringFocus: true) }
+
+    /// - Parameter restoringFocus: Whether to hand first responder back to the host. `true`
+    ///   for every ordinary dismissal: ordering out a key child window leaves the host key but
+    ///   first responder unset, so without this the terminal would go deaf to the next
+    ///   keystroke. `false` only from the deactivation path in `present(over:)` — there the
+    ///   app itself is resigning active, `makeKeyAndOrderFront:` cannot make a window key for
+    ///   an inactive app, but `orderFront:`'s half still runs and can raise the host window at
+    ///   the window-server level (shared across applications), which would make the deck
+    ///   window jump in front of whatever app the user just switched to.
+    private func dismiss(restoringFocus: Bool) {
         guard isPresented else { return }
         isPresented = false
         // Symmetric with what `present(over:)` adds: an observation left running past
@@ -106,10 +119,9 @@ final class SearchPanel: NSPanel {
         model.close()
         host?.removeChildWindow(self)
         orderOut(nil)
-        // Focus has to go back to the terminal explicitly. Ordering out a key child window
-        // leaves the host key but leaves first responder unset, so the next keystroke would
-        // go nowhere.
-        host?.makeKeyAndOrderFront(nil)
+        if restoringFocus {
+            host?.makeKeyAndOrderFront(nil)
+        }
     }
 
     /// Esc closes. Handled here rather than with `.keyboardShortcut(.cancelAction)` because
