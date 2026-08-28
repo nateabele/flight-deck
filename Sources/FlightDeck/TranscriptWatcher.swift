@@ -28,6 +28,9 @@ final class TranscriptWatcher {
     let url: URL
     private let onTitle: (String) -> Void
     private let onSubagentCount: (Int) -> Void
+    /// Reports conversation text to the search index. Optional and defaulted: title-only
+    /// call sites are unaffected, and a watcher built without it does no extra work.
+    private let onMessages: ([IndexedMessage]) -> Void
 
     /// Outstanding top-level `Agent` tool_use ids. Cleared at every turn boundary, which
     /// is what makes a miscount from attaching mid-turn self-correcting rather than
@@ -49,13 +52,15 @@ final class TranscriptWatcher {
         url: URL,
         clock: WatchClock? = nil,
         onTitle: @escaping (String) -> Void,
-        onSubagentCount: @escaping (Int) -> Void = { _ in }
+        onSubagentCount: @escaping (Int) -> Void = { _ in },
+        onMessages: @escaping ([IndexedMessage]) -> Void = { _ in }
     ) {
         self.sessionID = sessionID
         self.url = url
         self.clock = clock
         self.onTitle = onTitle
         self.onSubagentCount = onSubagentCount
+        self.onMessages = onMessages
     }
 
     func start() {
@@ -137,6 +142,7 @@ final class TranscriptWatcher {
 
         if let lastTitle { onTitle(lastTitle) }
         if countChanged { onSubagentCount(outstandingAgents.count) }
+        if !scan.messages.isEmpty { onMessages(scan.messages) }
     }
 }
 
@@ -149,6 +155,13 @@ struct Scan: Sendable {
     var offset: UInt64
     var hasChosenStart: Bool
     var events: [ClaudeSession.TranscriptEvent] = []
+    /// Conversation text found in this pass, for the search index.
+    ///
+    /// Collected here rather than in a second reader because this pass has already paid for
+    /// the two expensive parts — the file read and the JSON parse — and transcript lines are
+    /// large enough (a single assistant record carries whole tool inputs and results) that
+    /// doing either of them twice would be the most expensive thing in the app.
+    var messages: [IndexedMessage] = []
 
     /// Reads and parses everything appended after `offset`.
     ///
@@ -165,6 +178,9 @@ struct Scan: Sendable {
         var result = Scan(offset: tail.offset, hasChosenStart: tail.hasChosenStart)
         for line in tail.lines {
             result.events += ClaudeSession.events(inLine: line, sessionID: sessionID)
+            result.messages += TranscriptExtractor.messages(
+                inLine: line, conversationID: sessionID.uuidString.lowercased()
+            )
         }
         return result
     }
