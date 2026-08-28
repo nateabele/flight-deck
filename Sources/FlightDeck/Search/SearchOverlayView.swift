@@ -30,8 +30,8 @@ enum SearchSnippet {
 /// The card: query field, result rows, footer.
 ///
 /// Every row is a heading plus two lines, uniform across result kinds. The two lines are the
-/// snippet for a transcript hit and the working directory plus agent detail for a name
-/// match — the row must draw immediately either way and never wait on the index.
+/// snippet for a transcript hit and the project path for a name match — the row must draw
+/// immediately either way and never wait on the index.
 struct SearchOverlayView: View {
     @ObservedObject var model: SearchModel
     var onActivate: (SearchResult) -> Void
