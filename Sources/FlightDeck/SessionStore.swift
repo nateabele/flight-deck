@@ -2466,13 +2466,8 @@ final class SessionStore: ObservableObject {
     }
 
     /// Rebuilds one recorded tab. Returns true when it is a codex tab whose resume text still
-    /// has to be settled against the app-server and typed afterwards.
-    ///
-    /// Every rule here is `restore`'s, and the doc comments there are the explanation:
-    /// a transcript directory that has since gone (a deleted worktree, usually) falls back to
-    /// the project directory so `--resume` runs where claude actually wrote; a tab whose login
-    /// has been deleted is rebuilt but never launched; and codex is typed at only after
-    /// `resumeRestoredCodex` has confirmed its thread still exists.
+    /// has to be settled against the app-server and typed afterwards. All the actual rules
+    /// live on `resumeExisting`, which this and `openConversation` share.
     @discardableResult
     private func reinsertClosed(
         _ closed: ClosedSessionHistory.ClosedSession,
@@ -2486,6 +2481,38 @@ final class SessionStore: ObservableObject {
         )
     }
 
+    /// The literal directory a past conversation should resume into: the project itself, or
+    /// one of its worktrees, whichever one's *encoded* `~/.claude/projects` directory
+    /// actually holds `<conversationID>.jsonl`.
+    ///
+    /// `SearchResult.projectPath` only ever names the sidebar project — nothing in a search
+    /// result identifies which literal worktree a conversation ran in, because
+    /// `SearchCorpus`'s encoding is one-way (see its doc comment) — so this re-derives the
+    /// answer independently rather than trusting anything upstream. Falls back to the
+    /// project path when no candidate's transcript exists: a conversation whose worktree was
+    /// deleted since it last ran resumes at the project root rather than not resuming at all,
+    /// same fallback shape as `resumeExisting`'s own "directory gone" rule below.
+    /// `nonisolated`, not merely `private`: it is called from `openConversation`'s default
+    /// argument, which is evaluated at the call site and is not itself actor-isolated even
+    /// though `SessionStore` is — and the function touches no actor state anyway, only its
+    /// own injected closures.
+    private nonisolated static func resolvedTranscriptDirectory(
+        projectPath: String,
+        conversationID: UUID,
+        listing: (String) -> [String] = SearchCorpus.defaultListing,
+        projectsRoot: URL = ClaudeSession.defaultProjectsRoot,
+        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> String {
+        let candidates = SearchCorpus.candidateWorkingDirectories(
+            forProjectAt: projectPath, listing: listing
+        )
+        return candidates.first {
+            exists(ClaudeSession.transcriptURL(
+                sessionID: conversationID, workingDirectory: $0, projectsRoot: projectsRoot
+            ).path)
+        } ?? projectPath
+    }
+
     /// ⌘K activation. Selects an open tab, or rebuilds one onto a past conversation.
     ///
     /// The project is added back when it has left the sidebar, and un-collapsed either way:
@@ -2494,20 +2521,23 @@ final class SessionStore: ObservableObject {
     /// `reopenLastClosed`, which un-collapses for the same reason.
     func openConversation(
         _ activation: SearchActivation.Activation,
-        directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+        directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        resolveTranscriptDirectory: (String, UUID) -> String = {
+            SessionStore.resolvedTranscriptDirectory(projectPath: $0, conversationID: $1)
+        }
     ) {
         let projectPath: String
         let conversationID: String
-        let transcriptDirectory: String
+        let title: String
 
         switch activation {
         case .select(let id):
             selectSession(id)
             return
-        case .resume(let conversation, let project, let directory):
-            projectPath = project; conversationID = conversation; transcriptDirectory = directory
-        case .addProjectThenResume(let project, let conversation, let directory):
-            projectPath = project; conversationID = conversation; transcriptDirectory = directory
+        case .resume(let conversation, let project, let resultTitle, _):
+            projectPath = project; conversationID = conversation; title = resultTitle
+        case .addProjectThenResume(let project, let conversation, let resultTitle, _):
+            projectPath = project; conversationID = conversation; title = resultTitle
         }
 
         let url = URL(fileURLWithPath: projectPath, isDirectory: true)
@@ -2515,8 +2545,10 @@ final class SessionStore: ObservableObject {
         // nothing to resume, so land on the project instead of launching a nameless agent.
         guard let pinned = UUID(uuidString: conversationID) else {
             if let existing = indexOfRepo(for: url) {
-                repos[existing].isCollapsed = false
-                emit(.projectCollapsed(id: repos[existing].id, isCollapsed: false))
+                if repos[existing].isCollapsed {
+                    repos[existing].isCollapsed = false
+                    emit(.projectCollapsed(id: repos[existing].id, isCollapsed: false))
+                }
                 if let first = repos[existing].sessions.first { selectedSessionID = first.id }
             } else {
                 addProject(at: url)
@@ -2525,11 +2557,39 @@ final class SessionStore: ObservableObject {
             return
         }
 
+        // Enforced here too, not only inside `SearchActivation.plan`: a caller that fills
+        // `plan`'s `openSessions` wrong — exactly the case-mismatch bug the `UUID` typing on
+        // `ActiveSession.conversationID` exists to prevent — must not be trusted blind, or a
+        // second `claude --resume` starts on a conversation that already has a tab, two
+        // processes appending one transcript and colliding in claude's pid-keyed registry.
+        if let live = repos.flatMap(\.sessions).first(where: { $0.pinnedConversationID == pinned }) {
+            selectSession(live.id)
+            return
+        }
+
+        // Resolved before anything is filed, the same as `newSession`: nil would mean "the
+        // built-in home" forever, which is correct only until this project's login is set or
+        // changes — the silent wrong-login substitution `newSession`'s own comment refuses.
+        let account: AgentAccount?
+        switch launchAccount(for: .claude, project: projectPath) {
+        case .success(let resolved): account = resolved
+        case .failure(let error):
+            launchFailureReporter.report(error)
+            return
+        }
+
         let session = Session(
-            title: ClaudeSession.sanitizedName(conversationID) ?? "session",
+            // Falls back to the id only when the title sanitizes to nothing usable — not
+            // when it merely differs from the id — so a tab found *by name* comes back
+            // called that name rather than a raw UUID nobody could self-heal: `TailReader`
+            // starts at end-of-file, so the transcript's own `custom-title` record already
+            // written is never re-read.
+            title: ClaudeSession.sanitizedName(title) ?? ClaudeSession.sanitizedName(conversationID)
+                ?? "session",
             workingDirectory: projectPath,
-            transcriptDirectory: transcriptDirectory,
-            pinnedConversationID: pinned
+            transcriptDirectory: resolveTranscriptDirectory(projectPath, pinned),
+            pinnedConversationID: pinned,
+            accountID: account?.id
         )
         let deferred = resumeExisting(
             session, inProjectAt: projectPath, at: nil, directoryExists: directoryExists
