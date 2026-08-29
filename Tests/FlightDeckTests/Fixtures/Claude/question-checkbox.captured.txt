@@ -1,0 +1,26 @@
+ ▐▛███▛█   Claude Code v2.1.251                                                                                                         
+▝▜██████▀  Opus 5 (1M context) · Claude Max                                                                                             
+  ▝▝ ▝▝    /…/-Users-nate-Projects-Protos-n-Tools-flight-deck/020c217b-d41c-4d19-9f72-efe84f546ebb/scratchpad/capture-workspace         
+                                                                                                                                        
+                                                                                                                                        
+❯ Use the AskUserQuestion tool, with multiSelect set to true on the question, to ask me which snacks I would want on a long flight.     
+  Offer four options, each with a short description. Do nothing else, just ask.                                                         
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Snacks  ✔ Submit  →                                                                                                                
+                                                                                                                                        
+Which snacks would you want on a long flight?                                                                                           
+                                                                                                                                        
+❯ 1. [ ] Trail mix                                                                                                                      
+  Nuts, dried fruit, and a few chocolate pieces — filling, no crumbs, keeps well in a bag.                                              
+  2. [ ] Beef jerky                                                                                                                     
+  Salty protein that doesn't need refrigeration and holds off hunger between meal services.                                             
+  3. [ ] Dark chocolate                                                                                                                 
+  A small bar for a slow treat — sweet without the sugar crash of candy.                                                                
+  4. [ ] Fresh fruit                                                                                                                    
+  Apple slices or grapes — hydrating and a break from all the dry, salty airplane food.                                                 
+  5. [ ] Type something                                                                                                                 
+     Submit                                                                                                                             
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  6. Chat about this                                                                                                                    
+                                                                                                                                        
+Enter to select · ↑/↓ to navigate · Esc to cancel
