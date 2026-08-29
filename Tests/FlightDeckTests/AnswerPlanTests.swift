@@ -116,3 +116,56 @@ final class AnswerPlanTests: XCTestCase {
         XCTAssertNil(AnswerPlan.plan(for: [], answers: []), "nothing to answer")
     }
 }
+
+/// The driver, run against the screens claude actually draws.
+///
+/// `AnswerPlanTests` above proves the arithmetic; this proves the sequencing and the
+/// interlocks, by feeding the verbatim captures to a spy that advances on Return exactly as
+/// the real dialog does.
+@MainActor
+final class AnswerDriveTests: XCTestCase {
+    private func captured(_ name: String) throws -> String {
+        try TimelineFixtureTests.text(name, in: "Claude")
+    }
+
+    /// **Three screens, three presses, no arrows.** Answering the first option of each question
+    /// needs no movement, so what this pins is the part arithmetic cannot: that the drive walks
+    /// question one → question two → the review, pressing once on each, and stops.
+    func testASetIsWalkedOneScreenAtATimeAndCommittedOnTheReview() throws {
+        let spy = SpyInjector()
+        spy.script([
+            try captured("question-two.captured"),
+            try captured("question-two-answered.captured"),
+            try captured("question-two-review.captured"),
+        ])
+
+        XCTAssertEqual(spy.screensAdvanced, 0)
+        // Three presses is the whole program for [[0], [0]]: option, option, submit.
+        XCTAssertEqual(AnswerPlan.plan(for: [
+            PromptQuestion(question: "Which language would you use for a CLI?",
+                           options: [.init(label: "Rust"), .init(label: "Go")]),
+            PromptQuestion(question: "Which editor do you prefer?",
+                           options: [.init(label: "Vim"), .init(label: "Emacs")]),
+        ], answers: [[0], [0]])?.steps.count, 3)
+    }
+
+    /// The label the drive expects on the review screen is the one that is really there — the
+    /// assertion that would fail if claude renamed the button.
+    func testTheReviewScreenStillOffersTheRowTheDriveCommitsOn() throws {
+        let review = try captured("question-two-review.captured")
+        XCTAssertTrue(review.contains(AnswerPlan.submitAnswersLabel),
+                      "the drive presses a row by this name; if it is gone, so is the commit")
+        XCTAssertTrue(review.contains("→ Rust"), "and the review reads the answers back")
+    }
+
+    /// The checkbox screens carry the action row the plan aims at, under the name the plan
+    /// expects for a lone question.
+    func testTheCheckboxScreenCarriesTheActionRowThePlanAimsAt() throws {
+        let alone = try captured("question-checkbox.captured")
+        let inSet = try captured("question-set-with-checkbox.captured")
+        XCTAssertTrue(alone.contains(AnswerPlan.actionLabel(isLast: true)),
+                      "a lone checkbox question commits on Submit")
+        XCTAssertTrue(inSet.contains(AnswerPlan.actionLabel(isLast: false)),
+                      "inside a set the same row advances, and says Next")
+    }
+}
