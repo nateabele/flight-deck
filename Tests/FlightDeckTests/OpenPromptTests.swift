@@ -282,15 +282,18 @@ final class OpenPromptTests: XCTestCase {
     ///
     /// The fixture is a real `multiSelect: true` call, not the single-select one with its flag
     /// flipped.
-    func testAMultiSelectQuestionIsCarriedButNotAnswerable() throws {
+    func testAMultiSelectQuestionIsCarriedAsAShapeItCanBeAnsweredBy() throws {
         let question = try XCTUnwrap(
             PromptQuestion(toolInput: try Self.capturedInput("question-multi.captured"))
         )
         XCTAssertEqual(question.header, "Snacks")
         XCTAssertEqual(question.options.map(\.label),
                        ["Trail mix", "Dark chocolate", "Beef jerky", "Fresh fruit"])
-        XCTAssertFalse(question.isAnswerable)
-        XCTAssertEqual(question.unanswerable, PromptQuestion.multiSelectReason)
+        // A shape, not a refusal: `multiSelect` says the answer is a set of boxes to tick,
+        // and the driver ticks them. It used to be the reason the card went read-only.
+        XCTAssertTrue(question.multiSelect)
+        XCTAssertTrue(question.isAnswerable)
+        XCTAssertNil(question.unanswerable)
     }
 
     /// Two real questions in one `questions` array — **from a real capture now**. This used to
@@ -317,12 +320,13 @@ final class OpenPromptTests: XCTestCase {
                           + "answered from here yet, and that is not this type's judgement")
     }
 
-    /// The set-level refusal, where it actually lives.
-    func testAMultiSelectQuestionStillAnswersOnlyForItself() throws {
+    /// One question that takes several answers is still ONE question — the count is about the
+    /// `questions` array, never about how many boxes may be ticked in one of them.
+    func testAMultiSelectQuestionIsOneQuestionNotSeveral() throws {
         let input = try Self.capturedInput("question-multi.captured")
         let questions = PromptQuestion.all(toolInput: input)
         XCTAssertEqual(questions.count, 1)
-        XCTAssertEqual(questions[0].unanswerable, PromptQuestion.multiSelectReason)
+        XCTAssertTrue(questions[0].multiSelect)
     }
 
     /// A body cut at `TimelineLimits.maxItemBytes` is the ordinary state of a large tool input,
