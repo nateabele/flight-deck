@@ -320,11 +320,55 @@ struct FleetListScreen: View {
         Self.agentGroups(in: options)
     }
 
+    /// The leading swipe button's label and behaviour for one session — the same job as
+    /// `agentGroups(in:)` above: a pure decision pulled out of the row so the unit suite can
+    /// assert it without rendering the thing that reads it.
+    struct UnreadAction: Equatable {
+        let title: String
+        let systemImage: String
+        let marksUnread: Bool
+    }
+
+    static func unreadAction(for session: WireSession) -> UnreadAction {
+        session.isUnread
+            ? UnreadAction(title: "Read", systemImage: "circle", marksUnread: false)
+            : UnreadAction(title: "Unread", systemImage: "circle.fill", marksUnread: true)
+    }
+
     private func sessionRow(_ session: WireSession) -> some View {
         NavigationLink(value: session.id) {
             row(session)
         }
         .listRowInsets(Self.rowInsets)
+        // `allowsFullSwipe: true`, the mirror image of the trailing lane's `false` below —
+        // and for the mirror-image reason. Unread/read is a fact, and the same flick that set
+        // it puts it back, so the deliberateness a required tap buys the destructive lane is
+        // not worth charging for here: there is nothing this button does that a second full
+        // swipe cannot undo.
+        //
+        // **Why a toggle, not a bare "Mark as Unread" button.** The read mark is set
+        // automatically the moment a conversation reaches the screen — see this function's own
+        // doc comment above, "the read mark has moved to `SessionTimelineModel.open()`". So
+        // without a way to mark read again from this list, the only way to undo an accidental
+        // Unread swipe is to open the session, which is the one thing the reader swiped to
+        // avoid doing. The toggle makes the gesture its own undo.
+        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+            let unread = Self.unreadAction(for: session)
+            Button {
+                unread.marksUnread ? model.markUnread(session.id) : model.markRead(session.id)
+            } label: {
+                Label(unread.title, systemImage: unread.systemImage)
+            }
+            .tint(.blue)
+            // Second, not first: staying off the full swipe above is correct here, because
+            // this opens a text prompt rather than restoring a fact the same gesture undoes.
+            Button {
+                renaming = Renaming(id: session.id, title: session.title)
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+            .tint(.indigo)
+        }
         // `allowsFullSwipe: false`, which is the whole safety story for this gesture. A full
         // swipe closes on release with nothing in between, and this is the one action on the
         // screen that destroys something — a flick while scrolling a list of live sessions
@@ -337,15 +381,22 @@ struct FleetListScreen: View {
                 Label("Close", systemImage: "xmark")
             }
         }
-        // Long press. A `contextMenu` rather than more swipe actions: the swipe lane is for
-        // the one destructive verb and does not want three more, and a menu is what the Mac
-        // puts these on.
+        // Long press, for the rest. The trailing lane above still holds exactly one
+        // destructive verb and nothing else — that has not changed. A second lane, on the
+        // *leading* edge, is a different judgement, made above; the menu stays regardless,
+        // because it is the discoverable route — a reader finds it by holding a row — and the
+        // place a Mac reader already knows to look.
         //
         // **The items, their order and the divider all mirror `SessionSidebar`'s menu**, and
         // the mirroring is the point rather than a coincidence: this is the same fleet seen
         // from a second screen, and a reader who knows where "Mark as Unread" sits on the Mac
         // should not have to learn a second arrangement to find it here.
         .contextMenu {
+            // Plain, not a toggle like the swipe lane's version of this same action above: a
+            // menu shows every verb at once and can afford one that only ever means one thing,
+            // where a swipe lane shows a single button in a single slot and would be spending
+            // it on a no-op most of the time. Matches `SessionSidebar.swift:276` on the Mac,
+            // which keeps the same asymmetry for the same reason.
             Button {
                 model.markUnread(session.id)
             } label: {
