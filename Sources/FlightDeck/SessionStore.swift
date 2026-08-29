@@ -3445,6 +3445,12 @@ final class SessionStore: ObservableObject {
                 return .unanswerable
             }
             guard question.isAnswerable else { return .unanswerable }
+            // **`.option` is a commit, and a checkbox row is not.** On a multiSelect question
+            // Enter TOGGLES and stays put (`question-checkbox-toggled.captured.txt`), so this
+            // path would tick one box, believe it had answered, and leave the dialog open. A
+            // checkbox question is answered through the whole-set payload, which knows to
+            // press the action row afterwards.
+            guard !question.multiSelect else { return .unanswerable }
             // The client's label against the Mac's own copy, before any screen is consulted.
             // A phone naming words this transcript never carried is a reader looking at
             // something else, and its index is not to be trusted either.
