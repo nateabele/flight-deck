@@ -68,12 +68,15 @@ struct SessionStatusIcon: View {
                 // the way Mail's unread dot does.
                 symbol("circle.fill").foregroundStyle(Color.accentColor)
             } else {
-                // `.secondary` (α≈0.50 light / 0.55 dark) knocked back 20%, landing near
-                // α 0.40/0.44. Applied as view opacity on top of the *semantic* colour rather
-                // than as a literal grey, so it still adapts to light/dark and to the
-                // accessibility contrast settings. The next semantic step down, `.tertiary`,
-                // was measured at α≈0.26 — roughly half again, which reads as disabled.
-                symbol("circle.fill").foregroundStyle(.secondary).opacity(0.8)
+                // Ten percent off whatever it sits on, and no more. A read idle session is the
+                // sidebar's resting state, so this dot is on nearly every row at once — at any
+                // stronger tint the column reads as noise rather than as status. `.primary` at
+                // α 0.10 rather than a literal grey so it tracks light/dark *and* the row's own
+                // background: inside a selected row the hierarchical style resolves against the
+                // selection fill, keeping the dot the same 10% step off its background there as
+                // on an unselected one. Deliberately near-invisible; the tooltip and the
+                // accessibility label are what actually carry the state.
+                symbol("circle.fill").foregroundStyle(.primary).opacity(0.1)
             }
         case .busy:
             ProgressView()
