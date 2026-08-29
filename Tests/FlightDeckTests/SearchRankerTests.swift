@@ -109,6 +109,31 @@ final class SearchRankerTests: XCTestCase {
         XCTAssertTrue(results[1].highlightedRanges.isEmpty)
     }
 
+    /// A conversation with many matching messages contributes a short, adjacent group — not a
+    /// row per match, which read as the same session listed over and over.
+    func testAConversationsMatchesAreCappedAndGroupedTogether() {
+        let results = SearchRanker.rank(
+            names: [],
+            query: "rename",
+            transcripts: [
+                // `activity` counts backwards — it is seconds ago — so mobile-ui's leading hit
+                // is the more recent of the two conversations and its group sorts first.
+                hit("mobile-ui", snippet: "best", activity: 1),
+                hit("mobile-ui", snippet: "second", activity: 2),
+                hit("mobile-ui", snippet: "third", activity: 3),
+                hit("mobile-ui", snippet: "dropped", activity: 4),
+                hit("tailscale", snippet: "elsewhere", activity: 9),
+            ]
+        )
+
+        XCTAssertEqual(results.count, SearchRanker.maxMatchesPerConversation + 1)
+        // Adjacent, and in the order the index returned them (BM25 relevance).
+        XCTAssertEqual(results.map(\.title), ["mobile-ui", "mobile-ui", "mobile-ui", "tailscale"])
+        XCTAssertEqual(results.map(\.snippet), ["best", "second", "third", "elsewhere"])
+        // Only the group leader carries a heading; the rest draw indented and headless.
+        XCTAssertEqual(results.map(\.isContinuation), [false, true, true, false])
+    }
+
     func testNamesThatDoNotMatchAreExcluded() {
         let results = SearchRanker.rank(
             names: [session("wifi", activity: 1), session("rename", activity: 2)],

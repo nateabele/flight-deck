@@ -21,6 +21,7 @@ import SwiftUI
 final class SearchPanel: NSPanel {
     private let model: SearchModel
     private weak var host: NSWindow?
+    private var keyMonitor: Any?
     /// Guards `present`/`dismiss` against being called out of turn: a second `present` before
     /// a matching `dismiss` would re-register this panel as the host's child window, and Esc
     /// can reach `dismiss` twice for one keypress (`cancelOperation` and SwiftUI's
@@ -76,6 +77,7 @@ final class SearchPanel: NSPanel {
         self.host = host
         setFrame(host.frame, display: false)
         host.addChildWindow(self, ordered: .above)
+        startKeyMonitor(model: model)
         model.open()
         makeKeyAndOrderFront(nil)
 
@@ -118,11 +120,34 @@ final class SearchPanel: NSPanel {
         resizeObserver = nil
         deactivationObserver = nil
 
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
         model.close()
         host?.removeChildWindow(self)
         orderOut(nil)
         if restoringFocus {
             host?.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Up and down move the highlight while the query field keeps focus.
+    ///
+    /// SwiftUI's `.onMoveCommand` never fires here: the panel's first responder is the search
+    /// field, and the field consumes the arrow keys as text navigation before any enclosing view
+    /// sees them — so the list could not be arrowed through at all. A local monitor sits ahead of
+    /// the responder chain and claims exactly the two keycodes, returning nil so the field never
+    /// receives them, and passes everything else through untouched.
+    ///
+    /// Local, not global: it only sees this process's events and needs no accessibility
+    /// permission. Installed on present and removed on dismiss, so a dismissed panel is not still
+    /// eating arrow keys the terminal wants.
+    private func startKeyMonitor(model: SearchModel) {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            switch event.keyCode {
+            case 126: model.moveSelection(by: -1); return nil   // up arrow
+            case 125: model.moveSelection(by: 1); return nil    // down arrow
+            default: return event
+            }
         }
     }
 
@@ -147,7 +172,16 @@ private struct SearchOverlayRoot: View {
 
             GeometryReader { geometry in
                 SearchOverlayView(model: model, onActivate: onActivate, onDismiss: onDismiss)
-                    .position(x: geometry.size.width / 2, y: geometry.size.height * 0.18)
+                    // Top-anchored, NOT `.position`. `.position` places a view's CENTRE at the
+                    // given point, so as the card grew with the result count its top climbed
+                    // past the window and clipped — the query field itself could go off screen,
+                    // which is the one part that must never be hidden. Offsetting a
+                    // top-aligned frame instead pins the top edge and lets the card grow
+                    // downward, and `min` keeps it on screen when the window is short enough
+                    // that even 18% would push the bottom off.
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, min(geometry.size.height * 0.18,
+                                       max(0, geometry.size.height - 120)))
             }
         }
         // Arrow keys move the highlight. `onMoveCommand` rather than a key monitor: it is

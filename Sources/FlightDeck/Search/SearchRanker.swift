@@ -35,36 +35,86 @@ enum SearchRanker {
             return SearchResult(candidate: candidate, tier: match.tier, ranges: match.matchedRanges)
         }
 
-        results += transcripts.map { hit in
-            SearchResult(
-                // `hit.rowID` is `message.id`, unique per row unlike `(conversationID,
-                // timestamp)` — see the `TranscriptHit.rowID` doc comment for why that
-                // pair collides.
-                id: "\(hit.conversationID)#\(hit.rowID)",
-                kind: .conversation(hit.conversationID),
-                title: hit.conversationName,
-                projectName: URL(fileURLWithPath: hit.projectPath).lastPathComponent,
-                projectPath: hit.projectPath,
-                tier: .transcript,
-                recency: hit.timestamp,
-                highlightedRanges: [],
-                snippet: hit.snippet,
-                conversationID: hit.conversationID
-            )
+        // Transcript hits are GROUPED by conversation, not listed flat.
+        //
+        // The index answers per message, so a conversation mentioning the query twenty times
+        // produced twenty rows, every one carrying the same `name · project` heading — reading as
+        // the same session repeated, and crowding every other conversation off screen.
+        //
+        // Each conversation now contributes at most `maxMatchesPerConversation` adjacent rows:
+        // the first carries the heading, the rest are continuations the row view draws indented
+        // and headless. They stay separate rows rather than becoming one multi-line row so that
+        // arrow-key navigation still steps through individual matches, and so activating any of
+        // them is the same one-Return gesture.
+        //
+        // Order within a group is the order the index returned, which is BM25 relevance — so the
+        // heading row is the strongest moment in that conversation, and the cap drops the weakest
+        // rather than an arbitrary few.
+        var order: [String] = []
+        var byConversation: [String: [TranscriptHit]] = [:]
+        for hit in transcripts {
+            if byConversation[hit.conversationID] == nil { order.append(hit.conversationID) }
+            byConversation[hit.conversationID, default: []].append(hit)
         }
 
-        return results.sorted { lhs, rhs in
-            if lhs.tier != rhs.tier { return lhs.tier < rhs.tier }
-            // Sessions before projects at equal tier: the deck is session-centric, and
-            // activating a result opens a session either way, so a session is the likelier
-            // intent when both names match equally well.
-            if lhs.kindRank != rhs.kindRank { return lhs.kindRank < rhs.kindRank }
-            if lhs.recency != rhs.recency { return lhs.recency > rhs.recency }
-            // Total order. Without this, two candidates identical in tier and timestamp sort
-            // unstably and the list reshuffles between identical keystrokes — exactly the
-            // jitter the stable-selection property exists to prevent.
-            return lhs.id < rhs.id
+        // Groups are ordered by their best hit under the same rules a name match gets: recency
+        // decides, with the id as the total-order tiebreak so identical keystrokes cannot
+        // reshuffle the list.
+        let groups: [[TranscriptHit]] = order
+            .compactMap { byConversation[$0] }
+            .sorted { lhs, rhs in
+                guard let a = lhs.first, let b = rhs.first else { return false }
+                if a.timestamp != b.timestamp { return a.timestamp > b.timestamp }
+                return a.conversationID < b.conversationID
+            }
+
+        var grouped: [SearchResult] = []
+        for group in groups {
+            for (offset, hit) in group.prefix(maxMatchesPerConversation).enumerated() {
+                grouped.append(SearchResult(
+                    // `hit.rowID` is `message.id`, unique per row unlike `(conversationID,
+                    // timestamp)` — see the `TranscriptHit.rowID` doc comment for why that
+                    // pair collides.
+                    id: "\(hit.conversationID)#\(hit.rowID)",
+                    kind: .conversation(hit.conversationID),
+                    title: hit.conversationName,
+                    projectName: URL(fileURLWithPath: hit.projectPath).lastPathComponent,
+                    projectPath: hit.projectPath,
+                    tier: .transcript,
+                    recency: hit.timestamp,
+                    highlightedRanges: [],
+                    snippet: hit.snippet,
+                    conversationID: hit.conversationID,
+                    isContinuation: offset > 0
+                ))
+            }
         }
+
+        // Names are sorted; the grouped block is appended whole. Sorting everything together
+        // would interleave conversations and break the grouping, and it is safe to append
+        // because `.transcript` is unconditionally the last tier — the property that also lets
+        // late-arriving results append below the highlighted row without moving it.
+        return results.sorted(by: byTierThenRecency) + grouped
+    }
+
+    /// How many matches one conversation may contribute before the rest are dropped.
+    ///
+    /// Three is deliberately small. The point of showing more than one is evidence that the
+    /// conversation is the right one; past a few, extra matches stop informing that judgement and
+    /// start pushing other conversations out of the visible rows.
+    static let maxMatchesPerConversation = 3
+
+    private static func byTierThenRecency(_ lhs: SearchResult, _ rhs: SearchResult) -> Bool {
+        if lhs.tier != rhs.tier { return lhs.tier < rhs.tier }
+        // Sessions before projects at equal tier: the deck is session-centric, and activating a
+        // result opens a session either way, so a session is the likelier intent when both names
+        // match equally well.
+        if lhs.kindRank != rhs.kindRank { return lhs.kindRank < rhs.kindRank }
+        if lhs.recency != rhs.recency { return lhs.recency > rhs.recency }
+        // Total order. Without this, two candidates identical in tier and timestamp sort
+        // unstably and the list reshuffles between identical keystrokes — exactly the jitter
+        // the stable-selection property exists to prevent.
+        return lhs.id < rhs.id
     }
 
     private static func recencyThenID(_ lhs: NameCandidate, _ rhs: NameCandidate) -> Bool {

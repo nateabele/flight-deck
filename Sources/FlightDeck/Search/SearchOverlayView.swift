@@ -129,16 +129,27 @@ private struct SearchResultRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: symbol)
+            // Continuations show no icon and indent instead, so a group reads as one block
+            // belonging to the heading above it rather than as unrelated rows that happen to
+            // sit together.
+            Image(systemName: result.isContinuation ? "text.line.first.and.arrowtriangle.forward" : symbol)
                 .font(.system(size: 12))
-                .foregroundStyle(isSelected ? .primary : .secondary)
+                .foregroundStyle(isSelected ? .primary : .tertiary)
+                .opacity(result.isContinuation ? 0.5 : 1)
                 .frame(width: 16)
+                .padding(.leading, result.isContinuation ? 18 : 0)
                 .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 7) {
-                    Text(highlightedTitle).font(.system(size: 13, weight: .semibold))
-                    Text(result.projectName).font(.system(size: 11)).foregroundStyle(.secondary)
+                // A continuation is the 2nd or 3rd match from the SAME conversation, so it
+                // deliberately omits the heading its group leader already carries. Repeating it
+                // is what made one chatty conversation read as the same session listed over and
+                // over — the bug this grouping exists to fix.
+                if !result.isContinuation {
+                    HStack(spacing: 7) {
+                        Text(highlightedTitle).font(.system(size: 13, weight: .semibold))
+                        Text(result.projectName).font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
                 }
                 Text(detail)
                     .font(.system(size: 11))

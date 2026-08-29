@@ -59,4 +59,12 @@ struct SearchResult: Identifiable, Equatable {
     /// The two-line extract, with FTS5 sentinels. nil for name matches.
     let snippet: String?
     let conversationID: String?
+    /// True for the second and later matches shown from the SAME conversation.
+    ///
+    /// Transcript hits are grouped: the first row for a conversation carries its `name · project`
+    /// heading and the rest are continuations, drawn indented and headless. Without this every
+    /// row repeated the same heading, so one chatty conversation read as the same session listed
+    /// over and over. It is a display flag only — a continuation is still an independently
+    /// selectable row with its own id, so arrow-key navigation is unaffected.
+    var isContinuation: Bool = false
 }
