@@ -56,6 +56,7 @@ struct PromptCard: View {
     private func choose(question: Int, option: Int, multiSelect: Bool, call: String) {
         if picksFor != call {
             picks = [:]
+            page = 0
             picksFor = call
         }
         var chosen = picks[question, default: []]
@@ -67,31 +68,49 @@ struct PromptCard: View {
         picks[question] = chosen
     }
 
-    /// The commit, offered only once every question has an answer.
+    /// Back, and the button that either advances or commits.
     ///
-    /// **Disabled rather than hidden while the set is incomplete**, so the reader can see that
-    /// something is still owed rather than wondering where the button went. The Mac refuses an
-    /// incomplete set too — `AnswerPlan.plan` returns nil — so this is the courteous half of a
-    /// rule enforced on both sides.
+    /// **The commit only appears on the last question**, and only lights once every question
+    /// has an answer. A reader who skipped one is told by the dots above rather than by a
+    /// button that silently does nothing; the Mac refuses an incomplete set as well
+    /// (`AnswerPlan.plan` returns nil), so this is the courteous half of a rule enforced twice.
     @ViewBuilder
-    private func sendAnswers(
-        call: String, questions: [PromptQuestion], enabled: Bool
+    private func navigation(
+        call: String, questions: [PromptQuestion], index: Int, isLast: Bool, enabled: Bool
     ) -> some View {
         let complete = picksFor == call
             && questions.indices.allSatisfy { !picks[$0, default: []].isEmpty }
-        Button {
-            let selections = questions.indices.map { index in
-                picks[index, default: []].sorted().map {
-                    AnswerSelection(index: $0, label: questions[index].options[$0].label)
+        let answeredHere = !picks[index, default: []].isEmpty
+        HStack(spacing: 8) {
+            if index > 0 {
+                Button { page = index - 1 } label: {
+                    Label("Back", systemImage: "chevron.left").font(.footnote)
                 }
+                .buttonStyle(.bordered)
             }
-            model.answerSet(selections, to: call)
-        } label: {
-            Text(questions.count == 1 ? "Send answer" : "Send answers")
-                .frame(maxWidth: .infinity)
+            if isLast {
+                Button {
+                    let selections = questions.indices.map { question in
+                        picks[question, default: []].sorted().map {
+                            AnswerSelection(index: $0,
+                                            label: questions[question].options[$0].label)
+                        }
+                    }
+                    model.answerSet(selections, to: call)
+                } label: {
+                    Text(questions.count == 1 ? "Send answer" : "Send answers")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!enabled || !complete)
+            } else {
+                Button { page = index + 1 } label: {
+                    Text("Next").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!enabled || !answeredHere)
+            }
         }
-        .buttonStyle(.borderedProminent)
-        .disabled(!enabled || !complete)
         .padding(.top, 2)
     }
 
@@ -167,6 +186,9 @@ struct PromptCard: View {
     /// no longer looking at.
     @State private var picks: [Int: Set<Int>] = [:]
     @State private var picksFor: String?
+    /// Which question is on screen. Reset with the picks, for the same reason: a page left
+    /// over from the last dialog would open this one part-way through.
+    @State private var page = 0
 
     var body: some View {
         if let open {
@@ -222,41 +244,71 @@ struct PromptCard: View {
         let enabled = Self.showsControls(for: open, state: state)
         switch open {
         case .question(let call, let questions):
+            // **One question at a time**, which is how the terminal presents them too: claude
+            // draws a tab strip and shows the current question alone. A card that stacked all
+            // of them ran off the bottom of the phone — three questions with described options
+            // is well past a screen — and made the reader scroll to find out how much was left.
+            //
+            // The paging is the phone's own; nothing about the drive changes. Every answer is
+            // collected here and sent as one command, which is what lets the Mac walk the whole
+            // dialog in a single verified pass.
+            let index = min(page, questions.count - 1)
+            let question = questions[index]
+            let isLast = index == questions.count - 1
             // A lone single-select question answers on the tap, exactly as it always has: one
-            // question, one decision, no second gesture to confirm what is already unambiguous.
-            let immediate = questions.count == 1 && !questions[0].multiSelect
-            // One block per question. A set draws every one of them — the whole point of the
-            // change: a reader sent to their Mac to answer three questions could previously
-            // see only the first, which told them neither what was being asked nor how much.
-            ForEach(Array(questions.enumerated()), id: \.offset) { questionIndex, question in
+            // question, one decision, and no second gesture to confirm the unambiguous.
+            let immediate = questions.count == 1 && !question.multiSelect
+
             if questions.count > 1 {
-                VStack(alignment: .leading, spacing: 4) {
-                    if let header = question.header, !header.isEmpty {
-                        Text(header.uppercased())
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.orange)
+                HStack(spacing: 6) {
+                    Text("Question \(index + 1) of \(questions.count)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    // A dot per question, filled once it has an answer — the phone's reading of
+                    // the strip claude puts above the dialog, so a reader can see what is left
+                    // without paging through it.
+                    ForEach(questions.indices, id: \.self) { dot in
+                        Circle()
+                            .fill(picks[dot, default: []].isEmpty
+                                  ? Color.secondary.opacity(0.3) : Color.orange)
+                            .frame(width: 6, height: 6)
                     }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                if let header = question.header, !header.isEmpty {
+                    Text(header.uppercased())
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.orange)
+                }
+                if questions.count > 1 {
                     Text(question.question)
                         .font(.footnote.weight(.medium))
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, questionIndex == 0 ? 0 : 6)
             }
-            ForEach(Array(question.options.enumerated()), id: \.offset) { index, option in
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            ForEach(Array(question.options.enumerated()), id: \.offset) { option, choice in
                 Button {
                     if immediate {
-                        model.answer(.option(index: index, label: option.label), to: call)
+                        model.answer(.option(index: option, label: choice.label), to: call)
                     } else {
-                        choose(question: questionIndex, option: index,
+                        choose(question: index, option: option,
                                multiSelect: question.multiSelect, call: call)
+                        // Single-select advances by itself, the way the dialog does when you
+                        // press Enter on a row. A checkbox question cannot: the reader is not
+                        // finished until they say so.
+                        if !question.multiSelect, !isLast { page = index + 1 }
                     }
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(option.label)
+                        Text(choice.label)
                             .font(.footnote.weight(.medium))
                             .fixedSize(horizontal: false, vertical: true)
-                        if let detail = option.detail, !detail.isEmpty {
+                        if let detail = choice.detail, !detail.isEmpty {
                             Text(detail)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
@@ -279,9 +331,9 @@ struct PromptCard: View {
                 .disabled(!enabled)
                 .opacity(enabled ? 1 : 0.5)
                 // The tick is the only thing saying a tap registered, because on a set the tap
-                // no longer sends anything. Without it a reader taps and nothing happens.
+                // no longer sends anything.
                 .overlay(alignment: .trailing) {
-                    if !immediate, picks[questionIndex, default: []].contains(index) {
+                    if !immediate, picks[index, default: []].contains(option) {
                         Image(systemName: question.multiSelect
                               ? "checkmark.square.fill" : "largecircle.fill.circle")
                             .font(.footnote)
@@ -290,10 +342,12 @@ struct PromptCard: View {
                     }
                 }
             }
-            }
+
             if !immediate {
-                sendAnswers(call: call, questions: questions, enabled: enabled)
+                navigation(call: call, questions: questions, index: index,
+                           isLast: isLast, enabled: enabled)
             }
+
         case .permission(let call, _, _):
             HStack(spacing: 8) {
                 // Deny first, and leading. It is the safe answer, it is one Escape with no
