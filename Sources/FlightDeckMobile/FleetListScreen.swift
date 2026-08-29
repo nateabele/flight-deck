@@ -185,6 +185,7 @@ struct FleetListScreen: View {
     /// has moved to `SessionTimelineModel.open()`, which runs when the conversation is
     /// actually on screen. That is also the truer reading of spec §8 — the mark means "I have
     /// looked at this", and a tap that never opened anything is not a look.
+
     /// A project's header: a chevron that collapses it, its name and count, and a `+`.
     ///
     /// The chevron is a `Button` around the whole leading group rather than the glyph alone,
@@ -320,15 +321,15 @@ struct FleetListScreen: View {
         Self.agentGroups(in: options)
     }
 
-    /// The leading swipe button's label and behaviour for one session — the same job as
-    /// `agentGroups(in:)` above: a pure decision pulled out of the row so the unit suite can
-    /// assert it without rendering the thing that reads it.
     struct UnreadAction: Equatable {
-        let title: String
-        let systemImage: String
+        let title: String        // "Unread" | "Read"
+        let systemImage: String  // "circle.fill" | "circle"
         let marksUnread: Bool
     }
 
+    /// The leading swipe button's label and behaviour for one session — the same job as
+    /// `agentGroups(in:)` above: a pure decision pulled out of the row so the unit suite can
+    /// assert it without rendering the thing that reads it.
     static func unreadAction(for session: WireSession) -> UnreadAction {
         session.isUnread
             ? UnreadAction(title: "Read", systemImage: "circle", marksUnread: false)
@@ -343,19 +344,24 @@ struct FleetListScreen: View {
         // `allowsFullSwipe: true`, the mirror image of the trailing lane's `false` below —
         // and for the mirror-image reason. Unread/read is a fact, and the same flick that set
         // it puts it back, so the deliberateness a required tap buys the destructive lane is
-        // not worth charging for here: there is nothing this button does that a second full
-        // swipe cannot undo.
+        // not worth charging for here — with one caveat: nothing here is set optimistically
+        // (`FleetModel.swift:234-238`), so a second full swipe undoes the first only once the
+        // Mac's `unreadChanged` echo has landed and the button has relabelled itself; fired
+        // before that, it repeats the same command instead of reversing it.
         //
         // **Why a toggle, not a bare "Mark as Unread" button.** The read mark is set
-        // automatically the moment a conversation reaches the screen — see this function's own
-        // doc comment above, "the read mark has moved to `SessionTimelineModel.open()`". So
-        // without a way to mark read again from this list, the only way to undo an accidental
-        // Unread swipe is to open the session, which is the one thing the reader swiped to
-        // avoid doing. The toggle makes the gesture its own undo.
+        // automatically by `SessionTimelineModel.open()`, which runs the moment a conversation
+        // reaches the screen. So without a way to mark read again from this list, the only way
+        // to undo an accidental Unread swipe is to open the session, which is the one thing the
+        // reader swiped to avoid doing. The toggle makes the gesture its own undo.
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
             let unread = Self.unreadAction(for: session)
             Button {
-                unread.marksUnread ? model.markUnread(session.id) : model.markRead(session.id)
+                if unread.marksUnread {
+                    model.markUnread(session.id)
+                } else {
+                    model.markRead(session.id)
+                }
             } label: {
                 Label(unread.title, systemImage: unread.systemImage)
             }
@@ -381,11 +387,12 @@ struct FleetListScreen: View {
                 Label("Close", systemImage: "xmark")
             }
         }
-        // Long press, for the rest. The trailing lane above still holds exactly one
-        // destructive verb and nothing else — that has not changed. A second lane, on the
-        // *leading* edge, is a different judgement, made above; the menu stays regardless,
-        // because it is the discoverable route — a reader finds it by holding a row — and the
-        // place a Mac reader already knows to look.
+        // Long press, alongside both swipe lanes now — not for anything exclusive to it
+        // any more. The trailing lane above still holds exactly one destructive verb and
+        // nothing else — that has not changed. A second lane, on the *leading* edge, is a
+        // different judgement, made above; the menu stays regardless, because it is the
+        // discoverable route — a reader finds it by holding a row — and the place a Mac
+        // reader already knows to look.
         //
         // **The items, their order and the divider all mirror `SessionSidebar`'s menu**, and
         // the mirroring is the point rather than a coincidence: this is the same fleet seen
@@ -394,9 +401,9 @@ struct FleetListScreen: View {
         .contextMenu {
             // Plain, not a toggle like the swipe lane's version of this same action above: a
             // menu shows every verb at once and can afford one that only ever means one thing,
-            // where a swipe lane shows a single button in a single slot and would be spending
-            // it on a no-op most of the time. Matches `SessionSidebar.swift:276` on the Mac,
-            // which keeps the same asymmetry for the same reason.
+            // where a swipe lane spends its one slot for this verb on a no-op half the time if
+            // it does not toggle. Matches `SessionSidebar.swift:276` on the Mac, which keeps
+            // the same asymmetry for the same reason.
             Button {
                 model.markUnread(session.id)
             } label: {
