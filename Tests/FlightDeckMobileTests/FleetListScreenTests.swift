@@ -229,4 +229,27 @@ final class FleetListScreenTests: XCTestCase {
         XCTAssertTrue(FleetListScreen.agentGroups(in: []).isEmpty)
     }
 
+    // MARK: The leading swipe lane
+
+    /// A read session's button offers to mark it unread, not the other way round — the
+    /// ordinary case, and the one a toggle wired backwards would get wrong first.
+    func testUnreadActionOnAReadSessionOffersToMarkItUnread() {
+        let session = WireSession(id: UUID(), title: "Home", agent: "claude", isUnread: false)
+        let action = FleetListScreen.unreadAction(for: session)
+        XCTAssertEqual(action.title, "Unread")
+        XCTAssertEqual(action.systemImage, "circle.fill")
+        XCTAssertTrue(action.marksUnread)
+    }
+
+    /// The toggle's other half, and the reason it exists at all: an unread session offers
+    /// Read, so the same swipe that set the mark by accident takes it back off again without
+    /// opening the session — which is exactly what would have marked it read anyway.
+    func testUnreadActionOnAnUnreadSessionOffersToMarkItRead() {
+        let session = WireSession(id: UUID(), title: "Home", agent: "claude", isUnread: true)
+        let action = FleetListScreen.unreadAction(for: session)
+        XCTAssertEqual(action.title, "Read")
+        XCTAssertEqual(action.systemImage, "circle")
+        XCTAssertFalse(action.marksUnread)
+    }
+
 }
