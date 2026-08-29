@@ -42,17 +42,57 @@ struct PromptCard: View {
     ) -> Bool {
         if let pending = state.call, pending == open.callID { return false }
         switch open {
-        // **One question, and answerable.** A set is answered as a unit and nothing on this
-        // Mac can drive one yet, so its controls stay off — a tap would send an option index
-        // against whichever question the terminal happens to be showing, which is a wrong
-        // answer typed into someone's session rather than a missing feature. This is the line
-        // that flips when the multi-question driver lands.
+        // Every question in the set, or none: the Mac walks the whole dialog and commits at
+        // the end, so a set with one unanswerable question in it cannot be started.
         case .question(_, let questions):
-            return questions.count == 1 && questions[0].isAnswerable
+            return !questions.isEmpty && questions.allSatisfy(\.isAnswerable)
         // Allow and Deny are intents, not payload, so there is nothing to be unanswerable
         // about.
         case .permission: return true
         }
+    }
+
+    /// Record a tap. Single-select replaces; multiSelect toggles.
+    private func choose(question: Int, option: Int, multiSelect: Bool, call: String) {
+        if picksFor != call {
+            picks = [:]
+            picksFor = call
+        }
+        var chosen = picks[question, default: []]
+        if multiSelect {
+            if chosen.contains(option) { chosen.remove(option) } else { chosen.insert(option) }
+        } else {
+            chosen = [option]
+        }
+        picks[question] = chosen
+    }
+
+    /// The commit, offered only once every question has an answer.
+    ///
+    /// **Disabled rather than hidden while the set is incomplete**, so the reader can see that
+    /// something is still owed rather than wondering where the button went. The Mac refuses an
+    /// incomplete set too — `AnswerPlan.plan` returns nil — so this is the courteous half of a
+    /// rule enforced on both sides.
+    @ViewBuilder
+    private func sendAnswers(
+        call: String, questions: [PromptQuestion], enabled: Bool
+    ) -> some View {
+        let complete = picksFor == call
+            && questions.indices.allSatisfy { !picks[$0, default: []].isEmpty }
+        Button {
+            let selections = questions.indices.map { index in
+                picks[index, default: []].sorted().map {
+                    AnswerSelection(index: $0, label: questions[index].options[$0].label)
+                }
+            }
+            model.answerSet(selections, to: call)
+        } label: {
+            Text(questions.count == 1 ? "Send answer" : "Send answers")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(!enabled || !complete)
+        .padding(.top, 2)
     }
 
     /// The line under the controls, or none.
@@ -72,12 +112,10 @@ struct PromptCard: View {
         }
         // A shape this Mac will not drive says so in the Mac's own words, so a newer Mac that
         // learns to drive one simply stops producing the sentence.
-        // A set says the set's reason; a single question says its own. Order matters: several
-        // questions is the more surprising fact, so it wins over "one of these takes several
-        // answers".
+        // Only a genuine refusal now. Several questions is a shape the Mac drives, and so is
+        // a question that takes several answers.
         if case .question(_, let questions) = open {
-            if questions.count > 1 { return PromptQuestion.multiQuestionReason }
-            return questions.first?.unanswerable
+            return questions.compactMap(\.unanswerable).first
         }
         return nil
     }
@@ -120,6 +158,15 @@ struct PromptCard: View {
         else { return nil }
         return summary
     }
+
+    /// What the reader has chosen so far, per question.
+    ///
+    /// **Keyed by the call, and cleared when it changes.** A set is answered as a unit, so the
+    /// choices have to live somewhere between taps — and if they survived into the NEXT dialog
+    /// the reader would be one tap from submitting answers they picked for a question they are
+    /// no longer looking at.
+    @State private var picks: [Int: Set<Int>] = [:]
+    @State private var picksFor: String?
 
     var body: some View {
         if let open {
@@ -175,6 +222,9 @@ struct PromptCard: View {
         let enabled = Self.showsControls(for: open, state: state)
         switch open {
         case .question(let call, let questions):
+            // A lone single-select question answers on the tap, exactly as it always has: one
+            // question, one decision, no second gesture to confirm what is already unambiguous.
+            let immediate = questions.count == 1 && !questions[0].multiSelect
             // One block per question. A set draws every one of them — the whole point of the
             // change: a reader sent to their Mac to answer three questions could previously
             // see only the first, which told them neither what was being asked nor how much.
@@ -195,7 +245,12 @@ struct PromptCard: View {
             }
             ForEach(Array(question.options.enumerated()), id: \.offset) { index, option in
                 Button {
-                    model.answer(.option(index: index, label: option.label), to: call)
+                    if immediate {
+                        model.answer(.option(index: index, label: option.label), to: call)
+                    } else {
+                        choose(question: questionIndex, option: index,
+                               multiSelect: question.multiSelect, call: call)
+                    }
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(option.label)
@@ -223,7 +278,21 @@ struct PromptCard: View {
                 .buttonStyle(.plain)
                 .disabled(!enabled)
                 .opacity(enabled ? 1 : 0.5)
+                // The tick is the only thing saying a tap registered, because on a set the tap
+                // no longer sends anything. Without it a reader taps and nothing happens.
+                .overlay(alignment: .trailing) {
+                    if !immediate, picks[questionIndex, default: []].contains(index) {
+                        Image(systemName: question.multiSelect
+                              ? "checkmark.square.fill" : "largecircle.fill.circle")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                            .padding(.trailing, 10)
+                    }
+                }
             }
+            }
+            if !immediate {
+                sendAnswers(call: call, questions: questions, enabled: enabled)
             }
         case .permission(let call, _, _):
             HStack(spacing: 8) {
