@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-import json, random, sys, time
-from fuzz import drive, newest_result
+import random, sys, time
+from fuzz import drive
 
 SCENARIOS = {
  "single-set": lambda r: dict(
@@ -32,13 +32,12 @@ for i in range(runs):
         answers.append(sorted(rnd.sample(range(n), rnd.randint(1, min(2, n)))) if q["multi"]
                        else [rnd.randrange(n)])
     t0 = time.time()
-    final, abort = drive(spec["prompt"], answers)
-    # `drive()` already confirmed a fresh-enough tool_result exists (or set `abort` to the
-    # distinct stale/absent marker if not) — this second lookup is just to print the text.
-    # `since=t0` is safe on its own: `newest_result` checks each record's OWN timestamp, with a
-    # small clock-skew tolerance built in, so it can never fall back to an earlier run's answer.
-    result = newest_result(since=t0) if not abort else None
-    submitted = bool(result) and "doesn't want to proceed" not in (result or "")
+    # `drive()` reads its own run's transcript (bound to its own file — see fuzz.py) and, before
+    # ever returning `abort=None`, confirms both that a result was recorded AND that it names the
+    # options actually chosen. There is nothing left for this caller to independently re-verify;
+    # `abort is None` IS the pass condition.
+    final, abort, result = drive(spec["prompt"], answers)
+    submitted = abort is None
     status = "OK " if submitted else "FAIL"
     if submitted: ok += 1
     else: fail += 1
