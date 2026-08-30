@@ -11,11 +11,11 @@ import Foundation
 /// worse than no assertion.
 enum FleetProjection {
     @MainActor
-    static func snapshot(of store: SessionStore) -> FleetSnapshot {
+    static func snapshot(of store: SessionStore, planGates: PlanGateService? = nil) -> FleetSnapshot {
         FleetSnapshot(projects: store.repos.map {
             project(
                 $0, statuses: store.statuses, unread: store.unreadIdle,
-                backgroundWork: store.backgroundWorkSessions
+                backgroundWork: store.backgroundWorkSessions, planGates: planGates
             )
         })
     }
@@ -23,7 +23,7 @@ enum FleetProjection {
     @MainActor
     static func project(
         _ repo: Repo, statuses: [UUID: SessionStatus], unread: Set<UUID>,
-        backgroundWork: Set<UUID>
+        backgroundWork: Set<UUID>, planGates: PlanGateService? = nil
     ) -> WireProject {
         WireProject(
             id: repo.id,
@@ -33,7 +33,7 @@ enum FleetProjection {
             sessions: repo.sessions.map {
                 project(
                     $0, status: statuses[$0.id], unread: unread,
-                    hasBackgroundWork: backgroundWork.contains($0.id)
+                    hasBackgroundWork: backgroundWork.contains($0.id), planGates: planGates
                 )
             }
         )
@@ -41,7 +41,8 @@ enum FleetProjection {
 
     @MainActor
     static func project(
-        _ session: Session, status: SessionStatus?, unread: Set<UUID>, hasBackgroundWork: Bool
+        _ session: Session, status: SessionStatus?, unread: Set<UUID>, hasBackgroundWork: Bool,
+        planGates: PlanGateService? = nil
     ) -> WireSession {
         WireSession(
             id: session.id,
@@ -53,7 +54,11 @@ enum FleetProjection {
             waitingFor: status?.waitingFor,
             subagentCount: status?.subagentCount ?? 0,
             isUnread: unread.contains(session.id),
-            hasBackgroundWork: hasBackgroundWork
+            hasBackgroundWork: hasBackgroundWork,
+            // `nil` when no `PlanGateService` was threaded in — a projection built in a test
+            // with no service must still produce a `WireSession`, exactly as one with no
+            // status must.
+            planGate: planGates?.gate(for: session.id)
         )
     }
 }
