@@ -121,6 +121,8 @@ enum ChoiceDialog {
         var isMarked: Bool
         /// The row's own text, with the marker and the `N.` removed.
         var label: String
+        /// Whether the row drew a checkbox, i.e. whether this is a multi-select question.
+        var isCheckbox: Bool = false
         /// Unnumbered lines under it: a wrapped label at a narrow width, or an
         /// `AskUserQuestion` option's description. **The screen does not distinguish them** —
         /// both sit at the label's column.
@@ -146,10 +148,16 @@ enum ChoiceDialog {
     /// documentation: an unnumbered line carrying the marker is claude echoing what the user
     /// typed, and reading it as an option reports a row nobody is on.
     ///
-    /// A multi-select row additionally checkboxes — `❯ 1. [ ] Trail mix` — and that box is
-    /// deliberately *not* stripped. This feature refuses to answer a multi-select
-    /// (`PromptQuestion.multiSelectReason`), so a screen it cannot drive is a screen the
-    /// interlock must decline to confirm.
+    /// **A multi-select row carries a checkbox — `❯ 1. [ ] Trail mix` — and it IS stripped
+    /// now.** It deliberately was not, back when this feature refused to answer a multi-select:
+    /// a screen nothing could drive was a screen the interlock should decline to confirm. The
+    /// driver ticks boxes today, and leaving the glyph in made `row(k, reads: "Trail mix")`
+    /// false for every checkbox row — so a drive aborted at the first one, part-way through a
+    /// form, which is precisely the failure that sent this back from the phone.
+    ///
+    /// Only the box is taken, never a bracketed word that happens to start a label: the
+    /// pattern is a bracket, one space-or-tick, a bracket, a space, and it must sit
+    /// immediately after the `N.`.
     private static func parse(_ line: String, marker: Character) -> Row? {
         var rest = Substring(line).drop(while: { $0 == " " })
         var isMarked = false
@@ -167,9 +175,22 @@ enum ChoiceDialog {
         rest = rest.dropFirst()
         guard rest.first == " " else { return nil }
 
+        rest = rest.drop(while: { $0 == " " })
+        // The checkbox, if this is a multi-select row. `[ ]` unticked, `[✔]` ticked — both
+        // captured. Dropped so the row reads as the option's own words, which is what the
+        // transcript holds and therefore what the interlock compares against.
+        var isCheckbox = false
+        if rest.first == "[" {
+            let box = rest.prefix(3)
+            if box.count == 3, box.last == "]" {
+                isCheckbox = true
+                rest = rest.dropFirst(3).drop(while: { $0 == " " })
+            }
+        }
+
         let label = normalized(rest)
         guard !label.isEmpty else { return nil }
-        return Row(number: number, isMarked: isMarked, label: label)
+        return Row(number: number, isMarked: isMarked, label: label, isCheckbox: isCheckbox)
     }
 
     /// The select list on screen, or nil when there is none.
