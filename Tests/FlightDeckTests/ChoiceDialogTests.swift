@@ -277,13 +277,20 @@ final class ChoiceDialogTests: XCTestCase {
     /// disagree by exactly one row — which is `Fresh fruit` toggled instead of the answer being
     /// sent. `question-multi` is the only checkbox capture with a paired `.jsonl`, so it is the
     /// only screen where the count can come from the transcript rather than from this file.
+    ///
+    /// This question is on its own, so `Next` must fail at the same row: confirming it would
+    /// leave a drive parked in front of the commit, waiting for a question that isn't coming.
     func testTheActionRowAnswerPlanComputesIsTheRowTheScreenConfirms() throws {
         let screen = try captured("question-multi.captured")
         let labels = try transcriptLabels("question-multi.captured")
         XCTAssertEqual(labels.count, 4)
-        XCTAssertTrue(row(AnswerPlan.actionRow(optionCount: labels.count),
-                          reads: AnswerPlan.actionLabel(isLast: true), inViewport: screen),
+        let action = AnswerPlan.actionRow(optionCount: labels.count)
+        XCTAssertTrue(row(action, reads: AnswerPlan.actionLabel(isLast: true),
+                          inViewport: screen),
                       "the row the plan will move to is the row the screen shows")
+        XCTAssertFalse(row(action, reads: AnswerPlan.actionLabel(isLast: false),
+                           inViewport: screen),
+                       "there is no question after this one for Next to be waiting on")
     }
 
     /// **`Next` is not `Submit`.** Inside a set the same position commits nothing — it advances
