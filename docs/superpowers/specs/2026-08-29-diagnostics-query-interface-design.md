@@ -9,7 +9,7 @@ single query would have answered:
 |---|---|---|
 | Phone said "no agent running" on a live tab | `activity == "shell"`, refused by a guard written against a false premise | The status was fine; the *interpretation* was wrong, and nothing exposed it |
 | A tab on a second account showed no status at all | Its `SessionStatusWatcher` reads a different `CLAUDE_CONFIG_DIR` | Per-account watchers are invisible from outside the process |
-| `mobile-search` created from the phone never ran | `makeSurface` returned nil because **the screen was locked**, and the tab was created anyway | `surfaces[id]` is in-memory only. Nothing outside the app can see whether a tab has a terminal |
+| A tab created from the phone never ran | **The display was asleep**, so libghostty never forked a shell — while `makeSurface` returned a perfectly good `SurfaceView` | `SurfaceProcessRegistry`'s contents are in-memory. Nothing outside the app can see whether a tab's terminal ever forked a shell |
 
 The through-line: **the decisive fact was always in memory and never observable.** Diagnosis
 meant reading `sessions.json`, correlating `ps`, and walking status files across two config
@@ -17,6 +17,37 @@ homes — and even then, "does this tab have a surface?" could only be answered 
 
 This spec adds a local HTTP interface that answers those questions live, and can perform a
 small, closed set of repairs.
+
+### 1.1 The third failure, established by controlled trial
+
+Two earlier diagnoses of this were wrong and are recorded so they are not repeated:
+
+- **"`makeSurface` returned nil."** It cannot. `GhosttyApp.makeSurfaceView` returns a
+  **non-optional** `Ghostty.SurfaceView` and `SurfaceView.init(_:baseConfig:uuid:)` is
+  non-failable; the `Optional` exists only for the test seam. Any check on
+  `surfaces[id] == nil` is dead code in production.
+- **"The screen was locked."** Lock is a confounder, not the cause. A tab created 19s after
+  lock, with the display still on, came up healthy.
+
+The controlled trial: display slept with `pmset displaysleepnow`, condition verified held, one
+tab created from the phone with the Mac untouched.
+
+| Display | Outcome | n |
+|---|---|---|
+| **asleep** | no shell forked; tab inert from birth | 3 |
+| **awake** | healthy | 3 — one of them at `locked=1`, isolating display from lock |
+
+The mechanism is in CoreGraphics' own words: `CGDisplayIsAsleep` returns true when the display
+is asleep *"and is therefore **not drawable**"*, and `CGDisplayIsActive` means *"connected,
+awake, and available for **drawing**"*. libghostty needs a drawable to back a surface. Without
+one it still hands back a `SurfaceView` object, but never forks the child — so there is no
+`login`, no shell, no `claude`, no status file, and no `activity`.
+
+The tab is then created, persisted, and broadcast to the phone as a real session while being
+permanently inert: `surfaces[session.id] = surface` in `insertSession` is the only write to
+that dictionary, there is no retry, and selecting the tab does not create one.
+
+
 
 ## 2. Scope
 
@@ -65,7 +96,8 @@ Per tab, and the first three fields are the ones no existing tool can see:
 
 | Field | Why it is here |
 |---|---|
-| `hasSurface` | **The field that would have solved `mobile-search` instantly.** In-memory only today |
+| `hasShellProcess` | **The discriminator.** Empty for all three failures, populated for all three healthy tabs — `SurfaceProcessRegistry`'s record of the shell libghostty forked. NOT `hasSurface`: a `SurfaceView` always exists, so that field reads `true` even for an inert tab |
+| `hasSurface` | Kept, but only to make the distinction visible: `true` with `hasShellProcess` false IS the failure |
 | `hasInjector` | The other half of the prompt guard's condition |
 | `watcherPresent` | Whether *any* watcher is scanning this tab's account's config home |
 | `configHome` | Which `CLAUDE_CONFIG_DIR` this tab's account resolves to |
@@ -76,11 +108,11 @@ Per tab, and the first three fields are the ones no existing tool can see:
 
 Plus fleet-level rows: `orphanedAgents` (live `claude` whose session id matches no tab —
 `smart-search` is in that state now), `watchers` (one per account, with last drain time), and
-`screenLocked`.
+`displayAsleep` (plus `screenLocked`, which is diagnostic colour only — it is not the cause).
 
-`screenLocked` earns its place: it is the cause of the third failure above, and a tab created
-while locked is a tab with no terminal. A report that shows a surfaceless tab *and* a locked
-screen has stated the whole diagnosis in two fields.
+`displayAsleep` earns its place: it is the cause of the third failure, and a report showing
+`hasSurface: true, hasShellProcess: false, displayAsleep: true` has stated the entire diagnosis
+in three fields — which is the whole argument for this interface.
 
 ## 5. Repairs
 
@@ -96,18 +128,25 @@ Three reuse existing store paths — `closeSession(_:recordingHistory:)`,
 endpoints over machinery that already works.
 
 **`respawn-surface` is new code, and is the substantive part of this spec.** Nothing today can
-build a terminal for an existing tab: `surfaces[session.id] = surface` in `insertSession` is
-the only write to that dictionary, there is no retry, and selecting a tab does not create one.
-A tab that loses `makeSurface` is dead permanently. Respawn does what `insertSession` does —
-build the config, call `provider.makeSurface`, register the process, report the size, type the
-launch command, start watching — for a session that already exists.
+give an existing tab a working terminal. Respawn does what `insertSession` does — build the
+config, call `provider.makeSurface`, register the process, report the size, type the launch
+command, start watching — for a session that already exists.
 
-Two rules it must honour, both learned from the failure it exists to repair:
+It differs from the original design in one important way, forced by §1.1: **the broken tab
+already holds a `SurfaceView`.** It is inert — no drawable, no forked child — but it is there.
+So respawn must *replace* it, not fill an empty slot: discard the inert view, then build a new
+one. Discarding is safe precisely because the inert view has no child process to orphan.
 
-1. **Refuse when the screen is locked** (`409`, with `screenLocked` as the reason). A locked
-   session has no window server; retrying there is how the corpse was created.
-2. **Refuse when the tab already has a surface** (`409`). Respawning a live tab would orphan a
-   running agent and leave two shells writing one transcript.
+Three rules, all learned from the failure it repairs:
+
+1. **Detect on `SurfaceProcessRegistry`, never on `surfaces[id] == nil`.** The latter is never
+   true in production, so a respawn keyed on it could never fire on the tab it exists for.
+2. **Refuse when the display is asleep** (`409`, reason `displayAsleep`). A sleeping display is
+   not drawable; retrying there produces a second inert tab, which is how the first was made.
+   The check is `CGDisplayIsActive(CGMainDisplayID())`.
+3. **Refuse when the tab already has a working shell** (`409`, reason `alreadyRunning`) —
+   a registered shell process, not merely a surface. Respawning a live tab would orphan its
+   agent and leave two shells writing one transcript.
 
 ## 6. Auth
 
@@ -165,14 +204,18 @@ Listener runs for the app's lifetime, bound to `127.0.0.1` only.
 The bug that prompted this spec has a fix that does not need a server, and shipping it behind
 one would be backwards:
 
-1. **Make a nil surface loud.** `insertSession` treats `makeSurface` returning nil as benign —
-   it creates, persists and broadcasts the tab anyway. Report it through the existing
-   `AgentLaunchFailureReporting` path and either refuse to create the tab or mark it visibly
-   broken. Small, and it converts every future instance of this from an investigation into an
-   alert.
-2. **`respawn-surface` as a store method**, reachable from the sidebar's context menu. It is
-   the substantive new capability here, it is useful with no HTTP anywhere near it, and the
-   endpoint in §5 then becomes a thin call over an already-tested method.
+1. **Refuse to create a tab that cannot get a terminal.** The check is *before* creation, not
+   after: if `CGDisplayIsActive(CGMainDisplayID())` is false, creation cannot succeed, so
+   `newSession` refuses and reports through the existing `AgentLaunchFailureReporting` path.
+   The phone gets a truthful error instead of an inert tab. This is a **precondition**, which
+   is why it does not have the fatal problem the earlier draft did — no post-hoc nil check that
+   can never fire, and no change to `newSession`'s return type, which would have broken 340
+   tests across 43 classes because nearly every fixture builds a store with a nil-returning
+   provider.
+2. **A registry-backed health check plus `respawnSurface(for:)`**, reachable from the sidebar
+   context menu — "Restart Terminal", shown only for a tab whose registry entry is empty. Both
+   are useful with no HTTP anywhere near them, and §5's endpoint then becomes a thin call over
+   an already-tested method.
 
 The server, auth and report can follow. Both items above are prerequisites for §5 regardless,
 so this is ordering rather than added scope.
