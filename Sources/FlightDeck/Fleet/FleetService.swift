@@ -680,6 +680,11 @@ final class FleetService: ObservableObject {
             ) {
                 return .err(cid: cid, code: code.code)
             }
+        case .annotatePlan, .resolvePlan:
+            // Wired for real in a later task. Refused rather than acked in the meantime, so
+            // this intermediate build cannot silently claim to have annotated or resolved a
+            // plan gate — the same placeholder `FleetCommand.prompt` got in 29430b8.
+            return .err(cid: cid, code: "unhandled")
         }
         // `ack` means dispatched, not done. For the two read marks the observable effect is
         // the northbound `session.unread` event the store call just recorded; for a prompt it
