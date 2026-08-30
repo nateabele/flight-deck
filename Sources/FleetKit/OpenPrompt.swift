@@ -25,6 +25,13 @@ public struct PromptQuestion: Equatable, Hashable, Sendable {
     public var header: String?
     public var question: String
     public var options: [Option]
+    /// Whether this question takes several answers.
+    ///
+    /// **A shape, not a refusal.** It used to reach the phone only as an `unanswerable`
+    /// reason — "answer it on your Mac" — which conflated a question that takes more than one
+    /// answer with one nothing can drive. The driver toggles checkboxes now, so this says HOW
+    /// to answer the question rather than that you cannot.
+    public var multiSelect: Bool
     /// Why this cannot be answered from a phone, or `nil` when it can.
     ///
     /// A sentence rather than a code, because the reasons are facts about what the *Mac* can
@@ -34,8 +41,10 @@ public struct PromptQuestion: Equatable, Hashable, Sendable {
     public var unanswerable: String?
 
     public init(
-        header: String? = nil, question: String, options: [Option], unanswerable: String? = nil
+        header: String? = nil, question: String, options: [Option],
+        multiSelect: Bool = false, unanswerable: String? = nil
     ) {
+        self.multiSelect = multiSelect
         self.header = header
         self.question = question
         self.options = options
@@ -44,6 +53,8 @@ public struct PromptQuestion: Equatable, Hashable, Sendable {
 
     public var isAnswerable: Bool { unanswerable == nil && !options.isEmpty }
 
+    /// Kept for a Mac that still sends it and for the tests that pin the wording; nothing in
+    /// this build produces it any more. A multiSelect question is answerable from the phone.
     public static let multiSelectReason =
         "This question takes more than one answer. Answer it on your Mac."
     public static let multiQuestionReason =
@@ -96,10 +107,10 @@ public struct PromptQuestion: Equatable, Hashable, Sendable {
         // question one — which is why a set of three showed its first question wearing a
         // reason that belonged to all of them, and hid the other two entirely. `all(toolInput:)`
         // returns the set; what the card can do with it is the card's judgement.
-        var unanswerable: String?
-        if case .bool(true)? = first.member("multiSelect") { unanswerable = Self.multiSelectReason }
+        var multiSelect = false
+        if case .bool(true)? = first.member("multiSelect") { multiSelect = true }
 
-        self.init(header: header, question: text, options: options, unanswerable: unanswerable)
+        self.init(header: header, question: text, options: options, multiSelect: multiSelect)
     }
 
     /// Every question in one `AskUserQuestion` input, in the order it asks them.
@@ -135,11 +146,9 @@ public struct PromptQuestion: Equatable, Hashable, Sendable {
         guard !options.isEmpty else { return nil }
         var header: String?
         if case .string(let raw)? = question.member("header"), !raw.isEmpty { header = raw }
-        var unanswerable: String?
-        if case .bool(true)? = question.member("multiSelect") {
-            unanswerable = Self.multiSelectReason
-        }
-        self.init(header: header, question: text, options: options, unanswerable: unanswerable)
+        var multiSelect = false
+        if case .bool(true)? = question.member("multiSelect") { multiSelect = true }
+        self.init(header: header, question: text, options: options, multiSelect: multiSelect)
     }
 }
 

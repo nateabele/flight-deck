@@ -3431,6 +3431,25 @@ final class SessionStore: ObservableObject {
                 injector: injector, id: id, token: token
             )
 
+        case .answers(let selections):
+            // The set path. Everything it needs is checked before a key moves: the answers fit
+            // the questions the TRANSCRIPT holds, each label matches this Mac's own copy, and
+            // the plan exists at all.
+            guard case .question(_, let questions) = open else { return .unreadableScreen }
+            guard selections.count == questions.count else { return .unreadableScreen }
+            for (question, chosen) in zip(questions, selections) {
+                for selection in chosen {
+                    guard question.options.indices.contains(selection.index),
+                          question.options[selection.index].label == selection.label
+                    else { return .unreadableScreen }
+                }
+            }
+            guard let plan = AnswerPlan.plan(
+                for: questions, answers: selections.map { $0.map(\.index) }
+            ) else { return .unanswerable }
+            return drive(plan, questions: questions, driver: driver,
+                         injector: injector, id: id, token: token)
+
         case .option(let index, let label):
             // `option` indexes an `AskUserQuestion`'s own options, so a permission dialog —
             // which has no options this build can enumerate — has no list for the index to
@@ -3445,6 +3464,12 @@ final class SessionStore: ObservableObject {
                 return .unanswerable
             }
             guard question.isAnswerable else { return .unanswerable }
+            // **`.option` is a commit, and a checkbox row is not.** On a multiSelect question
+            // Enter TOGGLES and stays put (`question-checkbox-toggled.captured.txt`), so this
+            // path would tick one box, believe it had answered, and leave the dialog open. A
+            // checkbox question is answered through the whole-set payload, which knows to
+            // press the action row afterwards.
+            guard !question.multiSelect else { return .unanswerable }
             // The client's label against the Mac's own copy, before any screen is consulted.
             // A phone naming words this transcript never carried is a reader looking at
             // something else, and its index is not to be trusted either.
@@ -3490,6 +3515,91 @@ final class SessionStore: ObservableObject {
     /// A failed confirmation sends nothing further and reports nothing: the answer is already
     /// `dispatched` to the client, the cursor has moved, and a moved cursor is recoverable by
     /// the person at the keyboard in a way a wrong Return is not.
+    /// Answer a whole set of questions in one drive.
+    ///
+    /// **The plan is built first and the screen only ever CHECKS it.** `AnswerPlan` knows
+    /// every move and press from the transcript and the reader's choices, so this walks a
+    /// fixed program: before each press it confirms the cursor is where the plan says it
+    /// starts and that the row about to be pressed reads what the plan says it should. A
+    /// disagreement aborts — no further key is sent — rather than being counted from.
+    ///
+    /// **Nothing is committed until the last step.** claude shows a review screen listing every
+    /// question with its chosen answer and asks "Ready to submit your answers?", so an abort
+    /// part-way leaves a dialog the human can still finish or cancel. That is why this can be
+    /// driven at all: the failure mode is "stopped early", never "half an answer sent".
+    private func drive(
+        _ plan: AnswerPlan,
+        questions: [PromptQuestion],
+        driver: any AgentDialogDriver,
+        injector: TextInjecting,
+        id: UUID,
+        token: UUID
+    ) -> AnswerDispatch {
+        remember(answered: token, for: id)
+        injecting.insert(id)
+        perform(plan.steps, at: 0, questions: questions, driver: driver, injector: injector, id: id)
+        return .dispatched
+    }
+
+    /// One step, then the next from inside its settle. Recursive rather than a loop because
+    /// each press repaints asynchronously and the next step's checks are only meaningful once
+    /// the repaint has landed — the same 120ms seam `injectionSettle` is everywhere else.
+    private func perform(
+        _ steps: [AnswerPlan.Step],
+        at index: Int,
+        questions: [PromptQuestion],
+        driver: any AgentDialogDriver,
+        injector: TextInjecting,
+        id: UUID
+    ) {
+        guard index < steps.count else { injecting.remove(id); return }
+        let step = steps[index]
+
+        guard let screen = injector.readViewport(),
+              driver.focusedRow(inViewport: screen) == step.from,
+              Self.rowLabel(for: step, questions: questions).map({
+                  driver.row(step.to, reads: $0, inViewport: screen)
+              }) == true
+        else { injecting.remove(id); return }
+
+        let distance = step.to - step.from
+        for _ in 0..<abs(distance) {
+            if distance > 0 { injector.sendArrowDown() } else { injector.sendArrowUp() }
+        }
+
+        injectionSettle { [weak self] in
+            guard let self else { return }
+            // Re-read after the move: the row under the cursor must STILL be the one the plan
+            // named. This is the check that survives a human touching the terminal mid-drive.
+            guard let landed = injector.readViewport(),
+                  driver.focusedRow(inViewport: landed) == step.to
+            else { self.injecting.remove(id); return }
+            injector.sendReturn()
+            self.injectionSettle { [weak self] in
+                self?.perform(steps, at: index + 1, questions: questions,
+                              driver: driver, injector: injector, id: id)
+            }
+        }
+    }
+
+    /// What the row a step is about must read, or `nil` when the plan is inconsistent with the
+    /// questions — which `AnswerPlan.plan` already refuses to produce, so it is a belt on a
+    /// brace.
+    static func rowLabel(
+        for step: AnswerPlan.Step, questions: [PromptQuestion]
+    ) -> String? {
+        switch step.purpose {
+        case .option(let question, let option):
+            guard questions.indices.contains(question),
+                  questions[question].options.indices.contains(option) else { return nil }
+            return questions[question].options[option].label
+        case .action(_, let isLast):
+            return AnswerPlan.actionLabel(isLast: isLast)
+        case .submit:
+            return AnswerPlan.submitAnswersLabel
+        }
+    }
+
     private func drive(
         from current: Int,
         to target: Int,

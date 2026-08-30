@@ -483,6 +483,21 @@ page.
     whole file to a single line and the content is gone from the row, the clipboard and
     VoiceOver at once.
 
+68. **Answer a two-question prompt from the phone.** Ask claude something with two questions
+    in one `AskUserQuestion`. The card shows BOTH, each with its options; tapping records a
+    choice rather than sending one, and "Send answers" stays disabled until every question has
+    one. Send it, then watch the Mac: the terminal walks question one, question two, and the
+    review screen, and lands on the answers you picked. This is the item the whole feature
+    exists for — 16% of real questions have more than one.
+69. **Answer a checkbox question from the phone.** Ask for one with `multiSelect: true`. Tick
+    several boxes, send, and watch the Mac tick exactly those and press the row underneath.
+    Then do it as the FIRST of two questions: that row reads "Next" there and "Submit" when the
+    question is alone, and pressing the wrong one either commits early or fails to commit.
+70. **Interfere while it drives.** Send a set, and while the Mac is walking the dialog, move
+    the cursor in the terminal yourself. The drive must STOP — no further keys — rather than
+    counting arrows from where you left it. Nothing is committed until the review is submitted,
+    so the dialog should be left answerable by hand.
+
 ## A second checklist: the iOS plumbing
 
 The sixty-one items above test the *feature* — that pairing, replication, resume, revocation, and
