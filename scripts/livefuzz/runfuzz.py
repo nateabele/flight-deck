@@ -33,10 +33,11 @@ for i in range(runs):
                        else [rnd.randrange(n)])
     t0 = time.time()
     final, abort = drive(spec["prompt"], answers)
-    # `-2`: the workspace is reused run after run, so a stale transcript from an earlier run
-    # always exists alongside this one's; a couple of seconds of slack absorbs clock rounding
-    # without risking picking up that earlier run's result instead.
-    result = newest_result(since=t0 - 2) if not abort else None
+    # `drive()` already confirmed a fresh-enough tool_result exists (or set `abort` to the
+    # distinct stale/absent marker if not) — this second lookup is just to print the text.
+    # `since=t0` is safe on its own: `newest_result` checks each record's OWN timestamp, with a
+    # small clock-skew tolerance built in, so it can never fall back to an earlier run's answer.
+    result = newest_result(since=t0) if not abort else None
     submitted = bool(result) and "doesn't want to proceed" not in (result or "")
     status = "OK " if submitted else "FAIL"
     if submitted: ok += 1
