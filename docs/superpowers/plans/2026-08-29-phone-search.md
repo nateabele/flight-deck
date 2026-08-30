@@ -8,7 +8,25 @@
 
 **Tech Stack:** Swift 6 (FleetKit, FlightDeckMobile), Swift 5 (FlightDeck/macOS), SwiftUI, XCTest, SQLite FTS5, xcodegen.
 
-**Spec:** `docs/superpowers/specs/2026-08-29-phone-search-design.md`
+**Spec:** `docs/superpowers/specs/2026-08-29-phone-search-design.md` (approved, commit `cc61318`)
+
+## Context
+
+You asked for a phone search box reached by pulling down at the top of the session list. Four
+decisions in the spec review widened it past filtering the visible list: full desktop parity
+(transcript hits, not just names), tapping a hit jumps to that moment, the corpus is all 484
+conversations, and tapping one with no live tab resumes it into a tab on the Mac.
+
+The plan is committed at `docs/superpowers/plans/2026-08-29-phone-search.md`. Tasks 1–5 are
+Mac-side and independently shippable — the desktop keeps working throughout and gains a
+better index — so if this needs to be paused, task 5 is the clean seam.
+
+**Two corrections to the spec, already folded in below.** The spec said the moved tests go
+to "the FleetKit test target"; there is no such target — FleetKit's tests live in
+`Tests/FlightDeckTests`, which already links it, so the tests stay put and only their import
+line changes. And `WireSession` exposes no conversation id, so Task 9 matches a session to
+the catalogue by tab id, which is exact for claude and approximate for codex; the note there
+says so rather than inventing a mapping.
 
 ## Global Constraints
 
@@ -52,7 +70,7 @@ git mv Sources/FlightDeck/Search/FTS5Query.swift     Sources/FleetKit/Search/
 
 - [ ] **Step 2: Make every moved declaration public**
 
-In each moved file add `public` to the type and to every member FlightDeck or FlightDeckMobile reads. `SearchResult` and `NameCandidate` and `TranscriptHit` need `public init` written out — the memberwise init is internal by default. For example, in `SearchResult.swift`:
+In each moved file add `public` to the type and to every member FlightDeck or FlightDeckMobile reads. `SearchResult`, `NameCandidate` and `TranscriptHit` need `public init` written out — the memberwise init is internal by default. For example, in `SearchResult.swift`:
 
 ```swift
 public enum SearchResultKind: Equatable, Sendable {
@@ -252,7 +270,7 @@ A search hit has to be able to say where it is, not just that it exists."
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `Tests/FlightDeckTests/SQLiteSearchIndexTests.swift`, following the existing setup helper in that file for making a temporary index:
+Append to `Tests/FlightDeckTests/SQLiteSearchIndexTests.swift`, using that file's existing `makeIndex()` helper:
 
 ```swift
 /// The offset survives the round trip into SQLite and back out on a hit.
@@ -309,7 +327,7 @@ In `createSchema()`, add the column to `message`, after `source`:
 
 A version mismatch deletes the file and rebuilds, which is the whole migration story — the index is a cache and is never the source of truth for anything.
 
-In `ingest`, add `offset` to the `INSERT INTO message` column list and its value list, and bind `Int32(message.offset)` (or `sqlite3_bind_int64` with `Int64(message.offset)`) in the matching position.
+In `ingest`, add `offset` to the `INSERT INTO message` column list and its value list, and bind `Int64(message.offset)` in the matching position.
 
 In `search`, add `m.offset` to the `SELECT` list after `m.timestamp`, which shifts the snippet to column index 5:
 
@@ -442,7 +460,7 @@ An old Mac refuses it on its cid and reads on, rather than dropping the socket."
 
 **Files:**
 - Modify: `Sources/FleetKit/Wire.swift`
-- Modify: the Mac-side projection that builds `WireSession` (find with `rg -n 'WireSession(' Sources/FlightDeck/`)
+- Modify: the Mac-side projection that builds `WireSession` (find with `rg -n 'WireSession\(' Sources/FlightDeck/`)
 - Test: `Tests/FlightDeckTests/WireTests.swift`
 
 **Interfaces:**
@@ -710,7 +728,7 @@ git commit -m "feat: wire frames for the conversation catalogue, search and open
 
 **Files:**
 - Modify: `Sources/FlightDeck/Fleet/FleetService.swift:141` (`server.onRequest`)
-- Test: `Tests/FlightDeckTests/FleetServiceTests.swift`
+- Test: `Tests/FlightDeckTests/SQLiteSearchIndexTests.swift`, `Tests/FlightDeckTests/SearchActivationTests.swift`
 
 **Interfaces:**
 - Consumes: the frames from Task 6, `SQLiteSearchIndex.conversationNames()`, `FTS5Query.match`, `SearchIndex.search`, `SearchActivation.plan`, `SessionStore.openConversation`.
@@ -764,7 +782,7 @@ Alongside the existing `.timeline` and `.newSessionOptions` cases:
 
 Add a private helper on `FleetService` that builds a `SearchResult` for the conversation and hands it to the code the desktop's Return already runs — `SearchActivation.plan` followed by `SessionStore.openConversation`. Do not reimplement the rules; `SearchActivation` already decides select-vs-resume-vs-add-project, and `SessionStore` already re-resolves the real transcript directory. Return the resulting tab id.
 
-- [ ] **Step 3: Write the test**
+- [ ] **Step 3: Write the tests**
 
 ```swift
 /// A project that has left the sidebar contributes nothing, rather than a hit the Mac
@@ -816,11 +834,7 @@ func testOpenConversationSelectsAnExistingTab() {
 }
 ```
 
-Both assert the rules `FleetService` delegates to rather than re-asserting them through a
-socket: the scoping lives in `SQLiteSearchIndex.search`'s SQL, and the select-vs-resume
-decision lives in `SearchActivation.plan`. `makeIndex()` is the helper
-`SQLiteSearchIndexTests` already uses; put the first test in that file and the second in
-`SearchActivationTests`.
+Both assert the rules `FleetService` delegates to rather than re-asserting them through a socket: the scoping lives in `SQLiteSearchIndex.search`'s SQL, and the select-vs-resume decision lives in `SearchActivation.plan`. Put the first in `SQLiteSearchIndexTests` (whose `makeIndex()` helper it uses) and the second in `SearchActivationTests`.
 
 - [ ] **Step 4: Run the tests**
 
@@ -830,7 +844,9 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add Sources/FlightDeck/Fleet/FleetService.swift Tests/FlightDeckTests/FleetServiceTests.swift
+git add Sources/FlightDeck/Fleet/FleetService.swift \
+        Tests/FlightDeckTests/SQLiteSearchIndexTests.swift \
+        Tests/FlightDeckTests/SearchActivationTests.swift
 git commit -m "feat: answer catalogue, search and open-conversation from the Mac
 
 Activation goes through SearchActivation and SessionStore.openConversation —
@@ -858,13 +874,9 @@ Follow the existing shape exactly — `pending`, `pendingAcks`, `pendingOptions`
 
 Every one of them must complete **exactly once**, including with `.disconnected` when the socket dies — that is what stops a footer spinning forever.
 
-- [ ] **Step 2: Write the test**
+- [ ] **Step 2: Write the tests by copying the ones that already exist**
 
-```swift
-**Do not invent fixtures for this file.** `FleetConnectorTests` already has tests for
-`requestNewSessionOptions` that stand up a connector and drive replies into it. Open them,
-copy the two that cover *reply lands on its cid* and *socket death completes with
-`.disconnected`*, and change exactly three things in each copy:
+**Do not invent fixtures for this file.** `FleetConnectorTests` already has tests for `requestNewSessionOptions` that stand up a connector and drive replies into it. Open them, copy the two that cover *reply lands on its cid* and *socket death completes with `.disconnected`*, and change exactly three things in each copy:
 
 | In the copy | From | To |
 |---|---|---|
@@ -872,14 +884,9 @@ copy the two that cover *reply lands on its cid* and *socket death completes wit
 | the frame driven in | `.newSessionOptions(cid:, WireNewSessionOptions(...))` | `.searchHits(cid:, WireSearchHits(hits: [], indexing: nil))` |
 | the test names | `...NewSessionOptions...` | `...Search...` |
 
-Everything else — the connector construction, the store stub, the expectation and timeout —
-carries over unchanged, which is the point: this is a fourth table beside three that already
-work, and it should be tested the same way they are. Repeat the same three substitutions for
-`requestConversations` and `requestOpenConversation`.
+Everything else — the connector construction, the store stub, the expectation and timeout — carries over unchanged, which is the point: this is a fourth table beside three that already work, and it should be tested the same way they are. Repeat the same three substitutions for `requestConversations` and `requestOpenConversation`.
 
-Both properties must hold for all three: the entry is removed when it completes, so a second
-frame on the same `cid` cannot complete it twice, and a socket that goes away completes with
-`.disconnected` rather than never at all.
+Both properties must hold for all three: the entry is removed when it completes, so a second frame on the same `cid` cannot complete it twice, and a socket that goes away completes with `.disconnected` rather than never at all.
 
 - [ ] **Step 3: Run the tests**
 
@@ -1172,9 +1179,7 @@ final class SessionSearchModelTests: XCTestCase {
 }
 ```
 
-These drive the debounce with `Task.sleep` rather than an expectation, which sidesteps the
-`@MainActor` hazard entirely: **`wait(for:)` deadlocks on the main actor** — if you do reach
-for an expectation anywhere here, it must be `await fulfillment(of:)`.
+These drive the debounce with `Task.sleep` rather than an expectation, which sidesteps the `@MainActor` hazard entirely: **`wait(for:)` deadlocks on the main actor** — if you do reach for an expectation anywhere here, it must be `await fulfillment(of:)`.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -1183,7 +1188,7 @@ Expected: FAIL to compile.
 
 - [ ] **Step 3: Implement the model**
 
-Mirror `SearchModel`'s two-clock structure: `query`'s `didSet` clears held hits immediately and reranks with no debounce, then schedules a 90 ms task that issues one `requestSearch`. Drop a reply whose query does not equal the current one. Hold hits in a stored array cleared on every query change, so a previous query's evidence can never survive under a new one.
+Mirror `SearchModel`'s two-clock structure: `query`'s `didSet` clears held hits immediately and reranks with no debounce, then schedules a 90 ms task that issues one `searchTranscripts`. Drop a reply whose query does not equal the current one. Hold hits in a stored array cleared on every query change, so a previous query's evidence can never survive under a new one.
 
 ```swift
     /// Long enough to collapse a burst of typing into one request, short enough that pausing
