@@ -192,13 +192,11 @@ struct Scan: Sendable {
     ) -> Scan {
         let tail = TailReader.read(url: url, offset: offset, hasChosenStart: hasChosenStart)
         var result = Scan(offset: tail.offset, hasChosenStart: tail.hasChosenStart)
-        // The position of the line about to be parsed, not the position after it — a search
-        // hit needs to point at where its line STARTS. Begins at this pass's own starting
-        // offset and advances by each line's byte length plus the newline `TailReader` split
-        // it on.
-        var lineOffset = offset
-        for line in tail.lines {
-            defer { lineOffset += UInt64(line.utf8.count) + 1 }
+        // `tail.lineOffsets` is `TailReader`'s own accounting of where each line starts, in
+        // lockstep with `tail.lines` — not reconstructed here by summing line lengths, which
+        // would silently drift the moment a blank line in the tailed range is consumed but
+        // (like `tail.lines`) never appears in either array.
+        for (line, lineOffset) in zip(tail.lines, tail.lineOffsets) {
             guard let data = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { continue }
