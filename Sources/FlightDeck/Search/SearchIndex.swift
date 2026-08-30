@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// The markers `snippet()` wraps matched terms in.

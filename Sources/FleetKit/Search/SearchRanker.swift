@@ -16,8 +16,8 @@ import Foundation
 /// arriving late from the debounced index query can only ever append *below* what is already
 /// on screen. The highlighted row can never be shoved out from under the user by results
 /// landing — which is why `SearchModel` can track selection by identity and have it hold.
-enum SearchRanker {
-    static func rank(
+public enum SearchRanker {
+    public static func rank(
         names: [NameCandidate], query: String, transcripts: [TranscriptHit]
     ) -> [SearchResult] {
         // Nothing typed: the deck, most recent first. Projects are left out because a list
@@ -102,7 +102,7 @@ enum SearchRanker {
     /// Three is deliberately small. The point of showing more than one is evidence that the
     /// conversation is the right one; past a few, extra matches stop informing that judgement and
     /// start pushing other conversations out of the visible rows.
-    static let maxMatchesPerConversation = 3
+    public static let maxMatchesPerConversation = 3
 
     private static func byTierThenRecency(_ lhs: SearchResult, _ rhs: SearchResult) -> Bool {
         if lhs.tier != rhs.tier { return lhs.tier < rhs.tier }

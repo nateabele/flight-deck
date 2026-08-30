@@ -1,4 +1,5 @@
 import XCTest
+import FleetKit
 @testable import FlightDeck
 
 /// An index that answers instantly and records what it was asked, so the model's

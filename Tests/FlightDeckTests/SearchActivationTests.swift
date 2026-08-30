@@ -1,4 +1,5 @@
 import XCTest
+import FleetKit
 @testable import FlightDeck
 
 /// What pressing Return on a result means, decided as a value before anything is launched.
