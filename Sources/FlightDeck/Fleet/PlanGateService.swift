@@ -100,10 +100,21 @@ final class PlanGateService {
         }
 
         for (session, entry, call) in toFetch {
-            guard let plan = await makeClient(entry.port).plan() else { continue }
+            // A session lands here either brand new (nothing to clear) or because its call
+            // id/pid moved on from what `gates[session]` still holds — a superseded gate. On
+            // any failure below, that old entry must not keep being projected as though it
+            // were still the live one: clear it rather than `continue` past it.
+            guard let plan = await makeClient(entry.port).plan() else {
+                gates[session] = nil
+                continue
+            }
             // Re-check after the await: this call may have been resolved (and tombstoned)
-            // while its plan was in flight.
-            if resolvedCallIDs.contains(call) { continue }
+            // while its plan was in flight. Same reasoning — whatever is in `gates[session]`
+            // is stale either way, so clear it rather than leave it standing.
+            if resolvedCallIDs.contains(call) {
+                gates[session] = nil
+                continue
+            }
             gates[session] = Gate(entry: entry, callID: call, plan: plan,
                                  blocks: PlanBlocks.split(plan), annotationCount: 0)
         }
