@@ -223,6 +223,61 @@ final class PlanGateServiceTests: XCTestCase {
             "a refresh suspended fetching a different session's plan must not undo a concurrent annotate"
         )
     }
+
+    /// A session lands in `refresh()`'s fetch list either because it is brand new, or because
+    /// its gate was superseded — a new `ExitPlanMode` call moved the call id this service still
+    /// holds a `Gate` for. If the refetch for that second case fails, the old `Gate` — old call
+    /// id, old plan text, old `annotationCount` — must not be left in place and keep being
+    /// projected to the phone as though it were still the live gate. Regression coverage for
+    /// the stale-gate-on-failed-refetch defect.
+    @MainActor
+    func testASupersededGateWhoseRefetchFailsIsNotLeftProjectingStaleData() async {
+        let session = UUID()
+        let claudePID: pid_t = 4400
+        let plannotatorPID: pid_t = 9200
+        let port = 54400
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PlanGateServiceTests-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+
+        let registryJSON = """
+        {"pid":\(plannotatorPID),"port":\(port),"url":"http://localhost:\(port)",\
+        "mode":"plan","project":"flight-deck","startedAt":"2026-08-29T17:40:36.186Z"}
+        """
+        try? Data(registryJSON.utf8).write(to: dir.appendingPathComponent("\(plannotatorPID).json"))
+
+        let transport = RecordingTransport(plan: "# A", registryDirectory: dir)
+        // A `var` the closure captures by reference, so the second refresh can be made to see
+        // a new call id — standing in for a new `ExitPlanMode` call superseding the first.
+        var currentCallID = "c1"
+
+        let service = PlanGateService(
+            callID: { $0 == session ? currentCallID : nil },
+            pid: { $0 == session ? claudePID : nil },
+            sessions: { [session] }
+        )
+        service.registryDirectory = dir
+        service.isAlive = { _ in true }
+        service.parentOf = { $0 == plannotatorPID ? claudePID : nil }
+        service.makeClient = { port in
+            PlanGateClient(port: port, transport: { request in await transport.handle(request) })
+        }
+
+        await service.refresh()
+        XCTAssertNotNil(service.gate(for: session), "the first call's gate must be live")
+
+        // The call id moves on, but this time the refetch fails.
+        currentCallID = "c2"
+        await transport.failNextPlanFetch()
+        await service.refresh()
+
+        XCTAssertNil(
+            service.gate(for: session),
+            "a superseded gate whose refetch failed must not keep projecting the old, stale plan"
+        )
+    }
 }
 
 // MARK: - Fixtures
@@ -242,6 +297,7 @@ private actor RecordingTransport {
     private(set) var lastAnnotation: (text: String, originalText: String?)?
 
     private var shouldPauseNextPlanFetch = false
+    private var shouldFailNextPlanFetch = false
     private var pauseContinuation: CheckedContinuation<Void, Never>?
     private var pausedContinuation: CheckedContinuation<Void, Never>?
 
@@ -253,6 +309,12 @@ private actor RecordingTransport {
     /// Arranges for the *next* `/api/plan` fetch to suspend until `resume()` is called.
     func pauseNextPlanFetch() {
         shouldPauseNextPlanFetch = true
+    }
+
+    /// Arranges for the *next* `/api/plan` fetch to come back with a non-2xx status — the
+    /// shape `PlanGateClient.plan()` reports as `nil`, the same as a dropped connection.
+    func failNextPlanFetch() {
+        shouldFailNextPlanFetch = true
     }
 
     /// Waits until a paused fetch has actually reached its pause point, so a test never races
@@ -271,6 +333,10 @@ private actor RecordingTransport {
         switch request.url?.path {
         case "/api/plan":
             planFetchCount += 1
+            if shouldFailNextPlanFetch {
+                shouldFailNextPlanFetch = false
+                return (Data(), 500)
+            }
             if shouldPauseNextPlanFetch {
                 shouldPauseNextPlanFetch = false
                 await withCheckedContinuation { cont in
