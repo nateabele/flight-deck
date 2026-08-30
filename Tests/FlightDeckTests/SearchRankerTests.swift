@@ -34,7 +34,7 @@ final class SearchRankerTests: XCTestCase {
     ) -> TranscriptHit {
         TranscriptHit(
             rowID: rowID, conversationID: conversation, projectPath: "/w/flight-deck",
-            conversationName: conversation, snippet: snippet, timestamp: ago(activity)
+            conversationName: conversation, snippet: snippet, timestamp: ago(activity), offset: 0
         )
     }
 
