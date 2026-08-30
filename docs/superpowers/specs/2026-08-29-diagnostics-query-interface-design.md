@@ -188,13 +188,16 @@ Listener runs for the app's lifetime, bound to `127.0.0.1` only.
 
 ## 8. Testing
 
-- `DiagnosticsReport` is a pure value built from a store: assert `hasSurface` false for a tab
-  whose `makeSurface` returned nil, and true for one it did not — the exact discrimination no
-  existing test makes.
+- `DiagnosticsReport` is a pure value built from a store: assert `hasShellProcess` false for a
+  tab with no `SurfaceProcessRegistry` entry and true for one with it, **while `hasSurface` is
+  true in both** — that pairing is the exact discrimination no existing test makes, and the one
+  the original draft of this spec got backwards.
 - Auth: no token → 401 and a pending grant; approved token → 200; revoked token → 401;
   `/health` reachable unauthenticated.
-- `respawn-surface`: refuses with `screenLocked` when locked; refuses when a surface exists;
-  on success the tab gains a surface and an agent appears in the next report.
+- `respawn-surface`: refuses with `displayAsleep` when the display is not drawable; refuses
+  with `alreadyRunning` when the tab already has a registered shell process (not merely a
+  surface); on success the inert surface is replaced, a shell is forked, and an agent appears
+  in the next report.
 - Orphan detection: a status file whose session id matches no tab appears in `orphanedAgents`.
 - The server parses a request and rejects a malformed one without wedging the listener.
 - `build-ios.sh` still succeeds — the guard that this code did not drift into FleetKit.
