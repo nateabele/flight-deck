@@ -33,11 +33,13 @@ import Foundation
 ///
 /// ## What a real screen looks like
 ///
-/// Every rule here comes from captures — the six claude 2.1.241 screens in
-/// `Tests/FlightDeckTests/Fixtures/Claude/` and, since, the five codex-cli 0.148.0 screens in
-/// `Fixtures/Codex/` — not from either binary's string table. **Every structural rule below
-/// held unmodified against codex's screens; only the marker glyph differed**, which is why it
-/// is now a parameter and why nothing else here is per-agent:
+/// Every rule here comes from captures — the claude screens in
+/// `Tests/FlightDeckTests/Fixtures/Claude/`, recorded in three batches (twelve at 2.1.241, four
+/// at 2.1.247, and the four 2.1.251 checkbox screens the action-row rule below rests on), and
+/// the five codex-cli 0.148.0 screens in `Fixtures/Codex/` — not from either binary's string
+/// table. **Every structural rule below held unmodified against codex's screens; only the
+/// marker glyph differed**, which is why it is now a parameter and why nothing else here is
+/// per-agent:
 ///
 /// - The marker is `❯`, but **its column varies by dialog kind** — column 2 for a permission
 ///   and for folder-trust, column 1 for an `AskUserQuestion`. claude positions with absolute
@@ -185,7 +187,11 @@ enum ChoiceDialog {
     ///
     /// Only the box is taken, never a bracketed word that happens to start a label: the
     /// pattern is a bracket, one space-or-tick, a bracket, a space, and it must sit
-    /// immediately after the `N.`.
+    /// immediately after the `N.` — and nothing looser, because `isCheckbox` is `actionRow`'s
+    /// first conjunct. A `[x]` or a `[1]` admitted as a box is a screen that grows an
+    /// unnumbered row out of whatever sits under its options. A box shape no capture draws
+    /// leaves the row unchecked, the action row unadmitted and the drive refused, which is the
+    /// direction this file fails in.
     private static func parse(_ line: String, marker: Character) -> Row? {
         var rest = Substring(line).drop(while: { $0 == " " })
         var isMarked = false
@@ -206,16 +212,16 @@ enum ChoiceDialog {
         rest = rest.drop(while: { $0 == " " })
         let textColumn = line.distance(from: line.startIndex, to: rest.startIndex)
 
-        // The checkbox, if this is a multi-select row. `[ ]` unticked, `[✔]` ticked — both
-        // captured. Dropped so the row reads as the option's own words, which is what the
-        // transcript holds and therefore what the interlock compares against.
+        // The checkbox, if this is a multi-select row. `[ ]` unticked, `[✔]` ticked, each
+        // followed by a space — all five checkbox captures draw exactly those two shapes and
+        // nothing else is admitted. Dropped so the row reads as the option's own words, which
+        // is what the transcript holds and therefore what the interlock compares against.
         var isCheckbox = false
-        if rest.first == "[" {
-            let box = rest.prefix(3)
-            if box.count == 3, box.last == "]" {
-                isCheckbox = true
-                rest = rest.dropFirst(3).drop(while: { $0 == " " })
-            }
+        let box = Array(rest.prefix(4))
+        if box.count == 4, box[0] == "[", box[1] == " " || box[1] == "✔", box[2] == "]",
+           box[3] == " " {
+            isCheckbox = true
+            rest = rest.dropFirst(4).drop(while: { $0 == " " })
         }
 
         let label = normalized(rest)
@@ -242,12 +248,15 @@ enum ChoiceDialog {
     /// wrapped label satisfies every one of `actionRow`'s conditions — at the moment it is read
     /// the row it wraps IS the run's last row and has no continuations yet — so a candidate is
     /// held back until the next line says which it was. A line continuing the numbering demotes
-    /// it to a continuation; anything else confirms it, because **nothing follows the action row
-    /// inside a list**. That is the invariant, and what protects it on a real screen is the
-    /// full-width rule claude draws under the action row: `Chat about this` is numbered **6**
-    /// where the last option is **5**, so it would otherwise *look* like it continues the run
-    /// and demote a genuine `Submit`. Every capture draws that rule; a build that stopped would
-    /// take the action row back out of reach, which is a refusal, not a wrong keypress.
+    /// it to a continuation, and so does a further indented line — two indented lines under a
+    /// row mean the first of them was a wrap, not the row a list ends on. Anything else confirms
+    /// it — a blank line, a rule, unindented text, a row that breaks the numbering, or the end
+    /// of the viewport — because **nothing follows the action row inside a list**. That is the
+    /// invariant, and what protects it on a real screen is the full-width rule claude draws
+    /// under the action row: `Chat about this` is numbered **6** where the last option is **5**,
+    /// so it would otherwise *look* like it continues the run and demote a genuine `Submit`.
+    /// Every capture draws that rule; a build that stopped would take the action row back out
+    /// of reach, which is a refusal, not a wrong keypress.
     private static func list(inViewport viewport: String, marker: Character) -> [Row]? {
         var lists: [[Row]] = []
         var current: [Row] = []

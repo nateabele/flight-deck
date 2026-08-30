@@ -61,12 +61,14 @@ something the others do not — `ChoiceDialog.actionRow` carries the reasoning p
 
 **And the row is admitted one line late.** A wrapped label satisfies all four at the moment it is
 read, so a candidate is held until the next line says which it was: a line continuing the
-numbering demotes it to a continuation, anything else confirms it, because nothing follows the
-action row inside a list. What protects that on a real screen is the full-width rule claude draws
-under it — `Chat about this` is numbered **6** where the last option is **5**, so without the rule
-line it would look like a continuation of the run and demote a genuine `Submit`. A build that
-stopped drawing that rule takes the action row back out of reach, which is a **refusal, not a
-wrong keypress**.
+numbering demotes it to a continuation, and so does a further indented line — two indented lines
+under a row mean the first was a wrap, not the row a list ends on. Anything else confirms it — a
+blank line, a rule, unindented text, a row that breaks the numbering, or the end of the viewport
+— because nothing follows the action row inside a list. What protects that on a real screen is
+the full-width rule claude draws under it — `Chat about this` is numbered **6** where the last
+option is **5**, so without the rule line it would look like a continuation of the run and demote
+a genuine `Submit`. A build that stopped drawing that rule takes the action row back out of
+reach, which is a **refusal, not a wrong keypress**.
 
 No `Submit`/`Next` literal exists in `ChoiceDialog.swift`. Those are claude's words;
 `AnswerPlan.actionLabel` supplies them and `row(_:reads:)` checks them.
