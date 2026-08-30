@@ -1,3 +1,4 @@
+import FleetKit
 import SwiftUI
 
 /// Turns FTS5's sentinel-marked snippet into an `AttributedString`.
