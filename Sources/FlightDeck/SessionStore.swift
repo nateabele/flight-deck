@@ -126,8 +126,8 @@ final class SessionStore: ObservableObject {
     /// The process table the orphan sweep reads. Settable so tests can script it.
     var processInspector: ProcessInspecting = ProcessTree()
 
-    /// Injected for the reason `processInspector` is — see `ScreenLockInspecting`.
-    var screenLock: ScreenLockInspecting = ScreenLock()
+    /// Injected for the reason `processInspector` is — see `DisplayInspecting`.
+    var display: DisplayInspecting = DisplayState()
 
     /// This run's own identity, stamped into every snapshot as `owner`. Computed once: it
     /// cannot change for the life of the process, and `persist()` runs on every mutation —
