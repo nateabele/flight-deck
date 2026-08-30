@@ -145,18 +145,30 @@ final class ChoiceDialogTests: XCTestCase {
         }
     }
 
-    /// A multi-select numbers AND checkboxes each row — `❯ 1. [ ] Trail mix`. This feature
-    /// refuses to answer one upstream (`PromptQuestion.multiSelectReason`), so the interlock
-    /// declines to confirm the screen it cannot drive rather than quietly reading past the box.
-    func testAMultiSelectsCheckboxedRowConfirmsNothing() throws {
+    /// A multi-select numbers AND checkboxes each row — `❯ 1. [ ] Trail mix`.
+    ///
+    /// **This used to assert the opposite**, and the reason it gave was true when it was
+    /// written: the feature refused to answer a multi-select, so the interlock declined to
+    /// confirm a screen nothing could drive. The driver ticks boxes now, and leaving the glyph
+    /// in the label made every checkbox row unconfirmable — a drive aborted at the first one,
+    /// part-way through a form, which is how it failed on a real phone. The box is stripped;
+    /// the row reads as the option's own words, which is what the transcript holds.
+    func testAMultiSelectsCheckboxedRowReadsAsItsOwnLabel() throws {
         let screen = try captured("question-multi.captured")
         let labels = try transcriptLabels("question-multi.captured")
         XCTAssertEqual(labels, ["Trail mix", "Dark chocolate", "Beef jerky", "Fresh fruit"])
         for (index, label) in labels.enumerated() {
-            XCTAssertFalse(row(index, reads: label, inViewport: screen),
-                           "\(label) is drawn behind a checkbox on a list this build cannot "
-                           + "answer; confirming it would be confirming the wrong screen")
+            XCTAssertTrue(row(index, reads: label, inViewport: screen),
+                          "\(label) is what the transcript calls it, so it is what the "
+                          + "interlock must be able to confirm")
         }
+    }
+
+    /// And the box is not confused with a label that merely starts with a bracket.
+    func testABracketedLabelIsNotMistakenForACheckbox() {
+        let screen = viewport(["❯ 1. [draft] Retry the build", "  2. Something else"])
+        XCTAssertTrue(row(0, reads: "[draft] Retry the build", inViewport: screen),
+                      "only a one-character box is a box; a bracketed WORD is the label")
     }
 
     /// A description is not a label. `question-single`'s rows carry their descriptions on the
