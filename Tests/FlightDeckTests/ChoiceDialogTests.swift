@@ -4,13 +4,20 @@ import XCTest
 
 /// The interlock in front of an irreversible keypress.
 ///
-/// **Six of these fixtures are captured, not authored.** `permission-bash`, `permission-write`,
-/// `permission-write-60col`, `question-single`, `question-multi` and `workspace-trust` are
-/// verbatim renders of what claude 2.1.241 drew on a pty, with the two matching transcript
-/// records beside them; `dialogs.captured.provenance.json` holds the recipe, the digests and
-/// the five premises they refuted. The handful of hand-written screens below are degenerate
-/// cases no capture can produce on demand: a moved cursor, a list with no marker, a list with
-/// two, a list numbered out of sequence.
+/// **Everything `captured(_:)` reads is captured, not authored; everything built inline with
+/// `viewport(_:)` is authored.** That is the line a reader has to be able to draw, because the
+/// rule this suite runs on is *if a capture disagrees with the code, the code is wrong* — and it
+/// only means anything if you can tell which is which. The captures are verbatim renders of what
+/// claude drew on a pty, sha256-pinned in `dialogs.captured.provenance.json` along with the
+/// recipe, in three batches: 2.1.241 for the original six (`permission-bash`, `permission-write`,
+/// `permission-write-60col`, `question-single`, `question-multi`, `workspace-trust` — the two
+/// with a matching transcript record beside them, and the batch that refuted five premises),
+/// 2.1.247 for `question-two*` and `question-single-247`, and 2.1.251 for the four checkbox
+/// screens (`question-checkbox`, `-toggled`, `-submit-focused`, `question-set-with-checkbox`)
+/// the action row rule is built on. The authored screens are degenerate cases no capture can be
+/// made to produce on demand: a moved cursor, a list with no marker, a list with two, a list
+/// numbered out of sequence, and a checkbox option whose label wraps — which the 60-column
+/// capture has only for a permission dialog.
 ///
 /// The bias throughout is refusal. A wrong answer here becomes Return pressed on the wrong row
 /// of someone's live terminal — on a permission dialog, a decision nobody made — so a screen
@@ -296,6 +303,48 @@ final class ChoiceDialogTests: XCTestCase {
                        + "send a half-built answer")
     }
 
+    /// **A wrapped option label is not the action row, and telling them apart is why `list`
+    /// decides one line late.** At a narrow width a checkbox label runs onto a line indented to
+    /// the label column, and that line satisfies every condition `actionRow` states — at the
+    /// moment it is read, the row it wraps is the run's last row and has no continuations yet.
+    /// Admitted, it closes the run early: every option below the wrap becomes unconfirmable and
+    /// the real action row goes out of reach. That is this task's own symptom, reintroduced by
+    /// its own fix, on a screen the file's documentation says exists (`labels wrap; they never
+    /// elide`). What resolves it is the line after: one that continues the numbering demotes the
+    /// candidate to the continuation it always was.
+    ///
+    /// Both indents are checked because the obvious narrowing — insisting the column match
+    /// exactly — does not work: `[ ] ` puts the label four columns past the text column, but a
+    /// wrap indented to the text column itself is equally possible and equally wrong.
+    func testAWrappedCheckboxLabelIsNotMistakenForTheActionRow() {
+        for (indent, where_) in [("         ", "the label column"), ("     ", "the text column")] {
+            let screen = viewport([
+                "❯ 1. [ ] Trail mix",
+                "  2. [ ] Dark chocolate with sea salt",
+                indent + "and roasted almonds",
+                "  3. [ ] Beef jerky",
+                "  4. [ ] Fresh fruit",
+                "  5. [ ] Type something",
+                "     Submit",
+                "────────────────────────────",
+                "  6. Chat about this",
+            ])
+            XCTAssertEqual(focusedRow(inViewport: screen), 0, "wrapped at \(where_)")
+            XCTAssertTrue(row(1, reads: "Dark chocolate with sea salt and roasted almonds",
+                              inViewport: screen),
+                          "wrapped at \(where_): the row still reads as its reassembled label")
+            XCTAssertTrue(row(2, reads: "Beef jerky", inViewport: screen),
+                          "wrapped at \(where_): the options BELOW the wrap are the ones a "
+                          + "stolen line makes unreachable")
+            XCTAssertTrue(row(4, reads: "Type something", inViewport: screen),
+                          "wrapped at \(where_)")
+            XCTAssertTrue(row(AnswerPlan.actionRow(optionCount: 4), reads: "Submit",
+                              inViewport: screen),
+                          "wrapped at \(where_): and the action row is still where the plan "
+                          + "will look for it")
+        }
+    }
+
     // MARK: - What the action row rule must not admit
 
     /// **A single-select screen grows nothing**, and it is the case the rule comes closest to
@@ -335,6 +384,45 @@ final class ChoiceDialogTests: XCTestCase {
         XCTAssertEqual(focusedRow(inViewport: screen), 1)
         XCTAssertFalse(row(2, reads: "Use the AskUserQuestion tool to ask me which snacks I want",
                            inViewport: screen))
+    }
+
+    /// **The line that pins "immediately after the last row".** Deleting that condition leaves
+    /// every capture bit-identical and all the other cases green, so without this screen the
+    /// suite cannot tell the rule from a weaker one that admits any indented line under a
+    /// checkbox run. Here a description has already been filed under row 2, so the line below it
+    /// is two removes from the row and is a second description — not a row anyone can press.
+    func testALineTwoRemovesFromTheLastCheckboxRowIsNotTheActionRow() {
+        let screen = viewport([
+            "  1. [ ] Trail mix",
+            "  Nuts and dried fruit.",
+            "  2. [ ] Type something",
+            "  A description at column 2",
+            "     Submit",
+        ])
+        XCTAssertFalse(row(2, reads: "Submit", inViewport: screen),
+                       "the run's last row already carries a continuation, so this line is one "
+                       + "too, and there is no row 2 to press")
+    }
+
+    /// **An ordinary markdown checklist must not outrank a live dialog.** claude writes these in
+    /// its own output constantly, and `list` takes the LAST qualifying run on screen — so one
+    /// `1. [ ]` line plus one indented line under it, admitted as a two-row list, wins over the
+    /// permission dialog above it. `focusedRow` then reports nil and Allow-from-phone quietly
+    /// stops working for as long as the checklist is on screen. Requiring two rows before an
+    /// action row costs nothing: every multiSelect draws its options and `Type something` first.
+    func testAOneRowChecklistBelowADialogDoesNotBecomeAList() {
+        let screen = viewport([
+            " Do you want to proceed?",
+            " ❯ 1. Yes",
+            "   2. No",
+            "",
+            "⏺ Here is my plan:",
+            "  1. [ ] Rewrite the parser",
+            "     and then ship it",
+        ])
+        XCTAssertEqual(focusedRow(inViewport: screen), 0,
+                       "the dialog above is the list being offered")
+        XCTAssertTrue(row(0, reads: "Yes", inViewport: screen))
     }
 
     /// `question-single`'s layout reduced to the two lines that matter: a description at exactly
