@@ -113,28 +113,53 @@ def expected_label(step, questions):
     return SUBMIT_ANSWERS_LABEL
 
 
-def expected_answer_labels(questions, answers):
-    """Every option label the plan expects claude to RECORD, in question order — not merely
-    that a submission happened, but that it named the same options the drive actually pressed.
-    Pressing the right keys is not the assertion; the recorded result naming the right labels is.
-    """
-    labels = []
-    for qi, q in enumerate(questions):
-        for oi in sorted(answers[qi]):
-            labels.append(q["options"][oi]["label"])
-    return labels
+# claude's own tool_result names each question and its recorded answer as a quoted pair, e.g.
+# `"Which snacks do you want?"="Chocolate, Fruit"`, multiple pairs comma-separated when there is
+# more than one question. Matched as quoted pairs (not by splitting the whole string on ", ")
+# specifically so a multi-select answer's OWN internal ", " does not get confused with the
+# separator between two different questions.
+RESULT_PAIR_RE = re.compile(r'"([^"]*)"="([^"]*)"')
 
 
-def answer_mismatch(result, expected_labels):
-    """None if every expected label appears verbatim in the recorded result text, else a reason
-    naming expected vs. recorded — distinct from both an interlock abort and a stale-transcript
-    abort, so a wrong-answer submission is never mistaken for either.
+def _parse_recorded_answers(result):
+    """Every `(question text, raw answer value)` pair in claude's tool_result text, in the order
+    they appear — or `None` if the text contains no such pair at all. `None` is distinct from an
+    empty list: callers must treat "did not parse" as its own failure, never as a vacuous match.
     """
-    missing = [label for label in expected_labels if label not in result]
-    if not missing:
-        return None
-    return (f"answer mismatch: expected {expected_labels!r} but {missing!r} not found in "
-            f"recorded result {result!r}")
+    pairs = RESULT_PAIR_RE.findall(result)
+    return pairs if pairs else None
+
+
+def answer_mismatch(result, questions, answers):
+    """`None` only if the recorded result names EXACTLY the options chosen for every question —
+    as a set, per question — not merely that the expected labels appear somewhere in the text.
+
+    A plain substring check (`label not in result`) has a one-directional false-PASS hole: if one
+    option's label is a substring of another's (e.g. "Chocolate" vs. "Dark Chocolate"), pressing
+    the WRONG one still contains-matches the shorter label. That is exactly the failure the
+    interlock exists to prevent, undetected. Comparing the token SET recorded for each question
+    against the token set chosen closes that hole, and additionally catches an extra, unchosen
+    answer being recorded — something containment could never see either.
+
+    KNOWN, DELIBERATE limitation: an option label that itself contains the literal substring
+    `", "` will be split into two tokens here and reported as a mismatch that is not real. That
+    is the safe direction — a false FAIL, loudly labelled with the full expected/recorded sets —
+    never a false PASS. See the README's "answer mismatch" bullet.
+    """
+    pairs = _parse_recorded_answers(result)
+    if pairs is None:
+        return f"could not parse recorded result into question/answer pairs: {result!r}"
+    if len(pairs) != len(questions):
+        return (f"recorded result names {len(pairs)} question(s), expected {len(questions)}: "
+                f"{result!r}")
+    for qi, (q, (_, answer_value)) in enumerate(zip(questions, pairs)):
+        expected = {q["options"][oi]["label"] for oi in answers[qi]}
+        recorded = set(answer_value.split(", "))
+        if recorded != expected:
+            return (f"answer mismatch on question {qi} ({q.get('question', '')!r}): expected "
+                     f"{sorted(expected)!r}, recorded {sorted(recorded)!r} "
+                     f"(full result {result!r})")
+    return None
 
 
 # --- driving the pty -------------------------------------------------------------------------
@@ -274,7 +299,7 @@ def drive(prompt, answers, timeout=200):
                 # submission. A drive that pressed the wrong row is exactly the catastrophic
                 # failure the interlock exists to prevent; check that the recorded result
                 # actually names the options that were chosen and driven onto the screen.
-                abort = answer_mismatch(result_text, expected_answer_labels(questions, answers))
+                abort = answer_mismatch(result_text, questions, answers)
         final = disp()
         os.write(fd, b"\x04"); pump(1)
     finally:
