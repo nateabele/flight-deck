@@ -80,9 +80,17 @@ actor SearchIndexBuilder {
         }
 
         var batch: [IndexedMessage] = []
+        // The position of the line about to be handed to the extractor, not the position
+        // after it — a search hit needs to point at where its line STARTS. Begins at this
+        // pass's own starting offset and advances by each line's byte length plus the
+        // newline `TailReader` split it on.
+        var lineOffset = startOffset
 
         for line in read.lines {
-            batch += TranscriptExtractor.messages(inLine: line, conversationID: file.conversationID)
+            batch += TranscriptExtractor.messages(
+                inLine: line, conversationID: file.conversationID, offset: Int(lineOffset)
+            )
+            lineOffset += UInt64(line.utf8.count) + 1
 
             if batch.count >= Self.batchSize {
                 // `nil`: add these rows without moving the read position. The read position
