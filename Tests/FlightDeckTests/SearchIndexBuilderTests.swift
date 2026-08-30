@@ -234,6 +234,26 @@ final class SearchIndexBuilderTests: XCTestCase {
         XCTAssertEqual(hits.map(\.conversationID), ["c2"])
     }
 
+    /// `TailReader.lines` omits blank lines, but a blank line's own byte is still consumed —
+    /// so the record after it must not silently report an offset that is short by the blank
+    /// line's width. Regression for exactly that: before the fix, this walker reconstructed
+    /// offsets by summing each *emitted* line's length, which drifts the moment a blank line
+    /// is consumed without producing an element.
+    func testARecordAfterABlankLineReportsItsTrueOffset() async throws {
+        let folder = directory.appendingPathComponent("proj", isDirectory: true)
+        let first = userLine("first, alpha")
+        try write([first, "", userLine("second, beta-unique")], conversation: "c1", in: folder)
+        // first's own line, then its newline, then the blank line's newline.
+        let expectedOffset = first.utf8.count + 1 + 1
+
+        let builder = SearchIndexBuilder(index: index)
+        await builder.build(entries(folder), progress: { _ in })
+
+        let hits = try index.search(#""beta"*"#, projects: ["/w/fd"], limit: 10)
+        XCTAssertEqual(hits.count, 1)
+        XCTAssertEqual(hits.first?.offset, expectedOffset)
+    }
+
     /// Names come from the transcript itself, via the same rules the sidebar uses, so a
     /// result row for a conversation with no open tab is still called something meaningful.
     func testConversationNamesAreRecorded() async throws {
