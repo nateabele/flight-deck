@@ -136,10 +136,10 @@ enum ChoiceDialog {
 
     /// One row of a select list.
     private struct Row {
-        /// The number the screen draws, or nil for the action row — the one row claude does not
-        /// number. Not a detail: the screen numbers `Chat about this` **6** while `Type
-        /// something` above the action row is **5**, so a number invented here would be one the
-        /// screen contradicts, and `list`'s contiguity check reads this field.
+        /// The number the screen draws beside the row, or nil for the action row — which the
+        /// screen does not number at all. It numbers `Type something` **5** and `Chat about
+        /// this` **6**, straight past the row between them, so any number invented here would
+        /// be one the screen contradicts, and `list`'s contiguity check reads this field.
         var number: Int?
         var isMarked: Bool
         /// The row's own text, with the marker and the `N.` removed.
@@ -151,11 +151,6 @@ enum ChoiceDialog {
         var textColumn: Int
         /// Whether the row drew a checkbox, i.e. whether this is a multi-select question.
         var isCheckbox: Bool = false
-        /// Whether this is the action row rather than one of the options. `number == nil`
-        /// implies it, but only in the negative — read on its own that says "no number was
-        /// parsed", which is also what a malformed line would look like if one ever reached
-        /// here. This says which row it is.
-        var isAction: Bool = false
         /// Unnumbered lines under it: a wrapped label at a narrow width, or an
         /// `AskUserQuestion` option's description. **The screen does not distinguish them** —
         /// both sit at the label's column.
@@ -235,50 +230,91 @@ enum ChoiceDialog {
     /// earlier one above it. Same rule, and the same reason, as `InputBar.read` locking onto
     /// the last input box.
     ///
-    /// A list is a run of **at least two** rows numbered `1.`, `2.`, `3.` … with no gap. That
+    /// A list is a run of **at least two** rows numbered `1.`, `2.`, `3.` … with no gap, and —
+    /// on a multiSelect screen — the unnumbered action row `actionRow` admits at the end. That
     /// contiguity is the second half of the defence against the echoed-prompt trap, and it is
     /// what keeps a numbered paragraph from being confirmed: one row is a citation or a diff
     /// hunk, not a choice. A blank line, a rule, or any other unindented text ends the run —
     /// which is what splits an `AskUserQuestion`'s options from the `5. Chat about this` claude
-    /// draws below the closing rule. So does the action row `actionRow` admits, which is the
-    /// last thing in the list it ends.
+    /// draws below the closing rule.
+    ///
+    /// **The action row is admitted one line late, and that deferral is load-bearing.** A
+    /// wrapped label satisfies every one of `actionRow`'s conditions — at the moment it is read
+    /// the row it wraps IS the run's last row and has no continuations yet — so a candidate is
+    /// held back until the next line says which it was. A line continuing the numbering demotes
+    /// it to a continuation; anything else confirms it, because **nothing follows the action row
+    /// inside a list**. That is the invariant, and what protects it on a real screen is the
+    /// full-width rule claude draws under the action row: `Chat about this` is numbered **6**
+    /// where the last option is **5**, so it would otherwise *look* like it continues the run
+    /// and demote a genuine `Submit`. Every capture draws that rule; a build that stopped would
+    /// take the action row back out of reach, which is a refusal, not a wrong keypress.
     private static func list(inViewport viewport: String, marker: Character) -> [Row]? {
         var lists: [[Row]] = []
         var current: [Row] = []
+        // A line with the action row's shape, held until the next line says which it was.
+        var pending: Row?
+
+        // It was a wrapped label or a description after all: file it under the row above it,
+        // which is where `continuation` would have put it had it been tried first.
+        func demoteCandidate() {
+            guard let candidate = pending else { return }
+            current[current.count - 1].continuations.append(candidate.label)
+            pending = nil
+        }
+        // Nothing followed that could have continued the run, so it really is the action row —
+        // and it is the last row of its list.
+        func confirmCandidate() {
+            guard let candidate = pending else { return }
+            current.append(candidate)
+            pending = nil
+        }
 
         for line in viewport.components(separatedBy: "\n") {
             if let row = parse(line, marker: marker) {
+                // Counted without the candidate, which is exactly what is in question here.
                 if row.number == current.count + 1 {
+                    demoteCandidate()
                     current.append(row)
                     continue
                 }
                 // The numbering broke. Close what is open; this row may still head a new list.
+                confirmCandidate()
                 lists.append(current)
                 current = row.number == 1 ? [row] : []
-            } else if !current.isEmpty,
-                      let action = actionRow(line, after: current, marker: marker) {
-                current.append(action)
-                // Closed here rather than left open: the action row has no number for anything
-                // below it to be contiguous with, and claude draws nothing under it that
-                // belongs to the list anyway.
-                lists.append(current)
-                current = []
+            } else if pending == nil, !current.isEmpty,
+                      let candidate = actionRow(line, after: current, marker: marker) {
+                pending = candidate
             } else if !current.isEmpty, let continuation = continuation(line, marker: marker) {
+                demoteCandidate()
                 current[current.count - 1].continuations.append(continuation)
             } else {
+                confirmCandidate()
                 lists.append(current)
                 current = []
             }
         }
+        // The viewport ended on the candidate: nothing follows it, which is the action row's
+        // own defining property.
+        confirmCandidate()
         lists.append(current)
         return lists.last(where: { $0.count >= 2 })
     }
 
     /// The unnumbered row a multiSelect question submits through, or nil for any other line.
     ///
-    /// The exception to "an unnumbered line is not a row", fenced by three conditions. Each was
-    /// measured against the captures and each holds something the other two do not:
+    /// **This proposes; `list` disposes.** A wrapped label satisfies every condition below, so
+    /// a non-nil answer is a candidate held for one line rather than a row — see `list`.
     ///
+    /// The exception to "an unnumbered line is not a row", fenced by four conditions. Each was
+    /// measured against the captures and each holds something the others do not:
+    ///
+    /// 0. **The run already holds at least two rows.** Every multiSelect draws its options and
+    ///    then `Type something` before this row, so the condition costs nothing on a real
+    ///    screen — and without it one `1. [ ] …` line plus one wrapped line under it is a
+    ///    two-row "list". claude writes ordinary markdown checklists in its own output, and
+    ///    since the LAST qualifying run wins, such a checklist would outrank the live
+    ///    permission dialog above it: `focusedRow` goes to nil and Allow-from-phone stops
+    ///    working for as long as the checklist is on screen.
     /// 1. **Every row already in the run carries a checkbox.** Only a multiSelect screen has an
     ///    action row. Without this, `question-single.captured.txt`'s descriptions — which sit at
     ///    **column 5**, the very column a checkbox screen's action row sits at — would each
@@ -299,7 +335,8 @@ enum ChoiceDialog {
     /// build that renders something else in this position is refused and the drive aborts —
     /// the same failure as before this rule existed, and never a wrong keypress.
     private static func actionRow(_ line: String, after run: [Row], marker: Character) -> Row? {
-        guard let last = run.last, run.allSatisfy(\.isCheckbox), last.continuations.isEmpty
+        guard run.count >= 2, let last = run.last, run.allSatisfy(\.isCheckbox),
+              last.continuations.isEmpty
         else { return nil }
 
         var rest = Substring(line).drop(while: { $0 == " " })
@@ -313,8 +350,7 @@ enum ChoiceDialog {
         guard textColumn >= last.textColumn else { return nil }
         let label = normalized(rest)
         guard !label.isEmpty else { return nil }
-        return Row(number: nil, isMarked: isMarked, label: label, textColumn: textColumn,
-                   isAction: true)
+        return Row(number: nil, isMarked: isMarked, label: label, textColumn: textColumn)
     }
 
     /// A line belonging to the row above it: indented, non-empty, and not a row itself.
