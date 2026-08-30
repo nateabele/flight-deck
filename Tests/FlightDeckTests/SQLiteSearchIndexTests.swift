@@ -27,11 +27,12 @@ final class SQLiteSearchIndexTests: XCTestCase {
     }
 
     private func message(
-        _ text: String, conversation: String = "c1", at seconds: TimeInterval = 0
+        _ text: String, conversation: String = "c1", at seconds: TimeInterval = 0,
+        offset: Int = 0
     ) -> IndexedMessage {
         IndexedMessage(
             conversationID: conversation, role: .user, text: text,
-            timestamp: Date(timeIntervalSince1970: 1_800_000_000 + seconds)
+            timestamp: Date(timeIntervalSince1970: 1_800_000_000 + seconds), offset: offset
         )
     }
 
