@@ -19,7 +19,7 @@ import SQLite3
 /// This is the only file in the app that sees a `sqlite3*`.
 final class SQLiteSearchIndex: SearchIndex {
     /// Bump on any schema change. A mismatch deletes the file — see `init`.
-    static let schemaVersion = 1
+    static let schemaVersion = 2
 
     /// SQLite's own "copy this string, I may free it" sentinel. It is a `#define` casting
     /// -1 to a function pointer, which does not survive into Swift, so it is respelled here.
@@ -92,8 +92,8 @@ final class SQLiteSearchIndex: SearchIndex {
             // `message_identity` (source, timestamp, text) is what makes that overlap a no-op
             // instead of a duplicate row.
             let insert = try prepare("""
-                INSERT OR IGNORE INTO message(conversation_id, project_path, role, kind, timestamp, text, source)
-                VALUES (?, ?, ?, 'text', ?, ?, ?)
+                INSERT OR IGNORE INTO message(conversation_id, project_path, role, kind, timestamp, text, source, offset)
+                VALUES (?, ?, ?, 'text', ?, ?, ?, ?)
                 """)
             defer { sqlite3_finalize(insert) }
             let intoFTS = try prepare("INSERT INTO message_fts(rowid, text) VALUES (?, ?)")
@@ -106,6 +106,7 @@ final class SQLiteSearchIndex: SearchIndex {
                 sqlite3_bind_double(insert, 4, message.timestamp?.timeIntervalSince1970 ?? 0)
                 bind(insert, 5, message.text)
                 bind(insert, 6, source.path)
+                sqlite3_bind_int64(insert, 7, Int64(message.offset))
                 guard sqlite3_step(insert) == SQLITE_DONE else { throw failure() }
                 let inserted = sqlite3_changes(db) > 0
                 sqlite3_reset(insert)
@@ -169,7 +170,7 @@ final class SQLiteSearchIndex: SearchIndex {
         // 200 and silently shrink what the user sees.
         let placeholders = Array(repeating: "?", count: projects.count).joined(separator: ", ")
         let statement = try prepare("""
-            SELECT m.id, m.conversation_id, m.project_path, m.timestamp,
+            SELECT m.id, m.conversation_id, m.project_path, m.timestamp, m.offset,
                    snippet(message_fts, 0, char(2), char(3), '…', 24)
             FROM message_fts
             JOIN message m ON m.id = message_fts.rowid
@@ -196,8 +197,9 @@ final class SQLiteSearchIndex: SearchIndex {
                 // Falls back to the conversation id's leading segment, which is what the
                 // sidebar shows for an unnamed conversation too.
                 conversationName: names[conversation]?.name ?? String(conversation.prefix(8)),
-                snippet: text(statement, 4),
-                timestamp: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
+                snippet: text(statement, 5),
+                timestamp: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
+                offset: Int(sqlite3_column_int64(statement, 4))
             ))
         }
         return hits
@@ -335,7 +337,8 @@ final class SQLiteSearchIndex: SearchIndex {
               kind TEXT NOT NULL,
               timestamp REAL NOT NULL,
               text TEXT NOT NULL,
-              source TEXT NOT NULL
+              source TEXT NOT NULL,
+              offset INTEGER NOT NULL
             );
             CREATE INDEX message_by_source ON message(source);
             CREATE INDEX message_by_conversation ON message(conversation_id);

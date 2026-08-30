@@ -25,10 +25,14 @@ public struct TranscriptHit: Equatable, Sendable {
     public let conversationName: String
     public let snippet: String
     public let timestamp: Date
+    /// Where this message's record starts in its transcript, in bytes, at a line boundary —
+    /// which is exactly what `TimelineAnchor.around` takes. This is what lets a hit be
+    /// opened rather than only read.
+    public let offset: Int
 
     public init(
         rowID: Int64, conversationID: String, projectPath: String,
-        conversationName: String, snippet: String, timestamp: Date
+        conversationName: String, snippet: String, timestamp: Date, offset: Int
     ) {
         self.rowID = rowID
         self.conversationID = conversationID
@@ -36,6 +40,7 @@ public struct TranscriptHit: Equatable, Sendable {
         self.conversationName = conversationName
         self.snippet = snippet
         self.timestamp = timestamp
+        self.offset = offset
     }
 }
 

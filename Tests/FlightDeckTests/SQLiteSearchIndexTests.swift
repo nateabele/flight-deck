@@ -273,4 +273,19 @@ final class SQLiteSearchIndexTests: XCTestCase {
         XCTAssertEqual(try index.messageCount(forConversation: "cA"), count)
         XCTAssertEqual(try index.messageCount(forConversation: "cB"), count)
     }
+
+    /// The offset survives the round trip into SQLite and back out on a hit.
+    ///
+    /// Without this the phone can find a moment and not be able to open it.
+    func testSearchReturnsTheOffsetItIngested() throws {
+        try index.ingest(
+            [message("the rename path", offset: 8192)],
+            from: source("conv.jsonl"), projectPath: "/w/fd", offset: nil
+        )
+
+        let hits = try index.search("\"rename\"*", projects: ["/w/fd"], limit: 10)
+
+        XCTAssertEqual(hits.count, 1)
+        XCTAssertEqual(hits[0].offset, 8192)
+    }
 }
