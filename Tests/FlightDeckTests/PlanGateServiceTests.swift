@@ -19,7 +19,7 @@ final class PlanGateServiceTests: XCTestCase {
     /// A gate the phone never saw. Answering it would resolve a plan the reader did not read.
     @MainActor
     func testRefusesACallItDoesNotHave() async {
-        let service = PlanGateService.stub(plan: "# A\n\nB.", callID: "toolu_REAL")
+        let (service, _) = makeService(plan: "# A\n\nB.", callID: "toolu_REAL")
         await service.refresh()
         let result = await service.resolve(
             session: service.knownSession, call: "toolu_OTHER",
@@ -32,7 +32,7 @@ final class PlanGateServiceTests: XCTestCase {
     /// for `prompt.answer`, applied here so a flaky link cannot double-resolve.
     @MainActor
     func testTheSameTokenResolvesOnlyOnce() async {
-        let service = PlanGateService.stub(plan: "# A\n\nB.", callID: "c")
+        let (service, transport) = makeService(plan: "# A\n\nB.", callID: "c")
         await service.refresh()
         let token = UUID()
         let first = await service.resolve(session: service.knownSession, call: "c",
@@ -41,49 +41,56 @@ final class PlanGateServiceTests: XCTestCase {
                                            approve: true, feedback: nil, token: token)
         XCTAssertNil(first.failureCode)
         XCTAssertNil(second.failureCode, "a duplicate is an ack, not an error")
-        XCTAssertEqual(service.resolveCallCount, 1, "the gate must be resolved exactly once")
+        let resolveCallCount = await transport.resolveCallCount
+        XCTAssertEqual(resolveCallCount, 1, "the gate must be resolved exactly once")
     }
 
     /// The block index is resolved against the Mac's own split. A phone naming a block this
     /// plan does not have gets nothing pinned.
     @MainActor
     func testAnnotateResolvesTheBlockIndexLocally() async {
-        let service = PlanGateService.stub(plan: "First block.\n\nSecond block.", callID: "c")
+        let (service, transport) = makeService(plan: "First block.\n\nSecond block.", callID: "c")
         await service.refresh()
         let ok = await service.annotate(session: service.knownSession, call: "c",
                                         text: "note", block: 1, token: UUID())
         XCTAssertNil(ok.failureCode)
-        XCTAssertEqual(service.lastAnnotation?.originalText, "Second block.")
+        let lastAnnotation = await transport.lastAnnotation
+        XCTAssertEqual(lastAnnotation?.originalText, "Second block.")
     }
 
     @MainActor
     func testAnnotateRefusesAnOutOfRangeBlock() async {
-        let service = PlanGateService.stub(plan: "Only one.", callID: "c")
+        let (service, transport) = makeService(plan: "Only one.", callID: "c")
         await service.refresh()
         let result = await service.annotate(session: service.knownSession, call: "c",
                                             text: "note", block: 9, token: UUID())
         XCTAssertEqual(result.failureCode, "unreadable_screen")
-        XCTAssertNil(service.lastAnnotation)
+        let lastAnnotation = await transport.lastAnnotation
+        XCTAssertNil(lastAnnotation)
     }
 
     /// A non-target block cannot be pinned; the comment goes global rather than pinning to an
-    /// arbitrary copy.
+    /// arbitrary copy. Both halves of that must hold: the downgrade is a *different* outcome
+    /// than a refusal (an empty `lastAnnotation` reads the same for either), so this asserts
+    /// the comment actually went out, not just that it went out unpinned.
     @MainActor
     func testANonTargetBlockBecomesAGlobalComment() async {
-        let service = PlanGateService.stub(plan: "A.\n\n---\n\nB.", callID: "c")
+        let (service, transport) = makeService(plan: "A.\n\n---\n\nB.", callID: "c")
         await service.refresh()
         let breakIndex = PlanBlocks.split("A.\n\n---\n\nB.").blocks
             .firstIndex { !$0.isTarget }!
-        _ = await service.annotate(session: service.knownSession, call: "c",
-                                   text: "note", block: breakIndex, token: UUID())
-        XCTAssertNil(service.lastAnnotation?.originalText,
-                     "a non-target must not be sent as an anchor")
+        let result = await service.annotate(session: service.knownSession, call: "c",
+                                            text: "note", block: breakIndex, token: UUID())
+        XCTAssertNil(result.failureCode, "a non-target block is a downgrade, not a refusal")
+        let lastAnnotation = await transport.lastAnnotation
+        XCTAssertEqual(lastAnnotation?.text, "note", "the comment must actually have been posted")
+        XCTAssertNil(lastAnnotation?.originalText, "a non-target must not be sent as an anchor")
     }
 
     /// The gate closed between the tap and the command — hook killed, or answered on the Mac.
     @MainActor
     func testAVanishedGateRefuses() async {
-        let service = PlanGateService.stub(plan: "# A", callID: "c")
+        let (service, _) = makeService(plan: "# A", callID: "c")
         await service.refresh()
         service.killGate()
         await service.refresh()
@@ -96,102 +103,218 @@ final class PlanGateServiceTests: XCTestCase {
     /// 170,000 requests for a document that cannot change without the callID changing.
     @MainActor
     func testThePlanIsFetchedOncePerGate() async {
-        let service = PlanGateService.stub(plan: "# A", callID: "c")
+        let (service, transport) = makeService(plan: "# A", callID: "c")
         await service.refresh()
         await service.refresh()
         await service.refresh()
-        XCTAssertEqual(service.planFetchCount, 1)
+        let planFetchCount = await transport.planFetchCount
+        XCTAssertEqual(planFetchCount, 1)
+    }
+
+    /// The Plannotator hook sleeps for a beat before its server actually stops, so the
+    /// registry file backing a gate this Mac just resolved can still be on disk when the next
+    /// poll runs. That poll must not re-fetch the plan or re-open what the phone already
+    /// closed — regression coverage for the sequential-resurrection defect.
+    @MainActor
+    func testAResolvedGateIsNotResurrectedByALaterPoll() async {
+        let (service, transport) = makeService(plan: "# A", callID: "c")
+        await service.refresh()
+        let result = await service.resolve(session: service.knownSession, call: "c",
+                                           approve: true, feedback: nil, token: UUID())
+        XCTAssertNil(result.failureCode)
+        XCTAssertNil(service.gate(for: service.knownSession))
+
+        // `killGate()` was not called: the fake registry file is still on disk, standing in
+        // for the hook's server still winding down after the resolve.
+        await service.refresh()
+        XCTAssertNil(service.gate(for: service.knownSession),
+                     "a resolved gate must not be resurrected by a later poll")
+        let planFetchCount = await transport.planFetchCount
+        XCTAssertEqual(planFetchCount, 1, "must not re-fetch a plan it already resolved")
+    }
+
+    /// A concurrent `annotate` on one session must survive a `refresh()` that is, at that
+    /// moment, suspended fetching a *different* session's plan. Regression coverage for the
+    /// wholesale-rebuild defect: gathering kept-and-fetched gates into a separate dictionary
+    /// and swapping it in at the end discarded whatever a concurrent annotate/resolve had
+    /// mutated on another session while the fetch was in flight.
+    @MainActor
+    func testAConcurrentAnnotateSurvivesAnInFlightRefresh() async {
+        let sessionA = UUID()
+        let sessionB = UUID()
+        let claudePIDA: pid_t = 4300
+        let claudePIDB: pid_t = 4301
+        let plannotatorPIDA: pid_t = 9100
+        let plannotatorPIDB: pid_t = 9101
+        let portA = 54300
+        let portB = 54301
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PlanGateServiceTests-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+
+        func writeEntry(pid: pid_t, port: Int) {
+            let json = """
+            {"pid":\(pid),"port":\(port),"url":"http://localhost:\(port)",\
+            "mode":"plan","project":"flight-deck","startedAt":"2026-08-29T17:40:36.186Z"}
+            """
+            try? Data(json.utf8).write(to: dir.appendingPathComponent("\(pid).json"))
+        }
+        writeEntry(pid: plannotatorPIDA, port: portA)
+        writeEntry(pid: plannotatorPIDB, port: portB)
+
+        let transportA = RecordingTransport(plan: "# A", registryDirectory: dir)
+        let transportB = RecordingTransport(plan: "# B", registryDirectory: dir)
+
+        // A `var` a closure captures by reference, so the second refresh can be made to see a
+        // fresh call id for B — standing in for a new plan gate opening on that session.
+        var currentCallIDB = "callB1"
+
+        let service = PlanGateService(
+            callID: { session in
+                if session == sessionA { return "callA" }
+                if session == sessionB { return currentCallIDB }
+                return nil
+            },
+            pid: { session in
+                if session == sessionA { return claudePIDA }
+                if session == sessionB { return claudePIDB }
+                return nil
+            },
+            sessions: { [sessionA, sessionB] }
+        )
+        service.registryDirectory = dir
+        service.isAlive = { _ in true }
+        service.parentOf = { pid in
+            if pid == plannotatorPIDA { return claudePIDA }
+            if pid == plannotatorPIDB { return claudePIDB }
+            return nil
+        }
+        service.makeClient = { port in
+            let transport = port == portA ? transportA : transportB
+            return PlanGateClient(port: port, transport: { request in await transport.handle(request) })
+        }
+
+        // Both sessions are new, so this refresh fetches both — synchronously, since neither
+        // transport is paused yet.
+        await service.refresh()
+        XCTAssertNotNil(service.gate(for: sessionA))
+        XCTAssertNotNil(service.gate(for: sessionB))
+
+        // Force the next refresh to need a fetch only for B, and pause that fetch so the
+        // refresh suspends mid-flight with A's already-cached gate simply kept, untouched.
+        currentCallIDB = "callB2"
+        await transportB.pauseNextPlanFetch()
+
+        async let refreshTask: Void = service.refresh()
+        await transportB.waitUntilPaused()
+
+        let annotateResult = await service.annotate(
+            session: sessionA, call: "callA", text: "note", block: nil, token: UUID()
+        )
+        XCTAssertNil(annotateResult.failureCode)
+
+        await transportB.resume()
+        await refreshTask
+
+        XCTAssertEqual(
+            service.gate(for: sessionA)?.annotationCount, 1,
+            "a refresh suspended fetching a different session's plan must not undo a concurrent annotate"
+        )
     }
 }
 
-// MARK: - Stub
+// MARK: - Fixtures
 
-/// See Ruling B in the task brief: the stub wires a **real** `PlanGateService`'s existing
-/// injected seams to in-memory values — a temp registry directory, fixed process facts, and a
-/// recording transport standing in for Plannotator's HTTP API. It must never grow logic of its
-/// own that `refresh`/`resolve`/`annotate` already have; if it needs to, the seams are wrong.
-extension PlanGateService {
+/// Stands in for Plannotator's HTTP API and counts what it saw. An actor, not a plain class:
+/// `testAConcurrentAnnotateSurvivesAnInFlightRefresh` needs a fetch it can genuinely suspend on
+/// (via `pauseNextPlanFetch`/`waitUntilPaused`/`resume`) so a concurrent mutation on another
+/// session has a real window to land in, and actor isolation is what makes that safe to drive
+/// from two overlapping tasks.
+private actor RecordingTransport {
+    private let plan: String
+    /// Kept only so a test can point `addTeardownBlock` at the right directory when it builds
+    /// more than one fixture by hand, as `testAConcurrentAnnotateSurvivesAnInFlightRefresh` does.
+    let registryDirectory: URL
+    private(set) var planFetchCount = 0
+    private(set) var resolveCallCount = 0
+    private(set) var lastAnnotation: (text: String, originalText: String?)?
 
-    /// Stands in for Plannotator's HTTP API and counts what it saw, in the shape
-    /// `PlanGateClientTests.Recorder` counts requests — a plain class rather than an actor,
-    /// since every call arrives sequentially from the `@MainActor` service under test, exactly
-    /// as `PromptServiceTests.ReadCount` documents for its own `@unchecked Sendable`.
-    private final class RecordingTransport: @unchecked Sendable {
-        let plan: String
-        /// Kept only so `stub()` can remove it once this fixture is retired — see
-        /// `transports` below for why cleanup cannot ride `XCTestCase.addTeardownBlock`.
-        let registryDirectory: URL
-        var planFetchCount = 0
-        var resolveCallCount = 0
-        var lastAnnotation: (text: String, originalText: String?)?
+    private var shouldPauseNextPlanFetch = false
+    private var pauseContinuation: CheckedContinuation<Void, Never>?
+    private var pausedContinuation: CheckedContinuation<Void, Never>?
 
-        init(plan: String, registryDirectory: URL) {
-            self.plan = plan
-            self.registryDirectory = registryDirectory
-        }
+    init(plan: String, registryDirectory: URL) {
+        self.plan = plan
+        self.registryDirectory = registryDirectory
+    }
 
-        func handle(_ request: URLRequest) -> (Data, Int)? {
-            switch request.url?.path {
-            case "/api/plan":
-                planFetchCount += 1
-                let body = (try? JSONSerialization.data(withJSONObject: ["plan": plan])) ?? Data()
-                return (body, 200)
-            case "/api/external-annotations":
-                if let bodyData = request.httpBody,
-                   let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
-                    lastAnnotation = (json["text"] as? String ?? "", json["originalText"] as? String)
+    /// Arranges for the *next* `/api/plan` fetch to suspend until `resume()` is called.
+    func pauseNextPlanFetch() {
+        shouldPauseNextPlanFetch = true
+    }
+
+    /// Waits until a paused fetch has actually reached its pause point, so a test never races
+    /// its own setup.
+    func waitUntilPaused() async {
+        if pauseContinuation != nil { return }
+        await withCheckedContinuation { pausedContinuation = $0 }
+    }
+
+    func resume() {
+        pauseContinuation?.resume()
+        pauseContinuation = nil
+    }
+
+    func handle(_ request: URLRequest) async -> (Data, Int)? {
+        switch request.url?.path {
+        case "/api/plan":
+            planFetchCount += 1
+            if shouldPauseNextPlanFetch {
+                shouldPauseNextPlanFetch = false
+                await withCheckedContinuation { cont in
+                    pauseContinuation = cont
+                    pausedContinuation?.resume()
+                    pausedContinuation = nil
                 }
-                return (Data(#"{"ids":["stub"]}"#.utf8), 201)
-            case "/api/approve", "/api/deny":
-                resolveCallCount += 1
-                return (Data("{}".utf8), 200)
-            default:
-                return nil
             }
+            let body = (try? JSONSerialization.data(withJSONObject: ["plan": plan])) ?? Data()
+            return (body, 200)
+        case "/api/external-annotations":
+            if let bodyData = request.httpBody,
+               let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
+                lastAnnotation = (json["text"] as? String ?? "", json["originalText"] as? String)
+            }
+            return (Data(#"{"ids":["stub"]}"#.utf8), 201)
+        case "/api/approve", "/api/deny":
+            resolveCallCount += 1
+            return (Data("{}".utf8), 200)
+        default:
+            return nil
         }
     }
+}
 
-    /// Recording transports, keyed by the one session id each stub instance wires up. A plain
-    /// static dictionary rather than an associated object: extensions may not add stored
-    /// *instance* properties, but a static one is ordinary storage, and each `stub()` call
-    /// mints a fresh `UUID` so entries never collide across tests.
+extension PlanGateServiceTests {
+
+    /// Wires a **real** `PlanGateService`'s existing injected seams — `registryDirectory`,
+    /// `isAlive`, `parentOf`, `makeClient`, `callID`, `pid`, `sessions` — to in-memory values: a
+    /// temp registry directory with one fake Plannotator entry, fixed process facts, one known
+    /// session, and a `PlanGateClient` whose transport is a `RecordingTransport`. See Ruling B
+    /// in the task brief: this must never grow logic of its own that
+    /// `refresh`/`resolve`/`annotate` already have — if it needs to, the seams are wrong.
     ///
-    /// **Cleanup cannot use `XCTestCase.addTeardownBlock`.** That is an instance method with
-    /// no free-function form (confirmed against `XCTest.swiftinterface`), and `stub(plan:
-    /// callID:)`'s signature — fixed by the test call sites above — carries no `XCTestCase` to
-    /// call it on. Instead each `stub()` call purges the *previous* fixture's temp directory
-    /// before creating its own, which bounds the leak to at most one directory left behind at
-    /// process exit rather than one per test.
-    private static var transports: [UUID: RecordingTransport] = [:]
-
-    /// The single session id `stub` wired up — read straight off the real `sessions` seam
-    /// rather than duplicated, so this can never disagree with what `refresh()` actually sees.
-    var knownSession: UUID { sessions().first! }
-
-    var planFetchCount: Int { Self.transports[knownSession]?.planFetchCount ?? 0 }
-    var resolveCallCount: Int { Self.transports[knownSession]?.resolveCallCount ?? 0 }
-    var lastAnnotation: (text: String, originalText: String?)? {
-        Self.transports[knownSession]?.lastAnnotation
-    }
-
-    /// Empties the fake registry so the next `refresh()` finds nothing — standing in for the
-    /// hook dying, or the plan being answered directly on the Mac.
-    func killGate() {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: registryDirectory.path)) ?? []
-        for name in names {
-            try? FileManager.default.removeItem(at: registryDirectory.appendingPathComponent(name))
-        }
-    }
-
-    /// A service wired to an in-memory registry and a recording transport.
+    /// An instance method rather than a static factory (the review's finding on the original
+    /// `stub()`): a static factory had no `XCTestCase` to hand `addTeardownBlock`, so cleanup
+    /// had to fake it by purging the *previous* fixture on every new call — which meant a test
+    /// building two fixtures would have the first one silently deleted out from under it, and
+    /// every "nothing happened" assertion on it would pass vacuously instead of erroring. This
+    /// method uses real per-fixture teardown and permits as many fixtures as a test wants.
     @MainActor
-    static func stub(plan: String, callID: String) -> PlanGateService {
-        // Retire the previous fixture, if any — see `transports`'s doc comment.
-        for stale in transports.values {
-            try? FileManager.default.removeItem(at: stale.registryDirectory)
-        }
-        transports.removeAll()
-
+    fileprivate func makeService(
+        plan: String, callID: String
+    ) -> (service: PlanGateService, transport: RecordingTransport) {
         let session = UUID()
         let claudePID: pid_t = 4242
         let plannotatorPID: pid_t = 9001
@@ -200,6 +323,7 @@ extension PlanGateService {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("PlanGateServiceTests-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
 
         let registryJSON = """
         {"pid":\(plannotatorPID),"port":\(port),"url":"http://localhost:\(port)",\
@@ -208,7 +332,6 @@ extension PlanGateService {
         try? Data(registryJSON.utf8).write(to: dir.appendingPathComponent("\(plannotatorPID).json"))
 
         let transport = RecordingTransport(plan: plan, registryDirectory: dir)
-        Self.transports[session] = transport
 
         let service = PlanGateService(
             callID: { $0 == session ? callID : nil },
@@ -219,8 +342,25 @@ extension PlanGateService {
         service.isAlive = { _ in true }
         service.parentOf = { $0 == plannotatorPID ? claudePID : nil }
         service.makeClient = { port in
-            PlanGateClient(port: port, transport: { request in transport.handle(request) })
+            PlanGateClient(port: port, transport: { request in await transport.handle(request) })
         }
-        return service
+        return (service, transport)
+    }
+}
+
+extension PlanGateService {
+
+    /// The single session id `makeService` wired up — read straight off the real `sessions`
+    /// seam rather than duplicated, so this can never disagree with what `refresh()` actually
+    /// sees.
+    var knownSession: UUID { sessions().first! }
+
+    /// Empties the fake registry so the next `refresh()` finds nothing — standing in for the
+    /// hook dying, or the plan being answered directly on the Mac.
+    func killGate() {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: registryDirectory.path)) ?? []
+        for name in names {
+            try? FileManager.default.removeItem(at: registryDirectory.appendingPathComponent(name))
+        }
     }
 }

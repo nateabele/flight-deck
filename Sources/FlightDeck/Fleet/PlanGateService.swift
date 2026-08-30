@@ -36,6 +36,15 @@ final class PlanGateService {
 
     private var gates: [UUID: Gate] = [:]
     private var resolvedTokens: [UUID: [UUID]] = [:]
+    /// Call ids this Mac has already resolved. The Plannotator hook sleeps for a beat before
+    /// its server stops, so the registry file backing a gate we just resolved can outlive the
+    /// resolve by ~1.5s — long enough for the next poll to see it as still open. A tombstone
+    /// stops that poll from re-fetching a plan and re-opening a gate the phone already closed.
+    private var resolvedCallIDs: Set<String> = []
+    /// Single-flight guard: two overlapping `refresh()` calls (a slow poll and the next timer
+    /// firing before it returns) must not both decide the same new gate needs fetching. The
+    /// second call is dropped rather than queued — the next timer tick will simply try again.
+    private var isRefreshing = false
 
     init(callID: @escaping (UUID) -> String?,
          pid: @escaping (UUID) -> pid_t?,
@@ -47,25 +56,57 @@ final class PlanGateService {
 
     /// Re-read the registry. Gates that vanished are dropped; new ones have their plan
     /// fetched exactly once.
+    ///
+    /// This class is reentrant during the `await` below — an `annotate` or `resolve` call for
+    /// a session this refresh already decided to keep can run while a *different* session's
+    /// plan is still being fetched. So gates that need no fetch are never touched, and each
+    /// freshly-fetched gate is written into `gates` one key at a time as its fetch completes,
+    /// rather than assembled into a separate dictionary and swapped in at the end — a wholesale
+    /// swap would silently undo whatever `annotate`/`resolve` mutated on another session while
+    /// this refresh was suspended fetching.
     func refresh() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
+
         let live = PlannotatorRegistry.planGates(
             in: registryDirectory, isAlive: isAlive, parentOf: parentOf
         )
-        var next: [UUID: Gate] = [:]
+
+        var toFetch: [(session: UUID, entry: PlannotatorRegistry.Entry, call: String)] = []
+        var keep: Set<UUID> = []
+
         for session in sessions() {
             guard let claudePID = pid(session), let entry = live[claudePID] else { continue }
             guard let call = callID(session) else { continue }
-            // Already held, and the call has not moved: keep it, plan and all.
+            // Resolved and tombstoned: do not resurrect it just because the registry file is
+            // still on disk.
+            if resolvedCallIDs.contains(call) { continue }
+            // Already held, and the call has not moved: keep it, plan and all — no fetch, no
+            // touch, so nothing here can race a concurrent mutation on this session.
             if let existing = gates[session], existing.callID == call,
                existing.entry.pid == entry.pid {
-                next[session] = existing
+                keep.insert(session)
                 continue
             }
+            toFetch.append((session, entry, call))
+        }
+
+        // Drop gates for sessions no longer live or eligible. This runs before any `await`
+        // below, so it is atomic with the scan above and cannot race a concurrent mutation.
+        let wanted = keep.union(toFetch.map(\.session))
+        for session in gates.keys where !wanted.contains(session) {
+            gates[session] = nil
+        }
+
+        for (session, entry, call) in toFetch {
             guard let plan = await makeClient(entry.port).plan() else { continue }
-            next[session] = Gate(entry: entry, callID: call, plan: plan,
+            // Re-check after the await: this call may have been resolved (and tombstoned)
+            // while its plan was in flight.
+            if resolvedCallIDs.contains(call) { continue }
+            gates[session] = Gate(entry: entry, callID: call, plan: plan,
                                  blocks: PlanBlocks.split(plan), annotationCount: 0)
         }
-        gates = next
     }
 
     func gate(for session: UUID) -> WirePlanGate? {
@@ -122,6 +163,9 @@ final class PlanGateService {
             return .failure("unreadable_screen")
         }
         gates[session] = nil
+        // Tombstone the call id so a later poll — landing before the Plannotator hook's
+        // registry file is actually removed — cannot resurrect what the phone just resolved.
+        resolvedCallIDs.insert(call)
         return .success(())
     }
 }
