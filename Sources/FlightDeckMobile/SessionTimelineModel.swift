@@ -482,6 +482,15 @@ final class SessionTimelineModel {
     /// One in flight at a time, and on a permission dialog that guard is the difference between
     /// one decision and two. A state left over from a different call does not block this one —
     /// see `AnswerState`.
+    /// Answer a whole set of questions in one command.
+    ///
+    /// One send, one token, one decision — the Mac walks the dialog and commits at the end, so
+    /// there is no state here for "half answered". The same in-flight guard as `answer`: one
+    /// dialog, one decision.
+    func answerSet(_ selections: [[AnswerSelection]], to call: String) {
+        answer(.answers(selections), to: call)
+    }
+
     func answer(_ answer: PromptAnswer, to call: String) {
         guard answerInFlight == nil else { return }
         let token = UUID()

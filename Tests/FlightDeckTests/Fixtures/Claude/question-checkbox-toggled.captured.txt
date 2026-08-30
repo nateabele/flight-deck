@@ -1,0 +1,28 @@
+ ▐▛███▛█   Claude Code v2.1.251                                                                                                         
+▝▜██████▀  Opus 5 (1M context) · Claude Max                                                                                             
+  ▝▝ ▝▝    /…/-Users-nate-Projects-Protos-n-Tools-flight-deck/020c217b-d41c-4d19-9f72-efe84f546ebb/scratchpad/capture-workspace         
+                                                                                                                                        
+                                                                                                                                        
+❯ Use the AskUserQuestion tool, with multiSelect set to true on the question, to ask me which snacks I would want on a long flight.     
+  Offer four options, each with a short description. Do nothing else, just ask.                                                         
+                                                                                                                                        
+⏺ I'll ask you about snacks.                                                                                                            
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Snacks  ✔ Submit  →                                                                                                                
+                                                                                                                                        
+Which snacks would you want on a long flight?                                                                                           
+                                                                                                                                        
+  1. [✔] Trail mix                                                                                                                      
+  Nuts, seeds, and dried fruit — filling, no crumbs, no refrigeration needed.                                                           
+  2. [ ] Dark chocolate                                                                                                                 
+  Small, keeps well at altitude, and satisfies a sweet craving without a sugar crash.                                                   
+❯ 3. [✔] Beef or plant jerky                                                                                                            
+  High protein and shelf-stable, good for staving off hunger between meal services.                                                     
+  4. [ ] Pretzels or crackers                                                                                                           
+  Light, salty, and easy on the stomach if cabin pressure leaves you queasy.                                                            
+  5. [ ] Type something                                                                                                                 
+     Submit                                                                                                                             
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  6. Chat about this                                                                                                                    
+                                                                                                                                        
+Enter to select · ↑/↓ to navigate · Esc to cancel

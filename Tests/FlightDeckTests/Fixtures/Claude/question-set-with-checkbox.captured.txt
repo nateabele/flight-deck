@@ -1,0 +1,29 @@
+ ▐▛███▛█   Claude Code v2.1.251                                                                                                         
+▝▜██████▀  Opus 5 (1M context) · Claude Max                                                                                             
+  ▝▝ ▝▝    /…/-Users-nate-Projects-Protos-n-Tools-flight-deck/020c217b-d41c-4d19-9f72-efe84f546ebb/scratchpad/capture-workspace         
+                                                                                                                                        
+                                                                                                                                        
+❯ Use the AskUserQuestion tool to ask me TWO questions in one call. Question one, header Snacks, MUST have multiSelect true, asking     
+  which snacks I want (four options). Question two, header Seat, single-select, asking which seat I prefer (Window, Aisle, Middle).     
+  Give each option a short description. Do nothing else, just ask.                                                                      
+                                                                                                                                        
+⏺ I'll ask you both questions in one call.                                                                                              
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Snacks  ☐ Seat  ✔ Submit  →                                                                                                        
+                                                                                                                                        
+Which snacks would you like?                                                                                                            
+                                                                                                                                        
+❯ 1. [ ] Pretzels                                                                                                                       
+  Classic salted pretzels — light and crunchy.                                                                                          
+  2. [ ] Cookies                                                                                                                        
+  Warm chocolate chip cookies, soft in the middle.                                                                                      
+  3. [ ] Mixed nuts                                                                                                                     
+  Roasted almonds, cashews, and pecans, lightly salted.                                                                                 
+  4. [ ] Fruit cup                                                                                                                      
+  Fresh seasonal fruit — the lighter option.                                                                                            
+  5. [ ] Type something                                                                                                                 
+     Next                                                                                                                               
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  6. Chat about this                                                                                                                    
+                                                                                                                                        
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
