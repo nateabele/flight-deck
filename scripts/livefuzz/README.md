@@ -56,6 +56,48 @@ cd scripts/livefuzz
 /tmp/livefuzz-venv/bin/python runfuzz.py mixed-set 2        # checkbox + single-select together
 ```
 
+## Reading the transcript: staleness, and telling environmental misses from real ones
+
+The pty workspace (`capture-workspace/`) is reused run after run, so every run's own transcript
+sits in `~/.claude/projects/.../*.jsonl` alongside every earlier run's. `newest_questions()` and
+`newest_result()` have to pick out only the current run's record — and the naive way to do that,
+filtering candidate **files** by mtime, is not sufficient: claude can flush and touch a
+transcript file's mtime on shutdown well *after* the next run has already started, so an older
+run's file can pass an `mtime >= since` test even though every record inside it predates `since`.
+That let a genuinely stale record through and drove a live screen against a *previous* run's
+option labels — producing a `row N does not read '<label>'` abort that read exactly like a real
+interlock refusal, but meant nothing about the parser at all.
+
+Correctness instead rests on each record's own `timestamp` field (ISO-8601, e.g.
+`"2026-08-30T21:06:03.148Z"`), checked in `_newest_record()` against the run's own start time
+(with a few seconds of slack for clock skew between this machine and claude's server — see
+`CLOCK_SLACK`). File mtime is still used in `_transcript_files()`, but only as a cheap pre-filter
+to limit how much needs scanning; it can never cause a stale record to be accepted, because it
+cannot falsely *exclude* a genuine match (an append always bumps a file's mtime to at least the
+record's own timestamp) — it can only over-admit candidates, which the per-record timestamp check
+then filters correctly.
+
+When no record at or after the run's own start turns up within the polling window, `drive()`
+aborts with **`stale/absent transcript: no <kind> record after <run start>`** — a distinct,
+unmistakable shape that can never be confused with a `step N (...): row X does not read
+'<label>'` interlock refusal. Concretely, in `runfuzz.py` output:
+
+- `abort=stale/absent transcript: no AskUserQuestion record after ...` — **environmental**,
+  before the dialog is even driven. The current run's own `tool_use` never showed up in the
+  transcript within the poll window (observed lag runs from well under a second to 30s+;
+  occasionally the window runs out entirely, especially on a loaded machine). This says nothing
+  about the parser — it means the harness couldn't observe a fresh enough record to build a plan
+  from. Retry, or widen the poll window in `drive()`, before drawing any conclusion from it.
+- `abort=stale/absent transcript: no tool_result record after ...` — the same kind of
+  **environmental** miss, but on the other end: every interlock step passed and Return went to
+  `("submit",)`, yet no confirming `tool_result` turned up either (same timestamp guard, applied
+  in `newest_result()`, since a stale *answer* would be worse than a stale question — it would
+  report a submission that never happened).
+- `abort=step N ('option'|'action'|'submit', ...): row X does not read '<label>'` (or `expected
+  focus`/`expected to land on`) — **real.** The interlock was checking a genuinely fresh record
+  for THIS run and the screen did not read what the plan expected at that step. This is a finding
+  about `ChoiceDialog.swift`, not about the harness's plumbing.
+
 ## Honest limit
 
 The harness shares the real parser (`ChoiceDialog.swift`, via `probe.swift`), but its step loop
