@@ -9,15 +9,19 @@ import XCTest
 /// rule this suite runs on is *if a capture disagrees with the code, the code is wrong* — and it
 /// only means anything if you can tell which is which. The captures are verbatim renders of what
 /// claude drew on a pty, sha256-pinned in `dialogs.captured.provenance.json` along with the
-/// recipe, in three batches: 2.1.241 for the original six (`permission-bash`, `permission-write`,
-/// `permission-write-60col`, `question-single`, `question-multi`, `workspace-trust` — the two
-/// with a matching transcript record beside them, and the batch that refuted five premises),
-/// 2.1.247 for `question-two*` and `question-single-247`, and 2.1.251 for the four checkbox
-/// screens (`question-checkbox`, `-toggled`, `-submit-focused`, `question-set-with-checkbox`)
-/// the action row rule is built on. The authored screens are degenerate cases no capture can be
-/// made to produce on demand: a moved cursor, a list with no marker, a list with two, a list
-/// numbered out of sequence, and a checkbox option whose label wraps — which the 60-column
-/// capture has only for a permission dialog.
+/// recipe, in three batches. 2.1.241 is fourteen entries — twelve screens plus the `.jsonl`
+/// transcript record beside each of `question-single` and `question-multi` — of which this suite
+/// reads six (`permission-bash`, `permission-write`, `permission-write-60col`,
+/// `question-single`, `question-multi`, `workspace-trust`, the batch that refuted five
+/// premises); `permission-write-row2` is the same Write dialog with its cursor moved to row 2
+/// and is read by `AnswerPromptTests`; the remaining five `idle-*`/`busy-*` screens belong to
+/// `MidTurnDraftTests`. 2.1.247 holds `question-two*` and `question-single-247`; 2.1.251 holds
+/// the four checkbox screens (`question-checkbox`, `-toggled`, `-submit-focused`,
+/// `question-set-with-checkbox`) the action row rule is built on.
+/// The authored screens are degenerate cases no capture in this suite holds: a list with no
+/// marker, a list with two, a list numbered out of sequence, a cursor moved off row 0 with an
+/// echo above it, and a checkbox option whose label wraps — which the 60-column capture has
+/// only for a permission dialog.
 ///
 /// The bias throughout is refusal. A wrong answer here becomes Return pressed on the wrong row
 /// of someone's live terminal — on a permission dialog, a decision nobody made — so a screen
@@ -178,6 +182,33 @@ final class ChoiceDialogTests: XCTestCase {
                       "only a one-character box is a box; a bracketed WORD is the label")
     }
 
+    /// **A box shape no capture draws is not a box**, and this is why the parser is strict about
+    /// four characters rather than three. Every checkbox capture draws `[ ]` or `[✔]` and then a
+    /// space; a `[x]`, a `[1]`, or a box run straight into its label are shapes claude has never
+    /// been seen to render, so admitting them is guessing.
+    ///
+    /// It used to cost nothing, because `isCheckbox` was read by nobody. It is now `actionRow`'s
+    /// first conjunct — the one thing keeping the unnumbered-row rule off single-select and
+    /// permission screens — so a row that merely looks box-shaped is a run that can grow a
+    /// phantom row out of the line below it, and on a screen with no action row that phantom is
+    /// something a driver would press Return on. Refusing instead leaves the box in the label,
+    /// where the transcript's own words will not match it and the drive aborts.
+    func testABoxShapeNoCaptureDrawsIsNotACheckbox() {
+        for box in ["[x] ", "[1] ", "[Z]", "[✔]"] {
+            let screen = viewport([
+                "❯ 1. \(box)Trail mix",
+                "  2. \(box)Type something",
+                "     Submit",
+            ])
+            XCTAssertTrue(row(0, reads: "\(box)Trail mix", inViewport: screen),
+                          "\(box) is not a box, so it stays in the label the interlock "
+                          + "compares against")
+            XCTAssertFalse(row(2, reads: "Submit", inViewport: screen),
+                           "\(box): with no checkbox in the run there is no action row to "
+                           + "admit, and a line the parser cannot account for is a refusal")
+        }
+    }
+
     /// A description is not a label. `question-single`'s rows carry their descriptions on the
     /// same continuation lines this reader uses to reassemble a *wrapped* label — the screen
     /// does not distinguish the two — so the rule keeping them apart is that a row reads as its
@@ -214,10 +245,12 @@ final class ChoiceDialogTests: XCTestCase {
     /// echo carries two markers. Keying on the marker alone finds the echo and reports a row
     /// nobody is on — and then arrows are counted from the wrong place.
     ///
-    /// Asserted on the screens that actually carry an echo, and then on the case no capture
-    /// holds, because the AX grant that would have sent a keystroke lapsed mid-capture: **a
-    /// cursor moved off row 0.** That is where reading the wrong marker stops being merely
-    /// lucky and starts reporting `0` for a screen sitting on row 1.
+    /// Asserted on the screens that actually carry an echo, and then on the case none of THEM
+    /// holds — every capture this suite reads is at its initial selection: **a cursor moved off
+    /// row 0.** That is where reading the wrong marker stops being merely lucky and starts
+    /// reporting `0` for a screen sitting on row 1. (`permission-write-row2` is a capture of
+    /// exactly that, sent two Down arrows through the pty the screen was rendered from; it is
+    /// read by `AnswerPromptTests` rather than here.)
     func testTheEchoedPromptsBareMarkerIsNotAnOptionRow() throws {
         for name in ["permission-bash.captured", "permission-write.captured",
                      "question-single.captured", "question-multi.captured"] {

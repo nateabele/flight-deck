@@ -52,7 +52,16 @@ def probe_focused(screen_text):
 
 
 def probe_reads(screen_text, index, label):
-    """`ChoiceDialog.row(_:reads:)` — mirrors `probe reads <N> <label...>`."""
+    """`ChoiceDialog.row(_:reads:)` — mirrors `probe reads <N> <label...>`.
+
+    Anything but the literal `true` on stdout is False, INCLUDING a probe that never ran — a
+    missing binary, a swiftc failure, a rebuild racing another process on the fixed temp path.
+    Such a run aborts with text identical to a genuine interlock refusal, so a FAIL naming a
+    step and a label is not, on its own, evidence the parser refused anything. That is this
+    module's usual bias — a false FAIL rather than a false PASS, see `answer_mismatch` — and it
+    is left as is deliberately: the alternative is raising on a non-zero exit, which turns a
+    transient into a crash mid-drive with a live claude still holding a dialog open.
+    """
     build_probe()
     out = subprocess.run([PROBE_BIN, "reads", str(index), label], input=screen_text,
                           capture_output=True, text=True)
@@ -70,12 +79,25 @@ SUBMIT_ANSWERS_LABEL = "Submit answers"  # AnswerPlan.submitAnswersLabel
 
 
 def plan(questions, answers):
-    """`AnswerPlan.plan`, in Python — mirrors Sources/FleetKit/AnswerPlan.swift exactly.
+    """`AnswerPlan.plan`, in Python — its STEP ARITHMETIC, and none of its refusals.
 
     Returns a list of steps, each `frm`/`to` (screen row indices) and a `purpose` tuple:
     `("option", question_index, option_index)`, `("action", question_index, is_last)`, or
     `("submit",)`. Unlike the old version this does not emit keystrokes: the drive loop decides
     those, one step at a time, only after the interlock confirms each one.
+
+    What it mirrors: which steps a question produces, one press per single-select, one toggle per
+    chosen option with the cursor CARRYING between them on a multiSelect, the action row at
+    `len(options) + 1`, and the closing submit step.
+
+    What it does NOT mirror: `Sources/FleetKit/AnswerPlan.swift` returns `nil` — the Mac answers
+    nothing at all — for an empty question list, an answer list of the wrong length, an empty
+    choice, duplicate indices, an index outside the question's options, or a single-select given
+    more than one. None of those guards exist here, so this function is no evidence about them.
+    Two of the cases crash the run instead, which is the loud direction: an empty choice dies on
+    `chosen[0]`, and an index past the options claude actually rendered dies in `expected_label`
+    — the realistic one, since the option COUNT is claude's to invent, not the caller's. The
+    other two diverge quietly, planning steps where production would have refused.
     """
     steps = []
     last = len(questions) - 1
