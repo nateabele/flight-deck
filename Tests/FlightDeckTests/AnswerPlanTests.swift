@@ -128,6 +128,24 @@ final class AnswerDriveTests: XCTestCase {
         try TimelineFixtureTests.text(name, in: "Claude")
     }
 
+    /// Every screen this class reads is claude's — see `ChoiceDialogTests` for the same call
+    /// stated once for the same reason.
+    private func row(_ index: Int, reads label: String, inViewport viewport: String) -> Bool {
+        ChoiceDialog.row(index, reads: label, inViewport: viewport,
+                         marker: ChoiceDialog.claudeMarker)
+    }
+
+    /// The option count off `question-multi`'s own transcript record — the one checkbox
+    /// capture with a paired `.jsonl` — rather than off a literal this file would have to keep
+    /// in step with the fixture by hand.
+    private func transcriptOptionCount(_ name: String) throws -> Int {
+        let lines = try TimelineFixtureTests.lines(name, in: "Claude")
+        let items = ClaudeTimelineMapper.items(inLine: try XCTUnwrap(lines.first), at: 0)
+        let question = try XCTUnwrap(
+            PromptQuestion(toolInput: try XCTUnwrap(items.first).body.text))
+        return question.options.count
+    }
+
     /// **Three screens, three presses, no arrows.** Answering the first option of each question
     /// needs no movement, so what this pins is the part arithmetic cannot: that the drive walks
     /// question one → question two → the review, pressing once on each, and stops.
@@ -158,14 +176,43 @@ final class AnswerDriveTests: XCTestCase {
         XCTAssertTrue(review.contains("→ Rust"), "and the review reads the answers back")
     }
 
-    /// The checkbox screens carry the action row the plan aims at, under the name the plan
-    /// expects for a lone question.
-    func testTheCheckboxScreenCarriesTheActionRowThePlanAimsAt() throws {
-        let alone = try captured("question-checkbox.captured")
-        let inSet = try captured("question-set-with-checkbox.captured")
-        XCTAssertTrue(alone.contains(AnswerPlan.actionLabel(isLast: true)),
+    /// **A lone checkbox question commits on the row the interlock can confirm, not on a word
+    /// found anywhere on screen.** `question-multi.captured` draws "Submit" twice — once in the
+    /// tab strip (`✔ Submit`), once on the unnumbered action row the plan actually presses — so
+    /// a bare `String.contains` stayed green through the whole period the action row was
+    /// unreachable from a phone and the feature was broken. Going through
+    /// `ChoiceDialog.row(_:reads:)` at `AnswerPlan.actionRow` only passes once that row is
+    /// confirmable; asserting `Next` fails there is what would catch a commit mistaken for an
+    /// advance.
+    func testALoneCheckboxQuestionCommitsOnTheRowTheInterlockConfirms() throws {
+        let screen = try captured("question-multi.captured")
+        let action = AnswerPlan.actionRow(
+            optionCount: try transcriptOptionCount("question-multi.captured"))
+        XCTAssertTrue(row(action, reads: AnswerPlan.actionLabel(isLast: true),
+                         inViewport: screen),
                       "a lone checkbox question commits on Submit")
-        XCTAssertTrue(inSet.contains(AnswerPlan.actionLabel(isLast: false)),
+        XCTAssertFalse(row(action, reads: AnswerPlan.actionLabel(isLast: false),
+                          inViewport: screen),
+                       "Next here would leave the drive waiting for a question that isn't coming")
+    }
+
+    /// **The same row inside a set advances instead, and the tab strip's own "Submit" must not
+    /// fool the interlock either.** `question-set-with-checkbox.captured` carries "Submit" in
+    /// its tab strip — the set's overall commit — and "Next" on the row the plan presses for
+    /// *this* question: the two words a drive can least afford to swap, since getting it
+    /// backwards means expecting a commit and getting an advance, or the reverse. No `.jsonl`
+    /// is paired with this capture, so the count is a constant tied to the capture's own lines
+    /// rather than to the screen's row numbers, and `actionRow` supplies the arithmetic.
+    func testACheckboxQuestionInsideASetAdvancesOnTheRowTheInterlockConfirms() throws {
+        let screen = try captured("question-set-with-checkbox.captured")
+        // Pretzels, Cookies, Mixed nuts, Fruit cup — lines 16-23.
+        let optionCount = 4
+        let action = AnswerPlan.actionRow(optionCount: optionCount)
+        XCTAssertTrue(row(action, reads: AnswerPlan.actionLabel(isLast: false),
+                         inViewport: screen),
                       "inside a set the same row advances, and says Next")
+        XCTAssertFalse(row(action, reads: AnswerPlan.actionLabel(isLast: true),
+                          inViewport: screen),
+                       "Submit here would send a half-built answer with the rest unasked")
     }
 }
