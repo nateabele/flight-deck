@@ -118,13 +118,35 @@ unmistakable shape that can never be confused with a `step N (...): row X does n
   focus`/`expected to land on`) — **real.** The interlock was checking a genuinely fresh record
   for THIS run and the screen did not read what the plan expected at that step. This is a finding
   about `ChoiceDialog.swift`, not about the harness's plumbing.
-- `abort=answer mismatch: expected [...] but [...] not found in recorded result '...'` — also
-  **real**, and the most serious kind: every interlock step passed, a fresh result was recorded,
-  but it does not name the options the drive actually chose. This is the exact failure the
-  interlock exists to prevent (pressing the wrong row) slipping past the interlock's own checks
-  and only showing up in what claude recorded — "submission is the assertion" is not enough on
-  its own; it has to be the **chosen** submission (see `expected_answer_labels()` /
-  `answer_mismatch()` in `fuzz.py`).
+- `abort=answer mismatch on question N (...): expected [...], recorded [...] (full result
+  '...')` — also **real**, and the most serious kind: every interlock step passed, a fresh
+  result was recorded, but it does not name the options the drive actually chose. This is the
+  exact failure the interlock exists to prevent (pressing the wrong row) slipping past the
+  interlock's own checks and only showing up in what claude recorded — "submission is the
+  assertion" is not enough on its own; it has to be the **chosen** submission.
+
+  This check compares TOKEN SETS, not substrings (see `answer_mismatch()` in `fuzz.py`): it
+  parses each `"question"="answer"` pair out of claude's recorded text and splits the answer on
+  `", "` into the individual labels claimed for that question, then compares that set against
+  the labels actually chosen. A plain substring check (`label in result`) was tried first and
+  found to have a one-directional false-PASS hole — if one option's label is a substring of
+  another's (observed near-collisions in this workspace: `Popcorn`/`Salted popcorn`,
+  `Chocolate`/`Dark chocolate`, `Cookies`/`Chocolate chip cookie`), pressing the WRONG one still
+  contains-matches the shorter label, so a genuinely wrong answer could pass. Token-set
+  comparison closes that, and additionally catches an extra, unchosen answer being recorded,
+  which containment could never see either.
+
+  Two things to know about this check:
+  - `abort=could not parse recorded result into question/answer pairs: '...'` or
+    `abort=recorded result names N question(s), expected M: '...'` — the result text did not
+    parse into the expected `"question"="answer"` shape at all. This is its own distinct
+    failure, never silently treated as either a match or a genuine mismatch.
+  - **Known, deliberate limitation:** an option label that itself contains the literal substring
+    `", "` will be split into two tokens by this check and reported as a mismatch that is not
+    real. That is the safe direction on purpose — a false FAIL, loudly labelled with the full
+    expected/recorded sets so it is easy to recognise — never a false PASS. No heuristic papers
+    over this; if it ever fires, check whether an option's own label contains `", "` before
+    treating it as a real finding about the drive.
 
 ## Honest limit
 
