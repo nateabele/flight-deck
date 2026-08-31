@@ -118,6 +118,13 @@ public final class FleetConnector: @unchecked Sendable {
     /// one table per answer shape, all four sharing the single `cid` space `FleetClient.send`
     /// mints from, so a number is filed in at most one and `apply` tries each in turn.
     private var pendingEndpoints: [Int: (Result<[String], FleetRequestError>) -> Void] = [:]
+    /// A fifth answer type, same reasoning as the four above: one table per shape, sharing
+    /// the single `cid` space, so `apply` tries each in turn.
+    private var pendingConversations: [Int: (Result<WireConversationCatalogue, FleetRequestError>) -> Void] = [:]
+    /// A sixth answer type, same reasoning.
+    private var pendingSearch: [Int: (Result<WireSearchHits, FleetRequestError>) -> Void] = [:]
+    /// A seventh answer type, same reasoning.
+    private var pendingSession: [Int: (Result<UUID, FleetRequestError>) -> Void] = [:]
     private var browser: NWBrowser?
     private var fleet = FleetSnapshot.empty
     private var attempt = 0
@@ -267,6 +274,48 @@ public final class FleetConnector: @unchecked Sendable {
         completion(result)
     }
 
+    /// Ask for the whole conversation catalogue plus every live tab's recency. Same contract
+    /// as `request(_:then:)` — exactly one answer, `.disconnected` synchronously when there
+    /// is nothing to ask.
+    public func requestConversations(
+        then completion: @escaping (Result<WireConversationCatalogue, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.conversations)
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingConversations[cid] = completion
+    }
+
+    /// Search transcript content for `query`. Same contract as `request(_:then:)` — exactly
+    /// one answer, `.disconnected` synchronously when there is nothing to ask.
+    public func requestSearch(
+        query: String, limit: Int,
+        then completion: @escaping (Result<WireSearchHits, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.search(query: query, limit: limit))
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingSearch[cid] = completion
+    }
+
+    /// Ask the Mac to resume `conversationID` — from `projectPath` — into a new tab. Same
+    /// contract as `request(_:then:)` — exactly one answer, `.disconnected` synchronously
+    /// when there is nothing to ask.
+    public func requestOpenConversation(
+        conversationID: String, projectPath: String,
+        then completion: @escaping (Result<UUID, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(
+            FleetRequest.openConversation(conversationID: conversationID, projectPath: projectPath)
+        )
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingSession[cid] = completion
+    }
+
     /// Takes the Mac's list as authoritative for membership, keeping the promoted address in
     /// front when the Mac still claims it.
     private func adoptEndpoints(_ list: [String]) {
@@ -304,6 +353,30 @@ public final class FleetConnector: @unchecked Sendable {
     ) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let completion = pendingOptions.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
+    private func resolveConversations(
+        _ cid: Int, with result: Result<WireConversationCatalogue, FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingConversations.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
+    private func resolveSearch(
+        _ cid: Int, with result: Result<WireSearchHits, FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingSearch.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
+    private func resolveSession(
+        _ cid: Int, with result: Result<UUID, FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingSession.removeValue(forKey: cid) else { return }
         completion(result)
     }
 
@@ -515,6 +588,18 @@ public final class FleetConnector: @unchecked Sendable {
                 resolveEndpoints(cid, with: .failure(.server(code: code)))
                 return
             }
+            if pendingConversations[cid] != nil {
+                resolveConversations(cid, with: .failure(.server(code: code)))
+                return
+            }
+            if pendingSearch[cid] != nil {
+                resolveSearch(cid, with: .failure(.server(code: code)))
+                return
+            }
+            if pendingSession[cid] != nil {
+                resolveSession(cid, with: .failure(.server(code: code)))
+                return
+            }
             resolve(cid, with: .failure(.server(code: code)))
             return
         case .ack(let cid):
@@ -527,11 +612,18 @@ public final class FleetConnector: @unchecked Sendable {
             // completion, and is the no-op it has always been.
             resolve(cid, with: .failure(.server(code: "unexpected_ack")))
             return
-        case .conversations, .searchHits, .session:
-            // No completion table exists for these yet — the `request(_:then:)` methods and
-            // their `pending*` tables are the connector's own task, added alongside them.
-            // Kept exhaustive here only so `ServerFrame` gaining a case is a compile error
-            // everywhere it is switched over, per this file's usual style.
+        case .conversations(let cid, let catalogue):
+            // Unsequenced, exactly like `page` and `newSessionOptions` and for the same
+            // reason — the catalogue is not fleet state and must not move the resume point.
+            resolveConversations(cid, with: .success(catalogue))
+            return
+        case .searchHits(let cid, let hits):
+            // Unsequenced, same reason.
+            resolveSearch(cid, with: .success(hits))
+            return
+        case .session(let cid, let sessionID):
+            // Unsequenced, same reason.
+            resolveSession(cid, with: .success(sessionID))
             return
         }
         onFleet?(fleet)
@@ -692,6 +784,18 @@ public final class FleetConnector: @unchecked Sendable {
         let outstandingEndpoints = pendingEndpoints
         pendingEndpoints.removeAll()
         for completion in outstandingEndpoints.values { completion(.failure(.disconnected)) }
+        // And the three search tables, for the same reason: a phone whose socket dies with
+        // a catalogue fetch, a search, or an open-conversation request outstanding must be
+        // told rather than left spinning.
+        let outstandingConversations = pendingConversations
+        pendingConversations.removeAll()
+        for completion in outstandingConversations.values { completion(.failure(.disconnected)) }
+        let outstandingSearch = pendingSearch
+        pendingSearch.removeAll()
+        for completion in outstandingSearch.values { completion(.failure(.disconnected)) }
+        let outstandingSession = pendingSession
+        pendingSession.removeAll()
+        for completion in outstandingSession.values { completion(.failure(.disconnected)) }
     }
 
     private func report(_ state: State) { onState?(state) }
