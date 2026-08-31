@@ -527,6 +527,12 @@ public final class FleetConnector: @unchecked Sendable {
             // completion, and is the no-op it has always been.
             resolve(cid, with: .failure(.server(code: "unexpected_ack")))
             return
+        case .conversations, .searchHits, .session:
+            // No completion table exists for these yet — the `request(_:then:)` methods and
+            // their `pending*` tables are the connector's own task, added alongside them.
+            // Kept exhaustive here only so `ServerFrame` gaining a case is a compile error
+            // everywhere it is switched over, per this file's usual style.
+            return
         }
         onFleet?(fleet)
     }

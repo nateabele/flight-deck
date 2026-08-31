@@ -166,12 +166,35 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// and its addresses are true only on the day it was drawn.
     case macEndpoints
 
-    enum CodingKeys: String, CodingKey { case op, session, anchor, cursor, limit, project }
+    /// The whole catalogue of conversations the Mac's index knows a name for, plus every
+    /// live tab's recency. Answered with `WireConversationCatalogue` — see its doc comment
+    /// for why recency rides this reply rather than `WireSession`.
+    case conversations
+
+    /// Search `query` over transcript content. `limit` is clamped to `SearchLimits.maxHits`
+    /// by the reader rather than refused here, the same contract `timeline`'s `limit` keeps.
+    case search(query: String, limit: Int)
+
+    /// Resume conversation `conversationID` — from project `projectPath` — into a new tab.
+    ///
+    /// The project path travels alongside the id rather than being looked up from it: the
+    /// conversation may be one the phone learned about from `WireConversationCatalogue` and
+    /// the Mac may since have removed that project, and a path handed back is what lets the
+    /// Mac decide whether to open it under an existing project or refuse.
+    case openConversation(conversationID: String, projectPath: String)
+
+    enum CodingKeys: String, CodingKey {
+        case op, session, anchor, cursor, limit, project
+        case query, conversationID, projectPath
+    }
 
     private enum Op: String, Codable {
         case timeline = "timeline.page"
         case newSessionOptions = "session.newOptions"
         case macEndpoints = "mac.endpoints"
+        case conversations = "search.conversations"
+        case search = "search.query"
+        case openConversation = "search.open"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -190,6 +213,16 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             try c.encode(project, forKey: .project)
         case .macEndpoints:
             try c.encode(Op.macEndpoints, forKey: .op)
+        case .conversations:
+            try c.encode(Op.conversations, forKey: .op)
+        case .search(let query, let limit):
+            try c.encode(Op.search, forKey: .op)
+            try c.encode(query, forKey: .query)
+            try c.encode(limit, forKey: .limit)
+        case .openConversation(let conversationID, let projectPath):
+            try c.encode(Op.openConversation, forKey: .op)
+            try c.encode(conversationID, forKey: .conversationID)
+            try c.encode(projectPath, forKey: .projectPath)
         }
     }
 
@@ -218,6 +251,18 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             self = .newSessionOptions(project: try c.decode(UUID.self, forKey: .project))
         case .macEndpoints:
             self = .macEndpoints
+        case .conversations:
+            self = .conversations
+        case .search:
+            self = .search(
+                query: try c.decode(String.self, forKey: .query),
+                limit: try c.decode(Int.self, forKey: .limit)
+            )
+        case .openConversation:
+            self = .openConversation(
+                conversationID: try c.decode(String.self, forKey: .conversationID),
+                projectPath: try c.decode(String.self, forKey: .projectPath)
+            )
         }
     }
 }

@@ -188,6 +188,11 @@ final class FleetService: ObservableObject {
                     cid: cid,
                     LocalEndpoints.routable(port: boundPort.rawValue, limit: 4)
                 ))
+            case .conversations, .search, .openConversation:
+                // Not wired yet — handling these is its own task. Kept here only so this
+                // switch stays exhaustive over `FleetRequest`, per this file's usual style,
+                // rather than compiling with a case silently unhandled.
+                reply(.err(cid: cid, code: "unhandled"))
             }
         }
         server.onAttachedSlotsChanged = { [weak self] slots in
