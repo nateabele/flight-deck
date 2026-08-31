@@ -116,11 +116,6 @@ final class SessionStore: ObservableObject {
     /// the process (see `GhosttyApp.shared`'s doc comment); the store must not co-own it.
     private weak var provider: SurfaceProvider?
 
-    /// Test seam, paired with `seedInertSession(in:)`: keeps that call's stand-in provider
-    /// alive. `provider` above is intentionally `weak` (see its own doc comment), so nothing
-    /// else here would.
-    private var inertSeedProvider: SurfaceProvider?
-
     /// Live surfaces retained here (not by the SwiftUI view tree) so switching
     /// sessions re-parents rather than recreates. Dropping an entry frees it.
     private var surfaces: [UUID: Ghostty.SurfaceView] = [:]
@@ -1984,36 +1979,6 @@ final class SessionStore: ObservableObject {
         // the replicator re-reads and anyone behind is sent back for a snapshot.
         replicator?.reset()
         return !restoredIDs.isEmpty || !repos.isEmpty
-    }
-
-    /// Test seam. Builds a tab with no registry entry — exactly what a relaunch during sleep
-    /// leaves behind — for `RespawnSurfaceTests`.
-    ///
-    /// Goes through an actual `restore()`, on a second, throwaway, provider-less store, rather
-    /// than a hand-built `Session`: `restore()` is the path that inserts a tab without ever
-    /// checking `canCreateTerminal` (see `respawnSurface`'s doc comment for why that guard
-    /// cannot apply to it), which is exactly how a real inert tab gets produced. Its
-    /// provider-less-ness is what leaves `insertSession`'s registry recording with nothing to
-    /// record, matching `hasShellProcess(for:) == false`. The repo it restored is then grafted
-    /// onto `self`.
-    ///
-    /// A tab is only inert in practice because a real provider existed and could not draw —
-    /// `canCreateTerminal`'s "no provider" escape hatch does not apply to it — so `self` gets a
-    /// provider too, one that never manages to make a surface either. `provider` is `weak`;
-    /// retained on `self` because nothing else here would.
-    func seedInertSession(in directory: URL) -> UUID {
-        let id = UUID()
-        let entry = SessionSnapshot.Entry(id: id, title: "inert", workingDirectory: directory.path)
-        let snapshot = SessionSnapshot(sessions: [entry], selectedSessionID: nil, sessionCounter: 1)
-        let seed = SessionStore(provider: nil, persistence: InertSeedPersistence(snapshot: snapshot))
-        _ = seed.restore()
-        repos.append(contentsOf: seed.repos)
-        if provider == nil {
-            let stub = InertSurfaceProvider()
-            inertSeedProvider = stub
-            provider = stub
-        }
-        return id
     }
 
     /// Settles every restored codex tab against the app-server, then types its resume
@@ -4653,23 +4618,4 @@ final class SessionStore: ObservableObject {
         }
         return nil
     }
-}
-
-/// Backs `SessionStore.seedInertSession(in:)`: a present provider that never manages to make a
-/// surface, exactly like the `StubProvider` test doubles the suite uses elsewhere to keep
-/// `canCreateTerminal` sensitive to `display` while recording nothing in the registry.
-@MainActor
-private final class InertSurfaceProvider: SurfaceProvider {
-    func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? { nil }
-    func tick() {}
-}
-
-/// Backs `SessionStore.seedInertSession(in:)`: a `SessionPersisting` that always hands back
-/// the one snapshot it was built with, so `restore()` has something to rebuild.
-@MainActor
-private final class InertSeedPersistence: SessionPersisting {
-    private let snapshot: SessionSnapshot
-    init(snapshot: SessionSnapshot) { self.snapshot = snapshot }
-    func load() -> SessionSnapshot? { snapshot }
-    func save(_ snapshot: SessionSnapshot) {}
 }
