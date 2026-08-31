@@ -32,6 +32,17 @@ final class SessionStorePlanGateIntegrationTests: XCTestCase {
         }
     }
 
+    /// Captures every batch `SessionStore.emit` hands to `record(_:)`, one array per call — not
+    /// what the events *say*, only how many calls and how big each one was. That is exactly
+    /// what distinguishes the batching fix from the bug it replaced: the bug and the fix agree
+    /// on which events eventually get recorded, and disagree only on whether they arrive as one
+    /// call or several.
+    private final class SpyReplicator: FleetRecording {
+        var records: [[FleetEvent]] = []
+        func record(_ events: [FleetEvent]) { records.append(events) }
+        func reset() {}
+    }
+
     /// Stands in for Plannotator's HTTP API. Only `/api/plan` matters here — this file tests
     /// `SessionStore`'s wiring around `PlanGateService`, not the service's own HTTP handling,
     /// which `PlanGateServiceTests`'s `RecordingTransport` already covers in full.
@@ -122,5 +133,84 @@ final class SessionStorePlanGateIntegrationTests: XCTestCase {
         XCTAssertEqual(spy.withdrawn.count, 1, "a closed gate must withdraw its banner")
         XCTAssertEqual(spy.withdrawn.first, session.id)
         XCTAssertEqual(spy.notified.count, 1, "closing must not re-notify")
+    }
+
+    /// Regression coverage for the batching fix: `refresh()` updates `PlanGateService.gates`
+    /// for every session before `deliverPlanGateNotifications` runs a single loop over all of
+    /// them, so two sessions' gates opening in the same tick must fold into **one** `record`
+    /// call carrying both events — not two calls, where the first would see the oracle already
+    /// projecting the second session's new gate while the mirror still held its old one.
+    func testTwoGatesOpeningInOneTickProduceOneBatchedRecord() async throws {
+        let store = SessionStore(provider: StubProvider())
+        let sessionA = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        let sessionB = store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
+        let pidA: pid_t = 4243
+        let pidB: pid_t = 4244
+        let plannotatorPidA: pid_t = 9004
+        let plannotatorPidB: pid_t = 9005
+        let portA = 54236
+        let portB = 54237
+
+        store.applyRegistry([
+            pidA: row(sessionA, pid: pidA, activity: .busy),
+            pidB: row(sessionB, pid: pidB, activity: .busy),
+        ])
+        XCTAssertEqual(store.claudePID(of: sessionA.id), pidA, "precondition: anchor A resolved")
+        XCTAssertEqual(store.claudePID(of: sessionB.id), pidB, "precondition: anchor B resolved")
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SessionStorePlanGateBatch-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        func registryEntry(pid: pid_t, port: Int) -> String {
+            """
+            {"pid":\(pid),"port":\(port),"url":"http://localhost:\(port)",\
+            "mode":"plan","project":"flight-deck","startedAt":"2026-08-29T17:40:36.186Z"}
+            """
+        }
+        try Data(registryEntry(pid: plannotatorPidA, port: portA).utf8)
+            .write(to: dir.appendingPathComponent("\(plannotatorPidA).json"))
+        try Data(registryEntry(pid: plannotatorPidB, port: portB).utf8)
+            .write(to: dir.appendingPathComponent("\(plannotatorPidB).json"))
+
+        let transport = RecordingTransport(plan: "# Plan")
+        let service = PlanGateService(
+            callID: { id in
+                if id == sessionA.id { return "toolu_A" }
+                if id == sessionB.id { return "toolu_B" }
+                return nil
+            },
+            pid: { store.claudePID(of: $0) },
+            sessions: { store.allSessionIDs() }
+        )
+        service.registryDirectory = dir
+        service.isAlive = { _ in true }
+        service.parentOf = { pid in
+            if pid == plannotatorPidA { return pidA }
+            if pid == plannotatorPidB { return pidB }
+            return nil
+        }
+        service.makeClient = { port in
+            PlanGateClient(port: port, transport: { request in await transport.handle(request) })
+        }
+
+        let spy = SpyReplicator()
+        store.planGates = service
+        store.replicator = spy
+        store.appIsActive = { false }
+
+        // One tick, both gates open at once.
+        store.applyRegistry([
+            pidA: row(sessionA, pid: pidA, activity: .busy),
+            pidB: row(sessionB, pid: pidB, activity: .busy),
+        ])
+        for _ in 0..<100 where spy.records.isEmpty { await Task.yield() }
+
+        XCTAssertEqual(spy.records.count, 1, "two gates changing in one tick must batch into one record")
+        let ids = Set(spy.records.first?.compactMap { event -> UUID? in
+            guard case .planGateChanged(let id, _) = event else { return nil }
+            return id
+        } ?? [])
+        XCTAssertEqual(ids, [sessionA.id, sessionB.id], "the one record must carry both sessions")
     }
 }
