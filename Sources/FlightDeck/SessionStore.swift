@@ -2617,21 +2617,35 @@ final class SessionStore: ObservableObject {
     /// a tab resumed into a collapsed project would come back invisible, since
     /// `SidebarRow.rows` renders only the header for a collapsed repo. Same reasoning as
     /// `reopenLastClosed`, which un-collapses for the same reason.
+    ///
+    /// Returns the tab actually opened or selected, `nil` on every path that filed nothing —
+    /// `@discardableResult` because ⌘K Return and the search panel's `onSelect` have never
+    /// needed the answer, they read `selectedSessionID` same as before. `FleetService` is the
+    /// first caller that does: a phone's `search.open` request has no `selectedSessionID` to
+    /// fall back on, and reading that property after a call that took the failure branch below
+    /// would hand back whatever tab happened to be selected beforehand — a confident answer
+    /// naming the wrong conversation. Returning the id directly makes that failure mode
+    /// unrepresentable rather than relying on every caller to remember the gap.
+    @discardableResult
     func openConversation(
         _ activation: SearchActivation.Activation,
         directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
         resolveTranscriptDirectory: (String, UUID) -> String = {
             SessionStore.resolvedTranscriptDirectory(projectPath: $0, conversationID: $1)
         }
-    ) {
+    ) -> UUID? {
         let projectPath: String
         let conversationID: String
         let title: String
 
         switch activation {
         case .select(let id):
+            // `selectSession` is itself a no-op when `id` names no live tab — checked again
+            // here rather than trusted, so a stale id (a tab closed between `plan` and this
+            // call) reports `nil` instead of an id that does not resolve to anything.
+            guard locate(id) != nil else { return nil }
             selectSession(id)
-            return
+            return id
         case .resume(let conversation, let project, let resultTitle, _):
             projectPath = project; conversationID = conversation; title = resultTitle
         case .addProjectThenResume(let project, let conversation, let resultTitle, _):
@@ -2642,17 +2656,25 @@ final class SessionStore: ObservableObject {
         // A project row, or a result whose conversation id we never learned: there is
         // nothing to resume, so land on the project instead of launching a nameless agent.
         guard let pinned = UUID(uuidString: conversationID) else {
+            let opened: UUID?
             if let existing = indexOfRepo(for: url) {
                 if repos[existing].isCollapsed {
                     repos[existing].isCollapsed = false
                     emit(.projectCollapsed(id: repos[existing].id, isCollapsed: false))
                 }
-                if let first = repos[existing].sessions.first { selectedSessionID = first.id }
+                opened = repos[existing].sessions.first?.id
+                if let opened { selectedSessionID = opened }
             } else {
-                addProject(at: url)
+                let created = addProject(at: url)
+                // `addProject` delegates to `newSession(in:)`, whose own `launchAccount`
+                // failure branch returns a `Session` that was never filed — see that
+                // method's doc comment. Checked here rather than trusted, for the same
+                // reason `.select` re-checks `locate`: a fabricated id is worse than `nil`.
+                opened = repos.flatMap(\.sessions).contains { $0.id == created.id }
+                    ? created.id : nil
             }
             persist()
-            return
+            return opened
         }
 
         // Enforced here too, not only inside `SearchActivation.plan`: a caller that fills
@@ -2662,7 +2684,7 @@ final class SessionStore: ObservableObject {
         // processes appending one transcript and colliding in claude's pid-keyed registry.
         if let live = repos.flatMap(\.sessions).first(where: { $0.pinnedConversationID == pinned }) {
             selectSession(live.id)
-            return
+            return live.id
         }
 
         // Resolved before anything is filed, the same as `newSession`: nil would mean "the
@@ -2673,7 +2695,7 @@ final class SessionStore: ObservableObject {
         case .success(let resolved): account = resolved
         case .failure(let error):
             launchFailureReporter.report(error)
-            return
+            return nil
         }
 
         let session = Session(
@@ -2704,6 +2726,7 @@ final class SessionStore: ObservableObject {
                 await self?.resumeRestoredCodex([session.id])
             }
         }
+        return session.id
     }
     func closeProject(_ id: Repo.ID) {
         guard let index = repos.firstIndex(where: { $0.id == id }) else { return }

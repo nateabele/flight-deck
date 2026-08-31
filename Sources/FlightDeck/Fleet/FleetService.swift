@@ -153,20 +153,37 @@ final class FleetService: ObservableObject {
             .contentModificationDate ?? .distantPast
     }
 
+    /// Why `FleetService.openConversation` below could not open one.
+    private enum OpenConversationFailure: Error {
+        /// `conversationID` is not a UUID at all — nothing `SearchActivation.plan`'s
+        /// conversation branch, or `SessionStore.openConversation`'s pinning, could ever act
+        /// on. Wire code: `unknown_conversation`.
+        case unknownConversation
+        /// A well-formed conversation id whose launch `SessionStore.openConversation` itself
+        /// refused — a dangling or relocated account, the two `AgentLaunchError` cases
+        /// `launchAccount` documents. Wire code: `launch_failed`.
+        case launchFailed
+    }
+
     /// Resumes — or selects — conversation `conversationID` from project `projectPath`, over
     /// the same seam the desktop's ⌘K Return and the search panel's `onSelect` already use:
     /// build a `SearchResult`, hand it to `SearchActivation.plan` for the select-vs-resume
     /// decision, then let `SessionStore.openConversation` re-resolve the real transcript
     /// directory and act. Nothing about select-vs-resume is reimplemented here.
     ///
-    /// `nil` means `conversationID` is not a conversation this Mac can open at all — not a
-    /// UUID, so nothing `SearchActivation.plan`'s conversation branch or
-    /// `SessionStore.openConversation`'s pinning could ever act on. A well-formed id that
-    /// simply has no transcript on disk still reaches `SessionStore.openConversation`, which
-    /// fails it the same way `newSession` fails an unlaunchable agent — through
-    /// `launchFailureReporter`, not through this reply.
-    private func openConversation(conversationID: String, projectPath: String) -> UUID? {
-        guard UUID(uuidString: conversationID) != nil else { return nil }
+    /// Reads `SessionStore.openConversation`'s return value directly rather than
+    /// `store.selectedSessionID` afterward — the earlier shape here read that property, and on
+    /// `SessionStore.openConversation`'s `launchAccount`-failure branch (a dangling or
+    /// relocated account; see its own doc comment) that call returns having filed nothing and
+    /// changed no selection, so the property still named whatever tab was selected *before*
+    /// this request — a confident `.session(cid:, id)` reply naming an unrelated conversation.
+    /// `SessionStore.openConversation` now returns the id it actually opened or selected, `nil`
+    /// on every path that filed nothing, which is what makes that failure mode unrepresentable
+    /// here rather than merely untested.
+    private func openConversation(
+        conversationID: String, projectPath: String
+    ) -> Result<UUID, OpenConversationFailure> {
+        guard UUID(uuidString: conversationID) != nil else { return .failure(.unknownConversation) }
         let known = (try? store.searchIndex?.conversationNames()) ?? [:]
         let title = known[conversationID]?.name ?? conversationID
         let result = SearchResult(
@@ -187,8 +204,8 @@ final class FleetService: ObservableObject {
         let plan = SearchActivation.plan(
             for: result, openSessions: open, projects: openProjectPaths()
         )
-        store.openConversation(plan)
-        return store.selectedSessionID
+        guard let id = store.openConversation(plan) else { return .failure(.launchFailed) }
+        return .success(id)
     }
 
     private static func derivedServiceName(preferences: PreferencesStore) -> String {
@@ -297,12 +314,20 @@ final class FleetService: ObservableObject {
                 // report for the task that added this reply.
                 reply(.searchHits(cid: cid, WireSearchHits(hits: hits, indexing: nil)))
             case .openConversation(let conversationID, let projectPath):
-                guard let id = self.openConversation(
-                    conversationID: conversationID, projectPath: projectPath
-                ) else {
-                    return reply(.err(cid: cid, code: "unknown_conversation"))
+                switch self.openConversation(conversationID: conversationID, projectPath: projectPath) {
+                case .success(let id):
+                    reply(.session(cid: cid, id))
+                case .failure(.unknownConversation):
+                    reply(.err(cid: cid, code: "unknown_conversation"))
+                case .failure(.launchFailed):
+                    // The conversation is real; launching it is what failed — a dangling or
+                    // relocated account, the same refusal `SessionStore.openConversation`
+                    // reports to `launchFailureReporter` on the desktop. A distinct code, not
+                    // `unknown_conversation`, so the phone can tell "no such conversation"
+                    // from "found it, could not open it" rather than folding both into one
+                    // dead end.
+                    reply(.err(cid: cid, code: "launch_failed"))
                 }
-                reply(.session(cid: cid, id))
             }
         }
         server.onAttachedSlotsChanged = { [weak self] slots in

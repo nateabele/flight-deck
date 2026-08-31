@@ -188,4 +188,58 @@ final class FleetServiceTests: XCTestCase {
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
         await fulfillment(of: [refused], timeout: 10)
     }
+
+    /// **The wire half of the same bug `OpenConversationTests` pins at the store level.** With
+    /// the Mac already sitting on an unrelated tab, `search.open` for a conversation whose
+    /// account assignment is dangling must come back `err(launch_failed)` — never
+    /// `session(cid:, id)` naming the tab that merely happened to be selected beforehand. The
+    /// earlier shape here read `store.selectedSessionID` after the call and would have replied
+    /// with `elsewhere`'s id on exactly this path; this test fails against that shape and
+    /// passes against `FleetService.openConversation`'s `Result`-based one.
+    ///
+    /// Built by hand rather than through `FleetTestHarness`/`standUp()`: those wire the
+    /// `PreferencesStore` only to `FleetService`, not to the `SessionStore` underneath it
+    /// (`SessionStore(provider:persistence:)` leaves `preferences` at its default `nil`), so
+    /// `launchAccount` takes its `guard let preferences else { return .success(nil) }` escape
+    /// and a dangling assignment can never be reached at all. This fixture wires the same
+    /// `PreferencesStore` into both, the way the real app does.
+    func testAnOpenConversationRequestWhoseLaunchFailsIsRefusedNotConfusedWithAPreviouslySelectedTab() async throws {
+        let preferences = PreferencesStore(persistence: nil)
+        preferences.preferences.storedProjectSettings = [
+            "/w/alpha": ProjectSettings(accounts: [.claude: UUID()])
+        ]
+        let store = SessionStore(provider: nil, persistence: nil, preferences: preferences)
+        let key = FleetDeviceKey.mint()
+        preferences.upsert(
+            PairedDevice(slot: key.slot, name: "test device", secret: key.secret,
+                        pairedAt: Date(), lastSeenAt: nil, armedUntil: nil)
+        )
+        let service = FleetService(store: store, preferences: preferences, armer: PairingArmer())
+        self.service = service
+        let port = try await service.start(port: nil)
+
+        let elsewhere = store.newSession(in: URL(fileURLWithPath: "/w/elsewhere"))
+        store.selectSession(elsewhere.id)
+
+        let conversation = UUID()
+        let refused = expectation(description: "err")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.openConversation(
+                    conversationID: conversation.uuidString, projectPath: "/w/alpha"
+                ))
+            }
+            if case .session = frame {
+                XCTFail("a refused launch must never be reported as a session")
+            }
+            if case .err(_, "launch_failed") = frame { refused.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [refused], timeout: 10)
+
+        XCTAssertEqual(store.selectedSessionID, elsewhere.id,
+                       "selection is untouched by the refusal — the previously-selected tab a stale read would have named")
+    }
 }
