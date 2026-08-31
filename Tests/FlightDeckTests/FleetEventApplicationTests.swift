@@ -102,6 +102,27 @@ final class FleetEventApplicationTests: XCTestCase {
         XCTAssertTrue(after.projects[0].sessions[0].isUnread)
     }
 
+    /// The fold this whole case exists for: without it, `planGate` was a field the
+    /// projection oracle could see but no event could ever set, so the mirror and the
+    /// oracle disagreed by construction the moment a gate was open.
+    func testAPlanGateOpeningSetsTheField() {
+        let gate = WirePlanGate(callID: "toolu_1", tier: "annotate", plan: "# Plan",
+                               startedAt: "2026-08-29T17:40:36.186Z", annotationCount: 1)
+        let after = base().applying([.planGateChanged(id: sessionID, gate: gate)])
+        XCTAssertEqual(after.projects[0].sessions[0].planGate, gate)
+    }
+
+    /// The other half: a resolve or a withdrawal closes the gate, not merely stops updating it.
+    func testAPlanGateClosingClearsTheField() {
+        let gate = WirePlanGate(callID: "toolu_1", tier: "annotate", plan: "# Plan",
+                               startedAt: "2026-08-29T17:40:36.186Z", annotationCount: 1)
+        let after = base().applying([
+            .planGateChanged(id: sessionID, gate: gate),
+            .planGateChanged(id: sessionID, gate: nil)
+        ])
+        XCTAssertNil(after.projects[0].sessions[0].planGate)
+    }
+
     func testAMoveTakesTheSessionOutOfItsOldProject() {
         let other = UUID()
         var snapshot = base()
