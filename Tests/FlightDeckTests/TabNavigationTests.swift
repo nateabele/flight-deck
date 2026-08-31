@@ -16,7 +16,6 @@ final class TabNavigationTests: XCTestCase {
     /// Two projects, two sessions each. Sidebar order: foo[0], foo[1], bar[2], bar[3].
     private func makeStore() -> (SessionStore, [UUID]) {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let ids = [
             store.newSession(in: foo).id,
             store.newSession(in: foo).id,
@@ -63,7 +62,6 @@ final class TabNavigationTests: XCTestCase {
 
     func testASingleSessionStaysSelected() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let only = store.newSession(in: foo)
         store.selectNextSession()
         XCTAssertEqual(store.selectedSessionID, only.id)
@@ -73,7 +71,6 @@ final class TabNavigationTests: XCTestCase {
 
     func testAnEmptyStoreIsANoOp() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         store.selectNextSession()
         XCTAssertNil(store.selectedSessionID)
         store.selectPreviousSession()
@@ -113,7 +110,6 @@ final class TabNavigationTests: XCTestCase {
     /// tabs and never land on nothing — the same hazard `closeSession` documents.
     func testCyclesOverLiveTabsWhenTheFirstProjectIsEmpty() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let moved = store.newSession(in: foo)
         let stayed = store.newSession(in: bar)
         store.moveSession(moved.id, toProjectAt: bar)

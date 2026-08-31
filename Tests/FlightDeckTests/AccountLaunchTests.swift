@@ -591,7 +591,6 @@ final class AccountLaunchTests: XCTestCase {
         persistence: SessionPersisting? = nil
     ) -> SessionStore {
         let store = SessionStore(provider: provider, persistence: persistence, preferences: preferences)
-        store.display = DrawableDisplay()
         store.launchFailureReporter = reporter
         store.transcriptsRootOverride = temporaryRoot("projects")
         store.statusRootOverride = temporaryRoot("status")

@@ -24,12 +24,7 @@ final class CreateFromMenuAgentTests: XCTestCase {
     private func makeStore() -> SessionStore {
         let provider = StubProvider()
         retainedProviders.append(provider)
-        let store = SessionStore(provider: provider)
-        // This suite exercises `createFromMenu`'s branching, not display behaviour: without
-        // this, the `canCreateTerminal` guard (R1) would make every case depend on whether the
-        // host machine's real display happens to be drawable right now.
-        store.display = DrawableDisplay()
-        return store
+        return SessionStore(provider: provider)
     }
 
     private func titles(_ store: SessionStore) -> [String] {

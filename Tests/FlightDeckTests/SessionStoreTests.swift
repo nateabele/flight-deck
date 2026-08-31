@@ -25,7 +25,6 @@ final class SessionStoreTests: XCTestCase {
 
     func testNewSessionCreatesRepoAndSelects() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let session = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         XCTAssertEqual(store.repos.count, 1)
         XCTAssertEqual(store.repos[0].displayName, "foo")
@@ -35,7 +34,6 @@ final class SessionStoreTests: XCTestCase {
 
     func testDedupesReposByStandardizedPath() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         store.newSession(in: URL(fileURLWithPath: "/work/foo/", isDirectory: true))
         XCTAssertEqual(store.repos.count, 1)
@@ -44,7 +42,6 @@ final class SessionStoreTests: XCTestCase {
 
     func testTitlesIncrement() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let a = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         let b = store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
         XCTAssertEqual(a.title, "session 1")
@@ -53,7 +50,6 @@ final class SessionStoreTests: XCTestCase {
 
     func testCloseRemovesSessionButLeavesTheEmptyRepo() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         store.closeSession(s.id)
         // A project's lifetime is explicit: closing its last session empties it but does
@@ -65,7 +61,6 @@ final class SessionStoreTests: XCTestCase {
 
     func testCloseReselectsRemainingSession() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let s1 = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         let s2 = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         store.selectSession(s1.id)
@@ -81,7 +76,6 @@ final class SessionStoreTests: XCTestCase {
     /// while sessions are still open.
     func testCloseReselectsPastAnEmptyLeadingProject() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let s1 = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         let s2 = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         let bar = URL(fileURLWithPath: "/work/bar", isDirectory: true)
@@ -105,7 +99,6 @@ final class SessionStoreTests: XCTestCase {
 
     func testSeedInitialSessionCreatesOneHomeRepoOnce() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let home = URL(fileURLWithPath: "/Users/tester", isDirectory: true)
         store.seedInitialSession(homeURL: home)
         store.seedInitialSession(homeURL: home) // second call must be a no-op
@@ -118,7 +111,6 @@ final class SessionStoreTests: XCTestCase {
     func testProviderInvokedPerSession() {
         let stub = StubProvider()
         let store = SessionStore(provider: stub)
-        store.display = DrawableDisplay()
         store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
         XCTAssertEqual(stub.madeCount, 2)
@@ -132,7 +124,6 @@ final class SessionStoreTests: XCTestCase {
     func testRegistryTransitionPersists() {
         let persistence = FakePersistence()
         let store = SessionStore(provider: StubProvider(), persistence: persistence)
-        store.display = DrawableDisplay()
         let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         let before = persistence.saveCount
 
@@ -146,7 +137,6 @@ final class SessionStoreTests: XCTestCase {
     func testRegistryPollWithNoChangeDoesNotPersist() {
         let persistence = FakePersistence()
         let store = SessionStore(provider: StubProvider(), persistence: persistence)
-        store.display = DrawableDisplay()
         let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         let rows = [pid_t(1): row(s, activity: .busy)]
 
@@ -169,7 +159,6 @@ final class SessionStoreTests: XCTestCase {
     /// `booted` is here to make the tick real; `waiting` is the one under test.
     func testAMarkSurvivesATickInWhichTheSessionHasNoStatusYet() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let waiting = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         let booted = store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
         store.markUnreadForTesting([waiting.id])
@@ -188,7 +177,6 @@ final class SessionStoreTests: XCTestCase {
     /// a statusless-but-unread session is still visibly marked).
     func testAMarkSurvivesItsStatusDisappearing() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         store.selectedSessionID = nil
         store.appIsActive = { false }
@@ -204,7 +192,6 @@ final class SessionStoreTests: XCTestCase {
 
     func testClosingASessionDropsItsMark() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         store.markUnreadForTesting([s.id])
 
@@ -219,7 +206,6 @@ final class SessionStoreTests: XCTestCase {
     /// production `markUnread(_:)` itself lands in `unreadIdle`.
     func testMarkUnreadInsertsIntoUnreadIdle() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         XCTAssertFalse(store.unreadIdle.contains(s.id), "precondition: not yet marked")
 
@@ -234,7 +220,6 @@ final class SessionStoreTests: XCTestCase {
     /// is what tells you *why* it broke if it ever does again.
     func testSelectingASessionClearsItsMark() {
         let store = SessionStore(provider: StubProvider())
-        store.display = DrawableDisplay()
         let a = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         // Created after `a`, so `b` — not `a` — holds the selection below, the way looking
         // at a different tab before coming back to the marked one would.

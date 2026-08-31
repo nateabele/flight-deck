@@ -34,7 +34,6 @@ final class ReopenClosedSessionTests: XCTestCase {
 
     private func makeStore(provider: CapturingProvider? = nil) -> SessionStore {
         let store = SessionStore(provider: provider, persistence: nil)
-        store.display = DrawableDisplay()
         store.titleResolver = { _, _, done in done(nil) }
         store.launchFailureReporter = SilentReporter()
         return store

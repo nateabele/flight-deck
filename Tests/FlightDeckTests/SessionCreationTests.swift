@@ -16,9 +16,7 @@ final class SessionCreationTests: XCTestCase {
     private func makeStore() -> SessionStore {
         let provider = StubProvider()
         retainedProviders.append(provider)
-        let store = SessionStore(provider: provider)
-        store.display = DrawableDisplay()
-        return store
+        return SessionStore(provider: provider)
     }
 
     private func titles(_ store: SessionStore) -> [String] {

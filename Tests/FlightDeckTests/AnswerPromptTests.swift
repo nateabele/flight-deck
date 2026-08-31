@@ -61,7 +61,6 @@ final class AnswerPromptTests: XCTestCase {
     /// code. Same shape as `PhonePromptDispatchTests.makeStore`.
     private func makeStore(activity: SessionActivity) -> (SessionStore, SpyInjector, UUID) {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
-        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         let spy = SpyInjector()
@@ -77,7 +76,6 @@ final class AnswerPromptTests: XCTestCase {
     private func makeCodexStore(activity: SessionActivity) async throws
         -> (SessionStore, SpyInjector, UUID) {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
-        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()
@@ -575,7 +573,6 @@ final class AnswerPromptTests: XCTestCase {
     /// than dispatched into nothing.
     func testATabWithNoSurfaceIsRefused() {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
-        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.injectionSettle = { $0() }
