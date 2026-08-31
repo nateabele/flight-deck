@@ -353,7 +353,7 @@ private actor RecordingTransport {
                 lastAnnotation = (json["text"] as? String ?? "", json["originalText"] as? String)
             }
             return (Data(#"{"ids":["stub"]}"#.utf8), 201)
-        case "/api/approve", "/api/deny":
+        case "/api/approve", "/api/feedback":
             resolveCallCount += 1
             return (Data("{}".utf8), 200)
         default:
