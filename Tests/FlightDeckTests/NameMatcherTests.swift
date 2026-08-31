@@ -1,5 +1,6 @@
 // Tests/FlightDeckTests/NameMatcherTests.swift
 import XCTest
+import FleetKit
 @testable import FlightDeck
 
 /// Scoring one name against a typed query.

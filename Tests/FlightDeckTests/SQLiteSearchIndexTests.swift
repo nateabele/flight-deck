@@ -1,4 +1,5 @@
 import XCTest
+import FleetKit
 @testable import FlightDeck
 
 /// The index against a real SQLite file in a temp directory.
@@ -26,11 +27,12 @@ final class SQLiteSearchIndexTests: XCTestCase {
     }
 
     private func message(
-        _ text: String, conversation: String = "c1", at seconds: TimeInterval = 0
+        _ text: String, conversation: String = "c1", at seconds: TimeInterval = 0,
+        offset: Int = 0
     ) -> IndexedMessage {
         IndexedMessage(
             conversationID: conversation, role: .user, text: text,
-            timestamp: Date(timeIntervalSince1970: 1_800_000_000 + seconds)
+            timestamp: Date(timeIntervalSince1970: 1_800_000_000 + seconds), offset: offset
         )
     }
 
@@ -270,5 +272,35 @@ final class SQLiteSearchIndexTests: XCTestCase {
 
         XCTAssertEqual(try index.messageCount(forConversation: "cA"), count)
         XCTAssertEqual(try index.messageCount(forConversation: "cB"), count)
+    }
+
+    /// The offset survives the round trip into SQLite and back out on a hit.
+    ///
+    /// Without this the phone can find a moment and not be able to open it.
+    func testSearchReturnsTheOffsetItIngested() throws {
+        try index.ingest(
+            [message("the rename path", offset: 8192)],
+            from: source("conv.jsonl"), projectPath: "/w/fd", offset: nil
+        )
+
+        let hits = try index.search("\"rename\"*", projects: ["/w/fd"], limit: 10)
+
+        XCTAssertEqual(hits.count, 1)
+        XCTAssertEqual(hits[0].offset, 8192)
+    }
+
+    /// A project that has left the sidebar contributes nothing, rather than a hit the Mac
+    /// could not honour without silently re-adding it. Asserted at the index, which is where
+    /// the scoping actually happens — `FleetService` just passes `openProjectPaths()` through.
+    func testSearchIsScopedToOpenProjects() throws {
+        try index.ingest(
+            [message("the rename path")], from: source("c.jsonl"), projectPath: "/closed",
+            offset: nil
+        )
+
+        XCTAssertTrue(try index.search("\"rename\"*", projects: ["/open"], limit: 10).isEmpty)
+        XCTAssertEqual(
+            try index.search("\"rename\"*", projects: ["/closed"], limit: 10).count, 1
+        )
     }
 }

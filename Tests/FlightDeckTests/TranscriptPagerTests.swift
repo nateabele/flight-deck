@@ -497,4 +497,79 @@ final class TranscriptPagerTests: XCTestCase {
         XCTAssertEqual(page.end, 8)
         XCTAssertTrue(page.hasMore)
     }
+
+    // MARK: - `.around`
+
+    /// The record `.around` was asked for is the record `forwards` reads at the cursor, and
+    /// `backwards` stops immediately short of it — so a page about a mid-file offset holds it
+    /// exactly once, with history on both sides.
+    func testAroundReturnsThePivotOnceWithHistoryEitherSide() throws {
+        let url = try write(numbered(10))                       // 8 bytes per line
+        let pivot = 40                                          // "line005"
+        let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .around(pivot), limit: 6))
+        XCTAssertEqual(page.lines.map(\.text),
+                       ["line002", "line003", "line004", "line005", "line006", "line007"])
+        XCTAssertEqual(page.lines.filter { $0.offset == pivot }.count, 1,
+                       "the pivot record appears exactly once")
+        XCTAssertEqual(page.start, 16, "3 records before the pivot")
+        XCTAssertEqual(page.end, 64, "3 records at and after the pivot")
+        XCTAssertLessThanOrEqual(page.start, pivot)
+        XCTAssertGreaterThan(page.end, pivot)
+        XCTAssertTrue(page.hasMore, "8 more records precede this page")
+    }
+
+    /// A `limit` of 1 leaves `limit / 2 == 0` for the backward half — no history, only the
+    /// pivot itself and whatever the forward half's remaining share reaches.
+    func testAroundWithALimitOfOneReturnsOnlyThePivot() throws {
+        let url = try write(numbered(10))
+        let pivot = 40
+        let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .around(pivot), limit: 1))
+        XCTAssertEqual(page.lines.map(\.text), ["line005"])
+        XCTAssertEqual(page.start, pivot, "nothing kept from the backward half, but the "
+                       + "pivot's own offset is where this page begins")
+        XCTAssertEqual(page.end, 48)
+        XCTAssertTrue(page.hasMore, "5 records precede the pivot even though none of them "
+                      + "were kept — `hasMore` must still mean `start > 0` for `.around`, "
+                      + "exactly as it does for `.before`")
+    }
+
+    /// The other half of the same case: a `limit` of 1 at the very top of the file, where
+    /// nothing precedes the pivot at all. `hasMore` must land on `false` here and `true` in
+    /// `testAroundWithALimitOfOneReturnsOnlyThePivot` — the same probe, both answers.
+    func testAroundWithALimitOfOneAtTheStartOfTheFileReportsNoMore() throws {
+        let url = try write(numbered(10))
+        let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .around(0), limit: 1))
+        XCTAssertEqual(page.lines.map(\.text), ["line000"])
+        XCTAssertEqual(page.start, 0)
+        XCTAssertFalse(page.hasMore, "nothing precedes byte 0")
+    }
+
+    /// The pivot at byte 0: there is nothing for the backward half to find, and the merged
+    /// page is exactly what `forwards(from: 0)` alone would return.
+    func testAroundAtTheStartOfTheFileHasNoHistoryBeforeIt() throws {
+        let url = try write(numbered(10))
+        let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .around(0), limit: 6))
+        XCTAssertEqual(page.lines.map(\.text), ["line000", "line001", "line002"])
+        XCTAssertEqual(page.start, 0)
+        XCTAssertFalse(page.hasMore, "the top of the file")
+    }
+
+    /// The pivot at EOF: there is no record left for the forward half to find, and the merged
+    /// page is exactly what `backwards(from: size)` alone would return — the same page
+    /// `.before(size)` would hand back.
+    func testAroundAtTheEndOfTheFileHasNothingAfterIt() throws {
+        let url = try write(numbered(10))
+        let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .around(80), limit: 6))
+        XCTAssertEqual(page.lines.map(\.text), ["line007", "line008", "line009"])
+        XCTAssertEqual(page.end, 80)
+        XCTAssertTrue(page.hasMore)
+    }
+
+    /// The out-of-range guard `.before` and `.after` already carry, for the same reason: an
+    /// offset that does not name a byte in this file cannot be composed into a page at all.
+    func testAnOutOfRangeAroundCursorAnnouncesAReset() throws {
+        let url = try write(numbered(2))
+        let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .around(9_999), limit: 10))
+        XCTAssertTrue(page.reset)
+    }
 }

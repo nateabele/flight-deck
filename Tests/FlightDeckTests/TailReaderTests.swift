@@ -101,4 +101,20 @@ final class TailReaderTests: XCTestCase {
                                    truncation: .resumeAtEnd)
         XCTAssertEqual(next.lines, ["fresh"], "and reading must continue from there")
     }
+
+    /// `lines` omits blank lines (`omittingEmptySubsequences: true`), but a blank line's own
+    /// byte — the lone `\n` — is still consumed. `lineOffsets` must track the SAME omission
+    /// as `lines` while still reporting each surviving line's true position, not the position
+    /// it would have if the blank line had never been read at all.
+    func testLineOffsetsSurviveAnOmittedBlankLine() throws {
+        let url = dir.appendingPathComponent("f.jsonl")
+        try write("", to: url)
+        let primed = TailReader.read(url: url, offset: 0, hasChosenStart: false)
+
+        try write("A\n\nB\n", to: url)
+        let read = TailReader.read(url: url, offset: primed.offset, hasChosenStart: true)
+
+        XCTAssertEqual(read.lines, ["A", "B"])
+        XCTAssertEqual(read.lineOffsets, [0, 3], "B's true offset is 3 (A, its \\n, the blank line's \\n) — not 2, which is what summing only the emitted lines' lengths would give")
+    }
 }

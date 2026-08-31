@@ -35,12 +35,27 @@ final class TimelineFrameCodingTests: XCTestCase {
     // MARK: The request
 
     func testEveryAnchorRoundTrips() throws {
-        for anchor in [TimelineAnchor.latest, .before(4096), .after(0)] {
+        for anchor in [TimelineAnchor.latest, .before(4096), .after(0), .around(2_048)] {
             let frame = ClientFrame.req(
                 cid: 7, .timeline(session: session, anchor: anchor, limit: 40)
             )
             XCTAssertEqual(try roundTrip(frame), frame, "\(anchor) did not survive")
         }
+    }
+
+    /// `around` needs a cursor, and is refused without one — the same guard `before` and
+    /// `after` already carry, for the same reason: an anchor is executed, not rendered.
+    func testAroundRequiresACursor() {
+        XCTAssertEqual(TimelineAnchor(name: "around", cursor: 4_096), .around(4_096))
+        XCTAssertNil(TimelineAnchor(name: "around", cursor: nil))
+    }
+
+    func testAroundRoundTripsThroughARequest() throws {
+        let request = FleetRequest.timeline(
+            session: session, anchor: .around(4_096), limit: 20
+        )
+        let data = try JSONEncoder().encode(request)
+        XCTAssertEqual(try JSONDecoder().decode(FleetRequest.self, from: data), request)
     }
 
     /// Every field of the request at a distinct, non-default value, so a decoder reading one
@@ -108,7 +123,7 @@ final class TimelineFrameCodingTests: XCTestCase {
     func testAnUnknownAnchorIsRefused() throws {
         let json = """
         {"t":"req","cid":1,"op":"timeline.page","session":"\(session.uuidString)",\
-        "anchor":"around","cursor":88,"limit":40}
+        "anchor":"nearby","cursor":88,"limit":40}
         """
         XCTAssertThrowsError(
             try JSONDecoder().decode(ClientFrame.self, from: Data(json.utf8))
@@ -127,6 +142,19 @@ final class TimelineFrameCodingTests: XCTestCase {
         )
     }
 
+    /// The same guard, one anchor over: `.around` without a cursor names no offset either, and
+    /// guessing one would serve the wrong end of the file — see
+    /// `TimelineAnchor.init(name:cursor:)`.
+    func testACursorlessAroundAnchorIsRefused() throws {
+        let json = """
+        {"t":"req","cid":1,"op":"timeline.page","session":"\(session.uuidString)",\
+        "anchor":"around","limit":40}
+        """
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(ClientFrame.self, from: Data(json.utf8))
+        )
+    }
+
     /// The other half of the same decision, and the half `TimelineAnchor`'s tests do not
     /// reach: an `op` this build has never heard of is refused rather than read as the one
     /// request it does know. A lenient `Op` would answer `timeline.tail` with a page from the
@@ -139,6 +167,44 @@ final class TimelineFrameCodingTests: XCTestCase {
         XCTAssertThrowsError(
             try JSONDecoder().decode(ClientFrame.self, from: Data(json.utf8))
         )
+    }
+
+    // MARK: The other requests
+
+    /// The three requests search adds, over the same encode/decode `FleetRequest` already
+    /// uses for `timeline` — one round trip each is enough, since each carries no field this
+    /// file has not already exercised at a distinct value elsewhere.
+    func testTheSearchRequestsRoundTrip() throws {
+        let requests: [FleetRequest] = [
+            .conversations,
+            .search(query: "rename", limit: 200),
+            .openConversation(conversationID: "abc", projectPath: "/proj"),
+        ]
+        for request in requests {
+            let data = try JSONEncoder().encode(request)
+            XCTAssertEqual(
+                try JSONDecoder().decode(FleetRequest.self, from: data), request,
+                "\(request) did not survive a round trip"
+            )
+        }
+    }
+
+    /// `search` and `openConversation` are one flat object, like `timeline` — asserted on the
+    /// wire keys rather than the round trip, for the reason this file's header gives.
+    func testTheSearchRequestPutsItsFieldsOnTheWire() throws {
+        let json = try fields(of: FleetRequest.search(query: "rename", limit: 200))
+        XCTAssertEqual(json["op"] as? String, "search.query")
+        XCTAssertEqual(json["query"] as? String, "rename")
+        XCTAssertEqual(json["limit"] as? Int, 200)
+    }
+
+    func testTheOpenConversationRequestPutsItsFieldsOnTheWire() throws {
+        let json = try fields(
+            of: FleetRequest.openConversation(conversationID: "abc", projectPath: "/proj")
+        )
+        XCTAssertEqual(json["op"] as? String, "search.open")
+        XCTAssertEqual(json["conversationID"] as? String, "abc")
+        XCTAssertEqual(json["projectPath"] as? String, "/proj")
     }
 
     // MARK: The page
