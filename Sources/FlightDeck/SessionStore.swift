@@ -116,6 +116,11 @@ final class SessionStore: ObservableObject {
     /// the process (see `GhosttyApp.shared`'s doc comment); the store must not co-own it.
     private weak var provider: SurfaceProvider?
 
+    /// Test seam, paired with `seedInertSession(in:)`: keeps that call's stand-in provider
+    /// alive. `provider` above is intentionally `weak` (see its own doc comment), so nothing
+    /// else here would.
+    private var inertSeedProvider: SurfaceProvider?
+
     /// Live surfaces retained here (not by the SwiftUI view tree) so switching
     /// sessions re-parents rather than recreates. Dropping an entry frees it.
     private var surfaces: [UUID: Ghostty.SurfaceView] = [:]
@@ -869,6 +874,70 @@ final class SessionStore: ObservableObject {
     /// wholesale — the same shape of self-inflicted breakage that the `Session?` return type
     /// caused in the superseded plan, arriving by a different route.
     var canCreateTerminal: Bool { provider == nil || display.isDrawable }
+
+    /// Whether this tab's terminal actually forked a shell.
+    ///
+    /// **Not `surfaces[id] != nil`.** `makeSurfaceView` returns a non-optional and its init is
+    /// non-failable, so a surface always exists — including for a tab that is inert because the
+    /// display was asleep when it was born. The registry is what knows a child was forked, and
+    /// it discriminates every observed case correctly.
+    func hasShellProcess(for id: UUID) -> Bool { processRegistry.process(for: id) != nil }
+
+    /// The outcome of trying to give an existing tab a working terminal. Distinguished rather
+    /// than boolean because each sends the reader somewhere different, and plan 2 maps them
+    /// onto HTTP statuses.
+    enum RespawnOutcome: Equatable {
+        case respawned, alreadyRunning, displayAsleep, unknownSession, failed
+    }
+
+    /// Replaces an inert terminal with a working one.
+    ///
+    /// *Replaces*, not fills: the broken tab already holds a `SurfaceView`: it just has no
+    /// drawable behind it and never forked a child. Discarding it is safe precisely because
+    /// there is no child process to orphan.
+    @discardableResult
+    func respawnSurface(for id: UUID) -> RespawnOutcome {
+        guard let at = locate(id) else { return .unknownSession }
+        let session = repos[at.repo].sessions[at.session]
+        // Ordered before the display check deliberately: "it is already working" is true and
+        // more useful regardless of what the display is doing.
+        guard !hasShellProcess(for: id) else { return .alreadyRunning }
+        guard canCreateTerminal else {
+            launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
+            return .displayAsleep
+        }
+
+        // Drop the inert view and its (absent) registry record before rebuilding, so the new
+        // fork is contested by exactly one claimant.
+        surfaces[id] = nil
+        _ = processRegistry.forget(id)
+
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
+        config.workingDirectory = session.transcriptDirectory
+        // Adapter and options resolved exactly as `newSession(in:)` does: `launchCommand` takes
+        // a NON-optional `AgentOptions`, and the adapter comes from the tab's instance, not
+        // from `AgentID`.
+        let adapter = adapter(for: instance(for: session))
+        let options = options(for: session.agent, project: session.workingDirectory)
+        config.initialInput = adapter.launchCommand(adapter.binding(for: session), session, options)
+        let orphaned = accountIsMissing(for: session)
+        config.environmentVariables =
+            preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
+
+        guard let surface = processRegistry.record(for: id, around: { provider?.makeSurface(config) })
+        else {
+            launchFailureReporter.report(.terminalUnavailable(displayAsleep: false))
+            return .failed
+        }
+        surfaces[id] = surface
+        // Same ordering and reason as `insertSession`: before anything is typed, so the child
+        // is not left talking to libghostty's placeholder 800x600 grid.
+        report(terminalSize, to: id)
+        provider?.tick()
+        if !orphaned { startWatching(tabID: id) }
+        return .respawned
+    }
 
     /// Test seam for frontmost-ness; production reads `NSApplication`.
     var appIsActive: () -> Bool = { NSApplication.shared.isActive }
@@ -1915,6 +1984,36 @@ final class SessionStore: ObservableObject {
         // the replicator re-reads and anyone behind is sent back for a snapshot.
         replicator?.reset()
         return !restoredIDs.isEmpty || !repos.isEmpty
+    }
+
+    /// Test seam. Builds a tab with no registry entry — exactly what a relaunch during sleep
+    /// leaves behind — for `RespawnSurfaceTests`.
+    ///
+    /// Goes through an actual `restore()`, on a second, throwaway, provider-less store, rather
+    /// than a hand-built `Session`: `restore()` is the path that inserts a tab without ever
+    /// checking `canCreateTerminal` (see `respawnSurface`'s doc comment for why that guard
+    /// cannot apply to it), which is exactly how a real inert tab gets produced. Its
+    /// provider-less-ness is what leaves `insertSession`'s registry recording with nothing to
+    /// record, matching `hasShellProcess(for:) == false`. The repo it restored is then grafted
+    /// onto `self`.
+    ///
+    /// A tab is only inert in practice because a real provider existed and could not draw —
+    /// `canCreateTerminal`'s "no provider" escape hatch does not apply to it — so `self` gets a
+    /// provider too, one that never manages to make a surface either. `provider` is `weak`;
+    /// retained on `self` because nothing else here would.
+    func seedInertSession(in directory: URL) -> UUID {
+        let id = UUID()
+        let entry = SessionSnapshot.Entry(id: id, title: "inert", workingDirectory: directory.path)
+        let snapshot = SessionSnapshot(sessions: [entry], selectedSessionID: nil, sessionCounter: 1)
+        let seed = SessionStore(provider: nil, persistence: InertSeedPersistence(snapshot: snapshot))
+        _ = seed.restore()
+        repos.append(contentsOf: seed.repos)
+        if provider == nil {
+            let stub = InertSurfaceProvider()
+            inertSeedProvider = stub
+            provider = stub
+        }
+        return id
     }
 
     /// Settles every restored codex tab against the app-server, then types its resume
@@ -4554,4 +4653,23 @@ final class SessionStore: ObservableObject {
         }
         return nil
     }
+}
+
+/// Backs `SessionStore.seedInertSession(in:)`: a present provider that never manages to make a
+/// surface, exactly like the `StubProvider` test doubles the suite uses elsewhere to keep
+/// `canCreateTerminal` sensitive to `display` while recording nothing in the registry.
+@MainActor
+private final class InertSurfaceProvider: SurfaceProvider {
+    func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? { nil }
+    func tick() {}
+}
+
+/// Backs `SessionStore.seedInertSession(in:)`: a `SessionPersisting` that always hands back
+/// the one snapshot it was built with, so `restore()` has something to rebuild.
+@MainActor
+private final class InertSeedPersistence: SessionPersisting {
+    private let snapshot: SessionSnapshot
+    init(snapshot: SessionSnapshot) { self.snapshot = snapshot }
+    func load() -> SessionSnapshot? { snapshot }
+    func save(_ snapshot: SessionSnapshot) {}
 }
