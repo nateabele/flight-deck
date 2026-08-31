@@ -69,6 +69,24 @@ final class FleetService: ObservableObject {
     /// per-install id so it survives relaunches.
     let serviceName: String
 
+    /// The most recently constructed service.
+    ///
+    /// A fallback for `AppDelegate`, the same seam `SessionStore.current` is — see that
+    /// property's doc comment. `AppDelegate` builds the search index and its backfill well
+    /// after `FleetService` is constructed (`startSearch` runs off `.flightDeckStoreReady`,
+    /// which `FlightDeckApp`'s `@StateObject` autoclosures reach independently), so there is
+    /// no construction-time seam to inject a progress provider through; this is how the
+    /// backfill's progress reaches `indexingProgress` below. Weak so this service's lifetime
+    /// is still owned by the `@StateObject` that holds it.
+    static weak var current: FleetService?
+
+    /// How far the Mac's search backfill has got, or `nil` when none is running. Set by
+    /// `AppDelegate` from the same closure that drives `SearchModel.indexingProgressChanged`
+    /// — see `SearchIndexBuilder.build`'s `progress` callback. Read by the `.search` request
+    /// handler to populate `WireSearchHits.indexing`, so a phone searching mid-backfill sees
+    /// why its results are partial instead of a silent undercount.
+    var indexingProgress: SearchIndexBuilder.Progress?
+
     init(store: SessionStore, preferences: PreferencesStore, armer: PairingArmer) {
         self.store = store
         self.preferences = preferences
@@ -83,6 +101,7 @@ final class FleetService: ObservableObject {
         self.serviceName = Self.derivedServiceName(preferences: preferences)
         store.replicator = replicator
         wireHandlers()
+        Self.current = self
     }
 
     /// The rows of one project's New Session menu, or nil when there is no such project.
@@ -309,10 +328,14 @@ final class FleetService: ObservableObject {
                 let hits = (try? store.searchIndex?.search(
                     match, projects: openProjectPaths(), limit: capped
                 )) ?? []
-                // `indexing: nil` — nothing reaches this actor with the live backfill
-                // progress `AppDelegate` tracks in its own `SearchModel`; see this file's
-                // report for the task that added this reply.
-                reply(.searchHits(cid: cid, WireSearchHits(hits: hits, indexing: nil)))
+                // `nil` outside a backfill — an absent `indexingProgress` means "not
+                // indexing", not "0 of 0", and reporting the latter would put a meaningless
+                // footer on the phone permanently. See `indexingProgress`'s doc comment for
+                // where this is set.
+                let indexing = self.indexingProgress.map {
+                    WireIndexingProgress(done: $0.indexed, total: $0.total)
+                }
+                reply(.searchHits(cid: cid, WireSearchHits(hits: hits, indexing: indexing)))
             case .openConversation(let conversationID, let projectPath):
                 switch self.openConversation(conversationID: conversationID, projectPath: projectPath) {
                 case .success(let id):

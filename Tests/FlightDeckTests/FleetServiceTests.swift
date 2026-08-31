@@ -242,4 +242,44 @@ final class FleetServiceTests: XCTestCase {
         XCTAssertEqual(store.selectedSessionID, elsewhere.id,
                        "selection is untouched by the refusal — the previously-selected tab a stale read would have named")
     }
+
+    /// `WireSearchHits.indexing` must reflect whatever backfill `FleetService.indexingProgress`
+    /// currently holds, and must be `nil` the instant nothing is running — reporting `0 of 0`
+    /// permanently would put a meaningless footer on the phone. `store.searchIndex` is nil in
+    /// this harness, so every reply's `hits` is empty regardless of query; this exercises only
+    /// the progress plumbing, not the index itself.
+    func testASearchReplyCarriesIndexingProgressWhileABackfillIsInFlightAndNilOtherwise() async throws {
+        let (_, key, port) = try await standUp()
+
+        let inFlight = expectation(description: "in flight")
+        var duringBackfill: WireIndexingProgress?
+        service?.indexingProgress = SearchIndexBuilder.Progress(indexed: 312, total: 484)
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame { _ = client.send(.search(query: "hello", limit: 10)) }
+            if case .searchHits(_, let hits) = frame {
+                duringBackfill = hits.indexing
+                inFlight.fulfill()
+            }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [inFlight], timeout: 10)
+        XCTAssertEqual(duringBackfill, WireIndexingProgress(done: 312, total: 484))
+
+        // The backfill finishes: `AppDelegate` clears the progress the same way it does at
+        // the end of `SearchIndexBuilder.build`.
+        service?.indexingProgress = nil
+        let afterwards = expectation(description: "afterwards")
+        var afterBackfill: WireIndexingProgress? = WireIndexingProgress(done: 1, total: 1)
+        client.onFrame = { frame in
+            if case .searchHits(_, let hits) = frame {
+                afterBackfill = hits.indexing
+                afterwards.fulfill()
+            }
+        }
+        _ = client.send(.search(query: "hello", limit: 10))
+        await fulfillment(of: [afterwards], timeout: 10)
+        XCTAssertNil(afterBackfill, "an absent backfill must not leave a stale footer on screen")
+    }
 }
