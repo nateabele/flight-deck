@@ -298,4 +298,54 @@ final class FleetListScreenTests: XCTestCase {
 
         XCTAssertNil(destination, "a conversation hit always needs the Mac's round trip")
     }
+
+    // MARK: What the candidate wiring actually composes
+
+    /// A session the fleet is showing right now must be a candidate the ranker can match —
+    /// the one thing the `.onChange(of: model.fleet)` trigger exists to keep current. If the
+    /// wiring passed the wrong projects, or nothing at all, this session would never rank.
+    func testASessionInTheFleetIsAmongTheComposedCandidates() {
+        let projects = [WireProject(
+            id: UUID(), name: "flight-deck", path: "/proj",
+            sessions: [WireSession(id: UUID(), title: "rename fix", agent: "claude")]
+        )]
+
+        let candidates = FleetListScreen.searchCandidates(projects: projects, catalogue: nil)
+
+        XCTAssertTrue(candidates.contains { $0.name == "rename fix" })
+    }
+
+    /// No catalogue reply yet — the Mac hasn't answered, or the phone only just connected —
+    /// must not crash and must not invent a conversation candidate out of nothing. This is the
+    /// nil-coalescing this function does in place of a `WireConversationCatalogue.empty` that
+    /// doesn't exist; if it were removed, a nil catalogue would trap instead of composing.
+    func testANilCatalogueComposesOnlyFromTheFleet() {
+        let projects = [WireProject(
+            id: UUID(), name: "flight-deck", path: "/proj",
+            sessions: [WireSession(id: UUID(), title: "only session", agent: "claude")]
+        )]
+
+        let candidates = FleetListScreen.searchCandidates(projects: projects, catalogue: nil)
+
+        XCTAssertEqual(candidates.map(\.name), ["only session", "flight-deck"])
+    }
+
+    /// The catalogue arriving AFTER the fleet — the ordinary case, since the Mac answers the
+    /// fleet snapshot before the search backfill — contributes its own conversations once it
+    /// does. This is the `.onChange(of: model.conversationCatalogue)` trigger's whole reason to
+    /// exist: without a second call to this function on that reply, an unclaimed past
+    /// conversation would stay unfindable until the screen was torn down and rebuilt.
+    func testACatalogueArrivingAfterTheFleetContributesItsConversations() {
+        let projects = [WireProject(id: UUID(), name: "flight-deck", path: "/proj")]
+        let withoutCatalogue = FleetListScreen.searchCandidates(projects: projects, catalogue: nil)
+        XCTAssertFalse(withoutCatalogue.contains { $0.name == "old chat" })
+
+        let catalogue = WireConversationCatalogue(
+            conversations: [WireConversation(id: "abc123", name: "old chat", projectPath: "/proj")],
+            sessionActivity: [:]
+        )
+        let withCatalogue = FleetListScreen.searchCandidates(projects: projects, catalogue: catalogue)
+
+        XCTAssertTrue(withCatalogue.contains { $0.name == "old chat" })
+    }
 }
