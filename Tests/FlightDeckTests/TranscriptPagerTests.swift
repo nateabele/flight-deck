@@ -525,10 +525,23 @@ final class TranscriptPagerTests: XCTestCase {
         let pivot = 40
         let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .around(pivot), limit: 1))
         XCTAssertEqual(page.lines.map(\.text), ["line005"])
-        XCTAssertEqual(page.start, pivot, "nothing asked of the backward half")
+        XCTAssertEqual(page.start, pivot, "nothing kept from the backward half, but the "
+                       + "pivot's own offset is where this page begins")
         XCTAssertEqual(page.end, 48)
-        XCTAssertFalse(page.hasMore, "the backward half asked for nothing, so it has nothing "
-                       + "more to report")
+        XCTAssertTrue(page.hasMore, "5 records precede the pivot even though none of them "
+                      + "were kept — `hasMore` must still mean `start > 0` for `.around`, "
+                      + "exactly as it does for `.before`")
+    }
+
+    /// The other half of the same case: a `limit` of 1 at the very top of the file, where
+    /// nothing precedes the pivot at all. `hasMore` must land on `false` here and `true` in
+    /// `testAroundWithALimitOfOneReturnsOnlyThePivot` — the same probe, both answers.
+    func testAroundWithALimitOfOneAtTheStartOfTheFileReportsNoMore() throws {
+        let url = try write(numbered(10))
+        let page = try XCTUnwrap(TranscriptPager.page(url: url, anchor: .around(0), limit: 1))
+        XCTAssertEqual(page.lines.map(\.text), ["line000"])
+        XCTAssertEqual(page.start, 0)
+        XCTAssertFalse(page.hasMore, "nothing precedes byte 0")
     }
 
     /// The pivot at byte 0: there is nothing for the backward half to find, and the merged
