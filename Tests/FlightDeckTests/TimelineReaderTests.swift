@@ -297,6 +297,26 @@ final class TimelineReaderTests: XCTestCase {
         XCTAssertEqual(next.end, at[3])
     }
 
+    /// **`.around` trims like `.before`, not like `.after`, and this is the fixture that would
+    /// catch the reader picking the wrong end.** Anchored on the pivot record itself — the
+    /// last of the three, so the pager's raw merge is the same overflowing three-record page
+    /// `testTheBudgetTrimsFromTheOldestEndWhenPagingBackwards` uses. If the budget trimmed
+    /// from the newest end here, it would drop the pivot outright, which is the one record
+    /// this anchor exists to guarantee.
+    func testTheBudgetTrimsFromTheOldestEndWhenPagingAroundEvenWhenThePivotIsNewest() throws {
+        let lines = [padded("oldest"), padded("middle"), padded("newest")].map(userTurn)
+        let at = offsets(lines)
+        let url = try write(lines)
+        let page = try read(url, .around(at[2]), limit: 4)
+        XCTAssertEqual(marks(page), ["middle", "newest"],
+                       "the oldest record was dropped — never the pivot")
+        XCTAssertEqual(page.items.filter { $0.body.text.hasPrefix("newest") }.count, 1,
+                       "the pivot survives, and survives exactly once")
+        XCTAssertEqual(page.start, at[1], "the cursor moves with what was dropped")
+        XCTAssertEqual(page.end, at[3])
+        XCTAssertTrue(page.hasMore)
+    }
+
     /// **`end` is a boundary the pager handed over, not `offset + text.utf8.count + 1`.** The
     /// middle record here holds a hundred bytes that no UTF-8 sequence can begin with, and
     /// `SourceLine.text` has already been through `String(decoding:)`, which turns each of them

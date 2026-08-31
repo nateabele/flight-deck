@@ -12,6 +12,8 @@ public enum TimelineAnchor: Equatable, Sendable {
     case before(Int)
     /// Whatever has been appended since this offset. What a screen already open asks for.
     case after(Int)
+    /// The records either side of this offset. What opening a search hit asks for.
+    case around(Int)
 
     /// The wire spelling. A table rather than a derivation, for the same reason
     /// `FleetEventTag` is one: a case rename must not silently become a protocol break.
@@ -20,13 +22,14 @@ public enum TimelineAnchor: Equatable, Sendable {
         case .latest: return "latest"
         case .before: return "before"
         case .after: return "after"
+        case .around: return "around"
         }
     }
 
     var cursor: Int? {
         switch self {
         case .latest: return nil
-        case .before(let cursor), .after(let cursor): return cursor
+        case .before(let cursor), .after(let cursor), .around(let cursor): return cursor
         }
     }
 
@@ -57,6 +60,7 @@ public enum TimelineAnchor: Equatable, Sendable {
         case ("latest", _): self = .latest
         case ("before", let cursor?): self = .before(cursor)
         case ("after", let cursor?): self = .after(cursor)
+        case ("around", let cursor?): self = .around(cursor)
         default: return nil
         }
     }

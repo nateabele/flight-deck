@@ -104,6 +104,28 @@ enum TranscriptPager {
             guard (0...size).contains(cursor) else { return reset(at: size) }
             return forwards(handle, from: cursor, size: size, limit: limit,
                             window: window, maxScan: maxScan)
+        // `.before` and `.after` back to back about one pivot, not a third reading path.
+        // `forwards(from: cursor)` already includes the record that BEGINS at `cursor` — the
+        // same record `backwards(from: cursor)` stops immediately short of, because its
+        // window only ever covers bytes strictly before `cursor` — so the pivot is owned by
+        // the forward half alone and appears exactly once. Splitting `limit` unevenly in the
+        // forward half's favour (`limit - limit / 2` against `limit / 2`) is what keeps the
+        // pivot itself inside the count for a `limit` of 1, where the backward half then asks
+        // `backwards` for zero records and gets back its own cursor with nothing attached.
+        case .around(let cursor):
+            guard (0...size).contains(cursor) else { return reset(at: size) }
+            let earlier = backwards(handle, from: cursor, limit: limit / 2,
+                                    window: window, maxScan: maxScan)
+            let later = forwards(handle, from: cursor, size: size, limit: limit - limit / 2,
+                                 window: window, maxScan: maxScan)
+            return TranscriptPage(
+                lines: earlier.lines + later.lines,
+                start: earlier.start,
+                end: later.end,
+                // What precedes `start` — the merged page's oldest boundary is the backward
+                // half's own, so its `hasMore` already answers the merged question.
+                hasMore: earlier.hasMore
+            )
         }
     }
 

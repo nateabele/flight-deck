@@ -35,12 +35,27 @@ final class TimelineFrameCodingTests: XCTestCase {
     // MARK: The request
 
     func testEveryAnchorRoundTrips() throws {
-        for anchor in [TimelineAnchor.latest, .before(4096), .after(0)] {
+        for anchor in [TimelineAnchor.latest, .before(4096), .after(0), .around(2_048)] {
             let frame = ClientFrame.req(
                 cid: 7, .timeline(session: session, anchor: anchor, limit: 40)
             )
             XCTAssertEqual(try roundTrip(frame), frame, "\(anchor) did not survive")
         }
+    }
+
+    /// `around` needs a cursor, and is refused without one — the same guard `before` and
+    /// `after` already carry, for the same reason: an anchor is executed, not rendered.
+    func testAroundRequiresACursor() {
+        XCTAssertEqual(TimelineAnchor(name: "around", cursor: 4_096), .around(4_096))
+        XCTAssertNil(TimelineAnchor(name: "around", cursor: nil))
+    }
+
+    func testAroundRoundTripsThroughARequest() throws {
+        let request = FleetRequest.timeline(
+            session: session, anchor: .around(4_096), limit: 20
+        )
+        let data = try JSONEncoder().encode(request)
+        XCTAssertEqual(try JSONDecoder().decode(FleetRequest.self, from: data), request)
     }
 
     /// Every field of the request at a distinct, non-default value, so a decoder reading one
@@ -108,7 +123,7 @@ final class TimelineFrameCodingTests: XCTestCase {
     func testAnUnknownAnchorIsRefused() throws {
         let json = """
         {"t":"req","cid":1,"op":"timeline.page","session":"\(session.uuidString)",\
-        "anchor":"around","cursor":88,"limit":40}
+        "anchor":"nearby","cursor":88,"limit":40}
         """
         XCTAssertThrowsError(
             try JSONDecoder().decode(ClientFrame.self, from: Data(json.utf8))
@@ -121,6 +136,19 @@ final class TimelineFrameCodingTests: XCTestCase {
         let json = """
         {"t":"req","cid":1,"op":"timeline.page","session":"\(session.uuidString)",\
         "anchor":"before","limit":40}
+        """
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(ClientFrame.self, from: Data(json.utf8))
+        )
+    }
+
+    /// The same guard, one anchor over: `.around` without a cursor names no offset either, and
+    /// guessing one would serve the wrong end of the file — see
+    /// `TimelineAnchor.init(name:cursor:)`.
+    func testACursorlessAroundAnchorIsRefused() throws {
+        let json = """
+        {"t":"req","cid":1,"op":"timeline.page","session":"\(session.uuidString)",\
+        "anchor":"around","limit":40}
         """
         XCTAssertThrowsError(
             try JSONDecoder().decode(ClientFrame.self, from: Data(json.utf8))
