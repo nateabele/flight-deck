@@ -207,6 +207,12 @@ struct FlightDeckApp: App {
             transcriptsRoot: fixture?.projectsRoot,
             statusIsAlive: fixture == nil ? nil : { _ in true }
         )
+        // Load-bearing: `SessionStore.display` defaults to the always-permissive
+        // `AlwaysDrawableDisplay()` so ~50 test files that construct a store don't have to
+        // stub it. This line is what makes the guard real for an actual launch — remove it
+        // and `canCreateTerminal` is unconditionally `true` again, silently reviving the
+        // original bug (an inert tab with no shell, persisted and broadcast as if healthy).
+        store.display = DisplayState()
 
         // Test-only second project, so the sidebar has something to reorder. Guarded by
         // `resetState` as well as its own flag: a reset run reads and writes no persistence,
