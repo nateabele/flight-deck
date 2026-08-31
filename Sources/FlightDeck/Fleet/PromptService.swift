@@ -43,6 +43,16 @@ final class PromptService {
     /// dangerous direction.
     static let tailRecords = 8
 
+    /// Where a `PromptLifecycleRecord` goes. A seam on the SINK rather than a `#if DEBUG`
+    /// around the recording, for the reason `SessionStore.answerAbortSink` is one: the failure
+    /// this exists for reproduces only on the installed Release build, so what gets recorded
+    /// must be identical in both configurations and only the destination is replaced in a test.
+    ///
+    /// `PromptLifecycleObserver` files through this property too rather than owning a second
+    /// one, so a dialog's whole life — opened on the push side, refused here — reads as one
+    /// stream and a test substitutes one closure to see all of it.
+    var lifecycleSink: (PromptLifecycleRecord) -> Void = PromptLifecycleLog.record
+
     init(store: SessionStore) {
         self.store = store
     }
@@ -70,17 +80,36 @@ final class PromptService {
     ) -> Result<Void, TimelineErrorCode> {
         switch openPrompt(inSession: session) {
         case .failure(let code):
+            // **The pairing the prompt log exists for, in the case that produces the report.**
+            // A tap refused here reaches the phone as *"Your Mac has moved on from this"* with
+            // nothing anywhere saying what this Mac thought was open instead — and `open=none`
+            // is a different fault from `open=<some other call>`: the first is a Mac that has
+            // no dialog at all while a phone draws one, the second is an ordinary race.
+            record(session, sent: call, open: nil, code: code.code)
             return .failure(code)
         case .success(let open):
             // **The comparison this whole service exists for.** The derivation says what the
             // terminal is blocked on now; `call` says what the phone was showing when a thumb
             // came down. They are only the same dialog if they are the same call.
-            guard open.callID == call else { return .failure("prompt_changed") }
+            guard open.callID == call else {
+                record(session, sent: call, open: open.callID, code: "prompt_changed")
+                return .failure("prompt_changed")
+            }
 
             let outcome = store.answerPrompt(open, with: answer, in: session, token: token)
+            // Accepted answers are recorded too, and that is not noise: without a line for the
+            // tap that matched, a log holding no refusal cannot be told apart from one where
+            // the tap never arrived at the Mac at all.
+            record(session, sent: call, open: open.callID, code: outcome.errorCode)
             if let code = outcome.errorCode { return .failure(TimelineErrorCode(code)) }
             return .success(())
         }
+    }
+
+    private func record(_ session: UUID, sent: String, open: String?, code: String?) {
+        lifecycleSink(PromptLifecycleRecord(
+            session: session, event: .answer(sent: sent, open: open, code: code)
+        ))
     }
 
     /// What `session` is blocked on right now, or why nothing here can be answered.

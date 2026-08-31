@@ -44,6 +44,10 @@ final class FleetService: ObservableObject {
     /// command for the reason `timeline` is: it holds the store, and there is exactly one of
     /// it — a command carries its own session id, so nothing about it is per-connection.
     private let prompts: PromptService
+    /// Records what this Mac decides about each session's dialog and what it pushes about it.
+    /// Observability only — it reads the store and the frames already sent, and changes
+    /// nothing. See `PromptLifecycleObserver` for why the push side needs its own witness.
+    private let promptLifecycle: PromptLifecycleObserver
     private(set) var boundPort: NWEndpoint.Port?
     /// The window's own listener, and the port it is on. Both are `nil` whenever no window is
     /// open, which is invariant 2 stated as a field rather than as a comment.
@@ -79,7 +83,11 @@ final class FleetService: ObservableObject {
             return FleetProjection.snapshot(of: store)
         }
         self.timeline = TimelineService(store: store)
-        self.prompts = PromptService(store: store)
+        let prompts = PromptService(store: store)
+        self.prompts = prompts
+        // Built on the same `PromptService`, deliberately: what the log says is open has to be
+        // the same call an answer is judged against, which means one object over one transcript.
+        self.promptLifecycle = PromptLifecycleObserver(store: store, prompts: prompts)
         self.serviceName = Self.derivedServiceName(preferences: preferences)
         store.replicator = replicator
         wireHandlers()
@@ -126,9 +134,15 @@ final class FleetService: ObservableObject {
         // `armer.claim` is the sole witness that pairing finished.
         armer.onWindowClosed = { [weak self] in self?.closePairingListener() }
         replicator.onEvents = { [weak self] batch in
+            guard let self else { return }
             for entry in batch {
-                self?.server.broadcast(.event(seq: entry.seq, entry.event))
+                self.server.broadcast(.event(seq: entry.seq, entry.event))
             }
+            // After the sends, never before: a record that says a closure was pushed to one
+            // client is only true once it has been. The client count is read here for the
+            // whole batch — `attached` moves only on this queue, so it cannot have changed
+            // across the loop above.
+            self.promptLifecycle.observe(batch, clients: self.server.attachedCount)
         }
         server.onHello = { [weak self] attachment, lastSeq in
             guard let self else { return [] }
@@ -266,13 +280,21 @@ final class FleetService: ObservableObject {
     /// re-snapshot is the point: silently resuming from wherever the server happens to be is
     /// how a phone ends up confidently displaying a fleet that no longer exists.
     private func frames(resumingFrom lastSeq: Int) -> [ServerFrame] {
+        let answer: [ServerFrame]
         switch replicator.resume(from: lastSeq) {
         case .replay(let events):
-            return events.map { .event(seq: $0.seq, $0.event) }
+            answer = events.map { .event(seq: $0.seq, $0.event) }
         case .resnapshot(let reason):
             let current = replicator.snapshot()
-            return [.snapshot(seq: current.seq, fleet: current.fleet, reason: reason)]
+            answer = [.snapshot(seq: current.seq, fleet: current.fleet, reason: reason)]
         }
+        // A phone that was away across a dialog closing learns about it from this answer and
+        // from nothing later, so what it was handed is the other half of any stale-card
+        // question — see `PromptLifecycleObserver.observeResume`.
+        promptLifecycle.observeResume(
+            lastSeq: lastSeq, frames: answer, clients: server.attachedCount
+        )
+        return answer
     }
 
     /// `async` because `FleetSocketServer.start` awaits the OS reporting its bound port
@@ -522,6 +544,17 @@ final class FleetService: ObservableObject {
     var promptTailForTesting: @Sendable (URL, Int) -> [SourceLine] {
         get { prompts.tail }
         set { prompts.tail = newValue }
+    }
+
+    /// Test seam, forwarding to `PromptService.lifecycleSink` — the one destination both halves
+    /// of the prompt log file through, so substituting it here captures the push side and the
+    /// answer side together. No production caller.
+    ///
+    /// Every fleet test sets this, because the default sink appends to the developer's real
+    /// `~/Library/Logs/flight-deck-prompt.log`; see `FleetTestHarness`.
+    var promptLifecycleForTesting: (PromptLifecycleRecord) -> Void {
+        get { prompts.lifecycleSink }
+        set { prompts.lifecycleSink = newValue }
     }
 
     /// Convenience for the tests and for nothing else — production dials a discovered or

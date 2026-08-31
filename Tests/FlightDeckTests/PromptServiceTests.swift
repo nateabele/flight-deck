@@ -83,7 +83,12 @@ final class PromptServiceTests: XCTestCase {
         let session = store.newSession(in: tmp)
         store.applyRegistry([1: entry(session.pinnedConversationID, activity, cwd: tmp.path)])
         spy.events.removeAll()
-        return (PromptService(store: store), store, spy, session.id)
+        // Silenced: the production sink appends to the developer's own
+        // `~/Library/Logs/flight-deck-prompt.log`, and every refusal these tests provoke on
+        // purpose would land in it. `PromptLifecycleTests` is where the records are asserted.
+        let service = PromptService(store: store)
+        service.lifecycleSink = { _ in }
+        return (service, store, spy, session.id)
     }
 
     /// A codex tab, given a status directly because no claude registry describes one.
@@ -106,7 +111,12 @@ final class PromptServiceTests: XCTestCase {
         }
         store.applyRegistryForTesting([id: SessionStatus(activity: activity)])
         spy.events.removeAll()
-        return (PromptService(store: store), store, spy, id)
+        // Silenced: the production sink appends to the developer's own
+        // `~/Library/Logs/flight-deck-prompt.log`, and every refusal these tests provoke on
+        // purpose would land in it. `PromptLifecycleTests` is where the records are asserted.
+        let service = PromptService(store: store)
+        service.lifecycleSink = { _ in }
+        return (service, store, spy, id)
     }
 
     /// The wire code an answer came back with, or `nil` for success.
@@ -383,6 +393,7 @@ final class PromptServiceTests: XCTestCase {
         spy.events.removeAll()
 
         let service = PromptService(store: store)
+        service.lifecycleSink = { _ in }
         // Non-empty, so a service that reached the read would find a call rather than being
         // saved by an empty tail — the distinction `prompt_changed` would otherwise hide.
         // Built out here rather than inside the `@Sendable` seam, which cannot reach `self`.
