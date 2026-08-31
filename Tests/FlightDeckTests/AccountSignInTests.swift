@@ -51,7 +51,6 @@ final class AccountSignInTests: XCTestCase {
         let provider = RecordingProvider()
         retained.append(provider)
         let store = SessionStore(provider: provider, persistence: nil)
-        store.display = DrawableDisplay()
         store.transcriptsRootOverride = root.appendingPathComponent("projects")
         store.statusRootOverride = root.appendingPathComponent("status")
         return (store, provider)

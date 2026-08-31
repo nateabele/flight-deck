@@ -165,7 +165,6 @@ final class AgentTextChannelTests: XCTestCase {
     /// One live tab of `agent`, idle, with a spy that can be typed into.
     private func liveTab(agent: AgentID) async throws -> (SessionStore, UUID, SpyInjector) {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
-        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()

@@ -52,7 +52,6 @@ final class PhonePromptQueueTests: XCTestCase {
     private func makeStore(activity: SessionActivity = .busy)
         -> (SessionStore, SpyInjector, UUID, UUID) {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
-        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.statusRootOverride = projectsRoot

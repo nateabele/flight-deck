@@ -29,7 +29,6 @@ final class OpenConversationTests: XCTestCase {
 
     private func makeStore(preferences: PreferencesStore? = nil) -> SessionStore {
         let store = SessionStore(provider: CapturingProvider(), persistence: nil, preferences: preferences)
-        store.display = DrawableDisplay()
         store.titleResolver = { _, _, done in done(nil) }
         store.launchFailureReporter = SpyReporter()
         return store
