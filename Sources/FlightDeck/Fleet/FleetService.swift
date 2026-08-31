@@ -722,6 +722,16 @@ final class FleetService: ObservableObject {
                         "plan annotate from phone failed: \(code.code, privacy: .public)"
                     )
                 }
+                // A successful annotate mutates `planGates.gates[id]` (the annotation count,
+                // a `WirePlanGate` field) directly, off the poll cycle `deliverPlanGateNotifications`
+                // otherwise relies on. Between now and the next `applyRegistry` tick, the
+                // oracle's live read of this gate is ahead of the event-fold mirror — the same
+                // shape of drift `deliverPlanGateNotifications`'s own batching fix closes for
+                // `refresh()`, just reached from the command path instead. Calling it here
+                // closes the window immediately instead of leaving it open for however long
+                // until the next tick happens to run; it is a no-op on the failure branch,
+                // since nothing there changed the gate.
+                self.store.deliverPlanGateNotifications()
             }
         case .resolvePlan(let id, let token, let call, let approve, let feedback):
             Task { @MainActor in
@@ -732,6 +742,9 @@ final class FleetService: ObservableObject {
                         "plan resolve from phone failed: \(code.code, privacy: .public)"
                     )
                 }
+                // Same reasoning as `.annotatePlan` above: a successful resolve clears
+                // `planGates.gates[id]` directly, ahead of the next poll tick.
+                self.store.deliverPlanGateNotifications()
             }
         }
         // `ack` means dispatched, not done. For the two read marks the observable effect is
