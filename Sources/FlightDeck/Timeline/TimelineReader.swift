@@ -70,6 +70,14 @@ enum TimelineReader: Sendable {
         switch anchor {
         case .latest, .before: fromOldest = true
         case .after: fromOldest = false
+        case .around:
+            // `.around` pairs a backward half with a forward half about one pivot — the
+            // record a search hit named, and the reason a client asked for this page at all.
+            // Trimming from the newest end could drop that record outright, which would make
+            // the feature fail silently in exactly the case it exists for; trimming from the
+            // oldest end can only cost some of the earlier context around it. So `.around`
+            // trims like `.before`, never like `.after`.
+            fromOldest = true
         }
         let kept = withinBudget(mapped, droppingFromOldest: fromOldest)
         let dropped = kept.count < mapped.count
