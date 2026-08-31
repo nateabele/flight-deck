@@ -240,7 +240,7 @@ final class SessionStore: ObservableObject {
     private final class CodexStack {
         let transport: CodexProcessTransport
         let rpc: CodexRPC
-        let adapter: CodexAdapter
+        var adapter: CodexAdapter
         let runtime: CodexRuntime
 
         /// `home` and `indexURL` are two views of one account and must agree: the app-server
@@ -1395,7 +1395,13 @@ final class SessionStore: ObservableObject {
             // just this creation but every codex creation on this account for the rest of
             // the run, all of them awaiting the same wedged task. `verifyHandshake` below was
             // already bounded; the step in front of it was not. See `checkOffMainActor`.
-            _ = try await CodexVersionProbe.checkOffMainActor()
+            //
+            // The mode is set on `stack.adapter` before `verifyHandshake` runs, not after —
+            // every caller of `adapter(for:)` reads `stack.adapter` fresh once this task
+            // completes (see the comment there), so there is no window where a caller could
+            // observe the stack with the probe done but the mode unset.
+            let version = try await CodexVersionProbe.checkOffMainActor()
+            stack.adapter.historyMode = CodexVersionProbe.supportsHistoryMode(version) ? "legacy" : nil
             try stack.transport.start()
             try await CodexProcessTransport.verifyHandshake(stack.rpc)
         }
