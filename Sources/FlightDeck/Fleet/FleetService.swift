@@ -90,6 +90,15 @@ final class FleetService: ObservableObject {
         self.promptLifecycle = PromptLifecycleObserver(store: store, prompts: prompts)
         self.serviceName = Self.derivedServiceName(preferences: preferences)
         store.replicator = replicator
+        // The same `PromptService` again, and that is the point: what this Mac *pushes* as the
+        // open dialog and what it *refuses an answer against* are now one object reading one
+        // transcript. Two would be two opinions, and a phone told one thing and judged by
+        // another is the failure this field exists to close.
+        store.openPromptCallReader = { [weak prompts] session in
+            guard case .success(let open) = prompts?.pushedOpenPrompt(inSession: session)
+            else { return nil }
+            return open.callID
+        }
         wireHandlers()
     }
 

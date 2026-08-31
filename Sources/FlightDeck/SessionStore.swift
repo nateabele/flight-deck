@@ -42,6 +42,38 @@ final class SessionStore: ObservableObject {
     /// .reportsBackgroundWork`), so a `busy` tick carries the last known value forward and
     /// only a plain `idle` — or a vanished agent — clears it.
     @Published private(set) var backgroundWorkSessions: Set<UUID> = []
+
+    /// Which dialog each blocked tab is on, by the blocked call's `tool_use_id`. Absent for
+    /// every tab this Mac cannot name a dialog for, which is nearly all of them.
+    ///
+    /// **The third axis of `commitStatuses`, and the reason it exists.** `activity` was the
+    /// only thing a client was ever told about a dialog, so one prompt superseded by another
+    /// while the session stayed `waiting` moved nothing on the wire and a phone went on
+    /// drawing — and offering buttons for — a dialog this Mac had already left. This is
+    /// projected into `WireSession.openPromptCall`, so a change of dialog is itself a change
+    /// a client can see.
+    ///
+    /// Not `@Published`: nothing on the desktop renders it. The sidebar shows *that* a tab is
+    /// waiting, which `statuses` already says, and publishing a value that moves on a tick
+    /// nothing else moved on would invalidate the whole sidebar for no visible difference.
+    ///
+    /// Rebuilt wholesale by every commit, like `statuses`, so an entry cannot outlive the tab
+    /// it names or the dialog it describes.
+    private(set) var openPromptCalls: [UUID: String] = [:]
+
+    /// How this store learns which dialog a tab is blocked on.
+    ///
+    /// A closure rather than a call into `PromptService`, for two reasons. That service holds
+    /// *this* store, so naming it here would be a cycle; and the derivation it runs is
+    /// transcript grammar (`OpenPrompt.find` over a tail) that this file has no business
+    /// learning a second copy of. `FleetService` installs the real one over the same
+    /// `PromptService` an inbound answer is judged against, so what is pushed and what a tap
+    /// is refused against are one object reading one transcript.
+    ///
+    /// Nil by default: a store with no fleet behind it reports no dialogs, which is what the
+    /// hundred-odd tests that never open a socket want, and costs them no transcript reads.
+    var openPromptCallReader: (UUID) -> String? = { _ in nil }
+
     /// `didSet` persists every change, including one made through `SessionSidebar`'s
     /// `List(selection:)` binding — the only way selection actually changes in
     /// production, since that binding writes here directly rather than through
@@ -849,7 +881,8 @@ final class SessionStore: ObservableObject {
     private func wire(_ session: Session) -> WireSession {
         FleetProjection.project(
             session, status: statuses[session.id], unread: unreadIdle,
-            hasBackgroundWork: backgroundWorkSessions.contains(session.id)
+            hasBackgroundWork: backgroundWorkSessions.contains(session.id),
+            openPromptCall: openPromptCalls[session.id]
         )
     }
 
@@ -1704,7 +1737,7 @@ final class SessionStore: ObservableObject {
             emit(.projectAdded(
                 FleetProjection.project(
                     repos[repoIndex], statuses: statuses, unread: unreadIdle,
-                    backgroundWork: backgroundWorkSessions
+                    backgroundWork: backgroundWorkSessions, openPromptCalls: openPromptCalls
                 ),
                 at: repoIndex
             ))
@@ -2604,7 +2637,8 @@ final class SessionStore: ObservableObject {
                 emit(.projectAdded(
                     FleetProjection.project(
                         repo, statuses: statuses, unread: unreadIdle,
-                        backgroundWork: backgroundWorkSessions
+                        backgroundWork: backgroundWorkSessions,
+                        openPromptCalls: openPromptCalls
                     ), at: at
                 ))
             }
@@ -4291,25 +4325,46 @@ final class SessionStore: ObservableObject {
     /// the `previous` snapshot the next tick diffs against, so a later tick could fabricate
     /// or swallow an edge that never happened.
     private func commitStatuses(_ next: [UUID: SessionStatus], backgroundWork: Set<UUID>) {
-        // BOTH, not just `statuses`. A task starting or ending under an otherwise-idle tab
-        // moves this set and nothing else — guarding on `statuses` alone swallowed that tick
-        // entirely, so the badge never lit and no event ever reached the phone.
-        guard next != statuses || backgroundWork != backgroundWorkSessions else { return }
+        let previous = statuses
+        let previousBackgroundWork = backgroundWorkSessions
+        let previousOpenPromptCalls = openPromptCalls
+        // Installed **above** the guard rather than below it, because the third axis is
+        // derived FROM them: `openPromptCallReader` asks this store what each tab is doing,
+        // and asking it against the statuses this tick is replacing would report no dialog on
+        // the very tick a tab first blocks — a card a poll late for no reason. Written through
+        // an equality check so an unchanged tick still publishes nothing, which is what the
+        // single `guard` used to buy: both of these are `@Published`, and re-assigning an
+        // equal value at 2 Hz would invalidate the whole sidebar twice a second.
+        if next != statuses { statuses = next }
+        if backgroundWork != backgroundWorkSessions { backgroundWorkSessions = backgroundWork }
+        openPromptCalls = derivedOpenPromptCalls()
+        // THREE axes, not one. A task starting or ending under an otherwise-idle tab moves
+        // only `backgroundWork` — guarding on `statuses` alone swallowed that tick entirely,
+        // so the badge never lit and no event ever reached the phone. One dialog replaced by
+        // the next moves only `openPromptCalls`: same activity, often the same `waitingFor`,
+        // and until this axis existed the tick was swallowed the same way, leaving a phone
+        // holding a card for a dialog that was gone.
+        guard next != previous
+            || backgroundWork != previousBackgroundWork
+            || openPromptCalls != previousOpenPromptCalls
+        else { return }
         // A session that HAD a status and no longer does means its `claude` exited.
         // Drop its sub-agent count too, so a later process reusing the same session
         // UUID does not inherit a count from the dead one. Counts for sessions that
         // never had a status are deliberately left alone — that is the
         // count-arrives-before-registry case.
-        for id in statuses.keys where next[id] == nil {
+        for id in previous.keys where next[id] == nil {
             subagentCounts.removeValue(forKey: id)
         }
-        let previous = statuses
-        let previousBackgroundWork = backgroundWorkSessions
-        // Also `emitActivity`'s second axis, below: a tick can move this set alone, with
-        // every `SessionStatus` unchanged, and that tick still has to reach the wire.
+        // Also `emitActivity`'s second and third axes, below: a tick can move either of these
+        // alone, with every `SessionStatus` unchanged, and that tick still has to reach the
+        // wire.
         let backgroundWorkChanged = previousBackgroundWork.symmetricDifference(backgroundWork)
-        statuses = next
-        backgroundWorkSessions = backgroundWork
+        let openPromptChanged = Set(previousOpenPromptCalls.keys).union(openPromptCalls.keys)
+            .filter { previousOpenPromptCalls[$0] != openPromptCalls[$0] }
+        // `openPromptChanged` is deliberately not unioned in: a tab with a dialog has a status,
+        // so it is already in `next.keys`, and adding it would only be a way for this set to
+        // disagree with itself.
         let touched = Set(previous.keys)
             .union(next.keys)
             .union(backgroundWorkChanged)
@@ -4324,13 +4379,13 @@ final class SessionStore: ObservableObject {
         // activity having changed with no event on the wire for it yet, which is real
         // drift, just not a bug: the fix is recording activity first, not silencing the
         // check.
-        emitActivity(transitions, backgroundWorkChanged: backgroundWorkChanged)
+        emitActivity(transitions, backgroundWorkChanged: backgroundWorkChanged,
+                     openPromptChanged: openPromptChanged)
         applyReadState(transitions)
         deliverNotifications(transitions)
         cancelSupersededPrompts(transitions)
-        // Below the `guard next != statuses || backgroundWork != backgroundWorkSessions`
-        // above, so this writes only on a real transition — a handful of small atomic
-        // writes a minute, not one per poll.
+        // Below the three-axis guard above, so this writes only on a real transition — a
+        // handful of small atomic writes a minute, not one per poll.
         // Recording activity here rather than at quit is what covers a SIGKILL (which is
         // how scripts/swap-release.sh stops the app) and a panic, and an unplanned exit is
         // the case auto-resume is most wanted for.
@@ -4385,13 +4440,19 @@ final class SessionStore: ObservableObject {
     /// `old == new` throughout. Filtering on `old != new` alone would drop it — the sidebar
     /// (Task 5) would still update, because it reads `backgroundWorkSessions` directly, but a
     /// connected phone would hear nothing until some other field on that session happened to
-    /// change too. `changed` is therefore two axes, not one: it does not read off quite the
-    /// same diff `applyReadState`, `deliverNotifications` and `cancelSupersededPrompts` do.
+    /// change too. `openPromptChanged` is the same argument again for a different field, and
+    /// the one this Mac's stale-card reports were about: which dialog is up is invisible to
+    /// `SessionStatus` equality, so a supersede produces `old == new` throughout too.
+    /// `changed` is therefore three axes, not one: it does not read off quite the same diff
+    /// `applyReadState`, `deliverNotifications` and `cancelSupersededPrompts` do.
     private func emitActivity(
-        _ transitions: [StatusTransition], backgroundWorkChanged: Set<UUID>
+        _ transitions: [StatusTransition], backgroundWorkChanged: Set<UUID>,
+        openPromptChanged: Set<UUID>
     ) {
         let changed = transitions.filter {
-            $0.old != $0.new || backgroundWorkChanged.contains($0.id)
+            $0.old != $0.new
+                || backgroundWorkChanged.contains($0.id)
+                || openPromptChanged.contains($0.id)
         }
         emit(changed.map { transition in
             .activityChanged(
@@ -4401,9 +4462,37 @@ final class SessionStore: ObservableObject {
                 activity: transition.new?.activity.rawValue,
                 waitingFor: transition.new?.waitingFor,
                 subagentCount: transition.new?.subagentCount ?? 0,
-                hasBackgroundWork: backgroundWorkSessions.contains(transition.id)
+                hasBackgroundWork: backgroundWorkSessions.contains(transition.id),
+                openPromptCall: openPromptIdentity(of: transition.id)
             )
         })
+    }
+
+    /// Which dialog every blocked tab is on, as this Mac reads it right now.
+    ///
+    /// **Re-derived on every commit and never cached, exactly as `PromptService` re-derives on
+    /// every answer** — see that type for why a `served` table fails the case this whole
+    /// feature is about: claude answers one dialog and raises the next without the session
+    /// leaving `waiting`, and a cache still matches while a re-derivation does not.
+    ///
+    /// Only `waiting` tabs are asked, so the cost is bounded to the state a human is being
+    /// waited on in: an idle or busy fleet reads nothing at all, and the tail a blocked tab
+    /// does cost is `PromptService.tailRecords` records once per poll for as long as its
+    /// dialog is up. `openPromptCallReader` refuses a codex tab on the agent alone, before any
+    /// transcript is resolved, so an agent this build cannot read a dialog for is free too.
+    private func derivedOpenPromptCalls() -> [UUID: String] {
+        var derived: [UUID: String] = [:]
+        for (id, status) in statuses where status.activity == .waiting {
+            derived[id] = openPromptCallReader(id)
+        }
+        return derived
+    }
+
+    /// One tab's identity as it goes on the wire. Never `.unreported` — this build always
+    /// looks, so nothing found is this Mac asserting there is nothing to answer, which is the
+    /// assertion that retires a phone's card. Same rule `FleetProjection` states.
+    private func openPromptIdentity(of id: UUID) -> OpenPromptIdentity {
+        openPromptCalls[id].map(OpenPromptIdentity.call) ?? .noPrompt
     }
 
     /// Click-to-activate. The window ordering is the AppDelegate's job; this only moves
@@ -4472,7 +4561,13 @@ final class SessionStore: ObservableObject {
         emit(.activityChanged(
             id: id, activity: status.activity.rawValue,
             waitingFor: status.waitingFor, subagentCount: status.subagentCount,
-            hasBackgroundWork: backgroundWorkSessions.contains(id)
+            hasBackgroundWork: backgroundWorkSessions.contains(id),
+            // Carried, not re-derived: a sub-agent count arriving is not news about a dialog,
+            // and reading a transcript to say so would put a tail read on the watcher's path.
+            // Omitting it is not an option either — the fold overwrites unconditionally, so an
+            // event without it would replace a live call id with `.unreported` and drop this
+            // Mac's assertion on the floor.
+            openPromptCall: openPromptIdentity(of: id)
         ))
     }
 
@@ -4621,7 +4716,7 @@ final class SessionStore: ObservableObject {
             emit(.projectAdded(
                 FleetProjection.project(
                     repos[destination], statuses: statuses, unread: unreadIdle,
-                    backgroundWork: backgroundWorkSessions
+                    backgroundWork: backgroundWorkSessions, openPromptCalls: openPromptCalls
                 ),
                 at: destination
             ))

@@ -219,7 +219,10 @@ struct SessionTimelineScreen: View {
                 // is blocked on sits directly above the field, so a reader whose keyboard is up
                 // can still see what they are answering.
                 PromptCard(
-                    open: model.blocked(agent: session?.agent, activity: session?.activity),
+                    open: model.blocked(
+                        agent: session?.agent, activity: session?.activity,
+                        call: session?.openPromptCall ?? .unreported
+                    ),
                     agent: session?.agent,
                     state: model.answerState,
                     model: model
@@ -232,6 +235,13 @@ struct SessionTimelineScreen: View {
         // importantly the busy → idle transition, which is the moment the last records of a
         // turn have landed.
         .onChange(of: session?.activity) { _, _ in model.loadNewer() }
+        // The second event trigger, and it fires where the first cannot. A dialog answered at
+        // the keyboard with the next one raised immediately never leaves `waiting`, so
+        // `activity` is identical either side of it and the modifier above sees nothing — the
+        // stale-card report, exactly. Which call is open does move, so this is the fetch that
+        // brings the records naming the new dialog. Until they land `blocked` draws nothing,
+        // which is the honest state rather than the previous dialog's buttons.
+        .onChange(of: session?.openPromptCall) { _, _ in model.loadNewer() }
         // The timer, and it is not redundant with the event above: `emitActivity` on the Mac
         // filters to genuine transitions, so a turn that runs busy for four minutes emits
         // NOTHING in the middle of it. Without this, an open screen would sit unchanged
@@ -265,9 +275,16 @@ struct SessionTimelineScreen: View {
         // A separate `.task(id:)` from the busy poll above rather than a branch inside it: two
         // modifiers with the same id both run, and merging them would tie two different
         // cadences — a 1.5s follow and this — to one decision.
-        .task(id: session?.activity) {
+        //
+        // Keyed on the dialog as well as the activity: a supersede leaves `activity` untouched,
+        // so an id of `activity` alone would not restart the chase for the dialog that
+        // replaced it — the card would stay blank until something else happened to move.
+        .task(id: BlockedState(session)) {
             guard session?.activity == "waiting" else { return }
-            await model.chaseBlockedPrompt(agent: session?.agent, activity: session?.activity)
+            await model.chaseBlockedPrompt(
+                agent: session?.agent, activity: session?.activity,
+                call: session?.openPromptCall ?? .unreported
+            )
         }
     }
 
@@ -655,6 +672,22 @@ struct SessionTimelineScreen: View {
         )
         .listRowInsets(Self.rowInsets)
         .listRowSeparator(.hidden)
+    }
+
+    /// The two fields a blocked card is a function of, as one `.task(id:)` key.
+    ///
+    /// A struct because `.task(id:)` takes one value and these move independently: entering
+    /// and leaving `waiting` is one axis, and *which* dialog is up is the other — the axis a
+    /// supersede moves alone, and the reason a chase keyed on `activity` never restarted for
+    /// the dialog that replaced the one a reader was looking at.
+    private struct BlockedState: Equatable {
+        let activity: String?
+        let call: OpenPromptIdentity
+
+        init(_ session: WireSession?) {
+            activity = session?.activity
+            call = session?.openPromptCall ?? .unreported
+        }
     }
 
     /// The only live claim on the screen, and it is about the session rather than about the

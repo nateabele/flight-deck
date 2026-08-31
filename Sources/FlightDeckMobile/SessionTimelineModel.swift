@@ -63,9 +63,10 @@ protocol PromptSending: AnyObject {
 /// blocked on.
 ///
 /// **There is no `pendingPrompt` verb beside it, and that absence is the design.** What the
-/// session is blocked on is *derived* from the feed this model already holds and the `activity`
-/// the fleet already pushes — see `blocked(activity:)`. Nothing about a question is fetched,
-/// so there is nothing here to fetch it with.
+/// session is blocked on is *derived* from the feed this model already holds and the status the
+/// fleet already pushes — see `blocked(agent:activity:call:)`. The status names *which* dialog
+/// is open, never what it says, so nothing about a question is fetched and there is nothing
+/// here to fetch it with.
 ///
 /// A third protocol rather than a third method on either existing one, for the reason there are
 /// two already: a stub must be able to leave one verb outstanding while answering another, and
@@ -195,7 +196,8 @@ final class SessionTimelineModel {
         case idle
         /// Dispatched. `ack` means *dispatched, not done* — the Mac's driver refuses to press
         /// Return on a screen it cannot confirm — so what clears this card is the transcript:
-        /// the `tool_result` arrives, `blocked(activity:)` returns nil, and the card goes.
+        /// the `tool_result` arrives, `blocked(agent:activity:call:)` returns nil, and the card
+        /// goes.
         case sent(call: String)
         /// The Mac refused, or nobody confirmed. The question stays visible with the reason
         /// under it, because the reader has to see what they were being asked.
@@ -444,9 +446,14 @@ final class SessionTimelineModel {
     /// arrives — a codex tab, a body this build cannot parse — must not become a poll that
     /// runs for the life of the screen. That objection is why the original was a single shot;
     /// the answer is a bound, not one attempt.
-    func chaseBlockedPrompt(agent: String?, activity: String?) async {
+    ///
+    /// **It chases a changed dialog too, not only a missing one.** `call` goes through
+    /// `blocked` unchanged, so a Mac naming a call this feed has never seen reads here exactly
+    /// like a record that has not arrived yet — which is what it is. That is the supersede
+    /// case, and it needs no second mechanism.
+    func chaseBlockedPrompt(agent: String?, activity: String?, call: OpenPromptIdentity) async {
         for delay in promptRetries {
-            guard blocked(agent: agent, activity: activity) == nil else { return }
+            guard blocked(agent: agent, activity: activity, call: call) == nil else { return }
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             loadNewer()
@@ -465,16 +472,35 @@ final class SessionTimelineModel {
     /// **Derived, never fetched.** `OpenPrompt.find` is the same function the Mac runs over the
     /// same transcript — shared in `FleetKit` precisely so the two cannot drift — and it runs
     /// here over `feed.items`, which the history channel has already delivered. That is why
-    /// this feature adds no request, no reply frame and no event: a question appearing is an
-    /// `activity` change (already pushed) plus records (already fetched on that change), and a
-    /// question being answered on the Mac is a `tool_result` arriving on the next fetch.
+    /// this feature adds no request and no reply frame: a question appearing is a status change
+    /// (already pushed) plus records (already fetched on that change), and a question being
+    /// answered on the Mac is a `tool_result` arriving on the next fetch. What the status
+    /// gained is the call's *id* — `call` below — and never a word of the question.
     ///
-    /// A function of `agent` and `activity` rather than a stored property, so it cannot go
-    /// stale: the screen passes the live `WireSession` fields it is already reading. Both are
-    /// `find`'s to judge — including whether this Mac can answer for that agent at all, which
-    /// is why a codex tab is blocked on nothing here however it is drawn elsewhere.
-    func blocked(agent: String?, activity: String?) -> OpenPrompt? {
-        OpenPrompt.find(in: feed.items, agent: agent, activity: activity)
+    /// A function of `agent`, `activity` and `call` rather than a stored property, so it
+    /// cannot go stale: the screen passes the live `WireSession` fields it is already reading.
+    /// The first two are `find`'s to judge — including whether this Mac can answer for that
+    /// agent at all, which is why a codex tab is blocked on nothing here however it is drawn
+    /// elsewhere.
+    ///
+    /// **`call` is the Mac's veto, and it is the half `find` cannot supply.** The derivation
+    /// runs over `feed.items`, so it is only ever as current as the last fetch — and the case
+    /// this feature exists for is precisely the one where the feed is behind: the dialog was
+    /// answered at the keyboard and claude raised the next one without the session leaving
+    /// `waiting`, so nothing here changed and this went on returning a call the Mac has left.
+    /// A derived prompt the Mac does not name is therefore not shown at all: a card that draws
+    /// nothing for the beat it takes `loadNewer` to land is a great deal better than one that
+    /// offers Allow for a command nobody is being asked about. `.unreported` is the one state
+    /// that defers to this end — see `OpenPromptIdentity`; a Mac too old to send the field
+    /// still gets today's behaviour rather than a phone that shows no cards at all.
+    func blocked(agent: String?, activity: String?, call: OpenPromptIdentity) -> OpenPrompt? {
+        guard let open = OpenPrompt.find(in: feed.items, agent: agent, activity: activity)
+        else { return nil }
+        switch call {
+        case .unreported: return open
+        case .noPrompt: return nil
+        case .call(let id): return id == open.callID ? open : nil
+        }
     }
 
     /// Answer the dialog `call` names.

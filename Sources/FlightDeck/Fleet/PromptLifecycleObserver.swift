@@ -7,13 +7,17 @@ import Foundation
 /// they answer the one thing nothing recorded: when a dialog opens and closes on this Mac,
 /// what — if anything — leaves the machine.
 ///
-/// **There is no prompt on the wire, and that is the shape of the whole problem.** `OpenPrompt`
-/// is *derived* on both ends from a transcript each already holds (see that type, and
-/// `FleetCommand`'s own note that only the answer travels), so the only thing a client is ever
-/// told about a dialog is a session's `activity`. A close is therefore an
-/// `activityChanged(activity: "idle")` and nothing more — and a dialog *replaced* by the next
-/// one, with the session never leaving `waiting`, is not pushed at all. Both of those are
-/// invisible in a packet dump and both are recorded here.
+/// **There is still no prompt on the wire, only its identity.** `OpenPrompt` is *derived* on
+/// both ends from a transcript each already holds (see that type, and `FleetCommand`'s own
+/// note that only the answer travels); what a session's status now also carries is the blocked
+/// call's id, `WireSession.openPromptCall`. That is what this observer was built to find
+/// missing: a dialog replaced by the next one, with the session never leaving `waiting`, used
+/// to move nothing on the wire at all, and this log's `superseded` records with no `push`
+/// beside them are the evidence that closed it.
+///
+/// The records here are still about `activity` alone, deliberately: `asserts: .open` means the
+/// frame said `waiting`, which is the claim a card's *existence* rests on. What dialog it was
+/// is the `opened`/`closed` pair above it.
 ///
 /// Reads the store; writes nothing to it, sends nothing, and schedules nothing. It is invoked
 /// after the frames it describes have already gone.
@@ -52,7 +56,7 @@ final class PromptLifecycleObserver {
     func observe(_ batch: [SequencedEvent], clients: Int) {
         for entry in batch {
             switch entry.event {
-            case .activityChanged(let id, let activity, _, _, _):
+            case .activityChanged(let id, let activity, _, _, _, _):
                 note(id, activity: activity, clients: clients)
             case .sessionAdded(let session, _, _):
                 // A tab can be added already blocked — a restore, or a session adopted from a
@@ -84,7 +88,7 @@ final class PromptLifecycleObserver {
                     .flatMap(\.sessions)
                     .filter { $0.activity == SessionActivity.waiting.rawValue }
                     .count
-            case .event(_, .activityChanged(_, let activity, _, _, _)):
+            case .event(_, .activityChanged(_, let activity, _, _, _, _)):
                 if activity == SessionActivity.waiting.rawValue { waiting += 1 }
             default:
                 continue
@@ -175,20 +179,13 @@ final class PromptLifecycleObserver {
         return .unnamed(code: refusal ?? "-")
     }
 
-    /// The Mac's own answer to "which dialog is up", asked exactly as a tap asks it.
+    /// The Mac's own answer to "which dialog is up".
     ///
-    /// The agent test runs **before** `PromptService.openPrompt`, and only to keep this method
-    /// free of side effects: that call resolves the tab's transcript first, which builds and
-    /// memoizes the agent's adapter — for codex, a whole `CodexStack` with a runtime and an
-    /// index watcher in it. A log line must never be the thing that brings one into existence.
-    /// The refusal is the same string from the same property that method would have returned,
-    /// so nothing is decided differently here; only the order is.
+    /// `pushedOpenPrompt` and not `openPrompt`, because a log line must not build an agent's
+    /// adapter to write itself — see that method for the side-effect rule, which the store's
+    /// own per-tick derivation now leans on too.
     private func derive(_ id: UUID) -> Result<OpenPrompt, TimelineErrorCode> {
-        guard let agent = store.agent(of: id),
-              agent.dialogDriver != nil,
-              agent.openPromptReader != nil
-        else { return .failure("unsupported_agent") }
-        return prompts.openPrompt(inSession: id)
+        prompts.pushedOpenPrompt(inSession: id)
     }
 
     private static func kind(of prompt: OpenPrompt) -> PromptLifecycleRecord.Kind {

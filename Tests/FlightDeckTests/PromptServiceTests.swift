@@ -186,8 +186,13 @@ final class PromptServiceTests: XCTestCase {
 
     /// **Racing the Mac, the hard case — and the one a cache would not have caught.** The user
     /// approves prompt 1 in the terminal, claude raises prompt 2 immediately, and the session
-    /// NEVER leaves `waiting`: no activity change is emitted, so the phone's card still shows
-    /// prompt 1. A stale tap must not approve prompt 2, which nobody read.
+    /// NEVER leaves `waiting`, so the phone's card can still be showing prompt 1 when a thumb
+    /// comes down. A stale tap must not approve prompt 2, which nobody read.
+    ///
+    /// `WireSession.openPromptCall` pushes that supersede now, so the card should be gone by
+    /// the time a finger reaches it — which makes this rarer and not one bit less necessary.
+    /// The frame can be in flight, dropped, or ignored; this refusal is what stands between
+    /// any of those and a keystroke at a real terminal.
     ///
     /// The spy is showing prompt 2's dialog, so the refusal has to come from the call-id
     /// comparison: a service that dropped it would find prompt 2, be handed a screen it can
