@@ -31,7 +31,11 @@ final class CodexAdapterTests: XCTestCase {
 
     private func makeAdapter() -> (CodexAdapter, ScriptedTransport) {
         let t = ScriptedTransport()
-        return (CodexAdapter(rpc: CodexRPC(transport: t)), t)
+        // Every fixture's `thread["path"]` is a fake, non-existent path (`/r/<id>.jsonl`), so
+        // the production `rolloutExists` default would fail every one of these tests the
+        // moment `prepare`'s history-contract check exists. Stubbed true here rather than
+        // weakening the four-call-sequence assertions the tests below depend on.
+        return (CodexAdapter(rpc: CodexRPC(transport: t), rolloutExists: { _ in true }), t)
     }
 
     func testPrepareStartsThenNamesTheThread() async throws {
@@ -60,6 +64,86 @@ final class CodexAdapterTests: XCTestCase {
             _ = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
             XCTFail("an uncommitted thread must not be handed back — `codex resume` would fail on it")
         } catch {}
+    }
+
+    /// The diagnostic added for the paginated-history breakage: a missing rollout must
+    /// surface as `AgentLaunchError.prepareFailed`, naming the real cause, rather than as
+    /// codex's own raw `-32600 no rollout found for thread id <id>` — which is exactly what
+    /// `thread/archive` would answer with if this check did not exist.
+    func testPrepareDiagnosesAMissingRolloutRatherThanLettingCodexsRawErrorSurface() async {
+        let t = ScriptedTransport()
+        var adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+        adapter.rolloutExists = { _ in false }
+        let session = Session(title: "my tab", workingDirectory: "/w/a")
+
+        do {
+            _ = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+            XCTFail("a thread whose rollout never appeared is not resumable")
+        } catch AgentLaunchError.prepareFailed {
+            // expected — codex's own error must not reach the caller here.
+        } catch {
+            XCTFail("expected AgentLaunchError.prepareFailed, not codex's raw \(error)")
+        }
+        // The check sits between naming and archiving, so a missing rollout must be caught
+        // before `thread/archive` runs — never surfaced as that call's own failure, and
+        // never fired before `thread/name/set` either (that would trip on every healthy
+        // thread, per the comment at the check's call site).
+        XCTAssertEqual(t.methods, ["thread/start", "thread/name/set"],
+                       "the missing-rollout check must fire before thread/archive, not after")
+    }
+
+    /// `historyMode == nil` means this codex predates the pin and was sent nothing — a
+    /// materially different situation from the case below, so the message must say so.
+    func testPrepareMissingRolloutMessageNamesTheUnpinnedCodexWhenHistoryModeIsNil() async {
+        let t = ScriptedTransport()
+        var adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+        adapter.rolloutExists = { _ in false }
+        adapter.historyMode = nil
+        let session = Session(title: "my tab", workingDirectory: "/w/a")
+
+        do {
+            _ = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+            XCTFail("expected prepareFailed")
+        } catch AgentLaunchError.prepareFailed(let why) {
+            XCTAssertTrue(why.contains("no history-mode pin"),
+                          "the nil-historyMode branch must say Flight Deck sent nothing: \(why)")
+        } catch {
+            XCTFail("expected AgentLaunchError.prepareFailed, got \(error)")
+        }
+    }
+
+    /// `historyMode == "legacy"` means Flight Deck asked for the legacy contract and codex
+    /// still did not honor it — more alarming than the nil case, and the message must differ.
+    func testPrepareMissingRolloutMessageNamesTheBrokenPinWhenHistoryModeIsLegacy() async {
+        let t = ScriptedTransport()
+        var adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+        adapter.rolloutExists = { _ in false }
+        adapter.historyMode = "legacy"
+        let session = Session(title: "my tab", workingDirectory: "/w/a")
+
+        do {
+            _ = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+            XCTFail("expected prepareFailed")
+        } catch AgentLaunchError.prepareFailed(let why) {
+            XCTAssertTrue(why.contains("legacy history contract"),
+                          "the legacy-historyMode branch must say Flight Deck asked and was "
+                          + "refused, not that nothing was sent: \(why)")
+        } catch {
+            XCTFail("expected AgentLaunchError.prepareFailed, got \(error)")
+        }
+    }
+
+    /// The seam's own default path: when the rollout genuinely exists, the check must be
+    /// invisible — the full four-call sequence still runs and `prepare` still succeeds.
+    func testPrepareSucceedsWithTheFullSequenceWhenTheRolloutExists() async throws {
+        let t = ScriptedTransport()
+        var adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+        adapter.rolloutExists = { _ in true }
+        let session = Session(title: "my tab", workingDirectory: "/w/a")
+
+        _ = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+
+        XCTAssertEqual(t.methods, ["thread/start", "thread/name/set", "thread/archive", "thread/unarchive"])
     }
 
     func testLaunchCommandResumesTheBoundThread() async throws {
