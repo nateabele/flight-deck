@@ -12,12 +12,8 @@ import Foundation
 ///
 /// - `GET  /api/plan` → `{plan, origin, permissionMode, previousPlan, versionInfo, …}`
 /// - `POST /api/external-annotations` → `{source, type, text, originalText}`
-/// - `POST /api/approve`  → `{feedback?}`, resolves the hook, decision `"approved"`
-/// - `POST /api/feedback` → `{feedback}`,  resolves it too, decision `"annotated"` — **not**
-///   `/api/deny`, which the served frontend bundle still references but the v0.27.8 server
-///   answers with a 404. `/api/feedback` is what the real "Send Feedback" button calls, and
-///   it is a plain stateless POST with no lease/SSE connection required, exactly like
-///   `/api/approve`.
+/// - `POST /api/approve` → `{feedback?}`, resolves the hook `allow`
+/// - `POST /api/deny`    → `{feedback}`,  resolves it `deny`, feedback becomes the reason
 struct PlanGateClient {
     /// Test seam, in the shape `PromptService.tail` is one: the network is the thing a test
     /// must substitute. The `Int` is the HTTP status; `nil` is a transport failure, which is
@@ -95,19 +91,9 @@ struct PlanGateClient {
 
     /// Resolve the gate. **Approve carries feedback too** — reading a plan, marking it up and
     /// saying yes anyway is a first-class outcome, not a workaround.
-    ///
-    /// **Step 3 finding (2026-08-29, live server, `plannotator` 0.27.8):** the deny path is
-    /// `POST /api/feedback`, not `/api/deny`. `/api/deny` 404s every time against the real
-    /// binary, on every request shape tried — it is dead code, still referenced in the served
-    /// frontend bundle's minified JS but not wired to the UI's actual "Send Feedback" button,
-    /// which was captured (via the browser's network panel) calling `/api/feedback` instead.
-    /// `POST /api/feedback` with the same `{feedback}` body returns `200`, and the process
-    /// exits printing the feedback text back verbatim in a decision JSON of
-    /// `{"decision":"annotated","feedback":"…"}` — this client only checks the HTTP status,
-    /// so the different decision label doesn't otherwise matter here.
     func resolve(approved: Bool, feedback: String?) async -> Bool {
         var body: [String: Any] = [:]
         if let feedback, !feedback.isEmpty { body["feedback"] = feedback }
-        return await post(approved ? "/api/approve" : "/api/feedback", body)
+        return await post(approved ? "/api/approve" : "/api/deny", body)
     }
 }

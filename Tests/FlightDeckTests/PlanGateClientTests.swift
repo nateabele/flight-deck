@@ -98,15 +98,13 @@ final class PlanGateClientTests: XCTestCase {
         XCTAssertEqual(json["feedback"] as? String, "ship it, but rename X")
     }
 
-    /// Not `/api/deny` — confirmed 404 against a live `plannotator` 0.27.8 server. The real
-    /// deny path is `/api/feedback`, which the served UI's own "Send Feedback" button calls.
-    func testResolveDenyHitsFeedback() async throws {
+    func testResolveDenyHitsDeny() async throws {
         let recorder = Recorder()
         await recorder.push((Data(#"{"ok":true}"#.utf8), 200))
         _ = await client(recorder).resolve(approved: false, feedback: "step 3 is wrong")
         let requests = await recorder.all()
         let request = try XCTUnwrap(requests.first)
-        XCTAssertEqual(request.url?.path, "/api/feedback")
+        XCTAssertEqual(request.url?.path, "/api/deny")
     }
 
     /// A gate that closed between the tap and the request. The transport returns nothing;
