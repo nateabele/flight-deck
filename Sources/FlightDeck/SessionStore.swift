@@ -4015,16 +4015,30 @@ final class SessionStore: ObservableObject {
     /// for it. This runs on its own tick, after `refresh()`, against its own remembered map of
     /// what each session's gate was last time, so a re-poll of an unchanged gate is not a
     /// re-notify and a closed one still gets its banner withdrawn.
+    ///
+    /// **Emits `.planGateChanged` on every real change, independent of `notifier`.** The wire
+    /// event is what lets `FleetSnapshot.apply` fold `planGate` at all — without it, a client
+    /// resuming from a replay window never learns a gate opened or closed, and the projection
+    /// oracle (which reads `planGates` live) permanently disagrees with the event-fold mirror.
+    /// That has to hold even when this Mac has no local notifier — a headless `SessionStore`,
+    /// or one under test — so only the OS-banner half below is gated on `notifier`'s presence.
     private func deliverPlanGateNotifications() {
-        guard let notifier, let planGates else { return }
+        guard let planGates else { return }
         let active = appIsActive()
         for id in repos.flatMap(\.sessions).map(\.id) {
             let gate = planGates.gate(for: id)
-            let old = SessionNotificationPolicy.Input(
-                status: statuses[id], planGate: previousPlanGates[id]
-            )
-            let new = SessionNotificationPolicy.Input(status: statuses[id], planGate: gate)
+            let previous = previousPlanGates[id]
+            // Unchanged: `old.status == new.status` always below (both read `statuses[id]` at
+            // this same instant), so when the gate itself has not moved, `action` was already
+            // guaranteed `.none` — this is a fast path, not a behavior change.
+            guard gate != previous else { continue }
             previousPlanGates[id] = gate
+
+            emit(.planGateChanged(id: id, gate: gate))
+
+            guard let notifier else { continue }
+            let old = SessionNotificationPolicy.Input(status: statuses[id], planGate: previous)
+            let new = SessionNotificationPolicy.Input(status: statuses[id], planGate: gate)
             switch SessionNotificationPolicy.action(old: old, new: new, appActive: active) {
             case .none:
                 continue

@@ -100,7 +100,7 @@ public enum FleetReplay {
     /// collapsing them either — reorders are human drag gestures, while the volume this fold
     /// exists to absorb is machine-generated status flaps.
     private enum FoldKey: Hashable {
-        case activity(UUID), rename(UUID), unread(UUID), collapsed(UUID)
+        case activity(UUID), rename(UUID), unread(UUID), collapsed(UUID), planGate(UUID)
     }
 
     private static func key(_ event: FleetEvent) -> FoldKey? {
@@ -109,6 +109,11 @@ public enum FleetReplay {
         case .renamed(let id, _, _): return .rename(id)
         case .unreadChanged(let id, _): return .unread(id)
         case .projectCollapsed(let id, _): return .collapsed(id)
+        // Same rationale as `.activity`: a gate can flap open/closed/superseded several
+        // times inside one resume gap, and only the final value is real by the time a
+        // reconnecting phone would see it — the intermediate frames are indistinguishable
+        // from a status flap to a fold that only sees events, never a screen.
+        case .planGateChanged(let id, _): return .planGate(id)
         default: return nil
         }
     }
