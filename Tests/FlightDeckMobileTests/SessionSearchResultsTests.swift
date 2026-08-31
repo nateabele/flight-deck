@@ -71,4 +71,46 @@ final class SessionSearchResultsTests: XCTestCase {
         XCTAssertNil(attributed.underlineStyle)
         XCTAssertEqual(String(attributed.characters), "plain title")
     }
+
+    // MARK: A session result's live status (spec §10)
+
+    /// **The regression this exists for.** A `.session` result used to be drawn from
+    /// `SearchResult`'s own fields alone — `nameRow`'s `chevron.right` row, which has no
+    /// `waitingFor` because neither `SearchResult` nor the `NameCandidate` it is ranked from
+    /// carries one. This asserts the row's session comes from the LIVE fleet, where a
+    /// `waiting` session's `waitingFor` is visible — a fix that resolved the id against a
+    /// stale copy captured at ranking time, rather than `projects` as passed to this call,
+    /// would fail this the moment the fixture's `waitingFor` changed between the two.
+    func testALiveSessionIsFoundByIdSoItsWaitingStateStaysCurrent() {
+        let id = UUID()
+        let projects = [WireProject(
+            id: UUID(), name: "flight-deck", path: "/proj",
+            sessions: [
+                WireSession(
+                    id: id, title: "rename fix", agent: "claude",
+                    activity: "waiting", waitingFor: "Run the tests?"
+                )
+            ]
+        )]
+
+        let session = SessionSearchResults.liveSession(id: id, in: projects)
+
+        XCTAssertEqual(session?.waitingFor, "Run the tests?",
+                        "a session found by search must show it is waiting, the one signal " +
+                        "the fleet list exists to convey")
+    }
+
+    /// A session closed between the reply landing and this row drawing resolves to `nil`
+    /// rather than trapping — the shape `sessionRow`'s fallback branch exists to draw
+    /// something for.
+    func testALiveSessionLookupIsNilWhenTheSessionHasClosed() {
+        let projects = [WireProject(
+            id: UUID(), name: "flight-deck", path: "/proj",
+            sessions: [WireSession(id: UUID(), title: "unrelated", agent: "claude")]
+        )]
+
+        let session = SessionSearchResults.liveSession(id: UUID(), in: projects)
+
+        XCTAssertNil(session)
+    }
 }

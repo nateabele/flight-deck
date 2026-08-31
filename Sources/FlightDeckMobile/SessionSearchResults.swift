@@ -18,6 +18,9 @@ import SwiftUI
 struct SessionSearchResults: View {
     let results: [SearchResult]
     let footer: SessionSearchModel.Footer?
+    /// The live fleet, so a `.session` result can look up its actual `WireSession` rather than
+    /// carry a copy of one — see `sessionRow(_:id:)`.
+    let projects: [WireProject]
     let onTap: (SearchResult) -> Void
 
     var body: some View {
@@ -42,39 +45,90 @@ struct SessionSearchResults: View {
             continuationRow(result)
         } else {
             switch result.kind {
-            case .session, .project:
-                nameRow(result)
+            case .session(let id):
+                sessionRow(result, id: id)
+            case .project:
+                projectRow(result)
             case .conversation:
                 conversationRow(result)
             }
         }
     }
 
-    /// A session or a project: title, underlined where the query matched, and the project it
-    /// lives in underneath. Icon mirrors the desktop overlay's own `SearchResultRow` so the two
-    /// screens agree on what a session versus a project looks like.
-    private func nameRow(_ result: SearchResult) -> some View {
+    /// A session result: the row that already exists in the fleet list — `SessionStatusGlyph`
+    /// and all — with the matched span underlined, per spec §10. Looked up LIVE through
+    /// `liveSession(for:in:)` rather than drawn from `SearchResult`'s own fields, which carry
+    /// no status at all: a result here is ranked from `NameCandidate`, and neither it nor
+    /// `SearchResult` has a `waitingFor`. Reusing `FleetListScreen.row` is what makes that
+    /// status current rather than reinvented — two identically-titled sessions in different
+    /// states must stay distinguishable in results the same way they are in the plain list.
+    private func sessionRow(_ result: SearchResult, id: UUID) -> some View {
         Button {
             onTap(result)
         } label: {
-            HStack(spacing: 8) {
-                Image(systemName: result.kind == .project ? "folder" : "chevron.right")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 20)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(Self.highlighted(result.title, ranges: result.highlightedRanges))
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundStyle(.primary)
-                    if result.kind != .project {
-                        Text(result.projectName).font(.caption).foregroundStyle(.secondary)
-                    }
+            Group {
+                if let session = Self.liveSession(id: id, in: projects) {
+                    FleetListScreen.row(session, highlighted: result.highlightedRanges)
+                } else {
+                    // The session closed between the reply landing and this row drawing — rare,
+                    // but the tap still needs somewhere to land, so this falls back to the plain
+                    // name row rather than drawing nothing.
+                    nameRowContent(result, systemImage: "chevron.right", showsProjectName: true)
                 }
-                Spacer(minLength: 0)
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// A project result: title, underlined where the query matched, plus the project's session
+    /// count — the same figure `FleetListScreen.projectHeader` shows. There is no existing
+    /// project row to reuse the way `.session` reuses `FleetListScreen.row`, so this stays its
+    /// own, simpler shape.
+    private func projectRow(_ result: SearchResult) -> some View {
+        Button {
+            onTap(result)
+        } label: {
+            HStack(spacing: 8) {
+                nameRowContent(result, systemImage: "folder", showsProjectName: false)
+                if let count = projects.first(where: { $0.path == result.projectPath })?
+                    .sessions.count {
+                    Text("\(count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The icon-plus-title shape shared by a project row and a session row's closed-session
+    /// fallback. Not a `Button` itself — both callers wrap their own, since a project row adds
+    /// a trailing count outside this content and a session row's fallback does not.
+    private func nameRowContent(
+        _ result: SearchResult, systemImage: String, showsProjectName: Bool
+    ) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(Self.highlighted(result.title, ranges: result.highlightedRanges))
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.primary)
+                if showsProjectName {
+                    Text(result.projectName).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The live `WireSession` a `.session` result names, found by id rather than trusted from
+    /// the result itself — pulled out as a pure lookup so the "found it live" and "it closed
+    /// meanwhile" branches can both be asserted without rendering anything.
+    static func liveSession(id: UUID, in projects: [WireProject]) -> WireSession? {
+        projects.flatMap(\.sessions).first { $0.id == id }
     }
 
     /// A transcript hit: name, then `project · relative time`, then the two-sentinel snippet —

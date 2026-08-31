@@ -42,6 +42,11 @@ struct FleetListScreen: View {
         let title: String
     }
 
+    /// What a tapped search result's round trip to the Mac said when it did not open —
+    /// `nil` while nothing has failed. Holds the message text rather than the raw
+    /// `FleetRequestError`, so the alert below has nothing left to switch on.
+    @State private var searchOpenFailure: String?
+
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -80,7 +85,8 @@ struct FleetListScreen: View {
                     }
                 } else {
                     SessionSearchResults(
-                        results: search.results, footer: search.footer, onTap: handleSearchTap
+                        results: search.results, footer: search.footer,
+                        projects: model.fleet.projects, onTap: handleSearchTap
                     )
                 }
             }
@@ -177,6 +183,17 @@ struct FleetListScreen: View {
             ) {
                 Button("Unpair", role: .destructive) { model.unpair() }
             }
+            // `item:`-shaped for the same reason renaming and closing are: the message text is
+            // computed once, into `searchOpenFailure`, so the alert itself has nothing left to
+            // switch on and cannot outlive the tap that set it.
+            .alert("Couldn't Open Conversation", isPresented: Binding(
+                get: { searchOpenFailure != nil },
+                set: { if !$0 { searchOpenFailure = nil } }
+            )) {
+                Button("OK", role: .cancel) { searchOpenFailure = nil }
+            } message: {
+                Text(searchOpenFailure ?? "")
+            }
             // The candidate wiring. `FleetModel` deliberately does not push these itself — see
             // `PhoneSearchCandidates`' own doc comment — so this screen rebuilds them on every
             // moment either input can change: first appearance, a fleet event (a session
@@ -251,11 +268,46 @@ struct FleetListScreen: View {
             model.requestOpenConversation(
                 conversationID: conversationID, projectPath: result.projectPath
             ) { outcome in
-                guard case .success(let id) = outcome else { return }
-                if let offset = result.offset {
-                    model.timelineModel(for: id).openAt(offset)
+                switch outcome {
+                case .success(let id):
+                    if let offset = result.offset {
+                        model.timelineModel(for: id).openAt(offset)
+                    }
+                    path.append(id)
+                case .failure(let error):
+                    // Task 7 was re-opened specifically to split `unknown_conversation` from
+                    // `launch_failed` — see `TimelineFrames.FleetRequestError`'s doc comment —
+                    // and a tap that folded every code (plus `.disconnected`) into silence made
+                    // that split unreachable from here. Surfaced, not silent.
+                    searchOpenFailure = Self.searchOpenFailureMessage(
+                        for: error, macName: model.macName
+                    )
                 }
-                path.append(id)
+            }
+        }
+    }
+
+    /// Copy for a tapped search result's conversation that would not open — named the same
+    /// three ways the failure itself is: unreachable, not found, and found-but-refused. An
+    /// unrecognised `.server` code falls to the generic line rather than staying silent, the
+    /// same rule `SessionTimelineModel.message(for:)` follows for the same reason.
+    ///
+    /// Internal rather than private so the mapping can be asserted directly — the same
+    /// reasoning `SessionTimelineModel.message(for:)` gives for its own visibility: several of
+    /// these need a Mac in a state no test on this side can put it in.
+    static func searchOpenFailureMessage(for error: FleetRequestError, macName: String) -> String {
+        switch error {
+        case .disconnected:
+            return "Couldn't reach \(macName). Check that it's awake and on the same network."
+        case .server(let code):
+            switch code {
+            case "unknown_conversation":
+                return "\(macName) couldn't find that conversation. It may have been removed."
+            case "launch_failed":
+                return "\(macName) found that conversation but couldn't open it — the account "
+                    + "it needs may be missing or signed out."
+            default:
+                return "\(macName) couldn't open that conversation."
             }
         }
     }
@@ -435,7 +487,7 @@ struct FleetListScreen: View {
 
     private func sessionRow(_ session: WireSession) -> some View {
         NavigationLink(value: session.id) {
-            row(session)
+            Self.row(session)
         }
         .listRowInsets(Self.rowInsets)
         // `allowsFullSwipe: false`, which is the whole safety story for this gesture. A full
@@ -534,7 +586,15 @@ struct FleetListScreen: View {
     /// that did not. The terminal idiom is deliberate (see the headers' `.monospaced()`), so
     /// it is stated where it has to hold rather than inherited from a container that cannot
     /// be relied on to pass it down.
-    private func row(_ session: WireSession) -> some View {
+    ///
+    /// `static`, and not `private` — the same reasoning `rowInsets` above already gives, and
+    /// for the same reader: `SessionSearchResults` reuses this row outright for a `.session`
+    /// result rather than drawing a second, thinner one that cannot show `waitingFor`.
+    /// `highlighted` is empty for the plain fleet list, where nothing has matched a query, and
+    /// carries `SearchResult.highlightedRanges` when a search result calls this — routed
+    /// through `SessionSearchResults.highlighted`, the one place that turns a range into
+    /// underline styling, so a session row and a name row agree on what "matched" looks like.
+    static func row(_ session: WireSession, highlighted ranges: [Range<String.Index>] = []) -> some View {
         HStack(spacing: 8) {
             SessionStatusGlyph(session: session)
             // Gated on `activity` existing, not just on the flag: a fresh pairing (or a
@@ -549,7 +609,7 @@ struct FleetListScreen: View {
                     .accessibilityHidden(true)   // `SessionStatusGlyph.label` already says it
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.title)
+                Text(SessionSearchResults.highlighted(session.title, ranges: ranges))
                     .font(.system(.body, design: .monospaced))
                 if let waitingFor = session.waitingFor {
                     Text(waitingFor).font(.caption).foregroundStyle(.orange)
