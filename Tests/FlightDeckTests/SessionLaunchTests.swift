@@ -16,6 +16,7 @@ final class SessionLaunchTests: XCTestCase {
     func testLaunchesClaudeBoundToSessionUUID() {
         let provider = CapturingProvider()
         let store = SessionStore(provider: provider)
+        store.display = DrawableDisplay()
         let session = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
 
         let input = try? XCTUnwrap(provider.configs.first?.initialInput)
@@ -28,6 +29,7 @@ final class SessionLaunchTests: XCTestCase {
     func testStillLaunchesTheShellAsTheCommand() {
         let provider = CapturingProvider()
         let store = SessionStore(provider: provider)
+        store.display = DrawableDisplay()
         store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         XCTAssertEqual(provider.configs.first?.command, ShellResolver.resolve())
     }
@@ -41,6 +43,7 @@ final class SessionLaunchTests: XCTestCase {
         ]
         let provider = CapturingProvider()
         let store = SessionStore(provider: provider, persistence: nil, preferences: preferences)
+        store.display = DrawableDisplay()
 
         store.newSession(in: URL(fileURLWithPath: "/tmp", isDirectory: true))
 
@@ -58,6 +61,7 @@ final class SessionLaunchTests: XCTestCase {
         )
         let provider = CapturingProvider()
         let store = SessionStore(provider: provider, persistence: nil, preferences: preferences)
+        store.display = DrawableDisplay()
 
         store.newSession(in: URL(fileURLWithPath: "/tmp", isDirectory: true))
 
@@ -71,6 +75,7 @@ final class SessionLaunchTests: XCTestCase {
         preferences.preferences.shell.shellOverride = "/bin/fish"
         let provider = CapturingProvider()
         let store = SessionStore(provider: provider, persistence: nil, preferences: preferences)
+        store.display = DrawableDisplay()
 
         store.newSession(in: URL(fileURLWithPath: "/tmp", isDirectory: true))
 
@@ -82,6 +87,7 @@ final class SessionLaunchTests: XCTestCase {
         preferences.preferences.shell.environment = ["FOO": "bar"]
         let provider = CapturingProvider()
         let store = SessionStore(provider: provider, persistence: nil, preferences: preferences)
+        store.display = DrawableDisplay()
 
         store.newSession(in: URL(fileURLWithPath: "/tmp", isDirectory: true))
 
@@ -91,6 +97,7 @@ final class SessionLaunchTests: XCTestCase {
     func testStoreWithoutPreferencesStillLaunches() {
         let provider = CapturingProvider()
         let store = SessionStore(provider: provider, persistence: nil)
+        store.display = DrawableDisplay()
         store.newSession(in: URL(fileURLWithPath: "/tmp", isDirectory: true))
         XCTAssertTrue(provider.configs.last?.initialInput?.hasPrefix("claude --session-id") == true)
     }

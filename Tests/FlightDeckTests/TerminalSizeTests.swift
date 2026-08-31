@@ -21,7 +21,9 @@ final class TerminalSizeTests: XCTestCase {
     /// rather than delivered. `restore()` is called by the caller, not here, so a test can
     /// install the recorder before any session exists.
     private func makeStore(_ persistence: FakePersistence) -> SessionStore {
-        SessionStore(provider: StubProvider(), persistence: persistence)
+        let store = SessionStore(provider: StubProvider(), persistence: persistence)
+        store.display = DrawableDisplay()
+        return store
     }
 
     func testRestoredSessionIsSizedFromTheSnapshot() {

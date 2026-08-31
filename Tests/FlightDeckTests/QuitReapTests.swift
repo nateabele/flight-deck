@@ -162,6 +162,7 @@ final class QuitReapTests: XCTestCase {
 
     func testQuitWithNoSessionsIsANoOp() async {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.display = DrawableDisplay()
         await store.reapAllForQuit(budget: 1)
         XCTAssertTrue(true)
     }

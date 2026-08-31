@@ -326,6 +326,7 @@ final class CodexResumeTests: XCTestCase {
         let provider = RecordingProvider()
         retained.append(provider)
         let store = SessionStore(provider: provider, persistence: persistence)
+        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         // Never the user's real `~/.codex/session_index.jsonl`: restoring a codex session
         // below builds a real `CodexStack`, whose `CodexNameWatcher` would otherwise tail it.

@@ -45,6 +45,7 @@ final class AgentRoutingTests: XCTestCase {
         let provider = RecordingProvider()
         retainedProviders.append(provider)
         let store = SessionStore(provider: provider, persistence: nil)
+        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         return (store, provider)

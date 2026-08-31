@@ -162,6 +162,10 @@ final class CodexLaunchFailureTests: XCTestCase {
         // a real `CodexStack`, whose `CodexNameWatcher` would otherwise tail the user's home.
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = reporter
+        // These tests exercise codex launch-failure logic, not display behaviour: without this,
+        // `createSession`'s `canCreateTerminal` guard (R1) makes every one of them depend on
+        // whether the host machine's real display happens to be drawable right now.
+        store.display = DrawableDisplay()
         return (store, provider)
     }
 
