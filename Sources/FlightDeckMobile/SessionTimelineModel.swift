@@ -415,6 +415,15 @@ final class SessionTimelineModel {
         }
     }
 
+    /// A fire-and-forget send for `PlanReviewModel`'s two commands. Both are answered by a
+    /// `session.planGate` update the store folds on its own — an `.annotatePlan` bumps
+    /// `annotationCount`, a `.resolvePlan` clears the gate — so there is no reply here for a
+    /// completion to carry, unlike `sendPrompt` above, whose completion is what starts the
+    /// outbox row's own retirement.
+    func sendPlanCommand(_ command: FleetCommand) {
+        fleet.sendPrompt(command) { _ in }
+    }
+
     /// How long a blocked screen waits between asking again for the record that says what it
     /// is blocked ON, and how many times.
     ///
