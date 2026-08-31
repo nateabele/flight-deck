@@ -68,4 +68,58 @@ final class PhoneSearchCandidatesTests: XCTestCase {
         )
         XCTAssertEqual(candidates.first { $0.name == "t" }?.lastActivity, stamp)
     }
+
+    /// The whole reason this function takes a catalogue: an unclaimed conversation for an
+    /// open project must actually surface, as a `.conversation` candidate carrying the
+    /// conversation id, a project name derived from the path (not the raw path itself), and
+    /// `.distantPast` recency. If the append loop were deleted, or its `where` clause
+    /// inverted, this conversation would never appear and this assertion would fail.
+    func testAnUnclaimedConversationInAnOpenProjectAppearsAsAConversationCandidate() {
+        let candidates = PhoneSearchCandidates.build(
+            projects: [WireProject(id: UUID(), name: "flight-deck", path: "/proj")],
+            catalogue: WireConversationCatalogue(
+                conversations: [WireConversation(
+                    id: "abc123", name: "old chat", projectPath: "/proj"
+                )],
+                sessionActivity: [:]
+            )
+        )
+
+        let candidate = candidates.first { $0.name == "old chat" }
+        XCTAssertEqual(candidate?.kind, .conversation("abc123"))
+        XCTAssertEqual(candidate?.projectName, "proj")
+        XCTAssertEqual(candidate?.lastActivity, .distantPast)
+    }
+
+    /// A project row carries its newest session's activity, not its first or its last in
+    /// list order — so a project whose fresher session is listed FIRST still sorts as fresh.
+    /// The fresher session is deliberately first here: were the implementation to regress
+    /// from `max` to "whichever session is processed last wins", this ordering is exactly
+    /// what would expose it (a same-order regression would not).
+    func testAProjectCandidateCarriesTheNewerOfItsTwoSessionsActivity() {
+        let older = UUID()
+        let newer = UUID()
+        let olderStamp = Date(timeIntervalSince1970: 1_000)
+        let newerStamp = Date(timeIntervalSince1970: 2_000)
+        let candidates = PhoneSearchCandidates.build(
+            projects: [WireProject(
+                id: UUID(), name: "flight-deck", path: "/proj",
+                sessions: [
+                    WireSession(id: newer, title: "new", agent: "claude"),
+                    WireSession(id: older, title: "old", agent: "claude"),
+                ]
+            )],
+            catalogue: WireConversationCatalogue(
+                conversations: [],
+                sessionActivity: [
+                    older.uuidString: olderStamp,
+                    newer.uuidString: newerStamp,
+                ]
+            )
+        )
+
+        XCTAssertEqual(
+            candidates.first { $0.kind == .project }?.lastActivity, newerStamp
+        )
+    }
 }
