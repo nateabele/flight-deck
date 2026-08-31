@@ -281,7 +281,12 @@ final class CodexLaunchFailureTests: XCTestCase {
     func testACreatedCodexTabIsPinnedToTheThreadCodexNamed() async {
         let (store, provider) = makeStore()
         let transport = ScriptedTransport()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: transport)), for: .codex, account: nil)
+        // `/r/t.jsonl` above does not exist on disk; stubbed true so this exercises the full
+        // four-call sequence rather than `prepare`'s history-contract check.
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: transport), rolloutExists: { _ in true }),
+            for: .codex, account: nil
+        )
 
         let result = await store.createSession(agent: .codex, in: NSTemporaryDirectory())
 
@@ -325,8 +330,12 @@ final class CodexLaunchFailureTests: XCTestCase {
     /// assertions rather than stalling the suite.
     func testACrashedAppServerIsForgottenSoTheNextSessionRespawns() async {
         let (store, _) = makeStore()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport())),
-                              for: .codex, account: nil)
+        // `/r/t.jsonl` above does not exist on disk; stubbed true so both creations run the
+        // full four-call sequence rather than tripping `prepare`'s history-contract check.
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport()), rolloutExists: { _ in true }),
+            for: .codex, account: nil
+        )
         let first = await store.createSession(agent: .codex, in: NSTemporaryDirectory())
         guard case .success = first else { return XCTFail("expected success: \(first)") }
         let before = store.runtime(for: .codex, account: nil) as AnyObject
@@ -350,8 +359,11 @@ final class CodexLaunchFailureTests: XCTestCase {
     /// process, so this test observes the lifetime without ever running `codex`.
     func testTheStackIsBuiltOnFirstCodexUseAndDroppedWithTheLastCodexTab() async {
         let (store, _) = makeStore()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport())),
-                              for: .codex, account: nil)
+        // `/r/t.jsonl` above does not exist on disk; stubbed true for the same reason as above.
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport()), rolloutExists: { _ in true }),
+            for: .codex, account: nil
+        )
 
         XCTAssertFalse(store.hasCodexStackForTesting, "a store with no codex tab spawns nothing")
         _ = store.newSession(in: URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true))
