@@ -70,7 +70,11 @@ public enum SearchRanker {
 
         var grouped: [SearchResult] = []
         for group in groups {
-            for (offset, hit) in group.prefix(maxMatchesPerConversation).enumerated() {
+            // `position`, not `offset` — this is an enumeration index into the group, and
+            // `hit.offset` two lines below is a byte offset into the transcript. Both are
+            // legitimately named `offset` on their own, so this file is the one place they
+            // would sit beside each other under the same name if either kept it.
+            for (position, hit) in group.prefix(maxMatchesPerConversation).enumerated() {
                 grouped.append(SearchResult(
                     // `hit.rowID` is `message.id`, unique per row unlike `(conversationID,
                     // timestamp)` — see the `TranscriptHit.rowID` doc comment for why that
@@ -85,7 +89,7 @@ public enum SearchRanker {
                     highlightedRanges: [],
                     snippet: hit.snippet,
                     conversationID: hit.conversationID,
-                    isContinuation: offset > 0,
+                    isContinuation: position > 0,
                     offset: hit.offset
                 ))
             }
