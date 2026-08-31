@@ -430,6 +430,85 @@ final class SessionTimelineScreenTests: XCTestCase {
         XCTAssertNil(SessionTimelineScreen.pairedResult(for: items[0], in: items))
     }
 
+    // MARK: The plan gate
+
+    /// The happy path: the gate names a call, that call is `ExitPlanMode`, and its own input
+    /// carries the plan text the gate itself does not (see `WirePlanGate.plan`'s own comment).
+    func testTranscriptPlanReadsExitPlanModesOwnInput() {
+        let gate = WirePlanGate(callID: "toolu_plan1", tier: "verdict", plan: nil,
+                                startedAt: "t", annotationCount: 0)
+        let items = [exitPlanModeCall(id: "2000#0", callID: "toolu_plan1", plan: "# Title\n\nDo it.")]
+
+        XCTAssertEqual(
+            SessionTimelineScreen.transcriptPlan(for: gate, in: items), "# Title\n\nDo it."
+        )
+    }
+
+    /// The call the gate names has not reached this feed's window — a page boundary, or a
+    /// gate opened before the phone's earliest loaded page. `nil`, never another call's plan.
+    func testTranscriptPlanIsNilWhenTheNamedCallIsNotHeld() {
+        let gate = WirePlanGate(callID: "toolu_missing", tier: "verdict", plan: nil,
+                                startedAt: "t", annotationCount: 0)
+        let items = [exitPlanModeCall(id: "2000#0", callID: "toolu_plan1", plan: "A.")]
+
+        XCTAssertNil(SessionTimelineScreen.transcriptPlan(for: gate, in: items))
+    }
+
+    /// A call id is only unique per agent turn, not globally — a `Bash` call that happens to
+    /// share the gate's `callID` must not be mistaken for the plan call. `ExitPlanMode` is the
+    /// other half of the match.
+    func testTranscriptPlanIgnoresACallWithTheSameIdButTheWrongTool() {
+        let gate = WirePlanGate(callID: "toolu_shared", tier: "verdict", plan: nil,
+                                startedAt: "t", annotationCount: 0)
+        let items = [toolCall(id: "2000#0", callID: "toolu_shared")]
+
+        XCTAssertNil(SessionTimelineScreen.transcriptPlan(for: gate, in: items))
+    }
+
+    /// The Mac cuts an oversized tool call at its byte cap wherever that lands, so the JSON
+    /// can be structurally incomplete by design (see `TimelineItem.Body.text`'s own comment).
+    /// A body that fails to parse falls back to `nil`, not a crash.
+    func testTranscriptPlanIsNilWhenTheBodyDoesNotParse() {
+        let gate = WirePlanGate(callID: "toolu_plan1", tier: "verdict", plan: nil,
+                                startedAt: "t", annotationCount: 0)
+        let items = [
+            TimelineItem(
+                id: "2000#0", kind: .toolCall, status: .complete,
+                body: TimelineItem.Body(
+                    text: "{\"plan\": \"truncat", tool: "ExitPlanMode", callID: "toolu_plan1"
+                )
+            ),
+        ]
+
+        XCTAssertNil(SessionTimelineScreen.transcriptPlan(for: gate, in: items))
+    }
+
+    /// The banner's subtitle, read off the gate's own `startedAt`. Both timestamps are
+    /// hours (or days) in the past rather than minutes, so a slow test run cannot tip the
+    /// answer over a unit boundary between building the fixture and asserting on it.
+    func testElapsedTextReadsAFractionalTimestamp() {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let startedAt = formatter.string(from: Date().addingTimeInterval(-7200))
+
+        XCTAssertEqual(SessionTimelineScreen.elapsedText(since: startedAt), "Started 2 hours ago")
+    }
+
+    /// The fallback formatter, for a timestamp with no fractional seconds at all.
+    func testElapsedTextFallsBackToAWholeSecondTimestamp() {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        let startedAt = formatter.string(from: Date().addingTimeInterval(-172_800))
+
+        XCTAssertEqual(SessionTimelineScreen.elapsedText(since: startedAt), "Started 2 days ago")
+    }
+
+    /// Neither formatter can parse it — the banner still draws its headline with no subtitle
+    /// under it, rather than a crash.
+    func testElapsedTextIsNilForSomethingThatIsNotATimestampAtAll() {
+        XCTAssertNil(SessionTimelineScreen.elapsedText(since: "not-a-date"))
+    }
+
     /// Two calls in flight, each answered after the other one was issued, with the results
     /// arriving in the opposite order to the calls. `items[0]`'s output is the LAST row and
     /// `items[1]`'s is the first result in the list, so an implementation that took position
@@ -467,6 +546,21 @@ final class SessionTimelineScreenTests: XCTestCase {
         TimelineItem(
             id: id, kind: .toolResult, status: .complete,
             body: TimelineItem.Body(text: "nothing to commit", tool: "Bash", callID: callID)
+        )
+    }
+
+    /// An `ExitPlanMode` call whose own input carries the plan text — the shape
+    /// `transcriptPlan(for:in:)` reads for the `verdict` tier, where the gate itself has none.
+    private func exitPlanModeCall(id: String, callID: String, plan: String) -> TimelineItem {
+        let escaped = plan
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        return TimelineItem(
+            id: id, kind: .toolCall, status: .complete,
+            body: TimelineItem.Body(
+                text: "{\"plan\": \"\(escaped)\"}", tool: "ExitPlanMode", callID: callID
+            )
         )
     }
 
