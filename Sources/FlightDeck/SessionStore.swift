@@ -126,8 +126,12 @@ final class SessionStore: ObservableObject {
     /// The process table the orphan sweep reads. Settable so tests can script it.
     var processInspector: ProcessInspecting = ProcessTree()
 
-    /// Injected for the reason `processInspector` is — see `DisplayInspecting`.
-    var display: DisplayInspecting = DisplayState()
+    /// Injected for the reason `processInspector` is — see `DisplayInspecting`. Defaults to
+    /// `AlwaysDrawableDisplay()`, NOT the real `DisplayState()` (see that type's doc comment
+    /// for why the default is inverted from `processInspector`'s). `FlightDeckApp` injects the
+    /// real probe after construction; that injection is what makes `canCreateTerminal` mean
+    /// anything outside tests — removing it silently disables the guard.
+    var display: DisplayInspecting = AlwaysDrawableDisplay()
 
     /// This run's own identity, stamped into every snapshot as `owner`. Computed once: it
     /// cannot change for the life of the process, and `persist()` runs on every mutation —

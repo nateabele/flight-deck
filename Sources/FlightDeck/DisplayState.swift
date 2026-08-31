@@ -29,3 +29,27 @@ struct DisplayState: DisplayInspecting {
     /// `boolean_t` is a `UInt32`, hence the explicit comparison.
     var isDrawable: Bool { CGDisplayIsActive(CGMainDisplayID()) != 0 }
 }
+
+/// `SessionStore.display`'s default, deliberately permissive rather than deliberately real —
+/// the opposite choice from `processInspector`, which defaults to the real `ProcessTree()`.
+/// `ProcessTree` is a deterministic query that never gates control flow, so a real default
+/// there costs nothing. `display` gates whether creation is allowed to proceed at all, and its
+/// answer depends on whether a monitor happens to be awake on the machine running the code —
+/// something almost no test intends to depend on, and the one place that did depend on it
+/// (`CodexLaunchFailureTests.testClosingTheLastTabDoesNotKillAnAppServerACreationIsStillUsing`)
+/// didn't fail when the display went to sleep, it **hung**, because the guard's `.failure`
+/// returns before `GatedAdapter.prepare()` ever runs. A permissive default means every one of
+/// the ~50 test files that construct a `SessionStore` with a real provider gets a working
+/// terminal without asking for one, and the guard is only exercised by tests that inject
+/// `DisplayState()` (or another false-returning stub) on purpose — see
+/// `DisplayDrawableGuardTests`.
+///
+/// **This is the load-bearing seam for the whole feature.** `FlightDeckApp` injects the real
+/// `DisplayState()` after constructing its `SessionStore`; that one line is what makes the
+/// guard mean anything in production. Remove that wiring and `canCreateTerminal` is
+/// unconditionally `true` again — the original bug (an inert tab with no shell, silently
+/// persisted and broadcast) returns, and no test will notice, because every test that would
+/// have caught it also stopped injecting the real probe.
+struct AlwaysDrawableDisplay: DisplayInspecting {
+    var isDrawable: Bool { true }
+}
