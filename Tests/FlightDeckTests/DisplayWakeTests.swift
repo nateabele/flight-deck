@@ -158,4 +158,21 @@ final class DisplayWakeTests: XCTestCase {
         display.set(false)
         XCTAssertEqual(store.respawnSurface(for: session.id), .displayAsleep)
     }
+
+    /// The wiring that makes the wake real, mirroring `testTheRealProbeIsWiredIn`. Deleting
+    /// the assignment in `convenience init` is otherwise undetectable: the inert default
+    /// silently turns every sleeping display back into a refusal, and no test fails.
+    func testTheRealWakerIsWiredIn() {
+        let store = SessionStore(ghostty: nil, persistence: nil)
+        XCTAssertTrue(store.displayWaker is DisplayWaker)
+    }
+
+    /// The waker must poll the same probe the guard reads. Wired to a default-constructed
+    /// `DisplayState()` instead, it would answer about a different display on a multi-display
+    /// Mac, and the two could disagree indefinitely.
+    func testTheWiredWakerPollsTheStoresOwnProbe() throws {
+        let store = SessionStore(ghostty: nil, persistence: nil)
+        let waker = try XCTUnwrap(store.displayWaker as? DisplayWaker)
+        XCTAssertTrue(waker.display is DisplayState)
+    }
 }

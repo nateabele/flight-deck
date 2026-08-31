@@ -1215,6 +1215,12 @@ final class SessionStore: ObservableObject {
         // while the display is asleep, reintroducing the original bug. Removing this line
         // silently disables the guard for every session this store ever creates.
         display = DisplayState()
+        // Beside `display` and load-bearing in the same way: the default waker is inert, so
+        // without this line every sleeping display is a refusal again and no test notices.
+        // `DisplayWakerTests` covers the waker; `testTheRealWakerIsWiredIn` covers this line.
+        // Built around the probe just assigned, so the thing that decides "drawable" and the
+        // thing that waits for it can never be asking about different displays.
+        displayWaker = DisplayWaker(display: display)
         self.notifier = notifier
         // Both assigned before `startStatusWatching()` below, which reads them when it builds
         // each account's watcher — setting either afterwards would leave those watchers
