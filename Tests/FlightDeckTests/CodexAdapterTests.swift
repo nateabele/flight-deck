@@ -29,6 +29,27 @@ final class CodexAdapterTests: XCTestCase {
         }
     }
 
+    /// Answers `thread/start` with a `thread` object that carries no `path` at all — the
+    /// "unusable path" half of the brief's requirement, distinct from a path that is present
+    /// but whose file `rolloutExists` reports missing. Kept separate from `ScriptedTransport`
+    /// because that one always emits `path`.
+    private final class PathlessTransport: CodexTransport {
+        var onLine: ((String) -> Void)?
+        private(set) var methods: [String] = []
+
+        func send(_ line: String) {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let method = obj["method"] as? String, let id = obj["id"] as? Int else { return }
+            methods.append(method)
+            switch method {
+            case "thread/start":
+                onLine?(#"{"id":\#(id),"result":{"thread":{"id":"01a01269-baa6-7493-8d15-8fa21bcb602b"}}}"#)
+            default:
+                onLine?(#"{"id":\#(id),"result":{}}"#)
+            }
+        }
+    }
+
     private func makeAdapter() -> (CodexAdapter, ScriptedTransport) {
         let t = ScriptedTransport()
         // Every fixture's `thread["path"]` is a fake, non-existent path (`/r/<id>.jsonl`), so
@@ -144,6 +165,49 @@ final class CodexAdapterTests: XCTestCase {
         _ = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
 
         XCTAssertEqual(t.methods, ["thread/start", "thread/name/set", "thread/archive", "thread/unarchive"])
+    }
+
+    /// Pins the SEAM'S OWN default, not a stub of it — the only thing standing between
+    /// `prepare`'s history-contract check and always-true. Every other test in this file
+    /// (deliberately) overrides `rolloutExists`, and `CodexIntegrationTests`'s coverage of the
+    /// real default needs a live codex and skips without one, so this is the only place in the
+    /// hermetic suite that would catch the production closure being replaced with
+    /// `{ _ in true }`. Exercised directly against `rolloutExists` rather than through
+    /// `prepare`, because `prepare` has no other vantage point to observe it from.
+    func testTheProductionRolloutExistsDefaultChecksTheRealFilesystem() throws {
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport()))
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let real = dir.appendingPathComponent("codex-adapter-rollout-\(UUID().uuidString).jsonl")
+        let missing = dir.appendingPathComponent("codex-adapter-rollout-\(UUID().uuidString).jsonl")
+        try Data("{}".utf8).write(to: real)
+        defer { try? FileManager.default.removeItem(at: real) }
+
+        XCTAssertTrue(adapter.rolloutExists(real),
+                      "a rollout actually written to disk must read as present")
+        XCTAssertFalse(adapter.rolloutExists(missing),
+                       "a sibling path nothing ever wrote must read as absent, not present")
+    }
+
+    /// The other half of "absent or unusable" the brief calls out: a `thread/start` result
+    /// whose `thread` object carries no `path` key at all, as opposed to a `path` that is
+    /// present but whose rollout `rolloutExists` reports missing (the case above). Written so
+    /// that rewriting the guard as `thread["path"] as? String ?? ""` would fail this test.
+    func testPrepareDiagnosesAThreadStartResultWithNoRolloutPathAtAll() async {
+        let t = PathlessTransport()
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+        let session = Session(title: "my tab", workingDirectory: "/w/a")
+
+        do {
+            _ = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+            XCTFail("a thread whose rollout path codex never named is not resumable")
+        } catch AgentLaunchError.prepareFailed {
+            // expected — codex's own error must not reach the caller here.
+        } catch {
+            XCTFail("expected AgentLaunchError.prepareFailed, not codex's raw \(error)")
+        }
+        XCTAssertEqual(t.methods, ["thread/start", "thread/name/set"],
+                       "an absent path must be caught before thread/archive runs, same as a "
+                       + "path whose rollout does not exist")
     }
 
     func testLaunchCommandResumesTheBoundThread() async throws {
