@@ -190,11 +190,30 @@ struct FleetListScreen: View {
     }
 
     private func refreshSearchCandidates() {
-        search.candidatesChanged(PhoneSearchCandidates.build(
-            projects: model.fleet.projects,
-            catalogue: model.conversationCatalogue
-                ?? WireConversationCatalogue(conversations: [], sessionActivity: [:])
+        search.candidatesChanged(Self.searchCandidates(
+            projects: model.fleet.projects, catalogue: model.conversationCatalogue
         ))
+    }
+
+    /// What actually gets composed from which inputs — pulled out as a `static func`, the same
+    /// as `agentGroups(in:)` and `localDestination(for:in:)` above, so a fleet update and a
+    /// catalogue reply can each be checked to reach `PhoneSearchCandidates.build` without
+    /// rendering the screen. The `.onChange` triggers that call this on a fleet or catalogue
+    /// change stay build-verified only — SwiftUI's own reaction to a `@State` mutation isn't
+    /// independently observable from a unit test — but *this* is the part that can actually be
+    /// wrong: the wrong projects, the wrong catalogue, or a catalogue reply silently dropped.
+    ///
+    /// `catalogue` is nil-coalesced to empty here rather than at the call site, matching
+    /// `FleetModel.conversationCatalogue`'s own optionality — there is no
+    /// `WireConversationCatalogue.empty` static, and a phone that has not yet heard back from
+    /// the Mac must still rank the names it already has.
+    static func searchCandidates(
+        projects: [WireProject], catalogue: WireConversationCatalogue?
+    ) -> [NameCandidate] {
+        PhoneSearchCandidates.build(
+            projects: projects,
+            catalogue: catalogue ?? WireConversationCatalogue(conversations: [], sessionActivity: [:])
+        )
     }
 
     /// The two tap outcomes that resolve without a round trip to the Mac — pulled out as a

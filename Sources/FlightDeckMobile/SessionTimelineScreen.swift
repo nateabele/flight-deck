@@ -210,10 +210,11 @@ struct SessionTimelineScreen: View {
                 highlightedID = target
                 Task {
                     try? await Task.sleep(for: .milliseconds(1_500))
-                    // Guards against a second jump landing while the first is still fading —
-                    // clearing here would erase the SECOND highlight instead of the first.
-                    guard highlightedID == target else { return }
-                    withAnimation(.easeOut(duration: 0.4)) { highlightedID = nil }
+                    // `fadedHighlight` owns the guard against a second jump landing while the
+                    // first is still fading — see its own doc comment.
+                    withAnimation(.easeOut(duration: 0.4)) {
+                        highlightedID = Self.fadedHighlight(current: highlightedID, target: target)
+                    }
                 }
             }
         }
@@ -559,6 +560,21 @@ struct SessionTimelineScreen: View {
         guard let newest, newest != lastFollowed else { return nil }
         guard lastFollowed != nil else { return newest }
         return readerIsAtBottom ? newest : nil
+    }
+
+    // MARK: A search jump's fading highlight
+
+    /// What `highlightedID` becomes when a search jump's 1.5s fade timer fires, `target` being
+    /// the row that timer was armed for.
+    ///
+    /// **Owns the guard against a second jump landing mid-fade.** Both jumps write the same
+    /// `highlightedID`, so a timer that always cleared it would let the FIRST jump's timer
+    /// erase the SECOND jump's highlight — the reader taps a second result while the first is
+    /// still fading, and the row they just landed on goes dark under a timer that isn't even
+    /// its own. Clearing only when `current` still equals the timer's own `target` is what
+    /// keeps a later jump's highlight alive until ITS OWN timer fires.
+    static func fadedHighlight(current: String?, target: String) -> String? {
+        current == target ? nil : current
     }
 
     /// What the screen says about a fetch. Three phases, but the same phase means different
