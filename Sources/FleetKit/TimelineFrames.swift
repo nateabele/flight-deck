@@ -299,5 +299,12 @@ public enum FleetRequestError: Error, Equatable, Sendable {
     /// injection is resolving — try again in a moment), and `unanswerable` (a shape this Mac
     /// will not drive; see `PromptQuestion.unanswerable`). `unsupported_agent` and
     /// `unknown_session` keep the meanings `FleetCommand.prompt` gave them.
+    ///
+    /// Phone search adds `unknown_conversation` (no such id, from `.openConversation`) and
+    /// `launch_failed`: the conversation is real, but `SessionStore.openConversation`'s own
+    /// launch refused it — a dangling or relocated account, the same two states
+    /// `launchAccount`'s doc comment documents. Kept distinct from `unknown_conversation` on
+    /// purpose, so a phone can tell "no such conversation" from "found it, could not open it"
+    /// rather than folding both into one dead end.
     case server(code: String)
 }
