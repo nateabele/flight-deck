@@ -50,5 +50,11 @@ struct RootView: View {
                 }
             }
         }
+        // Sets the WINDOW's title, not a navigation bar's: on macOS `navigationTitle` on a
+        // `Window` scene's root view is what writes the title bar, and it re-applies on every
+        // body pass, so switching sessions retitles the window with no AppKit reach-through
+        // and nothing to keep in sync. Applied to the `NavigationSplitView` itself rather than
+        // to either column, which is the placement SwiftUI resolves to the window.
+        .navigationTitle(WindowTitle.text(project: store.currentProjectName))
     }
 }
