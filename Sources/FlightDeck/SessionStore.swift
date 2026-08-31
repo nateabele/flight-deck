@@ -852,6 +852,19 @@ final class SessionStore: ObservableObject {
     /// panel on screen. See `AgentLaunchFailureReporting`.
     var launchFailureReporter: AgentLaunchFailureReporting = NSAlertAgentLaunchFailureReporter()
 
+    /// Whether a terminal can be created *right now*. A precondition, deliberately: creating
+    /// and then discovering the failure is what produced tabs that looked real on the sidebar
+    /// and on the phone while being permanently inert.
+    ///
+    /// **Gated on having a provider, and that is load-bearing, not a convenience.** The
+    /// drawable is a requirement of *libghostty*, which is only involved when a provider
+    /// exists. Nearly every fixture in the suite builds a store with `provider: nil`, and those
+    /// fixtures create sessions and assert on them; without this clause a suite run that
+    /// happened to start while the display was asleep would refuse every one of them and fail
+    /// wholesale — the same shape of self-inflicted breakage that the `Session?` return type
+    /// caused in the superseded plan, arriving by a different route.
+    var canCreateTerminal: Bool { provider == nil || display.isDrawable }
+
     /// Test seam for frontmost-ness; production reads `NSApplication`.
     var appIsActive: () -> Bool = { NSApplication.shared.isActive }
 
@@ -1147,6 +1160,13 @@ final class SessionStore: ObservableObject {
     /// unchanged.
     @discardableResult
     func newSession(in url: URL, at index: Int? = nil, account explicit: UUID? = nil) -> Session {
+        guard canCreateTerminal else {
+            launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
+            // Un-inserted, exactly as the `launchAccount` failure path below does. The return
+            // type stays non-optional on purpose: making it `Session?` broke 340 tests, because
+            // nearly every fixture in the suite builds a store with a nil-returning provider.
+            return Session(title: "", workingDirectory: url.path)
+        }
         // Resolved before the title is minted, so a refusal does not burn a session number.
         let account: AgentAccount?
         switch launchAccount(for: .claude, project: url.path, choosing: explicit) {
@@ -1191,6 +1211,17 @@ final class SessionStore: ObservableObject {
     func createSession(
         agent: AgentID, in directory: String, at index: Int? = nil, account explicit: UUID? = nil
     ) async -> Result<UUID, AgentLaunchError> {
+        // Before anything else, covering both branches below: the codex branch calls
+        // `addSession` directly rather than routing through `newSession(in:)`, so it does not
+        // get that guard for free, and a codex tab created with the display asleep would
+        // otherwise be born just as inert as the bug this exists to fix. Reported through
+        // `launchFailureReporter` exactly as the neighbouring `launchAccount` failure branch
+        // does, just below.
+        guard canCreateTerminal else {
+            let error = AgentLaunchError.terminalUnavailable(displayAsleep: true)
+            launchFailureReporter.report(error)
+            return .failure(error)
+        }
         let url = URL(fileURLWithPath: directory, isDirectory: true)
         // FIRST, before a draft exists and before anything codex-shaped is touched. A login
         // that cannot launch must not mint a title, must not spawn an app-server to negotiate

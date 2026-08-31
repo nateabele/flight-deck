@@ -2,10 +2,7 @@
 import XCTest
 @testable import FlightDeck
 
-private final class StubProvider: SurfaceProvider {
-    func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? { nil }
-    func tick() {}
-}
+// `StubProvider` lives in its own file now — see that file's doc comment.
 
 private final class FakeInspector: ProcessInspecting, @unchecked Sendable {
     var living: Set<pid_t>
