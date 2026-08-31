@@ -39,17 +39,19 @@ struct DisplayState: DisplayInspecting {
 /// (`CodexLaunchFailureTests.testClosingTheLastTabDoesNotKillAnAppServerACreationIsStillUsing`)
 /// didn't fail when the display went to sleep, it **hung**, because the guard's `.failure`
 /// returns before `GatedAdapter.prepare()` ever runs. A permissive default means every one of
-/// the ~50 test files that construct a `SessionStore` with a real provider gets a working
-/// terminal without asking for one, and the guard is only exercised by tests that inject
-/// `DisplayState()` (or another false-returning stub) on purpose — see
+/// the 23 test files (75 call sites) that construct a `SessionStore` with a real provider gets
+/// a working terminal without asking for one, and the guard is only exercised by tests that
+/// inject `DisplayState()` (or another false-returning stub) on purpose — see
 /// `DisplayDrawableGuardTests`.
 ///
-/// **This is the load-bearing seam for the whole feature.** `FlightDeckApp` injects the real
-/// `DisplayState()` after constructing its `SessionStore`; that one line is what makes the
-/// guard mean anything in production. Remove that wiring and `canCreateTerminal` is
-/// unconditionally `true` again — the original bug (an inert tab with no shell, silently
-/// persisted and broadcast) returns, and no test will notice, because every test that would
-/// have caught it also stopped injecting the real probe.
+/// **This is the load-bearing seam for the whole feature.** `SessionStore`'s `convenience
+/// init(ghostty:...)` — the one production code actually calls — assigns the real
+/// `DisplayState()` immediately after `self.init(provider:...)`, before `seedInitialSession()`
+/// runs; that one line is what makes the guard mean anything in production. Remove it and
+/// `canCreateTerminal` is unconditionally `true` again — the original bug (an inert tab with
+/// no shell, silently persisted and broadcast) returns, and no test will notice, because every
+/// test that would have caught it also stopped injecting the real probe. `DisplayDrawableGuardTests
+/// .testTheRealProbeIsWiredIn` is the one test that exists specifically to catch that deletion.
 struct AlwaysDrawableDisplay: DisplayInspecting {
     var isDrawable: Bool { true }
 }

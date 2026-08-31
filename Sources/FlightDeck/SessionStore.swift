@@ -128,8 +128,9 @@ final class SessionStore: ObservableObject {
 
     /// Injected for the reason `processInspector` is — see `DisplayInspecting`. Defaults to
     /// `AlwaysDrawableDisplay()`, NOT the real `DisplayState()` (see that type's doc comment
-    /// for why the default is inverted from `processInspector`'s). `FlightDeckApp` injects the
-    /// real probe after construction; that injection is what makes `canCreateTerminal` mean
+    /// for why the default is inverted from `processInspector`'s). `convenience init(ghostty:...)`
+    /// below assigns the real probe immediately after `self.init(provider:...)`, before
+    /// `seedInitialSession()` can run; that injection is what makes `canCreateTerminal` mean
     /// anything outside tests — removing it silently disables the guard.
     var display: DisplayInspecting = AlwaysDrawableDisplay()
 
@@ -1108,6 +1109,15 @@ final class SessionStore: ObservableObject {
             persistence: persistence,
             preferences: preferences
         )
+        // Load-bearing: `display` defaults to the always-permissive `AlwaysDrawableDisplay()`
+        // so tests that construct a `SessionStore` don't have to stub it (see that type's doc
+        // comment). This line is what makes `canCreateTerminal` real outside tests, and it
+        // must run before `seedInitialSession()` below — that call creates a tab through this
+        // same store, so assigning the real probe any later (e.g. after this initializer
+        // returns, as `FlightDeckApp` used to) would let a cold launch seed an inert tab
+        // while the display is asleep, reintroducing the original bug. Removing this line
+        // silently disables the guard for every session this store ever creates.
+        display = DisplayState()
         self.notifier = notifier
         // Both assigned before `startStatusWatching()` below, which reads them when it builds
         // each account's watcher — setting either afterwards would leave those watchers
@@ -1332,6 +1342,13 @@ final class SessionStore: ObservableObject {
     func openSignInSession(
         for account: AgentAccount, in directory: String, using invocation: LoginInvocation
     ) -> Session {
+        guard canCreateTerminal else {
+            launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
+            // Same un-inserted-`Session` convention as `newSession(in:)`: this bypasses
+            // `createSession` entirely (see the doc comment above), so it needs its own guard
+            // rather than inheriting one — R1 missed this path.
+            return Session(title: "", workingDirectory: directory)
+        }
         let session = Session(
             title: nextSessionTitle(), workingDirectory: directory, agent: account.agent,
             accountID: account.id

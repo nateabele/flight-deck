@@ -63,6 +63,14 @@ final class DisplayDrawableGuardTests: XCTestCase {
         XCTAssertEqual(store.repos.flatMap(\.sessions).count, 1)
     }
 
+    /// The wiring that makes the guard real. Deleting the assignment in `convenience init`
+    /// used to be undetectable — the permissive default would silently disable the guard with
+    /// no test failing. This is that detector.
+    func testTheRealProbeIsWiredIn() {
+        let store = SessionStore(ghostty: nil, persistence: nil)
+        XCTAssertTrue(store.display is DisplayState)
+    }
+
     /// The message names the cause, because the cause is invisible and the fix is physical.
     func testTheMessageNamesTheDisplay() {
         XCTAssertEqual(

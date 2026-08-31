@@ -14,6 +14,10 @@ final class FleetServiceTests: XCTestCase {
     private var service: FleetService?
     private var client: FleetClient?
 
+    /// Same reason as `DisplayDrawableGuardTests`: `SessionStore.provider` is `weak`, so an
+    /// unretained `StubProvider` would deallocate mid-test.
+    private var retainedProviders: [StubProvider] = []
+
     override func tearDown() async throws {
         client?.disconnect()
         service?.stop()
@@ -187,5 +191,45 @@ final class FleetServiceTests: XCTestCase {
         }
         client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
         await fulfillment(of: [refused], timeout: 10)
+    }
+
+    /// A stub the display guard treats as asleep — same shape as `DisplayDrawableGuardTests`'s
+    /// own `Display`, redeclared here rather than shared because both files already keep their
+    /// own private test doubles.
+    private struct Display: DisplayInspecting { var isDrawable: Bool }
+
+    /// `.newSession` was answered from `SessionStore.canCreateTerminal` at the wire handler
+    /// (`FleetService.swift`'s `"terminal_unavailable"` code) with no test ever having sent the
+    /// command that reaches it — `DisplayDrawableGuardTests` covers the store-level guard, but
+    /// nothing covered the phone actually being told about a refusal. A provider is required:
+    /// with none, `canCreateTerminal` is unconditionally true and this command would succeed.
+    func testANewSessionFromThePhoneIsRefusedWhenTheDisplayCannotBeDrawnTo() async throws {
+        let provider = StubProvider()
+        retainedProviders.append(provider)
+        let store = SessionStore(provider: provider, persistence: nil)
+        store.display = Display(isDrawable: true)
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/target"))
+        let project = try XCTUnwrap(store.repos.first?.id)
+        // Flipped only after the project exists: the guard under test is `canCreateTerminal`,
+        // not the project lookup that runs ahead of it in the handler.
+        store.display = Display(isDrawable: false)
+
+        let harness = FleetTestHarness(store: store)
+        self.harness = harness
+        self.service = harness.service
+        let (_, key, port) = (harness.store, harness.key, try await harness.start())
+
+        let refused = expectation(description: "err")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.newSession(project: project, agent: nil, accountIndex: nil))
+            }
+            if case .err(_, "terminal_unavailable") = frame { refused.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [refused], timeout: 10)
+        XCTAssertEqual(store.repos.first?.sessions.count, 1, "no second tab was created")
     }
 }
