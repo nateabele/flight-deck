@@ -134,6 +134,12 @@ final class SessionStore: ObservableObject {
     /// anything outside tests — removing it silently disables the guard.
     var display: DisplayInspecting = AlwaysDrawableDisplay()
 
+    /// How a sleeping display is brought back before a terminal is created. Injected on the
+    /// same seam and for the same reason as `display`, but defaulting to the **inert**
+    /// `NeverWakingDisplay()`: a real waker in a test would physically wake the developer's
+    /// screen. `convenience init(ghostty:...)` assigns the real one.
+    var displayWaker: DisplayWaking = NeverWakingDisplay()
+
     /// This run's own identity, stamped into every snapshot as `owner`. Computed once: it
     /// cannot change for the life of the process, and `persist()` runs on every mutation —
     /// every tab switch, every rename, every registry tick.
@@ -870,6 +876,33 @@ final class SessionStore: ObservableObject {
     /// caused in the superseded plan, arriving by a different route.
     var canCreateTerminal: Bool { provider == nil || display.isDrawable }
 
+    /// Whether the wake should be attempted, for callers where it would be wrong.
+    enum DisplayWakePolicy { case wakeIfNeeded, never }
+
+    /// How long to block waiting for a woken display. 1.5s is more than four times the
+    /// slowest wake measured on this hardware (0.342s); past that the display is not coming
+    /// (clamshell, none attached) and blocking the main actor further buys nothing.
+    static let wakeTimeout: TimeInterval = 1.5
+
+    /// `canCreateTerminal`, but allowed to *make* it true.
+    ///
+    /// The four creation paths call this instead of reading `canCreateTerminal` directly, so
+    /// the wake happens in exactly one place. `canCreateTerminal` itself stays a pure query —
+    /// it is read in contexts that must not light up a screen, and a property getter with a
+    /// 350ms side effect would be a trap.
+    ///
+    /// **Blocking is deliberate.** Three of the four callers are synchronous and widely used;
+    /// `newSession(in:)`'s own comment records that changing its shape broke 340 tests. The
+    /// block only ever happens where the code currently fails outright, and only while the
+    /// display is asleep — which is to say, while nobody is looking at this Mac.
+    func ensureTerminalCreatable(_ policy: DisplayWakePolicy = .wakeIfNeeded) -> Bool {
+        if canCreateTerminal { return true }
+        // Reaching here means `provider != nil` (see `canCreateTerminal`), so the waker is
+        // only ever consulted on a path that genuinely needs libghostty.
+        guard policy == .wakeIfNeeded else { return false }
+        return displayWaker.wakeAndWaitForDrawable(timeout: Self.wakeTimeout)
+    }
+
     /// Whether this tab's terminal actually forked a shell.
     ///
     /// **Not `surfaces[id] != nil`.** `makeSurfaceView` returns a non-optional and its init is
@@ -1209,7 +1242,10 @@ final class SessionStore: ObservableObject {
         homeURL: URL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
     ) {
         guard repos.isEmpty else { return }
-        newSession(in: homeURL)
+        // `.never`: this runs inline inside `SessionStore.init`, so waking here would light
+        // the screen up on every unattended relaunch and block app startup while it waited.
+        // Seeding is the app starting, not someone asking for a terminal.
+        newSession(in: homeURL, waking: .never)
     }
 
     /// Claude's creation path, synchronous.
@@ -1237,8 +1273,11 @@ final class SessionStore: ObservableObject {
     /// project settings. Every other caller leaves it nil and gets the resolved default,
     /// unchanged.
     @discardableResult
-    func newSession(in url: URL, at index: Int? = nil, account explicit: UUID? = nil) -> Session {
-        guard canCreateTerminal else {
+    func newSession(
+        in url: URL, at index: Int? = nil, account explicit: UUID? = nil,
+        waking: DisplayWakePolicy = .wakeIfNeeded
+    ) -> Session {
+        guard ensureTerminalCreatable(waking) else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
             // Un-inserted, exactly as the `launchAccount` failure path below does. The return
             // type stays non-optional on purpose: making it `Session?` broke 340 tests, because
