@@ -1,4 +1,5 @@
 import XCTest
+import FleetKit
 @testable import FlightDeck
 
 /// Turning FTS5's marked-up snippet into something the row can draw.

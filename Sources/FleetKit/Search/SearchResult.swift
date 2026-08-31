@@ -97,12 +97,16 @@ public struct SearchResult: Identifiable, Equatable {
     /// over and over. It is a display flag only — a continuation is still an independently
     /// selectable row with its own id, so arrow-key navigation is unaffected.
     public var isContinuation: Bool = false
+    /// Where this match's message starts in its transcript, in bytes — `TranscriptHit.offset`,
+    /// carried through so an activator can ask `TimelineAnchor.around(offset)` for it. `nil`
+    /// for a name match, which names no line in particular.
+    public let offset: Int?
 
     public init(
         id: String, kind: SearchResultKind, title: String, projectName: String,
         projectPath: String, tier: MatchTier, recency: Date,
         highlightedRanges: [Range<String.Index>], snippet: String?, conversationID: String?,
-        isContinuation: Bool = false
+        isContinuation: Bool = false, offset: Int? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -115,5 +119,6 @@ public struct SearchResult: Identifiable, Equatable {
         self.snippet = snippet
         self.conversationID = conversationID
         self.isContinuation = isContinuation
+        self.offset = offset
     }
 }

@@ -8,6 +8,21 @@ struct FleetListScreen: View {
     /// separate string: two pieces of state can disagree — a stale title against a new id is
     /// a rename applied to the wrong tab — and this way they cannot.
     @State private var renaming: Renaming?
+    /// Drives `.searchable` below. Built here rather than pulled from `FleetModel` because the
+    /// candidate wiring belongs to THIS screen — see `refreshSearchCandidates()` — while the
+    /// ranking and debounce machinery it owns is exactly what `SessionSearchModel` already is.
+    @State private var search: SessionSearchModel
+    /// A binding path rather than plain `NavigationLink`s, and only because search needs it:
+    /// a `.session` result pushes straight away, but a `.conversation`/`.project` result opens
+    /// only after a round trip to the Mac answers — nothing to push a link value with a wait
+    /// in between. Every OTHER push in this screen still happens the ordinary
+    /// `NavigationLink(value:)` way; this only adds a second way to reach the same destination.
+    @State private var path = NavigationPath()
+
+    init(model: FleetModel) {
+        self.model = model
+        _search = State(initialValue: SessionSearchModel(transport: model, macName: model.macName))
+    }
 
     struct Renaming: Identifiable {
         let id: UUID
@@ -29,36 +44,51 @@ struct FleetListScreen: View {
 
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
-                connectionBanner
-                // Gated on `isConnected`, not just on the fleet being empty: on a cold
-                // launch or a fresh pairing the fleet is empty because nothing has arrived
-                // yet, not because there's genuinely nothing to show — and the "Connecting…"
-                // banner above already says that. Showing both at once claimed two different
-                // things about the same absence of data.
-                if model.fleet.projects.isEmpty && isConnected {
-                    emptyState
-                }
-                ForEach(model.fleet.projects) { project in
-                    Section {
-                        // Keyed on the session's tab id, never its conversation id — the
-                        // latter is not stable across a re-pin and, for codex, differs from
-                        // the tab id from birth.
-                        // Driven by the Mac's own `isCollapsed`, not by local state: the
-                        // Mac already owns this per project and emits `projectCollapsed`, so
-                        // a phone keeping its own copy would disagree with the desk the
-                        // moment either end toggled.
-                        if !project.isCollapsed {
-                            ForEach(project.sessions) { session in
-                                sessionRow(session)
-                            }
-                        }
-                    } header: {
-                        projectHeader(project)
+                // Empty query: today's screen, byte for byte. Non-empty: results swap in
+                // whole, per the brief — nothing here is filtered in place, because the two
+                // are different questions ("what's open" against "what matches") rather than
+                // one list narrowed.
+                if search.query.isEmpty {
+                    connectionBanner
+                    // Gated on `isConnected`, not just on the fleet being empty: on a cold
+                    // launch or a fresh pairing the fleet is empty because nothing has arrived
+                    // yet, not because there's genuinely nothing to show — and the
+                    // "Connecting…" banner above already says that. Showing both at once
+                    // claimed two different things about the same absence of data.
+                    if model.fleet.projects.isEmpty && isConnected {
+                        emptyState
                     }
+                    ForEach(model.fleet.projects) { project in
+                        Section {
+                            // Keyed on the session's tab id, never its conversation id — the
+                            // latter is not stable across a re-pin and, for codex, differs
+                            // from the tab id from birth.
+                            // Driven by the Mac's own `isCollapsed`, not by local state: the
+                            // Mac already owns this per project and emits `projectCollapsed`,
+                            // so a phone keeping its own copy would disagree with the desk
+                            // the moment either end toggled.
+                            if !project.isCollapsed {
+                                ForEach(project.sessions) { session in
+                                    sessionRow(session)
+                                }
+                            }
+                        } header: {
+                            projectHeader(project)
+                        }
+                    }
+                } else {
+                    SessionSearchResults(
+                        results: search.results, footer: search.footer, onTap: handleSearchTap
+                    )
                 }
             }
+            .searchable(
+                text: $search.query,
+                placement: .navigationBarDrawer(displayMode: .automatic),
+                prompt: "Search sessions and history"
+            )
             // The default inset-grouped style STAYS, against the obvious instinct. `.plain`
             // looks like the denser choice for a terminal-adjacent list and measures as the
             // opposite one here: on an iPhone 17 Pro it puts 22pt of padding above the first
@@ -147,6 +177,67 @@ struct FleetListScreen: View {
             ) {
                 Button("Unpair", role: .destructive) { model.unpair() }
             }
+            // The candidate wiring. `FleetModel` deliberately does not push these itself — see
+            // `PhoneSearchCandidates`' own doc comment — so this screen rebuilds them on every
+            // moment either input can change: first appearance, a fleet event (a session
+            // opened, closed or renamed), and the catalogue's own async replies (there is no
+            // catalogue-changed event; `refreshConversations` just overwrites the property, so
+            // watching it is the only way to notice a reply landed).
+            .onAppear { refreshSearchCandidates() }
+            .onChange(of: model.fleet) { _, _ in refreshSearchCandidates() }
+            .onChange(of: model.conversationCatalogue) { _, _ in refreshSearchCandidates() }
+        }
+    }
+
+    private func refreshSearchCandidates() {
+        search.candidatesChanged(PhoneSearchCandidates.build(
+            projects: model.fleet.projects,
+            catalogue: model.conversationCatalogue
+                ?? WireConversationCatalogue(conversations: [], sessionActivity: [:])
+        ))
+    }
+
+    /// The two tap outcomes that resolve without a round trip to the Mac — pulled out as a
+    /// pure function, tested directly, so the belief this replaced cannot quietly come back.
+    /// The brief said `.project` should open through `FleetConnector.requestOpenConversation`,
+    /// "the same as a transcript hit" — but a project candidate's `conversationID` is always
+    /// `nil` (see `PhoneSearchCandidates.build`) and `FleetService.openConversation` hard-requires
+    /// a real conversation UUID, so that call would fail every time. `SearchResultKind.project`'s
+    /// own doc comment says what activating it actually means — "selects the project's first
+    /// session" — which is a local lookup, the same as `.session` already is.
+    ///
+    /// `.conversation` is not reachable through here: it always needs the Mac, since it may
+    /// name a conversation with no open tab at all.
+    static func localDestination(for result: SearchResult, in projects: [WireProject]) -> UUID? {
+        switch result.kind {
+        case .session(let id):
+            return id
+        case .project:
+            return projects.first(where: { $0.path == result.projectPath })?.sessions.first?.id
+        case .conversation:
+            return nil
+        }
+    }
+
+    /// What a tap on a search result does. `.session` and `.project` resolve locally, through
+    /// `localDestination(for:in:)` above. `.conversation` is the one case that genuinely needs
+    /// the Mac, for a conversation with no tab of its own yet.
+    private func handleSearchTap(_ result: SearchResult) {
+        switch result.kind {
+        case .session, .project:
+            guard let id = Self.localDestination(for: result, in: model.fleet.projects)
+            else { return }
+            path.append(id)
+        case .conversation(let conversationID):
+            model.requestOpenConversation(
+                conversationID: conversationID, projectPath: result.projectPath
+            ) { outcome in
+                guard case .success(let id) = outcome else { return }
+                if let offset = result.offset {
+                    model.timelineModel(for: id).openAt(offset)
+                }
+                path.append(id)
+            }
         }
     }
 
@@ -160,7 +251,10 @@ struct FleetListScreen: View {
     /// whose reason caption sits under its title, drops from 66pt to the same 52pt as its
     /// neighbours instead of standing a quarter taller than them. It also takes 7pt off every
     /// section header.
-    private static let rowInsets = EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16)
+    ///
+    /// Not `private`: `SessionSearchResults` reuses it too, so a session row and a search
+    /// result row sit at the same density in the one list they can both appear in.
+    static let rowInsets = EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16)
 
     /// Every row opens its session, and what looks tappable is tappable.
     ///

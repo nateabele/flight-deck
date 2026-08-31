@@ -1,33 +1,6 @@
 import FleetKit
 import SwiftUI
 
-/// Turns FTS5's sentinel-marked snippet into an `AttributedString`.
-///
-/// An unbalanced opening sentinel — which a snippet truncated at FTS5's window boundary can
-/// genuinely produce — emphasises nothing and keeps the remaining text, because losing the
-/// rest of the line is far worse than losing a highlight.
-enum SearchSnippet {
-    static func attributed(_ raw: String) -> AttributedString {
-        var result = AttributedString()
-        var rest = Substring(raw)
-
-        while let open = rest.firstIndex(of: SnippetSentinel.open) {
-            result += AttributedString(String(rest[rest.startIndex..<open]))
-            let afterOpen = rest.index(after: open)
-            guard let close = rest[afterOpen...].firstIndex(of: SnippetSentinel.close) else {
-                result += AttributedString(String(rest[afterOpen...]))
-                return result
-            }
-            var marked = AttributedString(String(rest[afterOpen..<close]))
-            marked.inlinePresentationIntent = .stronglyEmphasized
-            result += marked
-            rest = rest[rest.index(after: close)...]
-        }
-        result += AttributedString(String(rest))
-        return result
-    }
-}
-
 /// The card: query field, result rows, footer.
 ///
 /// Every row is a heading plus two lines, uniform across result kinds. The two lines are the

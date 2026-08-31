@@ -416,6 +416,20 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         connector.requestSearch(query: query, limit: min(limit, SearchLimits.maxHits), then: completion)
     }
 
+    /// Resume a closed conversation, or select it if it is already open. Forwarded rather
+    /// than absorbed, exactly as `searchTranscripts` is: the connector answers **exactly
+    /// once**, including with `.disconnected`, and a layer here that could swallow that would
+    /// leave a tapped search result spinning forever with nothing pushed.
+    func requestOpenConversation(
+        conversationID: String, projectPath: String,
+        then completion: @escaping (Result<UUID, FleetRequestError>) -> Void
+    ) {
+        guard let connector else { return completion(.failure(.disconnected)) }
+        connector.requestOpenConversation(
+            conversationID: conversationID, projectPath: projectPath, then: completion
+        )
+    }
+
     func reconnect() {
         connect()
     }

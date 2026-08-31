@@ -100,6 +100,13 @@ final class SessionTimelineModelTests: XCTestCase {
                      body: TimelineItem.Body(text: text))
     }
 
+    /// Like `item(_:_:)`, but for the multi-item-per-offset tests below, where the kind and
+    /// the sub-index both matter and `.assistantText` at `#0` is too little to tell them apart.
+    private func item(_ offset: Int, index: Int, kind: TimelineItem.Kind, _ text: String) -> TimelineItem {
+        TimelineItem(id: "\(offset)#\(index)", kind: kind, status: .complete,
+                     body: TimelineItem.Body(text: text))
+    }
+
     private func page(
         _ items: [TimelineItem], start: Int, end: Int,
         hasMore: Bool = false, reset: Bool = false
@@ -665,5 +672,136 @@ final class SessionTimelineModelTests: XCTestCase {
 
         XCTAssertEqual(model.feed.items.map(\.body.text), ["new file"])
         XCTAssertEqual(model.phase, .idle)
+    }
+
+    // MARK: A search jump
+
+    /// `openAt` is a one-shot instruction for the very next `open()`, not an ordinary cursor:
+    /// the fleet list sets it just before pushing a session a search hit opened, and this is
+    /// the fetch that must land on the hit rather than at the live edge.
+    func testOpenAtLandsTheNextOpenOnAnAroundFetchRatherThanTheLatest() {
+        let pager = StubPager()
+        let model = model(pager)
+
+        model.openAt(1090)
+        model.open()
+
+        XCTAssertEqual(pager.marksRead, [session], "a search jump is still a look at the session")
+        XCTAssertEqual(pager.anchors, [.around(1090)])
+    }
+
+    /// The instruction is consumed once. A screen kept alive and reopened later — the reader
+    /// backing out and back in — must fall through to the ordinary `open()` path rather than
+    /// jumping to the same line again on every return.
+    func testOpenAtOnlyAppliesToTheOneOpenItWasSetBefore() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.openAt(1090)
+        model.open()
+        pager.answer(tail())
+
+        model.open()
+
+        XCTAssertEqual(pager.anchors, [.around(1090), .after(1200)],
+                       "the second open is an ordinary return, not a second jump")
+    }
+
+    /// What a search jump is FOR: the page it asked for lands, and the screen learns which row
+    /// to scroll to and flash.
+    func testAnAroundFetchLandingSetsTheScrollTargetToTheMatchingItem() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.openAt(1090)
+
+        model.open()
+        pager.answer(tail())
+
+        XCTAssertEqual(model.scrollTarget, "1090#0")
+    }
+
+    /// **The old-Mac fallback.** A Mac that predates `.around` cannot decode it and answers
+    /// `unsupported` rather than dropping the socket — see `FleetSocketServer.onUndecodable`.
+    /// That must read as "no scroll", not as a failure: the conversation still opens, at the
+    /// live edge, exactly as it would have without a search hit at all.
+    func testAnUnsupportedAroundFetchFallsBackToTheLiveEdgeWithoutSurfacingAsAnError() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.openAt(1090)
+        model.open()
+
+        pager.answer(.failure(.server(code: "unsupported")))
+
+        XCTAssertEqual(pager.anchors, [.around(1090), .latest],
+                       "the refusal itself falls back to the live edge, unasked")
+        XCTAssertEqual(model.phase, .loading, "the fallback is a fetch in flight, not a failure")
+
+        pager.answer(tail())
+
+        XCTAssertEqual(model.phase, .idle)
+        XCTAssertEqual(model.feed.items.map(\.body.text), ["first", "second"],
+                       "the conversation still opens")
+        XCTAssertNil(model.scrollTarget, "there was nothing to scroll to on a fallback page")
+    }
+
+    /// The fallback is specific to `.around` refused as `unsupported` — not to every failure a
+    /// search jump's fetch can hit. A disconnected phone still says so, the ordinary way.
+    func testAnAroundFetchRefusedForAnyOtherReasonFailsOrdinarilyRatherThanFallingBack() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.openAt(1090)
+        model.open()
+
+        pager.answer(.failure(.disconnected))
+
+        XCTAssertEqual(pager.anchors, [.around(1090)], "no fallback fetch went out")
+        XCTAssertEqual(model.phase, .failed("Not connected to your Mac."))
+    }
+
+    /// Nor is `unsupported` special on its own — only paired with the anchor it names. An
+    /// ordinary `.latest` fetch refused with the same code is just an unrecognised refusal,
+    /// carrying its code rather than silently retrying.
+    func testAnUnsupportedRefusalOnAnOrdinaryFetchDoesNotTriggerTheFallback() {
+        let pager = StubPager()
+        let model = model(pager)
+
+        model.loadLatest()
+        pager.answer(.failure(.server(code: "unsupported")))
+
+        XCTAssertEqual(pager.anchors, [.latest], "nothing was retried")
+        XCTAssertEqual(model.phase, .failed("Your Mac couldn't read this session (unsupported)."))
+    }
+
+    /// `TranscriptExtractor` only indexes text content, so a search hit's offset always lands
+    /// on a `.userTurn` or `.assistantText` item — but a record can still yield several items
+    /// at one offset (a wrapped user turn's harness notices sit beside the reader's own words).
+    /// The text item among them is what a search jump meant to land on.
+    func testHighlightTargetPrefersTheTextItemAmongSeveralSharingAnOffset() {
+        let items = [
+            item(500, index: 0, kind: .toolCall, "notice"),
+            item(500, index: 1, kind: .userTurn, "the actual words"),
+            item(500, index: 2, kind: .toolResult, "result"),
+        ]
+
+        XCTAssertEqual(SessionTimelineModel.highlightTarget(offset: 500, in: items), "500#1")
+    }
+
+    /// Falls back to whatever shares the offset when none of it is a text item, rather than to
+    /// nothing: a page that has the offset at all should still land somewhere close to what was
+    /// searched, not miss the jump entirely over a kind mismatch.
+    func testHighlightTargetFallsBackToAnyItemAtTheOffsetWhenNoneIsText() {
+        let items = [
+            item(500, index: 0, kind: .toolCall, "notice"),
+            item(500, index: 1, kind: .toolResult, "result"),
+        ]
+
+        XCTAssertEqual(SessionTimelineModel.highlightTarget(offset: 500, in: items), "500#0")
+    }
+
+    /// The offset the search hit named simply is not on the page that landed — a possibility
+    /// worth naming explicitly rather than leaving `nil` to mean it by accident.
+    func testHighlightTargetIsNilWhenThePageDoesNotHoldTheOffsetAtAll() {
+        let items = [item(1040, "first"), item(1090, "second")]
+
+        XCTAssertNil(SessionTimelineModel.highlightTarget(offset: 240, in: items))
     }
 }

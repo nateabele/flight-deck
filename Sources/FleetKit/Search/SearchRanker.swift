@@ -85,7 +85,8 @@ public enum SearchRanker {
                     highlightedRanges: [],
                     snippet: hit.snippet,
                     conversationID: hit.conversationID,
-                    isContinuation: offset > 0
+                    isContinuation: offset > 0,
+                    offset: hit.offset
                 ))
             }
         }
