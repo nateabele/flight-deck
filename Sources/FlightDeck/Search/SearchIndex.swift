@@ -1,18 +1,6 @@
 import FleetKit
 import Foundation
 
-/// The markers `snippet()` wraps matched terms in.
-///
-/// U+0002 and U+0003 (START OF TEXT / END OF TEXT) rather than something like `<b>`: the
-/// text being marked up is arbitrary conversation content, and any printable delimiter is
-/// something a message could legitimately contain — an agent discussing HTML would produce
-/// snippets that highlight the wrong span. `TranscriptExtractor` cannot emit these because
-/// they are control characters, which is what makes them unambiguous.
-enum SnippetSentinel {
-    static let open: Character = "\u{2}"
-    static let close: Character = "\u{3}"
-}
-
 /// What the index knows about a conversation: its newest name, and which project it
 /// belongs to. Defined here rather than beside its consumer so the protocol, the SQLite
 /// implementation and `SearchCandidates` all name one type.

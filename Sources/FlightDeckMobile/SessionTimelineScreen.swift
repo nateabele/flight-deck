@@ -55,6 +55,11 @@ struct SessionTimelineScreen: View {
     /// `onAppear` has already fired for a row that is still visible, so without this a read
     /// that failed while the reader sat at the top would never be attempted again.
     @State private var isNearOldest = false
+    /// The row a search jump landed on, briefly. Mirrors `model.scrollTarget` but fades on its
+    /// own clock rather than being cleared by the model, so a reader who lingers keeps seeing
+    /// the row that answered their tap for exactly as long as the fade takes and not a frame
+    /// longer.
+    @State private var highlightedID: String?
 
     var body: some View {
         ScrollViewReader { scroll in
@@ -83,6 +88,14 @@ struct SessionTimelineScreen: View {
                         // middle of a rounded panel, which is the same defect that keeps the
                         // fleet list inset-grouped and this list plain.
                         .listRowSeparator(.hidden)
+                        // The search-jump highlight. `entry.id == highlightedID` is a plain
+                        // comparison, not a fade of its own — the fade is `highlightedID`
+                        // being cleared under `withAnimation` in the `onChange` below, and a
+                        // `List` row animates a background change on its own.
+                        .listRowBackground(
+                            entry.id == highlightedID
+                                ? Color.accentColor.opacity(0.15) : Color.clear
+                        )
                         // **The prefetch trigger, and its depth is the whole design.** It is
                         // NOT the top row: an `onAppear` up there re-fires on every bounce of
                         // an over-scroll and lands its page while the list is still settling,
@@ -179,6 +192,28 @@ struct SessionTimelineScreen: View {
                             scroll.scrollTo(Self.bottomAnchor, anchor: .bottom)
                         }
                     }
+                }
+            }
+            // A search jump. `model.scrollTarget` is set exactly once per `.around` fetch that
+            // lands (see `SessionTimelineModel.fetch`), so this fires once per tap on a
+            // transcript result rather than on every re-render.
+            .onChange(of: model.scrollTarget) { _, target in
+                guard let target else { return }
+                // Two hops, the same reason as the follow-to-bottom jump above: the row this
+                // targets was inserted by the very fetch that set `scrollTarget`, and `List`
+                // has not laid it out yet when `onChange` runs.
+                DispatchQueue.main.async {
+                    DispatchQueue.main.async {
+                        withAnimation { scroll.scrollTo(target, anchor: .center) }
+                    }
+                }
+                highlightedID = target
+                Task {
+                    try? await Task.sleep(for: .milliseconds(1_500))
+                    // Guards against a second jump landing while the first is still fading —
+                    // clearing here would erase the SECOND highlight instead of the first.
+                    guard highlightedID == target else { return }
+                    withAnimation(.easeOut(duration: 0.4)) { highlightedID = nil }
                 }
             }
         }

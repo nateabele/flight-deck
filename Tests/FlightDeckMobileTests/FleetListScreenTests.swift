@@ -229,4 +229,73 @@ final class FleetListScreenTests: XCTestCase {
         XCTAssertTrue(FleetListScreen.agentGroups(in: []).isEmpty)
     }
 
+    // MARK: A search result's tap destination
+
+    private func result(
+        _ kind: SearchResultKind, title: String = "session", projectPath: String = "/proj"
+    ) -> SearchResult {
+        SearchResult(
+            id: title, kind: kind, title: title, projectName: "proj", projectPath: projectPath,
+            tier: .exact, recency: Date(timeIntervalSince1970: 1), highlightedRanges: [],
+            snippet: nil, conversationID: nil
+        )
+    }
+
+    /// A `.session` result already names its open tab, so the destination is the id it carries
+    /// — no lookup at all, and unaffected by whatever the fleet happens to hold.
+    func testASessionResultsDestinationIsTheIdItAlreadyCarries() {
+        let id = UUID()
+        let destination = FleetListScreen.localDestination(for: result(.session(id)), in: [])
+
+        XCTAssertEqual(destination, id)
+    }
+
+    /// **The regression this exists for.** A `.project` result's `conversationID` is always
+    /// `nil` — see `PhoneSearchCandidates.build` — so it cannot be opened through the Mac the
+    /// way a transcript hit is; the brief said it should be, and the Mac's own
+    /// `FleetService.openConversation` would refuse it every time. Activating it must resolve
+    /// locally to the project's first session instead, per `SearchResultKind.project`'s own doc
+    /// comment.
+    func testAProjectResultsDestinationIsTheProjectsFirstSession() {
+        let first = UUID()
+        let projects = [
+            WireProject(id: UUID(), name: "nate", path: "/proj", sessions: [
+                WireSession(id: first, title: "one", agent: "claude"),
+                WireSession(id: UUID(), title: "two", agent: "claude"),
+            ])
+        ]
+
+        let destination = FleetListScreen.localDestination(
+            for: result(.project, projectPath: "/proj"), in: projects
+        )
+
+        XCTAssertEqual(destination, first, "the FIRST session, not any session in the project")
+    }
+
+    /// A project result naming a project the fleet no longer holds — closed while the search
+    /// was open — resolves to nothing to push, rather than crashing on a force unwrap.
+    func testAProjectResultsDestinationIsNilWhenTheProjectIsNoLongerInTheFleet() {
+        let destination = FleetListScreen.localDestination(
+            for: result(.project, projectPath: "/gone"), in: []
+        )
+
+        XCTAssertNil(destination)
+    }
+
+    /// `.conversation` is never resolved locally — it may name a conversation with no tab of
+    /// its own at all, which only the Mac can open. A `nil` here is what sends
+    /// `handleSearchTap` down the `requestOpenConversation` path instead of pushing directly.
+    func testAConversationResultsDestinationIsNeverResolvedLocally() {
+        let projects = [
+            WireProject(id: UUID(), name: "nate", path: "/proj", sessions: [
+                WireSession(id: UUID(), title: "one", agent: "claude"),
+            ])
+        ]
+
+        let destination = FleetListScreen.localDestination(
+            for: result(.conversation("abc"), projectPath: "/proj"), in: projects
+        )
+
+        XCTAssertNil(destination, "a conversation hit always needs the Mac's round trip")
+    }
 }
