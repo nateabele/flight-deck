@@ -306,5 +306,11 @@ public enum FleetRequestError: Error, Equatable, Sendable {
     /// `launchAccount`'s doc comment documents. Kept distinct from `unknown_conversation` on
     /// purpose, so a phone can tell "no such conversation" from "found it, could not open it"
     /// rather than folding both into one dead end.
+    ///
+    /// Also `index_unavailable`, from `.search` and `.conversations`: `store.searchIndex` was
+    /// nil — `AppDelegate`'s `try? SQLiteSearchIndex(at:)` can leave it that way for the life
+    /// of the process — or the read itself threw. Refused rather than answered with an empty
+    /// hit list or catalogue, which would tell a phone "No Results" or "no history", a claim
+    /// about the corpus §9 of the spec forbids making from a position of not knowing.
     case server(code: String)
 }

@@ -143,18 +143,25 @@ final class FleetService: ObservableObject {
     /// comment. Building a second `SQLiteSearchIndex` here, on the same file, would be a
     /// second writer; reading the store's is the same seam `SearchCandidates.build` and
     /// `AppDelegate.presentSearch` already use.
-    private func conversationCatalogue() -> WireConversationCatalogue {
+    ///
+    /// `nil` — never an empty catalogue — when there is no index to read, or reading it threw:
+    /// `AppDelegate.presentSearch`'s `try? SQLiteSearchIndex(at:)` can leave `store.searchIndex`
+    /// nil for the life of the process, and collapsing that into "no history" here would be the
+    /// same quiet lie §9 forbids on `.search`, just for the name half instead of the transcript
+    /// half. The caller turns `nil` into `err(index_unavailable)`.
+    private func conversationCatalogue() -> WireConversationCatalogue? {
+        guard let index = store.searchIndex else { return nil }
+        guard let known = try? index.conversationNames() else { return nil }
         let open = Set(openProjectPaths())
-        let conversations = ((try? store.searchIndex?.conversationNames()) ?? [:])
+        let conversations = known
             .filter { open.contains($0.value.projectPath) }
             .map { WireConversation(
                 id: $0.key, name: $0.value.name, projectPath: $0.value.projectPath
             ) }
             .sorted { $0.id < $1.id }
         let sessionActivity = Dictionary(
-            uniqueKeysWithValues: store.repos.flatMap(\.sessions).map {
-                ($0.id.uuidString, transcriptModified($0))
-            }
+            store.repos.flatMap(\.sessions).map { ($0.id.uuidString, transcriptModified($0)) },
+            uniquingKeysWith: { first, _ in first }
         )
         return WireConversationCatalogue(
             conversations: conversations, sessionActivity: sessionActivity
@@ -313,7 +320,13 @@ final class FleetService: ObservableObject {
                 // `SQLiteSearchIndex` is already called this way off a debounce timer in
                 // `SearchModel`, on this same actor — see `AppDelegate.presentSearch`. Nothing
                 // here writes and nothing enters `FleetSnapshot`.
-                reply(.conversations(cid: cid, conversationCatalogue()))
+                //
+                // `nil` — no index, or the read threw — is refused rather than answered with an
+                // empty catalogue; see `conversationCatalogue`'s doc comment.
+                guard let catalogue = self.conversationCatalogue() else {
+                    return reply(.err(cid: cid, code: "index_unavailable"))
+                }
+                reply(.conversations(cid: cid, catalogue))
             case .search(let query, let limit):
                 // A query FTS5 cannot match — empty or all whitespace — is not a failure. It
                 // is a query with nothing to match, and an empty hit list is the honest
@@ -321,13 +334,23 @@ final class FleetService: ObservableObject {
                 guard let match = FTS5Query.match(for: query) else {
                     return reply(.searchHits(cid: cid, WireSearchHits(hits: [], indexing: nil)))
                 }
+                // No index yet, or a genuinely failed read, is refused rather than answered
+                // with an empty hit list — folding "not open" and "threw" into `[]` would tell
+                // the phone "No Results", a claim about the corpus this Mac is in no position
+                // to make (§9). This is the one state `SearchLimits` and the empty-query guard
+                // above do not cover: a query FTS5 *can* match, but there is nothing to ask.
+                guard let index = self.store.searchIndex else {
+                    return reply(.err(cid: cid, code: "index_unavailable"))
+                }
                 // Clamped with `SearchLimits.maxHits`, not `SearchModel.transcriptLimit`:
                 // that property is `@MainActor`-isolated for `SearchModel`'s own state, and
                 // `FleetKit` gives both sides the same ceiling with no actor to cross.
                 let capped = min(limit, SearchLimits.maxHits)
-                let hits = (try? store.searchIndex?.search(
-                    match, projects: openProjectPaths(), limit: capped
-                )) ?? []
+                guard let hits = try? index.search(
+                    match, projects: self.openProjectPaths(), limit: capped
+                ) else {
+                    return reply(.err(cid: cid, code: "index_unavailable"))
+                }
                 // `nil` outside a backfill — an absent `indexingProgress` means "not
                 // indexing", not "0 of 0", and reporting the latter would put a meaningless
                 // footer on the phone permanently. See `indexingProgress`'s doc comment for

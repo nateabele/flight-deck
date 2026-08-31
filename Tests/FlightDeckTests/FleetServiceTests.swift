@@ -245,11 +245,14 @@ final class FleetServiceTests: XCTestCase {
 
     /// `WireSearchHits.indexing` must reflect whatever backfill `FleetService.indexingProgress`
     /// currently holds, and must be `nil` the instant nothing is running — reporting `0 of 0`
-    /// permanently would put a meaningless footer on the phone. `store.searchIndex` is nil in
-    /// this harness, so every reply's `hits` is empty regardless of query; this exercises only
-    /// the progress plumbing, not the index itself.
+    /// permanently would put a meaningless footer on the phone. A working `StubSearchIndex` is
+    /// installed so the reply travels the `.searchHits` path at all — see
+    /// `testASearchRequestWithNoIndexIsRefusedRatherThanAnsweredEmpty` below for the nil case,
+    /// which this test used to (wrongly) share a harness with; this one exercises only the
+    /// progress plumbing, not the index itself.
     func testASearchReplyCarriesIndexingProgressWhileABackfillIsInFlightAndNilOtherwise() async throws {
-        let (_, key, port) = try await standUp()
+        let (store, key, port) = try await standUp()
+        store.searchIndex = StubSearchIndex()
 
         let inFlight = expectation(description: "in flight")
         var duringBackfill: WireIndexingProgress?
@@ -282,4 +285,115 @@ final class FleetServiceTests: XCTestCase {
         await fulfillment(of: [afterwards], timeout: 10)
         XCTAssertNil(afterBackfill, "an absent backfill must not leave a stale footer on screen")
     }
+
+    // MARK: An unavailable index must be refused, never answered as empty
+
+    /// **The regression this exists for.** `try? store.searchIndex?.search(...) ?? []`
+    /// collapsed "no index open" into an empty hit list, which `SessionSearchModel.apply`
+    /// reads as `.empty` and renders as "No Results" — a claim about the corpus the Mac is in
+    /// no position to make (spec §9), reachable for the life of the process whenever
+    /// `AppDelegate`'s `try? SQLiteSearchIndex(at:)` fails. `store.searchIndex` is nil by
+    /// default in this harness — nothing needs to be configured to reach it. This test would
+    /// fail against the old `try?`-collapsing line, which answered `.searchHits(hits: [])`
+    /// here instead of refusing.
+    func testASearchRequestWithNoIndexIsRefusedRatherThanAnsweredEmpty() async throws {
+        let (_, key, port) = try await standUp()
+
+        let arrived = expectation(description: "reply")
+        var reply: ServerFrame?
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame { _ = client.send(.search(query: "hello", limit: 10)) }
+            if case .searchHits = frame { reply = frame; arrived.fulfill() }
+            if case .err = frame { reply = frame; arrived.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [arrived], timeout: 10)
+
+        guard case .err(_, let code) = reply else {
+            return XCTFail("a search with no index must be refused, not answered: \(String(describing: reply))")
+        }
+        XCTAssertEqual(code, "index_unavailable")
+    }
+
+    /// The other half of the same collapse: an index that is open but whose read itself
+    /// throws — a locked or corrupt file — must be refused the same way as no index at all,
+    /// not answered with whatever `try?` happened to swallow into `[]`.
+    func testASearchRequestWhenTheIndexThrowsIsRefusedRatherThanAnsweredEmpty() async throws {
+        let (store, key, port) = try await standUp()
+        let index = StubSearchIndex()
+        index.shouldThrow = true
+        store.searchIndex = index
+
+        let arrived = expectation(description: "reply")
+        var reply: ServerFrame?
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame { _ = client.send(.search(query: "hello", limit: 10)) }
+            if case .searchHits = frame { reply = frame; arrived.fulfill() }
+            if case .err = frame { reply = frame; arrived.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [arrived], timeout: 10)
+
+        guard case .err(_, let code) = reply else {
+            return XCTFail("a throwing index must be refused, not answered: \(String(describing: reply))")
+        }
+        XCTAssertEqual(code, "index_unavailable")
+    }
+
+    /// The same collapse existed in `conversationCatalogue()`, with the milder consequence the
+    /// finding names — the name half of search silently loses all history — but it is the
+    /// identical lie: an empty catalogue reads as "the Mac has no history for you at all"
+    /// rather than "the Mac could not read its index right now".
+    func testAConversationsRequestWithNoIndexIsRefusedRatherThanAnsweredEmpty() async throws {
+        let (_, key, port) = try await standUp()
+
+        let arrived = expectation(description: "reply")
+        var reply: ServerFrame?
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame { _ = client.send(.conversations) }
+            if case .conversations = frame { reply = frame; arrived.fulfill() }
+            if case .err = frame { reply = frame; arrived.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [arrived], timeout: 10)
+
+        guard case .err(_, let code) = reply else {
+            return XCTFail("a conversations request with no index must be refused, not answered: \(String(describing: reply))")
+        }
+        XCTAssertEqual(code, "index_unavailable")
+    }
 }
+
+/// A minimal `SearchIndex` for exercising `FleetService`'s wiring without a real SQLite file.
+/// `shouldThrow` flips `search`/`conversationNames` into throwing, the shape a corrupt or
+/// mid-migration index takes — the state `FleetService`'s `try? index.search(...)` must turn
+/// into `index_unavailable` rather than an empty answer.
+private final class StubSearchIndex: SearchIndex {
+    var hits: [TranscriptHit] = []
+    var conversations: [String: IndexedConversation] = [:]
+    var shouldThrow = false
+
+    func ingest(_: [IndexedMessage], from: URL, projectPath: String, offset: UInt64?) throws {}
+    func readOffset(for: URL) -> UInt64 { 0 }
+    func setConversationName(_: String, projectPath: String, for: String) throws {}
+    func prune(keepingSources: Set<URL>, projects: Set<String>) throws {}
+    func messageCount(forConversation: String) throws -> Int { 0 }
+
+    func search(_ query: String, projects: [String], limit: Int) throws -> [TranscriptHit] {
+        if shouldThrow { throw StubSearchIndexError.boom }
+        return hits
+    }
+
+    func conversationNames() throws -> [String: IndexedConversation] {
+        if shouldThrow { throw StubSearchIndexError.boom }
+        return conversations
+    }
+}
+
+private enum StubSearchIndexError: Error { case boom }
