@@ -27,7 +27,7 @@ import Foundation
 ///   `CachedValue<String>`. **They do not, in this build.** `accessibilityValue()` returns
 ///   `cachedScreenContents` (`SurfaceView_AppKit:2255`), built over `GHOSTTY_POINT_SCREEN` —
 ///   the whole scrollback — while `readViewport()` returns `cachedVisibleContents`
-///   (`TextInjecting:128`), built over `GHOSTTY_POINT_VIEWPORT`. Two caches, two selections.
+///   (`TextInjecting:153`), built over `GHOSTTY_POINT_VIEWPORT`. Two caches, two selections.
 ///   So the cross-check is a live-terminal exercise, not a comparison of one string, and it
 ///   remains open. What the tests below therefore prove is that this parser reads a **pyte**
 ///   render of codex's byte stream; that ghostty renders that same stream identically is

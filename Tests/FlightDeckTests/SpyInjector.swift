@@ -59,28 +59,38 @@ final class SpyInjector: TextInjecting {
     /// is the half of the interlock an index check alone cannot see.
     private var pendingRelabel: [String]?
 
-    func sendText(_ text: String) { events.append(.text(text)) }
+    func sendText(_ text: String) { record(.text(text)) }
     func sendReturn() {
-        events.append(.ret)
+        record(.ret)
         // A press replaces the screen when one is scripted, which is what the real dialog does.
         if !scriptedScreens.isEmpty { screenIndex += 1 }
+        if !optionsAfterReturn.isEmpty { showOptions(optionsAfterReturn.removeFirst()) }
     }
 
     func sendKillLine() {
-        events.append(.killLine)
+        record(.killLine)
         guard !buffer.isEmpty else { return }   // Ctrl+U on an empty line is a no-op
         buffer = ""
         renderedRows = ["❯"]
     }
 
-    func sendYank() { events.append(.yank) }
+    func sendYank() { record(.yank) }
 
     func sendArrowDown() { move(by: 1) }
     func sendArrowUp() { move(by: -1) }
-    func sendEscape() { events.append(.escape) }
+    func sendEscape() { record(.escape) }
+
+    /// Every send goes through here, because the transcript entry and the cache drop below are
+    /// the same event: a keystroke has gone to the terminal, so whatever was read before it no
+    /// longer describes the screen. The real injector funnels its sends the same way and for
+    /// the same reason — see `TextInjecting.screenChanged()`.
+    private func record(_ event: Event) {
+        events.append(event)
+        if cacheClearedByInjection { viewportCache?.invalidate() }
+    }
 
     private func move(by step: Int) {
-        events.append(.arrow(step))
+        record(.arrow(step))
         arrowsSeen += 1
         guard !options.isEmpty, arrowsSeen <= (ignoreArrowsAfter ?? .max) else { return }
         selected = min(max(selected + step, 0), options.count - 1)
@@ -101,6 +111,18 @@ final class SpyInjector: TextInjecting {
     /// `pendingRelabel`.
     func relabelAfterArrows(_ labels: [String]) { pendingRelabel = labels }
 
+    /// The option lists the dialog repaints into as each Return is answered — question two
+    /// after question one, then the review — with the marker back on row 0, which is what
+    /// claude does and the invariant `AnswerPlan` rests on.
+    ///
+    /// `scriptedScreens` below cannot serve a drive that MOVES: those are verbatim captures,
+    /// so their marker is frozen where the camera found it and any arrow is refused by the
+    /// drive's own landing check. A drive that both arrows and crosses screens — the shape a
+    /// whole set of questions takes — needs a list the fake still models.
+    private var optionsAfterReturn: [[String]] = []
+
+    func advanceOnReturn(to lists: [[String]]) { optionsAfterReturn = lists }
+
     /// Screens handed back in turn, advancing on each Return.
     ///
     /// Models the one thing a multi-step drive depends on and nothing else can fake: pressing
@@ -118,6 +140,38 @@ final class SpyInjector: TextInjecting {
     /// How many screens the drive got through — one per Return it actually sent.
     var screensAdvanced: Int { screenIndex }
 
+    /// The screen as this fake's model has it — through the cache when one has been asked for.
+    func readViewport() -> String? {
+        guard let viewportCache else { return render() }
+        return viewportCache.get()
+    }
+
+    /// The `CachedValue` a real `readViewport()` is served from, off by default.
+    ///
+    /// Built from the production type itself rather than re-modelled, so a test drives the
+    /// cache Flight Deck actually ships and the `invalidate()` it actually calls — see
+    /// `TextInjecting.screenChanged()`. Off by default because every other test in this suite
+    /// is about what a drive DOES, and a cache in front of those screens would be scenery in
+    /// the way.
+    private var viewportCache: CachedValue<String?>?
+    private var cacheClearedByInjection = true
+
+    /// Serve the screen from a cache, as the real surface does.
+    ///
+    /// An hour, not production's 500ms: a test that passed because the entry happened to
+    /// expire while it ran would prove nothing about freshness. With the default, every read
+    /// that is up to date is up to date because a keystroke dropped the entry.
+    ///
+    /// `clearedByInjection: false` is the build this modelling exists for — the cache the
+    /// answer drive was really reading, which no keystroke dropped, so a re-read after a move
+    /// described the screen from before it.
+    func cacheViewport(clearedByInjection: Bool = true) {
+        cacheClearedByInjection = clearedByInjection
+        viewportCache = CachedValue(duration: .seconds(3600)) { [weak self] in
+            self?.render() ?? nil
+        }
+    }
+
     /// Whichever is up: the dialog if `showOptions` put one there, the input bar otherwise.
     ///
     /// The dialog rendering is copied off a real screen rather than invented — the marker at
@@ -125,7 +179,7 @@ final class SpyInjector: TextInjecting {
     /// `Fixtures/Claude/permission-bash.captured.txt` has them. It is a permission prompt's
     /// layout specifically; an `AskUserQuestion` indents one column less, which is why the
     /// parser that reads both is tested against the captures and not against this.
-    func readViewport() -> String? {
+    private func render() -> String? {
         guard viewportIsReadable else { return nil }
         if !scriptedScreens.isEmpty {
             return screenIndex < scriptedScreens.count ? scriptedScreens[screenIndex] : nil
