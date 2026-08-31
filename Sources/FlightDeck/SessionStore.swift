@@ -800,6 +800,21 @@ final class SessionStore: ObservableObject {
     /// Test seam. Production sets this from the convenience init.
     var notifier: Notifying?
 
+    /// Where plan gates come from. Nil by default, like `notifier` and `replicator`: most
+    /// tests build a store with no phone-facing services attached. Assigned once by
+    /// `FleetService.init`, then driven by `applyRegistry`'s existing tick — see
+    /// `pollPlanGates()`. Not `private`: `FleetService` reads it to thread the same instance
+    /// into every `FleetProjection` call site, so the oracle snapshot and the event-fold
+    /// mirror never disagree about a gate.
+    var planGates: PlanGateService?
+
+    /// What each session's gate looked like last time `pollPlanGates()` ran, so
+    /// `deliverPlanGateNotifications` can tell a re-poll of the same gate from a closed one or
+    /// a revised one — the same job `statuses` does for `commitStatuses`, but plan gates never
+    /// touch `statuses` (that is the defect this feature exists to fix), so they need their
+    /// own remembered "before."
+    private var previousPlanGates: [UUID: WirePlanGate] = [:]
+
     /// Where fleet changes are reported for replication to paired devices. Optional and nil
     /// by default, exactly like `notifier`: nearly every test builds a store with no client
     /// attached and must not be made to care.
@@ -2964,6 +2979,19 @@ final class SessionStore: ObservableObject {
         return repos[at.repo].sessions[at.session].agent
     }
 
+    /// The `claude` pid backing a tab, for `PlanGateService`'s `pid` closure — the same field
+    /// `applyRegistry` already keys `rows[anchor.pid]` on, so a plan gate and a status read
+    /// agree about which process they mean.
+    func claudePID(of id: UUID) -> pid_t? {
+        anchors[id]?.pid
+    }
+
+    /// Every session this Mac knows, for `PlanGateService`'s `sessions` closure. Order is
+    /// whatever `repos` is in; `PlanGateService` only ever uses this to scan, never to display.
+    func allSessionIDs() -> [UUID] {
+        repos.flatMap(\.sessions).map(\.id)
+    }
+
     /// Sidebar → the agent. Updates the title immediately, then tells the agent, by whatever
     /// route that agent renames its own conversation.
     ///
@@ -4042,8 +4070,14 @@ final class SessionStore: ObservableObject {
         guard let notifier else { return }
         let active = appIsActive()
         for transition in transitions {
+            // `planGate: nil` on both sides — this pipeline only ever sees status edges.
+            // A gate opening moves neither `statuses` nor `backgroundWorkSessions`, so it
+            // never produces a `StatusTransition` at all; `pollPlanGates` below is where that
+            // half of `Input` comes from.
             switch SessionNotificationPolicy.action(
-                old: transition.old, new: transition.new, appActive: active
+                old: .init(status: transition.old, planGate: nil),
+                new: .init(status: transition.new, planGate: nil),
+                appActive: active
             ) {
             case .none:
                 continue

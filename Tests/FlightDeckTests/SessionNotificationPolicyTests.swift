@@ -7,42 +7,64 @@ final class SessionNotificationPolicyTests: XCTestCase {
     private let busy = SessionStatus(activity: .busy)
     private let waiting = SessionStatus(activity: .waiting, waitingFor: "permission prompt")
 
+    /// Every existing case here is about status alone — `planGate` is nil on both sides
+    /// throughout this file. `PlanGateNotificationTests` covers the gate half.
+    private func input(_ status: SessionStatus?) -> Policy.Input {
+        Policy.Input(status: status, planGate: nil)
+    }
+
     func testNotifiesOnEnteringWaitingWhileBackgrounded() {
-        XCTAssertEqual(Policy.action(old: busy, new: waiting, appActive: false), .notify)
+        XCTAssertEqual(
+            Policy.action(old: input(busy), new: input(waiting), appActive: false), .notify
+        )
     }
 
     func testSuppressedWhileAppIsFrontmost() {
-        XCTAssertEqual(Policy.action(old: busy, new: waiting, appActive: true), .none)
+        XCTAssertEqual(
+            Policy.action(old: input(busy), new: input(waiting), appActive: true), .none
+        )
     }
 
     func testDoesNotRefireWhileStillWaiting() {
-        XCTAssertEqual(Policy.action(old: waiting, new: waiting, appActive: false), .none)
+        XCTAssertEqual(
+            Policy.action(old: input(waiting), new: input(waiting), appActive: false), .none
+        )
     }
 
     func testWithdrawsWhenLeavingWaiting() {
-        XCTAssertEqual(Policy.action(old: waiting, new: busy, appActive: false), .withdraw)
+        XCTAssertEqual(
+            Policy.action(old: input(waiting), new: input(busy), appActive: false), .withdraw
+        )
     }
 
     /// Withdrawal must not depend on focus — the prompt resolved either way.
     func testWithdrawsEvenWhileFrontmost() {
-        XCTAssertEqual(Policy.action(old: waiting, new: busy, appActive: true), .withdraw)
+        XCTAssertEqual(
+            Policy.action(old: input(waiting), new: input(busy), appActive: true), .withdraw
+        )
     }
 
     func testWithdrawsWhenSessionDisappearsWhileWaiting() {
-        XCTAssertEqual(Policy.action(old: waiting, new: nil, appActive: false), .withdraw)
+        XCTAssertEqual(
+            Policy.action(old: input(waiting), new: input(nil), appActive: false), .withdraw
+        )
     }
 
     func testNotifiesWhenSessionAppearsAlreadyWaiting() {
-        XCTAssertEqual(Policy.action(old: nil, new: waiting, appActive: false), .notify)
+        XCTAssertEqual(
+            Policy.action(old: input(nil), new: input(waiting), appActive: false), .notify
+        )
     }
 
     func testNoActionForUnrelatedTransitions() {
-        XCTAssertEqual(Policy.action(old: busy, new: busy, appActive: false), .none)
+        XCTAssertEqual(Policy.action(old: input(busy), new: input(busy), appActive: false), .none)
         XCTAssertEqual(
-            Policy.action(old: SessionStatus(activity: .idle),
-                          new: SessionStatus(activity: .busy), appActive: false),
+            Policy.action(
+                old: input(SessionStatus(activity: .idle)),
+                new: input(SessionStatus(activity: .busy)), appActive: false
+            ),
             .none
         )
-        XCTAssertEqual(Policy.action(old: nil, new: nil, appActive: false), .none)
+        XCTAssertEqual(Policy.action(old: input(nil), new: input(nil), appActive: false), .none)
     }
 }
