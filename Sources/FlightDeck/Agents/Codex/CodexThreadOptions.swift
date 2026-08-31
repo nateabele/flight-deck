@@ -25,11 +25,17 @@ struct CodexThreadOptions: Codable, Equatable, Sendable {
     /// unknown fields rather than rejecting them. It is still sent, unchanged, so nothing
     /// that reads these params regresses; the directories reach codex through `config`
     /// below, which is the same free-form override mechanism `codex -c` uses.
-    func asThreadStartParams(cwd: String) -> [String: Any] {
+    ///
+    /// `historyMode` is the one deliberate exception to "omitted means codex's own default":
+    /// `CodexAdapter.prepare` and this app's rollout parser both require `legacy`, so a caller
+    /// that has one to give pins it rather than inheriting whatever codex-cli 0.151.0+
+    /// defaults to now. See `CodexAdapter.historyMode` for where the value comes from.
+    func asThreadStartParams(cwd: String, historyMode: String?) -> [String: Any] {
         var params: [String: Any] = ["cwd": cwd]
         if let model { params["model"] = model }
         if let sandbox { params["sandbox"] = sandbox }
         if let approvalPolicy { params["approvalPolicy"] = approvalPolicy }
+        if let historyMode { params["historyMode"] = historyMode }
         if !addDirs.isEmpty {
             params["addDirs"] = addDirs
             // `sandbox_workspace_write.writable_roots` is codex's own config key — see

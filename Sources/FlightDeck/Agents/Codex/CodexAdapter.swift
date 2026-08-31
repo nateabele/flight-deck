@@ -121,6 +121,13 @@ struct CodexAdapter: AgentAdapter {
     /// stays out of the `AgentAdapter.rebind` signature, which is not codex's to shape.
     var readTimeout: Double = 5
 
+    /// Set by `SessionStore.startCodex` from the probed codex version, before `prepare` can
+    /// be reached — `nil` means this codex predates the `historyMode` param, and its own
+    /// default is already `legacy`; a non-nil value is always `"legacy"`. See
+    /// `CodexThreadOptions.asThreadStartParams(cwd:historyMode:)` for why pinning it here is
+    /// deliberate rather than a `config.toml` override this app should be leaving alone.
+    var historyMode: String?
+
     /// Start, then name, then archive/unarchive. NOT optional and NOT reorderable.
     ///
     /// `thread/start` does not persist anything: no `threads` row, no rollout file, even
@@ -132,7 +139,10 @@ struct CodexAdapter: AgentAdapter {
     /// took out — see the comment at that call below for why it exists and must come
     /// after naming, not before.
     func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
-        let params = threadOptions(options).asThreadStartParams(cwd: session.transcriptDirectory)
+        let params = threadOptions(options).asThreadStartParams(
+            cwd: session.transcriptDirectory,
+            historyMode: historyMode
+        )
         let result = try await rpc.request("thread/start", params)
 
         guard let thread = result["thread"] as? [String: Any],
@@ -204,7 +214,8 @@ struct CodexAdapter: AgentAdapter {
 
     func location(for session: Session) -> AgentLocation {
         // `prepare` passes transcriptDirectory as codex's own thread cwd via
-        // `asThreadStartParams(cwd:)`, and `launchCommand` requires the pty to be spawned there.
+        // `asThreadStartParams(cwd:historyMode:)`, and `launchCommand` requires the pty to be
+        // spawned there.
         AgentLocation(workingDirectory: session.transcriptDirectory, binding: binding(for: session))
     }
 

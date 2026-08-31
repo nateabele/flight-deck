@@ -105,13 +105,14 @@ final class CodexAdapterTests: XCTestCase {
     func testAsThreadStartParamsOmitsNilKeysRatherThanSendingNulls() {
         // An explicit null would pin the value in the JSON-RPC call and defeat the user's
         // own config.toml defaults, so unset fields must be absent, not null.
-        let bare = CodexThreadOptions().asThreadStartParams(cwd: "/w/a")
+        let bare = CodexThreadOptions().asThreadStartParams(cwd: "/w/a", historyMode: nil)
 
         XCTAssertEqual(bare["cwd"] as? String, "/w/a")
         XCTAssertNil(bare["model"])
         XCTAssertNil(bare["sandbox"])
         XCTAssertNil(bare["approvalPolicy"])
         XCTAssertNil(bare["addDirs"])
+        XCTAssertNil(bare["historyMode"])
         XCTAssertEqual(bare.count, 1)
     }
 
@@ -119,12 +120,31 @@ final class CodexAdapterTests: XCTestCase {
         let full = CodexThreadOptions(
             model: "gpt-5-codex", sandbox: "workspace-write",
             approvalPolicy: "on-request", addDirs: ["/w/b", "/w/c"]
-        ).asThreadStartParams(cwd: "/w/a")
+        ).asThreadStartParams(cwd: "/w/a", historyMode: nil)
 
         XCTAssertEqual(full["cwd"] as? String, "/w/a")
         XCTAssertEqual(full["model"] as? String, "gpt-5-codex")
         XCTAssertEqual(full["sandbox"] as? String, "workspace-write")
         XCTAssertEqual(full["approvalPolicy"] as? String, "on-request")
         XCTAssertEqual(full["addDirs"] as? [String], ["/w/b", "/w/c"])
+    }
+
+    func testAsThreadStartParamsIncludesHistoryModeWhenSetWithoutDisturbingOtherKeys() {
+        // `historyMode` is the one deliberate exception to "omitted means codex's own
+        // default" — see `CodexThreadOptions.asThreadStartParams`. `CodexAdapter` only ever
+        // passes `"legacy"`, so that is what this pins.
+        let params = CodexThreadOptions(
+            model: "gpt-5-codex", sandbox: "workspace-write",
+            approvalPolicy: "on-request", addDirs: ["/w/b", "/w/c"]
+        ).asThreadStartParams(cwd: "/w/a", historyMode: "legacy")
+
+        XCTAssertEqual(params["historyMode"] as? String, "legacy")
+        XCTAssertEqual(params["cwd"] as? String, "/w/a")
+        XCTAssertEqual(params["model"] as? String, "gpt-5-codex")
+        XCTAssertEqual(params["sandbox"] as? String, "workspace-write")
+        XCTAssertEqual(params["approvalPolicy"] as? String, "on-request")
+        XCTAssertEqual(params["addDirs"] as? [String], ["/w/b", "/w/c"])
+        XCTAssertNotNil(params["config"], "addDirs still routes through the config override")
+        XCTAssertEqual(params.count, 7)
     }
 }
