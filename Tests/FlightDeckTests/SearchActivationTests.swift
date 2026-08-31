@@ -117,4 +117,32 @@ final class SearchActivationTests: XCTestCase {
             transcriptDirectory: "/w/fd/.claude/worktrees/fleet-pairing"
         ))
     }
+
+    /// Opening a conversation that already has a tab selects it rather than starting a
+    /// second `--resume` against a live transcript — two processes appending one file. This
+    /// is the branch `FleetService.openConversation` relies on for a phone's `search.open`.
+    func testOpenConversationSelectsAnExistingTab() {
+        let tab = UUID()
+        let conversation = UUID()
+        let result = SearchResult(
+            id: "conversation:\(conversation.uuidString.lowercased())",
+            kind: .conversation(conversation.uuidString.lowercased()),
+            title: "auth refactor",
+            projectName: "proj",
+            projectPath: "/proj",
+            tier: .transcript,
+            recency: Date(timeIntervalSince1970: 1),
+            highlightedRanges: [],
+            snippet: "the rename path",
+            conversationID: conversation.uuidString.lowercased()
+        )
+
+        let plan = SearchActivation.plan(
+            for: result,
+            openSessions: [.init(id: tab, conversationID: conversation)],
+            projects: ["/proj"]
+        )
+
+        XCTAssertEqual(plan, .select(tab))
+    }
 }

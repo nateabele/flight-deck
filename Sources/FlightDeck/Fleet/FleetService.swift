@@ -107,6 +107,90 @@ final class FleetService: ObservableObject {
         )
     }
 
+    /// Projects currently in the sidebar. `SearchCandidates.build` filters a phone's own
+    /// name matches to this same set, for the same reason: a historical conversation whose
+    /// project has since left the sidebar is a match the Mac cannot honour without silently
+    /// re-adding the project the user removed.
+    private func openProjectPaths() -> [String] { store.repos.map(\.url.path) }
+
+    /// The whole catalogue of conversations the Mac's index has a name for, filtered to
+    /// `openProjectPaths()`, plus every open tab's transcript recency — see
+    /// `WireConversationCatalogue`'s doc comment for why recency travels here rather than on
+    /// `WireSession`.
+    ///
+    /// Reads `store.searchIndex` rather than holding a second reference to it: `AppDelegate`
+    /// opens the one `SQLiteSearchIndex` for the process and hands it to `SessionStore` so
+    /// `ClaudeRuntime` can report live text into it — see `SessionStore.searchIndex`'s doc
+    /// comment. Building a second `SQLiteSearchIndex` here, on the same file, would be a
+    /// second writer; reading the store's is the same seam `SearchCandidates.build` and
+    /// `AppDelegate.presentSearch` already use.
+    private func conversationCatalogue() -> WireConversationCatalogue {
+        let open = Set(openProjectPaths())
+        let conversations = ((try? store.searchIndex?.conversationNames()) ?? [:])
+            .filter { open.contains($0.value.projectPath) }
+            .map { WireConversation(
+                id: $0.key, name: $0.value.name, projectPath: $0.value.projectPath
+            ) }
+            .sorted { $0.id < $1.id }
+        let sessionActivity = Dictionary(
+            uniqueKeysWithValues: store.repos.flatMap(\.sessions).map {
+                ($0.id.uuidString, transcriptModified($0))
+            }
+        )
+        return WireConversationCatalogue(
+            conversations: conversations, sessionActivity: sessionActivity
+        )
+    }
+
+    /// A live tab's transcript modification date, read the same way
+    /// `AppDelegate.presentSearch` reads it for `SearchCandidates.build` — a syscall, not a
+    /// read of file content, so there is nothing here worth hopping off this actor for.
+    private func transcriptModified(_ session: Session) -> Date {
+        let url = ClaudeSession.transcriptURL(
+            sessionID: session.pinnedConversationID, workingDirectory: session.transcriptDirectory
+        )
+        return (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate ?? .distantPast
+    }
+
+    /// Resumes — or selects — conversation `conversationID` from project `projectPath`, over
+    /// the same seam the desktop's ⌘K Return and the search panel's `onSelect` already use:
+    /// build a `SearchResult`, hand it to `SearchActivation.plan` for the select-vs-resume
+    /// decision, then let `SessionStore.openConversation` re-resolve the real transcript
+    /// directory and act. Nothing about select-vs-resume is reimplemented here.
+    ///
+    /// `nil` means `conversationID` is not a conversation this Mac can open at all — not a
+    /// UUID, so nothing `SearchActivation.plan`'s conversation branch or
+    /// `SessionStore.openConversation`'s pinning could ever act on. A well-formed id that
+    /// simply has no transcript on disk still reaches `SessionStore.openConversation`, which
+    /// fails it the same way `newSession` fails an unlaunchable agent — through
+    /// `launchFailureReporter`, not through this reply.
+    private func openConversation(conversationID: String, projectPath: String) -> UUID? {
+        guard UUID(uuidString: conversationID) != nil else { return nil }
+        let known = (try? store.searchIndex?.conversationNames()) ?? [:]
+        let title = known[conversationID]?.name ?? conversationID
+        let result = SearchResult(
+            id: "conversation:\(conversationID)",
+            kind: .conversation(conversationID),
+            title: title,
+            projectName: URL(fileURLWithPath: projectPath).lastPathComponent,
+            projectPath: projectPath,
+            tier: .transcript,
+            recency: .distantPast,
+            highlightedRanges: [],
+            snippet: nil,
+            conversationID: conversationID
+        )
+        let open = store.repos.flatMap(\.sessions).map {
+            SearchActivation.ActiveSession(id: $0.id, conversationID: $0.pinnedConversationID)
+        }
+        let plan = SearchActivation.plan(
+            for: result, openSessions: open, projects: openProjectPaths()
+        )
+        store.openConversation(plan)
+        return store.selectedSessionID
+    }
+
     private static func derivedServiceName(preferences: PreferencesStore) -> String {
         let raw = Host.current().localizedName ?? "Mac"
         let cleaned = raw.unicodeScalars
@@ -188,11 +272,37 @@ final class FleetService: ObservableObject {
                     cid: cid,
                     LocalEndpoints.routable(port: boundPort.rawValue, limit: 4)
                 ))
-            case .conversations, .search, .openConversation:
-                // Not wired yet — handling these is its own task. Kept here only so this
-                // switch stays exhaustive over `FleetRequest`, per this file's usual style,
-                // rather than compiling with a case silently unhandled.
-                reply(.err(cid: cid, code: "unhandled"))
+            case .conversations:
+                // Answered synchronously, the same as `newSessionOptions` and `macEndpoints`:
+                // `SQLiteSearchIndex` is already called this way off a debounce timer in
+                // `SearchModel`, on this same actor — see `AppDelegate.presentSearch`. Nothing
+                // here writes and nothing enters `FleetSnapshot`.
+                reply(.conversations(cid: cid, conversationCatalogue()))
+            case .search(let query, let limit):
+                // A query FTS5 cannot match — empty or all whitespace — is not a failure. It
+                // is a query with nothing to match, and an empty hit list is the honest
+                // answer, not `err`.
+                guard let match = FTS5Query.match(for: query) else {
+                    return reply(.searchHits(cid: cid, WireSearchHits(hits: [], indexing: nil)))
+                }
+                // Clamped with `SearchLimits.maxHits`, not `SearchModel.transcriptLimit`:
+                // that property is `@MainActor`-isolated for `SearchModel`'s own state, and
+                // `FleetKit` gives both sides the same ceiling with no actor to cross.
+                let capped = min(limit, SearchLimits.maxHits)
+                let hits = (try? store.searchIndex?.search(
+                    match, projects: openProjectPaths(), limit: capped
+                )) ?? []
+                // `indexing: nil` — nothing reaches this actor with the live backfill
+                // progress `AppDelegate` tracks in its own `SearchModel`; see this file's
+                // report for the task that added this reply.
+                reply(.searchHits(cid: cid, WireSearchHits(hits: hits, indexing: nil)))
+            case .openConversation(let conversationID, let projectPath):
+                guard let id = self.openConversation(
+                    conversationID: conversationID, projectPath: projectPath
+                ) else {
+                    return reply(.err(cid: cid, code: "unknown_conversation"))
+                }
+                reply(.session(cid: cid, id))
             }
         }
         server.onAttachedSlotsChanged = { [weak self] slots in

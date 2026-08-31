@@ -288,4 +288,19 @@ final class SQLiteSearchIndexTests: XCTestCase {
         XCTAssertEqual(hits.count, 1)
         XCTAssertEqual(hits[0].offset, 8192)
     }
+
+    /// A project that has left the sidebar contributes nothing, rather than a hit the Mac
+    /// could not honour without silently re-adding it. Asserted at the index, which is where
+    /// the scoping actually happens — `FleetService` just passes `openProjectPaths()` through.
+    func testSearchIsScopedToOpenProjects() throws {
+        try index.ingest(
+            [message("the rename path")], from: source("c.jsonl"), projectPath: "/closed",
+            offset: nil
+        )
+
+        XCTAssertTrue(try index.search("\"rename\"*", projects: ["/open"], limit: 10).isEmpty)
+        XCTAssertEqual(
+            try index.search("\"rename\"*", projects: ["/closed"], limit: 10).count, 1
+        )
+    }
 }
