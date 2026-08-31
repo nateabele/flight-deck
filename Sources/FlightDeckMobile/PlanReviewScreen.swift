@@ -23,6 +23,10 @@ struct PlanReviewScreen: View {
         var id: Int { block.index }
     }
     @State private var commentTarget: CommentTarget?
+    /// Whether the plan-wide comment sheet is up. Separate from `commentTarget` rather than a
+    /// second case of it, because this one carries no block — see the button that sets it, in
+    /// `verdictFooter`, for why a global comment needs an entry point at all.
+    @State private var showingGlobalComment = false
     /// Which row is under a finger right now, so its container can highlight — set and cleared
     /// by the drag-recognising half of `tapTarget(_:)`, never by the tap itself, which only
     /// fires on release.
@@ -55,6 +59,11 @@ struct PlanReviewScreen: View {
         .sheet(item: $commentTarget) { target in
             CommentSheet(blockIndex: target.block.index) { text in
                 model.comment(on: target.block.index, text: text)
+            }
+        }
+        .sheet(isPresented: $showingGlobalComment) {
+            CommentSheet(blockIndex: nil) { text in
+                model.comment(on: nil, text: text)
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -125,6 +134,26 @@ struct PlanReviewScreen: View {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(Color(.secondarySystemBackground))
                 )
+            // The answer to a non-target block, and to the plan as a whole: `PlanBlocks.Block`
+            // and `FleetCommand.annotatePlan`'s own doc comments both put it here — "anything a
+            // reader wants to say about it goes in a global comment, which needs no anchor."
+            // Never gated on `gate.tier`, unlike a per-block pin: `PlanReviewModel.comment(on:
+            // nil, ...)` checks only `!resolved`, because a comment with no anchor cannot be
+            // the kind of pin the `verdict` tier is unable to place.
+            Button {
+                showingGlobalComment = true
+            } label: {
+                Label(
+                    model.globalSent.isEmpty
+                        ? "Comment on the plan"
+                        : "Comment on the plan (\(model.globalSent.count))",
+                    systemImage: "bubble.left"
+                )
+                .font(.footnote.weight(.medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(model.resolved)
             // Both carry `model.feedback` — approving with notes is one action, not "send
             // notes, then approve" (see `PlanReviewModel.resolve`'s own comment).
             HStack(spacing: 8) {
@@ -216,10 +245,14 @@ private struct TapTarget: ViewModifier {
     }
 }
 
-/// One comment, on one block. Presented modally rather than inline, so typing it does not
-/// scroll the plan out from under the row it is about.
+/// One comment, on one block or on the plan as a whole. Presented modally rather than inline,
+/// so typing it does not scroll the plan out from under the row it is about — and, for the
+/// global case, because there is no row for it to sit under at all.
 private struct CommentSheet: View {
-    let blockIndex: Int
+    /// `nil` for the plan-wide comment reached from `verdictFooter`'s own button; a block
+    /// index for the per-row sheet `blockRow` opens. Only the navigation title reads it —
+    /// `onSend` already closes over which one this is.
+    let blockIndex: Int?
     let onSend: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -246,7 +279,7 @@ private struct CommentSheet: View {
                 Spacer()
             }
             .padding(16)
-            .navigationTitle("Comment")
+            .navigationTitle(blockIndex == nil ? "Comment on the plan" : "Comment")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
