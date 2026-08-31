@@ -12,7 +12,7 @@ import SwiftUI
 /// its own split of the same text, and a disagreement here is a comment pinned to the wrong
 /// phrase there.
 struct PlanReviewScreen: View {
-    @ObservedObject var model: PlanReviewModel
+    @Bindable var model: PlanReviewModel
 
     /// The block a tap opened a sheet for. Wrapped rather than presenting `PlanBlocks.Block`
     /// itself: that type is shared with the Mac in `FleetKit` and deliberately only
