@@ -3974,6 +3974,25 @@ final class SessionStore: ObservableObject {
         return repos.first?.url.path
     }
 
+    /// The project the window title names — the display name of the repo the ACTIVE session
+    /// is filed under, and nil when nothing is selected.
+    ///
+    /// Deliberately not `currentProjectPath`'s walk. That property answers "where would a new
+    /// tab land", so it falls back to the last active project and then to the first repo,
+    /// which is right for ⌘N and wrong for a title: with the selection cleared the detail pane
+    /// shows the "No Session" empty state, and a title still naming a project would be telling
+    /// the user they are somewhere they are not.
+    ///
+    /// Reads the repo's `displayName` rather than deriving a name from the session's
+    /// `workingDirectory`. The two disagree once an agent follows itself into a worktree —
+    /// `transcriptDirectory` moves to `<project>/.claude/worktrees/<name>`, and a title built
+    /// from a path would start naming the worktree instead of the project the sidebar files
+    /// the tab under.
+    var currentProjectName: String? {
+        guard let activeID = selectedSessionID, let at = locate(activeID) else { return nil }
+        return repos[at.repo].displayName
+    }
+
     func status(for id: UUID) -> SessionStatus? { statuses[id] }
 
     /// The tab's terminal screen, or nil when there is no surface or it cannot be read.
