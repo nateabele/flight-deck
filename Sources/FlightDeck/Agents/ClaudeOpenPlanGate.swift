@@ -19,9 +19,20 @@ enum ClaudeOpenPlanGate {
             if let id = item.body.callID { answered.insert(id) }
         }
 
-        // Reversed: the newest unanswered call is the live one, exactly as `OpenPrompt.find`
-        // reads its window — a superseded call earlier in the tail must not win over one that
-        // followed it.
+        // Reversed, and — unlike `OpenPrompt.find` — skipping straight past any unanswered
+        // call that is not `ExitPlanMode`, rather than stopping at the first unanswered item
+        // regardless of tool. That divergence is deliberate, not an oversight: `OpenPrompt`
+        // treats the newest unanswered call as having *superseded* whatever else is open,
+        // because a person answering a dialog can raise a new one in the same breath. A gate
+        // has no such successor to be superseded by. `ExitPlanMode` blocks the tool loop until
+        // it resolves, so nothing this session writes can be a later, truer plan call than an
+        // unanswered `ExitPlanMode` still sitting in the tail — a younger unanswered call of a
+        // different tool is a sibling from the same blocked turn (parallel tool calls in one
+        // message), not a call claude went on to make afterward. And this is only ever asked
+        // of a transcript `PlanGateService.refresh()` has already matched to a gate the
+        // registry independently confirms is open for this pid — so skipping past the
+        // stranger to keep looking for the real one is the correct read of what is on screen,
+        // not a guess.
         for item in items.reversed() {
             guard item.kind == .toolCall, item.body.tool == "ExitPlanMode",
                   let id = item.body.callID, !answered.contains(id)
