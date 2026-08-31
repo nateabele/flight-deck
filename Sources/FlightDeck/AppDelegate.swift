@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import OSLog
 import UserNotifications
 
 /// App-level delegate: notification handling and the last-window-closed policy.
@@ -14,6 +15,10 @@ import UserNotifications
 /// file was missed. Corrected here since we are rewriting the file anyway.)
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let ghostty: GhosttyApp? = GhosttyApp.shared
+
+    private static let logger = Logger(
+        subsystem: "dev.flightdeck.FlightDeck", category: "answer"
+    )
 
     /// The store the delegate does not own — see the type doc comment. Set from
     /// `.flightDeckStoreReady`, the same notification hop `flightDeckActivateSession` uses to
@@ -43,6 +48,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var searchPanel: SearchPanel?
     private var searchBuildTask: Task<Void, Never>?
 
+    /// The shell's way into the answer drive, and the socket it listens on. Both nil unless
+    /// `AnswerTrigger.isEnabled` — see that type for why this is off by default. Owned here
+    /// for the reason the search index is: a socket outlives any view and must be opened
+    /// exactly once per launch.
+    private var answerTrigger: AnswerTrigger?
+    private var answerTriggerSocket: AnswerTriggerSocket?
+
     /// Beside `sessions.json`, and honouring `-FlightDeckStateDir` for the same reason that
     /// flag exists: a debug instance pointed at a copy of a real deck must not also write
     /// into the real index.
@@ -50,6 +62,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static func searchIndexURL() -> URL {
         (FlightDeckApp.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
             .appendingPathComponent("search-index.sqlite")
+    }
+
+    /// Beside the index, and honouring `-FlightDeckStateDir` for the same reason it does: two
+    /// instances pointed at different decks must not share one socket, or a shell would drive
+    /// whichever of them happened to bind first.
+    @MainActor
+    private static func answerTriggerURL() -> URL {
+        (FlightDeckApp.stateDirectory() ?? FileSessionPersistence.defaultDirectory())
+            .appendingPathComponent("answer-trigger.sock")
     }
 
     /// Registered before launch completes, which is required for the delegate to
@@ -66,7 +87,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // The store can arrive after `applicationDidFinishLaunching` already tried
                 // and bailed out for lack of one, so installation is retried from here too.
                 self?.installToolsMenu()
-                if let store = note.object as? SessionStore { self?.startSearch(store: store) }
+                if let store = note.object as? SessionStore {
+                    self?.startSearch(store: store)
+                    self?.startAnswerTrigger(store: store)
+                }
             }
         }
     }
@@ -89,7 +113,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         //
         // `startSearch` guards on `searchIndex == nil`, so whichever hop arrives second is a
         // no-op rather than a second index handle and a doubled backfill.
-        if let store = store ?? SessionStore.current { startSearch(store: store) }
+        if let store = store ?? SessionStore.current {
+            startSearch(store: store)
+            startAnswerTrigger(store: store)
+        }
+    }
+
+    /// Opens the answer trigger's socket, if this launch was told to.
+    ///
+    /// Reached from both store-ready hops for the reason `startSearch` is, and idempotent for
+    /// the same reason: whichever arrives second must not bind a second listener over the
+    /// first one's socket file.
+    ///
+    /// A socket that will not bind is logged and dropped rather than raised. This is a
+    /// developer's diagnostic channel; an app that refused to finish launching because of one
+    /// would be a far worse failure than the one it exists to diagnose.
+    @MainActor
+    private func startAnswerTrigger(store: SessionStore) {
+        guard answerTriggerSocket == nil, AnswerTrigger.isEnabled() else { return }
+        let trigger = AnswerTrigger(store: store)
+        let socket = AnswerTriggerSocket(url: Self.answerTriggerURL()) { [weak trigger] line in
+            trigger?.handle(line) ?? #"{"ok":false,"error":"stopped"}"#
+        }
+        do {
+            try socket.start()
+        } catch {
+            Self.logger.error(
+                "answer trigger failed to open its socket: \(String(describing: error), privacy: .public)"
+            )
+            return
+        }
+        answerTrigger = trigger
+        answerTriggerSocket = socket
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

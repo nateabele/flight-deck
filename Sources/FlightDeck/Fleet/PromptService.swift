@@ -61,9 +61,41 @@ final class PromptService {
     /// `AgentAdapter.dialogDriver` — the *same question* the store asks, of the same object —
     /// plus `openPrompt`, which is this file's own half and is asked of the same adapter
     /// rather than hardcoded to one agent's transcript grammar.
+    ///
+    /// The three refusals themselves live in `openPrompt(inSession:)`, so a caller that needs
+    /// to *see* the open dialog reads it through the same gauntlet this answers against — see
+    /// that method for why it is not a second copy.
     func answer(
         session: UUID, call: String, answer: PromptAnswer, token: UUID
     ) -> Result<Void, TimelineErrorCode> {
+        switch openPrompt(inSession: session) {
+        case .failure(let code):
+            return .failure(code)
+        case .success(let open):
+            // **The comparison this whole service exists for.** The derivation says what the
+            // terminal is blocked on now; `call` says what the phone was showing when a thumb
+            // came down. They are only the same dialog if they are the same call.
+            guard open.callID == call else { return .failure("prompt_changed") }
+
+            let outcome = store.answerPrompt(open, with: answer, in: session, token: token)
+            if let code = outcome.errorCode { return .failure(TimelineErrorCode(code)) }
+            return .success(())
+        }
+    }
+
+    /// What `session` is blocked on right now, or why nothing here can be answered.
+    ///
+    /// **Split out of `answer` rather than copied for it.** The answer path and any reader of
+    /// the open dialog must agree on all four questions below — is the tab there, is it
+    /// waiting, can this build drive and read its agent, and does it have a transcript — and
+    /// two copies of that sequence would drift the first time one of them gained a case. The
+    /// call-id comparison deliberately stays in `answer`: it is a fact about what the *client*
+    /// was looking at, not about what the terminal is blocked on, and a reader has nothing to
+    /// compare against.
+    ///
+    /// Every code returned here is one `answer` has always returned, in the order it has
+    /// always returned them.
+    func openPrompt(inSession session: UUID) -> Result<OpenPrompt, TimelineErrorCode> {
         // Resolved once, up front. A tab closed between the tap and here is the ordinary case,
         // not an edge one — the same ruling `TimelineService.page` makes.
         let source = store.timelineSource(of: session)
@@ -105,16 +137,12 @@ final class PromptService {
         // thing that code now means.
         guard case .file(_, let url) = source else { return .failure("prompt_changed") }
         let lines = tail(url, Self.tailRecords)
-        // **The comparison this whole service exists for.** The derivation says what the
-        // terminal is blocked on now; `call` says what the phone was showing when a thumb
-        // came down. They are only the same dialog if they are the same call.
-        guard let open = reader.openPrompt(inTranscriptTail: lines, activity: activity),
-              open.callID == call
+        // A tab that is waiting on something this reader cannot name in the transcript. The
+        // terminal has a dialog up; nothing here knows which call it belongs to, so there is
+        // nothing safe to answer and nothing honest to show.
+        guard let open = reader.openPrompt(inTranscriptTail: lines, activity: activity)
         else { return .failure("prompt_changed") }
-
-        let outcome = store.answerPrompt(open, with: answer, in: session, token: token)
-        if let code = outcome.errorCode { return .failure(TimelineErrorCode(code)) }
-        return .success(())
+        return .success(open)
     }
 }
 
