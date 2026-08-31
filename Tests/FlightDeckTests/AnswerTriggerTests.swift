@@ -56,7 +56,11 @@ final class AnswerTriggerTests: XCTestCase {
         let session = store.newSession(in: tmp)
         store.applyRegistry([1: entry(session.pinnedConversationID, activity, cwd: tmp.path)])
         spy.events.removeAll()
-        return (AnswerTrigger(store: store), spy, session.id)
+        let trigger = AnswerTrigger(store: store)
+        // Silenced for `PromptServiceTests.makeService`'s reason: the default sink appends to
+        // the developer's own `~/Library/Logs/flight-deck-prompt.log`.
+        trigger.prompts.lifecycleSink = { _ in }
+        return (trigger, spy, session.id)
     }
 
     /// One `AskUserQuestion` record, in claude's own transcript shape.

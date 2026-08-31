@@ -416,6 +416,19 @@ public final class FleetSocketServer: @unchecked Sendable {
         }
     }
 
+    /// How many clients a `broadcast` right now would reach.
+    ///
+    /// A count where `onAttachedSlotsChanged` is a set, because the question is different:
+    /// that signal drives per-slot UI and needs to know *which* phone, while this answers "did
+    /// what I just sent leave the machine, and to how many" for a diagnostic log. It counts
+    /// every attachment, including one whose PSK identity could not be read back — such a
+    /// connection is absent from the slot set and is still a phone receiving frames, and a
+    /// count that omitted it would say "nobody was listening" about a push that arrived.
+    public var attachedCount: Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return attached.count
+    }
+
     /// Which paired slot this connection's peer holds the key for — the PSK identity its
     /// handshake offered, which is the slot's UUID (`FleetDeviceKey.identity`).
     ///
