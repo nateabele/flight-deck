@@ -10,9 +10,15 @@ import Foundation
 /// **There is no cache and there must not be one.** The open call is re-derived from the
 /// transcript on every answer. A `served` table would be faster and would fail the case this
 /// service exists for: the user approves a dialog in the terminal, claude raises the next one
-/// immediately, and the session **never leaves `waiting`** — so no event is emitted, the
-/// phone's card still shows the old dialog, and a cached entry still matches it. The
-/// re-derivation does not match, because the new dialog is a different call.
+/// immediately, and the session **never leaves `waiting`** — so the phone's card can still be
+/// showing the old dialog when a thumb comes down, and a cached entry would still match it.
+/// The re-derivation does not match, because the new dialog is a different call.
+///
+/// `WireSession.openPromptCall` now pushes that supersede, so a phone should learn about it and
+/// stop offering the old card. That reduces how often a stale answer is *sent*; it does not
+/// make this check optional. A frame can be in flight, dropped, or applied by a client that
+/// ignores the field, and this is the only thing standing between any of those and a keystroke
+/// at a real terminal.
 ///
 /// The read is a tail — `TimelineLimits.window` at most, `tailRecords` records — done once per
 /// human tap, on the main queue, inside `FleetSocketServer`'s synchronous `onCommand`. That is
@@ -110,6 +116,27 @@ final class PromptService {
         lifecycleSink(PromptLifecycleRecord(
             session: session, event: .answer(sent: sent, open: open, code: code)
         ))
+    }
+
+    /// The same question `openPrompt` answers, asked the way the **push** side has to ask it:
+    /// without waking anything up.
+    ///
+    /// Two callers, both of which run on a schedule rather than on a tap —
+    /// `SessionStore.commitStatuses` on every registry tick, and `PromptLifecycleObserver` on
+    /// every activity edge. The agent test runs FIRST and exists only to keep this free of
+    /// side effects: `openPrompt` resolves the tab's transcript, and that resolution builds
+    /// and memoizes the agent's adapter — for codex, a whole `CodexStack` with a runtime and
+    /// an index watcher in it. Reporting what is on screen must never be the thing that brings
+    /// one into existence.
+    ///
+    /// The refusal is the same string from the same property `openPrompt` would have returned,
+    /// so nothing is decided differently here; only the order is.
+    func pushedOpenPrompt(inSession session: UUID) -> Result<OpenPrompt, TimelineErrorCode> {
+        guard let agent = store.agent(of: session),
+              agent.dialogDriver != nil,
+              agent.openPromptReader != nil
+        else { return .failure("unsupported_agent") }
+        return openPrompt(inSession: session)
     }
 
     /// What `session` is blocked on right now, or why nothing here can be answered.

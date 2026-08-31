@@ -163,10 +163,11 @@ final class FleetAccountEmissionTests: XCTestCase {
 
         XCTAssertTrue(replicator.recorded.contains(
             .activityChanged(id: first.id, activity: "idle", waitingFor: nil, subagentCount: 0,
-                             hasBackgroundWork: false)
+                             hasBackgroundWork: false, openPromptCall: .noPrompt)
         ))
         XCTAssertFalse(replicator.recorded.contains { event in
-            guard case .activityChanged(let id, let activity, _, _, _) = event else { return false }
+            guard case .activityChanged(let id, let activity, _, _, _, _) = event
+            else { return false }
             return id == second.id && activity == nil
         }, "the other login's tab did not exit; nothing about it changed")
     }

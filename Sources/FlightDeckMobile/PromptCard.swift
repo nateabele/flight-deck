@@ -26,8 +26,9 @@ struct PromptCard: View {
     let open: OpenPrompt?
     /// The session's agent, straight off the wire and never a client-side enum — see
     /// `TimelineStyle.agentName`. Only ever used to *name* what is waiting; whether a card
-    /// appears at all is `OpenPrompt.find`'s decision, which refuses an agent no Mac can
-    /// answer for before this view is ever handed one.
+    /// appears at all is decided before this view is ever handed one — by `OpenPrompt.find`,
+    /// which refuses an agent no Mac can answer for, and then by the Mac's own
+    /// `WireSession.openPromptCall`, which refuses a dialog it has moved on from.
     let agent: String?
     let state: SessionTimelineModel.AnswerState
     let model: SessionTimelineModel

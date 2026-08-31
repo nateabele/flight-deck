@@ -209,9 +209,13 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     ///
     /// It closes the harder race too, which a served-and-echoed id would not: the user approves
     /// in the terminal, claude raises the next dialog immediately, and the session **never
-    /// leaves `waiting`** — so no activity change is emitted and a card that looks live is
-    /// describing a dialog that is gone. A cache of "what I last served" still matches there.
-    /// A re-derivation does not, because the new dialog is a different call.
+    /// leaves `waiting`**, so a card that looks live can be describing a dialog that is gone. A
+    /// cache of "what I last served" still matches there. A re-derivation does not, because the
+    /// new dialog is a different call.
+    ///
+    /// `WireSession.openPromptCall` makes that supersede visible to a client, so the tap is
+    /// less likely to be sent at all — but it is the phone being *told*, not the Mac being
+    /// convinced. What arrives here is still judged against a fresh derivation, always.
     ///
     /// `token` is the client's own idempotency key, minted once per tap, for the reason
     /// `.prompt`'s is: the socket can drop between the command landing and its `ack` being

@@ -15,7 +15,8 @@ enum FleetProjection {
         FleetSnapshot(projects: store.repos.map {
             project(
                 $0, statuses: store.statuses, unread: store.unreadIdle,
-                backgroundWork: store.backgroundWorkSessions
+                backgroundWork: store.backgroundWorkSessions,
+                openPromptCalls: store.openPromptCalls
             )
         })
     }
@@ -23,7 +24,7 @@ enum FleetProjection {
     @MainActor
     static func project(
         _ repo: Repo, statuses: [UUID: SessionStatus], unread: Set<UUID>,
-        backgroundWork: Set<UUID>
+        backgroundWork: Set<UUID>, openPromptCalls: [UUID: String]
     ) -> WireProject {
         WireProject(
             id: repo.id,
@@ -33,7 +34,8 @@ enum FleetProjection {
             sessions: repo.sessions.map {
                 project(
                     $0, status: statuses[$0.id], unread: unread,
-                    hasBackgroundWork: backgroundWork.contains($0.id)
+                    hasBackgroundWork: backgroundWork.contains($0.id),
+                    openPromptCall: openPromptCalls[$0.id]
                 )
             }
         )
@@ -41,7 +43,8 @@ enum FleetProjection {
 
     @MainActor
     static func project(
-        _ session: Session, status: SessionStatus?, unread: Set<UUID>, hasBackgroundWork: Bool
+        _ session: Session, status: SessionStatus?, unread: Set<UUID>,
+        hasBackgroundWork: Bool, openPromptCall: String?
     ) -> WireSession {
         WireSession(
             id: session.id,
@@ -53,7 +56,11 @@ enum FleetProjection {
             waitingFor: status?.waitingFor,
             subagentCount: status?.subagentCount ?? 0,
             isUnread: unread.contains(session.id),
-            hasBackgroundWork: hasBackgroundWork
+            hasBackgroundWork: hasBackgroundWork,
+            // Never `.unreported`: this build always looks, so "no entry" is this Mac saying
+            // it can name no open dialog — which is the assertion that retires a phone's card.
+            // `.unreported` is reserved for a peer that predates the field.
+            openPromptCall: openPromptCall.map(OpenPromptIdentity.call) ?? .noPrompt
         )
     }
 }

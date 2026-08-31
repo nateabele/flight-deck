@@ -205,10 +205,15 @@ final class PromptLifecycleTests: XCTestCase {
         ])
     }
 
-    /// **The transition nothing is pushed for.** claude answers one dialog and raises the next
-    /// without the session leaving `waiting`, so the only frame that goes out says `waiting`
-    /// exactly as the last one did — a phone holding the first card has been told nothing.
-    /// The absence of a `pushed` record here is the assertion.
+    /// **The transition this log was built to catch.** claude answers one dialog and raises
+    /// the next without the session leaving `waiting`, so the frame that goes out still says
+    /// `waiting` exactly as the last one did. The absence of a `pushed` record here is the
+    /// assertion, and it still is: `pushed` reports the `waiting` claim a card's *existence*
+    /// rests on, which genuinely did not move.
+    ///
+    /// What did move is `openPromptCall`, which now rides on that same frame — see
+    /// `PromptIdentityWireTests`, which owns what the fleet sends. Nothing here may become a
+    /// test of that.
     func testANewCallWhileStillWaitingRecordsASupersedeAndNoPush() throws {
         let (recorder, transcript, _) = standUp()
         transcript.lines = [SourceLine(offset: 0, text: askLine("toolu_A"))]
@@ -220,9 +225,9 @@ final class PromptLifecycleTests: XCTestCase {
             SourceLine(offset: 1, text: resultLine("toolu_A")),
             SourceLine(offset: 2, text: bashLine("toolu_B")),
         ]
-        // Still waiting; only the reason moved, which is what makes the tick emit an event at
-        // all. Without one there is no fleet frame and nothing for the observer to look at —
-        // the worst case of this failure, and one this log cannot see by construction.
+        // Still waiting; only the reason moved. This observer reads the fleet's own outbound
+        // events, so it can only see a tick that produced one — which is why the reason is
+        // moved here rather than held fixed.
         report(.waiting, waitingFor: "permission prompt")
 
         XCTAssertEqual(recorder.events, [
