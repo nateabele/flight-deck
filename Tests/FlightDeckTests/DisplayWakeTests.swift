@@ -104,4 +104,58 @@ final class DisplayWakeTests: XCTestCase {
         XCTAssertEqual(waker.calls, 0)
         XCTAssertEqual(store.repos.flatMap(\.sessions).count, 1)
     }
+
+    /// codex does not route through `newSession(in:)`, so it needs its own guard — and
+    /// therefore its own wake. R1 of the original guard missed this path.
+    func testCreateSessionWakesASleepingDisplay() async {
+        let (store, _, waker) = makeStore(drawable: false, wakeSucceeds: true)
+        _ = await store.createSession(agent: .claude, in: tmp.path)
+        XCTAssertEqual(waker.calls, 1)
+    }
+
+    func testCreateSessionStillFailsWhenTheWakeFails() async {
+        let (store, _, waker) = makeStore(drawable: false, wakeSucceeds: false)
+        let result = await store.createSession(agent: .claude, in: tmp.path)
+        XCTAssertEqual(waker.calls, 1)
+        guard case .failure(let error) = result else {
+            return XCTFail("a display that will not wake must still refuse")
+        }
+        XCTAssertEqual(error, .terminalUnavailable(displayAsleep: true))
+    }
+
+    /// Signing in bypasses `createSession` entirely, so it too needs its own wake.
+    func testOpenSignInSessionWakesASleepingDisplay() {
+        let (store, _, waker) = makeStore(drawable: false, wakeSucceeds: true)
+        let account = AgentAccount(
+            agent: .claude, displayName: "Work",
+            home: URL(fileURLWithPath: "/tmp/claude-work")
+        )
+        _ = store.openSignInSession(
+            for: account, in: tmp.path,
+            using: LoginInvocation(command: "claude", inject: nil)
+        )
+        XCTAssertEqual(waker.calls, 1)
+    }
+
+    /// Restart Terminal on an inert tab. Reachable while the display is asleep — that is
+    /// precisely the state that produced the inert tab in the first place.
+    func testRespawnWakesASleepingDisplay() {
+        let (store, _, waker) = makeStore(drawable: true, wakeSucceeds: true)
+        let session = store.newSession(in: tmp)
+        (store.display as? MutableDisplay)?.set(false)
+        _ = store.respawnSurface(for: session.id)
+        XCTAssertEqual(waker.calls, 1)
+    }
+
+    func testRespawnStillReportsDisplayAsleepWhenTheWakeFails() {
+        let provider = StubProvider()
+        retainedProviders.append(provider)
+        let store = SessionStore(provider: provider, persistence: nil)
+        let display = MutableDisplay(true)
+        store.display = display
+        store.displayWaker = Waker(succeeds: false)
+        let session = store.newSession(in: tmp)
+        display.set(false)
+        XCTAssertEqual(store.respawnSurface(for: session.id), .displayAsleep)
+    }
 }

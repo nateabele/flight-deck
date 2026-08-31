@@ -930,7 +930,7 @@ final class SessionStore: ObservableObject {
         // Ordered before the display check deliberately: "it is already working" is true and
         // more useful regardless of what the display is doing.
         guard !hasShellProcess(for: id) else { return .alreadyRunning }
-        guard canCreateTerminal else {
+        guard ensureTerminalCreatable() else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
             return .displayAsleep
         }
@@ -1334,7 +1334,7 @@ final class SessionStore: ObservableObject {
         // otherwise be born just as inert as the bug this exists to fix. Reported through
         // `launchFailureReporter` exactly as the neighbouring `launchAccount` failure branch
         // does, just below.
-        guard canCreateTerminal else {
+        guard ensureTerminalCreatable() else {
             let error = AgentLaunchError.terminalUnavailable(displayAsleep: true)
             launchFailureReporter.report(error)
             return .failure(error)
@@ -1445,7 +1445,7 @@ final class SessionStore: ObservableObject {
     func openSignInSession(
         for account: AgentAccount, in directory: String, using invocation: LoginInvocation
     ) -> Session {
-        guard canCreateTerminal else {
+        guard ensureTerminalCreatable() else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
             // Same un-inserted-`Session` convention as `newSession(in:)`: this bypasses
             // `createSession` entirely (see the doc comment above), so it needs its own guard
