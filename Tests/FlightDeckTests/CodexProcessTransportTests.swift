@@ -61,7 +61,7 @@ final class CodexProcessTransportTests: XCTestCase {
     func testAProbeThatNeverAnswersFailsRatherThanHanging() async {
         let started = Date()
         do {
-            try await CodexVersionProbe.checkOffMainActor(timeoutSeconds: 0.2) { _ in
+            _ = try await CodexVersionProbe.checkOffMainActor(timeoutSeconds: 0.2) { _ in
                 // Blocks its thread the way a wedged child process does. It is detached, so
                 // the deadline has to come from outside it — which is the whole point.
                 Thread.sleep(forTimeInterval: 1.5)
@@ -77,14 +77,14 @@ final class CodexProcessTransportTests: XCTestCase {
     }
 
     func testAProbeThatAnswersInTimeStillSucceeds() async throws {
-        try await CodexVersionProbe.checkOffMainActor(timeoutSeconds: 5) { _ in "codex-cli 0.147.0" }
+        _ = try await CodexVersionProbe.checkOffMainActor(timeoutSeconds: 5) { _ in "codex-cli 0.147.0" }
     }
 
     /// The deadline must not swallow the specific diagnosis. A binary that answers promptly
     /// with a version too old still reports `.versionTooOld`, not a timeout.
     func testARealFailureBeatsTheDeadlineToTheCaller() async {
         do {
-            try await CodexVersionProbe.checkOffMainActor(timeoutSeconds: 5) { _ in "codex-cli 0.1.0" }
+            _ = try await CodexVersionProbe.checkOffMainActor(timeoutSeconds: 5) { _ in "codex-cli 0.1.0" }
             XCTFail("an old codex must still be rejected")
         } catch {
             XCTAssertEqual(
@@ -136,12 +136,43 @@ final class CodexProcessTransportTests: XCTestCase {
         XCTAssertFalse(CodexVersionProbe.isAtLeast("0.142", minimum: "0.142.4"))
     }
 
+    // MARK: - CodexVersionProbe.supportsHistoryMode
+
+    /// `0.151.0` is the floor: the only version directly verified to accept `historyMode` on
+    /// `thread/start`. `0.151` (missing the patch component) is true, not the false one might
+    /// guess: `isAtLeast` treats a missing component as 0 on *both* sides of the comparison,
+    /// so `0.151`'s implicit `.0` patch compares equal to the minimum's explicit `.0`, not
+    /// less than it. Verified directly rather than assumed — see `isAtLeast`.
+    func testSupportsHistoryModeAtVariousVersions() {
+        let cases: [(String, Bool)] = [
+            ("0.142.4", false),
+            ("0.147.0", false),
+            ("0.150.9", false),
+            ("0.151.0", true),
+            ("0.152.0", true),
+            ("0.151", true),
+        ]
+        for (version, expected) in cases {
+            XCTAssertEqual(
+                CodexVersionProbe.supportsHistoryMode(version), expected,
+                "supportsHistoryMode(\(version)) should be \(expected)"
+            )
+        }
+    }
+
     // MARK: - CodexVersionProbe.check
 
     func testCheckPassesSilentlyWhenTheInstalledVersionMeetsTheMinimum() {
         XCTAssertNoThrow(
             try CodexVersionProbe.check(executable: "codex", run: { _ in "codex-cli 0.142.4\n" })
         )
+    }
+
+    /// Callers past task 1 need the parsed version — task 2 uses it to decide whether to send
+    /// `historyMode` at all.
+    func testCheckReturnsTheParsedVersionOnSuccess() throws {
+        let version = try CodexVersionProbe.check(executable: "codex", run: { _ in "codex-cli 0.147.0\n" })
+        XCTAssertEqual(version, "0.147.0")
     }
 
     func testCheckThrowsVersionTooOldBelowTheMinimum() {
@@ -215,6 +246,13 @@ final class CodexProcessTransportTests: XCTestCase {
         let clientInfo = try XCTUnwrap(params["clientInfo"] as? [String: Any])
         XCTAssertFalse((clientInfo["name"] as? String ?? "").isEmpty, "clientInfo.name must not be empty")
         XCTAssertNotNil(clientInfo["version"] as? String, "clientInfo.version must be present")
+
+        let capabilities = try XCTUnwrap(params["capabilities"] as? [String: Any])
+        XCTAssertEqual(
+            capabilities["experimentalApi"] as? Bool, true,
+            "without this, real codex rejects historyMode with " +
+                "\"thread/start.historyMode requires experimentalApi capability\""
+        )
     }
 
     /// A wedged app-server (spawned, alive, never answering) must not hang session creation

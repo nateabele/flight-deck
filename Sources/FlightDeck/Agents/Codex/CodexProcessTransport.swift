@@ -72,6 +72,22 @@ enum CodexVersionProbe {
     /// against the binary, not derived from a changelog.
     static let minimumVersion = "0.142.4"
 
+    /// The floor for sending `historyMode` on `thread/start` — a capability gate, not a
+    /// replacement for `minimumVersion`. 0.151.0 is the only version directly verified to
+    /// accept the param: the pinned 0.147.0 schema
+    /// (`Tests/FlightDeckTests/Fixtures/Codex/codex-app-server-v2.generated.json`) defines
+    /// `ThreadHistoryMode` but leaves it orphaned there — `ThreadStartParams` has no such
+    /// property — so 0.147.0 rejects it. 0.148.0 and earlier default to `legacy` anyway, so
+    /// sending nothing is already correct for them. 0.149.x–0.150.x are untested: that gap is
+    /// what the diagnostic added in a later task exists to report.
+    static let historyModeMinimumVersion = "0.151.0"
+
+    /// Whether `version` is new enough to accept `historyMode` on `thread/start`. See
+    /// `historyModeMinimumVersion` for why the floor sits where it does.
+    static func supportsHistoryMode(_ version: String) -> Bool {
+        isAtLeast(version, minimum: historyModeMinimumVersion)
+    }
+
     /// How long any single step of the probe may take before it is treated as a failure.
     ///
     /// Matches `CodexProcessTransport.verifyHandshake`'s default, and for the same reason:
@@ -94,7 +110,7 @@ enum CodexVersionProbe {
         executable: String = "codex",
         timeoutSeconds: Double = timeoutSeconds + 1,
         run: @escaping @Sendable (String) throws -> String = defaultRun
-    ) async throws {
+    ) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             let race = FirstToFinish(continuation)
             // Detached and deliberately NOT awaited structurally. `check` blocks a thread on
@@ -106,16 +122,16 @@ enum CodexVersionProbe {
             // which is what releases this thread.
             Task.detached {
                 do {
-                    try check(executable: executable, run: run)
-                    race.finish(nil)
+                    let version = try check(executable: executable, run: run)
+                    race.finish(.success(version))
                 } catch {
-                    race.finish(error)
+                    race.finish(.failure(error))
                 }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds) {
-                race.finish(AgentLaunchError.prepareFailed(
+                race.finish(.failure(AgentLaunchError.prepareFailed(
                     "`\(executable) --version` did not answer within \(timeoutSeconds)s."
-                ))
+                )))
             }
         }
     }
@@ -125,35 +141,37 @@ enum CodexVersionProbe {
     /// tidiness — and the two racers genuinely can finish at the same moment.
     private final class FirstToFinish: @unchecked Sendable {
         private let lock = NSLock()
-        private var continuation: CheckedContinuation<Void, Error>?
+        private var continuation: CheckedContinuation<String, Error>?
 
-        init(_ continuation: CheckedContinuation<Void, Error>) {
+        init(_ continuation: CheckedContinuation<String, Error>) {
             self.continuation = continuation
         }
 
-        func finish(_ error: Error?) {
+        func finish(_ outcome: Result<String, Error>) {
             lock.lock()
             let pending = continuation
             continuation = nil
             lock.unlock()
             guard let pending else { return }
-            if let error { pending.resume(throwing: error) } else { pending.resume() }
+            pending.resume(with: outcome)
         }
     }
 
     /// Runs `codex --version`, parses it, and throws the launch error that names what's
-    /// wrong. `executable` also names the binary in that error; `run` is injected so tests
-    /// can supply canned output instead of spawning a real process.
+    /// wrong, or returns the parsed version on success. `executable` also names the binary in
+    /// that error; `run` is injected so tests can supply canned output instead of spawning a
+    /// real process.
     static func check(
         executable: String = "codex",
         run: (String) throws -> String = defaultRun
-    ) throws {
+    ) throws -> String {
         guard let output = try? run(executable), let found = parse(output) else {
             throw AgentLaunchError.notInstalled(executable)
         }
         guard isAtLeast(found, minimum: minimumVersion) else {
             throw AgentLaunchError.versionTooOld(found: found, minimum: minimumVersion)
         }
+        return found
     }
 
     /// codex prints e.g. `codex-cli 0.142.4` on the first line of `--version` — the version
@@ -395,9 +413,20 @@ extension CodexProcessTransport {
     /// on every real handshake, against both codex-cli 0.142.4 and 0.147.0. Caught only by
     /// `CodexIntegrationTests`, because every hermetic test talks to a stub transport that
     /// never validates params. See this task's report for the incident.
+    ///
+    /// `capabilities.experimentalApi` MUST also be present, and unconditionally — not
+    /// version-gated, because `InitializeCapabilities` exists as far back as the pinned
+    /// 0.147.0 schema. It declares that this client may send experimental params, which is
+    /// what lets a later step ask for `historyMode: "legacy"` on `thread/start`; without it,
+    /// codex rejects that param with `thread/start.historyMode requires experimentalApi
+    /// capability`.
     static func verifyHandshake(_ rpc: CodexRPC, timeoutSeconds: Double = 5) async throws {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
-        let params: [String: Any] = ["clientInfo": ["name": "flight-deck", "version": version]]
+        let capabilities: [String: Bool] = ["experimentalApi": true]
+        let params: [String: Any] = [
+            "clientInfo": ["name": "flight-deck", "version": version],
+            "capabilities": capabilities,
+        ]
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask { _ = try await rpc.request("initialize", params) }
             group.addTask {

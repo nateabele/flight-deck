@@ -1395,7 +1395,7 @@ final class SessionStore: ObservableObject {
             // just this creation but every codex creation on this account for the rest of
             // the run, all of them awaiting the same wedged task. `verifyHandshake` below was
             // already bounded; the step in front of it was not. See `checkOffMainActor`.
-            try await CodexVersionProbe.checkOffMainActor()
+            _ = try await CodexVersionProbe.checkOffMainActor()
             try stack.transport.start()
             try await CodexProcessTransport.verifyHandshake(stack.rpc)
         }
