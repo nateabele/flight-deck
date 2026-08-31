@@ -24,6 +24,12 @@ public struct TranscriptHit: Codable, Equatable, Sendable {
     public let projectPath: String
     public let conversationName: String
     public let snippet: String
+    /// A bare `Date`, against `TimelineItem.at`'s documented reason not to be one — see
+    /// `TimelineItem.at`'s doc comment. Safe only while neither end sets a date strategy on
+    /// its `JSONEncoder`/`JSONDecoder`; both currently use the bare default, which round-trips
+    /// a `Date` as seconds-since-epoch on both sides identically. Setting a strategy anywhere
+    /// — on either type, since `JSONEncoder`'s strategy is per-instance, not per-type — would
+    /// shift every timestamp on this wire silently, with nothing here to catch it.
     public let timestamp: Date
     /// Where this message's record starts in its transcript, in bytes, at a line boundary —
     /// which is exactly what `TimelineAnchor.around` takes. This is what lets a hit be
