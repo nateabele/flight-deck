@@ -607,6 +607,15 @@ final class FleetService: ObservableObject {
             guard let path = store.projectPath(project) else {
                 return .err(cid: cid, code: "unknown_project")
             }
+            // After the project lookup, so an unknown project still says so rather than being
+            // masked by this. Checked once, ahead of both branches below (the plain `+` tap and
+            // the agent/account variant): `store.newSession`/`createSession` would otherwise
+            // refuse silently — `newSession(inProject:)` still returns a non-nil `Session`, an
+            // un-inserted one, so the phone would see an ordinary ack for a tab that was never
+            // created.
+            guard store.canCreateTerminal else {
+                return .err(cid: cid, code: "terminal_unavailable")
+            }
             // Both nil is a plain `+` tap: the project's defaults, exactly as before this
             // feature existed and exactly what an older phone sends.
             guard let agent, let accountIndex, let picked = AgentID(rawValue: agent) else {
