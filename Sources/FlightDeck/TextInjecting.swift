@@ -55,6 +55,7 @@ protocol TextInjecting: AnyObject {
 extension Ghostty.SurfaceView: TextInjecting {
     func sendText(_ text: String) {
         surfaceModel?.sendText(text)
+        screenChanged()
     }
 
     /// Sends Return as a key event rather than as text, which is load-bearing.
@@ -72,6 +73,7 @@ extension Ghostty.SurfaceView: TextInjecting {
         guard let surfaceModel else { return }
         surfaceModel.sendKeyEvent(.init(key: .enter, action: .press, text: "\r"))
         surfaceModel.sendKeyEvent(.init(key: .enter, action: .release))
+        screenChanged()
     }
 
     func sendKillLine() {
@@ -108,6 +110,7 @@ extension Ghostty.SurfaceView: TextInjecting {
         guard let surfaceModel else { return }
         surfaceModel.sendKeyEvent(.init(key: key, action: .press))
         surfaceModel.sendKeyEvent(.init(key: key, action: .release))
+        screenChanged()
     }
 
     /// Control keys go the same route as Return, and for the same reason — a control byte
@@ -120,10 +123,33 @@ extension Ghostty.SurfaceView: TextInjecting {
         guard let surfaceModel else { return }
         surfaceModel.sendKeyEvent(.init(key: key, action: .press, text: byte, mods: .ctrl))
         surfaceModel.sendKeyEvent(.init(key: key, action: .release, mods: .ctrl))
+        screenChanged()
     }
 
-    /// The screen ghostty already keeps for accessibility, reused rather than re-read: it
-    /// is cached for 500 ms, which is well inside the cadence a rename needs.
+    /// Every send above ends here, and it is what makes reading the screen back honest.
+    ///
+    /// The cache `readViewport()` is served from holds a screen for 500ms, while a driver
+    /// waits 120ms for the repaint before looking again (`SessionStore.injectionSettle`).
+    /// Without this the read after a keystroke can be answered from *before* that keystroke:
+    /// the answer drive then sees the cursor still on the row it started from, decides the key
+    /// never landed and abandons the dialog half-answered — intermittently, because whether it
+    /// happens depends on where the press fell in the cache's lifetime. Dropping the entry at
+    /// the point the screen is known to have changed makes the next read fetch, and leaves the
+    /// cache doing its job for the pollers that never touch the keyboard (`ClaudeTextChannel`,
+    /// `SessionStore.viewport(of:)`).
+    ///
+    /// **No test can catch its removal**, for the same reason `sendBareKey`'s release cannot:
+    /// nothing under XCTest stands on a real surface, so this whole extension is unreachable
+    /// there. What the suite pins instead is the primitive and the shape — `CachedValue`
+    /// really re-fetches after `invalidate()`, and a drive against a fake cache that is only
+    /// cleared this way completes rather than aborting. See `ViewportFreshnessTests`.
+    private func screenChanged() {
+        cachedVisibleContents.invalidate()
+    }
+
+    /// The screen ghostty already keeps for accessibility, reused rather than re-read: it is
+    /// cached for 500 ms, which is well inside the cadence a rename needs — and dropped by
+    /// `screenChanged()` the moment this injector types, which is what a read-back needs.
     func readViewport() -> String? {
         cachedVisibleContents.get()
     }
