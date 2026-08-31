@@ -54,6 +54,7 @@ final class PhonePromptDispatchTests: XCTestCase {
     private func makeStore(activity: SessionActivity = .idle, background: Bool = false)
         -> (SessionStore, SpyInjector, UUID) {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         let spy = SpyInjector()
@@ -121,6 +122,7 @@ final class PhonePromptDispatchTests: XCTestCase {
     /// reachable and the spy assertion can actually fail.
     func testACodexTabIsRefusedRatherThanPastedInto() async throws {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()
@@ -151,6 +153,7 @@ final class PhonePromptDispatchTests: XCTestCase {
     /// one proves the guard order, this one proves the guard prevents the paste.
     func testAnIdleCodexTabIsToldNeverRatherThanNotYet() async throws {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()
@@ -181,6 +184,7 @@ final class PhonePromptDispatchTests: XCTestCase {
 
     func testATabWithNoAgentAtAllIsRefused() {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         let spy = SpyInjector()
         store.injectorOverride = spy

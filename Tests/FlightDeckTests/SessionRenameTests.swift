@@ -20,6 +20,7 @@ final class SessionRenameTests: XCTestCase {
     /// the tests read as straight-line code.
     private func makeStore() -> (SessionStore, SpyInjector, UUID) {
         let store = SessionStore(provider: StubProvider())
+        store.display = DrawableDisplay()
         let spy = SpyInjector()
         store.injectorOverride = spy
         store.injectionSettle = { $0() }

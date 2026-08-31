@@ -75,6 +75,7 @@ final class PromptServiceTests: XCTestCase {
     private func makeService(activity: SessionActivity)
         -> (PromptService, SessionStore, SpyInjector, UUID) {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         let spy = SpyInjector()
@@ -90,6 +91,7 @@ final class PromptServiceTests: XCTestCase {
     private func makeCodexService(activity: SessionActivity) async throws
         -> (PromptService, SessionStore, SpyInjector, UUID) {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()
@@ -357,6 +359,7 @@ final class PromptServiceTests: XCTestCase {
     /// that moved, for a tab that never had one.
     func testACodexSignInTabIsRefusedAsUnsupportedRatherThanAsChanged() {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()

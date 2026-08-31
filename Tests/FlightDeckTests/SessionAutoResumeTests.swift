@@ -294,6 +294,7 @@ final class SessionAutoResumeTests: XCTestCase {
     func testAQuitTimeEmptyTickDoesNotWipeRecordedState() async {
         let persistence = FakePersistence()
         let store = SessionStore(provider: StubProvider(), persistence: persistence)
+        store.display = DrawableDisplay()
         store.titleResolver = { _, _, done in done(nil) }
         // Never viewed, so the busy -> idle transition below marks unread rather than
         // clearing it — `appIsActive` alone decides that, independent of the selection.

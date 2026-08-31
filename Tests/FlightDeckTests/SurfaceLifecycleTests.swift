@@ -21,6 +21,7 @@ final class SurfaceLifecycleTests: XCTestCase {
         XCTAssertTrue(ghostty.hasValidApp)
 
         let store = SessionStore(provider: ghostty)
+        store.display = DrawableDisplay()
         let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
 
         for _ in 0..<3 {

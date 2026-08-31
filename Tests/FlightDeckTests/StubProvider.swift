@@ -9,3 +9,11 @@ final class StubProvider: SurfaceProvider {
     func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? { nil }
     func tick() {}
 }
+
+/// A display that is always drawable. Lifted beside `StubProvider` because guarding
+/// `createSession`/`newSession(in:)` on `canCreateTerminal` (R1) means every fixture that
+/// supplies a real provider now depends on `store.display` too — without this, those fixtures
+/// silently inherit whatever the *host machine's* real display happens to be doing right now.
+struct DrawableDisplay: DisplayInspecting {
+    var isDrawable: Bool = true
+}

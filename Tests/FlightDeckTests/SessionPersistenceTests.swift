@@ -87,6 +87,7 @@ final class SessionPersistenceTests: XCTestCase {
     func testCreatingASessionPersistsIt() {
         let fake = FakePersistence()
         let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        store.display = DrawableDisplay()
         let session = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
 
         XCTAssertEqual(fake.stored?.sessions.map(\.id), [session.id])
@@ -96,6 +97,7 @@ final class SessionPersistenceTests: XCTestCase {
     func testRenamePersistsTheNewTitle() {
         let fake = FakePersistence()
         let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        store.display = DrawableDisplay()
         let session = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         store.rename(session.id, to: "renamed")
         XCTAssertEqual(fake.stored?.sessions.first?.title, "renamed")
@@ -104,6 +106,7 @@ final class SessionPersistenceTests: XCTestCase {
     func testClosePersistsRemoval() {
         let fake = FakePersistence()
         let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        store.display = DrawableDisplay()
         let session = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         store.closeSession(session.id)
         XCTAssertEqual(fake.stored?.sessions.count, 0)
@@ -123,6 +126,7 @@ final class SessionPersistenceTests: XCTestCase {
         )
 
         let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        store.display = DrawableDisplay()
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
 
         XCTAssertEqual(store.repos.map(\.displayName), ["foo", "bar"])
@@ -142,6 +146,7 @@ final class SessionPersistenceTests: XCTestCase {
         )
 
         let store = SessionStore(provider: provider, persistence: fake)
+        store.display = DrawableDisplay()
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
         XCTAssertEqual(
             provider.configs.first?.initialInput,
@@ -161,6 +166,7 @@ final class SessionPersistenceTests: XCTestCase {
         )
 
         let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        store.display = DrawableDisplay()
         XCTAssertTrue(store.restore(directoryExists: { $0 != "/work/deleted" }))
         XCTAssertEqual(store.repos.flatMap(\.sessions).map(\.title), ["kept"])
     }
@@ -175,6 +181,7 @@ final class SessionPersistenceTests: XCTestCase {
         )
 
         let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        store.display = DrawableDisplay()
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
         let fresh = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         XCTAssertEqual(fresh.title, "session 4")
@@ -197,12 +204,14 @@ final class SessionPersistenceTests: XCTestCase {
         )
 
         let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        store.display = DrawableDisplay()
         XCTAssertTrue(store.restore(directoryExists: { $0 != "/work/deleted" }))
         XCTAssertEqual(store.selectedSessionID, first)
     }
 
     func testRestoreReturnsFalseWhenNothingStored() {
         let store = SessionStore(provider: CapturingProvider(), persistence: FakePersistence())
+        store.display = DrawableDisplay()
         XCTAssertFalse(store.restore(directoryExists: allDirsExist))
         XCTAssertTrue(store.repos.isEmpty)
     }
@@ -219,6 +228,7 @@ final class SessionPersistenceTests: XCTestCase {
         )
 
         let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        store.display = DrawableDisplay()
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
         XCTAssertFalse(store.restore(directoryExists: allDirsExist), "second call must be a no-op")
         XCTAssertEqual(store.repos.flatMap(\.sessions).map(\.title), ["one"])
@@ -298,6 +308,7 @@ final class SessionPersistenceTests: XCTestCase {
         )
 
         let store = SessionStore(provider: CapturingProvider(), persistence: fake)
+        store.display = DrawableDisplay()
         store.transcriptsRootOverride = projectsRoot
         // Poll at the foreground cadence: this test asserts on watcher ticks in real time,
         // and a headless run is never frontmost. See `waitForWatcher`.
@@ -338,6 +349,7 @@ final class SessionPersistenceTests: XCTestCase {
     func testPersistRecordsEachSessionsActivity() {
         let persistence = FakePersistence()
         let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        store.display = DrawableDisplay()
         let a = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         let b = store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
 
@@ -360,6 +372,7 @@ final class SessionPersistenceTests: XCTestCase {
     func testPersistRecordsNoActivityForASessionWithNoStatus() {
         let persistence = FakePersistence()
         let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        store.display = DrawableDisplay()
         let a = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
 
         XCTAssertNil(persistence.stored?.sessions.first(where: { $0.id == a.id })?.activity)
@@ -386,6 +399,7 @@ final class SessionPersistenceTests: XCTestCase {
             sessionCounter: 2
         )
         let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        store.display = DrawableDisplay()
 
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
 
@@ -412,6 +426,7 @@ final class SessionPersistenceTests: XCTestCase {
             sessionCounter: 2
         )
         let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        store.display = DrawableDisplay()
 
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
 
@@ -442,6 +457,7 @@ final class SessionPersistenceTests: XCTestCase {
             sessionCounter: 3
         )
         let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        store.display = DrawableDisplay()
 
         store.restore(directoryExists: { $0 == "/kept" || $0 == "/elsewhere" })
 
@@ -465,6 +481,7 @@ final class SessionPersistenceTests: XCTestCase {
             sessionCounter: 2
         )
         let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        store.display = DrawableDisplay()
 
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
 
@@ -477,6 +494,7 @@ final class SessionPersistenceTests: XCTestCase {
     func testPersistRecordsUnreadAsTrueOrAbsent() {
         let persistence = FakePersistence()
         let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        store.display = DrawableDisplay()
         let marked = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         let clean = store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
 
@@ -499,6 +517,7 @@ final class SessionPersistenceTests: XCTestCase {
     func testPersistRecordsHasBackgroundWorkAsTrueOrAbsent() {
         let persistence = FakePersistence()
         let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        store.display = DrawableDisplay()
         let marked = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         let clean = store.newSession(in: URL(fileURLWithPath: "/work/bar", isDirectory: true))
 
@@ -519,6 +538,7 @@ final class SessionPersistenceTests: XCTestCase {
     func testMarkUnreadPersistsAndSurvivesRestore() {
         let persistence = FakePersistence()
         let store = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        store.display = DrawableDisplay()
         let marked = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
         // Created after `marked`, so it — not `marked` — holds the selection below, keeping
         // `marked`'s mark from being cleared by `selectedSessionID`'s own `didSet`.
@@ -532,6 +552,7 @@ final class SessionPersistenceTests: XCTestCase {
         )
 
         let restored = SessionStore(provider: CapturingProvider(), persistence: persistence)
+        restored.display = DrawableDisplay()
         XCTAssertTrue(restored.restore(directoryExists: allDirsExist))
         XCTAssertTrue(restored.unreadIdle.contains(marked.id))
         XCTAssertFalse(restored.unreadIdle.contains(other.id))
@@ -573,6 +594,7 @@ final class SessionPersistenceTests: XCTestCase {
         )
         let provider = CapturingProvider()
         let store = SessionStore(provider: provider, persistence: persistence)
+        store.display = DrawableDisplay()
 
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
 
@@ -610,6 +632,7 @@ final class SessionPersistenceTests: XCTestCase {
         )
         let provider = CapturingProvider()
         let store = SessionStore(provider: provider, persistence: persistence)
+        store.display = DrawableDisplay()
 
         XCTAssertTrue(store.restore(directoryExists: { $0 != worktree }))
 
@@ -637,6 +660,7 @@ final class SessionPersistenceTests: XCTestCase {
         )
         let provider = CapturingProvider()
         let store = SessionStore(provider: provider, persistence: persistence)
+        store.display = DrawableDisplay()
 
         XCTAssertTrue(store.restore(directoryExists: allDirsExist))
 
