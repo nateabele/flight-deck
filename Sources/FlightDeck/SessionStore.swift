@@ -855,7 +855,7 @@ final class SessionStore: ObservableObject {
     private func wire(_ session: Session) -> WireSession {
         FleetProjection.project(
             session, status: statuses[session.id], unread: unreadIdle,
-            hasBackgroundWork: backgroundWorkSessions.contains(session.id)
+            hasBackgroundWork: backgroundWorkSessions.contains(session.id), planGates: planGates
         )
     }
 
@@ -1599,7 +1599,7 @@ final class SessionStore: ObservableObject {
             emit(.projectAdded(
                 FleetProjection.project(
                     repos[repoIndex], statuses: statuses, unread: unreadIdle,
-                    backgroundWork: backgroundWorkSessions
+                    backgroundWork: backgroundWorkSessions, planGates: planGates
                 ),
                 at: repoIndex
             ))
@@ -2499,7 +2499,7 @@ final class SessionStore: ObservableObject {
                 emit(.projectAdded(
                     FleetProjection.project(
                         repo, statuses: statuses, unread: unreadIdle,
-                        backgroundWork: backgroundWorkSessions
+                        backgroundWork: backgroundWorkSessions, planGates: planGates
                     ), at: at
                 ))
             }
@@ -3988,6 +3988,56 @@ final class SessionStore: ObservableObject {
         }
 
         commitStatuses(next, backgroundWork: nextBackgroundWork)
+
+        // Driven off this same tick, deliberately not a second timer: one poll of two
+        // directories (the registry above, `PlannotatorRegistry` inside `refresh()`) is
+        // cheaper than two, and two would let a gate and a status be read at different
+        // instants — see the brief this method was written against.
+        pollPlanGates()
+    }
+
+    /// Re-reads `PlannotatorRegistry` through `planGates` and delivers any resulting
+    /// notification. Fire-and-forget: this tick's caller (`applyRegistry`) does not await it,
+    /// the same way `.newSession`'s command handler does not await its own dispatch — a poll
+    /// that is a tick late is a poll, not a failure.
+    private func pollPlanGates() {
+        guard let planGates else { return }
+        Task { @MainActor [weak self] in
+            await planGates.refresh()
+            self?.deliverPlanGateNotifications()
+        }
+    }
+
+    /// The plan-gate half of `deliverNotifications`, and why it cannot be folded into that
+    /// one method: a gate opening moves neither `statuses` nor `backgroundWorkSessions` —
+    /// claude's registry still reports `busy` while a gate is open, which is the defect this
+    /// feature exists to fix — so `commitStatuses`'s diff never produces a `StatusTransition`
+    /// for it. This runs on its own tick, after `refresh()`, against its own remembered map of
+    /// what each session's gate was last time, so a re-poll of an unchanged gate is not a
+    /// re-notify and a closed one still gets its banner withdrawn.
+    private func deliverPlanGateNotifications() {
+        guard let notifier, let planGates else { return }
+        let active = appIsActive()
+        for id in repos.flatMap(\.sessions).map(\.id) {
+            let gate = planGates.gate(for: id)
+            let old = SessionNotificationPolicy.Input(
+                status: statuses[id], planGate: previousPlanGates[id]
+            )
+            let new = SessionNotificationPolicy.Input(status: statuses[id], planGate: gate)
+            previousPlanGates[id] = gate
+            switch SessionNotificationPolicy.action(old: old, new: new, appActive: active) {
+            case .none:
+                continue
+            case .notify:
+                guard let named = titleAndProject(of: id) else { continue }
+                notifier.notify(
+                    sessionID: id, title: named.title, subtitle: named.project,
+                    body: "A plan is ready for your review."
+                )
+            case .withdraw:
+                notifier.withdraw(sessionID: id)
+            }
+        }
     }
 
     /// The single writer of `statuses`, and the one place a status change turns into its
@@ -4336,7 +4386,7 @@ final class SessionStore: ObservableObject {
             emit(.projectAdded(
                 FleetProjection.project(
                     repos[destination], statuses: statuses, unread: unreadIdle,
-                    backgroundWork: backgroundWorkSessions
+                    backgroundWork: backgroundWorkSessions, planGates: planGates
                 ),
                 at: destination
             ))

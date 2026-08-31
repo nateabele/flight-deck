@@ -44,6 +44,10 @@ final class FleetService: ObservableObject {
     /// command for the reason `timeline` is: it holds the store, and there is exactly one of
     /// it — a command carries its own session id, so nothing about it is per-connection.
     private let prompts: PromptService
+    /// Finds, describes and acts on plan gates. Also assigned to `store.planGates`, which is
+    /// the single instance every `FleetProjection` call site reads — the oracle snapshot
+    /// below included — so a gate can never be present in one and absent in the other.
+    private let planGates: PlanGateService
     private(set) var boundPort: NWEndpoint.Port?
     /// The window's own listener, and the port it is on. Both are `nil` whenever no window is
     /// open, which is invariant 2 stated as a field rather than as a comment.
@@ -74,14 +78,37 @@ final class FleetService: ObservableObject {
         self.preferences = preferences
         self.armer = armer
         self.server = FleetSocketServer()
+        // The three closures are the production wiring for the test seams `PlanGateService`
+        // declares. `callID` re-derives the open `ExitPlanMode` call from a transcript tail —
+        // `PromptService`'s own read, sized the same — through `ClaudeOpenPlanGate`, which
+        // (unlike `ClaudeOpenCall`/`OpenPrompt.find`) does not gate on `waiting`: gating on it
+        // is exactly the defect a plan gate exists to fix, since claude reports `busy` while
+        // one is open.
+        let planGates = PlanGateService(
+            callID: { [weak store] session in
+                guard let store,
+                      case .file(.claude, let url) = store.timelineSource(of: session)
+                else { return nil }
+                let lines = TranscriptPager.page(
+                    url: url, anchor: .latest, limit: PromptService.tailRecords
+                )?.lines ?? []
+                return ClaudeOpenPlanGate.find(in: lines)
+            },
+            pid: { [weak store] session in store?.claudePID(of: session) },
+            sessions: { [weak store] in store?.allSessionIDs() ?? [] }
+        )
+        self.planGates = planGates
         self.replicator = FleetReplicator { [weak store] in
             guard let store else { return .empty }
-            return FleetProjection.snapshot(of: store)
+            return FleetProjection.snapshot(of: store, planGates: planGates)
         }
         self.timeline = TimelineService(store: store)
         self.prompts = PromptService(store: store)
         self.serviceName = Self.derivedServiceName(preferences: preferences)
         store.replicator = replicator
+        // The single live instance every `FleetProjection` call site reads — see the
+        // `planGates` doc comment above.
+        store.planGates = planGates
         wireHandlers()
     }
 
@@ -680,11 +707,32 @@ final class FleetService: ObservableObject {
             ) {
                 return .err(cid: cid, code: code.code)
             }
-        case .annotatePlan, .resolvePlan:
-            // Wired for real in a later task. Refused rather than acked in the meantime, so
-            // this intermediate build cannot silently claim to have annotated or resolved a
-            // plan gate — the same placeholder `FleetCommand.prompt` got in 29430b8.
-            return .err(cid: cid, code: "unhandled")
+        case .annotatePlan(let id, let token, let call, let text, let block):
+            // Dispatched, not awaited — `onCommand` answers inline and has no reply channel
+            // of its own, the same constraint `.newSession` is under. A refusal here is
+            // logged rather than surfaced: the phone already has its ack, and the next
+            // `plan.*` poll or command against a stale `call` will refuse again with a code
+            // it *can* see, so nothing is silently lost — only slower to notice than a
+            // synchronous `.err` would have been.
+            Task { @MainActor in
+                if case .failure(let code) = await self.planGates.annotate(
+                    session: id, call: call, text: text, block: block, token: token
+                ) {
+                    Self.logger.error(
+                        "plan annotate from phone failed: \(code.code, privacy: .public)"
+                    )
+                }
+            }
+        case .resolvePlan(let id, let token, let call, let approve, let feedback):
+            Task { @MainActor in
+                if case .failure(let code) = await self.planGates.resolve(
+                    session: id, call: call, approve: approve, feedback: feedback, token: token
+                ) {
+                    Self.logger.error(
+                        "plan resolve from phone failed: \(code.code, privacy: .public)"
+                    )
+                }
+            }
         }
         // `ack` means dispatched, not done. For the two read marks the observable effect is
         // the northbound `session.unread` event the store call just recorded; for a prompt it
