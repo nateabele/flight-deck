@@ -15,7 +15,7 @@ public enum SearchResultKind: Equatable, Sendable {
 /// `snippet` arrives with the sentinel markers FTS5 was asked for; the view turns those into
 /// an `AttributedString`. Keeping them as markers rather than as ranges means the index does
 /// not have to reason about `String.Index` across a SQLite boundary.
-public struct TranscriptHit: Equatable, Sendable {
+public struct TranscriptHit: Codable, Equatable, Sendable {
     /// `message.id` — the FTS table's `content_rowid`. Two messages in the same
     /// conversation can share a timestamp (or carry none at all), so this, not
     /// `(conversationID, timestamp)`, is what the result id is built from.

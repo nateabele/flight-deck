@@ -169,6 +169,44 @@ final class TimelineFrameCodingTests: XCTestCase {
         )
     }
 
+    // MARK: The other requests
+
+    /// The three requests search adds, over the same encode/decode `FleetRequest` already
+    /// uses for `timeline` — one round trip each is enough, since each carries no field this
+    /// file has not already exercised at a distinct value elsewhere.
+    func testTheSearchRequestsRoundTrip() throws {
+        let requests: [FleetRequest] = [
+            .conversations,
+            .search(query: "rename", limit: 200),
+            .openConversation(conversationID: "abc", projectPath: "/proj"),
+        ]
+        for request in requests {
+            let data = try JSONEncoder().encode(request)
+            XCTAssertEqual(
+                try JSONDecoder().decode(FleetRequest.self, from: data), request,
+                "\(request) did not survive a round trip"
+            )
+        }
+    }
+
+    /// `search` and `openConversation` are one flat object, like `timeline` — asserted on the
+    /// wire keys rather than the round trip, for the reason this file's header gives.
+    func testTheSearchRequestPutsItsFieldsOnTheWire() throws {
+        let json = try fields(of: FleetRequest.search(query: "rename", limit: 200))
+        XCTAssertEqual(json["op"] as? String, "search.query")
+        XCTAssertEqual(json["query"] as? String, "rename")
+        XCTAssertEqual(json["limit"] as? Int, 200)
+    }
+
+    func testTheOpenConversationRequestPutsItsFieldsOnTheWire() throws {
+        let json = try fields(
+            of: FleetRequest.openConversation(conversationID: "abc", projectPath: "/proj")
+        )
+        XCTAssertEqual(json["op"] as? String, "search.open")
+        XCTAssertEqual(json["conversationID"] as? String, "abc")
+        XCTAssertEqual(json["projectPath"] as? String, "/proj")
+    }
+
     // MARK: The page
 
     func testAPageRoundTrips() throws {
