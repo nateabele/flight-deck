@@ -2,6 +2,7 @@
 import AppKit
 import FleetKit
 import Foundation
+import OSLog
 import SwiftUI
 
 /// One session's status edge across a single registry tick.
@@ -3461,6 +3462,14 @@ final class SessionStore: ObservableObject {
     /// and a shared list would let one silence the other.
     private var answeredPromptTokens: [UUID: [UUID]] = [:]
 
+    /// Where an aborted drive's description goes. See `AnswerAbort`, and `AnswerAbortLog` for
+    /// the two places production puts one.
+    ///
+    /// A seam on the SINK rather than a `#if DEBUG` around the recording: the failure this
+    /// exists for reproduces only on the installed Release build, so what gets recorded must be
+    /// identical in both configurations and it is only the destination a test replaces.
+    var answerAbortSink: (AnswerAbort) -> Void = AnswerAbortLog.record
+
     /// A client answered the dialog tab `id` is blocked on.
     ///
     /// `open` is the Mac's **own** derivation, from `PromptService`, never the client's claim.
@@ -3547,7 +3556,7 @@ final class SessionStore: ObservableObject {
             return drive(
                 from: current, to: driver.allowRow,
                 confirm: { driver.focusedRow(inViewport: $0) == driver.allowRow },
-                injector: injector, id: id, token: token
+                driver: driver, injector: injector, id: id, token: token
             )
 
         case .answers(let selections):
@@ -3616,7 +3625,7 @@ final class SessionStore: ObservableObject {
                     driver.focusedRow(inViewport: $0) == index
                         && driver.row(index, reads: label, inViewport: $0)
                 },
-                injector: injector, id: id, token: token
+                driver: driver, injector: injector, id: id, token: token
             )
         }
     }
@@ -3674,12 +3683,28 @@ final class SessionStore: ObservableObject {
         guard index < steps.count else { injecting.remove(id); return }
         let step = steps[index]
 
-        guard let screen = injector.readViewport(),
-              driver.focusedRow(inViewport: screen) == step.from,
-              Self.rowLabel(for: step, questions: questions).map({
-                  driver.row(step.to, reads: $0, inViewport: screen)
-              }) == true
-        else { injecting.remove(id); return }
+        // One guard per check, where a single compound one would do. The conditions, their
+        // order and their short-circuiting are unchanged — what the split buys is a NAME for
+        // whichever one refused, because an abort sends no further key and is otherwise
+        // indistinguishable from a drive that finished.
+        guard let screen = injector.readViewport() else {
+            note(.unreadableBeforePress, step: index, step, viewport: nil)
+            injecting.remove(id)
+            return
+        }
+        let focused = driver.focusedRow(inViewport: screen)
+        guard focused == step.from else {
+            note(.cursorBeforePress, step: index, step, focused: focused, viewport: screen)
+            injecting.remove(id)
+            return
+        }
+        let expected = Self.rowLabel(for: step, questions: questions)
+        guard let expected, driver.row(step.to, reads: expected, inViewport: screen) else {
+            note(.labelBeforePress, step: index, step, expected: expected,
+                 focused: focused, viewport: screen)
+            injecting.remove(id)
+            return
+        }
 
         let distance = step.to - step.from
         for _ in 0..<abs(distance) {
@@ -3690,15 +3715,42 @@ final class SessionStore: ObservableObject {
             guard let self else { return }
             // Re-read after the move: the row under the cursor must STILL be the one the plan
             // named. This is the check that survives a human touching the terminal mid-drive.
-            guard let landed = injector.readViewport(),
-                  driver.focusedRow(inViewport: landed) == step.to
-            else { self.injecting.remove(id); return }
+            guard let landed = injector.readViewport() else {
+                self.note(.unreadableAfterMove, step: index, step, expected: expected,
+                          viewport: nil)
+                self.injecting.remove(id)
+                return
+            }
+            let arrived = driver.focusedRow(inViewport: landed)
+            guard arrived == step.to else {
+                self.note(.landingAfterMove, step: index, step, expected: expected,
+                          focused: arrived, viewport: landed)
+                self.injecting.remove(id)
+                return
+            }
             injector.sendReturn()
             self.injectionSettle { [weak self] in
                 self?.perform(steps, at: index + 1, questions: questions,
                               driver: driver, injector: injector, id: id)
             }
         }
+    }
+
+    /// Files one abort against `answerAbortSink`. A method rather than the literal at each
+    /// site: the step is the source of every field except the one that failed, so only the
+    /// difference is written out where the drive can be read.
+    private func note(
+        _ check: AnswerAbort.Check,
+        step index: Int,
+        _ step: AnswerPlan.Step,
+        expected: String? = nil,
+        focused: Int? = nil,
+        viewport: String?
+    ) {
+        answerAbortSink(AnswerAbort(
+            check: check, step: index, purpose: step.purpose, from: step.from, to: step.to,
+            expected: expected, focused: focused, viewport: viewport
+        ))
     }
 
     /// What the row a step is about must read, or `nil` when the plan is inconsistent with the
@@ -3723,6 +3775,7 @@ final class SessionStore: ObservableObject {
         from current: Int,
         to target: Int,
         confirm: @escaping (String) -> Bool,
+        driver: any AgentDialogDriver,
         injector: TextInjecting,
         id: UUID,
         token: UUID
@@ -3739,7 +3792,25 @@ final class SessionStore: ObservableObject {
         // production, that a kill waits out.
         injectionSettle { [weak self] in
             defer { self?.injecting.remove(id) }
-            guard let screen = injector.readViewport(), confirm(screen) else { return }
+            // Split for the reason `perform`'s is, and one more: `confirm` is a closure the
+            // caller composed, so the only thing that can be said about its refusal here is
+            // where the marker ended up — which is worth saying, because that is the number
+            // the caller disagreed with.
+            guard let screen = injector.readViewport() else {
+                self?.answerAbortSink(AnswerAbort(
+                    check: .unreadableAfterMove, step: nil, purpose: nil,
+                    from: current, to: target, expected: nil, focused: nil, viewport: nil
+                ))
+                return
+            }
+            guard confirm(screen) else {
+                self?.answerAbortSink(AnswerAbort(
+                    check: .landingAfterMove, step: nil, purpose: nil,
+                    from: current, to: target, expected: nil,
+                    focused: driver.focusedRow(inViewport: screen), viewport: screen
+                ))
+                return
+            }
             injector.sendReturn()
         }
         return .dispatched
@@ -4746,5 +4817,128 @@ final class SessionStore: ObservableObject {
             }
         }
         return nil
+    }
+}
+
+/// Why an answer drive stopped, described well enough to diagnose it without the handset.
+///
+/// **A drive aborts silently on purpose, and that silence used to reach the log too.** Sending
+/// no further key is the right behaviour — a stopped drive leaves a dialog a person can still
+/// finish, a Return on the wrong row leaves nothing — but it recorded nothing at all, so a
+/// four-option checkbox question that ticked one box and stopped could not be told apart from
+/// one that never started. Which check refused, and what it refused against, cost a human a
+/// round trip on a phone to find out.
+///
+/// Every field here answers a question that round trip was spent on. `viewport` is the one
+/// that matters: without the actual screen there is no way to say whether the terminal drew
+/// something unexpected or the parser misread something ordinary.
+struct AnswerAbort: Equatable {
+    /// Which check refused, named apart rather than collapsed into "failed". The repairs are
+    /// unrelated: a cursor that did not start where the plan said is a screen that moved under
+    /// the plan, a label mismatch is this Mac's copy disagreeing with what is drawn, a landing
+    /// failure is a keystroke the TUI dropped or has yet to repaint, and an unreadable viewport
+    /// is not about the dialog at all.
+    enum Check: String, Equatable {
+        case unreadableBeforePress = "unreadable-viewport-before-press"
+        case cursorBeforePress = "pre-press-cursor"
+        case labelBeforePress = "pre-press-label"
+        case unreadableAfterMove = "unreadable-viewport-after-move"
+        case landingAfterMove = "post-move-landing"
+    }
+
+    let check: Check
+    /// Which step of the plan, or `nil` for the one-step drive that walks no plan.
+    let step: Int?
+    let purpose: AnswerPlan.Step.Purpose?
+    let from: Int
+    let to: Int
+    /// The label the check wanted the row to read, verbatim — the string that was compared,
+    /// not a description of it, because a trailing space or a stripped glyph is exactly the
+    /// kind of difference this is here to expose.
+    let expected: String?
+    /// What `focusedRow` returned. `nil` covers both "no marker found on the screen" and "no
+    /// screen to look at", which the `check` tells apart.
+    let focused: Int?
+    /// The whole screen the check saw, and the reason any of this goes to a file.
+    let viewport: String?
+
+    /// The one-line form. Kept short deliberately: os_log truncates a message, and everything
+    /// here has to survive that — which is why the viewport is not part of it.
+    var summary: String {
+        "answer abort check=\(check.rawValue) step=\(step.map(String.init) ?? "-")"
+            + " purpose=\(Self.describe(purpose)) from=\(from) to=\(to)"
+            + " focused=\(focused.map(String.init) ?? "nil")"
+            + " expected=\(expected.map { "\"\($0)\"" } ?? "-")"
+    }
+
+    private static func describe(_ purpose: AnswerPlan.Step.Purpose?) -> String {
+        switch purpose {
+        case .option(let question, let option): return "option(q\(question),o\(option))"
+        case .action(let question, let isLast):
+            return "action(q\(question),\(AnswerPlan.actionLabel(isLast: isLast)))"
+        case .submit: return "submit"
+        case nil: return "-"
+        }
+    }
+}
+
+/// Puts an `AnswerAbort` in the two places it can be read after the fact.
+///
+/// **Two channels because neither is enough alone.** The unified log is where every other
+/// subsystem's summary goes and where a person already looks, but os_log truncates — and the
+/// field that decides whether the terminal or the parser was at fault is a whole 40-row screen.
+/// So the summary goes to `Logger` and the screen to a file beside it, delimited so consecutive
+/// dumps come apart again.
+///
+/// Unconditional: not `#if DEBUG`, and not behind a preference. The failure this exists for
+/// reproduces only on the installed Release build, and an abort is rare enough that always
+/// writing one costs nothing worth measuring.
+enum AnswerAbortLog {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
+        category: "answer"
+    )
+
+    /// Beside the system's own logs, where `Console.app` lists it and a `tail -f` finds it
+    /// without knowing anything about this app. Not in a container — this build is unsandboxed,
+    /// and a path a human can type is the whole point.
+    static let fileURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/flight-deck-answer.log")
+
+    static func record(_ abort: AnswerAbort) {
+        logger.error("\(abort.summary, privacy: .public)")
+        write(abort, to: fileURL)
+    }
+
+    /// Appends one record: a timestamp, the same fields, then the screen between markers.
+    ///
+    /// **Every failure is swallowed, and the file is only ever appended to.** This runs inside
+    /// a drive a person is waiting on, so a log that cannot be written is not a reason to
+    /// behave differently from one that can — and an unopenable file is left alone rather than
+    /// replaced, because the history already in it is worth more than this one record.
+    static func write(_ abort: AnswerAbort, to url: URL) {
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        // Local time, with its offset, because the other half of this record is in the unified
+        // log — which Console shows in local time — and correlating the two should not need
+        // arithmetic.
+        stamp.timeZone = .current
+        let record = """
+            \(stamp.string(from: Date())) \(abort.summary)
+            --- viewport begin ---
+            \(abort.viewport ?? "(none — readViewport() returned nil)")
+            --- viewport end ---
+
+            """
+        let manager = FileManager.default
+        if !manager.fileExists(atPath: url.path) {
+            try? manager.createDirectory(at: url.deletingLastPathComponent(),
+                                         withIntermediateDirectories: true)
+            manager.createFile(atPath: url.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data(record.utf8))
     }
 }
