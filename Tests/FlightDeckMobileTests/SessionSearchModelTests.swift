@@ -18,8 +18,8 @@ final class SessionSearchModelTests: XCTestCase {
             pending.append(completion)
         }
 
-        func answer(_ hits: [TranscriptHit], at index: Int = 0) {
-            pending[index](.success(WireSearchHits(hits: hits, indexing: nil)))
+        func answer(_ hits: [TranscriptHit], indexing: WireIndexingProgress? = nil, at index: Int = 0) {
+            pending[index](.success(WireSearchHits(hits: hits, indexing: indexing)))
         }
     }
 
@@ -140,5 +140,51 @@ final class SessionSearchModelTests: XCTestCase {
 
         XCTAssertEqual(model.results.map(\.title), ["rename fix", "conv"])
         XCTAssertEqual(model.results.last?.conversationID, "conv")
+    }
+
+    /// The `Footer.indexing` numbers must be `done`/`total` as the Mac sent them, not
+    /// swapped. `done: 3, total: 9` are deliberately distinct so a transposition of the two
+    /// fields — the exact class of bug a same-looking pair of ints invites — fails this
+    /// assertion instead of passing by coincidence.
+    func testIndexingProgressIsSurfacedWithItsExactNumbers() async throws {
+        let transport = Transport()
+        let model = SessionSearchModel(transport: transport, macName: "Mac")
+        model.candidatesChanged([candidate("rename fix")])
+
+        model.query = "rename"
+        try await letTheDebounceFire()
+        transport.answer([hit("conv")], indexing: WireIndexingProgress(done: 3, total: 9))
+
+        XCTAssertEqual(model.footer, .indexing(done: 3, total: 9))
+    }
+
+    /// Indexing must be reported even when the reply carries no hits — that ordering is the
+    /// part most likely to be silently inverted, since both branches are reachable from the
+    /// same "results is empty" state and only one is correct while a backfill is running.
+    /// A footer of `.empty` here would be exactly the "there is nothing to find" confusion
+    /// this footer exists to prevent during the one-time backfill.
+    func testIndexingTakesPriorityOverEmptyWhenThereAreNoResults() async throws {
+        let transport = Transport()
+        let model = SessionSearchModel(transport: transport, macName: "Mac")
+
+        model.query = "rename"
+        try await letTheDebounceFire()
+        transport.answer([], indexing: WireIndexingProgress(done: 1, total: 5))
+
+        XCTAssertEqual(model.footer, .indexing(done: 1, total: 5))
+    }
+
+    /// The other side of the priority test above: once indexing is finished — `indexing:
+    /// nil` — a genuinely empty answer must still be claimed as `.empty`, not silently drop
+    /// the footer altogether.
+    func testANilIndexingWithNoResultsStillProducesTheEmptyFooter() async throws {
+        let transport = Transport()
+        let model = SessionSearchModel(transport: transport, macName: "Mac")
+
+        model.query = "rename"
+        try await letTheDebounceFire()
+        transport.answer([], indexing: nil)
+
+        XCTAssertEqual(model.footer, .empty)
     }
 }

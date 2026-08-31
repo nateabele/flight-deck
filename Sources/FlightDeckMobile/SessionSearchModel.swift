@@ -118,6 +118,16 @@ final class SessionSearchModel {
                 // A reply for a query that is no longer current is discarded outright, not
                 // merged — the phone's version of the desktop's cancellation, and what keeps
                 // a superseded query's evidence from ever landing under a new one.
+                //
+                // Detection is by QUERY VALUE, not request identity — there is no per-request
+                // token here. That is sufficient rather than merely convenient: if a user
+                // types "rena", deletes to "ren", and retypes "rena" inside one debounce
+                // window, the still-outstanding first reply is accepted for the second
+                // request too. That is harmless because `rerank()` is a pure function of the
+                // CURRENT `query` and `transcripts` — accepting a by-value-current reply
+                // yields exactly what a fresh request for the identical string would produce,
+                // at the cost of one redundant round trip the debounce would otherwise have
+                // sent anyway.
                 guard self.query == query else { return }
                 self.apply(result)
             }
