@@ -40,6 +40,8 @@ final class FleetFrameCodingTests: XCTestCase {
     func testEveryEventCaseRoundTrips() throws {
         let project = WireProject(id: UUID(), name: "n", path: "/w/n")
         let session = WireSession(id: UUID(), title: "s", agent: "codex")
+        let gate = WirePlanGate(callID: "toolu_1", tier: "annotate", plan: "# Plan",
+                               startedAt: "2026-08-29T17:40:36.186Z", annotationCount: 2)
         let cases: [FleetEvent] = [
             .projectAdded(project, at: 1),
             .projectRemoved(id: UUID()),
@@ -52,13 +54,35 @@ final class FleetFrameCodingTests: XCTestCase {
             .renamed(id: UUID(), title: "t", origin: .user),
             .activityChanged(id: UUID(), activity: nil, waitingFor: nil, subagentCount: 0,
                              hasBackgroundWork: true),
-            .unreadChanged(id: UUID(), isUnread: true)
+            .unreadChanged(id: UUID(), isUnread: true),
+            .planGateChanged(id: UUID(), gate: gate),
+            .planGateChanged(id: UUID(), gate: nil)
         ]
         for event in cases {
             let data = try JSONEncoder().encode(event)
             XCTAssertEqual(try JSONDecoder().decode(FleetEvent.self, from: data), event,
                            "\(event) did not survive a round trip")
         }
+    }
+
+    func testAPlanGateOpeningEncodesFlatWithItsTag() throws {
+        let id = UUID()
+        let gate = WirePlanGate(callID: "toolu_1", tier: "annotate", plan: "# Plan",
+                               startedAt: "2026-08-29T17:40:36.186Z", annotationCount: 0)
+        let encoded = try fields(of: FleetEvent.planGateChanged(id: id, gate: gate))
+        XCTAssertEqual(encoded["t"] as? String, "session.planGate")
+        XCTAssertEqual(encoded["id"] as? String, id.uuidString)
+        let wireGate = try XCTUnwrap(encoded["gate"] as? [String: Any])
+        XCTAssertEqual(wireGate["callID"] as? String, "toolu_1")
+        XCTAssertEqual(wireGate["tier"] as? String, "annotate")
+    }
+
+    /// A closed gate must not put `"gate":null` on the wire — the same reasoning
+    /// `testAHelloThatClaimsNoNameOmitsTheKeyEntirely` gives for `device`: an older decoder
+    /// reading a build that predates this case must see exactly what it already tolerates.
+    func testAClosedPlanGateOmitsTheGateKeyEntirely() throws {
+        let encoded = try fields(of: FleetEvent.planGateChanged(id: UUID(), gate: nil))
+        XCTAssertEqual(Set(encoded.keys), ["t", "id"])
     }
 
     /// An unrecognised `t` must throw rather than decode to some default. A frame the client
