@@ -348,4 +348,44 @@ final class FleetListScreenTests: XCTestCase {
 
         XCTAssertTrue(withCatalogue.contains { $0.name == "old chat" })
     }
+
+    // MARK: A search tap's failure is surfaced, not silent
+
+    /// **The regression this exists for.** `handleSearchTap`'s completion used to be
+    /// `guard case .success(let id) = outcome else { return }`, which folded
+    /// `unknown_conversation`, `launch_failed` AND `.disconnected` into the same silent
+    /// nothing — a tap that did nothing at all, with no way to tell a dropped socket from a
+    /// dangling account. This asserts the three named outcomes produce three DIFFERENT
+    /// messages, which a mapping collapsed back to `return`, or back to one shared string,
+    /// could not do.
+    func testEachSearchTapFailureProducesItsOwnMessage() {
+        let disconnected = FleetListScreen.searchOpenFailureMessage(
+            for: .disconnected, macName: "Nate's Mac"
+        )
+        let unknown = FleetListScreen.searchOpenFailureMessage(
+            for: .server(code: "unknown_conversation"), macName: "Nate's Mac"
+        )
+        let launchFailed = FleetListScreen.searchOpenFailureMessage(
+            for: .server(code: "launch_failed"), macName: "Nate's Mac"
+        )
+
+        XCTAssertNotEqual(disconnected, unknown)
+        XCTAssertNotEqual(disconnected, launchFailed)
+        XCTAssertNotEqual(unknown, launchFailed)
+        XCTAssertTrue(disconnected.contains("Nate's Mac"), "names the Mac, per this file's style")
+        XCTAssertTrue(unknown.contains("Nate's Mac"))
+        XCTAssertTrue(launchFailed.contains("Nate's Mac"))
+    }
+
+    /// An old Mac's code this build has never heard of — or a future one's — falls to a
+    /// generic message rather than staying silent. `FleetRequestError.server`'s own doc
+    /// comment requires exactly this of every client on the channel.
+    func testAnUnrecognisedServerCodeFallsToAGenericMessageRatherThanSilence() {
+        let message = FleetListScreen.searchOpenFailureMessage(
+            for: .server(code: "some_future_code"), macName: "Nate's Mac"
+        )
+
+        XCTAssertFalse(message.isEmpty)
+        XCTAssertTrue(message.contains("Nate's Mac"))
+    }
 }
