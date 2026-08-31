@@ -57,39 +57,46 @@ final class DisplayWakerTests: XCTestCase {
         }
     }
 
-    private func makeWaker(
-        probe: Probe, declared: @escaping @Sendable () -> Void = {}
-    ) -> DisplayWaker {
+    /// A class, not a captured `var`: `declareUserActivity` is `@Sendable`, and capturing a
+    /// mutable local in one is a compile error under Swift 6.
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func increment() { lock.lock(); value += 1; lock.unlock() }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    private func makeWaker(probe: Probe, declared: Counter) -> DisplayWaker {
         DisplayWaker(
             display: probe,
             pollInterval: 0.001,
             sleep: { _ in },
-            declareUserActivity: declared
+            declareUserActivity: { declared.increment() }
         )
     }
 
     /// The awake case must cost nothing: no assertion, no sleeping. Every creation from the
     /// Mac itself takes this path.
     func testAlreadyDrawableReturnsImmediatelyWithoutDeclaringActivity() {
-        var declarations = 0
-        let waker = makeWaker(probe: Probe(flipsAfter: 0), declared: { declarations += 1 })
+        let declarations = Counter()
+        let waker = makeWaker(probe: Probe(flipsAfter: 0), declared: declarations)
         XCTAssertTrue(waker.wakeAndWaitForDrawable(timeout: 1.5))
-        XCTAssertEqual(declarations, 0, "an awake display must not be poked")
+        XCTAssertEqual(declarations.count, 0, "an awake display must not be poked")
     }
 
     /// The measured behaviour: the wake is asynchronous, so the drawable arrives some polls
     /// after the declaration rather than with it.
     func testWakesAndWaitsUntilDrawable() {
-        var declarations = 0
-        let waker = makeWaker(probe: Probe(flipsAfter: 3), declared: { declarations += 1 })
+        let declarations = Counter()
+        let waker = makeWaker(probe: Probe(flipsAfter: 3), declared: declarations)
         XCTAssertTrue(waker.wakeAndWaitForDrawable(timeout: 1.5))
-        XCTAssertEqual(declarations, 1)
+        XCTAssertEqual(declarations.count, 1)
     }
 
     /// A display that cannot wake — clamshell, none attached — must be given up on, not
     /// waited for forever, because this blocks the main actor.
     func testGivesUpAtTheTimeout() {
-        let waker = makeWaker(probe: Probe(flipsAfter: .max))
+        let waker = makeWaker(probe: Probe(flipsAfter: .max), declared: Counter())
         XCTAssertFalse(waker.wakeAndWaitForDrawable(timeout: 0.05))
     }
 
