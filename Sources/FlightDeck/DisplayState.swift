@@ -1,6 +1,7 @@
 // Sources/FlightDeck/DisplayState.swift
 import CoreGraphics
 import Foundation
+import IOKit.pwr_mgt
 
 /// Whether the main display can currently be drawn to.
 ///
@@ -54,4 +55,72 @@ struct DisplayState: DisplayInspecting {
 /// .testTheRealProbeIsWiredIn` is the one test that exists specifically to catch that deletion.
 struct AlwaysDrawableDisplay: DisplayInspecting {
     var isDrawable: Bool { true }
+}
+
+/// Asks a sleeping display to wake, and waits for it to become drawable.
+///
+/// Separate from `DisplayInspecting` because the two answer different questions and only one
+/// of them has a side effect: `isDrawable` is a cheap pure query that `canCreateTerminal`
+/// leans on, and lighting up the user's screen must never be something a property getter can
+/// do by accident.
+protocol DisplayWaking: Sendable {
+    /// Wake the display if needed and block until it is drawable. Returns whether it is.
+    func wakeAndWaitForDrawable(timeout: TimeInterval) -> Bool
+}
+
+/// The real one.
+///
+/// **The wake is asynchronous, which is the whole reason this type exists.** Measured on
+/// 2026-08-31: `IOPMAssertionDeclareUserActivity` returns at once, but `CGDisplayIsActive`
+/// only goes true 0.173-0.342s later (n=4, locked Mac). Declaring activity and proceeding
+/// straight to `ghostty_surface_new` would therefore still find no drawable and still fork
+/// nothing — the exact bug this is meant to fix, arriving 200ms later. So: declare, then poll.
+///
+/// **One declaration is enough and nothing needs releasing.** The display stayed active for
+/// at least 3s after a single call, which is ample to fork a shell. This deliberately does
+/// not hold an assertion open: the screen should go back to sleep on its own schedule.
+struct DisplayWaker: DisplayWaking {
+    /// The probe to poll. Injected so the polling and timeout logic is testable without a
+    /// display; the IOKit call below is the only part that cannot be.
+    var display: DisplayInspecting = DisplayState()
+    /// 25ms against a 173-342ms wake is 7-14 samples across the expected range.
+    var pollInterval: TimeInterval = 0.025
+    var sleep: @Sendable (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    /// Injected so no test can wake the machine running the suite.
+    var declareUserActivity: @Sendable () -> Void = DisplayWaker.declareLocalUserActivity
+
+    /// `kIOPMUserActiveLocal` — activity at *this* machine, which is what wakes its display.
+    ///
+    /// The return code is deliberately discarded. A failed assertion does not prove the
+    /// display is un-drawable (something else may be waking it), and the poll below is a
+    /// direct observation, which beats an inference either way.
+    static func declareLocalUserActivity() {
+        var assertion: IOPMAssertionID = 0
+        _ = IOPMAssertionDeclareUserActivity(
+            "Flight Deck is opening a terminal" as CFString, kIOPMUserActiveLocal, &assertion
+        )
+    }
+
+    func wakeAndWaitForDrawable(timeout: TimeInterval) -> Bool {
+        // Checked first so the common case — every creation on a Mac someone is looking at —
+        // costs one `CGDisplayIsActive` call and never sleeps.
+        if display.isDrawable { return true }
+        declareUserActivity()
+        var waited: TimeInterval = 0
+        while waited < timeout {
+            sleep(pollInterval)
+            waited += pollInterval
+            if display.isDrawable { return true }
+        }
+        return false
+    }
+}
+
+/// `SessionStore.displayWaker`'s default: never wakes, never blocks, always reports failure.
+///
+/// Inert for the same reason `AlwaysDrawableDisplay` is permissive — the suite must not
+/// depend on the machine running it. Here the stakes are higher than a wrong answer: a real
+/// `DisplayWaker` in a test would physically wake the developer's screen, once per call.
+struct NeverWakingDisplay: DisplayWaking {
+    func wakeAndWaitForDrawable(timeout: TimeInterval) -> Bool { false }
 }
