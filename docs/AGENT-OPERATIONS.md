@@ -45,7 +45,7 @@ What the script guarantees, and why each guarantee exists:
 | Guarantee | The failure it prevents |
 |---|---|
 | Verifies the new bundle **without executing it** (executable + `Info.plist` + `codesign --verify`) | Flight Deck has no argv parsing — argv goes straight to `ghostty_init`. `--help` does *not* print usage; it **boots a second full app instance**, restoring every session and spawning duplicate `claude --resume` processes. |
-| Only ever `open`s `/Applications/Flight Deck.app` — never the DerivedData bundle | A DerivedData launch is a second live app holding live sessions. Duplicates collide in Claude's pid-keyed name registry, which is why `/rename Crashing` started returning `Crashing-valiant-quilt`. |
+| Only ever `open`s `/Applications/Flight Deck.app` — never the DerivedData bundle | *In this script*, a DerivedData launch would be a second live app on the **same state file**: both restore the deck, both spawn `claude --resume` for the same ids, and the duplicates collide in Claude's pid-keyed name registry — which is why `/rename Crashing` started returning `Crashing-valiant-quilt`. A DerivedData bundle run with `-FlightDeckStateDir` is a different matter and is safe; see §2's rule. The script has no scratch directory to point at, so for it the blanket rule holds. |
 | Only relaunches if the app **was** running when the swap began | Don't spring a window on a machine where the user deliberately quit. |
 | Stages via `ditto`, backs the old bundle up to `…/Flight Deck/backups/<ts>/`, restores on failure | A half-swapped `/Applications` with no working app. |
 | Post-order signal walk (leaves → app), SIGTERM then SIGKILL | Children reparented to `launchd` become unkillable orphans. |
@@ -53,8 +53,29 @@ What the script guarantees, and why each guarantee exists:
 
 Log: `~/Library/Logs/flight-deck-swap.log`. Rollback is printed at the end of every run.
 
-**Rule: never launch a bundle from `DerivedData/` directly.** Build there, run from
-`/Applications`.
+**Rule: never launch a `DerivedData/` bundle against the real state directory.** The danger
+was never the bundle's location — it is two live apps sharing
+`~/Library/Application Support/Flight Deck/sessions.json`. Both restore the same deck, both
+spawn `claude --resume` for the same session ids, and the duplicates collide in Claude's
+pid-keyed name registry.
+
+**`-FlightDeckStateDir <path>` removes that entirely**, which is what it exists for
+(`FlightDeckApp.swift`). Point it at a scratch directory for a fresh deck, or at a *copy* of
+the real `sessions.json` to reproduce a specific deck — either is safe, and the choice makes no
+difference to the isolation. The real state file is never opened, so no session is restored
+twice and nothing collides.
+
+```bash
+open -n "DerivedData/Build/Products/Debug/Flight Deck.app" \
+  --args -FlightDeckStateDir /tmp/fd-scratch
+```
+
+Note `-FlightDeckStateDir` redirects `sessions.json` only. Preferences still resolve to the
+shared `UserDefaults` domain, so a debug run can still change a real preference.
+
+The swap script's own "never `open`s the DerivedData bundle" guarantee above is narrower and
+still correct: it runs unattended against the live deck, where there is no scratch directory in
+play and a second instance would be exactly the collision described.
 
 ## 3. Process hygiene
 

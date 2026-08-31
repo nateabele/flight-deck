@@ -126,6 +126,14 @@ final class SessionStore: ObservableObject {
     /// The process table the orphan sweep reads. Settable so tests can script it.
     var processInspector: ProcessInspecting = ProcessTree()
 
+    /// Injected for the reason `processInspector` is — see `DisplayInspecting`. Defaults to
+    /// `AlwaysDrawableDisplay()`, NOT the real `DisplayState()` (see that type's doc comment
+    /// for why the default is inverted from `processInspector`'s). `convenience init(ghostty:...)`
+    /// below assigns the real probe immediately after `self.init(provider:...)`, before
+    /// `seedInitialSession()` can run; that injection is what makes `canCreateTerminal` mean
+    /// anything outside tests — removing it silently disables the guard.
+    var display: DisplayInspecting = AlwaysDrawableDisplay()
+
     /// This run's own identity, stamped into every snapshot as `owner`. Computed once: it
     /// cannot change for the life of the process, and `persist()` runs on every mutation —
     /// every tab switch, every rename, every registry tick.
@@ -849,6 +857,83 @@ final class SessionStore: ObservableObject {
     /// panel on screen. See `AgentLaunchFailureReporting`.
     var launchFailureReporter: AgentLaunchFailureReporting = NSAlertAgentLaunchFailureReporter()
 
+    /// Whether a terminal can be created *right now*. A precondition, deliberately: creating
+    /// and then discovering the failure is what produced tabs that looked real on the sidebar
+    /// and on the phone while being permanently inert.
+    ///
+    /// **Gated on having a provider, and that is load-bearing, not a convenience.** The
+    /// drawable is a requirement of *libghostty*, which is only involved when a provider
+    /// exists. Nearly every fixture in the suite builds a store with `provider: nil`, and those
+    /// fixtures create sessions and assert on them; without this clause a suite run that
+    /// happened to start while the display was asleep would refuse every one of them and fail
+    /// wholesale — the same shape of self-inflicted breakage that the `Session?` return type
+    /// caused in the superseded plan, arriving by a different route.
+    var canCreateTerminal: Bool { provider == nil || display.isDrawable }
+
+    /// Whether this tab's terminal actually forked a shell.
+    ///
+    /// **Not `surfaces[id] != nil`.** `makeSurfaceView` returns a non-optional and its init is
+    /// non-failable, so a surface always exists — including for a tab that is inert because the
+    /// display was asleep when it was born. The registry is what knows a child was forked, and
+    /// it discriminates every observed case correctly.
+    func hasShellProcess(for id: UUID) -> Bool { processRegistry.process(for: id) != nil }
+
+    /// The outcome of trying to give an existing tab a working terminal. Distinguished rather
+    /// than boolean because each sends the reader somewhere different, and plan 2 maps them
+    /// onto HTTP statuses.
+    enum RespawnOutcome: Equatable {
+        case respawned, alreadyRunning, displayAsleep, unknownSession, failed
+    }
+
+    /// Replaces an inert terminal with a working one.
+    ///
+    /// *Replaces*, not fills: the broken tab already holds a `SurfaceView`: it just has no
+    /// drawable behind it and never forked a child. Discarding it is safe precisely because
+    /// there is no child process to orphan.
+    @discardableResult
+    func respawnSurface(for id: UUID) -> RespawnOutcome {
+        guard let at = locate(id) else { return .unknownSession }
+        let session = repos[at.repo].sessions[at.session]
+        // Ordered before the display check deliberately: "it is already working" is true and
+        // more useful regardless of what the display is doing.
+        guard !hasShellProcess(for: id) else { return .alreadyRunning }
+        guard canCreateTerminal else {
+            launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
+            return .displayAsleep
+        }
+
+        // Drop the inert view and its (absent) registry record before rebuilding, so the new
+        // fork is contested by exactly one claimant.
+        surfaces[id] = nil
+        _ = processRegistry.forget(id)
+
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
+        config.workingDirectory = session.transcriptDirectory
+        // Adapter and options resolved exactly as `newSession(in:)` does: `launchCommand` takes
+        // a NON-optional `AgentOptions`, and the adapter comes from the tab's instance, not
+        // from `AgentID`.
+        let adapter = adapter(for: instance(for: session))
+        let options = options(for: session.agent, project: session.workingDirectory)
+        config.initialInput = adapter.launchCommand(adapter.binding(for: session), session, options)
+        let orphaned = accountIsMissing(for: session)
+        config.environmentVariables =
+            preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
+
+        guard let surface = processRegistry.record(for: id, around: { provider?.makeSurface(config) })
+        else {
+            launchFailureReporter.report(.terminalUnavailable(displayAsleep: false))
+            return .failed
+        }
+        surfaces[id] = surface
+        // Same ordering and reason as `insertSession`: before anything is typed, so the child
+        // is not left talking to libghostty's placeholder 800x600 grid.
+        report(terminalSize, to: id)
+        provider?.tick()
+        if !orphaned { startWatching(tabID: id) }
+        return .respawned
+    }
+
     /// Test seam for frontmost-ness; production reads `NSApplication`.
     var appIsActive: () -> Bool = { NSApplication.shared.isActive }
 
@@ -1088,6 +1173,15 @@ final class SessionStore: ObservableObject {
             persistence: persistence,
             preferences: preferences
         )
+        // Load-bearing: `display` defaults to the always-permissive `AlwaysDrawableDisplay()`
+        // so tests that construct a `SessionStore` don't have to stub it (see that type's doc
+        // comment). This line is what makes `canCreateTerminal` real outside tests, and it
+        // must run before `seedInitialSession()` below — that call creates a tab through this
+        // same store, so assigning the real probe any later (e.g. after this initializer
+        // returns, as `FlightDeckApp` used to) would let a cold launch seed an inert tab
+        // while the display is asleep, reintroducing the original bug. Removing this line
+        // silently disables the guard for every session this store ever creates.
+        display = DisplayState()
         self.notifier = notifier
         // Both assigned before `startStatusWatching()` below, which reads them when it builds
         // each account's watcher — setting either afterwards would leave those watchers
@@ -1144,6 +1238,13 @@ final class SessionStore: ObservableObject {
     /// unchanged.
     @discardableResult
     func newSession(in url: URL, at index: Int? = nil, account explicit: UUID? = nil) -> Session {
+        guard canCreateTerminal else {
+            launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
+            // Un-inserted, exactly as the `launchAccount` failure path below does. The return
+            // type stays non-optional on purpose: making it `Session?` broke 340 tests, because
+            // nearly every fixture in the suite builds a store with a nil-returning provider.
+            return Session(title: "", workingDirectory: url.path)
+        }
         // Resolved before the title is minted, so a refusal does not burn a session number.
         let account: AgentAccount?
         switch launchAccount(for: .claude, project: url.path, choosing: explicit) {
@@ -1188,6 +1289,17 @@ final class SessionStore: ObservableObject {
     func createSession(
         agent: AgentID, in directory: String, at index: Int? = nil, account explicit: UUID? = nil
     ) async -> Result<UUID, AgentLaunchError> {
+        // Before anything else, covering both branches below: the codex branch calls
+        // `addSession` directly rather than routing through `newSession(in:)`, so it does not
+        // get that guard for free, and a codex tab created with the display asleep would
+        // otherwise be born just as inert as the bug this exists to fix. Reported through
+        // `launchFailureReporter` exactly as the neighbouring `launchAccount` failure branch
+        // does, just below.
+        guard canCreateTerminal else {
+            let error = AgentLaunchError.terminalUnavailable(displayAsleep: true)
+            launchFailureReporter.report(error)
+            return .failure(error)
+        }
         let url = URL(fileURLWithPath: directory, isDirectory: true)
         // FIRST, before a draft exists and before anything codex-shaped is touched. A login
         // that cannot launch must not mint a title, must not spawn an app-server to negotiate
@@ -1294,6 +1406,13 @@ final class SessionStore: ObservableObject {
     func openSignInSession(
         for account: AgentAccount, in directory: String, using invocation: LoginInvocation
     ) -> Session {
+        guard canCreateTerminal else {
+            launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
+            // Same un-inserted-`Session` convention as `newSession(in:)`: this bypasses
+            // `createSession` entirely (see the doc comment above), so it needs its own guard
+            // rather than inheriting one — R1 missed this path.
+            return Session(title: "", workingDirectory: directory)
+        }
         let session = Session(
             title: nextSessionTitle(), workingDirectory: directory, agent: account.agent,
             accountID: account.id
