@@ -464,7 +464,15 @@ final class CodexIntegrationTests: XCTestCase {
         let creatorRPC = CodexRPC(transport: creator)
         try await CodexProcessTransport.verifyHandshake(creatorRPC)
 
-        let adapter = CodexAdapter(rpc: creatorRPC)
+        // `historyMode: "legacy"` set by hand, matching what `SessionStore.startCodex` sets
+        // from the probed codex version in production. This test deliberately bypasses
+        // `SessionStore` — it needs two independent app-server connections to the same
+        // thread, which `SessionStore` has no path for — so a directly-constructed
+        // `CodexAdapter` does not get the mode for free the way a real tab does. Without
+        // this, `prepare` sends no `historyMode`, codex-cli 0.151.0 defaults to `paginated`,
+        // no rollout is ever written, and `prepare`'s own post-naming guard throws
+        // `AgentLaunchError.prepareFailed` before this test ever reaches `thread/resume`.
+        let adapter = CodexAdapter(rpc: creatorRPC, historyMode: "legacy")
         let session = Session(title: "writer-lock probe", workingDirectory: cwd.path)
         let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
         let id = binding.conversationID.uuidString.lowercased()
