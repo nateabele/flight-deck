@@ -1,5 +1,6 @@
 import FleetKit
 import Foundation
+import Observation
 
 /// What the phone knows about the gate it is showing.
 ///
@@ -7,17 +8,18 @@ import Foundation
 /// `FleetKit`. The index this model sends is meaningful only because the Mac computes the
 /// same list from the same text.
 @MainActor
-final class PlanReviewModel: ObservableObject {
+@Observable
+final class PlanReviewModel {
     let session: UUID
     let gate: WirePlanGate
     let blocks: [PlanBlocks.Block]
 
     /// Typed into the box above the verdict buttons, and carried by whichever one is pressed.
-    @Published var feedback: String = ""
+    var feedback: String = ""
     /// Comments already sent, by block index, so the row can show a marker.
-    @Published private(set) var sent: [Int: [String]] = [:]
-    @Published private(set) var globalSent: [String] = []
-    @Published private(set) var resolved = false
+    private(set) var sent: [Int: [String]] = [:]
+    private(set) var globalSent: [String] = []
+    private(set) var resolved = false
 
     private let send: (FleetCommand) -> Void
 
