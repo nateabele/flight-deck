@@ -49,6 +49,12 @@ public struct WireConversationCatalogue: Codable, Equatable, Sendable {
     /// they are already in `FleetSnapshot` — but their recency is, in `sessionActivity`.
     public let conversations: [WireConversation]
     /// Live tab id (`uuidString`) → its transcript's mtime.
+    ///
+    /// A bare `Date`, against `TimelineItem.at`'s documented reason not to be one — see that
+    /// doc comment, and `TranscriptHit.timestamp`'s, which carries the identical exception.
+    /// Safe only while neither end sets a date strategy on its `JSONEncoder`/`JSONDecoder`;
+    /// both currently use the bare default. Setting one anywhere would shift every timestamp
+    /// on this wire silently, with nothing here to catch it.
     public let sessionActivity: [String: Date]
 
     public init(conversations: [WireConversation], sessionActivity: [String: Date]) {
