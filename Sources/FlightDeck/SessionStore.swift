@@ -4022,9 +4022,24 @@ final class SessionStore: ObservableObject {
     /// oracle (which reads `planGates` live) permanently disagrees with the event-fold mirror.
     /// That has to hold even when this Mac has no local notifier — a headless `SessionStore`,
     /// or one under test — so only the OS-banner half below is gated on `notifier`'s presence.
-    private func deliverPlanGateNotifications() {
+    ///
+    /// **Batched into one `emit`, not one per session — the same reason `emitActivity` batches
+    /// its whole transition list.** `refresh()` (the caller's caller, `pollPlanGates()`) already
+    /// updated `planGates.gates` for every session before this method runs, so the oracle's
+    /// live read reflects *all* of this tick's changes from the first line. Emitting per
+    /// session inside the loop would `record([event])` — and therefore `checkForDrift()` — one
+    /// session at a time: the very first emit, for session A, would already see the oracle
+    /// projecting session B's new gate while the mirror still held B's old one (no event for B
+    /// has been recorded yet), and trip the DEBUG drift assertion on two gates changing in one
+    /// tick. Collecting the events and emitting once after the loop folds the whole tick before
+    /// any drift check runs, closing that window the same way `emitActivity` already does for
+    /// activity transitions. Not `internal` for the batching to hold, `func` rather than
+    /// `private` only so `FleetService` can call this directly after a successful
+    /// `annotate`/`resolve` — see the doc comment there for the matching window on that path.
+    func deliverPlanGateNotifications() {
         guard let planGates else { return }
         let active = appIsActive()
+        var events: [FleetEvent] = []
         for id in repos.flatMap(\.sessions).map(\.id) {
             let gate = planGates.gate(for: id)
             let previous = previousPlanGates[id]
@@ -4034,7 +4049,7 @@ final class SessionStore: ObservableObject {
             guard gate != previous else { continue }
             previousPlanGates[id] = gate
 
-            emit(.planGateChanged(id: id, gate: gate))
+            events.append(.planGateChanged(id: id, gate: gate))
 
             guard let notifier else { continue }
             let old = SessionNotificationPolicy.Input(status: statuses[id], planGate: previous)
@@ -4052,6 +4067,7 @@ final class SessionStore: ObservableObject {
                 notifier.withdraw(sessionID: id)
             }
         }
+        emit(events)
     }
 
     /// The single writer of `statuses`, and the one place a status change turns into its
