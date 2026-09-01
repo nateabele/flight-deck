@@ -232,4 +232,74 @@ final class FleetServiceTests: XCTestCase {
         await fulfillment(of: [refused], timeout: 10)
         XCTAssertEqual(store.repos.first?.sessions.count, 1, "no second tab was created")
     }
+
+    /// A stub the display guard can flip mid-test — `Display` above is a `let`-only struct,
+    /// which cannot express "becomes drawable once woken" from inside a `DisplayWaking`.
+    private final class MutableDisplay: DisplayInspecting, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _drawable: Bool
+        init(_ drawable: Bool) { _drawable = drawable }
+        var isDrawable: Bool { lock.lock(); defer { lock.unlock() }; return _drawable }
+        func set(_ v: Bool) { lock.lock(); _drawable = v; lock.unlock() }
+    }
+
+    /// A waker that succeeds and, like the real one, leaves the display actually drawable —
+    /// same shape as `DisplayWakeTests`'s own `Waker`, redeclared here rather than shared for
+    /// the same reason `Display` above is. Flipping `display` on success matters here and not
+    /// just in `DisplayWakeTests`: `store.newSession(inProject:)` calls `ensureTerminalCreatable`
+    /// again internally, and a waker that returned `true` without making `isDrawable` true
+    /// would be woken twice for one tap.
+    private final class Waker: DisplayWaking, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls = 0
+        var calls: Int { lock.lock(); defer { lock.unlock() }; return _calls }
+        private let onWake: @Sendable () -> Void
+        init(onWake: @escaping @Sendable () -> Void) { self.onWake = onWake }
+        func wakeAndWaitForDrawable(timeout: TimeInterval) -> Bool {
+            lock.lock(); _calls += 1; lock.unlock()
+            onWake()
+            return true
+        }
+    }
+
+    /// The companion to the refusal above: a phone `+` reaching an asleep display must
+    /// attempt a wake, not refuse outright — this is `Finding 1`'s regression test.
+    /// `ensureTerminalCreatable`, not `canCreateTerminal`, is what the handler must call, and
+    /// a `Waker` that always succeeds is what tells the two apart: with `canCreateTerminal`
+    /// still read directly, this display never becomes drawable and the phone gets refused.
+    func testANewSessionFromThePhoneWakesTheDisplayAndSucceeds() async throws {
+        let provider = StubProvider()
+        retainedProviders.append(provider)
+        let store = SessionStore(provider: provider, persistence: nil)
+        store.display = Display(isDrawable: true)
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/target"))
+        let project = try XCTUnwrap(store.repos.first?.id)
+        // Flipped only after the project exists, same as the refusal test above.
+        let display = MutableDisplay(false)
+        store.display = display
+        let waker = Waker(onWake: { display.set(true) })
+        store.displayWaker = waker
+
+        let harness = FleetTestHarness(store: store)
+        self.harness = harness
+        self.service = harness.service
+        let (_, key, port) = (harness.store, harness.key, try await harness.start())
+
+        let acked = expectation(description: "ack")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.newSession(project: project, agent: nil, accountIndex: nil))
+            }
+            if case .err(_, "terminal_unavailable") = frame {
+                XCTFail("a display that can be woken must not be refused")
+            }
+            if case .ack = frame { acked.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [acked], timeout: 10)
+        XCTAssertEqual(waker.calls, 1)
+        XCTAssertEqual(store.repos.first?.sessions.count, 2, "the woken display got its tab")
+    }
 }
