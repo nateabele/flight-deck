@@ -114,6 +114,18 @@ call through; the real waker injected in `convenience init(ghostty:)`. `seedInit
 deliberately opts out with `.never` — it runs inline inside `SessionStore.init`, so waking there
 would light the screen on an unattended relaunch and would block startup on the poll.
 
+**The guard-site inventory is five, not four.** The spec (`docs/superpowers/specs/
+2026-08-31-display-wake-design.md`) enumerated only the four inside `SessionStore` —
+`newSession(in:)`, `createSession(agent:in:)`, `openSignInSession(for:in:using:)`,
+`respawnSurface(for:)` — and missed `FleetService`'s `.newSession` wire handler, which read
+`store.canCreateTerminal` directly rather than going through the funnel. That is the phone's
+only creation command, so the miss closed the whole path this feature exists for: with the
+display asleep, the phone was refused before `ensureTerminalCreatable` was ever reached, on
+every phone-originated creation. Caught in a whole-branch review, fixed by routing that guard
+through `ensureTerminalCreatable()` too. **`rg -n 'canCreateTerminal' Sources/` is the check**
+that finds every direct reader of the pure query in seconds — run it before any future change
+to this guard, so a sixth site cannot go missing the same way.
+
 **The guard is NOT removed.** A wake can still fail — clamshell mode, no display attached — and
 must still refuse rather than birth an inert tab. B makes refusal the exception instead of the
 routine outcome; it does not make refusal impossible.
@@ -127,6 +139,17 @@ still does not exist.
 brief — build, swap in, sleep the display for real, tap `+` from the phone, confirm the tab —
 is a step still pending; everything above was measured against the spike harness, not the
 shipped app.
+
+**Follow-up, not done: make the phone's guard async.** `FleetService`'s `.newSession` handler
+now blocks the caller's thread for up to 1.5s inside `ensureTerminalCreatable()` before either
+creation branch runs. It is the one site that need not: the agent/account branch already
+dispatches its own work into a `Task`, so restructuring the handler to check-then-launch
+asynchronously would cost it nothing, and would free the frame-handling thread for the
+duration of the wake. The plain-`+` branch is why this was not just done here — it currently
+distinguishes `unknown_project` from `terminal_unavailable` synchronously, and threading that
+distinction through an `async` reshape is real work, not a one-line change. Ruled out of this
+fix wave: the worst case (1.5s) sits far inside the 10s TCP keepalive idle the connection
+tolerates, so the synchronous form is not a correctness problem, only a missed efficiency.
 
 ### A — rejected
 
@@ -163,3 +186,12 @@ render as a generic fallback.
   would lose the deck. So a relaunch with the display asleep can bring back a whole deck of
   inert tabs, and `respawnSurface` is the only remedy. An auto-respawn on display wake would
   close this properly and does not exist.
+- **`DisplayState.isDrawable` asks about `CGMainDisplayID()` only.** On a Mac with more than
+  one display, a main display that has slept while a secondary stays awake and in active use
+  reads as not-drawable, and the guard blocks the main actor for up to 1.5s in front of someone
+  who is actively looking at a screen — just not the main one. A single-display probe is
+  deciding a question that is really machine-wide; nothing in this change addresses that.
+- **No memoisation of a recently-failed wake.** Each `+` pays the full attempted-wake cost
+  independently — up to 1.5s — with nothing remembering that the last attempt, moments ago,
+  timed out. In clamshell mode or with no display attached, every tap recurs the same cost with
+  the same outcome; there is no backoff or short-lived "don't bother" cache.
