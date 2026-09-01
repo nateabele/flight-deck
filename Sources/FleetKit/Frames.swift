@@ -209,9 +209,13 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     ///
     /// It closes the harder race too, which a served-and-echoed id would not: the user approves
     /// in the terminal, claude raises the next dialog immediately, and the session **never
-    /// leaves `waiting`** — so no activity change is emitted and a card that looks live is
-    /// describing a dialog that is gone. A cache of "what I last served" still matches there.
-    /// A re-derivation does not, because the new dialog is a different call.
+    /// leaves `waiting`**, so a card that looks live can be describing a dialog that is gone. A
+    /// cache of "what I last served" still matches there. A re-derivation does not, because the
+    /// new dialog is a different call.
+    ///
+    /// `WireSession.openPromptCall` makes that supersede visible to a client, so the tap is
+    /// less likely to be sent at all — but it is the phone being *told*, not the Mac being
+    /// convinced. What arrives here is still judged against a fresh derivation, always.
     ///
     /// `token` is the client's own idempotency key, minted once per tap, for the reason
     /// `.prompt`'s is: the socket can drop between the command landing and its `ack` being
@@ -402,24 +406,47 @@ public enum ClientFrame: Codable, Equatable, Sendable {
     /// without this a paired phone can only ever be listed under a placeholder. It is a
     /// claim, not a credential: identity is the slot the handshake proved, and a client is
     /// free to send nothing at all, which is what `nil` means.
-    case hello(lastSeq: Int, device: String?)
+    ///
+    /// `caps` is what this client can be *asked*, and it is the whole compatibility story for
+    /// `ServerFrame.phoneRequest` — see `FleetCapability`. Defaulted so every existing
+    /// construction site compiles unchanged, exactly as `FleetEvent.activityChanged`'s
+    /// `openPromptCall` is.
+    case hello(lastSeq: Int, device: String?, caps: [String] = [])
     case cmd(cid: Int, FleetCommand)
     /// Ask, rather than tell. See `FleetRequest` for why this is not a `cmd`.
     case req(cid: Int, FleetRequest)
+    /// The reply to `ServerFrame.phoneRequest(.logs)`, correlated on the Mac's `cid`.
+    ///
+    /// **A second `cid` space, travelling the other way, and the two cannot collide.** A
+    /// client's numbers appear in `req`/`cmd` and come back in `page`/`ack`/`err`; the Mac's
+    /// appear in `phoneRequest` and come back here. Neither end ever looks a number up in the
+    /// other's table, because the frame types that carry them are disjoint.
+    case logs(cid: Int, WirePhoneLogs)
+    /// The mirror of `ServerFrame.err`: this client will not answer that request, and why.
+    ///
+    /// Codes a phone produces: `unhandled` (this build has no provider wired), `unsupported`
+    /// (an `ask` it could not parse — see `FleetClient.connect`'s salvage), and `unreadable`
+    /// (`OSLogStore` refused). A Mac must treat any unrecognised code as "no logs", the same
+    /// rule `FleetRequestError.server` states for the other direction.
+    case refused(cid: Int, code: String)
 
-    enum CodingKeys: String, CodingKey { case t, lastSeq, device, cid }
+    enum CodingKeys: String, CodingKey { case t, lastSeq, device, caps, cid, logs, code }
 
-    private enum Tag: String, Codable { case hello, cmd, req }
+    private enum Tag: String, Codable { case hello, cmd, req, logs, refused }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .hello(let lastSeq, let device):
+        case .hello(let lastSeq, let device, let caps):
             try c.encode(Tag.hello, forKey: .t)
             try c.encode(lastSeq, forKey: .lastSeq)
             // `encodeIfPresent`, so a client with no name to claim emits the same two-key
             // frame it always did rather than an explicit `"device":null`.
             try c.encodeIfPresent(device, forKey: .device)
+            // Omitted when empty, for the same reason `device` is omitted when nil: a client
+            // claiming nothing must put the same bytes on the wire it always did, so an older
+            // Mac reading a dump sees the frame it has always seen.
+            if !caps.isEmpty { try c.encode(caps, forKey: .caps) }
         case .cmd(let cid, let command):
             try c.encode(Tag.cmd, forKey: .t)
             try c.encode(cid, forKey: .cid)
@@ -434,6 +461,17 @@ public enum ClientFrame: Codable, Equatable, Sendable {
             // keyed containers over one encoder merge into a single JSON object, and one
             // request reading as one line is what makes a packet dump usable.
             try request.encode(to: encoder)
+        case .logs(let cid, let logs):
+            try c.encode(Tag.logs, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            // Nested under its own key rather than flattened, unlike `cmd` and `req`: those
+            // carry a handful of scalars that read well inline, and this carries an array of
+            // records that would bury the `t` and the `cid` a reader is scanning for.
+            try c.encode(logs, forKey: .logs)
+        case .refused(let cid, let code):
+            try c.encode(Tag.refused, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(code, forKey: .code)
         }
     }
 
@@ -444,14 +482,28 @@ public enum ClientFrame: Codable, Equatable, Sendable {
             // `decodeIfPresent`, not `decode`: a phone built before `device` existed sends a
             // `hello` without it, and that frame must still attach rather than throw — the
             // Mac would otherwise stop talking to every already-paired device on upgrade.
+            // `caps` is read the same way and for the same reason, one feature later: every
+            // phone in the field today sends a `hello` without it, and "claims nothing" is
+            // exactly what an empty list means.
             self = .hello(lastSeq: try c.decode(Int.self, forKey: .lastSeq),
-                          device: try c.decodeIfPresent(String.self, forKey: .device))
+                          device: try c.decodeIfPresent(String.self, forKey: .device),
+                          caps: try c.decodeIfPresent([String].self, forKey: .caps) ?? [])
         case .cmd:
             self = .cmd(cid: try c.decode(Int.self, forKey: .cid),
                         try FleetCommand(from: decoder))
         case .req:
             self = .req(cid: try c.decode(Int.self, forKey: .cid),
                         try FleetRequest(from: decoder))
+        case .logs:
+            self = .logs(cid: try c.decode(Int.self, forKey: .cid),
+                         try c.decode(WirePhoneLogs.self, forKey: .logs))
+        case .refused:
+            self = .refused(cid: try c.decode(Int.self, forKey: .cid),
+                            // A `String` rather than an enum, the same decode-unknown rule
+                            // `FleetRequestError.server` states for the other direction: a
+                            // newer phone inventing a code must leave an older Mac printing
+                            // "the phone said no" rather than failing to parse the frame.
+                            code: try c.decode(String.self, forKey: .code))
         }
     }
 }
@@ -484,15 +536,27 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     case searchHits(cid: Int, WireSearchHits)
     /// The reply to `FleetRequest.openConversation`: the tab it was opened into.
     case session(cid: Int, UUID)
+    /// The Mac asking the **phone** something — the only frame here that is not an answer.
+    ///
+    /// Correlated by a `cid` from the Mac's own space and answered with `ClientFrame.logs` or
+    /// `ClientFrame.refused`. Deliberately **not** sequenced, for the reason `page` is not: a
+    /// diagnostic fetch is not fleet state, and a `seq` on one would move the resume point the
+    /// phone hands back on its next `hello`.
+    ///
+    /// **Never sent to a client that did not advertise it** — see `FleetCapability`. A phone
+    /// built before this frame existed cannot decode it and would lose its socket, so the
+    /// `caps` gate is the compatibility mechanism and this frame is merely what it protects.
+    case phoneRequest(cid: Int, PhoneRequest)
 
     enum CodingKeys: String, CodingKey {
         case t, seq, fleet, reason, cid, code, page, options, endpoints
         case conversations, hits, session
     }
 
-    /// Undotted, deliberately, and the newer three along with it — see the decoder below.
+    /// Undotted, deliberately, and the newer four along with it — see the decoder below.
     private enum Tag: String, Codable {
         case snapshot, ack, err, page, options, endpoints, conversations, hits, session
+        case ask
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -539,6 +603,13 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.session, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(session, forKey: .session)
+        case .phoneRequest(let cid, let request):
+            try c.encode(Tag.ask, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            // Flattened into the same object, exactly as `ClientFrame.req` flattens its
+            // request: two keyed containers over one encoder merge into a single JSON object,
+            // and one request reading as one line is what makes a packet dump usable.
+            try request.encode(to: encoder)
         }
     }
 
@@ -546,7 +617,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         // Try the frame's own tags first; anything else is an event's tag, which is why
         // the two namespaces must never collide. `FleetEventTag`'s values are all dotted
-        // and these nine are not, which keeps that a property rather than a promise.
+        // and these ten are not, which keeps that a property rather than a promise.
         if let tag = try? c.decode(Tag.self, forKey: .t) {
             switch tag {
             case .snapshot:
@@ -585,6 +656,11 @@ public enum ServerFrame: Codable, Equatable, Sendable {
                 self = .session(
                     cid: try c.decode(Int.self, forKey: .cid),
                     try c.decode(UUID.self, forKey: .session)
+                )
+            case .ask:
+                self = .phoneRequest(
+                    cid: try c.decode(Int.self, forKey: .cid),
+                    try PhoneRequest(from: decoder)
                 )
             }
             return

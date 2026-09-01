@@ -234,4 +234,98 @@ final class FleetFrameCodingTests: XCTestCase {
             XCTAssertNil(FleetEventTag(rawValue: tag))
         }
     }
+
+    // MARK: The log fetch, which is the one request that travels Mac → phone
+
+    /// Flattened into the frame, exactly as `ClientFrame.req` flattens its request: one
+    /// request reads as one line in a dump, which is what makes a dump usable.
+    func testAPhoneRequestEncodesFlatWithItsOwnOp() throws {
+        let encoded = try fields(of: ServerFrame.phoneRequest(
+            cid: 12, .logs(seconds: 600, limit: 500)
+        ))
+        XCTAssertEqual(encoded["t"] as? String, "ask")
+        XCTAssertEqual(encoded["cid"] as? Int, 12)
+        XCTAssertEqual(encoded["op"] as? String, "phone.logs")
+        XCTAssertEqual(encoded["seconds"] as? Int, 600)
+        XCTAssertEqual(encoded["limit"] as? Int, 500)
+    }
+
+    /// The same non-collision property the four replies above keep, for the tag that carries
+    /// the only Mac → phone request: `ServerFrame`'s decoder tries its own tags first and
+    /// treats anything else as a `FleetEvent` tag.
+    func testTheAskTagDoesNotCollideWithAnEventTag() throws {
+        let tag = try XCTUnwrap(
+            try fields(of: ServerFrame.phoneRequest(cid: 1, .logs(seconds: 1, limit: 1)))["t"]
+                as? String
+        )
+        XCTAssertFalse(tag.contains("."), "\(tag) is shaped like an event tag")
+        XCTAssertNil(FleetEventTag(rawValue: tag))
+    }
+
+    func testTheLogReplyAndItsRefusalRoundTrip() throws {
+        let frames: [ClientFrame] = [
+            .logs(cid: 3, WirePhoneLogs(
+                entries: [WirePhoneLogEntry(
+                    at: "2026-09-01T09:15:00.000+01:00", level: "notice",
+                    category: "prompt", message: "prompt derived=toolu_1 shown=toolu_1"
+                )],
+                truncated: true
+            )),
+            .logs(cid: 4, WirePhoneLogs(entries: [], truncated: false)),
+            .refused(cid: 5, code: "unsupported"),
+        ]
+        for frame in frames {
+            let data = try JSONEncoder().encode(frame)
+            XCTAssertEqual(
+                try JSONDecoder().decode(ClientFrame.self, from: data), frame,
+                "\(frame) did not survive a round trip"
+            )
+        }
+        let ask = ServerFrame.phoneRequest(cid: 6, .logs(seconds: 120, limit: 50))
+        let data = try JSONEncoder().encode(ask)
+        XCTAssertEqual(try JSONDecoder().decode(ServerFrame.self, from: data), ask)
+    }
+
+    /// A refusal code is a `String` on this wire, not an enum, so a newer phone inventing one
+    /// leaves an older Mac printing "the phone said no" rather than failing to parse the frame
+    /// — the same decode-unknown rule `FleetRequestError.server` states for the other
+    /// direction.
+    func testARefusalCodeThisBuildHasNeverHeardOfStillDecodes() throws {
+        let json = Data(#"{"t":"refused","cid":9,"code":"battery_saver"}"#.utf8)
+        XCTAssertEqual(
+            try JSONDecoder().decode(ClientFrame.self, from: json),
+            .refused(cid: 9, code: "battery_saver")
+        )
+    }
+
+    // MARK: What a phone says it can be asked
+
+    /// `caps` is what keeps a new Mac from stranding an old phone: nothing is ever asked of a
+    /// peer that did not claim it. Asserted on the bytes for the reason the rest of this file
+    /// is — this field is read by a Mac, not by a `Decodable`.
+    func testHelloCarriesWhatThePhoneCanBeAsked() throws {
+        let encoded = try fields(of: ClientFrame.hello(
+            lastSeq: 4, device: "iPhone", caps: [FleetCapability.logs]
+        ))
+        XCTAssertEqual(encoded["caps"] as? [String], ["logs"])
+    }
+
+    /// The compatibility guarantee in the phone → Mac direction, stated as the bytes every
+    /// already-paired handset actually sends: a `hello` with no `caps` key must decode as
+    /// "claims nothing", not throw. A frame that fails to decode is a connection that never
+    /// attaches, so getting this wrong would drop every paired phone off the Mac on upgrade.
+    func testAHelloWithoutCapsDecodesAsClaimingNothing() throws {
+        let json = Data(#"{"t":"hello","lastSeq":812,"device":"iPhone"}"#.utf8)
+        XCTAssertEqual(
+            try JSONDecoder().decode(ClientFrame.self, from: json),
+            .hello(lastSeq: 812, device: "iPhone", caps: [])
+        )
+    }
+
+    /// And the other half: a client claiming nothing must not put `"caps":[]` on the wire, so
+    /// the frame it sends stays byte-identical to the one it sent before this existed.
+    func testAHelloThatClaimsNoCapabilitiesOmitsTheKeyEntirely() throws {
+        let encoded = try fields(of: ClientFrame.hello(lastSeq: 0, device: nil, caps: []))
+        XCTAssertEqual(Set(encoded.keys), ["t", "lastSeq"])
+    }
 }

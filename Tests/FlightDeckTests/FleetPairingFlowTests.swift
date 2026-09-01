@@ -29,6 +29,9 @@ final class FleetPairingFlowTests: XCTestCase {
             store: store, preferences: preferences,
             armer: PairingArmer(now: { self.now })
         )
+        // Silenced for `FleetTestHarness`'s reason: the default prompt-lifecycle sink
+        // appends to the developer's own `~/Library/Logs/flight-deck-prompt.log`.
+        service.promptLifecycleForTesting = { _ in }
         self.service = service
         _ = try await service.start(port: nil)
         return (store, preferences, service)
@@ -141,6 +144,7 @@ final class FleetPairingFlowTests: XCTestCase {
             store: SessionStore(provider: nil, persistence: nil), preferences: firstPreferences,
             armer: PairingArmer(now: { self.now })
         )
+        firstService.promptLifecycleForTesting = { _ in }
         _ = try await firstService.start(port: nil)
         let armed = try await firstService.arm()
         XCTAssertEqual(firstPreferences.pairedDevices.first?.isProvisional, true)
@@ -159,6 +163,7 @@ final class FleetPairingFlowTests: XCTestCase {
             store: SessionStore(provider: nil, persistence: nil), preferences: secondPreferences,
             armer: PairingArmer(now: { self.now })
         )
+        secondService.promptLifecycleForTesting = { _ in }
         self.service = secondService
         _ = try await secondService.start(port: nil)
 

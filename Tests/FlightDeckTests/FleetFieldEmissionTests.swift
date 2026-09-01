@@ -46,11 +46,15 @@ final class FleetFieldEmissionTests: XCTestCase {
         ])
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
             id: a.id, activity: "busy", waitingFor: nil, subagentCount: 3,
-            hasBackgroundWork: false
+            hasBackgroundWork: false, openPromptCall: .noPrompt
         )))
+        // `.noPrompt` and never `.unreported`, even for the waiting tab: this store has no
+        // fleet behind it, so `openPromptCallReader` names nothing — and "I looked and found
+        // nothing" is what the Mac asserts, which is what retires a phone's card. A tab that
+        // is blocked on a dialog this build cannot name reaches the wire exactly this way.
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
             id: b.id, activity: "waiting", waitingFor: "input needed", subagentCount: 0,
-            hasBackgroundWork: false
+            hasBackgroundWork: false, openPromptCall: .noPrompt
         )))
     }
 
@@ -64,7 +68,7 @@ final class FleetFieldEmissionTests: XCTestCase {
         store.applyRegistryForTesting([:])
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
             id: session.id, activity: nil, waitingFor: nil, subagentCount: 0,
-            hasBackgroundWork: false
+            hasBackgroundWork: false, openPromptCall: .noPrompt
         )))
     }
 
@@ -78,7 +82,7 @@ final class FleetFieldEmissionTests: XCTestCase {
         store.applySubagentCount(session.id, 4)
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
             id: session.id, activity: "busy", waitingFor: nil, subagentCount: 4,
-            hasBackgroundWork: false
+            hasBackgroundWork: false, openPromptCall: .noPrompt
         )))
     }
 
@@ -102,7 +106,7 @@ final class FleetFieldEmissionTests: XCTestCase {
 
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(
             id: session.id, activity: "idle", waitingFor: nil, subagentCount: 0,
-            hasBackgroundWork: true
+            hasBackgroundWork: true, openPromptCall: .noPrompt
         )))
     }
 

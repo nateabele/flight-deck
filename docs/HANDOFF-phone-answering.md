@@ -37,7 +37,9 @@ worse than no claim, so one is retracted below rather than quietly replaced.
 
 Report 1 is fixed (`dae216f`, merged): the one-shot retry became a bounded, backing-off chase
 whose condition is the card rather than a count. Report 2 is fixed (`2db6c52`, merged).
-Report 3 is fixed at `3d28d77`/`78b7ba5`, described next.
+Report 3 is fixed at `3d28d77`/`78b7ba5`, described next. Reports 1 and 4 both had a second,
+deeper cause — the open prompt's identity was never on the wire — addressed below; that one is
+built on both sides and awaiting a live reproduction.
 
 ## The action row, as implemented (report 3)
 
@@ -107,14 +109,77 @@ list wins" exists for a reason. Note the direction it fails in — `focusedRow` 
 fails to **refusal**, never to a keypress on a row nobody chose.
 
 This is **not** a claim about report 4. That is a different symptom — a card rendering with no
-controls at all, where this makes a drive refuse. Worth ruling in or out when report 4 is finally
-investigated, and no more than that.
+controls at all, where this makes a drive refuse — and report 4's own cause is now known and
+described below. Still worth ruling in or out; no more than that.
 
-### Permission prompts (report 4) — undiagnosed
+### Permission prompts (report 4) — the open prompt was never on the wire
 
-Not investigated. It is a different path — `.toolCall` → `OpenPrompt.permission`, not `.prompt`
-— so it is **not** the same cause as reports 1–3, and it should not be assumed to be the retry
-race either. Verify before changing anything.
+Confirmed from the code and from a live failure: the phone showed *"Claude wants to run bash"*
+for a dialog the Mac had long since moved past, Allow came back *"Your Mac has moved on from
+this"*, and at that moment the Mac had **no** open prompt in any session. Not the retry race,
+and not the `.toolCall` path being different from `.prompt`.
+
+`ServerFrame` carried no prompt, by design — `OpenPrompt.find` derives it on both ends — so the
+only signal a client got that anything had changed was the session's `activity`. One dialog
+superseded by another **while the session stays `waiting`** therefore moved nothing at all: same
+activity, often the same `waitingFor`, no event, and a card left describing a dialog that was
+gone. `8b4fc56`'s lifecycle log records exactly that as `reason=superseded-by-…` with no `push`
+beside it.
+
+The fix puts the blocked call's `tool_use_id` — identity only, never the question — into
+`WireSession.openPromptCall`, so a change of dialog is itself a wire change; `SessionStore
+.commitStatuses` gains it as a third axis beside `backgroundWork`, and the phone re-derives on
+it and draws nothing for a dialog the Mac does not name. See `OpenPromptIdentity` for the
+three-state wire encoding and `PromptIdentityWireTests` for the tick nothing used to be sent
+for. The `prompt_changed` refusal is untouched and stays the last line of defence: this changes
+how often a stale answer is *sent*, not whether one is checked.
+
+## Diagnostics — what to read before touching anything
+
+Two logs, both unconditional and both in the Release build. Neither is behind
+`FlightDeckAnswerTrigger`: that flag guards a control surface, these only observe.
+
+| What | Unified log | File |
+|---|---|---|
+| Why an answer **drive** stopped, plus the whole screen it saw (`440d253`) | `category: answer`, error level | `~/Library/Logs/flight-deck-answer.log` |
+| When a dialog **opens, closes and is answered**, and what left the Mac for it | `category: prompt`, default level | `~/Library/Logs/flight-deck-prompt.log` |
+
+```bash
+tail -f ~/Library/Logs/flight-deck-prompt.log
+log show --last 30m --predicate 'subsystem == "dev.flightdeck.FlightDeck" && category == "prompt"' --style compact
+log stream --predicate 'subsystem == "dev.flightdeck.FlightDeck" && (category == "prompt" || category == "answer")' --style compact
+```
+
+**The line to look for first is `answer`.** It carries the call the client tapped and the call
+this Mac believes is open, side by side, which is what tells the stale-phone report apart from a
+Mac that forgot:
+
+```
+prompt session=<uuid> answer sent=toolu_STALE open=toolu_OPEN code=prompt_changed   # the phone was behind
+prompt session=<uuid> answer sent=toolu_STALE open=none      code=not_waiting       # the Mac had no dialog at all
+prompt session=<uuid> answer sent=toolu_A     open=toolu_A   code=ok                # accepted
+```
+
+The other lines say what the Mac decided and what it sent. `push clients=N` is the one that
+decides whose bug it is: a `closed` with a `push` behind it that reached a client is a phone
+that failed to apply what it was sent; a `closed` with `clients=0`, or no `push` at all, is a
+closure that never left the machine.
+
+```
+prompt session=… opened call=toolu_A agent=claude kind=question questions=2 options=3,4
+prompt session=… opened call=toolu_B agent=claude kind=permission tool=Bash
+prompt session=… unnamed code=prompt_changed         # "waiting", and this Mac cannot name the dialog
+prompt session=… closed call=toolu_A reason=activity-idle
+prompt session=… closed call=toolu_A reason=superseded-by-toolu_B   # never pushed: activity did not move
+prompt session=… closed call=toolu_A reason=unnamed-prompt_changed  # answered at the keyboard, still waiting
+prompt session=… push asserts=absent activity=idle clients=1
+prompt session=- resume lastSeq=0 mode=snapshot-initial frames=1 waiting=1 clients=1
+```
+
+**No prompt is ever on the wire** — `OpenPrompt` is derived on both ends from a transcript each
+already holds — so `activity` is the *whole* of what a client is told about a dialog. That is
+why `superseded-by-…` has no push beside it, and it is the fact any repair has to start from.
+Option labels and tool summaries go to the file only, never to the unified log.
 
 ## The fuzz harness
 

@@ -221,6 +221,10 @@ enum CodexVersionProbe {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = [executable, "--version"]
+        // Without this, a Flight Deck launched from Finder probes for codex on launchd's
+        // `PATH=/usr/bin:/bin:/usr/sbin:/sbin` and reports `.notInstalled` for a codex that is
+        // installed — see `LoginShellPath` for the measurement and why claude never hit it.
+        process.environment = LoginShellPath.repairing()
         let pipe = Pipe()
         process.standardOutput = pipe
         // `--version` output is far too small to ever fill a pipe buffer, so an unread
@@ -299,10 +303,14 @@ final class CodexProcessTransport: CodexTransport {
     /// Split out of `start()` so the binding can be asserted without spawning anything: the
     /// committed suite may never run `codex`, and "which home did the app-server get" is
     /// otherwise only observable from inside a process that must not exist.
+    /// Always set now, where it used to be `nil` without a home. The PATH repair applies to
+    /// every spawn, not just the account-scoped ones: an app-server started on launchd's bare
+    /// PATH fails to exec codex for exactly the same reason the version probe does, so a
+    /// home-less transport that "inherits exactly what it always did" inherits the bug.
     var spawnEnvironment: [String: String]? {
-        guard let home else { return nil }
-        return ProcessInfo.processInfo.environment
-            .merging([AgentID.codex.homeEnvironmentKey: home.path]) { _, override in override }
+        let base = LoginShellPath.repairing()
+        guard let home else { return base }
+        return base.merging([AgentID.codex.homeEnvironmentKey: home.path]) { _, override in override }
     }
 
     /// Spawns the process. `/usr/bin/env` resolves `executable` against `$PATH`, same as

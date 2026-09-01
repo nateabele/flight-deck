@@ -8,6 +8,22 @@ import Network
 /// idle timeout, and a relay (§3, out of scope but designed for) speaks WebSocket
 /// everywhere and a bespoke framing nowhere.
 enum FleetSocket {
+    /// The two fields every frame that can be refused in isolation must have: what kind of
+    /// frame it claimed to be, and the correlation id to refuse it on. Decoded from the raw
+    /// bytes of a message `ClientFrame` or `ServerFrame` threw on, which is why it names its
+    /// own keys rather than reusing either one's `CodingKeys` — the point is to read the
+    /// little that is legible in a frame whose remainder is not.
+    ///
+    /// Lives here rather than on one side because both halves of this wire now carry a
+    /// request the other may not understand: the Mac salvages a `req` it cannot parse
+    /// (`FleetSocketServer.accept`) and the phone salvages an `ask` it cannot parse
+    /// (`FleetClient.connect`). Two copies of this struct would be two chances for the two
+    /// salvage paths to disagree about what is legible.
+    struct CorrelatedFrame: Decodable {
+        let t: String
+        let cid: Int
+    }
+
     /// `maximumMessageSize` is not optional here, and its default is not
     /// `NWProtocolWebSocket.Options`': that one is **0, meaning no receive limit at all**
     /// (`ws_options.h:313-314`), so a peer can make the stack buffer an arbitrarily large

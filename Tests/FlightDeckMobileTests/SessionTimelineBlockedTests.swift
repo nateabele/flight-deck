@@ -140,7 +140,7 @@ final class SessionTimelineBlockedTests: XCTestCase {
         model.loadLatest()
         stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
         guard case .question("toolu_A", let questions)? =
-            model.blocked(agent: "claude", activity: "waiting")
+            model.blocked(agent: "claude", activity: "waiting", call: .unreported)
         else { return XCTFail("expected a question") }
         XCTAssertEqual(questions.count, 1, "this fixture asks one")
         XCTAssertEqual(questions[0].options.map(\.label), ["Yes", "No"])
@@ -156,9 +156,9 @@ final class SessionTimelineBlockedTests: XCTestCase {
         let (model, stub) = makeModel()
         model.loadLatest()
         stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
-        XCTAssertNil(model.blocked(agent: "codex", activity: "waiting"))
+        XCTAssertNil(model.blocked(agent: "codex", activity: "waiting", call: .unreported))
         XCTAssertNotNil(
-            model.blocked(agent: "claude", activity: "waiting"),
+            model.blocked(agent: "claude", activity: "waiting", call: .unreported),
             "the same feed must still block a claude tab, or this is asserting the feed"
         )
     }
@@ -171,7 +171,7 @@ final class SessionTimelineBlockedTests: XCTestCase {
         stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
         for agent in [nil, "", "gemini"] as [String?] {
             XCTAssertNil(
-                model.blocked(agent: agent, activity: "waiting"),
+                model.blocked(agent: agent, activity: "waiting", call: .unreported),
                 "agent \(String(describing: agent))"
             )
         }
@@ -181,8 +181,8 @@ final class SessionTimelineBlockedTests: XCTestCase {
         let (model, stub) = makeModel()
         model.loadLatest()
         stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
-        XCTAssertNil(model.blocked(agent: "claude", activity: "busy"))
-        XCTAssertNil(model.blocked(agent: "claude", activity: nil))
+        XCTAssertNil(model.blocked(agent: "claude", activity: "busy", call: .unreported))
+        XCTAssertNil(model.blocked(agent: "claude", activity: nil, call: .unreported))
     }
 
     /// **The Mac answered first.** The result arrives on the next fetch, and the card is gone
@@ -191,12 +191,12 @@ final class SessionTimelineBlockedTests: XCTestCase {
         let (model, stub) = makeModel()
         model.loadLatest()
         stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
-        XCTAssertNotNil(model.blocked(agent: "claude", activity: "waiting"))
+        XCTAssertNotNil(model.blocked(agent: "claude", activity: "waiting", call: .unreported))
         model.loadNewer()
         stub.answer(.success(page(
             [askItem(callID: "toolu_A"), resultItem(callID: "toolu_A")], session: model.sessionID
         )))
-        XCTAssertNil(model.blocked(agent: "claude", activity: "waiting"))
+        XCTAssertNil(model.blocked(agent: "claude", activity: "waiting", call: .unreported))
     }
 
     func testTappingAnOptionSendsAnAnswerNamingTheCall() {
@@ -293,9 +293,12 @@ final class SessionTimelineBlockedTests: XCTestCase {
         model.promptRetries = Array(repeating: .milliseconds(30), count: 5)
         model.loadLatest()
         stub.answer(.success(page([], session: model.sessionID)))
-        XCTAssertNil(model.blocked(agent: "claude", activity: "waiting"), "the premise: no card")
+        XCTAssertNil(model.blocked(agent: "claude", activity: "waiting", call: .unreported),
+                     "the premise: no card")
 
-        async let chase: Void = model.chaseBlockedPrompt(agent: "claude", activity: "waiting")
+        async let chase: Void = model.chaseBlockedPrompt(
+            agent: "claude", activity: "waiting", call: .unreported
+        )
         // The record lands on the second look, the way a transcript written a beat late does.
         await stub.answerWhenAsked(.success(page([], session: model.sessionID)))
         await stub.answerWhenAsked(
@@ -303,7 +306,7 @@ final class SessionTimelineBlockedTests: XCTestCase {
         )
         await chase
 
-        XCTAssertNotNil(model.blocked(agent: "claude", activity: "waiting"),
+        XCTAssertNotNil(model.blocked(agent: "claude", activity: "waiting", call: .unreported),
                         "the card is there once the record is")
     }
 
@@ -317,7 +320,7 @@ final class SessionTimelineBlockedTests: XCTestCase {
         stub.answer(.success(page([askItem(callID: "toolu_here")], session: model.sessionID)))
         let asked = stub.requests.count
 
-        await model.chaseBlockedPrompt(agent: "claude", activity: "waiting")
+        await model.chaseBlockedPrompt(agent: "claude", activity: "waiting", call: .unreported)
 
         XCTAssertEqual(stub.requests.count, asked, "nothing was asked for")
     }
@@ -333,11 +336,79 @@ final class SessionTimelineBlockedTests: XCTestCase {
         stub.answer(.success(page([], session: model.sessionID)))
         let before = stub.requests.count
 
-        async let chase: Void = model.chaseBlockedPrompt(agent: "claude", activity: "waiting")
+        async let chase: Void = model.chaseBlockedPrompt(
+            agent: "claude", activity: "waiting", call: .unreported
+        )
         for _ in 0..<3 { await stub.answerWhenAsked(.success(page([], session: model.sessionID))) }
         await chase
 
         XCTAssertEqual(stub.requests.count - before, 3, "three attempts, then it stops")
-        XCTAssertNil(model.blocked(agent: "claude", activity: "waiting"))
+        XCTAssertNil(model.blocked(agent: "claude", activity: "waiting", call: .unreported))
+    }
+
+    // MARK: - What the Mac says is open
+
+    /// **The stale card, from this end.** The feed still holds `toolu_A` unanswered — the
+    /// derivation on its own is perfectly happy — but the Mac's status now names `toolu_B`,
+    /// which is claude having answered one dialog and raised the next without the session
+    /// leaving `waiting`. Drawing A's question here is drawing a dialog nobody is being asked,
+    /// with buttons whose answer comes back `prompt_changed`. Nothing is better.
+    func testADialogTheMacNoLongerNamesIsNotDrawn() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
+        XCTAssertNotNil(
+            model.blocked(agent: "claude", activity: "waiting", call: .call("toolu_A")),
+            "the premise: while the Mac agrees, the card is drawn"
+        )
+
+        XCTAssertNil(model.blocked(agent: "claude", activity: "waiting", call: .call("toolu_B")))
+    }
+
+    /// The other half: the Mac is still `waiting` but can name no dialog at all — answered at
+    /// the keyboard, or a dialog this build cannot read. `activity` says nothing has changed,
+    /// so before this field the card simply stayed.
+    func testNoDialogNamedMeansNoCardEvenWhileWaiting() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
+
+        XCTAssertNil(model.blocked(agent: "claude", activity: "waiting", call: .noPrompt))
+    }
+
+    /// **A Mac too old to send the field gets today's behaviour.** `.unreported` is the state
+    /// that defers to this end, and it has to: reading an absent key as "no dialog" would hide
+    /// every card the phone can still draw, which is a worse regression than the stale card
+    /// and one a reader has no way out of.
+    func testAMacThatReportsNothingIsStillTrustedToBeBlocked() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
+
+        XCTAssertNotNil(model.blocked(agent: "claude", activity: "waiting", call: .unreported))
+    }
+
+    /// The chase covers a *changed* dialog and not only a late one: a Mac naming a call this
+    /// feed has never seen reads exactly like a record that has not arrived yet, because that
+    /// is what it is. Without this the card would stay blank until something else moved.
+    func testAChaseRunsUntilTheDialogTheMacNamesArrives() async {
+        let (model, stub) = makeModel()
+        model.promptRetries = Array(repeating: .milliseconds(30), count: 5)
+        model.loadLatest()
+        stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
+
+        async let chase: Void = model.chaseBlockedPrompt(
+            agent: "claude", activity: "waiting", call: .call("toolu_B")
+        )
+        await stub.answerWhenAsked(.success(page(
+            [askItem(callID: "toolu_A"), resultItem(callID: "toolu_A"),
+             askItem(callID: "toolu_B")],
+            session: model.sessionID
+        )))
+        await chase
+
+        guard case .question("toolu_B", _)? =
+            model.blocked(agent: "claude", activity: "waiting", call: .call("toolu_B"))
+        else { return XCTFail("expected the dialog the Mac named") }
     }
 }

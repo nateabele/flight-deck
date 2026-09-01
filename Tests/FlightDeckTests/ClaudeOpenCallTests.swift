@@ -87,12 +87,12 @@ final class ClaudeOpenCallTests: XCTestCase {
 
     /// **The race this derivation exists to close.** A person approves in the terminal, claude
     /// raises the *next* dialog in the same breath, and the session never leaves `waiting` —
-    /// so nothing tears down the card the phone is already showing, and a tap on it would
-    /// answer a dialog nobody read. The refusal is that the newest open call has MOVED, which
-    /// only holds if it is derived again from the file on the answer path: the same question
-    /// is asked twice here, `waiting` both times, and the two answers differ. A cached
-    /// derivation, or one that stopped at the first unanswered call from the top, returns
-    /// `toolu_READ` the second time.
+    /// so no *activity* change tears down the card the phone is already showing, and a tap on
+    /// it would answer a dialog nobody read. The refusal is that the newest open call has
+    /// MOVED, which only holds if it is derived again from the file on the answer path: the
+    /// same question is asked twice here, `waiting` both times, and the two answers differ.
+    /// A cached derivation, or one that stopped at the first unanswered call from the top,
+    /// returns `toolu_READ` the second time.
     func testTheOpenCallMovesWhileTheSessionNeverLeavesWaiting() {
         let read = [line(0, ask("toolu_READ", question: "Read?"))]
         XCTAssertEqual(ClaudeOpenCall.find(in: read, activity: .waiting)?.callID, "toolu_READ")

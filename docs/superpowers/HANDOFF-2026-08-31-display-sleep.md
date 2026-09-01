@@ -135,10 +135,25 @@ and non-waking (see Loose ends below) — a relaunch with the display asleep can
 a deck of inert tabs, `respawnSurface` remains the only remedy, and auto-respawn on display wake
 still does not exist.
 
-**Not yet verified end-to-end against a real build:** the manual verification in the task
-brief — build, swap in, sleep the display for real, tap `+` from the phone, confirm the tab —
-is a step still pending; everything above was measured against the spike harness, not the
-shipped app.
+**Verified end-to-end against the shipped app, 2026-09-01 09:31.** A Release build was swapped
+into `/Applications`, the display slept and the Mac auto-locked (`active=false asleep=true
+locked=true`, confirmed held), and a `+` tap on the phone produced:
+
+```
+89959  Flight Deck            <- the post-swap pid
+ └─ 17649  /usr/bin/login
+     └─ 17650  fish
+         └─ 17712  claude --session-id f15601e3-...-8486d79d4029
+```
+
+with the session id matching the new `sessions.json` entry and the display reading
+`active=true locked=true` at the moment of creation. **Per-tab evidence — a new pid parented to
+the post-swap app and tied to the new session id — never a net shell count.**
+
+This also retires the one risk the code review could not: that `CGDisplayIsActive` might be
+served from a per-process value refreshed on the main run loop, which a poll running with the
+main thread blocked would never observe. It observes it. The spike harness polled from a
+separate process; the shipped app polls from the blocked main actor, and both see the flip.
 
 **Follow-up, not done: make the phone's guard async.** `FleetService`'s `.newSession` handler
 now blocks the caller's thread for up to 1.5s inside `ensureTerminalCreatable()` before either

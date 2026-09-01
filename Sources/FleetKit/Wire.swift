@@ -72,6 +72,63 @@ public struct WirePlanGate: Codable, Equatable, Sendable {
     }
 }
 
+/// Which dialog a session is blocked on, named by the blocked tool call's `tool_use_id`.
+///
+/// **Identity, and deliberately nothing else.** What the dialog *says* is still derived on
+/// both ends by `OpenPrompt.find` over a transcript each already holds; that split is the
+/// design and this does not touch it. What was missing is the *when*. The only thing a client
+/// was ever told about a dialog was the session's `activity`, so a prompt superseded by
+/// another while the session stayed `waiting` moved nothing on the wire at all — and a phone
+/// went on drawing a card, and offering buttons, for a dialog its Mac had already left. Naming
+/// the call makes that a wire change. The phone still reads the question out of its own copy
+/// of the transcript.
+///
+/// **Three states, because "nobody said" and "nothing is open" are different facts.** A Mac
+/// built before this field omits the key, and a client that read absence as "no dialog" would
+/// hide every card it is still perfectly able to draw — a worse regression than the stale card
+/// this closes, and one with no way back short of downgrading the phone. So an absent key is
+/// `.unreported` and a client falls back to its own derivation, while an explicit null is this
+/// Mac saying it looked and there is nothing to answer.
+public enum OpenPromptIdentity: Equatable, Sendable {
+    /// The peer does not report this at all — it predates the field.
+    case unreported
+    /// The peer looked and can name no open dialog.
+    case noPrompt
+    /// The blocked call's `tool_use_id`, the same string `FleetCommand.answerPrompt` carries
+    /// back and the same one `PromptService` refuses an answer against.
+    case call(String)
+
+    /// The id, for a caller that only wants to compare it against one it derived itself.
+    public var callID: String? {
+        guard case .call(let id) = self else { return nil }
+        return id
+    }
+}
+
+extension KeyedEncodingContainer {
+    /// `.unreported` writes no key and every other case writes one — null included — because
+    /// the key's *absence* is the third state. `encodeIfPresent` over a `String?` would fold
+    /// `.noPrompt` into `.unreported` and give the whole distinction away on the wire.
+    mutating func encode(_ value: OpenPromptIdentity, forKey key: Key) throws {
+        switch value {
+        case .unreported: return
+        case .noPrompt: try encodeNil(forKey: key)
+        case .call(let id): try encode(id, forKey: key)
+        }
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// The mirror of the encode above, and the reason neither side may use `decodeIfPresent`:
+    /// that collapses a missing key and an explicit null, which are the two cases this type
+    /// exists to keep apart.
+    func decode(_ type: OpenPromptIdentity.Type, forKey key: Key) throws -> OpenPromptIdentity {
+        guard contains(key) else { return .unreported }
+        if try decodeNil(forKey: key) { return .noPrompt }
+        return .call(try decode(String.self, forKey: key))
+    }
+}
+
 public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     /// The tab's id, which is the only stable key a client may hold. Never the conversation
     /// id: that is not stable across a re-pin and, for codex, differs from the tab id from
@@ -97,12 +154,20 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     /// The plan gate this tab is blocked on, or `nil`. See `WirePlanGate` for why this is
     /// carried rather than derived.
     public var planGate: WirePlanGate?
+    /// Which dialog this session is blocked on. See `OpenPromptIdentity` for why it is
+    /// three-valued and what each state obliges a client to do; `activity == "waiting"` says
+    /// only *that* something is blocked, and used to be the whole story.
+    ///
+    /// `.unreported` by default, because a value nobody set is nobody's assertion.
+    public var openPromptCall: OpenPromptIdentity
 
     public init(
         id: UUID, title: String, agent: String,
         activity: String? = nil, waitingFor: String? = nil,
         subagentCount: Int = 0, isUnread: Bool = false,
-        hasBackgroundWork: Bool = false, planGate: WirePlanGate? = nil
+        hasBackgroundWork: Bool = false,
+        planGate: WirePlanGate? = nil,
+        openPromptCall: OpenPromptIdentity = .unreported
     ) {
         self.id = id
         self.title = title
@@ -113,6 +178,40 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         self.isUnread = isUnread
         self.hasBackgroundWork = hasBackgroundWork
         self.planGate = planGate
+        self.openPromptCall = openPromptCall
+    }
+
+    /// Spelled out rather than synthesized, because `openPromptCall` is not `Codable` — its
+    /// whole point is a state that is the *absence* of a key, which no synthesized member can
+    /// express. `activity` and `waitingFor` keep `encodeIfPresent` so the bytes an older phone
+    /// receives for a session with no status are the ones it has always received.
+    ///
+    /// **`planGate` must be listed here and written below.** It used to ride on the synthesized
+    /// encoder, which gives every optional `encodeIfPresent` for free. Spelling the encoder out
+    /// took that away: a member omitted from this enum is not a compile error on the encode
+    /// side, it is a field that silently never reaches the wire — and the test that a gateless
+    /// session encodes no key passes just as happily when the key is never encoded at all. So
+    /// the gate is enumerated here and `encodeIfPresent`ed below, and
+    /// `testSessionWithAGateRoundTrips` is what keeps it that way.
+    enum CodingKeys: String, CodingKey {
+        case id, title, agent, activity, waitingFor, subagentCount, isUnread
+        case hasBackgroundWork, planGate, openPromptCall
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(title, forKey: .title)
+        try c.encode(agent, forKey: .agent)
+        try c.encodeIfPresent(activity, forKey: .activity)
+        try c.encodeIfPresent(waitingFor, forKey: .waitingFor)
+        try c.encode(subagentCount, forKey: .subagentCount)
+        try c.encode(isUnread, forKey: .isUnread)
+        try c.encode(hasBackgroundWork, forKey: .hasBackgroundWork)
+        // Absent, not `null`, exactly as the synthesized encoder used to write it — a build
+        // that predates the gate must see the same bytes for a tab with none.
+        try c.encodeIfPresent(planGate, forKey: .planGate)
+        try c.encode(openPromptCall, forKey: .openPromptCall)
     }
 
     public init(from decoder: any Decoder) throws {
@@ -128,6 +227,9 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         let decodedBackgroundWork = try c.decodeIfPresent(
             Bool.self, forKey: .hasBackgroundWork
         ) ?? false
+        // Absent from an older Mac too, and here the absence is kept rather than defaulted
+        // away: `.unreported` is what tells this client to go on trusting its own derivation.
+        openPromptCall = try c.decode(OpenPromptIdentity.self, forKey: .openPromptCall)
         // The wire version was deliberately not bumped for the `hasBackgroundWork` split, so
         // an older Mac can still send the pre-decomposition `"shell"` string here. That is
         // this skew's other direction from the `hasBackgroundWork` key being absent above:

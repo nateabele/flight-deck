@@ -486,10 +486,66 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
             MainActor.assumeIsolated {
                 self?.state = state
                 if case .connected = state { self?.lastLive = Date() }
+                PhoneLog.connection.notice("state \(Self.describe(state), privacy: .public)")
             }
         }
+        // The counterpart to the Mac's own `resume lastSeq=… mode=…` line, and the reason
+        // `FleetConnector.onSnapshot` exists at all: `onFleet` fires for snapshots and for
+        // every folded event alike, so it cannot say which of the two just happened — and
+        // "I threw away my history and took a whole new snapshot" is exactly the fact a
+        // stale-card report needs from this end.
+        connector.onSnapshot = { seq, reason in
+            MainActor.assumeIsolated {
+                PhoneLog.connection.notice(
+                    "snapshot seq=\(seq) reason=\(reason.rawValue, privacy: .public)"
+                )
+            }
+        }
+        // The phone's half of the log fetch. Wired here rather than inside `FleetConnector`
+        // because reading `OSLogStore` needs `OSLog`, which FleetKit deliberately does not
+        // import — see `FleetConnector.onPhoneRequest`.
+        connector.onPhoneRequest = { request, reply in
+            MainActor.assumeIsolated {
+                switch request {
+                case .logs(let seconds, let limit):
+                    let answer = PhoneLog.entries(seconds: seconds, limit: limit)
+                    // Logged before the reply goes out, so the fetch itself appears in the
+                    // NEXT fetch — which is how a reader tells "the Mac asked and got nothing"
+                    // from "the Mac never asked".
+                    switch answer {
+                    case .success(let logs):
+                        // Composed first, then logged as one interpolation: `OSLogMessage` is
+                        // not a `String` and cannot be concatenated.
+                        let served = "logs served seconds=\(seconds)"
+                            + " entries=\(logs.entries.count) truncated=\(logs.truncated)"
+                        PhoneLog.connection.notice("\(served, privacy: .public)")
+                    case .failure(let refusal):
+                        PhoneLog.connection.error(
+                            "logs refused code=\(refusal.code, privacy: .public)"
+                        )
+                    }
+                    reply(answer)
+                }
+            }
+        }
+        // Before `start()`, so the line is in the log ahead of whatever the dial produces.
+        // `lastSeq` is what this phone is about to ask to resume from — zero on a cold launch
+        // by design, see `init`.
+        let dialing = "dialing lastSeq=\(mac.lastSeq) endpoints=\(mac.endpoints.count)"
+        PhoneLog.connection.notice("\(dialing, privacy: .public)")
         self.connector = connector
         connector.start()
+    }
+
+    /// One short, structural word per state — never the Mac's name, which is a user-chosen
+    /// string and has no business crossing back over the wire in a diagnostic.
+    private static func describe(_ state: FleetConnector.State) -> String {
+        switch state {
+        case .idle: return "idle"
+        case .searching: return "searching"
+        case .connected: return "connected"
+        case .lost(let retryingIn): return "lost retrying-in=\(Int(retryingIn))s"
+        }
     }
 
     var macName: String { mac?.macName ?? "your Mac" }

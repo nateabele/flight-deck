@@ -85,13 +85,65 @@ final class FleetWireTests: XCTestCase {
     /// `WireSession` tolerates the missing key; this proves the `activityChanged` decode arm
     /// in `WireCoding.swift` does too — it has its own `decodeIfPresent(...) ?? false`, wired
     /// up separately, and nothing exercised it.
+    /// **The three states of `openPromptCall`, over the wire, in one test.** The distinction is
+    /// carried by the *presence* of the key, so a decoder reaching for `decodeIfPresent` would
+    /// fold the first two together — and a phone would then stop drawing cards against a Mac
+    /// that has no opinion about dialogs at all.
+    func testOpenPromptIdentityKeepsAnAbsentKeyAndAnExplicitNullApart() throws {
+        let id = UUID().uuidString
+        let tail = #""agent":"claude","activity":"waiting","subagentCount":0,"isUnread":false"#
+        let cases: [(String, OpenPromptIdentity)] = [
+            ("", .unreported),
+            (#","openPromptCall":null"#, .noPrompt),
+            (#","openPromptCall":"toolu_A""#, .call("toolu_A")),
+        ]
+        for (fragment, expected) in cases {
+            let json = Data(#"{"id":"\#(id)","title":"t",\#(tail)\#(fragment)}"#.utf8)
+            XCTAssertEqual(
+                try JSONDecoder().decode(WireSession.self, from: json).openPromptCall,
+                expected, "decoding \(fragment.isEmpty ? "an absent key" : fragment)"
+            )
+        }
+    }
+
+    /// Each of the three round-trips as itself, in the snapshot and in the incremental frame
+    /// alike. That is what makes `.unreported` safe to hold on a client rather than something
+    /// that has to be normalized away the moment it arrives.
+    func testOpenPromptIdentityRoundTripsInEveryState() throws {
+        for identity in [OpenPromptIdentity.unreported, .noPrompt, .call("toolu_B")] {
+            let session = WireSession(id: UUID(), title: "t", agent: "claude",
+                                      activity: "waiting", openPromptCall: identity)
+            XCTAssertEqual(try roundTrip(session).openPromptCall, identity)
+            let event = FleetEvent.activityChanged(
+                id: session.id, activity: "waiting", waitingFor: nil, subagentCount: 0,
+                hasBackgroundWork: false, openPromptCall: identity
+            )
+            let data = try JSONEncoder().encode(event)
+            XCTAssertEqual(try JSONDecoder().decode(FleetEvent.self, from: data), event)
+        }
+    }
+
+    /// The incremental frame's own decode arm, wired up separately from `WireSession`'s and so
+    /// able to rot on its own — the gap `testActivityChangedDecodesWithoutBackgroundWorkKey`
+    /// below was written to close for the flag beside it.
+    func testActivityChangedDecodesWithoutTheOpenPromptKeyAsUnreported() throws {
+        let id = UUID().uuidString
+        let json = Data(#"""
+        {"t":"session.activity","id":"\#(id)","activity":"waiting","subagentCount":0}
+        """#.utf8)
+        guard case .activityChanged(_, _, _, _, _, let call) =
+            try JSONDecoder().decode(FleetEvent.self, from: json)
+        else { return XCTFail("expected .activityChanged") }
+        XCTAssertEqual(call, .unreported)
+    }
+
     func testActivityChangedDecodesWithoutBackgroundWorkKey() throws {
         let id = UUID()
         let json = Data("""
         {"t":"session.activity","id":"\(id.uuidString)","activity":"idle","subagentCount":0}
         """.utf8)
         let event = try JSONDecoder().decode(FleetEvent.self, from: json)
-        guard case .activityChanged(_, _, _, _, let hasBackgroundWork) = event else {
+        guard case .activityChanged(_, _, _, _, let hasBackgroundWork, _) = event else {
             return XCTFail("expected .activityChanged, got \(event)")
         }
         XCTAssertFalse(hasBackgroundWork)
