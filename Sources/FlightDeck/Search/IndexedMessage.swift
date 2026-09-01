@@ -15,4 +15,8 @@ struct IndexedMessage: Equatable, Sendable {
     /// builder substitutes the transcript file's mtime — a whole-file approximation, which
     /// is why the per-record value is preferred whenever it exists.
     let timestamp: Date?
+    /// Where the record this came from starts in its transcript, in bytes, at a line
+    /// boundary. Several messages from one record share it — a `TimelineAnchor` cursor names
+    /// a line, so that is the right granularity rather than a collision.
+    let offset: Int
 }

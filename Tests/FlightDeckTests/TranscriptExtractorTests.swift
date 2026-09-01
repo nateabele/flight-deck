@@ -11,7 +11,7 @@ final class TranscriptExtractorTests: XCTestCase {
     private let conversation = "c1"
 
     private func extract(_ line: String) -> [IndexedMessage] {
-        TranscriptExtractor.messages(inLine: line, conversationID: conversation)
+        TranscriptExtractor.messages(inLine: line, conversationID: conversation, offset: 0)
     }
 
     func testAStringContentUserMessageIsExtracted() {
@@ -78,5 +78,22 @@ final class TranscriptExtractorTests: XCTestCase {
 
     func testWhitespaceOnlyTextIsNotWorthIndexing() {
         XCTAssertTrue(extract(#"{"type":"user","message":{"content":"   \n  "}}"#).isEmpty)
+    }
+
+    /// One line can yield several messages, and they all name the same line.
+    ///
+    /// An offset here is a LINE boundary, which is exactly what a timeline cursor is — so two
+    /// messages from one record sharing a number is correct, not a collision.
+    func testEveryMessageFromOneLineCarriesThatLinesOffset() {
+        let line = """
+            {"type":"assistant","timestamp":"2026-08-26T21:57:19.490Z","message":{"content":\
+            [{"type":"text","text":"first"},{"type":"text","text":"second"}]}}
+            """
+        let messages = TranscriptExtractor.messages(
+            inLine: line, conversationID: "abc", offset: 4096
+        )
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages.map(\.offset), [4096, 4096])
+        XCTAssertEqual(messages.map(\.text), ["first", "second"])
     }
 }

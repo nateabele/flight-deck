@@ -14,8 +14,8 @@ import Foundation
 ///
 /// The single `*` this type adds itself, on the final token, is what makes results narrow
 /// while you are still typing a word.
-enum FTS5Query {
-    static func match(for input: String) -> String? {
+public enum FTS5Query {
+    public static func match(for input: String) -> String? {
         let tokens = input.split(whereSeparator: \.isWhitespace)
         guard !tokens.isEmpty else { return nil }
 

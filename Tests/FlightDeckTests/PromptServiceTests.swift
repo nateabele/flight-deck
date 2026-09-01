@@ -98,8 +98,10 @@ final class PromptServiceTests: XCTestCase {
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()
+        // The fixture's rollout path does not exist on disk; stubbed true so creation reaches
+        // success rather than tripping `prepare`'s history-contract check.
         store.overrideAdapter(
-            CodexAdapter(rpc: CodexRPC(transport: ScriptedCodexTransport())),
+            CodexAdapter(rpc: CodexRPC(transport: ScriptedCodexTransport()), rolloutExists: { _ in true }),
             for: .codex, account: nil
         )
         let spy = SpyInjector()

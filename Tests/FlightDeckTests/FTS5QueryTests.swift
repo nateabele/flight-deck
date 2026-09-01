@@ -1,4 +1,5 @@
 import XCTest
+import FleetKit
 @testable import FlightDeck
 
 /// Typed text is data, never syntax.

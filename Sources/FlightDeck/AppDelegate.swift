@@ -250,9 +250,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 exists: { FileManager.default.fileExists(atPath: $0) }
             )
             await builder.build(entries) { progress in
-                Task { @MainActor in model?.indexingProgressChanged(progress) }
+                Task { @MainActor in
+                    model?.indexingProgressChanged(progress)
+                    // Mirrors the same progress into `FleetService`, so a phone searching
+                    // mid-backfill gets the same "partial results" footer the desktop
+                    // overlay shows — see `FleetService.indexingProgress`'s doc comment.
+                    FleetService.current?.indexingProgress = progress
+                }
             }
-            await MainActor.run { model?.indexingProgressChanged(nil) }
+            await MainActor.run {
+                model?.indexingProgressChanged(nil)
+                FleetService.current?.indexingProgress = nil
+            }
         }
     }
 

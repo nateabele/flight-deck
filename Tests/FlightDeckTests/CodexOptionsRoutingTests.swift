@@ -142,7 +142,7 @@ final class CodexOptionsRoutingTests: XCTestCase {
     /// `codex -c` uses.
     func testAdditionalDirectoriesBecomeWritableRootsInTheConfigOverride() {
         let params = CodexThreadOptions(sandbox: "workspace-write", addDirs: ["/w/b", "/w/c"])
-            .asThreadStartParams(cwd: "/w/a")
+            .asThreadStartParams(cwd: "/w/a", historyMode: nil)
 
         let config = params["config"] as? [String: Any]
         let workspace = config?["sandbox_workspace_write"] as? [String: Any]
@@ -151,7 +151,8 @@ final class CodexOptionsRoutingTests: XCTestCase {
 
     func testNoAdditionalDirectoriesMeansNoConfigOverrideAtAll() {
         // An empty override would still be an override — send nothing so `config.toml` wins.
-        let params = CodexThreadOptions(sandbox: "workspace-write").asThreadStartParams(cwd: "/w/a")
+        let params = CodexThreadOptions(sandbox: "workspace-write")
+            .asThreadStartParams(cwd: "/w/a", historyMode: nil)
         XCTAssertNil(params["config"])
     }
 }

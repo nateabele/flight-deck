@@ -167,6 +167,12 @@ final class SessionStore: ObservableObject {
     /// anything outside tests — removing it silently disables the guard.
     var display: DisplayInspecting = AlwaysDrawableDisplay()
 
+    /// How a sleeping display is brought back before a terminal is created. Injected on the
+    /// same seam and for the same reason as `display`, but defaulting to the **inert**
+    /// `NeverWakingDisplay()`: a real waker in a test would physically wake the developer's
+    /// screen. `convenience init(ghostty:...)` assigns the real one.
+    var displayWaker: DisplayWaking = NeverWakingDisplay()
+
     /// This run's own identity, stamped into every snapshot as `owner`. Computed once: it
     /// cannot change for the life of the process, and `persist()` runs on every mutation —
     /// every tab switch, every rename, every registry tick.
@@ -281,7 +287,7 @@ final class SessionStore: ObservableObject {
     private final class CodexStack {
         let transport: CodexProcessTransport
         let rpc: CodexRPC
-        let adapter: CodexAdapter
+        var adapter: CodexAdapter
         let runtime: CodexRuntime
 
         /// `home` and `indexURL` are two views of one account and must agree: the app-server
@@ -417,7 +423,9 @@ final class SessionStore: ObservableObject {
     /// thread to codex's own storage, which is exactly what makes `codex resume <id>` work
     /// across processes — so nothing is lost, and the next codex session spawns a fresh
     /// server. Keeping it alive instead would leave a process running for the rest of the
-    /// run on the strength of a tab the user closed.
+    /// run on the strength of a tab the user closed. True under the `legacy` history
+    /// contract `CodexAdapter.historyMode` pins — see `prepare`'s doc comment for what
+    /// changes under `paginated`.
     ///
     /// Narrowed from "no codex tabs remain anywhere" to "no tabs remain on *this* account":
     /// the wider predicate would keep one login's app-server alive for the whole run because
@@ -428,8 +436,9 @@ final class SessionStore: ObservableObject {
         guard let stack = codexStacks[account] else { return }
         // A codex creation that has not inserted its tab yet is invisible to the check
         // below, and killing the app-server out from under it between `thread/start` and
-        // `thread/name/set` EVAPORATES the thread — naming is what commits it. So a tab
-        // closed mid-creation defers the teardown rather than skipping it: `createSession`
+        // `thread/name/set` EVAPORATES the thread — naming is what commits it, under the
+        // `legacy` history contract `CodexAdapter.historyMode` pins. So a tab closed
+        // mid-creation defers the teardown rather than skipping it: `createSession`
         // re-runs this on its way out. Per account, like everything else here: a creation on
         // one login must not pin another login's server open.
         guard codexCreationsInFlight[account, default: 0] == 0 else { return }
@@ -904,6 +913,33 @@ final class SessionStore: ObservableObject {
     /// caused in the superseded plan, arriving by a different route.
     var canCreateTerminal: Bool { provider == nil || display.isDrawable }
 
+    /// Whether the wake should be attempted, for callers where it would be wrong.
+    enum DisplayWakePolicy { case wakeIfNeeded, never }
+
+    /// How long to block waiting for a woken display. 1.5s is more than four times the
+    /// slowest wake measured on this hardware (0.342s); past that the display is not coming
+    /// (clamshell, none attached) and blocking the main actor further buys nothing.
+    static let wakeTimeout: TimeInterval = 1.5
+
+    /// `canCreateTerminal`, but allowed to *make* it true.
+    ///
+    /// The four creation paths call this instead of reading `canCreateTerminal` directly, so
+    /// the wake happens in exactly one place. `canCreateTerminal` itself stays a pure query —
+    /// it is read in contexts that must not light up a screen, and a property getter with a
+    /// 350ms side effect would be a trap.
+    ///
+    /// **Blocking is deliberate.** Three of the four callers are synchronous and widely used;
+    /// `newSession(in:)`'s own comment records that changing its shape broke 340 tests. The
+    /// block only ever happens where the code currently fails outright, and only while the
+    /// display is asleep — which is to say, while nobody is looking at this Mac.
+    func ensureTerminalCreatable(_ policy: DisplayWakePolicy = .wakeIfNeeded) -> Bool {
+        if canCreateTerminal { return true }
+        // Reaching here means `provider != nil` (see `canCreateTerminal`), so the waker is
+        // only ever consulted on a path that genuinely needs libghostty.
+        guard policy == .wakeIfNeeded else { return false }
+        return displayWaker.wakeAndWaitForDrawable(timeout: Self.wakeTimeout)
+    }
+
     /// Whether this tab's terminal actually forked a shell.
     ///
     /// **Not `surfaces[id] != nil`.** `makeSurfaceView` returns a non-optional and its init is
@@ -931,7 +967,7 @@ final class SessionStore: ObservableObject {
         // Ordered before the display check deliberately: "it is already working" is true and
         // more useful regardless of what the display is doing.
         guard !hasShellProcess(for: id) else { return .alreadyRunning }
-        guard canCreateTerminal else {
+        guard ensureTerminalCreatable() else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
             return .displayAsleep
         }
@@ -1216,6 +1252,13 @@ final class SessionStore: ObservableObject {
         // while the display is asleep, reintroducing the original bug. Removing this line
         // silently disables the guard for every session this store ever creates.
         display = DisplayState()
+        // Beside `display` and load-bearing in the same way: the default waker is inert, so
+        // without this line every sleeping display is a refusal again and no test notices.
+        // `DisplayWakerTests` covers the waker; `testTheRealWakerIsWiredIn` covers this line.
+        // Built around the probe just assigned on principle, not because a different one
+        // could disagree — `DisplayState` is a stateless struct that always reads
+        // `CGMainDisplayID()`, so any instance of it answers identically to any other.
+        displayWaker = DisplayWaker(display: display)
         self.notifier = notifier
         // Both assigned before `startStatusWatching()` below, which reads them when it builds
         // each account's watcher — setting either afterwards would leave those watchers
@@ -1243,7 +1286,10 @@ final class SessionStore: ObservableObject {
         homeURL: URL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
     ) {
         guard repos.isEmpty else { return }
-        newSession(in: homeURL)
+        // `.never`: this runs inline inside `SessionStore.init`, so waking here would light
+        // the screen up on every unattended relaunch and block app startup while it waited.
+        // Seeding is the app starting, not someone asking for a terminal.
+        newSession(in: homeURL, waking: .never)
     }
 
     /// Claude's creation path, synchronous.
@@ -1271,8 +1317,11 @@ final class SessionStore: ObservableObject {
     /// project settings. Every other caller leaves it nil and gets the resolved default,
     /// unchanged.
     @discardableResult
-    func newSession(in url: URL, at index: Int? = nil, account explicit: UUID? = nil) -> Session {
-        guard canCreateTerminal else {
+    func newSession(
+        in url: URL, at index: Int? = nil, account explicit: UUID? = nil,
+        waking: DisplayWakePolicy = .wakeIfNeeded
+    ) -> Session {
+        guard ensureTerminalCreatable(waking) else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
             // Un-inserted, exactly as the `launchAccount` failure path below does. The return
             // type stays non-optional on purpose: making it `Session?` broke 340 tests, because
@@ -1329,7 +1378,7 @@ final class SessionStore: ObservableObject {
         // otherwise be born just as inert as the bug this exists to fix. Reported through
         // `launchFailureReporter` exactly as the neighbouring `launchAccount` failure branch
         // does, just below.
-        guard canCreateTerminal else {
+        guard ensureTerminalCreatable() else {
             let error = AgentLaunchError.terminalUnavailable(displayAsleep: true)
             launchFailureReporter.report(error)
             return .failure(error)
@@ -1377,7 +1426,8 @@ final class SessionStore: ObservableObject {
         // remaining codex tab runs `stopCodexIfUnused`, which counts tabs in `repos` — and
         // this one is not in `repos` until `addSession` below. Without this the app-server
         // could be killed between `thread/start` and `thread/name/set`, which evaporates the
-        // thread, because naming is what commits it.
+        // thread, because naming is what commits it — under the `legacy` history contract
+        // `CodexAdapter.historyMode` pins.
         codexCreationsInFlight[instance.account, default: 0] += 1
         defer {
             codexCreationsInFlight[instance.account, default: 0] -= 1
@@ -1440,7 +1490,7 @@ final class SessionStore: ObservableObject {
     func openSignInSession(
         for account: AgentAccount, in directory: String, using invocation: LoginInvocation
     ) -> Session {
-        guard canCreateTerminal else {
+        guard ensureTerminalCreatable() else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
             // Same un-inserted-`Session` convention as `newSession(in:)`: this bypasses
             // `createSession` entirely (see the doc comment above), so it needs its own guard
@@ -1548,7 +1598,13 @@ final class SessionStore: ObservableObject {
             // just this creation but every codex creation on this account for the rest of
             // the run, all of them awaiting the same wedged task. `verifyHandshake` below was
             // already bounded; the step in front of it was not. See `checkOffMainActor`.
-            try await CodexVersionProbe.checkOffMainActor()
+            //
+            // The mode is set on `stack.adapter` before `verifyHandshake` runs, not after —
+            // every caller of `adapter(for:)` reads `stack.adapter` fresh once this task
+            // completes (see the comment there), so there is no window where a caller could
+            // observe the stack with the probe done but the mode unset.
+            let version = try await CodexVersionProbe.checkOffMainActor()
+            stack.adapter.historyMode = CodexVersionProbe.supportsHistoryMode(version) ? "legacy" : nil
             try stack.transport.start()
             try await CodexProcessTransport.verifyHandshake(stack.rpc)
         }
@@ -2771,21 +2827,35 @@ final class SessionStore: ObservableObject {
     /// a tab resumed into a collapsed project would come back invisible, since
     /// `SidebarRow.rows` renders only the header for a collapsed repo. Same reasoning as
     /// `reopenLastClosed`, which un-collapses for the same reason.
+    ///
+    /// Returns the tab actually opened or selected, `nil` on every path that filed nothing —
+    /// `@discardableResult` because ⌘K Return and the search panel's `onSelect` have never
+    /// needed the answer, they read `selectedSessionID` same as before. `FleetService` is the
+    /// first caller that does: a phone's `search.open` request has no `selectedSessionID` to
+    /// fall back on, and reading that property after a call that took the failure branch below
+    /// would hand back whatever tab happened to be selected beforehand — a confident answer
+    /// naming the wrong conversation. Returning the id directly makes that failure mode
+    /// unrepresentable rather than relying on every caller to remember the gap.
+    @discardableResult
     func openConversation(
         _ activation: SearchActivation.Activation,
         directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
         resolveTranscriptDirectory: (String, UUID) -> String = {
             SessionStore.resolvedTranscriptDirectory(projectPath: $0, conversationID: $1)
         }
-    ) {
+    ) -> UUID? {
         let projectPath: String
         let conversationID: String
         let title: String
 
         switch activation {
         case .select(let id):
+            // `selectSession` is itself a no-op when `id` names no live tab — checked again
+            // here rather than trusted, so a stale id (a tab closed between `plan` and this
+            // call) reports `nil` instead of an id that does not resolve to anything.
+            guard locate(id) != nil else { return nil }
             selectSession(id)
-            return
+            return id
         case .resume(let conversation, let project, let resultTitle, _):
             projectPath = project; conversationID = conversation; title = resultTitle
         case .addProjectThenResume(let project, let conversation, let resultTitle, _):
@@ -2796,17 +2866,25 @@ final class SessionStore: ObservableObject {
         // A project row, or a result whose conversation id we never learned: there is
         // nothing to resume, so land on the project instead of launching a nameless agent.
         guard let pinned = UUID(uuidString: conversationID) else {
+            let opened: UUID?
             if let existing = indexOfRepo(for: url) {
                 if repos[existing].isCollapsed {
                     repos[existing].isCollapsed = false
                     emit(.projectCollapsed(id: repos[existing].id, isCollapsed: false))
                 }
-                if let first = repos[existing].sessions.first { selectedSessionID = first.id }
+                opened = repos[existing].sessions.first?.id
+                if let opened { selectedSessionID = opened }
             } else {
-                addProject(at: url)
+                let created = addProject(at: url)
+                // `addProject` delegates to `newSession(in:)`, whose own `launchAccount`
+                // failure branch returns a `Session` that was never filed — see that
+                // method's doc comment. Checked here rather than trusted, for the same
+                // reason `.select` re-checks `locate`: a fabricated id is worse than `nil`.
+                opened = repos.flatMap(\.sessions).contains { $0.id == created.id }
+                    ? created.id : nil
             }
             persist()
-            return
+            return opened
         }
 
         // Enforced here too, not only inside `SearchActivation.plan`: a caller that fills
@@ -2816,7 +2894,7 @@ final class SessionStore: ObservableObject {
         // processes appending one transcript and colliding in claude's pid-keyed registry.
         if let live = repos.flatMap(\.sessions).first(where: { $0.pinnedConversationID == pinned }) {
             selectSession(live.id)
-            return
+            return live.id
         }
 
         // Resolved before anything is filed, the same as `newSession`: nil would mean "the
@@ -2827,7 +2905,7 @@ final class SessionStore: ObservableObject {
         case .success(let resolved): account = resolved
         case .failure(let error):
             launchFailureReporter.report(error)
-            return
+            return nil
         }
 
         let session = Session(
@@ -2858,6 +2936,7 @@ final class SessionStore: ObservableObject {
                 await self?.resumeRestoredCodex([session.id])
             }
         }
+        return session.id
     }
     func closeProject(_ id: Repo.ID) {
         guard let index = repos.firstIndex(where: { $0.id == id }) else { return }

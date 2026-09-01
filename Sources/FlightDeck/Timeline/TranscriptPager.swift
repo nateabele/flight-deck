@@ -104,6 +104,44 @@ enum TranscriptPager {
             guard (0...size).contains(cursor) else { return reset(at: size) }
             return forwards(handle, from: cursor, size: size, limit: limit,
                             window: window, maxScan: maxScan)
+        // `.before` and `.after` back to back about one pivot, not a third reading path.
+        // `forwards(from: cursor)` already includes the record that BEGINS at `cursor` — the
+        // same record `backwards(from: cursor)` stops immediately short of, because its
+        // window only ever covers bytes strictly before `cursor` — so the pivot is owned by
+        // the forward half alone and appears exactly once. Splitting `limit` unevenly in the
+        // forward half's favour (`limit - limit / 2` against `limit / 2`) is what keeps the
+        // pivot itself inside the count for a `limit` of 1, where the backward half's share
+        // of records to KEEP is zero.
+        case .around(let cursor):
+            guard (0...size).contains(cursor) else { return reset(at: size) }
+            let share = limit / 2
+            // `backwards` documents its own precondition as `limit` already clamped to at
+            // least 1 by `page` — it needs one full boundary to prove a line is whole, even
+            // to answer "is there anything here at all". A `share` of zero would break that
+            // precondition and come back `hasMore: false` unconditionally, which is a lie the
+            // moment something actually precedes the pivot: `TranscriptPage.hasMore` documents
+            // backwards as meaning exactly `start > 0`, and `.around` owes it the same meaning.
+            // So the probe always asks for at least one boundary; only what gets KEPT is
+            // limited to `share`.
+            let probe = backwards(handle, from: cursor, limit: max(1, share),
+                                  window: window, maxScan: maxScan)
+            let earlier = share > 0 ? probe : TranscriptPage(
+                start: cursor, end: cursor,
+                // The probe's own record is not kept — the pivot's half of the budget claimed
+                // none — but finding one at all is proof something precedes the pivot, which
+                // is the only question being asked at `share == 0`.
+                hasMore: !probe.lines.isEmpty
+            )
+            let later = forwards(handle, from: cursor, size: size, limit: limit - share,
+                                 window: window, maxScan: maxScan)
+            return TranscriptPage(
+                lines: earlier.lines + later.lines,
+                start: earlier.start,
+                end: later.end,
+                // What precedes `start` — the merged page's oldest boundary is the backward
+                // half's own, so its `hasMore` already answers the merged question.
+                hasMore: earlier.hasMore
+            )
         }
     }
 
