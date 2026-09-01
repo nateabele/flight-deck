@@ -4150,13 +4150,23 @@ final class SessionStore: ObservableObject {
         guard let notifier else { return }
         let active = appIsActive()
         for transition in transitions {
-            // `planGate: nil` on both sides — this pipeline only ever sees status edges.
-            // A gate opening moves neither `statuses` nor `backgroundWorkSessions`, so it
-            // never produces a `StatusTransition` at all; `pollPlanGates` below is where that
-            // half of `Input` comes from.
+            // **The session's CURRENT gate on both sides, not `nil` on both sides.** This
+            // pipeline only ever sees status edges — a gate opening moves neither `statuses`
+            // nor `backgroundWorkSessions`, so it produces no `StatusTransition` at all, and
+            // `deliverPlanGateNotifications` is where that half of `Input` changes. But
+            // `wantsYou` is *"waiting OR a gate"*, so passing `nil` here does not mean "the
+            // gate is not this pipeline's business", it means "there is no gate" — and a
+            // `waiting`→`busy` edge under an open gate then computed
+            // `true`→`false` = `.withdraw`, pulling the banner off a plan still waiting to be
+            // read. Nothing could put it back: the gate itself had not changed, so
+            // `deliverPlanGateNotifications`'s `guard gate != previous` skips the session
+            // forever after. Identical on both sides is what makes this pipeline blind to
+            // gates instead of wrong about them — same `wantsYou`, same `subject`, so a
+            // status edge under a standing gate neither re-notifies nor withdraws.
+            let gate = planGates?.gate(for: transition.id)
             switch SessionNotificationPolicy.action(
-                old: .init(status: transition.old, planGate: nil),
-                new: .init(status: transition.new, planGate: nil),
+                old: .init(status: transition.old, planGate: gate),
+                new: .init(status: transition.new, planGate: gate),
                 appActive: active
             ) {
             case .none:
