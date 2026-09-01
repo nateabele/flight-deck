@@ -539,9 +539,9 @@ final class CodexIntegrationTests: XCTestCase {
         }
     }
 
-    /// Reads codex's own state store directly — the ground truth the whole commit rule is
-    /// about — rather than asking codex about itself, which would only prove the app-server's
-    /// in-memory view agrees with itself.
+    /// Reads codex's own state store directly — the ground truth the whole commit rule
+    /// (under `historyMode: "legacy"`) is about — rather than asking codex about itself,
+    /// which would only prove the app-server's in-memory view agrees with itself.
     ///
     /// A non-zero `sqlite3` exit — a missing db, a renamed `state_6.sqlite`, an absent
     /// `threads` table on some future codex — throws rather than reading as "no row found":

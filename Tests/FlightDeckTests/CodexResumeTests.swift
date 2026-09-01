@@ -111,10 +111,11 @@ final class CodexResumeTests: XCTestCase {
 
     /// The whole point of the fix: `thread/archive` and `thread/unarchive` must follow
     /// `thread/name/set`, in that exact order — archiving before naming would fail (an
-    /// unnamed thread has no rollout to archive), and unarchiving before archiving is
-    /// meaningless. See the comment at the call site in `CodexAdapter.prepare` for why the
-    /// round trip exists at all: it releases the writer lock `thread/start` takes out, which
-    /// otherwise makes `codex resume <id>` refuse on codex-cli 0.148.0.
+    /// unnamed thread has no rollout to archive, under the `legacy` history contract
+    /// `CodexAdapter` pins), and unarchiving before archiving is meaningless. See the
+    /// comment at the call site in `CodexAdapter.prepare` for why the round trip exists at
+    /// all: it releases the writer lock `thread/start` takes out, which otherwise makes
+    /// `codex resume <id>` refuse on codex-cli 0.148.0 (re-verified on 0.151.0).
     func testPrepareArchivesAndUnarchivesTheThreadAfterNamingIt() async throws {
         let t = ScriptedTransport()
         // The fixture's `thread["path"]` (`/r/y.jsonl`) does not exist on disk, so this must

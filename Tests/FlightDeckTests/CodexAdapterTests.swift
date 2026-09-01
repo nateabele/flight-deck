@@ -66,7 +66,8 @@ final class CodexAdapterTests: XCTestCase {
         let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
 
         // Order is load-bearing: thread/start alone does NOT persist the thread, so naming
-        // it is what commits it. Reversing these leaves a thread codex cannot resume.
+        // it is what commits it — under the `legacy` history contract `CodexAdapter`
+        // pins. Reversing these leaves a thread codex cannot resume.
         // The archive/unarchive pair that follows releases the writer lock `thread/start`
         // takes out — see the comment at that call site in `CodexAdapter.prepare` — and
         // must come after naming (archiving an unnamed thread has no rollout to archive)

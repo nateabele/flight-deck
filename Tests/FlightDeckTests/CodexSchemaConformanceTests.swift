@@ -100,10 +100,12 @@ final class CodexSchemaConformanceTests: XCTestCase {
     /// `CodexAdapter` or `CodexProcessTransport` without adding it here is the omission this
     /// suite is meant to make loud. Grep `rpc.request(` — these are all of them.
     private static let sentMethods = [
-        "initialize",         // CodexProcessTransport.verifyHandshake
-        "thread/start",       // CodexAdapter.prepare
-        "thread/name/set",    // CodexAdapter.prepare, CodexAdapter.rename
-        "thread/read",        // CodexAdapter.read
+        "initialize",          // CodexProcessTransport.verifyHandshake
+        "thread/start",        // CodexAdapter.prepare
+        "thread/name/set",     // CodexAdapter.prepare, CodexAdapter.rename
+        "thread/read",         // CodexAdapter.read
+        "thread/archive",      // CodexAdapter.prepare
+        "thread/unarchive",    // CodexAdapter.prepare
     ]
 
     func testEveryMethodTheAdapterSendsExists() throws {

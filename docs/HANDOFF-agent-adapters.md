@@ -139,20 +139,29 @@ exists in any of 492 surveyed rollouts, so there is no ground truth to map it fr
 
 ## 4. Verified facts about codex — do not re-derive these
 
-All established empirically against `codex-cli` 0.142.4 / 0.147.0. The schema is ground truth
-and is checked in: `Tests/FlightDeckTests/Fixtures/Codex/codex-app-server-v2.generated.json`
-(with a provenance file), asserted by `CodexSchemaConformanceTests`.
+All established empirically against `codex-cli` 0.142.4 / 0.147.0 / 0.151.0. The schema is
+ground truth and is checked in:
+`Tests/FlightDeckTests/Fixtures/Codex/codex-app-server-v2.generated.json` (with a provenance
+file), asserted by `CodexSchemaConformanceTests`.
 
-1. **`thread/start` does not persist a thread.** No `state_5.sqlite` row, no rollout file, even
-   seconds later with the app-server alive. **`thread/name/set` commits it**, and must be
-   issued to the *same* app-server process. An unnamed thread cannot be resumed.
+1. **`thread/start` does not persist a thread — under the `legacy` history contract.** No
+   `state_5.sqlite` row, no rollout file, even seconds later with the app-server alive.
+   **`thread/name/set` commits it**, and must be issued to the *same* app-server process. An
+   unnamed thread cannot be resumed. codex-cli 0.151.0 flipped the default contract to
+   `paginated`, under which neither call persists anything for a thread that has taken no
+   turn; `CodexAdapter.historyMode` pins `legacy` explicitly (see item 4 below and
+   `docs/FOLLOWUPS.md`).
 2. **A thread belongs to the app-server process that created it** — one long-lived app-server
    per codex account (`SessionStore.CodexStack`, one per `AgentInstance.account`, as of the
    2026-08-19 accounts work), not one for the whole app.
 3. **Identity is returned, never minted.** `ThreadStartParams` has no `threadId`.
 4. **`initialize` requires real `clientInfo`.** Sending empty params omits the key entirely and
    codex answers `-32600 missing field 'params'`. This broke every codex launch end-to-end and
-   was invisible to 708 hermetic tests, because stub transports validate nothing.
+   was invisible to 708 hermetic tests, because stub transports validate nothing. It also
+   requires declaring `capabilities.experimentalApi`: without it, `thread/start`'s
+   `historyMode` param (item 1 above) is refused with
+   `thread/start.historyMode requires experimentalApi capability`. See
+   `CodexHandshakeVerifier.verifyHandshake`.
 5. **Notifications are connection-scoped** (§2).
 6. **`-32600` is also codex's "no such thread" answer** — so error *codes* cannot discriminate
    "gone" from "malformed". `CodexAdapter.isThreadGone` matches on the message plus an id echo.

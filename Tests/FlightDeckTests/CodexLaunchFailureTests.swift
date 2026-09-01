@@ -175,8 +175,8 @@ final class CodexLaunchFailureTests: XCTestCase {
     /// `stopCodexIfUnused` counts codex tabs in `repos`, and a creation's tab is not in
     /// `repos` until `addSession` runs — so a close landing mid-`prepare` used to stop the
     /// app-server between `thread/start` and `thread/name/set`, which EVAPORATES the thread,
-    /// because naming is what commits it. The tab would then exist bound to a thread
-    /// `codex resume` cannot find.
+    /// because naming is what commits it — under the `legacy` history contract `CodexAdapter`
+    /// pins. The tab would then exist bound to a thread `codex resume` cannot find.
     func testClosingTheLastTabDoesNotKillAnAppServerACreationIsStillUsing() async {
         let (store, _) = makeStore()
         // Builds the stack without spawning anything — only `startCodex()` runs a process,
@@ -239,8 +239,9 @@ final class CodexLaunchFailureTests: XCTestCase {
                        "no tab may survive a failed prepare")
     }
 
-    /// The commit half of `prepare`. `thread/start` alone persists nothing, so a failure to
-    /// name the thread has to fail the whole creation rather than leave a tab behind.
+    /// The commit half of `prepare`. `thread/start` alone persists nothing (under the
+    /// `legacy` history contract `CodexAdapter` pins), so a failure to name the thread has
+    /// to fail the whole creation rather than leave a tab behind.
     func testARefusedThreadAlsoCreatesNoTab() async {
         let (store, _) = makeStore()
         store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: RefusingTransport())),
@@ -302,8 +303,9 @@ final class CodexLaunchFailureTests: XCTestCase {
                        "codex resume \(threadID.uuidString.lowercased())\n")
         XCTAssertEqual(transport.methods,
                        ["thread/start", "thread/name/set", "thread/archive", "thread/unarchive"],
-                       "start then name, in that order — naming is what commits the thread — "
-                       + "then archive/unarchive to release the writer lock thread/start took out")
+                       "start then name, in that order — naming is what commits the thread "
+                       + "under the legacy history contract CodexAdapter pins — then "
+                       + "archive/unarchive to release the writer lock thread/start took out")
     }
 
     /// Claude mints its own id and cannot fail, so it must keep the synchronous path
