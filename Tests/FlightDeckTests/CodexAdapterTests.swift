@@ -30,9 +30,9 @@ final class CodexAdapterTests: XCTestCase {
     }
 
     /// Answers `thread/start` with a `thread` object that carries no `path` at all — the
-    /// "unusable path" half of the brief's requirement, distinct from a path that is present
-    /// but whose file `rolloutExists` reports missing. Kept separate from `ScriptedTransport`
-    /// because that one always emits `path`.
+    /// "unusable path" case, distinct from a path that is present but whose file
+    /// `rolloutExists` reports missing. Kept separate from `ScriptedTransport` because that
+    /// one always emits `path`.
     private final class PathlessTransport: CodexTransport {
         var onLine: ((String) -> Void)?
         private(set) var methods: [String] = []
@@ -189,7 +189,7 @@ final class CodexAdapterTests: XCTestCase {
                        "a sibling path nothing ever wrote must read as absent, not present")
     }
 
-    /// The other half of "absent or unusable" the brief calls out: a `thread/start` result
+    /// The other half of "absent or unusable": a `thread/start` result
     /// whose `thread` object carries no `path` key at all, as opposed to a `path` that is
     /// present but whose rollout `rolloutExists` reports missing (the case above). Written so
     /// that rewriting the guard as `thread["path"] as? String ?? ""` would fail this test.

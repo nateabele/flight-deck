@@ -168,8 +168,8 @@ final class CodexProcessTransportTests: XCTestCase {
         )
     }
 
-    /// Callers past task 1 need the parsed version — task 2 uses it to decide whether to send
-    /// `historyMode` at all.
+    /// Callers need the parsed version — `CodexVersionProbe.supportsHistoryMode` uses it to
+    /// decide whether to send `historyMode` at all.
     func testCheckReturnsTheParsedVersionOnSuccess() throws {
         let version = try CodexVersionProbe.check(executable: "codex", run: { _ in "codex-cli 0.147.0\n" })
         XCTAssertEqual(version, "0.147.0")
