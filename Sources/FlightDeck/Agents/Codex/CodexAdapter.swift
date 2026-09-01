@@ -121,18 +121,37 @@ struct CodexAdapter: AgentAdapter {
     /// stays out of the `AgentAdapter.rebind` signature, which is not codex's to shape.
     var readTimeout: Double = 5
 
+    /// Set by `SessionStore.startCodex` from the probed codex version, before `prepare` can
+    /// be reached — `nil` means this codex predates the `historyMode` param, and its own
+    /// default is already `legacy`; a non-nil value is always `"legacy"`. See
+    /// `CodexThreadOptions.asThreadStartParams(cwd:historyMode:)` for why pinning it here is
+    /// deliberate rather than a `config.toml` override this app should be leaving alone.
+    var historyMode: String?
+
+    /// The seam `prepare`'s history-contract check calls through, so the diagnostic added
+    /// there is testable without a real codex on disk. Defaults to an actual filesystem
+    /// check, matching `CodexVersionProbe.run`'s injected default for the same reason: a
+    /// test may override it, production never needs to.
+    var rolloutExists: @Sendable (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+
     /// Start, then name, then archive/unarchive. NOT optional and NOT reorderable.
     ///
     /// `thread/start` does not persist anything: no `threads` row, no rollout file, even
     /// with the app-server left alive. `thread/name/set` — issued to the same app-server
-    /// process — commits it. Skip the name and `codex resume <id>` dies with
-    /// `ERROR: No saved session found with ID …`, which is a tab that can never launch.
-    /// Naming costs nothing anyway: the tab already has the title we want to set. The
-    /// archive/unarchive round trip that follows releases the writer lock `thread/start`
-    /// took out — see the comment at that call below for why it exists and must come
-    /// after naming, not before.
+    /// process — commits it. This is the `legacy` history contract, which
+    /// `CodexAdapter.historyMode` pins on codex builds new enough to accept it; see the guard
+    /// below for what changes under `paginated`, codex-cli 0.151.0's new default. Skip the
+    /// name and `codex resume <id>` dies with `ERROR: No saved session found with ID …`,
+    /// which is a tab that can never launch. Naming costs nothing anyway: the tab already
+    /// has the title we want to set. The archive/unarchive round trip that follows releases
+    /// the writer lock
+    /// `thread/start` took out — see the comment at that call below for why it exists and
+    /// must come after naming, not before.
     func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
-        let params = threadOptions(options).asThreadStartParams(cwd: session.transcriptDirectory)
+        let params = threadOptions(options).asThreadStartParams(
+            cwd: session.transcriptDirectory,
+            historyMode: historyMode
+        )
         let result = try await rpc.request("thread/start", params)
 
         guard let thread = result["thread"] as? [String: Any],
@@ -140,23 +159,77 @@ struct CodexAdapter: AgentAdapter {
               let id = UUID(uuidString: raw)
         else { throw CodexRPCError.malformed("thread/start returned no usable thread id") }
 
-        // Commit. A failure here must propagate: a bound-but-uncommitted thread is worse
-        // than no tab, because it looks fine until the terminal reports it cannot resume.
+        // Commit — under the `legacy` history contract this call is pinned to; see the
+        // guard below for `paginated`. A failure here must propagate: a bound-but-uncommitted
+        // thread is worse than no tab, because it looks fine until the terminal reports it
+        // cannot resume.
         //
         // Cross-agent audit (spec rule: no failure or recovery path may rename a
         // conversation): codex is compliant. `prepare` is reached only from a user action
         // (`newSession`) or from `rebind`'s thread-gone recovery branch below — and in both
         // cases this `thread/name/set` names a BRAND-NEW thread, not the user's real one;
-        // codex simply cannot persist a thread without naming it. So on the recovery path the
-        // user's real conversation is never renamed — it is gone, and a fresh, separately
-        // named thread takes its place. One residual asymmetry versus claude: claude's
-        // recovery path (the `AgentAdapter.rebind` default) writes no name at all, while
-        // codex's writes `session.title` onto the new thread.
+        // under `legacy` history, codex simply cannot persist a thread without naming it. So
+        // on the recovery path the user's real conversation is never renamed — it is gone,
+        // and a fresh, separately named thread takes its place. One residual asymmetry
+        // versus claude: claude's recovery path (the `AgentAdapter.rebind` default) writes
+        // no name at all, while codex's writes `session.title` onto the new thread.
         _ = try await rpc.request("thread/name/set", ["threadId": raw, "name": session.title])
+
+        // Confirm the rollout `thread["path"]` names actually exists, RIGHT HERE and nowhere
+        // else — both facts below came from driving a live app-server, not from reasoning
+        // about it, and moving this check breaks it in opposite directions:
+        //
+        // - Under `legacy` history, the rollout does NOT exist the instant `thread/start`
+        //   above returns, and DOES exist the instant `thread/name/set` above returns —
+        //   verified deterministically across four consecutive threads. So this cannot move
+        //   before naming: it would fire on every healthy thread.
+        // - `thread/archive` below MOVES the rollout out of `sessions/` as part of releasing
+        //   the writer lock. So this cannot move after archiving either: it would fire on
+        //   every healthy thread, for the opposite reason. (An early probe in this
+        //   investigation looked flaky for exactly that reason before the move was
+        //   understood.) No polling, no retry, no sleep — it is deterministic at this one
+        //   point and nowhere else.
+        //
+        // What it exists to catch: codex-cli 0.151.0 flipped the default thread-history
+        // contract from `legacy` to `paginated`, under which nothing writes a rollout for a
+        // thread that has taken no turn yet — so `thread/archive` below would instead fail
+        // with codex's own `-32600 no rollout found for thread id <id>`, a message that names
+        // a symptom of codex's internals rather than a cause anyone reading it can act on.
+        // `historyMode` already pins `legacy` on codex builds new enough to accept it, which
+        // is why this should never actually fire on a supported install — it exists to report
+        // the next contract change by name, rather than as another opaque `-32600`.
+        // The two branches below read `historyMode` rather than the probed codex version
+        // (which this adapter does not hold) because they say genuinely different things: a
+        // `nil` codex was sent no pin at all and may simply be too old to have one; a
+        // `"legacy"` codex was asked for the contract explicitly and still did not honor it.
+        //
+        // Two guards, not one, because an absent `path` and a present-but-missing rollout are
+        // different failures with different causes: the first means codex's `thread/start`
+        // response itself changed shape (a `path` field renamed or dropped), which a
+        // history-contract message would misdiagnose; the second is the history-contract
+        // problem this whole check exists to catch. Still one point-in-time check apiece — no
+        // retry, no polling.
+        guard let path = thread["path"] as? String else {
+            throw AgentLaunchError.prepareFailed(
+                "Codex's thread/start response named no rollout path for this thread, so "
+                    + "Flight Deck cannot confirm it was persisted."
+            )
+        }
+        guard rolloutExists(URL(fileURLWithPath: path)) else {
+            throw AgentLaunchError.prepareFailed(historyMode == nil
+                ? "this Codex build did not persist the new thread's history, and Flight "
+                    + "Deck sent it no history-mode pin because it predates the 0.151.0 "
+                    + "threshold that pin needs — try codex-cli 0.151.0 or newer."
+                : "this Codex build did not persist the new thread's history even though "
+                    + "Flight Deck asked it for the legacy history contract — it may no "
+                    + "longer honor that pin. Try a codex-cli version Flight Deck supports.")
+        }
 
         // Release the writer lock `thread/start` just took, or `codex resume <id>` — what
         // `launchCommand` spawns next, in its own pty — refuses on codex-cli 0.148.0 with
         // `thread/resume failed: thread <id> already has an active writer (code -32600)`.
+        // Re-verified on 0.151.0: a second connection resuming an unarchived thread still
+        // gets the same refusal, so this release is still required under `legacy` history.
         // This app-server is the one long-lived process that created the thread, and it
         // cannot simply be stopped: a thread belongs to the process that created it, and
         // this same process is also what renames it and reads its status later.
@@ -187,7 +260,7 @@ struct CodexAdapter: AgentAdapter {
 
         return AgentBinding(
             conversationID: id,
-            transcriptURL: (thread["path"] as? String).map { URL(fileURLWithPath: $0) }
+            transcriptURL: URL(fileURLWithPath: path)
         )
     }
 
@@ -204,7 +277,8 @@ struct CodexAdapter: AgentAdapter {
 
     func location(for session: Session) -> AgentLocation {
         // `prepare` passes transcriptDirectory as codex's own thread cwd via
-        // `asThreadStartParams(cwd:)`, and `launchCommand` requires the pty to be spawned there.
+        // `asThreadStartParams(cwd:historyMode:)`, and `launchCommand` requires the pty to be
+        // spawned there.
         AgentLocation(workingDirectory: session.transcriptDirectory, binding: binding(for: session))
     }
 

@@ -456,6 +456,37 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
 
 ### Worth doing
 
+- **codex-cli 0.151.0 flipped the default thread-history contract from `legacy` to
+  `paginated`, and Flight Deck now pins `legacy` explicitly** (`historyMode: "legacy"` on
+  `thread/start`, gated by `CodexVersionProbe.supportsHistoryMode`'s 0.151.0 threshold, plus
+  `capabilities.experimentalApi` at `initialize` — without it codex refuses the param). This
+  keeps the `thread/start` does-not-persist / `thread/name/set` commits invariant the rest of
+  the adapter relies on (see the doc comments in
+  `Sources/FlightDeck/Agents/Codex/CodexAdapter.swift` and `SessionStore.swift`). But `legacy`
+  is **deprecated upstream** — codex ships a `migrate-rollouts` command to move users off
+  it — so this pin will need revisiting once `legacy` support is actually removed, at which
+  point the adapter has to speak `paginated` for real (a rollout is not written until a turn
+  is taken, so the commit-on-name invariant this whole area depends on goes away). Also
+  untested: codex-cli 0.149.x–0.150.x, which sit below the `supportsHistoryMode` threshold
+  and so receive no `historyMode` pin at all — if `paginated` was already default there, the
+  same failure this fix addresses would reproduce, and `AgentLaunchError.prepareFailed`'s
+  diagnostic (the `rolloutExists` guard in `CodexAdapter.prepare`) is what should report it
+  rather than an opaque `-32600`.
+- **`SessionStore.swift:1408` (`stack.adapter.historyMode = ...`) — the single line that makes
+  production use the right history mode — is not covered by any test, hermetic or live.**
+  Deleting it leaves all 1959 hermetic and 5 live tests green.
+  `CodexIntegrationTests.testARestoredCodexTabReattachesAfterAStartCodexFailure` does NOT cover
+  it: that test deliberately makes `checkOffMainActor` throw, so execution never reaches the
+  assignment. The fix is to give `SessionStore.startCodex` an injectable probe seam — a `run:`-
+  style closure threaded through to `CodexVersionProbe.checkOffMainActor` — plus a testing read
+  of the adapter's `historyMode`, which would let two hermetic tests exist: "a 0.151.0 codex
+  gets `legacy`" and "a 0.147.0 codex gets `nil`".
+  Also worth noting for whoever eventually migrates off `legacy`: if codex ever answers
+  `-32600 no rollout found for thread id <id>` for a RESTORED thread under `paginated`,
+  `CodexAdapter.isThreadGone` will match on "no rollout" plus the echoed id and `rebind` will
+  re-pin the tab onto a fresh empty thread — the exact loss `isThreadGone` exists to prevent.
+  This is pre-existing and harmless while `legacy` holds (restored threads always have a
+  rollout under `legacy`), but it needs handling before `paginated` becomes real.
 - **`SessionStore.newSession` returns a `Session` it did not create** when the project's claude
   account no longer resolves. The refusal is real — nothing is filed, no surface exists, and
   `launchFailureReporter` tells the user — but the return value is an unfiled draft, because

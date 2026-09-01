@@ -176,7 +176,12 @@ final class AgentRoutingTests: XCTestCase {
         let store = makeStore()
         store.launchFailureReporter = SilentReporter()
         let t = RenameTransport()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: t)), for: .codex, account: nil)
+        // `/r/x.jsonl` above does not exist on disk; stubbed true so a codex creation in
+        // this file reaches success rather than tripping `prepare`'s history-contract check.
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: t), rolloutExists: { _ in true }),
+            for: .codex, account: nil
+        )
         let spy = SpyInjector()
         store.injectorOverride = spy
         store.injectionSettle = { $0() }
@@ -208,7 +213,12 @@ final class AgentRoutingTests: XCTestCase {
     func testRenamingAClaudeTabStillTypesIntoThePtyAndSendsNoRequest() {
         let store = makeStore()
         let t = RenameTransport()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: t)), for: .codex, account: nil)
+        // `/r/x.jsonl` above does not exist on disk; stubbed true so a codex creation in
+        // this file reaches success rather than tripping `prepare`'s history-contract check.
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: t), rolloutExists: { _ in true }),
+            for: .codex, account: nil
+        )
         let spy = SpyInjector()
         store.injectorOverride = spy
         store.injectionSettle = { $0() }
@@ -303,7 +313,12 @@ final class AgentRoutingTests: XCTestCase {
         let store = makeStore()
         store.launchFailureReporter = SilentReporter()
         let t = RenameTransport()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: t)), for: .codex, account: nil)
+        // `/r/x.jsonl` above does not exist on disk; stubbed true so a codex creation in
+        // this file reaches success rather than tripping `prepare`'s history-contract check.
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: t), rolloutExists: { _ in true }),
+            for: .codex, account: nil
+        )
         let spy = SpyInjector()
         store.injectorOverride = spy
         store.injectionSettle = { $0() }

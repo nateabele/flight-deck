@@ -254,7 +254,7 @@ final class SessionStore: ObservableObject {
     private final class CodexStack {
         let transport: CodexProcessTransport
         let rpc: CodexRPC
-        let adapter: CodexAdapter
+        var adapter: CodexAdapter
         let runtime: CodexRuntime
 
         /// `home` and `indexURL` are two views of one account and must agree: the app-server
@@ -390,7 +390,9 @@ final class SessionStore: ObservableObject {
     /// thread to codex's own storage, which is exactly what makes `codex resume <id>` work
     /// across processes — so nothing is lost, and the next codex session spawns a fresh
     /// server. Keeping it alive instead would leave a process running for the rest of the
-    /// run on the strength of a tab the user closed.
+    /// run on the strength of a tab the user closed. True under the `legacy` history
+    /// contract `CodexAdapter.historyMode` pins — see `prepare`'s doc comment for what
+    /// changes under `paginated`.
     ///
     /// Narrowed from "no codex tabs remain anywhere" to "no tabs remain on *this* account":
     /// the wider predicate would keep one login's app-server alive for the whole run because
@@ -401,8 +403,9 @@ final class SessionStore: ObservableObject {
         guard let stack = codexStacks[account] else { return }
         // A codex creation that has not inserted its tab yet is invisible to the check
         // below, and killing the app-server out from under it between `thread/start` and
-        // `thread/name/set` EVAPORATES the thread — naming is what commits it. So a tab
-        // closed mid-creation defers the teardown rather than skipping it: `createSession`
+        // `thread/name/set` EVAPORATES the thread — naming is what commits it, under the
+        // `legacy` history contract `CodexAdapter.historyMode` pins. So a tab closed
+        // mid-creation defers the teardown rather than skipping it: `createSession`
         // re-runs this on its way out. Per account, like everything else here: a creation on
         // one login must not pin another login's server open.
         guard codexCreationsInFlight[account, default: 0] == 0 else { return }
@@ -1389,7 +1392,8 @@ final class SessionStore: ObservableObject {
         // remaining codex tab runs `stopCodexIfUnused`, which counts tabs in `repos` — and
         // this one is not in `repos` until `addSession` below. Without this the app-server
         // could be killed between `thread/start` and `thread/name/set`, which evaporates the
-        // thread, because naming is what commits it.
+        // thread, because naming is what commits it — under the `legacy` history contract
+        // `CodexAdapter.historyMode` pins.
         codexCreationsInFlight[instance.account, default: 0] += 1
         defer {
             codexCreationsInFlight[instance.account, default: 0] -= 1
@@ -1560,7 +1564,13 @@ final class SessionStore: ObservableObject {
             // just this creation but every codex creation on this account for the rest of
             // the run, all of them awaiting the same wedged task. `verifyHandshake` below was
             // already bounded; the step in front of it was not. See `checkOffMainActor`.
-            try await CodexVersionProbe.checkOffMainActor()
+            //
+            // The mode is set on `stack.adapter` before `verifyHandshake` runs, not after —
+            // every caller of `adapter(for:)` reads `stack.adapter` fresh once this task
+            // completes (see the comment there), so there is no window where a caller could
+            // observe the stack with the probe done but the mode unset.
+            let version = try await CodexVersionProbe.checkOffMainActor()
+            stack.adapter.historyMode = CodexVersionProbe.supportsHistoryMode(version) ? "legacy" : nil
             try stack.transport.start()
             try await CodexProcessTransport.verifyHandshake(stack.rpc)
         }
@@ -2782,21 +2792,35 @@ final class SessionStore: ObservableObject {
     /// a tab resumed into a collapsed project would come back invisible, since
     /// `SidebarRow.rows` renders only the header for a collapsed repo. Same reasoning as
     /// `reopenLastClosed`, which un-collapses for the same reason.
+    ///
+    /// Returns the tab actually opened or selected, `nil` on every path that filed nothing —
+    /// `@discardableResult` because ⌘K Return and the search panel's `onSelect` have never
+    /// needed the answer, they read `selectedSessionID` same as before. `FleetService` is the
+    /// first caller that does: a phone's `search.open` request has no `selectedSessionID` to
+    /// fall back on, and reading that property after a call that took the failure branch below
+    /// would hand back whatever tab happened to be selected beforehand — a confident answer
+    /// naming the wrong conversation. Returning the id directly makes that failure mode
+    /// unrepresentable rather than relying on every caller to remember the gap.
+    @discardableResult
     func openConversation(
         _ activation: SearchActivation.Activation,
         directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
         resolveTranscriptDirectory: (String, UUID) -> String = {
             SessionStore.resolvedTranscriptDirectory(projectPath: $0, conversationID: $1)
         }
-    ) {
+    ) -> UUID? {
         let projectPath: String
         let conversationID: String
         let title: String
 
         switch activation {
         case .select(let id):
+            // `selectSession` is itself a no-op when `id` names no live tab — checked again
+            // here rather than trusted, so a stale id (a tab closed between `plan` and this
+            // call) reports `nil` instead of an id that does not resolve to anything.
+            guard locate(id) != nil else { return nil }
             selectSession(id)
-            return
+            return id
         case .resume(let conversation, let project, let resultTitle, _):
             projectPath = project; conversationID = conversation; title = resultTitle
         case .addProjectThenResume(let project, let conversation, let resultTitle, _):
@@ -2807,17 +2831,25 @@ final class SessionStore: ObservableObject {
         // A project row, or a result whose conversation id we never learned: there is
         // nothing to resume, so land on the project instead of launching a nameless agent.
         guard let pinned = UUID(uuidString: conversationID) else {
+            let opened: UUID?
             if let existing = indexOfRepo(for: url) {
                 if repos[existing].isCollapsed {
                     repos[existing].isCollapsed = false
                     emit(.projectCollapsed(id: repos[existing].id, isCollapsed: false))
                 }
-                if let first = repos[existing].sessions.first { selectedSessionID = first.id }
+                opened = repos[existing].sessions.first?.id
+                if let opened { selectedSessionID = opened }
             } else {
-                addProject(at: url)
+                let created = addProject(at: url)
+                // `addProject` delegates to `newSession(in:)`, whose own `launchAccount`
+                // failure branch returns a `Session` that was never filed — see that
+                // method's doc comment. Checked here rather than trusted, for the same
+                // reason `.select` re-checks `locate`: a fabricated id is worse than `nil`.
+                opened = repos.flatMap(\.sessions).contains { $0.id == created.id }
+                    ? created.id : nil
             }
             persist()
-            return
+            return opened
         }
 
         // Enforced here too, not only inside `SearchActivation.plan`: a caller that fills
@@ -2827,7 +2859,7 @@ final class SessionStore: ObservableObject {
         // processes appending one transcript and colliding in claude's pid-keyed registry.
         if let live = repos.flatMap(\.sessions).first(where: { $0.pinnedConversationID == pinned }) {
             selectSession(live.id)
-            return
+            return live.id
         }
 
         // Resolved before anything is filed, the same as `newSession`: nil would mean "the
@@ -2838,7 +2870,7 @@ final class SessionStore: ObservableObject {
         case .success(let resolved): account = resolved
         case .failure(let error):
             launchFailureReporter.report(error)
-            return
+            return nil
         }
 
         let session = Session(
@@ -2869,6 +2901,7 @@ final class SessionStore: ObservableObject {
                 await self?.resumeRestoredCodex([session.id])
             }
         }
+        return session.id
     }
     func closeProject(_ id: Repo.ID) {
         guard let index = repos.firstIndex(where: { $0.id == id }) else { return }

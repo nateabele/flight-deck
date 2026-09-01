@@ -8,6 +8,21 @@ struct FleetListScreen: View {
     /// separate string: two pieces of state can disagree — a stale title against a new id is
     /// a rename applied to the wrong tab — and this way they cannot.
     @State private var renaming: Renaming?
+    /// Drives `.searchable` below. Built here rather than pulled from `FleetModel` because the
+    /// candidate wiring belongs to THIS screen — see `refreshSearchCandidates()` — while the
+    /// ranking and debounce machinery it owns is exactly what `SessionSearchModel` already is.
+    @State private var search: SessionSearchModel
+    /// A binding path rather than plain `NavigationLink`s, and only because search needs it:
+    /// a `.session` result pushes straight away, but a `.conversation`/`.project` result opens
+    /// only after a round trip to the Mac answers — nothing to push a link value with a wait
+    /// in between. Every OTHER push in this screen still happens the ordinary
+    /// `NavigationLink(value:)` way; this only adds a second way to reach the same destination.
+    @State private var path = NavigationPath()
+
+    init(model: FleetModel) {
+        self.model = model
+        _search = State(initialValue: SessionSearchModel(transport: model, macName: model.macName))
+    }
 
     struct Renaming: Identifiable {
         let id: UUID
@@ -27,38 +42,59 @@ struct FleetListScreen: View {
         let title: String
     }
 
+    /// What a tapped search result's round trip to the Mac said when it did not open —
+    /// `nil` while nothing has failed. Holds the message text rather than the raw
+    /// `FleetRequestError`, so the alert below has nothing left to switch on.
+    @State private var searchOpenFailure: String?
+
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
-                connectionBanner
-                // Gated on `isConnected`, not just on the fleet being empty: on a cold
-                // launch or a fresh pairing the fleet is empty because nothing has arrived
-                // yet, not because there's genuinely nothing to show — and the "Connecting…"
-                // banner above already says that. Showing both at once claimed two different
-                // things about the same absence of data.
-                if model.fleet.projects.isEmpty && isConnected {
-                    emptyState
-                }
-                ForEach(model.fleet.projects) { project in
-                    Section {
-                        // Keyed on the session's tab id, never its conversation id — the
-                        // latter is not stable across a re-pin and, for codex, differs from
-                        // the tab id from birth.
-                        // Driven by the Mac's own `isCollapsed`, not by local state: the
-                        // Mac already owns this per project and emits `projectCollapsed`, so
-                        // a phone keeping its own copy would disagree with the desk the
-                        // moment either end toggled.
-                        if !project.isCollapsed {
-                            ForEach(project.sessions) { session in
-                                sessionRow(session)
-                            }
-                        }
-                    } header: {
-                        projectHeader(project)
+                // Empty query: today's screen, byte for byte. Non-empty: results swap in
+                // whole, per the brief — nothing here is filtered in place, because the two
+                // are different questions ("what's open" against "what matches") rather than
+                // one list narrowed.
+                if search.query.isEmpty {
+                    connectionBanner
+                    // Gated on `isConnected`, not just on the fleet being empty: on a cold
+                    // launch or a fresh pairing the fleet is empty because nothing has arrived
+                    // yet, not because there's genuinely nothing to show — and the
+                    // "Connecting…" banner above already says that. Showing both at once
+                    // claimed two different things about the same absence of data.
+                    if model.fleet.projects.isEmpty && isConnected {
+                        emptyState
                     }
+                    ForEach(model.fleet.projects) { project in
+                        Section {
+                            // Keyed on the session's tab id, never its conversation id — the
+                            // latter is not stable across a re-pin and, for codex, differs
+                            // from the tab id from birth.
+                            // Driven by the Mac's own `isCollapsed`, not by local state: the
+                            // Mac already owns this per project and emits `projectCollapsed`,
+                            // so a phone keeping its own copy would disagree with the desk
+                            // the moment either end toggled.
+                            if !project.isCollapsed {
+                                ForEach(project.sessions) { session in
+                                    sessionRow(session)
+                                }
+                            }
+                        } header: {
+                            projectHeader(project)
+                        }
+                    }
+                } else {
+                    SessionSearchResults(
+                        results: search.results, footer: search.footer,
+                        projects: model.fleet.projects, onTap: handleSearchTap
+                    )
                 }
             }
+            .searchable(
+                text: $search.query,
+                placement: .navigationBarDrawer(displayMode: .automatic),
+                prompt: "Search sessions and history"
+            )
             // The default inset-grouped style STAYS, against the obvious instinct. `.plain`
             // looks like the denser choice for a terminal-adjacent list and measures as the
             // opposite one here: on an iPhone 17 Pro it puts 22pt of padding above the first
@@ -147,6 +183,132 @@ struct FleetListScreen: View {
             ) {
                 Button("Unpair", role: .destructive) { model.unpair() }
             }
+            // `item:`-shaped for the same reason renaming and closing are: the message text is
+            // computed once, into `searchOpenFailure`, so the alert itself has nothing left to
+            // switch on and cannot outlive the tap that set it.
+            .alert("Couldn't Open Conversation", isPresented: Binding(
+                get: { searchOpenFailure != nil },
+                set: { if !$0 { searchOpenFailure = nil } }
+            )) {
+                Button("OK", role: .cancel) { searchOpenFailure = nil }
+            } message: {
+                Text(searchOpenFailure ?? "")
+            }
+            // The candidate wiring. `FleetModel` deliberately does not push these itself — see
+            // `PhoneSearchCandidates`' own doc comment — so this screen rebuilds them on every
+            // moment either input can change: first appearance, a fleet event (a session
+            // opened, closed or renamed), and the catalogue's own async replies (there is no
+            // catalogue-changed event; `refreshConversations` just overwrites the property, so
+            // watching it is the only way to notice a reply landed).
+            .onAppear { refreshSearchCandidates() }
+            .onChange(of: model.fleet) { _, _ in refreshSearchCandidates() }
+            .onChange(of: model.conversationCatalogue) { _, _ in refreshSearchCandidates() }
+        }
+    }
+
+    private func refreshSearchCandidates() {
+        search.candidatesChanged(Self.searchCandidates(
+            projects: model.fleet.projects, catalogue: model.conversationCatalogue
+        ))
+    }
+
+    /// What actually gets composed from which inputs — pulled out as a `static func`, the same
+    /// as `agentGroups(in:)` and `localDestination(for:in:)` above, so a fleet update and a
+    /// catalogue reply can each be checked to reach `PhoneSearchCandidates.build` without
+    /// rendering the screen. The `.onChange` triggers that call this on a fleet or catalogue
+    /// change stay build-verified only — SwiftUI's own reaction to a `@State` mutation isn't
+    /// independently observable from a unit test — but *this* is the part that can actually be
+    /// wrong: the wrong projects, the wrong catalogue, or a catalogue reply silently dropped.
+    ///
+    /// `catalogue` is nil-coalesced to empty here rather than at the call site, matching
+    /// `FleetModel.conversationCatalogue`'s own optionality — there is no
+    /// `WireConversationCatalogue.empty` static, and a phone that has not yet heard back from
+    /// the Mac must still rank the names it already has.
+    static func searchCandidates(
+        projects: [WireProject], catalogue: WireConversationCatalogue?
+    ) -> [NameCandidate] {
+        PhoneSearchCandidates.build(
+            projects: projects,
+            catalogue: catalogue ?? WireConversationCatalogue(conversations: [], sessionActivity: [:])
+        )
+    }
+
+    /// The two tap outcomes that resolve without a round trip to the Mac — pulled out as a
+    /// pure function, tested directly, so the belief this replaced cannot quietly come back.
+    /// The brief said `.project` should open through `FleetConnector.requestOpenConversation`,
+    /// "the same as a transcript hit" — but a project candidate's `conversationID` is always
+    /// `nil` (see `PhoneSearchCandidates.build`) and `FleetService.openConversation` hard-requires
+    /// a real conversation UUID, so that call would fail every time. `SearchResultKind.project`'s
+    /// own doc comment says what activating it actually means — "selects the project's first
+    /// session" — which is a local lookup, the same as `.session` already is.
+    ///
+    /// `.conversation` is not reachable through here: it always needs the Mac, since it may
+    /// name a conversation with no open tab at all.
+    static func localDestination(for result: SearchResult, in projects: [WireProject]) -> UUID? {
+        switch result.kind {
+        case .session(let id):
+            return id
+        case .project:
+            return projects.first(where: { $0.path == result.projectPath })?.sessions.first?.id
+        case .conversation:
+            return nil
+        }
+    }
+
+    /// What a tap on a search result does. `.session` and `.project` resolve locally, through
+    /// `localDestination(for:in:)` above. `.conversation` is the one case that genuinely needs
+    /// the Mac, for a conversation with no tab of its own yet.
+    private func handleSearchTap(_ result: SearchResult) {
+        switch result.kind {
+        case .session, .project:
+            guard let id = Self.localDestination(for: result, in: model.fleet.projects)
+            else { return }
+            path.append(id)
+        case .conversation(let conversationID):
+            model.requestOpenConversation(
+                conversationID: conversationID, projectPath: result.projectPath
+            ) { outcome in
+                switch outcome {
+                case .success(let id):
+                    if let offset = result.offset {
+                        model.timelineModel(for: id).openAt(offset)
+                    }
+                    path.append(id)
+                case .failure(let error):
+                    // Task 7 was re-opened specifically to split `unknown_conversation` from
+                    // `launch_failed` — see `TimelineFrames.FleetRequestError`'s doc comment —
+                    // and a tap that folded every code (plus `.disconnected`) into silence made
+                    // that split unreachable from here. Surfaced, not silent.
+                    searchOpenFailure = Self.searchOpenFailureMessage(
+                        for: error, macName: model.macName
+                    )
+                }
+            }
+        }
+    }
+
+    /// Copy for a tapped search result's conversation that would not open — named the same
+    /// three ways the failure itself is: unreachable, not found, and found-but-refused. An
+    /// unrecognised `.server` code falls to the generic line rather than staying silent, the
+    /// same rule `SessionTimelineModel.message(for:)` follows for the same reason.
+    ///
+    /// Internal rather than private so the mapping can be asserted directly — the same
+    /// reasoning `SessionTimelineModel.message(for:)` gives for its own visibility: several of
+    /// these need a Mac in a state no test on this side can put it in.
+    static func searchOpenFailureMessage(for error: FleetRequestError, macName: String) -> String {
+        switch error {
+        case .disconnected:
+            return "Couldn't reach \(macName). Check that it's awake and on the same network."
+        case .server(let code):
+            switch code {
+            case "unknown_conversation":
+                return "\(macName) couldn't find that conversation. It may have been removed."
+            case "launch_failed":
+                return "\(macName) found that conversation but couldn't open it — the account "
+                    + "it needs may be missing or signed out."
+            default:
+                return "\(macName) couldn't open that conversation."
+            }
         }
     }
 
@@ -160,7 +322,10 @@ struct FleetListScreen: View {
     /// whose reason caption sits under its title, drops from 66pt to the same 52pt as its
     /// neighbours instead of standing a quarter taller than them. It also takes 7pt off every
     /// section header.
-    private static let rowInsets = EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16)
+    ///
+    /// Not `private`: `SessionSearchResults` reuses it too, so a session row and a search
+    /// result row sit at the same density in the one list they can both appear in.
+    static let rowInsets = EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16)
 
     /// Every row opens its session, and what looks tappable is tappable.
     ///
@@ -338,7 +503,7 @@ struct FleetListScreen: View {
 
     private func sessionRow(_ session: WireSession) -> some View {
         NavigationLink(value: session.id) {
-            row(session)
+            Self.row(session)
         }
         .listRowInsets(Self.rowInsets)
         // `allowsFullSwipe: true`, the mirror image of the trailing lane's `false` below —
@@ -479,7 +644,15 @@ struct FleetListScreen: View {
     /// that did not. The terminal idiom is deliberate (see the headers' `.monospaced()`), so
     /// it is stated where it has to hold rather than inherited from a container that cannot
     /// be relied on to pass it down.
-    private func row(_ session: WireSession) -> some View {
+    ///
+    /// `static`, and not `private` — the same reasoning `rowInsets` above already gives, and
+    /// for the same reader: `SessionSearchResults` reuses this row outright for a `.session`
+    /// result rather than drawing a second, thinner one that cannot show `waitingFor`.
+    /// `highlighted` is empty for the plain fleet list, where nothing has matched a query, and
+    /// carries `SearchResult.highlightedRanges` when a search result calls this — routed
+    /// through `SessionSearchResults.highlighted`, the one place that turns a range into
+    /// underline styling, so a session row and a name row agree on what "matched" looks like.
+    static func row(_ session: WireSession, highlighted ranges: [Range<String.Index>] = []) -> some View {
         HStack(spacing: 8) {
             SessionStatusGlyph(session: session)
             // Gated on `activity` existing, not just on the flag: a fresh pairing (or a
@@ -494,7 +667,7 @@ struct FleetListScreen: View {
                     .accessibilityHidden(true)   // `SessionStatusGlyph.label` already says it
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.title)
+                Text(SessionSearchResults.highlighted(session.title, ranges: ranges))
                     .font(.system(.body, design: .monospaced))
                 if let waitingFor = session.waitingFor {
                     Text(waitingFor).font(.caption).foregroundStyle(.orange)

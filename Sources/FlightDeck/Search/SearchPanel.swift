@@ -1,4 +1,5 @@
 import AppKit
+import FleetKit
 import SwiftUI
 
 /// The window the overlay lives in.

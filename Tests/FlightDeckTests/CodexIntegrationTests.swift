@@ -10,7 +10,10 @@ import XCTest
 /// experimental, fast-moving binary, none of which the other 708 tests can see because they
 /// all talk to a scripted `CodexTransport`:
 ///
-/// 1. **The commit rule** — `thread/start` does not persist a thread; `thread/name/set` does.
+/// 1. **The commit rule** — under `historyMode: "legacy"`, `thread/start` does not persist a
+///    thread; `thread/name/set` does. (Under the codex-cli 0.151.0 default, `"paginated"`,
+///    naming commits nothing at all — see item 1's test below, and `CodexAdapter`/
+///    `SessionStore`, which now pin `"legacy"` in production for exactly this reason.)
 ///    `testThreadStartAloneDoesNotPersistButNamingCommits` below.
 /// 2. **The real termination hook** — every committed test proving `CodexProcessTransport`'s
 ///    `onTerminate` de-dupes across EOF and `terminationHandler` does so through
@@ -50,10 +53,16 @@ final class CodexIntegrationTests: XCTestCase {
 
     // MARK: - 1. The commit rule
 
-    /// The rule the whole codex adapter is built on. If `thread/start` alone ever starts
-    /// persisting, `CodexAdapter.prepare` can be simplified; if `thread/name/set` ever stops
-    /// committing, every codex tab silently stops being resumable — and nothing else in the
-    /// committed suite would notice either flip.
+    /// The rule the whole codex adapter is built on, under `historyMode: "legacy"` — the mode
+    /// this test pins explicitly on its own `thread/start` call, since it bypasses
+    /// `CodexAdapter` and would otherwise fall to codex-cli 0.151.0's default, `"paginated"`,
+    /// under which naming commits nothing. If `thread/start` alone ever starts persisting
+    /// under `"legacy"`, `CodexAdapter.prepare` can be simplified; if `thread/name/set` ever
+    /// stops committing under it, every codex tab silently stops being resumable — and
+    /// nothing else in the committed suite would notice either flip. Re-verified against
+    /// 0.151.0 with `"legacy"` explicitly set: the rollout is absent immediately after
+    /// `thread/start` returns and present the instant `thread/name/set` returns,
+    /// deterministically across four consecutive threads.
     func testThreadStartAloneDoesNotPersistButNamingCommits() async throws {
         let transport = CodexProcessTransport()
         try transport.start()
@@ -70,7 +79,12 @@ final class CodexIntegrationTests: XCTestCase {
         // correct request, actually succeeds against a real `codex app-server`.
         try await CodexProcessTransport.verifyHandshake(rpc)
 
-        let started = try await rpc.request("thread/start", ["cwd": cwd.path])
+        // `historyMode: "legacy"` pins this to the mode the commit rule is actually about —
+        // see the class doc comment. `CodexAdapter`/`SessionStore` pin the same mode in
+        // production; this test bypasses the adapter, so it must set it explicitly.
+        let started = try await rpc.request(
+            "thread/start", ["cwd": cwd.path, "historyMode": "legacy"]
+        )
         let thread = try XCTUnwrap(started["thread"] as? [String: Any])
         let id = try XCTUnwrap(thread["id"] as? String)
         // `thread/start`'s reply already names the rollout file it will eventually write —
@@ -340,12 +354,17 @@ final class CodexIntegrationTests: XCTestCase {
         let rpc = CodexRPC(transport: transport)
         try await CodexProcessTransport.verifyHandshake(rpc)
 
-        let started = try await rpc.request("thread/start", ["cwd": cwd.path])
+        // `historyMode: "legacy"` — same reason as in item 1's test above: this call bypasses
+        // `CodexAdapter`, so it must pin the mode itself, and under codex-cli 0.151.0's
+        // default, `"paginated"`, the rollout below is never written at all.
+        let started = try await rpc.request(
+            "thread/start", ["cwd": cwd.path, "historyMode": "legacy"]
+        )
         let thread = try XCTUnwrap(started["thread"] as? [String: Any])
         let id = try XCTUnwrap(thread["id"] as? String)
         let rollout = URL(fileURLWithPath: try XCTUnwrap(thread["path"] as? String))
-        // Naming commits the thread. An unnamed one cannot be resumed at all — see
-        // `testThreadStartAloneDoesNotPersistButNamingCommits` above.
+        // Naming commits the thread under `"legacy"`. An unnamed one cannot be resumed at
+        // all — see `testThreadStartAloneDoesNotPersistButNamingCommits` above.
         _ = try await rpc.request("thread/name/set", ["threadId": id, "name": "rollout vocabulary"])
         // Our own app-server holds an exclusive writer lock on the thread it just created.
         // codex-cli 0.148.0 refuses `thread/resume` — and the interactive `codex resume <id>`
@@ -445,7 +464,15 @@ final class CodexIntegrationTests: XCTestCase {
         let creatorRPC = CodexRPC(transport: creator)
         try await CodexProcessTransport.verifyHandshake(creatorRPC)
 
-        let adapter = CodexAdapter(rpc: creatorRPC)
+        // `historyMode: "legacy"` set by hand, matching what `SessionStore.startCodex` sets
+        // from the probed codex version in production. This test deliberately bypasses
+        // `SessionStore` — it needs two independent app-server connections to the same
+        // thread, which `SessionStore` has no path for — so a directly-constructed
+        // `CodexAdapter` does not get the mode for free the way a real tab does. Without
+        // this, `prepare` sends no `historyMode`, codex-cli 0.151.0 defaults to `paginated`,
+        // no rollout is ever written, and `prepare`'s own post-naming guard throws
+        // `AgentLaunchError.prepareFailed` before this test ever reaches `thread/resume`.
+        let adapter = CodexAdapter(rpc: creatorRPC, historyMode: "legacy")
         let session = Session(title: "writer-lock probe", workingDirectory: cwd.path)
         let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
         let id = binding.conversationID.uuidString.lowercased()
@@ -512,9 +539,9 @@ final class CodexIntegrationTests: XCTestCase {
         }
     }
 
-    /// Reads codex's own state store directly — the ground truth the whole commit rule is
-    /// about — rather than asking codex about itself, which would only prove the app-server's
-    /// in-memory view agrees with itself.
+    /// Reads codex's own state store directly — the ground truth the whole commit rule
+    /// (under `historyMode: "legacy"`) is about — rather than asking codex about itself,
+    /// which would only prove the app-server's in-memory view agrees with itself.
     ///
     /// A non-zero `sqlite3` exit — a missing db, a renamed `state_6.sqlite`, an absent
     /// `threads` table on some future codex — throws rather than reading as "no row found":

@@ -1,4 +1,5 @@
 import XCTest
+import FleetKit
 @testable import FlightDeck
 
 /// An index that answers instantly and records what it was asked, so the model's
@@ -57,7 +58,7 @@ final class SearchModelTests: XCTestCase {
     func testTranscriptResultsArriveAfterTheDebounce() async throws {
         index.hits = [TranscriptHit(
             rowID: 1, conversationID: "c1", projectPath: "/w/fd", conversationName: "mobile-ui",
-            snippet: "don't fire a \u{2}rename\u{3}", timestamp: Date(timeIntervalSince1970: 1)
+            snippet: "don't fire a \u{2}rename\u{3}", timestamp: Date(timeIntervalSince1970: 1), offset: 0
         )]
 
         model.query = "rename"
@@ -85,7 +86,7 @@ final class SearchModelTests: XCTestCase {
     func testLateTranscriptResultsDoNotMoveTheSelection() async throws {
         index.hits = [TranscriptHit(
             rowID: 1, conversationID: "c1", projectPath: "/w/fd", conversationName: "mobile-ui",
-            snippet: "x", timestamp: Date(timeIntervalSince1970: 1)
+            snippet: "x", timestamp: Date(timeIntervalSince1970: 1), offset: 0
         )]
         model.query = "nme"                   // fuzzy-matches two of the three names
         model.moveSelection(by: 1)
@@ -137,7 +138,7 @@ final class SearchModelTests: XCTestCase {
     func testChangingTheQueryDropsAPreviousQuerysSnippet() async throws {
         index.hits = [TranscriptHit(
             rowID: 1, conversationID: "c1", projectPath: "/w/fd", conversationName: "mobile-ui",
-            snippet: "x", timestamp: Date(timeIntervalSince1970: 1)
+            snippet: "x", timestamp: Date(timeIntervalSince1970: 1), offset: 0
         )]
         model.query = "rename"
         try await Task.sleep(for: SearchModel.transcriptDebounce * 3)
