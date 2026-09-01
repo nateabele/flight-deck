@@ -138,12 +138,14 @@ struct CodexAdapter: AgentAdapter {
     ///
     /// `thread/start` does not persist anything: no `threads` row, no rollout file, even
     /// with the app-server left alive. `thread/name/set` — issued to the same app-server
-    /// process — commits it. Skip the name and `codex resume <id>` dies with
-    /// `ERROR: No saved session found with ID …`, which is a tab that can never launch.
-    /// Naming costs nothing anyway: the tab already has the title we want to set. The
-    /// archive/unarchive round trip that follows releases the writer lock `thread/start`
-    /// took out — see the comment at that call below for why it exists and must come
-    /// after naming, not before.
+    /// process — commits it. This is the `legacy` history contract, which `historyMode`
+    /// (task 2) pins on codex builds new enough to accept it; see the guard below for what
+    /// changes under `paginated`, codex-cli 0.151.0's new default. Skip the name and `codex
+    /// resume <id>` dies with `ERROR: No saved session found with ID …`, which is a tab that
+    /// can never launch. Naming costs nothing anyway: the tab already has the title we want
+    /// to set. The archive/unarchive round trip that follows releases the writer lock
+    /// `thread/start` took out — see the comment at that call below for why it exists and
+    /// must come after naming, not before.
     func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
         let params = threadOptions(options).asThreadStartParams(
             cwd: session.transcriptDirectory,
@@ -156,18 +158,20 @@ struct CodexAdapter: AgentAdapter {
               let id = UUID(uuidString: raw)
         else { throw CodexRPCError.malformed("thread/start returned no usable thread id") }
 
-        // Commit. A failure here must propagate: a bound-but-uncommitted thread is worse
-        // than no tab, because it looks fine until the terminal reports it cannot resume.
+        // Commit — under the `legacy` history contract this call is pinned to; see the
+        // guard below for `paginated`. A failure here must propagate: a bound-but-uncommitted
+        // thread is worse than no tab, because it looks fine until the terminal reports it
+        // cannot resume.
         //
         // Cross-agent audit (spec rule: no failure or recovery path may rename a
         // conversation): codex is compliant. `prepare` is reached only from a user action
         // (`newSession`) or from `rebind`'s thread-gone recovery branch below — and in both
         // cases this `thread/name/set` names a BRAND-NEW thread, not the user's real one;
-        // codex simply cannot persist a thread without naming it. So on the recovery path the
-        // user's real conversation is never renamed — it is gone, and a fresh, separately
-        // named thread takes its place. One residual asymmetry versus claude: claude's
-        // recovery path (the `AgentAdapter.rebind` default) writes no name at all, while
-        // codex's writes `session.title` onto the new thread.
+        // under `legacy` history, codex simply cannot persist a thread without naming it. So
+        // on the recovery path the user's real conversation is never renamed — it is gone,
+        // and a fresh, separately named thread takes its place. One residual asymmetry
+        // versus claude: claude's recovery path (the `AgentAdapter.rebind` default) writes
+        // no name at all, while codex's writes `session.title` onto the new thread.
         _ = try await rpc.request("thread/name/set", ["threadId": raw, "name": session.title])
 
         // Confirm the rollout `thread["path"]` names actually exists, RIGHT HERE and nowhere
@@ -211,6 +215,8 @@ struct CodexAdapter: AgentAdapter {
         // Release the writer lock `thread/start` just took, or `codex resume <id>` — what
         // `launchCommand` spawns next, in its own pty — refuses on codex-cli 0.148.0 with
         // `thread/resume failed: thread <id> already has an active writer (code -32600)`.
+        // Re-verified on 0.151.0: a second connection resuming an unarchived thread still
+        // gets the same refusal, so this release is still required under `legacy` history.
         // This app-server is the one long-lived process that created the thread, and it
         // cannot simply be stopped: a thread belongs to the process that created it, and
         // this same process is also what renames it and reads its status later.

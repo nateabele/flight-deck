@@ -456,6 +456,21 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
 
 ### Worth doing
 
+- **codex-cli 0.151.0 flipped the default thread-history contract from `legacy` to
+  `paginated`, and Flight Deck now pins `legacy` explicitly** (`historyMode: "legacy"` on
+  `thread/start`, gated by `CodexVersionProbe.supportsHistoryMode`'s 0.151.0 threshold, plus
+  `capabilities.experimentalApi` at `initialize` — without it codex refuses the param). This
+  keeps the `thread/start` does-not-persist / `thread/name/set` commits invariant the rest of
+  the adapter relies on (see the doc comments in
+  `Sources/FlightDeck/Agents/Codex/CodexAdapter.swift` and `SessionStore.swift`). But `legacy`
+  is **deprecated upstream** — codex ships a `migrate-rollouts` command to move users off
+  it — so this pin will need revisiting once `legacy` support is actually removed, at which
+  point the adapter has to speak `paginated` for real (a rollout is not written until a turn
+  is taken, so the commit-on-name invariant this whole area depends on goes away). Also
+  untested: codex-cli 0.149.x–0.150.x, which sit below the `supportsHistoryMode` threshold
+  and so receive no `historyMode` pin at all — if `paginated` was already default there, the
+  same failure this fix addresses would reproduce, and `AgentLaunchError.prepareFailed`'s
+  diagnostic (task 3) is what should report it rather than an opaque `-32600`.
 - **`SessionStore.newSession` returns a `Session` it did not create** when the project's claude
   account no longer resolves. The refusal is real — nothing is filed, no surface exists, and
   `launchFailureReporter` tells the user — but the return value is an unfiled draft, because
