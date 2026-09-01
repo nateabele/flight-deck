@@ -12,6 +12,8 @@ public enum TimelineAnchor: Equatable, Sendable {
     case before(Int)
     /// Whatever has been appended since this offset. What a screen already open asks for.
     case after(Int)
+    /// The records either side of this offset. What opening a search hit asks for.
+    case around(Int)
 
     /// The wire spelling. A table rather than a derivation, for the same reason
     /// `FleetEventTag` is one: a case rename must not silently become a protocol break.
@@ -20,13 +22,14 @@ public enum TimelineAnchor: Equatable, Sendable {
         case .latest: return "latest"
         case .before: return "before"
         case .after: return "after"
+        case .around: return "around"
         }
     }
 
     var cursor: Int? {
         switch self {
         case .latest: return nil
-        case .before(let cursor), .after(let cursor): return cursor
+        case .before(let cursor), .after(let cursor), .around(let cursor): return cursor
         }
     }
 
@@ -57,6 +60,7 @@ public enum TimelineAnchor: Equatable, Sendable {
         case ("latest", _): self = .latest
         case ("before", let cursor?): self = .before(cursor)
         case ("after", let cursor?): self = .after(cursor)
+        case ("around", let cursor?): self = .around(cursor)
         default: return nil
         }
     }
@@ -162,12 +166,35 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// and its addresses are true only on the day it was drawn.
     case macEndpoints
 
-    enum CodingKeys: String, CodingKey { case op, session, anchor, cursor, limit, project }
+    /// The whole catalogue of conversations the Mac's index knows a name for, plus every
+    /// live tab's recency. Answered with `WireConversationCatalogue` — see its doc comment
+    /// for why recency rides this reply rather than `WireSession`.
+    case conversations
+
+    /// Search `query` over transcript content. `limit` is clamped to `SearchLimits.maxHits`
+    /// by the reader rather than refused here, the same contract `timeline`'s `limit` keeps.
+    case search(query: String, limit: Int)
+
+    /// Resume conversation `conversationID` — from project `projectPath` — into a new tab.
+    ///
+    /// The project path travels alongside the id rather than being looked up from it: the
+    /// conversation may be one the phone learned about from `WireConversationCatalogue` and
+    /// the Mac may since have removed that project, and a path handed back is what lets the
+    /// Mac decide whether to open it under an existing project or refuse.
+    case openConversation(conversationID: String, projectPath: String)
+
+    enum CodingKeys: String, CodingKey {
+        case op, session, anchor, cursor, limit, project
+        case query, conversationID, projectPath
+    }
 
     private enum Op: String, Codable {
         case timeline = "timeline.page"
         case newSessionOptions = "session.newOptions"
         case macEndpoints = "mac.endpoints"
+        case conversations = "search.conversations"
+        case search = "search.query"
+        case openConversation = "search.open"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -186,6 +213,16 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             try c.encode(project, forKey: .project)
         case .macEndpoints:
             try c.encode(Op.macEndpoints, forKey: .op)
+        case .conversations:
+            try c.encode(Op.conversations, forKey: .op)
+        case .search(let query, let limit):
+            try c.encode(Op.search, forKey: .op)
+            try c.encode(query, forKey: .query)
+            try c.encode(limit, forKey: .limit)
+        case .openConversation(let conversationID, let projectPath):
+            try c.encode(Op.openConversation, forKey: .op)
+            try c.encode(conversationID, forKey: .conversationID)
+            try c.encode(projectPath, forKey: .projectPath)
         }
     }
 
@@ -214,6 +251,18 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             self = .newSessionOptions(project: try c.decode(UUID.self, forKey: .project))
         case .macEndpoints:
             self = .macEndpoints
+        case .conversations:
+            self = .conversations
+        case .search:
+            self = .search(
+                query: try c.decode(String.self, forKey: .query),
+                limit: try c.decode(Int.self, forKey: .limit)
+            )
+        case .openConversation:
+            self = .openConversation(
+                conversationID: try c.decode(String.self, forKey: .conversationID),
+                projectPath: try c.decode(String.self, forKey: .projectPath)
+            )
         }
     }
 }
@@ -250,5 +299,18 @@ public enum FleetRequestError: Error, Equatable, Sendable {
     /// injection is resolving — try again in a moment), and `unanswerable` (a shape this Mac
     /// will not drive; see `PromptQuestion.unanswerable`). `unsupported_agent` and
     /// `unknown_session` keep the meanings `FleetCommand.prompt` gave them.
+    ///
+    /// Phone search adds `unknown_conversation` (no such id, from `.openConversation`) and
+    /// `launch_failed`: the conversation is real, but `SessionStore.openConversation`'s own
+    /// launch refused it — a dangling or relocated account, the same two states
+    /// `launchAccount`'s doc comment documents. Kept distinct from `unknown_conversation` on
+    /// purpose, so a phone can tell "no such conversation" from "found it, could not open it"
+    /// rather than folding both into one dead end.
+    ///
+    /// Also `index_unavailable`, from `.search` and `.conversations`: `store.searchIndex` was
+    /// nil — `AppDelegate`'s `try? SQLiteSearchIndex(at:)` can leave it that way for the life
+    /// of the process — or the read itself threw. Refused rather than answered with an empty
+    /// hit list or catalogue, which would tell a phone "No Results" or "no history", a claim
+    /// about the corpus §9 of the spec forbids making from a position of not knowing.
     case server(code: String)
 }

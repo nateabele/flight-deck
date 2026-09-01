@@ -15,7 +15,7 @@ import UIKit
 /// simulator — see `scripts/test-ios.sh`.
 @MainActor
 @Observable
-final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting {
+final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, PresenceReporting, TranscriptSearching {
     private(set) var mac: PairedMac?
     private(set) var fleet = FleetSnapshot.empty
     private(set) var state = FleetConnector.State.idle
@@ -302,6 +302,28 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         }
     }
 
+    /// Every historical conversation the Mac's index knows a name for, plus every live tab's
+    /// recency — what `PhoneSearchCandidates.build` turns into the name half of search. `nil`
+    /// until the first reply, exactly like `newSessionOptions`'s per-project entries: absent
+    /// and empty are different states, and a phone that has not yet asked must not render as
+    /// though it asked and found nothing.
+    private(set) var conversationCatalogue: WireConversationCatalogue?
+
+    /// Ask for the whole conversation catalogue.
+    ///
+    /// Called when the fleet list appears, on reconnect, and on returning to the foreground —
+    /// see `connect()`'s `onFleet` closure, which is every one of those moments at once. That
+    /// single placement is deliberate, the same reasoning `refreshNewSessionOptions` gives:
+    /// the catalogue is a request's answer, not fleet state, so nothing pushes it when it goes
+    /// stale — the only moment the phone can learn about it is the moment someone looks.
+    func refreshConversations() {
+        guard let connector else { return }
+        connector.requestConversations { [weak self] result in
+            guard let self, case .success(let catalogue) = result else { return }
+            self.conversationCatalogue = catalogue
+        }
+    }
+
     /// The model behind one session screen, made once and kept.
     ///
     /// **Cached because the alternative is a screen that empties itself.** A
@@ -377,6 +399,37 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         connector.send(command, then: completion)
     }
 
+    /// Search transcript content for `query`. Forwarded rather than absorbed, exactly as
+    /// `timelinePage` is: the connector answers **exactly once**, including with
+    /// `.disconnected` when nothing is connected or the socket dies mid-search, and a layer
+    /// here that could swallow that would leave `SessionSearchModel` waiting on a footer that
+    /// never arrives.
+    ///
+    /// `limit` is clamped with `SearchLimits.maxHits` here rather than trusted from the
+    /// caller — the same ceiling the Mac itself clamps to (`FleetService`'s `.search` handler),
+    /// so a phone-side bug that asked for more could not cost the Mac an unbounded query.
+    func searchTranscripts(
+        query: String, limit: Int,
+        then completion: @escaping (Result<WireSearchHits, FleetRequestError>) -> Void
+    ) {
+        guard let connector else { return completion(.failure(.disconnected)) }
+        connector.requestSearch(query: query, limit: min(limit, SearchLimits.maxHits), then: completion)
+    }
+
+    /// Resume a closed conversation, or select it if it is already open. Forwarded rather
+    /// than absorbed, exactly as `searchTranscripts` is: the connector answers **exactly
+    /// once**, including with `.disconnected`, and a layer here that could swallow that would
+    /// leave a tapped search result spinning forever with nothing pushed.
+    func requestOpenConversation(
+        conversationID: String, projectPath: String,
+        then completion: @escaping (Result<UUID, FleetRequestError>) -> Void
+    ) {
+        guard let connector else { return completion(.failure(.disconnected)) }
+        connector.requestOpenConversation(
+            conversationID: conversationID, projectPath: projectPath, then: completion
+        )
+    }
+
     func reconnect() {
         connect()
     }
@@ -413,6 +466,10 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                 // rows until the next connect and falls back to the default row. That is the
                 // supported state, not a gap: it is also what an older Mac produces forever.
                 self?.refreshNewSessionOptions()
+                // Same reasoning, same placement: the catalogue is a request's answer, not
+                // fleet state (see `conversationCatalogue`'s doc comment), so this is the only
+                // hook it gets.
+                self?.refreshConversations()
             }
         }
         // Routed to the tab's own model rather than held here: the outbox belongs to the

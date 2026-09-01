@@ -594,6 +594,28 @@ final class SessionTimelineScreenTests: XCTestCase {
         XCTAssertNil(SessionTimelineScreen.elapsedText(since: "not-a-date"))
     }
 
+    // MARK: A search jump's fading highlight
+
+    /// The ordinary case: the timer fires for the row it was armed for, and nothing else has
+    /// happened since — the highlight it owns is cleared.
+    func testTheFadeTimerClearsTheHighlightItOwns() {
+        XCTAssertNil(SessionTimelineScreen.fadedHighlight(current: "1090#0", target: "1090#0"))
+    }
+
+    /// **The regression this exists for.** A second search jump lands while the first row's
+    /// fade timer is still running: `current` is now the SECOND jump's row, but the timer
+    /// firing is still the FIRST jump's — `target` names the row it was armed for, not
+    /// whatever `highlightedID` has since become. Were the equality check dropped in favour of
+    /// clearing unconditionally, the second jump's highlight would go dark under a timer that
+    /// was never its own.
+    func testAFadeTimerForAnEarlierJumpDoesNotClearTheHighlightALaterJumpInstalled() {
+        XCTAssertEqual(
+            SessionTimelineScreen.fadedHighlight(current: "1400#0", target: "1090#0"),
+            "1400#0",
+            "the later jump's own highlight is untouched by an earlier timer"
+        )
+    }
+
     /// Two calls in flight, each answered after the other one was issued, with the results
     /// arriving in the opposite order to the calls. `items[0]`'s output is the LAST row and
     /// `items[1]`'s is the first result in the list, so an implementation that took position

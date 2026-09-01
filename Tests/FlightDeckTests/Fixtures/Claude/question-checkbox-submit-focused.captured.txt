@@ -1,0 +1,26 @@
+ ▐▛███▛█   Claude Code v2.1.251                                                                                                         
+▝▜██████▀  Opus 5 (1M context) · Claude Max                                                                                             
+  ▝▝ ▝▝    /…/-Users-nate-Projects-Protos-n-Tools-flight-deck/020c217b-d41c-4d19-9f72-efe84f546ebb/scratchpad/capture-workspace         
+                                                                                                                                        
+                                                                                                                                        
+❯ Use the AskUserQuestion tool, with multiSelect set to true on the question, to ask me which snacks I would want on a long flight.     
+  Offer four options, each with a short description. Do nothing else, just ask.                                                         
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Snacks  ✔ Submit  →                                                                                                                
+                                                                                                                                        
+Which snacks would you want on a long flight?                                                                                           
+                                                                                                                                        
+  1. [✔] Trail mix                                                                                                                      
+  Nuts, seeds, and dried fruit — filling, no crumbs, easy to graze on for hours.                                                        
+  2. [ ] Dark chocolate                                                                                                                 
+  Small squares that keep well and don't melt into a mess in a seat pocket.                                                             
+  3. [ ] Beef jerky                                                                                                                     
+  High-protein and shelf-stable, holds you over between meal services.                                                                  
+  4. [ ] Pretzels or crackers                                                                                                           
+  Light, salty, and gentle on the stomach at altitude.                                                                                  
+  5. [ ] Type something                                                                                                                 
+❯    Submit                                                                                                                             
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  6. Chat about this                                                                                                                    
+                                                                                                                                        
+Enter to select · ↑/↓ to navigate · ctrl+g to edit in Cursor · Esc to cancel

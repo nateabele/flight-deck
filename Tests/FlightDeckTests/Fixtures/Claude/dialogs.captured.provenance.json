@@ -18,7 +18,11 @@
     "question-two-answered.captured.txt",
     "question-two-review.captured.txt",
     "question-two.captured.jsonl",
-    "question-single-247.captured.txt"
+    "question-single-247.captured.txt",
+    "question-checkbox.captured.txt",
+    "question-checkbox-toggled.captured.txt",
+    "question-checkbox-submit-focused.captured.txt",
+    "question-set-with-checkbox.captured.txt"
   ],
   "isVerbatimCapturedOutput": true,
   "claudeVersion": "2.1.241 (Claude Code)",
@@ -42,7 +46,11 @@
     "question-two-answered.captured.txt": "6d6dea379543babb2101368162164de9579e077a144474e53589d4df06a61b32",
     "question-two-review.captured.txt": "4370621dc96266e9b098924a6308cbd3f1c373af8120784d657ff78ad5621392",
     "question-two.captured.jsonl": "8cd8e0a9353810fdeaafb514e437b933af7c0e8c3b65ee745af80048ef397db5",
-    "question-single-247.captured.txt": "caf4cfc3a91d00461222961a04840d4814cc181e1539085bf50800d3c3a5a382"
+    "question-single-247.captured.txt": "caf4cfc3a91d00461222961a04840d4814cc181e1539085bf50800d3c3a5a382",
+    "question-checkbox.captured.txt": "0c76c48a9b7d17e6a1a76d4cae1ed47e3d5dff285ae48254dd43a472771b9fb0",
+    "question-checkbox-toggled.captured.txt": "6b05efd5de19f4bf334efe6ab8850f02810e3c4d6a06d76ea95a7be714eeb512",
+    "question-checkbox-submit-focused.captured.txt": "7ff4ca6839d2893e3b7937c142516c94ff542ab0efe87a338c49cb797e928a94",
+    "question-set-with-checkbox.captured.txt": "029779dd0be2cae6ff6d3fd2ba14cdce85004f4f6bc4dda8bed0849104411c02"
   },
   "whatTheseAre": [
     "The terminal SCREEN a blocked claude session shows, as plain text on a fixed-width grid \u2014",
@@ -285,6 +293,16 @@
         "question-single-247.captured.txt"
       ],
       "note": "Captured by driving a real claude in a 136x34 pty and rendering the stream through a terminal emulator, so these are what a terminal DISPLAYS \u2014 the same thing TextInjecting.readViewport hands the driver. question-single-247 exists to compare against question-single (2.1.241): the option grammar and the 'Enter to select - up/down to navigate' hint are unchanged, so the shipping single-question driver's assumptions still hold at 2.1.247."
+    },
+    "2.1.251 (Claude Code)": {
+      "capturedOn": "2026-08-29",
+      "files": [
+        "question-checkbox.captured.txt",
+        "question-checkbox-toggled.captured.txt",
+        "question-checkbox-submit-focused.captured.txt",
+        "question-set-with-checkbox.captured.txt"
+      ],
+      "note": "The checkbox (multiSelect) interaction, captured by driving a real claude. Enter TOGGLES a checkbox: it neither submits nor advances, and the cursor stays on the row. For n transcript options the rows are 0..n-1 options, n 'Type something', n+1 the unnumbered action row, n+2 'Chat about this' - so the action row is always n+1 from the top, verified by -submit-focused (Down x5 with n=4 lands on it). That row reads 'Submit' for a lone question and 'Next' inside a set, which is what -set-with-checkbox records and what a driver written from the lone case alone would get wrong. NOTE: the hint line is NOT a stable discriminator - it gained 'ctrl+g to edit in Cursor' on this machine, so it varies with installed tooling. Discriminate on the checkbox glyphs and the tab strip."
     }
   }
 }
