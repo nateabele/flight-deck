@@ -4875,6 +4875,33 @@ final class SessionStore: ObservableObject {
             self?.apply(event, to: tabID)
         }
         attachments[tabID] = TabAttachment(instance: instance, binding: binding, token: token)
+
+        // **An agent with no registry has no resting state unless one is seeded here, and
+        // without it the tab reads as "no agent running" forever.**
+        //
+        // A claude tab gets its activity from the status registry, which reports whether the
+        // agent is there at all. Codex has none — `hasStatusRegistry` is false — so its only
+        // source of activity is `CodexRolloutWatcher`, which speaks exclusively in TURN
+        // BOUNDARIES: `task_started` -> busy, `task_complete` -> idle. A codex tab that has
+        // never taken a turn therefore never produces a single activity event, and
+        // `statuses[tabID]` stays nil for the life of the tab.
+        //
+        // That nil is not cosmetic. `submitPrompt` refuses a statusless tab with
+        // `notRunning`, and the phone renders it as "There's no agent running in this tab
+        // right now" — on a tab where `codex resume` is sitting at its composer, ready. It is
+        // why typing into codex from the phone stayed broken after the channel existed.
+        //
+        // `.idle` is the honest claim: attachment happens only once the thread is bound and
+        // the tab has been told to run `codex resume`, so there IS an agent and it is not
+        // mid-turn. Anything the agent actually does overwrites this within milliseconds —
+        // the first `task_started` makes it busy — so this only ever describes the gap
+        // before the first turn, which is exactly the gap that was unrepresentable.
+        //
+        // Seeded only for agents with no registry: a claude tab must keep getting this from
+        // the registry, whose absence genuinely means the agent is gone.
+        if !instance.agent.hasStatusRegistry, statuses[tabID] == nil {
+            applyActivity(.idle, to: tabID)
+        }
     }
 
     /// Drops a tab's subscription. The runtime tears its source down when the last

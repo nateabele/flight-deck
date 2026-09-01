@@ -116,14 +116,14 @@ final class PhonePromptLoopbackTests: XCTestCase {
     }
 
     /// The other half, in the same store, so a Mac that refused EVERYTHING could not pass
-    /// both tests. It still names the code, because the codes send the reader in opposite
-    /// directions — but the code changed, and that IS the feature: a freshly created codex
-    /// tab reports no registry status, so it is `not_running` ("not right now") rather than
-    /// `unsupported_agent` ("never on this tab"). Codex has a text channel now.
+    /// both tests — except the answer inverted, and that IS the feature: a codex tab is now
+    /// ACCEPTED over the wire, where it used to be refused `unsupported_agent`.
     ///
-    /// The spy assertion is unchanged and is the half that guards the user's words: whatever
-    /// the code, nothing may be typed into a screen that is not codex's composer.
-    func testACodexTabWithNoStatusIsRefusedWithNotRunning() async throws {
+    /// The spy assertion is unchanged and is the half that guards the user's words: accepted
+    /// over the wire is not the same as typed, and nothing may be typed into a screen that is
+    /// not codex's composer. This spy renders `❯` with no codex status line — what a codex tab
+    /// fallen back to a bare shell looks like.
+    func testACodexTabIsAcceptedOverTheWireButNotTypedIntoANonCodexScreen() async throws {
         let (harness, spy, client, _) = try await standUp()
         guard case .success(let codexID) =
                 await harness.store.createSession(agent: .codex, in: tmp.path) else {
@@ -135,11 +135,11 @@ final class PhonePromptLoopbackTests: XCTestCase {
         let (landed, frame) = answer(client, cid: cid)
         await fulfillment(of: [landed], timeout: 10)
 
-        guard case .err(cid, let code) = try XCTUnwrap(frame()) else {
-            return XCTFail("a codex tab with no status must be refused, not acked")
+        guard case .ack(cid) = try XCTUnwrap(frame()) else {
+            return XCTFail("a codex tab has a text channel now and must be accepted, not refused")
         }
-        XCTAssertEqual(code, "not_running")
-        XCTAssertTrue(spy.events.isEmpty)
+        XCTAssertTrue(spy.events.isEmpty,
+                      "a `❯` screen with no codex status line is not codex's composer")
     }
 
     func testAControlCharacterIsRefusedWithItsOwnCode() async throws {
