@@ -568,22 +568,30 @@ final class SessionTimelineScreenTests: XCTestCase {
         XCTAssertEqual(second.feedback, "")
     }
 
-    /// The banner's subtitle, read off the gate's own `startedAt`. Both timestamps are
-    /// hours (or days) in the past rather than minutes, so a slow test run cannot tip the
-    /// answer over a unit boundary between building the fixture and asserting on it.
+    /// The banner's subtitle, read off the gate's own `startedAt`.
+    ///
+    /// **Deliberately mid-bucket, not on the boundary.** These offsets were exactly 7200s and
+    /// exactly 172800s, and both were flaky for the reason the old comment said they were not:
+    /// `RelativeDateTimeFormatter` truncates, so the microseconds that pass between building
+    /// the fixture and formatting it turn exactly-two-hours into 1.9999 hours and print
+    /// "1 hour ago". It passed on an idle machine and failed on a loaded one — caught on a
+    /// merge run at 09:47, having passed twice earlier the same morning. Half an hour and half
+    /// a day of slack put the answer in the middle of its bucket, where no plausible delay can
+    /// reach an edge.
     func testElapsedTextReadsAFractionalTimestamp() {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let startedAt = formatter.string(from: Date().addingTimeInterval(-7200))
+        let startedAt = formatter.string(from: Date().addingTimeInterval(-9000))
 
         XCTAssertEqual(SessionTimelineScreen.elapsedText(since: startedAt), "Started 2 hours ago")
     }
 
-    /// The fallback formatter, for a timestamp with no fractional seconds at all.
+    /// The fallback formatter, for a timestamp with no fractional seconds at all. Mid-bucket
+    /// for the reason above.
     func testElapsedTextFallsBackToAWholeSecondTimestamp() {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
-        let startedAt = formatter.string(from: Date().addingTimeInterval(-172_800))
+        let startedAt = formatter.string(from: Date().addingTimeInterval(-216_000))
 
         XCTAssertEqual(SessionTimelineScreen.elapsedText(since: startedAt), "Started 2 days ago")
     }
