@@ -109,17 +109,19 @@ final class PhonePromptDispatchTests: XCTestCase {
         XCTAssertEqual(spy.sent, ["ship it"])
     }
 
-    /// **Both assertions, and the second is the one that matters.** A refusal that returned
-    /// the right enum and still typed the text would pass an enum-only test — which is exactly
-    /// the failure `SessionStore.rename`'s comment records for codex.
+    /// **A freshly created codex tab must report an activity, and this is the regression that
+    /// kept phone typing broken after the channel already existed.**
     ///
-    /// Codex has a text channel now, so the capability gate passes and the *status* gate is
-    /// what answers: this tab has no registry status, so `notRunning` — "not right now",
-    /// which is the honest answer for a codex tab whose agent is not reporting.
+    /// Codex has no status registry, so its only source of activity is the rollout watcher,
+    /// which speaks only in turn boundaries. A tab that has never taken a turn produced no
+    /// event at all, `statuses[tab]` stayed nil, and `submitPrompt` answered `notRunning` —
+    /// surfaced on the phone as "There's no agent running in this tab right now", on a tab
+    /// where `codex resume` was sitting at its composer. `startWatching` now seeds `.idle`
+    /// for registry-less agents, which is what this pins.
     ///
-    /// The spy assertion is the half that still matters and is unchanged: whatever the enum
-    /// says, nothing may be pasted into a screen that is not codex's composer.
-    func testACodexTabWithNoStatusIsToldNotRunningAndNothingIsPasted() async throws {
+    /// The spy assertion is the half that guards the user's words and is unchanged: nothing
+    /// may be pasted into a screen that is not codex's composer.
+    func testAFreshlyCreatedCodexTabReportsIdleRatherThanNoAgent() async throws {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
@@ -138,9 +140,12 @@ final class PhonePromptDispatchTests: XCTestCase {
         }
         spy.events.removeAll()
 
-        XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .notRunning)
+        XCTAssertEqual(store.status(for: id)?.activity, .idle,
+                       "a bound codex tab IS an agent that is running and not mid-turn")
+        XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .queued,
+                       "never `notRunning` — that sent the phone 'no agent running in this tab'")
         XCTAssertTrue(spy.events.isEmpty,
-                      "a tab with no reported status has nothing to type into, whatever its agent")
+                      "accepted, but a `❯` screen with no codex status line is not codex's composer")
     }
 
     /// **The fixture where the paste is actually reachable — and the one that now proves the
