@@ -530,8 +530,12 @@ final class AccountLaunchTests: XCTestCase {
         let transport = CodexProcessTransport(home: URL(fileURLWithPath: "/tmp/codex-work"))
         let environment = try XCTUnwrap(transport.spawnEnvironment)
         XCTAssertEqual(environment["CODEX_HOME"], "/tmp/codex-work")
-        XCTAssertNil(CodexProcessTransport().spawnEnvironment,
-                     "no home means inherit, exactly as before")
+        // No longer nil without a home: every spawn needs the login-shell PATH repair, or an
+        // app-server started from a Finder-launched app cannot exec codex at all. What a
+        // home-less transport must still not carry is a CODEX_HOME.
+        let homeless = try XCTUnwrap(CodexProcessTransport().spawnEnvironment)
+        XCTAssertNil(homeless["CODEX_HOME"],
+                     "no home means no CODEX_HOME override, whatever else the environment carries")
     }
 
     // MARK: - Fixtures
