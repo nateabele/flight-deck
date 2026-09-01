@@ -126,6 +126,14 @@ final class SessionStore: ObservableObject {
     /// The process table the orphan sweep reads. Settable so tests can script it.
     var processInspector: ProcessInspecting = ProcessTree()
 
+    /// Injected for the reason `processInspector` is — see `DisplayInspecting`. Defaults to
+    /// `AlwaysDrawableDisplay()`, NOT the real `DisplayState()` (see that type's doc comment
+    /// for why the default is inverted from `processInspector`'s). `convenience init(ghostty:...)`
+    /// below assigns the real probe immediately after `self.init(provider:...)`, before
+    /// `seedInitialSession()` can run; that injection is what makes `canCreateTerminal` mean
+    /// anything outside tests — removing it silently disables the guard.
+    var display: DisplayInspecting = AlwaysDrawableDisplay()
+
     /// This run's own identity, stamped into every snapshot as `owner`. Computed once: it
     /// cannot change for the life of the process, and `persist()` runs on every mutation —
     /// every tab switch, every rename, every registry tick.
@@ -852,6 +860,83 @@ final class SessionStore: ObservableObject {
     /// panel on screen. See `AgentLaunchFailureReporting`.
     var launchFailureReporter: AgentLaunchFailureReporting = NSAlertAgentLaunchFailureReporter()
 
+    /// Whether a terminal can be created *right now*. A precondition, deliberately: creating
+    /// and then discovering the failure is what produced tabs that looked real on the sidebar
+    /// and on the phone while being permanently inert.
+    ///
+    /// **Gated on having a provider, and that is load-bearing, not a convenience.** The
+    /// drawable is a requirement of *libghostty*, which is only involved when a provider
+    /// exists. Nearly every fixture in the suite builds a store with `provider: nil`, and those
+    /// fixtures create sessions and assert on them; without this clause a suite run that
+    /// happened to start while the display was asleep would refuse every one of them and fail
+    /// wholesale — the same shape of self-inflicted breakage that the `Session?` return type
+    /// caused in the superseded plan, arriving by a different route.
+    var canCreateTerminal: Bool { provider == nil || display.isDrawable }
+
+    /// Whether this tab's terminal actually forked a shell.
+    ///
+    /// **Not `surfaces[id] != nil`.** `makeSurfaceView` returns a non-optional and its init is
+    /// non-failable, so a surface always exists — including for a tab that is inert because the
+    /// display was asleep when it was born. The registry is what knows a child was forked, and
+    /// it discriminates every observed case correctly.
+    func hasShellProcess(for id: UUID) -> Bool { processRegistry.process(for: id) != nil }
+
+    /// The outcome of trying to give an existing tab a working terminal. Distinguished rather
+    /// than boolean because each sends the reader somewhere different, and plan 2 maps them
+    /// onto HTTP statuses.
+    enum RespawnOutcome: Equatable {
+        case respawned, alreadyRunning, displayAsleep, unknownSession, failed
+    }
+
+    /// Replaces an inert terminal with a working one.
+    ///
+    /// *Replaces*, not fills: the broken tab already holds a `SurfaceView`: it just has no
+    /// drawable behind it and never forked a child. Discarding it is safe precisely because
+    /// there is no child process to orphan.
+    @discardableResult
+    func respawnSurface(for id: UUID) -> RespawnOutcome {
+        guard let at = locate(id) else { return .unknownSession }
+        let session = repos[at.repo].sessions[at.session]
+        // Ordered before the display check deliberately: "it is already working" is true and
+        // more useful regardless of what the display is doing.
+        guard !hasShellProcess(for: id) else { return .alreadyRunning }
+        guard canCreateTerminal else {
+            launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
+            return .displayAsleep
+        }
+
+        // Drop the inert view and its (absent) registry record before rebuilding, so the new
+        // fork is contested by exactly one claimant.
+        surfaces[id] = nil
+        _ = processRegistry.forget(id)
+
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
+        config.workingDirectory = session.transcriptDirectory
+        // Adapter and options resolved exactly as `newSession(in:)` does: `launchCommand` takes
+        // a NON-optional `AgentOptions`, and the adapter comes from the tab's instance, not
+        // from `AgentID`.
+        let adapter = adapter(for: instance(for: session))
+        let options = options(for: session.agent, project: session.workingDirectory)
+        config.initialInput = adapter.launchCommand(adapter.binding(for: session), session, options)
+        let orphaned = accountIsMissing(for: session)
+        config.environmentVariables =
+            preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
+
+        guard let surface = processRegistry.record(for: id, around: { provider?.makeSurface(config) })
+        else {
+            launchFailureReporter.report(.terminalUnavailable(displayAsleep: false))
+            return .failed
+        }
+        surfaces[id] = surface
+        // Same ordering and reason as `insertSession`: before anything is typed, so the child
+        // is not left talking to libghostty's placeholder 800x600 grid.
+        report(terminalSize, to: id)
+        provider?.tick()
+        if !orphaned { startWatching(tabID: id) }
+        return .respawned
+    }
+
     /// Test seam for frontmost-ness; production reads `NSApplication`.
     var appIsActive: () -> Bool = { NSApplication.shared.isActive }
 
@@ -1091,6 +1176,15 @@ final class SessionStore: ObservableObject {
             persistence: persistence,
             preferences: preferences
         )
+        // Load-bearing: `display` defaults to the always-permissive `AlwaysDrawableDisplay()`
+        // so tests that construct a `SessionStore` don't have to stub it (see that type's doc
+        // comment). This line is what makes `canCreateTerminal` real outside tests, and it
+        // must run before `seedInitialSession()` below — that call creates a tab through this
+        // same store, so assigning the real probe any later (e.g. after this initializer
+        // returns, as `FlightDeckApp` used to) would let a cold launch seed an inert tab
+        // while the display is asleep, reintroducing the original bug. Removing this line
+        // silently disables the guard for every session this store ever creates.
+        display = DisplayState()
         self.notifier = notifier
         // Both assigned before `startStatusWatching()` below, which reads them when it builds
         // each account's watcher — setting either afterwards would leave those watchers
@@ -1147,6 +1241,13 @@ final class SessionStore: ObservableObject {
     /// unchanged.
     @discardableResult
     func newSession(in url: URL, at index: Int? = nil, account explicit: UUID? = nil) -> Session {
+        guard canCreateTerminal else {
+            launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
+            // Un-inserted, exactly as the `launchAccount` failure path below does. The return
+            // type stays non-optional on purpose: making it `Session?` broke 340 tests, because
+            // nearly every fixture in the suite builds a store with a nil-returning provider.
+            return Session(title: "", workingDirectory: url.path)
+        }
         // Resolved before the title is minted, so a refusal does not burn a session number.
         let account: AgentAccount?
         switch launchAccount(for: .claude, project: url.path, choosing: explicit) {
@@ -1191,6 +1292,17 @@ final class SessionStore: ObservableObject {
     func createSession(
         agent: AgentID, in directory: String, at index: Int? = nil, account explicit: UUID? = nil
     ) async -> Result<UUID, AgentLaunchError> {
+        // Before anything else, covering both branches below: the codex branch calls
+        // `addSession` directly rather than routing through `newSession(in:)`, so it does not
+        // get that guard for free, and a codex tab created with the display asleep would
+        // otherwise be born just as inert as the bug this exists to fix. Reported through
+        // `launchFailureReporter` exactly as the neighbouring `launchAccount` failure branch
+        // does, just below.
+        guard canCreateTerminal else {
+            let error = AgentLaunchError.terminalUnavailable(displayAsleep: true)
+            launchFailureReporter.report(error)
+            return .failure(error)
+        }
         let url = URL(fileURLWithPath: directory, isDirectory: true)
         // FIRST, before a draft exists and before anything codex-shaped is touched. A login
         // that cannot launch must not mint a title, must not spawn an app-server to negotiate
@@ -1298,6 +1410,13 @@ final class SessionStore: ObservableObject {
     func openSignInSession(
         for account: AgentAccount, in directory: String, using invocation: LoginInvocation
     ) -> Session {
+        guard canCreateTerminal else {
+            launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
+            // Same un-inserted-`Session` convention as `newSession(in:)`: this bypasses
+            // `createSession` entirely (see the doc comment above), so it needs its own guard
+            // rather than inheriting one — R1 missed this path.
+            return Session(title: "", workingDirectory: directory)
+        }
         let session = Session(
             title: nextSessionTitle(), workingDirectory: directory, agent: account.agent,
             accountID: account.id
@@ -2627,21 +2746,35 @@ final class SessionStore: ObservableObject {
     /// a tab resumed into a collapsed project would come back invisible, since
     /// `SidebarRow.rows` renders only the header for a collapsed repo. Same reasoning as
     /// `reopenLastClosed`, which un-collapses for the same reason.
+    ///
+    /// Returns the tab actually opened or selected, `nil` on every path that filed nothing —
+    /// `@discardableResult` because ⌘K Return and the search panel's `onSelect` have never
+    /// needed the answer, they read `selectedSessionID` same as before. `FleetService` is the
+    /// first caller that does: a phone's `search.open` request has no `selectedSessionID` to
+    /// fall back on, and reading that property after a call that took the failure branch below
+    /// would hand back whatever tab happened to be selected beforehand — a confident answer
+    /// naming the wrong conversation. Returning the id directly makes that failure mode
+    /// unrepresentable rather than relying on every caller to remember the gap.
+    @discardableResult
     func openConversation(
         _ activation: SearchActivation.Activation,
         directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
         resolveTranscriptDirectory: (String, UUID) -> String = {
             SessionStore.resolvedTranscriptDirectory(projectPath: $0, conversationID: $1)
         }
-    ) {
+    ) -> UUID? {
         let projectPath: String
         let conversationID: String
         let title: String
 
         switch activation {
         case .select(let id):
+            // `selectSession` is itself a no-op when `id` names no live tab — checked again
+            // here rather than trusted, so a stale id (a tab closed between `plan` and this
+            // call) reports `nil` instead of an id that does not resolve to anything.
+            guard locate(id) != nil else { return nil }
             selectSession(id)
-            return
+            return id
         case .resume(let conversation, let project, let resultTitle, _):
             projectPath = project; conversationID = conversation; title = resultTitle
         case .addProjectThenResume(let project, let conversation, let resultTitle, _):
@@ -2652,17 +2785,25 @@ final class SessionStore: ObservableObject {
         // A project row, or a result whose conversation id we never learned: there is
         // nothing to resume, so land on the project instead of launching a nameless agent.
         guard let pinned = UUID(uuidString: conversationID) else {
+            let opened: UUID?
             if let existing = indexOfRepo(for: url) {
                 if repos[existing].isCollapsed {
                     repos[existing].isCollapsed = false
                     emit(.projectCollapsed(id: repos[existing].id, isCollapsed: false))
                 }
-                if let first = repos[existing].sessions.first { selectedSessionID = first.id }
+                opened = repos[existing].sessions.first?.id
+                if let opened { selectedSessionID = opened }
             } else {
-                addProject(at: url)
+                let created = addProject(at: url)
+                // `addProject` delegates to `newSession(in:)`, whose own `launchAccount`
+                // failure branch returns a `Session` that was never filed — see that
+                // method's doc comment. Checked here rather than trusted, for the same
+                // reason `.select` re-checks `locate`: a fabricated id is worse than `nil`.
+                opened = repos.flatMap(\.sessions).contains { $0.id == created.id }
+                    ? created.id : nil
             }
             persist()
-            return
+            return opened
         }
 
         // Enforced here too, not only inside `SearchActivation.plan`: a caller that fills
@@ -2672,7 +2813,7 @@ final class SessionStore: ObservableObject {
         // processes appending one transcript and colliding in claude's pid-keyed registry.
         if let live = repos.flatMap(\.sessions).first(where: { $0.pinnedConversationID == pinned }) {
             selectSession(live.id)
-            return
+            return live.id
         }
 
         // Resolved before anything is filed, the same as `newSession`: nil would mean "the
@@ -2683,7 +2824,7 @@ final class SessionStore: ObservableObject {
         case .success(let resolved): account = resolved
         case .failure(let error):
             launchFailureReporter.report(error)
-            return
+            return nil
         }
 
         let session = Session(
@@ -2714,6 +2855,7 @@ final class SessionStore: ObservableObject {
                 await self?.resumeRestoredCodex([session.id])
             }
         }
+        return session.id
     }
     func closeProject(_ id: Repo.ID) {
         guard let index = repos.firstIndex(where: { $0.id == id }) else { return }
@@ -3441,6 +3583,25 @@ final class SessionStore: ObservableObject {
                 injector: injector, id: id, token: token
             )
 
+        case .answers(let selections):
+            // The set path. Everything it needs is checked before a key moves: the answers fit
+            // the questions the TRANSCRIPT holds, each label matches this Mac's own copy, and
+            // the plan exists at all.
+            guard case .question(_, let questions) = open else { return .unreadableScreen }
+            guard selections.count == questions.count else { return .unreadableScreen }
+            for (question, chosen) in zip(questions, selections) {
+                for selection in chosen {
+                    guard question.options.indices.contains(selection.index),
+                          question.options[selection.index].label == selection.label
+                    else { return .unreadableScreen }
+                }
+            }
+            guard let plan = AnswerPlan.plan(
+                for: questions, answers: selections.map { $0.map(\.index) }
+            ) else { return .unanswerable }
+            return drive(plan, questions: questions, driver: driver,
+                         injector: injector, id: id, token: token)
+
         case .option(let index, let label):
             // `option` indexes an `AskUserQuestion`'s own options, so a permission dialog —
             // which has no options this build can enumerate — has no list for the index to
@@ -3455,6 +3616,12 @@ final class SessionStore: ObservableObject {
                 return .unanswerable
             }
             guard question.isAnswerable else { return .unanswerable }
+            // **`.option` is a commit, and a checkbox row is not.** On a multiSelect question
+            // Enter TOGGLES and stays put (`question-checkbox-toggled.captured.txt`), so this
+            // path would tick one box, believe it had answered, and leave the dialog open. A
+            // checkbox question is answered through the whole-set payload, which knows to
+            // press the action row afterwards.
+            guard !question.multiSelect else { return .unanswerable }
             // The client's label against the Mac's own copy, before any screen is consulted.
             // A phone naming words this transcript never carried is a reader looking at
             // something else, and its index is not to be trusted either.
@@ -3500,6 +3667,91 @@ final class SessionStore: ObservableObject {
     /// A failed confirmation sends nothing further and reports nothing: the answer is already
     /// `dispatched` to the client, the cursor has moved, and a moved cursor is recoverable by
     /// the person at the keyboard in a way a wrong Return is not.
+    /// Answer a whole set of questions in one drive.
+    ///
+    /// **The plan is built first and the screen only ever CHECKS it.** `AnswerPlan` knows
+    /// every move and press from the transcript and the reader's choices, so this walks a
+    /// fixed program: before each press it confirms the cursor is where the plan says it
+    /// starts and that the row about to be pressed reads what the plan says it should. A
+    /// disagreement aborts — no further key is sent — rather than being counted from.
+    ///
+    /// **Nothing is committed until the last step.** claude shows a review screen listing every
+    /// question with its chosen answer and asks "Ready to submit your answers?", so an abort
+    /// part-way leaves a dialog the human can still finish or cancel. That is why this can be
+    /// driven at all: the failure mode is "stopped early", never "half an answer sent".
+    private func drive(
+        _ plan: AnswerPlan,
+        questions: [PromptQuestion],
+        driver: any AgentDialogDriver,
+        injector: TextInjecting,
+        id: UUID,
+        token: UUID
+    ) -> AnswerDispatch {
+        remember(answered: token, for: id)
+        injecting.insert(id)
+        perform(plan.steps, at: 0, questions: questions, driver: driver, injector: injector, id: id)
+        return .dispatched
+    }
+
+    /// One step, then the next from inside its settle. Recursive rather than a loop because
+    /// each press repaints asynchronously and the next step's checks are only meaningful once
+    /// the repaint has landed — the same 120ms seam `injectionSettle` is everywhere else.
+    private func perform(
+        _ steps: [AnswerPlan.Step],
+        at index: Int,
+        questions: [PromptQuestion],
+        driver: any AgentDialogDriver,
+        injector: TextInjecting,
+        id: UUID
+    ) {
+        guard index < steps.count else { injecting.remove(id); return }
+        let step = steps[index]
+
+        guard let screen = injector.readViewport(),
+              driver.focusedRow(inViewport: screen) == step.from,
+              Self.rowLabel(for: step, questions: questions).map({
+                  driver.row(step.to, reads: $0, inViewport: screen)
+              }) == true
+        else { injecting.remove(id); return }
+
+        let distance = step.to - step.from
+        for _ in 0..<abs(distance) {
+            if distance > 0 { injector.sendArrowDown() } else { injector.sendArrowUp() }
+        }
+
+        injectionSettle { [weak self] in
+            guard let self else { return }
+            // Re-read after the move: the row under the cursor must STILL be the one the plan
+            // named. This is the check that survives a human touching the terminal mid-drive.
+            guard let landed = injector.readViewport(),
+                  driver.focusedRow(inViewport: landed) == step.to
+            else { self.injecting.remove(id); return }
+            injector.sendReturn()
+            self.injectionSettle { [weak self] in
+                self?.perform(steps, at: index + 1, questions: questions,
+                              driver: driver, injector: injector, id: id)
+            }
+        }
+    }
+
+    /// What the row a step is about must read, or `nil` when the plan is inconsistent with the
+    /// questions — which `AnswerPlan.plan` already refuses to produce, so it is a belt on a
+    /// brace.
+    static func rowLabel(
+        for step: AnswerPlan.Step, questions: [PromptQuestion]
+    ) -> String? {
+        switch step.purpose {
+        case .option(let question, let option):
+            guard questions.indices.contains(question),
+                  questions[question].options.indices.contains(option) else { return nil }
+            return questions[question].options[option].label
+        case .action(_, let isLast):
+            return AnswerPlan.actionLabel(isLast: isLast)
+        case .submit:
+            return AnswerPlan.submitAnswersLabel
+        }
+    }
+
     private func drive(
         from current: Int,
         to target: Int,
@@ -3753,6 +4005,25 @@ final class SessionStore: ObservableObject {
             return url.path
         }
         return repos.first?.url.path
+    }
+
+    /// The project the window title names — the display name of the repo the ACTIVE session
+    /// is filed under, and nil when nothing is selected.
+    ///
+    /// Deliberately not `currentProjectPath`'s walk. That property answers "where would a new
+    /// tab land", so it falls back to the last active project and then to the first repo,
+    /// which is right for ⌘N and wrong for a title: with the selection cleared the detail pane
+    /// shows the "No Session" empty state, and a title still naming a project would be telling
+    /// the user they are somewhere they are not.
+    ///
+    /// Reads the repo's `displayName` rather than deriving a name from the session's
+    /// `workingDirectory`. The two disagree once an agent follows itself into a worktree —
+    /// `transcriptDirectory` moves to `<project>/.claude/worktrees/<name>`, and a title built
+    /// from a path would start naming the worktree instead of the project the sidebar files
+    /// the tab under.
+    var currentProjectName: String? {
+        guard let activeID = selectedSessionID, let at = locate(activeID) else { return nil }
+        return repos[at.repo].displayName
     }
 
     func status(for id: UUID) -> SessionStatus? { statuses[id] }

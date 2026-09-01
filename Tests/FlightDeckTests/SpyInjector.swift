@@ -60,7 +60,11 @@ final class SpyInjector: TextInjecting {
     private var pendingRelabel: [String]?
 
     func sendText(_ text: String) { events.append(.text(text)) }
-    func sendReturn() { events.append(.ret) }
+    func sendReturn() {
+        events.append(.ret)
+        // A press replaces the screen when one is scripted, which is what the real dialog does.
+        if !scriptedScreens.isEmpty { screenIndex += 1 }
+    }
 
     func sendKillLine() {
         events.append(.killLine)
@@ -97,6 +101,23 @@ final class SpyInjector: TextInjecting {
     /// `pendingRelabel`.
     func relabelAfterArrows(_ labels: [String]) { pendingRelabel = labels }
 
+    /// Screens handed back in turn, advancing on each Return.
+    ///
+    /// Models the one thing a multi-step drive depends on and nothing else can fake: pressing
+    /// Enter REPLACES the screen — question one becomes question two, and the last answer
+    /// becomes the review. Fed the verbatim captures, so a driver is checked against what
+    /// claude draws rather than against a rendering this file invented.
+    var scriptedScreens: [String] = []
+    private var screenIndex = 0
+
+    func script(_ screens: [String]) {
+        scriptedScreens = screens
+        screenIndex = 0
+    }
+
+    /// How many screens the drive got through — one per Return it actually sent.
+    var screensAdvanced: Int { screenIndex }
+
     /// Whichever is up: the dialog if `showOptions` put one there, the input bar otherwise.
     ///
     /// The dialog rendering is copied off a real screen rather than invented — the marker at
@@ -106,6 +127,9 @@ final class SpyInjector: TextInjecting {
     /// parser that reads both is tested against the captures and not against this.
     func readViewport() -> String? {
         guard viewportIsReadable else { return nil }
+        if !scriptedScreens.isEmpty {
+            return screenIndex < scriptedScreens.count ? scriptedScreens[screenIndex] : nil
+        }
         if let viewportOverride { return viewportOverride }
         let rule = String(repeating: "─", count: 92)
         guard options.isEmpty else {

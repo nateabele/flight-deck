@@ -370,6 +370,41 @@ final class TerminalSmokeTests: XCTestCase {
         XCTAssertTrue(field.waitForNonExistence(timeout: 2), "Esc did not close the overlay")
     }
 
+    /// The window title names the active project: `Flight Deck - <project>`.
+    ///
+    /// `WindowTitleTests` pins the rule and the store property it reads, but neither can see
+    /// the only step that can silently do nothing — SwiftUI resolving `RootView`'s
+    /// `navigationTitle` onto the real `NSWindow`. A `navigationTitle` placed on the wrong
+    /// view of a `NavigationSplitView` renders nowhere on macOS and reports no error; the
+    /// window simply keeps the `Window(WindowTitle.base, id:)` scene title. So the assertion
+    /// is deliberately for the *decorated* title and not `hasPrefix("Flight Deck")`, which
+    /// that failure would satisfy.
+    ///
+    /// The expected project is the seeded slate's: `-FlightDeckResetState YES` makes
+    /// `SessionStore.seedInitialSession` open the home directory, so the name is the home
+    /// folder's. Looked up rather than written out, so this does not pin the suite to one
+    /// developer's machine.
+    ///
+    /// Looked up through `getpwuid`, NOT `NSHomeDirectory()`. The UI-test runner is a
+    /// container-backed process, so its `NSHomeDirectory()` is
+    /// `~/Library/Containers/<runner>/Data` and the name comes back as "Data" — while the
+    /// app under test is unsandboxed and seeds from the real `/Users/<user>`. The passwd
+    /// entry is the same for both.
+    ///
+    /// Its own function rather than a group inside `testTheWholeShellInOneSession`, for that
+    /// suite's stated rule: it depends on none of the shared sequence, so it should not be
+    /// unrunnable whenever an unrelated earlier group fails.
+    func testTheWindowTitleNamesTheActiveProject() {
+        let app = launchIsolated()
+        let home = getpwuid(getuid()).map { String(cString: $0.pointee.pw_dir) } ?? NSHomeDirectory()
+        let project = URL(fileURLWithPath: home, isDirectory: true).lastPathComponent
+
+        XCTAssertEqual(
+            app.windows.firstMatch.title, "Flight Deck - \(project)",
+            "the window title does not name the active project"
+        )
+    }
+
     func testTheWholeShellInOneSession() {
         let app = launchIsolated()
         let window = app.windows.firstMatch

@@ -186,7 +186,7 @@ final class ClaudeOpenCallTests: XCTestCase {
     /// A captured multi-select call. It is still found — the card has to be able to say why
     /// it cannot be answered from here, which it can only do if the derivation returns it
     /// rather than swallowing it.
-    func testACapturedMultiSelectCallIsFoundAndSaysWhyItCannotBeAnswered() throws {
+    func testACapturedMultiSelectCallIsCarriedAsAShapeRatherThanARefusal() throws {
         let record = try XCTUnwrap(
             TimelineFixtureTests.lines("question-multi.captured", in: "Claude").first,
             "question-multi.captured.jsonl is empty"
@@ -196,7 +196,10 @@ final class ClaudeOpenCallTests: XCTestCase {
         else { return XCTFail("expected a question") }
         // The payload is the whole set now; these cases each assert one question.
         let question = questions[0]
-        XCTAssertEqual(question.unanswerable, PromptQuestion.multiSelectReason)
-        XCTAssertFalse(question.isAnswerable)
+        // It used to arrive as "answer it on your Mac". The driver toggles checkboxes now, so
+        // multiSelect says HOW to answer the question rather than that you cannot.
+        XCTAssertTrue(question.multiSelect)
+        XCTAssertNil(question.unanswerable)
+        XCTAssertTrue(question.isAnswerable)
     }
 }

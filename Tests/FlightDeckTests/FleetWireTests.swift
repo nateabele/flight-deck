@@ -96,4 +96,51 @@ final class FleetWireTests: XCTestCase {
         }
         XCTAssertFalse(hasBackgroundWork)
     }
+
+    // MARK: Search's wire types
+
+    func testWireConversationSurvivesARoundTrip() throws {
+        let conversation = WireConversation(id: "abc", name: "n", projectPath: "/proj")
+        XCTAssertEqual(try roundTrip(conversation), conversation)
+    }
+
+    /// `sessionActivity` is keyed by `uuidString`, not `UUID`, specifically so it encodes as
+    /// a JSON object rather than `Codable`'s synthesized flat array for a non-`String`-keyed
+    /// dictionary — see `WireConversationCatalogue`'s doc comment. Asserted on the bytes,
+    /// since a round trip alone cannot see which shape shipped.
+    func testWireConversationCatalogueEncodesSessionActivityAsAnObjectKeyedByUUIDString() throws {
+        let id = UUID()
+        let catalogue = WireConversationCatalogue(
+            conversations: [WireConversation(id: "abc", name: "n", projectPath: "/proj")],
+            sessionActivity: [id.uuidString: Date(timeIntervalSince1970: 1_000)]
+        )
+        XCTAssertEqual(try roundTrip(catalogue), catalogue)
+
+        let data = try JSONEncoder().encode(catalogue)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let activity = try XCTUnwrap(json["sessionActivity"] as? [String: Any])
+        XCTAssertNotNil(activity[id.uuidString], "keyed by uuidString, not nested as an array")
+    }
+
+    func testWireSearchHitsSurvivesARoundTripWithAndWithoutIndexingProgress() throws {
+        let hit = TranscriptHit(
+            rowID: 7, conversationID: "abc", projectPath: "/proj", conversationName: "n",
+            snippet: "s", timestamp: Date(timeIntervalSince1970: 1), offset: 4_096
+        )
+        let withoutProgress = WireSearchHits(hits: [hit], indexing: nil)
+        XCTAssertEqual(try roundTrip(withoutProgress), withoutProgress)
+
+        let withProgress = WireSearchHits(
+            hits: [hit], indexing: WireIndexingProgress(done: 3, total: 10)
+        )
+        XCTAssertEqual(try roundTrip(withProgress), withProgress)
+    }
+
+    func testTranscriptHitSurvivesARoundTrip() throws {
+        let hit = TranscriptHit(
+            rowID: 42, conversationID: "abc", projectPath: "/proj", conversationName: "n",
+            snippet: "s", timestamp: Date(timeIntervalSince1970: 5), offset: 8_192
+        )
+        XCTAssertEqual(try roundTrip(hit), hit)
+    }
 }

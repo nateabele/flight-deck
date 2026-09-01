@@ -39,19 +39,41 @@ public enum SnapshotReason: String, Codable, Equatable, Sendable {
 /// `option` is for `AskUserQuestion` only, where the Mac has the real labels from its own
 /// transcript. `label` is a **cross-check**, never an instruction: the Mac matches its own copy
 /// on screen and refuses when the client's disagrees. Nothing a client sends becomes a keystroke.
+/// One chosen option, named twice.
+///
+/// The label travels beside the index for the reason `PromptAnswer.option` carries one: the
+/// Mac checks the label against its own copy of the transcript before it counts a single
+/// arrow, so a phone naming words this transcript never held is refused rather than trusted.
+public struct AnswerSelection: Codable, Equatable, Sendable {
+    public let index: Int
+    public let label: String
+
+    public init(index: Int, label: String) {
+        self.index = index
+        self.label = label
+    }
+}
+
 public enum PromptAnswer: Codable, Equatable, Sendable {
     case option(index: Int, label: String)
+    /// Every answer to a set of questions, at once: one array per question, in the order the
+    /// questions are asked, each entry naming an option by index AND by label.
+    ///
+    /// **One command, not one per question.** A set is answered as a unit — the Mac walks the
+    /// whole dialog and commits at the end — so a half-collected set can never be started, and
+    /// one token still means one answer for the duplicate guard.
+    case answers([[AnswerSelection]])
     /// A permission dialog's first row.
     case allow
     /// Escape.
     case deny
 
-    enum CodingKeys: String, CodingKey { case answer, index, label }
+    enum CodingKeys: String, CodingKey { case answer, index, label, answers }
 
     /// Internal and `CaseIterable` where `FleetCommand.Op` is `private`, because this is the
     /// wire vocabulary the security property is stated in: `AnswerFrameCodingTests` counts
     /// these cases, and that assertion is the only thing that fails when a fourth is added.
-    enum Tag: String, Codable, CaseIterable { case option, allow, deny }
+    enum Tag: String, Codable, CaseIterable { case option, allow, deny, answers }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -64,6 +86,9 @@ public enum PromptAnswer: Codable, Equatable, Sendable {
             try c.encode(Tag.allow, forKey: .answer)
         case .deny:
             try c.encode(Tag.deny, forKey: .answer)
+        case .answers(let selections):
+            try c.encode(Tag.answers, forKey: .answer)
+            try c.encode(selections, forKey: .answers)
         }
     }
 
@@ -81,6 +106,8 @@ public enum PromptAnswer: Codable, Equatable, Sendable {
             )
         case .allow: self = .allow
         case .deny: self = .deny
+        case .answers:
+            self = .answers(try c.decode([[AnswerSelection]].self, forKey: .answers))
         }
     }
 }
@@ -402,12 +429,25 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     /// `newSessionOptions` are: a list of addresses is not fleet state, and giving it a `seq`
     /// would move the resume point a client hands back on its next `hello`.
     case macEndpoints(cid: Int, [String])
+    /// The reply to `FleetRequest.conversations`. Unsequenced for the same reason `page` is:
+    /// see `WireConversationCatalogue`'s doc comment for why its recency field lives here
+    /// and not on `FleetSnapshot`.
+    case conversations(cid: Int, WireConversationCatalogue)
+    /// The reply to `FleetRequest.search`. Unsequenced for the same reason `page` is: a set
+    /// of search results is not fleet state.
+    case searchHits(cid: Int, WireSearchHits)
+    /// The reply to `FleetRequest.openConversation`: the tab it was opened into.
+    case session(cid: Int, UUID)
 
     enum CodingKeys: String, CodingKey {
         case t, seq, fleet, reason, cid, code, page, options, endpoints
+        case conversations, hits, session
     }
 
-    private enum Tag: String, Codable { case snapshot, ack, err, page, options, endpoints }
+    /// Undotted, deliberately, and the newer three along with it — see the decoder below.
+    private enum Tag: String, Codable {
+        case snapshot, ack, err, page, options, endpoints, conversations, hits, session
+    }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -441,6 +481,18 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.endpoints, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(list, forKey: .endpoints)
+        case .conversations(let cid, let catalogue):
+            try c.encode(Tag.conversations, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(catalogue, forKey: .conversations)
+        case .searchHits(let cid, let hits):
+            try c.encode(Tag.hits, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(hits, forKey: .hits)
+        case .session(let cid, let session):
+            try c.encode(Tag.session, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(session, forKey: .session)
         }
     }
 
@@ -448,7 +500,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         // Try the frame's own tags first; anything else is an event's tag, which is why
         // the two namespaces must never collide. `FleetEventTag`'s values are all dotted
-        // and these six are not, which keeps that a property rather than a promise.
+        // and these nine are not, which keeps that a property rather than a promise.
         if let tag = try? c.decode(Tag.self, forKey: .t) {
             switch tag {
             case .snapshot:
@@ -472,6 +524,21 @@ public enum ServerFrame: Codable, Equatable, Sendable {
                 self = .macEndpoints(
                     cid: try c.decode(Int.self, forKey: .cid),
                     try c.decode([String].self, forKey: .endpoints)
+                )
+            case .conversations:
+                self = .conversations(
+                    cid: try c.decode(Int.self, forKey: .cid),
+                    try c.decode(WireConversationCatalogue.self, forKey: .conversations)
+                )
+            case .hits:
+                self = .searchHits(
+                    cid: try c.decode(Int.self, forKey: .cid),
+                    try c.decode(WireSearchHits.self, forKey: .hits)
+                )
+            case .session:
+                self = .session(
+                    cid: try c.decode(Int.self, forKey: .cid),
+                    try c.decode(UUID.self, forKey: .session)
                 )
             }
             return

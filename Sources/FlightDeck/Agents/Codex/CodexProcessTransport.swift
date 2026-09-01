@@ -19,6 +19,10 @@ enum AgentLaunchError: LocalizedError, Equatable {
     /// name: the fix is per-account, and "Claude's home is missing" tells a user with three
     /// claude logins nothing.
     case accountHomeMissing(String)
+    /// No terminal could be opened. `displayAsleep` is carried because it is the cause we have
+    /// actually observed and the only one with a physical fix — libghostty needs a drawable,
+    /// and a sleeping or inactive display is not one. See spec §1.1.
+    case terminalUnavailable(displayAsleep: Bool)
 
     var errorDescription: String? {
         switch self {
@@ -37,6 +41,11 @@ enum AgentLaunchError: LocalizedError, Equatable {
         case .accountHomeMissing(let account):
             "The home directory for the “\(account)” account is missing. "
             + "Relocate it in Preferences → Accounts, or choose another account for this project."
+        case .terminalUnavailable(let displayAsleep):
+            displayAsleep
+                ? "Flight Deck could not open a terminal because this Mac's display is asleep. "
+                  + "Wake it and try again."
+                : "Flight Deck could not open a terminal for this session."
         }
     }
 }

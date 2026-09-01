@@ -9,10 +9,7 @@ import XCTest
 /// `FleetService` is how they drift.
 @MainActor
 final class PhonePromptDispatchTests: XCTestCase {
-    private final class StubProvider: SurfaceProvider {
-        func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? { nil }
-        func tick() {}
-    }
+    // `StubProvider` lives in its own file now — see that file's doc comment.
 
     private struct SilentReporter: AgentLaunchFailureReporting {
         func report(_ error: AgentLaunchError) {}

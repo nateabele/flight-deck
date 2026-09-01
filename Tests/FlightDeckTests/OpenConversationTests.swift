@@ -176,7 +176,7 @@ final class OpenConversationTests: XCTestCase {
         store.launchFailureReporter = reporter
         let conversation = UUID()
 
-        store.openConversation(.resume(
+        let opened = store.openConversation(.resume(
             conversationID: conversation.uuidString, projectPath: projectA.path,
             title: "Chat", transcriptDirectory: projectA.path
         ), directoryExists: { _ in true })
@@ -184,6 +184,37 @@ final class OpenConversationTests: XCTestCase {
         XCTAssertTrue(store.repos.flatMap(\.sessions).isEmpty,
                       "a tab under the wrong login is worse than no tab")
         XCTAssertEqual(reporter.reported, [.accountMissing("Claude")])
+        XCTAssertNil(opened, "a refused launch must report that nothing opened, not a tab id")
+    }
+
+    /// The bug this return value exists to make unrepresentable: before it returned `UUID?`,
+    /// this method's only outward signal of success was `selectedSessionID`, which a refused
+    /// launch below leaves untouched — so a caller reading that property afterward, the way
+    /// `FleetService` used to, would see whatever tab was already selected and report a
+    /// confident success naming an unrelated conversation. Pre-selecting `unrelated` here is
+    /// what makes that failure mode visible: this test fails on the old `Void`-returning shape
+    /// (nothing to assert `XCTAssertNil` against) and would have falsely passed a version that
+    /// read `selectedSessionID` back, since that property still names `unrelated.id` on this path.
+    func testARefusedLaunchNeverReportsAPreviouslySelectedTabAsTheResult() {
+        let preferences = PreferencesStore(persistence: nil)
+        preferences.preferences.storedAccounts = []
+        preferences.preferences.storedProjectSettings = [
+            projectA.path: ProjectSettings(accounts: [.claude: UUID()])
+        ]
+        let store = makeStore(preferences: preferences)
+        store.launchFailureReporter = SpyReporter()
+        let unrelated = store.newSession(in: projectB)
+        store.selectSession(unrelated.id)
+        let conversation = UUID()
+
+        let opened = store.openConversation(.resume(
+            conversationID: conversation.uuidString, projectPath: projectA.path,
+            title: "Chat", transcriptDirectory: projectA.path
+        ), directoryExists: { _ in true })
+
+        XCTAssertNil(opened, "a refused launch must not be reported as the previously-selected tab")
+        XCTAssertEqual(store.selectedSessionID, unrelated.id,
+                       "selection is untouched by the refusal — exactly why reading it back is unsafe")
     }
 
     // MARK: - Item 4: the title
