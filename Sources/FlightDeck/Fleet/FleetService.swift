@@ -825,8 +825,10 @@ final class FleetService: ObservableObject {
             // the agent/account variant): `store.newSession`/`createSession` would otherwise
             // refuse silently — `newSession(inProject:)` still returns a non-nil `Session`, an
             // un-inserted one, so the phone would see an ordinary ack for a tab that was never
-            // created.
-            guard store.canCreateTerminal else {
+            // created. `ensureTerminalCreatable`, not `canCreateTerminal`: this is the phone's
+            // only creation command, so this is the one call that must attempt a wake first
+            // rather than just reading whether the display already happens to be drawable.
+            guard store.ensureTerminalCreatable() else {
                 return .err(cid: cid, code: "terminal_unavailable")
             }
             // Both nil is a plain `+` tap: the project's defaults, exactly as before this
