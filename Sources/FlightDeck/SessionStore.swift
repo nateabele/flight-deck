@@ -3221,6 +3221,13 @@ final class SessionStore: ObservableObject {
     /// `@discardableResult` because every existing caller is a local UI action that has
     /// already validated its own field; the Bool exists for the fleet command, which has to
     /// answer a phone that sent a title this agent cannot use.
+    /// Read with:
+    /// `log show --predicate 'subsystem == "dev.flightdeck.FlightDeck" AND category == "rename"' --last 30m`
+    static let renameLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
+        category: "rename"
+    )
+
     @discardableResult
     func rename(_ id: UUID, to newTitle: String) -> Bool {
         guard let at = locate(id),
@@ -3266,7 +3273,25 @@ final class SessionStore: ObservableObject {
             // Fire and forget: the sidebar already has the name, and a thread that refuses
             // the rename (or an app-server that is gone) must not block the user's edit or
             // pop an alert over a cosmetic failure.
-            Task { try? await adapter.rename(binding, to: name) }
+            //
+            // Fire-and-forget is NOT fire-and-say-nothing, and the difference is the whole
+            // reason this is logged. When the request never lands, codex keeps the old name;
+            // `CodexNameWatcher` then tails that name out of `session_index.jsonl` and pushes
+            // it back UP into the sidebar, so the user's rename appears to revert on its own
+            // and the working up-path is what disguises the broken down-path. Swallowing the
+            // error with a bare `try?` left no evidence anywhere — not a log line, not a
+            // failed test — which is why "renames don't reach codex" could only be reported
+            // as a symptom and never traced. Cosmetic enough not to alert, never so cosmetic
+            // that it should be invisible.
+            Task {
+                do {
+                    try await adapter.rename(binding, to: name)
+                } catch {
+                    Self.renameLogger.error(
+                        "codex rename failed for thread \(binding.conversationID.uuidString.lowercased(), privacy: .public): \(String(describing: error), privacy: .public)"
+                    )
+                }
+            }
         }
         // True means the name was ACCEPTED and the local title changed — not that the agent
         // has been told. The codex arm above is deliberately fire-and-forget and the claude
