@@ -161,7 +161,7 @@ file), asserted by `CodexSchemaConformanceTests`.
    requires declaring `capabilities.experimentalApi`: without it, `thread/start`'s
    `historyMode` param (item 1 above) is refused with
    `thread/start.historyMode requires experimentalApi capability`. See
-   `CodexHandshakeVerifier.verifyHandshake`.
+   `CodexProcessTransport.verifyHandshake`.
 5. **Notifications are connection-scoped** (§2).
 6. **`-32600` is also codex's "no such thread" answer** — so error *codes* cannot discriminate
    "gone" from "malformed". `CodexAdapter.isThreadGone` matches on the message plus an id echo.
