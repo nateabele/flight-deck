@@ -536,12 +536,61 @@ final class SessionTimelineModel {
     /// that defers to this end — see `OpenPromptIdentity`; a Mac too old to send the field
     /// still gets today's behaviour rather than a phone that shows no cards at all.
     func blocked(agent: String?, activity: String?, call: OpenPromptIdentity) -> OpenPrompt? {
-        guard let open = OpenPrompt.find(in: feed.items, agent: agent, activity: activity)
-        else { return nil }
+        let derived = OpenPrompt.find(in: feed.items, agent: agent, activity: activity)
+        let shown = Self.shown(derived: derived, call: call)
+        note(derived: derived, macSays: call, shown: shown)
+        return shown
+    }
+
+    /// The veto, factored out of `blocked` so that method reads as "derive, record, return".
+    /// Unchanged in behaviour: `.unreported` defers to this end, `.noPrompt` overrides it, and
+    /// a named call must match the one derived here.
+    private static func shown(derived: OpenPrompt?, call: OpenPromptIdentity) -> OpenPrompt? {
+        guard let derived else { return nil }
         switch call {
-        case .unreported: return open
+        case .unreported: return derived
         case .noPrompt: return nil
-        case .call(let id): return id == open.callID ? open : nil
+        case .call(let id): return id == derived.callID ? derived : nil
+        }
+    }
+
+    /// The last line `note` wrote, so an unchanged one is not written again.
+    ///
+    /// `@ObservationIgnored`, and that is load-bearing rather than tidiness: this is written
+    /// from inside a view update — see `note` — and an observed mutation there would invalidate
+    /// the very view being built.
+    @ObservationIgnored private var lastNotedPrompt: String?
+
+    /// One line per **change** in what this screen believes is open, and never one per call.
+    ///
+    /// `blocked(agent:activity:call:)` is read from a view body, so it runs on every render —
+    /// logging there directly would produce hundreds of identical lines and drown the fetch
+    /// that has to carry them. What is worth recording is the transition, and the transition is
+    /// the whole of the stale-card report: `derived` is what this phone found in the transcript
+    /// it holds, `macSays` is the call the Mac claims is open right now, and `shown` is which of
+    /// the two won. Side by side they say which end was behind — the same reading
+    /// `PromptLifecycleRecord.answer` was built to give on the Mac.
+    private func note(
+        derived: OpenPrompt?, macSays: OpenPromptIdentity, shown: OpenPrompt?
+    ) {
+        // Counts and ids only — never a question, a header or an option label. See `PhoneLog`.
+        let line = "derived=\(derived?.callID ?? "none") mac=\(Self.describe(macSays))"
+            + " shown=\(shown?.callID ?? "none")"
+        guard lastNotedPrompt != line else { return }
+        lastNotedPrompt = line
+        PhoneLog.prompt.notice(
+            "\("prompt session=\(self.sessionID.uuidString) " + line, privacy: .public)"
+        )
+    }
+
+    /// The three states of `WireSession.openPromptCall`, spelled out. `unreported` is the one
+    /// that matters most in a log: it is a Mac too old to name the open dialog, so this phone
+    /// is deciding on its own and the Mac's veto is not in play at all.
+    private static func describe(_ call: OpenPromptIdentity) -> String {
+        switch call {
+        case .unreported: return "unreported"
+        case .noPrompt: return "none"
+        case .call(let id): return id
         }
     }
 
@@ -564,6 +613,16 @@ final class SessionTimelineModel {
         let token = UUID()
         answerInFlight = token
         answerState = .sent(call: call)
+        // Which call this thumb came down on, and what shape of answer — never which option.
+        // The Mac writes the other half of this line (`PromptLifecycleRecord.answer`, with the
+        // call IT believed was open), and the pair is what says which end was wrong.
+        //
+        // Composed first, then logged as one interpolation, here and at every other call site
+        // in this file: `OSLogMessage` is not a `String` and cannot be concatenated, and one
+        // `notice` per fragment would split a record across lines in the file the Mac fetches.
+        let sent = "sent session=\(sessionID.uuidString) call=\(call)"
+            + " kind=\(Self.describe(answer))"
+        PhoneLog.answer.notice("\(sent, privacy: .public)")
 
         // Armed BEFORE the send, because the send can complete before it returns:
         // `FleetConnector.send(_:then:)` answers `.disconnected` synchronously by design, the
@@ -581,12 +640,38 @@ final class SessionTimelineModel {
             guard let self, self.claimAnswer(token) else { return }
             switch result {
             case .success:
+                PhoneLog.answer.notice("acked call=\(call, privacy: .public)")
                 // Stays `.sent`. What retires the card is the transcript — so pull it, for the
                 // same reason `send(_:)` does: the Mac emits no frame when a Return lands.
                 self.loadNewer()
             case .failure(let error):
+                // The refusal a person reads as "Your Mac has moved on from this". Logged with
+                // the Mac's own code rather than the copy shown on screen, because the code is
+                // what correlates with the Mac's side of the same second.
+                let refusal = "refused call=\(call) code=\(Self.describe(error))"
+                PhoneLog.answer.error("\(refusal, privacy: .public)")
                 self.answerState = .failed(call: call, Self.answerMessage(for: error))
             }
+        }
+    }
+
+    /// The shape of an answer, never its content: which of `PromptAnswer`'s cases went out,
+    /// and for a set, how many questions it covered. An option label is the user's own text
+    /// and does not cross the device boundary — see `PhoneLog`.
+    private static func describe(_ answer: PromptAnswer) -> String {
+        switch answer {
+        case .option: return "option"
+        case .answers(let selections): return "answers questions=\(selections.count)"
+        case .allow: return "allow"
+        case .deny: return "deny"
+        }
+    }
+
+    /// The Mac's own refusal code, or `disconnected` when there was no Mac to refuse.
+    private static func describe(_ error: FleetRequestError) -> String {
+        switch error {
+        case .disconnected: return "disconnected"
+        case .server(let code): return code
         }
     }
 

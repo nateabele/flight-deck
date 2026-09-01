@@ -752,6 +752,30 @@ final class FleetService: ObservableObject {
         set { prompts.lifecycleSink = newValue }
     }
 
+    /// Every phone attached right now, as `onHello` saw it.
+    ///
+    /// Exposed for `AnswerTrigger`'s `logs` op and for nothing else. A list rather than the
+    /// `attachedSlots` set already published above, because a log fetch needs what that set
+    /// throws away: the connection to address, the name to print beside the answer, and the
+    /// capabilities that decide whether this phone can be asked at all.
+    var attachedClients: [FleetAttachment] { server.attachments }
+
+    /// Ask one attached phone for its own log. See `PhoneRequest` for why the Mac may ask this
+    /// at all, and `FleetSocketServer.request` for what the completion promises: exactly one
+    /// answer, `.disconnected` when there is no such connection, `unsupported_peer` for a phone
+    /// that never claimed it could answer, and `timed_out` for one that simply did not.
+    ///
+    /// Nothing here writes and nothing enters `FleetSnapshot` — the same property every
+    /// request handler in `wireHandlers()` keeps, and the reason `ServerFrame.phoneRequest`
+    /// carries no `seq`: a diagnostic fetch is not fleet state, so there is nothing for
+    /// `FleetReplicator`'s drift check to guard.
+    func fetchPhoneLogs(
+        from client: UUID, seconds: Int, limit: Int,
+        then completion: @escaping (Result<WirePhoneLogs, FleetRequestError>) -> Void
+    ) {
+        server.request(.logs(seconds: seconds, limit: limit), of: client, then: completion)
+    }
+
     /// Convenience for the tests and for nothing else — production dials a discovered or
     /// remembered endpoint, never a hard-coded host.
     func loopbackEndpoint() throws -> NWEndpoint {

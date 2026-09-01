@@ -132,8 +132,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startAnswerTrigger(store: SessionStore) {
         guard answerTriggerSocket == nil, AnswerTrigger.isEnabled() else { return }
         let trigger = AnswerTrigger(store: store)
-        let socket = AnswerTriggerSocket(url: Self.answerTriggerURL()) { [weak trigger] line in
-            trigger?.handle(line) ?? #"{"ok":false,"error":"stopped"}"#
+        let socket = AnswerTriggerSocket(url: Self.answerTriggerURL()) { [weak trigger] line, reply in
+            guard let trigger else { return reply(#"{"ok":false,"error":"stopped"}"#) }
+            trigger.handle(line, then: reply)
         }
         do {
             try socket.start()

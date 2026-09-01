@@ -43,6 +43,32 @@ public final class FleetConnector: @unchecked Sendable {
     /// screen's outbox, which is not snapshot state, so folding it changes nothing and a
     /// client watching only `onFleet` would never learn its message was dropped.
     public var onEvent: ((FleetEvent) -> Void)?
+    /// Fires once per applied snapshot, with the sequence it lands on and why it arrived.
+    ///
+    /// Separate from `onFleet`, which fires on snapshots *and* on every folded event, so it
+    /// cannot tell a consumer which of the two it just saw. That distinction is the whole
+    /// reason this exists: the phone's diagnostic log needs the counterpart to the Mac's own
+    /// `resume lastSeq=… mode=…` line, and "I got a whole snapshot at seq N because my resume
+    /// point was too old" is a different fact from "I applied one more event".
+    ///
+    /// Nothing branches on it. A consumer that made a decision here would be deciding on a
+    /// signal `onFleet` already covers, one frame later.
+    public var onSnapshot: ((_ seq: Int, _ reason: SnapshotReason) -> Void)?
+    /// Answers a `PhoneRequest` the Mac asked of this phone, or `nil` when nothing is wired.
+    ///
+    /// **A closure the app supplies rather than something this class does**, because reading
+    /// the phone's own log needs `OSLogStore` — and FleetKit imports Foundation, Network,
+    /// Security and CryptoKit and nothing else, which is what the `FleetKitiOS` target exists
+    /// to enforce. So the frame handling lives here and the reading lives in
+    /// `FlightDeckMobile.PhoneLog`.
+    ///
+    /// `then` may be called on any queue and at any time; whatever it is handed is delivered
+    /// on `queue`. Unwired, the Mac is answered `unhandled` — a refusal it can print, rather
+    /// than a request that never comes back.
+    public var onPhoneRequest: (
+        (_ request: PhoneRequest,
+         _ then: @escaping (Result<WirePhoneLogs, PhoneRequestRefusal>) -> Void) -> Void
+    )?
     /// Backoff between races; the last value repeats. Settable so tests do not wait it out.
     public var retryDelays: [TimeInterval] = [1, 2, 5, 15, 30]
     /// How long a race may run before it is abandoned and retried. Well short of a TCP
@@ -539,9 +565,12 @@ public final class FleetConnector: @unchecked Sendable {
     /// frame. Do not add a receive-timeout that assumes a frame always follows `hello`.
     private func apply(_ frame: ServerFrame) {
         switch frame {
-        case .snapshot(let seq, let snapshot, _):
+        case .snapshot(let seq, let snapshot, let reason):
             fleet = snapshot
             adopt(seq)
+            // After `adopt`, so a handler that reads the connector's own resume point sees the
+            // one this snapshot just established rather than the one it replaced.
+            onSnapshot?(seq, reason)
             // No endpoint refresh here. It is fired from `accept()` the moment `.connected`
             // is reported, which covers a replayed resume as well as a snapshot — see the
             // comment there for why a snapshot is not every connect.
@@ -625,8 +654,46 @@ public final class FleetConnector: @unchecked Sendable {
             // Unsequenced, same reason.
             resolveSession(cid, with: .success(sessionID))
             return
+        case .phoneRequest(let cid, let request):
+            // The one frame on this socket the phone answers rather than applies. Unsequenced
+            // for the reason every reply above is: a diagnostic fetch is not fleet state, and
+            // reaching `advance(to:)` from here would let the Mac's own correlation id move
+            // this phone's resume point.
+            serve(request, cid: cid)
+            return
         }
         onFleet?(fleet)
+    }
+
+    /// Answers one `PhoneRequest`, on the connection it arrived on.
+    ///
+    /// The reply is hopped back onto `queue` and re-checked against `winner`, because
+    /// `onPhoneRequest` is free to answer from wherever it read: a phone that lost Wi-Fi mid
+    /// read would otherwise write a reply into a client this connector has already torn down,
+    /// or — worse — into whichever client happens to be the winner by then, on a `cid` from a
+    /// connection that no longer exists. The Mac's own `askDeadline` releases the caller in
+    /// that case; a misdirected reply would have it answering the wrong question instead.
+    private func serve(_ request: PhoneRequest, cid: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let onPhoneRequest else {
+            // Answered rather than ignored, and with the same code an unwired `onRequest` on
+            // the Mac produces: a caller whose fetch is dropped in silence waits out a
+            // deadline for a reply that was never coming.
+            winner?.answer(.refused(cid: cid, code: "unhandled"))
+            return
+        }
+        let client = winner
+        onPhoneRequest(request) { [weak self, weak client] result in
+            guard let self else { return }
+            self.queue.async {
+                guard let client, client === self.winner else { return }
+                switch result {
+                case .success(let logs): client.answer(.logs(cid: cid, logs))
+                case .failure(let refusal):
+                    client.answer(.refused(cid: cid, code: refusal.code))
+                }
+            }
+        }
     }
 
     /// A `.snapshot` sets `lastSeq` ABSOLUTELY, not just when it is higher.
