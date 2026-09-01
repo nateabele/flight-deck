@@ -248,7 +248,7 @@ final class SessionStore: ObservableObject {
     private final class CodexStack {
         let transport: CodexProcessTransport
         let rpc: CodexRPC
-        let adapter: CodexAdapter
+        var adapter: CodexAdapter
         let runtime: CodexRuntime
 
         /// `home` and `indexURL` are two views of one account and must agree: the app-server
@@ -384,7 +384,9 @@ final class SessionStore: ObservableObject {
     /// thread to codex's own storage, which is exactly what makes `codex resume <id>` work
     /// across processes — so nothing is lost, and the next codex session spawns a fresh
     /// server. Keeping it alive instead would leave a process running for the rest of the
-    /// run on the strength of a tab the user closed.
+    /// run on the strength of a tab the user closed. True under the `legacy` history
+    /// contract `CodexAdapter.historyMode` pins — see `prepare`'s doc comment for what
+    /// changes under `paginated`.
     ///
     /// Narrowed from "no codex tabs remain anywhere" to "no tabs remain on *this* account":
     /// the wider predicate would keep one login's app-server alive for the whole run because
@@ -395,8 +397,9 @@ final class SessionStore: ObservableObject {
         guard let stack = codexStacks[account] else { return }
         // A codex creation that has not inserted its tab yet is invisible to the check
         // below, and killing the app-server out from under it between `thread/start` and
-        // `thread/name/set` EVAPORATES the thread — naming is what commits it. So a tab
-        // closed mid-creation defers the teardown rather than skipping it: `createSession`
+        // `thread/name/set` EVAPORATES the thread — naming is what commits it, under the
+        // `legacy` history contract `CodexAdapter.historyMode` pins. So a tab closed
+        // mid-creation defers the teardown rather than skipping it: `createSession`
         // re-runs this on its way out. Per account, like everything else here: a creation on
         // one login must not pin another login's server open.
         guard codexCreationsInFlight[account, default: 0] == 0 else { return }
@@ -1358,7 +1361,8 @@ final class SessionStore: ObservableObject {
         // remaining codex tab runs `stopCodexIfUnused`, which counts tabs in `repos` — and
         // this one is not in `repos` until `addSession` below. Without this the app-server
         // could be killed between `thread/start` and `thread/name/set`, which evaporates the
-        // thread, because naming is what commits it.
+        // thread, because naming is what commits it — under the `legacy` history contract
+        // `CodexAdapter.historyMode` pins.
         codexCreationsInFlight[instance.account, default: 0] += 1
         defer {
             codexCreationsInFlight[instance.account, default: 0] -= 1
@@ -1529,7 +1533,13 @@ final class SessionStore: ObservableObject {
             // just this creation but every codex creation on this account for the rest of
             // the run, all of them awaiting the same wedged task. `verifyHandshake` below was
             // already bounded; the step in front of it was not. See `checkOffMainActor`.
-            try await CodexVersionProbe.checkOffMainActor()
+            //
+            // The mode is set on `stack.adapter` before `verifyHandshake` runs, not after —
+            // every caller of `adapter(for:)` reads `stack.adapter` fresh once this task
+            // completes (see the comment there), so there is no window where a caller could
+            // observe the stack with the probe done but the mode unset.
+            let version = try await CodexVersionProbe.checkOffMainActor()
+            stack.adapter.historyMode = CodexVersionProbe.supportsHistoryMode(version) ? "legacy" : nil
             try stack.transport.start()
             try await CodexProcessTransport.verifyHandshake(stack.rpc)
         }

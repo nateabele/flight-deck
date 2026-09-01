@@ -170,8 +170,10 @@ final class AccountLaunchTests: XCTestCase {
     func testACodexTabIsStampedWithTheAccountItRunsAs() async throws {
         let (preferences, work) = configured(.codex)
         let store = makeStore(preferences)
+        // `/r/t.jsonl` above does not exist on disk; stubbed true so creation reaches
+        // success rather than tripping `prepare`'s history-contract check.
         store.overrideAdapter(
-            CodexAdapter(rpc: CodexRPC(transport: ThreadStartingTransport())),
+            CodexAdapter(rpc: CodexRPC(transport: ThreadStartingTransport()), rolloutExists: { _ in true }),
             for: .codex, account: work.id
         )
 
