@@ -102,15 +102,23 @@ are created — see §8.
 
 Four changes, each closing one gap from §3.
 
-**`WireSession.lastActivity: Date?`.** The transcript's mtime, which the Mac already reads
-for `SearchCandidates`. Optional so an older Mac decodes into a newer phone; absent sorts as
-`.distantPast`, which degrades ranking to sidebar order rather than to a crash.
+**`WireSession.lastActivity: Date?` — cancelled during execution.** The plan going in was a
+field here, the transcript's mtime, read the same way `SearchCandidates` already does. It did
+not ship. `WireSession` is what `FleetProjection` builds, and `FleetReplicator`'s drift check
+compares its event-folded mirror against every batch; a transcript's mtime moves on every
+write an agent makes with no fleet event recorded, so this field would have tripped that
+alarm continuously. See `WireSearch.swift:31-45` (`WireConversationCatalogue`'s doc comment)
+for the reasoning in full. What shipped instead: live-tab recency travels as
+`WireConversationCatalogue.sessionActivity` (§below), a request's answer rather than fleet
+state, correlated by `cid` and out of the drift check's reach entirely.
 
 **`FleetRequest.conversations`** → **`ServerFrame.conversations(cid:, WireConversationCatalogue)`**.
 The catalogue is `[WireConversation]`, each `{ id: String, name: String, projectPath:
 String }` — exactly what `SQLiteSearchIndex.conversationNames()` already returns, filtered
 to open projects the way `SearchCandidates` filters it and for the same reason: offering a
-name match the Mac cannot honour without silently re-adding a project the user removed.
+name match the Mac cannot honour without silently re-adding a project the user removed. It
+also carries `sessionActivity: [String: Date]`, live tab id (`uuidString`) → transcript mtime
+— the field `WireSession.lastActivity` above was cancelled in favour of.
 
 At 484 conversations this is roughly 30 KB. It is requested on every snapshot, alongside
 `refreshNewSessionOptions`, which already covers first dial, reconnect and return from
@@ -137,10 +145,14 @@ flattens `fleet.projects` and the catalogue into `[NameCandidate]`, and `SearchR
 scores them. A few hundred candidates with no I/O is not worth a debounce, and the list
 responding to the letter you just typed is the whole feel of the feature.
 
-Live sessions contribute `lastActivity` from §5. Catalogue conversations contribute
-`.distantPast`, exactly as `SearchCandidates` gives them — the desktop's reasoning holds
-unchanged here: anything with a live tab is more likely to be what you want, and stat-ing
-484 transcripts to do better would put a filesystem walk behind a keystroke.
+Live sessions contribute a `NameCandidate.lastActivity` looked up from
+`WireConversationCatalogue.sessionActivity` — not `WireSession.lastActivity`, which §5 records
+as cancelled; `PhoneSearchCandidates.build` reads the catalogue reply's map by tab id, falling
+back to `.distantPast` for a session the catalogue reply has not yet named. Catalogue
+conversations contribute `.distantPast` outright, exactly as `SearchCandidates` gives them —
+the desktop's reasoning holds unchanged here: anything with a live tab is more likely to be
+what you want, and stat-ing 484 transcripts to do better would put a filesystem walk behind a
+keystroke.
 
 Projects contribute a row as they do on the desktop, with the newest session's activity.
 
@@ -272,15 +284,17 @@ The pure units are the bulk of it and stay instant.
 - **Moved tests** (`NameMatcherTests`, `SearchRankerTests`) must pass unchanged after the
   move. Unchanged is the assertion — a diff in them means the move was a rewrite.
 - **`PhoneSearchCandidates`**: a live session and a catalogue entry for the same
-  conversation contribute one candidate, not two. Absent `lastActivity` sorts as
-  `.distantPast` rather than crashing. Catalogue entries for projects not in the fleet are
-  dropped.
+  conversation contribute one candidate, not two. A session the catalogue reply has not
+  named yet — `WireConversationCatalogue.sessionActivity` has no entry for it — sorts its
+  `lastActivity` as `.distantPast` rather than crashing (§5, §6: `lastActivity` rides the
+  catalogue reply, not `WireSession`, which never shipped the field). Catalogue entries for
+  projects not in the fleet are dropped.
 - **`SessionSearchModel`**: names rank with no request in flight; a reply for a superseded
   query is discarded; `.disconnected` sets the offline footer rather than "No results"; hits
   land below names for every ordering of arrival.
-- **Wire round-trips**: each new frame encodes and decodes, and an older Mac's
-  `WireSession` without `lastActivity` still decodes — the compatibility direction that
-  actually happens in the field.
+- **Wire round-trips**: each new frame encodes and decodes, including
+  `WireConversationCatalogue.sessionActivity` — `lastActivity` never became a `WireSession`
+  field (§5), so there is no old-Mac decode case for it to cover.
 - **`.around`**: `TimelineAnchor(name:cursor:)` accepts `"around"` with a cursor and rejects
   it without one, matching how `.before` and `.after` are already guarded.
 - **Offsets**: a line yielding two messages stamps the same offset on both, and that offset
@@ -295,7 +309,7 @@ platform behaviour and is not worth a UI test to assert that Apple's field appea
    slice compiling them is the proof the move was legal.
 2. `offset` through `TranscriptExtractor`, the schema, and `TranscriptHit`. Schema bump.
 3. `TimelineAnchor.around` and its reader support, with the old-Mac refusal path.
-4. The three new frames and `WireSession.lastActivity`, with round-trip tests.
+4. The three new frames and `WireConversationCatalogue.sessionActivity`, with round-trip tests.
 5. `PhoneSearchCandidates` and `SessionSearchModel`, pure and tested first.
 6. The `.searchable` surface and the result rows.
 7. `openConversation` end to end: tap a closed conversation on the phone, watch the tab

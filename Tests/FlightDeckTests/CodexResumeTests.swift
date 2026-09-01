@@ -111,13 +111,17 @@ final class CodexResumeTests: XCTestCase {
 
     /// The whole point of the fix: `thread/archive` and `thread/unarchive` must follow
     /// `thread/name/set`, in that exact order — archiving before naming would fail (an
-    /// unnamed thread has no rollout to archive), and unarchiving before archiving is
-    /// meaningless. See the comment at the call site in `CodexAdapter.prepare` for why the
-    /// round trip exists at all: it releases the writer lock `thread/start` takes out, which
-    /// otherwise makes `codex resume <id>` refuse on codex-cli 0.148.0.
+    /// unnamed thread has no rollout to archive, under the `legacy` history contract
+    /// `CodexAdapter` pins), and unarchiving before archiving is meaningless. See the
+    /// comment at the call site in `CodexAdapter.prepare` for why the round trip exists at
+    /// all: it releases the writer lock `thread/start` takes out, which otherwise makes
+    /// `codex resume <id>` refuse on codex-cli 0.148.0 (re-verified on 0.151.0).
     func testPrepareArchivesAndUnarchivesTheThreadAfterNamingIt() async throws {
         let t = ScriptedTransport()
-        let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+        // The fixture's `thread["path"]` (`/r/y.jsonl`) does not exist on disk, so this must
+        // be stubbed true rather than left at the production default — see `CodexAdapter`'s
+        // history-contract check in `prepare`.
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: t), rolloutExists: { _ in true })
         let session = Session(title: "t", workingDirectory: "/w/a", pinnedConversationID: existing)
 
         let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
@@ -151,7 +155,10 @@ final class CodexResumeTests: XCTestCase {
             }
         }
         let t = UnarchiveFailsTransport()
-        let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+        // Stubbed true for the same reason as the fixture above: `/r/y.jsonl` does not exist
+        // on disk, and this test's failure must come from the unarchive refusal below, not
+        // from the earlier history-contract check.
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: t), rolloutExists: { _ in true })
         let session = Session(title: "t", workingDirectory: "/w/a", pinnedConversationID: existing)
 
         do {
@@ -168,7 +175,9 @@ final class CodexResumeTests: XCTestCase {
     func testRebindStartsAFreshThreadWhenTheOldOneIsGone() async throws {
         let t = ScriptedTransport()
         t.threadMissing = true
-        let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+        // Stubbed true: this exercises `rebind`'s recovery `prepare` call, whose fixture
+        // path (`/r/y.jsonl`) does not exist on disk.
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: t), rolloutExists: { _ in true })
         let session = Session(title: "t", workingDirectory: "/w/a", pinnedConversationID: existing)
 
         let binding = try await adapter.rebind(for: session, options: .codex(CodexThreadOptions()))
@@ -335,7 +344,12 @@ final class CodexResumeTests: XCTestCase {
         store.injectorOverride = injector
         if let transport {
             store.overrideAdapter(
-                CodexAdapter(rpc: CodexRPC(transport: transport), readTimeout: readTimeout),
+                // Stubbed true: the restore-then-gone test below drives `rebind`'s recovery
+                // `prepare` call, whose fixture path does not exist on disk.
+                CodexAdapter(
+                    rpc: CodexRPC(transport: transport), readTimeout: readTimeout,
+                    rolloutExists: { _ in true }
+                ),
                 // No `PreferencesStore` on this store, so every tab resolves to the nil
                 // account — the key the restore path will look this up under.
                 for: .codex, account: nil

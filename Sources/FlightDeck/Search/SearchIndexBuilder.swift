@@ -81,8 +81,14 @@ actor SearchIndexBuilder {
 
         var batch: [IndexedMessage] = []
 
-        for line in read.lines {
-            batch += TranscriptExtractor.messages(inLine: line, conversationID: file.conversationID)
+        // `read.lineOffsets` is `TailReader`'s own accounting of where each line starts, in
+        // lockstep with `read.lines` — not reconstructed here by summing line lengths, which
+        // would silently drift the moment a blank line in the tailed range is consumed but
+        // (like `read.lines`) never appears in either array.
+        for (line, offset) in zip(read.lines, read.lineOffsets) {
+            batch += TranscriptExtractor.messages(
+                inLine: line, conversationID: file.conversationID, offset: Int(offset)
+            )
 
             if batch.count >= Self.batchSize {
                 // `nil`: add these rows without moving the read position. The read position
