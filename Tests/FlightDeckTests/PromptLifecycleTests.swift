@@ -41,7 +41,10 @@ final class PromptLifecycleTests: XCTestCase {
     }
 
     /// Answers `thread/start` so a codex tab can be created at all — lifted from
-    /// `PromptServiceTests`, which needs a real codex tab for the same reason.
+    /// `PromptServiceTests`, which needs a real codex tab for the same reason. The rollout path
+    /// this answers with does not exist on disk, so the adapter is built below with
+    /// `rolloutExists` stubbed true, or `prepare`'s history-contract check trips before this
+    /// test ever gets to the refusal it is checking.
     private final class ScriptedCodexTransport: CodexTransport {
         var onLine: ((String) -> Void)?
         func send(_ line: String) {
@@ -307,7 +310,7 @@ final class PromptLifecycleTests: XCTestCase {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
         store.launchFailureReporter = SilentReporter()
         store.overrideAdapter(
-            CodexAdapter(rpc: CodexRPC(transport: ScriptedCodexTransport())),
+            CodexAdapter(rpc: CodexRPC(transport: ScriptedCodexTransport()), rolloutExists: { _ in true }),
             for: .codex, account: nil
         )
         let harness = FleetTestHarness(store: store)
