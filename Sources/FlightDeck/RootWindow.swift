@@ -17,7 +17,11 @@ struct RootWindow: Scene {
     var phoneActiveSessions: Set<UUID> = []
 
     var body: some Scene {
-        Window("Flight Deck", id: Self.id) {
+        // The scene title is the pre-selection value only: `RootView` applies a
+        // `navigationTitle` naming the active project, which is what the user actually sees.
+        // Spelled as `WindowTitle.base` so the empty-state title cannot drift from the one
+        // that rule falls back to.
+        Window(WindowTitle.base, id: Self.id) {
             RootView(store: store, preferences: preferences,
                      phoneActiveSessions: phoneActiveSessions)
                 .frame(minWidth: 800, minHeight: 500)

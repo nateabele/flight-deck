@@ -21,6 +21,15 @@ struct TailRead: Sendable {
     var offset: UInt64
     var hasChosenStart: Bool
     var lines: [String] = []
+    /// Where each element of `lines` starts in the file, in bytes — same length as `lines`,
+    /// same order, so index `i` of one is index `i` of the other.
+    ///
+    /// Computed straight from the newline positions in the raw bytes, not by summing up each
+    /// emitted line's length. That summation is exactly what silently drifts the moment a
+    /// blank line is in the tailed range: `lines` omits it (see `read`), but its one byte —
+    /// the lone `\n` — was still consumed, so every line after it would be reported one byte
+    /// short per blank line skipped that way.
+    var lineOffsets: [UInt64] = []
 }
 
 /// Incremental line-by-line tailing of an append-only file.
@@ -83,12 +92,43 @@ enum TailReader {
         // it, and a read can land mid-write.
         guard let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) else { return result }
         let consumed = data.distance(from: data.startIndex, to: lastNewline) + 1
+        let regionStart = result.offset
         result.offset += UInt64(consumed)
 
-        result.lines = String(decoding: data[..<lastNewline], as: UTF8.self)
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map(String.init)
+        (result.lines, result.lineOffsets) = splitLines(data[..<lastNewline], baseOffset: regionStart)
 
         return result
+    }
+
+    /// Splits `region` on `\n`, the same way `String.split(separator:omittingEmptySubsequences:)`
+    /// would, but working in raw bytes so each surviving line's absolute file offset can be
+    /// reported alongside it — including across an omitted blank line, whose byte still moves
+    /// where the next line starts.
+    ///
+    /// Byte offsets rather than decoded-`String` offsets on purpose: `region` is UTF-8, and
+    /// walking `\n` positions directly means a multi-byte character never has to be reasoned
+    /// about to get a line's start right.
+    private static func splitLines(
+        _ region: Data, baseOffset: UInt64
+    ) -> (lines: [String], offsets: [UInt64]) {
+        var lines: [String] = []
+        var offsets: [UInt64] = []
+        var start = region.startIndex
+        var index = region.startIndex
+        while index < region.endIndex {
+            if region[index] == UInt8(ascii: "\n") {
+                if index > start {
+                    lines.append(String(decoding: region[start..<index], as: UTF8.self))
+                    offsets.append(baseOffset + UInt64(region.distance(from: region.startIndex, to: start)))
+                }
+                start = region.index(after: index)
+            }
+            index = region.index(after: index)
+        }
+        if start < region.endIndex {
+            lines.append(String(decoding: region[start...], as: UTF8.self))
+            offsets.append(baseOffset + UInt64(region.distance(from: region.startIndex, to: start)))
+        }
+        return (lines, offsets)
     }
 }

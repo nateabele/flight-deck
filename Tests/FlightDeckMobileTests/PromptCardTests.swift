@@ -177,21 +177,40 @@ final class PromptCardTests: XCTestCase {
         XCTAssertEqual(PromptCard.title(for: question(), agent: "claude"), "Which?")
     }
 
-    /// **Read-only until something can drive it**, and this is the assertion that keeps a tap
-    /// from answering the wrong question. `.option` names an index into ONE question's options;
-    /// a set has several lists and the terminal is showing whichever claude has advanced to.
-    func testASetsControlsAreOffUntilAMacCanDriveOne() {
-        XCTAssertFalse(PromptCard.showsControls(for: twoQuestions(), state: .idle))
-        XCTAssertEqual(PromptCard.footnote(for: twoQuestions(), state: .idle),
-                       PromptQuestion.multiQuestionReason)
+    /// **A set is answerable now, and this is the assertion that flipped.** It used to read
+    /// "read-only until something can drive one"; `AnswerPlan` and `SessionStore`'s set path
+    /// are that something. The card collects a choice per question and sends them together.
+    func testASetIsAnswerableAndSaysNothingAboutGoingToTheMac() {
+        XCTAssertTrue(PromptCard.showsControls(for: twoQuestions(), state: .idle))
+        XCTAssertNil(PromptCard.footnote(for: twoQuestions(), state: .idle),
+                     "there is no longer anything to apologise for")
     }
 
-    /// Several questions outranks "one of these takes several answers": it is the more
-    /// surprising fact, and the one that explains why nothing can be tapped.
-    func testSeveralQuestionsIsTheReasonGivenEvenWhenOneIsAlsoMultiSelect() {
-        XCTAssertEqual(
-            PromptCard.footnote(for: twoQuestions(multiSelectFirst: true), state: .idle),
-            PromptQuestion.multiQuestionReason
-        )
+    /// A question that takes several answers is a shape the driver handles, not a refusal, so
+    /// a set containing one is still answerable.
+    func testASetContainingACheckboxQuestionIsStillAnswerable() {
+        let mixed = OpenPrompt.question(callID: "toolu_SET", [
+            PromptQuestion(header: "Snacks", question: "Which snacks?",
+                           options: [.init(label: "Pretzels"), .init(label: "Cookies")],
+                           multiSelect: true),
+            PromptQuestion(header: "Seat", question: "Which seat?",
+                           options: [.init(label: "Window"), .init(label: "Aisle")]),
+        ])
+        XCTAssertTrue(PromptCard.showsControls(for: mixed, state: .idle))
+        XCTAssertNil(PromptCard.footnote(for: mixed, state: .idle))
+    }
+
+    /// A genuine refusal still surfaces. `unanswerable` now means only what it says — a shape
+    /// this Mac cannot drive — and one anywhere in a set stops the whole set, because the Mac
+    /// commits it as a unit.
+    func testARealRefusalAnywhereInASetStopsTheWholeSet() {
+        let blocked = OpenPrompt.question(callID: "toolu_SET", [
+            PromptQuestion(question: "Fine?", options: [.init(label: "Yes")]),
+            PromptQuestion(question: "Odd?", options: [.init(label: "Yes")],
+                           unanswerable: "Flight Deck can't answer this one from here."),
+        ])
+        XCTAssertFalse(PromptCard.showsControls(for: blocked, state: .idle))
+        XCTAssertEqual(PromptCard.footnote(for: blocked, state: .idle),
+                       "Flight Deck can't answer this one from here.")
     }
 }

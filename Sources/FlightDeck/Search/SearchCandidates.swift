@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// Flattens the deck and the index into the one list `SearchModel` matches names against.

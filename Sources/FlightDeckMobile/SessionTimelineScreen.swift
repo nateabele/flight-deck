@@ -74,6 +74,11 @@ struct SessionTimelineScreen: View {
     /// from under a reader still mid-review the instant the Mac's gate clears — which `resolve`
     /// itself causes a heartbeat after the reader's own tap.
     @State private var reviewModel: PlanReviewModel?
+    /// The row a search jump landed on, briefly. Mirrors `model.scrollTarget` but fades on its
+    /// own clock rather than being cleared by the model, so a reader who lingers keeps seeing
+    /// the row that answered their tap for exactly as long as the fade takes and not a frame
+    /// longer.
+    @State private var highlightedID: String?
 
     var body: some View {
         ScrollViewReader { scroll in
@@ -102,6 +107,14 @@ struct SessionTimelineScreen: View {
                         // middle of a rounded panel, which is the same defect that keeps the
                         // fleet list inset-grouped and this list plain.
                         .listRowSeparator(.hidden)
+                        // The search-jump highlight. `entry.id == highlightedID` is a plain
+                        // comparison, not a fade of its own — the fade is `highlightedID`
+                        // being cleared under `withAnimation` in the `onChange` below, and a
+                        // `List` row animates a background change on its own.
+                        .listRowBackground(
+                            entry.id == highlightedID
+                                ? Color.accentColor.opacity(0.15) : Color.clear
+                        )
                         // **The prefetch trigger, and its depth is the whole design.** It is
                         // NOT the top row: an `onAppear` up there re-fires on every bounce of
                         // an over-scroll and lands its page while the list is still settling,
@@ -197,6 +210,29 @@ struct SessionTimelineScreen: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                             scroll.scrollTo(Self.bottomAnchor, anchor: .bottom)
                         }
+                    }
+                }
+            }
+            // A search jump. `model.scrollTarget` is set exactly once per `.around` fetch that
+            // lands (see `SessionTimelineModel.fetch`), so this fires once per tap on a
+            // transcript result rather than on every re-render.
+            .onChange(of: model.scrollTarget) { _, target in
+                guard let target else { return }
+                // Two hops, the same reason as the follow-to-bottom jump above: the row this
+                // targets was inserted by the very fetch that set `scrollTarget`, and `List`
+                // has not laid it out yet when `onChange` runs.
+                DispatchQueue.main.async {
+                    DispatchQueue.main.async {
+                        withAnimation { scroll.scrollTo(target, anchor: .center) }
+                    }
+                }
+                highlightedID = target
+                Task {
+                    try? await Task.sleep(for: .milliseconds(1_500))
+                    // `fadedHighlight` owns the guard against a second jump landing while the
+                    // first is still fading — see its own doc comment.
+                    withAnimation(.easeOut(duration: 0.4)) {
+                        highlightedID = Self.fadedHighlight(current: highlightedID, target: target)
                     }
                 }
             }
@@ -567,6 +603,21 @@ struct SessionTimelineScreen: View {
         guard let newest, newest != lastFollowed else { return nil }
         guard lastFollowed != nil else { return newest }
         return readerIsAtBottom ? newest : nil
+    }
+
+    // MARK: A search jump's fading highlight
+
+    /// What `highlightedID` becomes when a search jump's 1.5s fade timer fires, `target` being
+    /// the row that timer was armed for.
+    ///
+    /// **Owns the guard against a second jump landing mid-fade.** Both jumps write the same
+    /// `highlightedID`, so a timer that always cleared it would let the FIRST jump's timer
+    /// erase the SECOND jump's highlight — the reader taps a second result while the first is
+    /// still fading, and the row they just landed on goes dark under a timer that isn't even
+    /// its own. Clearing only when `current` still equals the timer's own `target` is what
+    /// keeps a later jump's highlight alive until ITS OWN timer fires.
+    static func fadedHighlight(current: String?, target: String) -> String? {
+        current == target ? nil : current
     }
 
     /// What the screen says about a fetch. Three phases, but the same phase means different

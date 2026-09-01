@@ -1,5 +1,5 @@
 import XCTest
-import FleetKit
+@testable import FleetKit
 
 /// These tests assert the *bytes*, not just round-tripping. Round-tripping alone would pass
 /// happily against Swift's synthesized nesting, which is exactly the shape the spec does not
@@ -169,6 +169,69 @@ final class FleetFrameCodingTests: XCTestCase {
         for frame in client {
             let data = try JSONEncoder().encode(frame)
             XCTAssertEqual(try JSONDecoder().decode(ClientFrame.self, from: data), frame)
+        }
+    }
+
+    // MARK: The three new replies
+
+    func testTheThreeNewRepliesRoundTrip() throws {
+        let hit = TranscriptHit(
+            rowID: 1, conversationID: "abc", projectPath: "/proj", conversationName: "n",
+            snippet: "s", timestamp: Date(timeIntervalSince1970: 1), offset: 4_096
+        )
+        let frames: [ServerFrame] = [
+            .conversations(cid: 1, WireConversationCatalogue(
+                conversations: [WireConversation(id: "abc", name: "n", projectPath: "/proj")],
+                sessionActivity: [UUID().uuidString: Date(timeIntervalSince1970: 2)]
+            )),
+            .searchHits(cid: 2, WireSearchHits(hits: [hit], indexing: nil)),
+            .session(cid: 3, UUID()),
+        ]
+        for frame in frames {
+            let data = try JSONEncoder().encode(frame)
+            XCTAssertEqual(
+                try JSONDecoder().decode(ServerFrame.self, from: data), frame,
+                "\(frame) did not survive a round trip"
+            )
+        }
+    }
+
+    /// The reply carrying the indexing progress, since `testTheThreeNewRepliesRoundTrip`
+    /// exercises `.searchHits` only with `indexing: nil`.
+    func testSearchHitsCarriesIndexingProgress() throws {
+        let hit = TranscriptHit(
+            rowID: 2, conversationID: "def", projectPath: "/proj", conversationName: "n",
+            snippet: "s", timestamp: Date(timeIntervalSince1970: 3), offset: 0
+        )
+        let frame = ServerFrame.searchHits(cid: 4, WireSearchHits(
+            hits: [hit], indexing: WireIndexingProgress(done: 3, total: 10)
+        ))
+        let data = try JSONEncoder().encode(frame)
+        XCTAssertEqual(try JSONDecoder().decode(ServerFrame.self, from: data), frame)
+    }
+
+    /// `ServerFrame`'s decoder tries its own tags first and treats anything else as a
+    /// `FleetEvent` tag — see `TimelineFrameCodingTests.testThePageTagDoesNotCollideWithAnEventTag`
+    /// for the property this states for `page`. `conversations`, `hits` and `session` must
+    /// keep it too, and are read off an encoded frame rather than spelled as literals here,
+    /// for the same reason: `ServerFrame.Tag` is private, so only the raw value that actually
+    /// ships can be asserted against.
+    func testTheNewFrameTagsDoNotCollideWithEventTags() throws {
+        let hit = TranscriptHit(
+            rowID: 1, conversationID: "abc", projectPath: "/proj", conversationName: "n",
+            snippet: "s", timestamp: Date(timeIntervalSince1970: 1), offset: 0
+        )
+        let frames: [ServerFrame] = [
+            .conversations(cid: 1, WireConversationCatalogue(
+                conversations: [], sessionActivity: [:]
+            )),
+            .searchHits(cid: 2, WireSearchHits(hits: [hit], indexing: nil)),
+            .session(cid: 3, UUID()),
+        ]
+        for frame in frames {
+            let tag = try XCTUnwrap(try fields(of: frame)["t"] as? String)
+            XCTAssertFalse(tag.contains("."), "\(tag) is shaped like an event tag")
+            XCTAssertNil(FleetEventTag(rawValue: tag))
         }
     }
 }

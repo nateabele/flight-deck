@@ -192,7 +192,11 @@ struct Scan: Sendable {
     ) -> Scan {
         let tail = TailReader.read(url: url, offset: offset, hasChosenStart: hasChosenStart)
         var result = Scan(offset: tail.offset, hasChosenStart: tail.hasChosenStart)
-        for line in tail.lines {
+        // `tail.lineOffsets` is `TailReader`'s own accounting of where each line starts, in
+        // lockstep with `tail.lines` — not reconstructed here by summing line lengths, which
+        // would silently drift the moment a blank line in the tailed range is consumed but
+        // (like `tail.lines`) never appears in either array.
+        for (line, lineOffset) in zip(tail.lines, tail.lineOffsets) {
             guard let data = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { continue }
@@ -200,7 +204,8 @@ struct Scan: Sendable {
             result.events += ClaudeSession.events(inObject: obj, sessionID: sessionID)
             if wantsMessages {
                 result.messages += TranscriptExtractor.messages(
-                    inObject: obj, conversationID: sessionID.uuidString.lowercased()
+                    inObject: obj, conversationID: sessionID.uuidString.lowercased(),
+                    offset: Int(lineOffset)
                 )
             }
         }
