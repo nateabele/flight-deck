@@ -99,8 +99,14 @@ final class AnswerTriggerTests: XCTestCase {
     /// The reply, as a dictionary, because the caller is a script reading JSON and that is
     /// what a script sees.
     private func reply(_ trigger: AnswerTrigger, _ request: String) throws -> [String: Any] {
-        let text = trigger.handle(request)
-        let object = try JSONSerialization.jsonObject(with: Data(text.utf8))
+        // **Unwrapped rather than awaited, and the `XCTUnwrap` is the assertion.** `handle`
+        // takes a completion because the `logs` op waits on a phone; `list` and `answer` still
+        // answer before it returns, and every caller here is one of those two. A nil here would
+        // mean one of them had quietly become asynchronous, which is worth failing on.
+        var text: String?
+        trigger.handle(request) { text = $0 }
+        let answered = try XCTUnwrap(text, "list and answer answer synchronously")
+        let object = try JSONSerialization.jsonObject(with: Data(answered.utf8))
         return try XCTUnwrap(object as? [String: Any], "a reply is always a JSON object")
     }
 
@@ -308,6 +314,191 @@ final class AnswerTriggerTests: XCTestCase {
         )
     }
 
+    // MARK: - logs
+
+    /// The phones a `logs` fetch would reach, played without a socket, a pairing or a handset.
+    /// See `PhoneLogFetching` for why the trigger takes this seam rather than `FleetService`.
+    private final class StubPhones: PhoneLogFetching {
+        var attachedClients: [FleetAttachment] = []
+        /// What each connection answers, by id. A connection with no entry never answers at
+        /// all, which is how "the phone went into a pocket" is played.
+        var answers: [UUID: Result<WirePhoneLogs, FleetRequestError>] = [:]
+        private(set) var asked: [(client: UUID, seconds: Int, limit: Int)] = []
+
+        func fetchPhoneLogs(
+            from client: UUID, seconds: Int, limit: Int,
+            then completion: @escaping (Result<WirePhoneLogs, FleetRequestError>) -> Void
+        ) {
+            asked.append((client, seconds, limit))
+            guard let answer = answers[client] else { return }
+            completion(answer)
+        }
+    }
+
+    private func phone(
+        _ name: String, caps: Set<String> = [FleetCapability.logs]
+    ) -> FleetAttachment {
+        FleetAttachment(id: UUID(), slot: UUID(), name: name, caps: caps)
+    }
+
+    private func logs(_ messages: [String], truncated: Bool = false) -> WirePhoneLogs {
+        WirePhoneLogs(
+            entries: messages.map {
+                WirePhoneLogEntry(
+                    at: "2026-09-01T09:15:00.000+01:00", level: "notice",
+                    category: "prompt", message: $0
+                )
+            },
+            truncated: truncated
+        )
+    }
+
+    /// A trigger whose `logs` op reaches `phones` and appends nowhere near the developer's
+    /// real `~/Library/Logs/flight-deck-phone.log`.
+    private func makeLogTrigger(_ phones: StubPhones) -> (AnswerTrigger, [WirePhoneLogs]) {
+        let (trigger, _, _) = makeTrigger()
+        trigger.phones = phones
+        return (trigger, [])
+    }
+
+    func testLogsFetchesEveryAttachedPhoneAndSaysWhereItLanded() throws {
+        let phones = StubPhones()
+        let iphone = phone("iPhone")
+        phones.attachedClients = [iphone]
+        phones.answers[iphone.id] = .success(logs(["prompt derived=toolu_1 shown=toolu_1"]))
+        let (trigger, _) = makeLogTrigger(phones)
+        var appended: [(WirePhoneLogs, String?)] = []
+        trigger.appendPhoneLogs = { appended.append(($0, $1)) }
+
+        let reply = try self.reply(trigger, #"{"op":"logs"}"#)
+        XCTAssertEqual(reply["ok"] as? Bool, true)
+        XCTAssertEqual(reply["entries"] as? Int, 1)
+        XCTAssertEqual(reply["path"] as? String, PhoneLogFile.fileURL.path)
+        // The default window, and the cap the phone will clamp to anyway — asserted here
+        // because a caller reading `seconds` back is how it knows what it actually got.
+        XCTAssertEqual(reply["seconds"] as? Int, PhoneLogLimits.defaultSeconds)
+        XCTAssertEqual(phones.asked.first?.limit, PhoneLogLimits.maxEntries)
+        XCTAssertEqual(appended.count, 1)
+        XCTAssertEqual(appended.first?.1, "iPhone")
+    }
+
+    /// A window a caller names is passed through; one past the ceiling is clamped rather than
+    /// refused, the same contract the phone itself keeps against this Mac.
+    func testLogsClampsTheWindowRatherThanRefusingIt() throws {
+        let phones = StubPhones()
+        let iphone = phone("iPhone")
+        phones.attachedClients = [iphone]
+        phones.answers[iphone.id] = .success(logs([]))
+        let (trigger, _) = makeLogTrigger(phones)
+        trigger.appendPhoneLogs = { _, _ in }
+
+        _ = try reply(trigger, #"{"op":"logs","seconds":90}"#)
+        XCTAssertEqual(phones.asked.last?.seconds, 90)
+        _ = try reply(trigger, #"{"op":"logs","seconds":9999999}"#)
+        XCTAssertEqual(phones.asked.last?.seconds, PhoneLogLimits.maxSeconds)
+    }
+
+    /// **The compatibility case, from the shell's side.** A handset built before this feature
+    /// existed never claimed `logs`, so `FleetSocketServer.request` refuses without sending it
+    /// anything — and the caller is told which phone and why, rather than being left to guess
+    /// from an empty file.
+    func testAPhoneTooOldToBeAskedIsNamedRatherThanSilentlySkipped() throws {
+        let phones = StubPhones()
+        let old = phone("iPhone", caps: [])
+        phones.attachedClients = [old]
+        phones.answers[old.id] = .failure(.server(code: "unsupported_peer"))
+        let (trigger, _) = makeLogTrigger(phones)
+        var appended = 0
+        trigger.appendPhoneLogs = { _, _ in appended += 1 }
+
+        let reply = try self.reply(trigger, #"{"op":"logs"}"#)
+        // `ok: false` because nothing new is in the file, which is what a script branches on.
+        XCTAssertEqual(reply["ok"] as? Bool, false)
+        XCTAssertEqual(reply["error"] as? String, "no_logs")
+        let devices = try XCTUnwrap(reply["devices"] as? [[String: Any]])
+        XCTAssertEqual(devices.first?["device"] as? String, "iPhone")
+        XCTAssertEqual(devices.first?["error"] as? String, "unsupported_peer")
+        XCTAssertEqual(appended, 0, "a refusal must not write a block to the file")
+    }
+
+    /// Two phones, one of which cannot answer. A partial fetch is a success with one bad row
+    /// in it — a top-level error there would have a script discard a file it should be reading.
+    func testOnePhoneRefusingDoesNotSinkTheWholeFetch() throws {
+        let phones = StubPhones()
+        let good = phone("iPhone")
+        let old = phone("iPad", caps: [])
+        phones.attachedClients = [good, old]
+        phones.answers[good.id] = .success(logs(["a", "b"], truncated: true))
+        phones.answers[old.id] = .failure(.server(code: "unsupported_peer"))
+        let (trigger, _) = makeLogTrigger(phones)
+        var appended: [(WirePhoneLogs, String?)] = []
+        trigger.appendPhoneLogs = { appended.append(($0, $1)) }
+
+        let reply = try self.reply(trigger, #"{"op":"logs"}"#)
+        XCTAssertEqual(reply["ok"] as? Bool, true)
+        XCTAssertNil(reply["error"])
+        XCTAssertEqual(reply["entries"] as? Int, 2)
+        let devices = try XCTUnwrap(reply["devices"] as? [[String: Any]])
+        XCTAssertEqual(devices.count, 2)
+        XCTAssertEqual(
+            Set(devices.compactMap { $0["device"] as? String }), ["iPhone", "iPad"]
+        )
+        XCTAssertEqual(appended.map(\.1), ["iPhone"])
+        XCTAssertEqual(appended.first?.0.truncated, true)
+    }
+
+    /// Nothing attached is its own answer, not an empty success: "no phone is connected" and
+    /// "your phone had nothing to say" send a person to two different places.
+    func testLogsWithNoPhoneAttachedSaysSoRatherThanReturningNothing() throws {
+        let (trigger, _) = makeLogTrigger(StubPhones())
+        let reply = try self.reply(trigger, #"{"op":"logs"}"#)
+        XCTAssertEqual(reply["ok"] as? Bool, false)
+        XCTAssertEqual(reply["error"] as? String, "no_phones")
+    }
+
+    /// The fleet service is gone — the app is shutting down, or was never listening. Named
+    /// distinctly from `no_phones` so a caller can tell "nothing to ask" from "nothing to ask
+    /// with".
+    func testLogsWithNoFleetServiceIsRefusedByName() throws {
+        let (trigger, _, _) = makeTrigger()
+        trigger.phones = nil
+        let reply = try self.reply(trigger, #"{"op":"logs"}"#)
+        XCTAssertEqual(reply["ok"] as? Bool, false)
+        XCTAssertEqual(reply["error"] as? String, "stopped")
+    }
+
+    // MARK: - The file
+
+    /// A header per fetch, even for an empty answer, and the phone's own timestamps kept
+    /// verbatim. Restamping them on this Mac would put every entry of a fetch at one instant,
+    /// which destroys the only thing these lines are for.
+    func testTheFetchedLogIsAppendedWithThePhonesOwnTimestamps() throws {
+        let url = socketRoot.appendingPathComponent("\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(at: url) }
+        PhoneLogFile.append(
+            WirePhoneLogs(entries: [WirePhoneLogEntry(
+                at: "2026-09-01T09:15:00.000+01:00", level: "notice", category: "prompt",
+                message: "prompt derived=toolu_1 mac=toolu_2 shown=none"
+            )], truncated: false),
+            device: "iPhone", to: url
+        )
+        PhoneLogFile.append(
+            WirePhoneLogs(entries: [], truncated: false), device: nil, to: url
+        )
+        let text = try String(contentsOf: url, encoding: .utf8)
+        let lines = text.split(separator: "\n").map(String.init)
+        XCTAssertEqual(lines.count, 3)
+        XCTAssertTrue(lines[0].contains(#"fetch device="iPhone" entries=1 truncated=false"#))
+        XCTAssertEqual(
+            lines[1],
+            "2026-09-01T09:15:00.000+01:00 [prompt/notice]"
+                + " prompt derived=toolu_1 mac=toolu_2 shown=none"
+        )
+        // The empty fetch still leaves a header: "the phone had nothing in the window" and
+        // "the fetch never happened" are different facts.
+        XCTAssertTrue(lines[2].contains(#"fetch device="-" entries=0 truncated=false"#))
+    }
+
     // MARK: - The socket
 
     /// The transport, once, over a real unix socket — because `nc -U` is the only client this
@@ -318,9 +509,9 @@ final class AnswerTriggerTests: XCTestCase {
     /// on the read would be waiting for a reply that cannot be computed until it stops.
     func testASocketCarriesOneRequestAndItsReplyBack() throws {
         let url = socketRoot.appendingPathComponent("\(UUID().uuidString).sock")
-        let socket = AnswerTriggerSocket(url: url) { line in
+        let socket = AnswerTriggerSocket(url: url) { line, reply in
             XCTAssertEqual(line.trimmingCharacters(in: .newlines), #"{"op":"ping"}"#)
-            return #"{"ok":true,"op":"ping"}"#
+            reply(#"{"ok":true,"op":"ping"}"#)
         }
         try socket.start()
         defer { socket.stop() }
@@ -335,12 +526,39 @@ final class AnswerTriggerTests: XCTestCase {
         XCTAssertEqual(received.text?.trimmingCharacters(in: .newlines), #"{"ok":true,"op":"ping"}"#)
     }
 
+    /// The handler that answers *after* it returns, which is what the `logs` op does and what
+    /// the socket had to grow a semaphore for. A synchronous `DispatchQueue.main.sync` would
+    /// have written the caller an empty reply and closed the connection before the answer
+    /// existed — the failure this shape exists to prevent, and one no in-process test of
+    /// `AnswerTrigger` alone could see.
+    func testASocketWaitsForAHandlerThatAnswersLater() throws {
+        let url = socketRoot.appendingPathComponent("\(UUID().uuidString).sock")
+        let socket = AnswerTriggerSocket(url: url) { _, reply in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                reply(#"{"ok":true,"op":"logs"}"#)
+            }
+        }
+        try socket.start()
+        defer { socket.stop() }
+
+        let answered = expectation(description: "the socket waits")
+        let received = Received()
+        DispatchQueue.global().async {
+            received.text = Self.roundTrip(#"{"op":"logs"}"#, to: url.path)
+            answered.fulfill()
+        }
+        wait(for: [answered], timeout: 5)
+        XCTAssertEqual(
+            received.text?.trimmingCharacters(in: .newlines), #"{"ok":true,"op":"logs"}"#
+        )
+    }
+
     /// **A path that will not fit is refused by name.** `sockaddr_un` does not truncate — it
     /// fails with `EINVAL`, which says nothing about a length — and the socket lives wherever
     /// `-FlightDeckStateDir` points, so this is reachable without doing anything unusual.
     func testAPathTooLongForAUnixSocketIsRefusedByName() {
         let long = "/tmp/" + String(repeating: "d", count: AnswerTriggerSocket.maxPathLength)
-        let socket = AnswerTriggerSocket(url: URL(fileURLWithPath: long)) { _ in "" }
+        let socket = AnswerTriggerSocket(url: URL(fileURLWithPath: long)) { _, reply in reply("") }
         XCTAssertThrowsError(try socket.start()) { error in
             XCTAssertEqual(
                 error as? AnswerTriggerSocket.Failure, .pathTooLong(long.utf8.count)

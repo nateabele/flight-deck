@@ -45,13 +45,26 @@ final class AnswerTriggerSocket {
     /// it holds it for two seconds rather than for the life of the app.
     private static let ioTimeout = timeval(tv_sec: 2, tv_usec: 0)
 
+    /// How long one request may take the app to answer.
+    ///
+    /// **Fifteen seconds, and it is deliberately longer than what it bounds.** The only
+    /// operation that is not answered inline is `logs`, which puts a frame on a phone's socket
+    /// and waits; `FleetSocketServer.askDeadline` already gives that ten and releases the
+    /// caller itself. So this never fires in a working system — it is the backstop for a
+    /// handler that fails to call back at all, which would otherwise hold this worker, and the
+    /// caller's `nc -U`, forever.
+    private static let handlerDeadline = DispatchTimeInterval.seconds(15)
+
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
         category: "answer"
     )
 
     let url: URL
-    private let handle: @MainActor (String) -> String
+    /// **A completion rather than a return value, and the `logs` op is why** — see
+    /// `AnswerTrigger.handle`. `list` and `answer` still call back before they return; a fetch
+    /// from a phone cannot, because it is waiting for a phone.
+    private let handle: @MainActor (String, @escaping (String) -> Void) -> Void
     /// Serial, so one request is served at a time. Serving two at once would let two answers
     /// race into the same terminal, which is the thing `SessionStore.injecting` exists to
     /// prevent and not something to hand it a second way to happen.
@@ -59,7 +72,7 @@ final class AnswerTriggerSocket {
     private var descriptor: Int32 = -1
     private var source: DispatchSourceRead?
 
-    init(url: URL, handle: @escaping @MainActor (String) -> String) {
+    init(url: URL, handle: @escaping @MainActor (String, @escaping (String) -> Void) -> Void) {
         self.url = url
         self.handle = handle
     }
@@ -139,13 +152,41 @@ final class AnswerTriggerSocket {
         setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, size)
 
         guard let request = readRequest(from: client) else { return }
-        // **`sync`, and it cannot deadlock.** The main actor never waits on this queue — the
-        // trigger is reached from here and from nowhere else — so the only thing this blocks
-        // is one request while the app is busy. `PromptService`'s whole design is a read small
-        // enough to run inline on the main queue, which is exactly what the phone's socket
-        // does with it.
-        let response = DispatchQueue.main.sync {
-            MainActor.assumeIsolated { handle(request) }
+        // **A semaphore, and it cannot deadlock.** The main actor never waits on this queue —
+        // the trigger is reached from here and from nowhere else — so the only thing this
+        // blocks is one request while the app is busy, exactly as the `DispatchQueue.main.sync`
+        // this replaces did. What changed is that the handler may now answer *after* returning:
+        // `logs` waits on a phone, so it cannot be a return value, and a `sync` that ran a
+        // handler which called back later would answer the caller before the answer existed.
+        //
+        // `nonisolated(unsafe)`: `response` is written once, on the main actor, and read here
+        // only after `wait` observes the signal — the semaphore is the ordering, so there is no
+        // race for the compiler's checking to protect.
+        let ready = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var response: String?
+        // `self.handle` rather than a bare `handle`: this closure outlives the call, so the
+        // capture has to be explicit. The socket owns the closure and cancels its source in
+        // `deinit`, so there is no cycle to break with a weak capture.
+        let handle = self.handle
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                handle(request) { answer in
+                    response = answer
+                    ready.signal()
+                }
+            }
+        }
+        // Bounded, because a handler that never calls back would otherwise hold this worker —
+        // and the caller's `nc -U` — for the life of the app. The refusal names the deadline
+        // rather than saying "error", so a caller can tell "the app is wedged" from "the app
+        // said no".
+        guard ready.wait(timeout: .now() + Self.handlerDeadline) == .success,
+              let response
+        else {
+            Self.logger.error("answer trigger handler did not answer in time")
+            let bytes = Array(#"{"error":"timed_out","ok":false}"#.utf8) + [UInt8(ascii: "\n")]
+            bytes.withUnsafeBytes { _ = write(client, $0.baseAddress!, $0.count) }
+            return
         }
         var bytes = Array(response.utf8)
         bytes.append(UInt8(ascii: "\n"))

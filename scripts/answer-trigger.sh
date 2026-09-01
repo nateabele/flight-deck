@@ -17,6 +17,7 @@ set -euo pipefail
 # Usage:
 #   scripts/answer-trigger.sh list
 #   scripts/answer-trigger.sh answer <session-uuid> '[[0,1],[2]]' [call-id]
+#   scripts/answer-trigger.sh logs [seconds]
 #   scripts/answer-trigger.sh raw '{"op":"list"}'
 #
 # `[[0,1],[2]]` is one array per question, in the order the questions are asked, holding the
@@ -26,12 +27,19 @@ set -euo pipefail
 # The call id is optional. Supplied, it is compared against what the terminal is blocked on
 # right now and a tab that has moved on answers `prompt_changed` — the same check a phone gets.
 # Omitted, this answers whatever is open, which is what a script driving its own session wants.
+#
+# `logs` pulls every attached phone's own diagnostic log to this Mac and appends it to
+# ~/Library/Logs/flight-deck-phone.log, beside the Mac's own answer and prompt logs. The reply
+# names that path and how many entries arrived. `seconds` is how far back to reach and defaults
+# to 600; the phone clamps it. It answers `no_phones` when nothing is attached, and
+# `unsupported_peer` for a handset built before the feature existed — that phone is not sent
+# anything, because a frame it cannot decode would cost it its connection.
 
 STATE_DIR="${FLIGHT_DECK_STATE_DIR:-$HOME/Library/Application Support/Flight Deck}"
 SOCKET="$STATE_DIR/answer-trigger.sock"
 
 usage() {
-  sed -n '4,28p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '4,35p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -77,6 +85,19 @@ case "${1:-}" in
       request="$request,\"call\":$(json_string "$4")"
     fi
     send "$request}"
+    ;;
+  logs)
+    # `case` rather than a `[ ]` numeric test: the argument is whatever a person typed, and
+    # `[ "$2" -gt 0 ]` on a non-number is a shell error under `set -e` rather than a usage
+    # message. The app clamps whatever number does get through.
+    if [ $# -ge 2 ]; then
+      case "$2" in
+        ''|*[!0-9]*) echo "error: seconds must be a whole number" >&2; exit 2 ;;
+      esac
+      send "{\"op\":\"logs\",\"seconds\":$2}"
+    else
+      send '{"op":"logs"}'
+    fi
     ;;
   raw)
     [ $# -ge 2 ] || usage

@@ -47,6 +47,22 @@ final class AnswerTrigger {
     /// and the production value is the length of `AnswerAbortLog.fileURL`.
     var answerLogLength: () -> Int = AnswerTrigger.answerLogLength
 
+    /// How the `logs` op reaches the attached phones.
+    ///
+    /// A seam rather than a stored `FleetService`, on the same reasoning `answerLogLength` is
+    /// one: the trigger is constructed from a `SessionStore` and the service is built by
+    /// `FlightDeckApp` on an independent path, so there is no construction-time hook to inject
+    /// through — and a test needs to present phones that are attached, refuse, or never answer
+    /// without a socket, a pairing and a real handset. Production resolves `FleetService`'s own
+    /// `current` seam, which is exactly what `AppDelegate` does for the search index.
+    var phones: (any PhoneLogFetching)? = FleetService.current
+
+    /// Where a fetched log is appended. A seam for the same reason: the production value writes
+    /// to the developer's real `~/Library/Logs/flight-deck-phone.log`, which a test must not.
+    var appendPhoneLogs: (WirePhoneLogs, String?) -> Void = {
+        PhoneLogFile.append($0, device: $1)
+    }
+
     init(store: SessionStore) {
         self.store = store
         self.prompts = PromptService(store: store)
@@ -55,19 +71,28 @@ final class AnswerTrigger {
     /// One request line in, one response line out. Never throws and never traps: this runs on
     /// the main actor with a socket on the other end, and a malformed line is a caller's
     /// mistake, not a reason to take the app down.
-    func handle(_ line: String) -> String {
+    ///
+    /// **A completion rather than a return value, and `logs` is why.** `list` and `answer` are
+    /// answered from state this actor already holds, and both still complete before this call
+    /// returns. `logs` cannot: it puts a frame on a phone's socket and waits for the phone, so
+    /// a synchronous shape would either block the main actor on a network round trip or need a
+    /// second, differently-shaped entry point for one operation. One shape that some callers
+    /// satisfy immediately beats two shapes a reader has to keep apart.
+    func handle(_ line: String, then reply: @escaping (String) -> Void) {
         guard let data = line.data(using: .utf8),
               let request = try? JSONDecoder().decode(Request.self, from: data)
         else {
-            return encode(.failure(
+            return reply(encode(.failure(
                 op: nil, error: "bad_request",
-                detail: "expected one line of JSON: {\"op\":\"list\"} or "
-                    + "{\"op\":\"answer\",\"session\":\"<uuid>\",\"selections\":[[0,1]]}"
-            ))
+                detail: "expected one line of JSON: {\"op\":\"list\"}, "
+                    + "{\"op\":\"answer\",\"session\":\"<uuid>\",\"selections\":[[0,1]]} "
+                    + "or {\"op\":\"logs\"}"
+            )))
         }
         switch request.op {
-        case .list: return encode(list())
-        case .answer: return encode(answer(request))
+        case .list: reply(encode(list()))
+        case .answer: reply(encode(answer(request)))
+        case .logs: logs(request) { reply(self.encode($0)) }
         }
     }
 
@@ -179,6 +204,96 @@ final class AnswerTrigger {
         )
     }
 
+    // MARK: - logs
+
+    /// Pull every attached phone's own log to this Mac and append it to
+    /// `~/Library/Logs/flight-deck-phone.log`.
+    ///
+    /// **Behind this gate rather than a new one.** Anything that can reach this socket can
+    /// already press Return in the developer's terminal; reading a paired phone's diagnostics
+    /// is strictly less than that, and a second flag would be a second thing to remember to
+    /// turn off.
+    ///
+    /// **Every attached phone, not one named by the caller.** The question this answers is
+    /// "what did my phone see", and the overwhelmingly common fleet is one handset — so making
+    /// the caller first list devices, then name one, would be two round trips to save nothing.
+    /// Two phones each get their own block in the file and their own row in the reply.
+    ///
+    /// **`ok` is true when at least one phone answered.** All-refused and none-attached are
+    /// both `ok: false`, because either way there is nothing new in the file — and a script
+    /// that branched on `ok` would otherwise report success for a fetch that returned nothing.
+    /// Which of the two it was is in `error`, and every phone's own outcome is in `devices`.
+    private func logs(_ request: Request, then reply: @escaping (Response) -> Void) {
+        let seconds = min(
+            max(request.seconds ?? PhoneLogLimits.defaultSeconds, 1), PhoneLogLimits.maxSeconds
+        )
+        guard let phones else {
+            return reply(.failure(op: "logs", error: "stopped",
+                                  detail: "the fleet service is not running"))
+        }
+        let clients = phones.attachedClients
+        guard !clients.isEmpty else {
+            return reply(.failure(
+                op: "logs", error: "no_phones",
+                detail: "no paired phone is attached — open the app on your phone and retry"
+            ))
+        }
+
+        // Fanned out rather than run in series, and the ordering is settled by the counter
+        // below rather than by the order the answers land: two phones on the same LAN answer
+        // in whatever order their radios wake up, and serialising them would make the whole
+        // fetch as slow as the slowest handset for no gain.
+        var rows: [Response.PhoneLogs] = []
+        var outstanding = clients.count
+        for client in clients {
+            phones.fetchPhoneLogs(
+                from: client.id, seconds: seconds, limit: PhoneLogLimits.maxEntries
+            ) { [weak self] result in
+                switch result {
+                case .success(let logs):
+                    // Written before the row is recorded, so a reply claiming N entries is one
+                    // whose N entries are already in the file.
+                    self?.appendPhoneLogs(logs, client.name)
+                    rows.append(Response.PhoneLogs(
+                        device: client.name, entries: logs.entries.count,
+                        truncated: logs.truncated, error: nil
+                    ))
+                case .failure(let error):
+                    rows.append(Response.PhoneLogs(
+                        device: client.name, entries: nil, truncated: nil,
+                        error: Self.describe(error)
+                    ))
+                }
+                outstanding -= 1
+                guard outstanding == 0 else { return }
+                let total = rows.compactMap(\.entries).reduce(0, +)
+                let answered = rows.contains { $0.error == nil }
+                reply(Response(
+                    ok: answered, op: "logs",
+                    // Named only when nothing came back: a partial fetch is a success with one
+                    // bad row in it, and putting a top-level error on that would have a script
+                    // discard a file it should be reading.
+                    error: answered ? nil : "no_logs",
+                    path: PhoneLogFile.fileURL.path, seconds: seconds, entries: total,
+                    devices: rows
+                ))
+            }
+        }
+    }
+
+    /// The refusal a caller sees, in the phone's own vocabulary where there is one.
+    ///
+    /// `FleetRequestError.server`'s code is carried through verbatim rather than mapped: this
+    /// build produces `unsupported_peer` (a phone too old to be asked — see `FleetCapability`),
+    /// `timed_out`, `unhandled` and `unreadable`, and a newer phone may invent more. A caller
+    /// must treat an unrecognised code as "no logs from that phone".
+    private static func describe(_ error: FleetRequestError) -> String {
+        switch error {
+        case .disconnected: return "disconnected"
+        case .server(let code): return code
+        }
+    }
+
     /// The length of the abort log, or 0 when there is not one yet. Every failure reads as
     /// zero: a cursor that cannot be taken is better given as "read the whole file" than as a
     /// refusal to answer at all.
@@ -210,6 +325,7 @@ extension AnswerTrigger {
         enum Op: String, Decodable {
             case list
             case answer
+            case logs
         }
 
         let op: Op
@@ -219,6 +335,10 @@ extension AnswerTrigger {
         /// One array per question, in the order the questions are asked, each holding the
         /// option indices chosen for it.
         let selections: [[Int]]?
+        /// How far back `logs` reaches, in seconds. `nil` is `PhoneLogLimits.defaultSeconds`;
+        /// anything past `maxSeconds` is clamped rather than refused, the same contract the
+        /// phone itself keeps against this Mac.
+        let seconds: Int?
     }
 
     /// One envelope for both operations, with every field that does not apply left out.
@@ -236,9 +356,28 @@ extension AnswerTrigger {
         var session: UUID?
         var call: String?
         var abortLog: AbortLog?
+        /// Where `logs` put what it fetched, and what it fetched. `entries` is the total across
+        /// every phone; `devices` breaks it down and is where a single phone's refusal is.
+        var path: String?
+        var seconds: Int?
+        var entries: Int?
+        var devices: [PhoneLogs]?
 
         static func failure(op: String?, error: String, detail: String?) -> Response {
             Response(ok: false, op: op, error: error, detail: detail)
+        }
+
+        /// One phone's outcome. `entries` and `error` are mutually exclusive — a phone either
+        /// answered or refused — and both are optional so the row carries only the one that
+        /// happened rather than a null beside it.
+        struct PhoneLogs: Encodable {
+            /// What the phone calls itself, which since iOS 16 is usually just "iPhone" — see
+            /// `FleetModel.deviceName`. The paired slot is deliberately not here: it is an
+            /// internal identifier that would tell a reader nothing this does not.
+            let device: String?
+            let entries: Int?
+            let truncated: Bool?
+            let error: String?
         }
 
         /// Where this answer's abort record will land, if it aborts. See `AnswerAbortLog`.
