@@ -173,6 +173,14 @@ final class SessionStore: ObservableObject {
     /// screen. `convenience init(ghostty:...)` assigns the real one.
     var displayWaker: DisplayWaking = NeverWakingDisplay()
 
+    /// When the last wake attempt failed, so a display that cannot wake is not re-attempted on
+    /// every tap. **Only ever consulted when `canCreateTerminal` is already false**, so a
+    /// display that comes back is never suppressed by it — it short-circuits first.
+    private var lastFailedWake: Date?
+    /// Long enough that a burst of taps costs one timeout, short enough that plugging a display
+    /// in is noticed almost immediately. Only matters while creation is failing anyway.
+    static let wakeRetryCooldown: TimeInterval = 10
+
     /// This run's own identity, stamped into every snapshot as `owner`. Computed once: it
     /// cannot change for the life of the process, and `persist()` runs on every mutation —
     /// every tab switch, every rename, every registry tick.
@@ -933,20 +941,30 @@ final class SessionStore: ObservableObject {
     /// block only ever happens where the code currently fails outright, and only while the
     /// display is asleep — which is to say, while nobody is looking at this Mac.
     func ensureTerminalCreatable(_ policy: DisplayWakePolicy = .wakeIfNeeded) -> Bool {
-        if canCreateTerminal { return true }
+        if canCreateTerminal { lastFailedWake = nil; return true }
         // Reaching here means `provider != nil` (see `canCreateTerminal`), so the waker is
         // only ever consulted on a path that genuinely needs libghostty.
         guard policy == .wakeIfNeeded else { return false }
-        return displayWaker.wakeAndWaitForDrawable(timeout: Self.wakeTimeout)
+        if let last = lastFailedWake, now().timeIntervalSince(last) < Self.wakeRetryCooldown {
+            return false
+        }
+        let woken = displayWaker.wakeAndWaitForDrawable(timeout: Self.wakeTimeout)
+        lastFailedWake = woken ? nil : now()
+        return woken
     }
 
     /// `ensureTerminalCreatable`, for a caller that can afford to await instead of blocking.
     /// The phone's `.newSession` is the only one. Behaviour is identical in every other
     /// respect, including the `provider == nil` short-circuit inherited from `canCreateTerminal`.
     func awaitTerminalCreatable(_ policy: DisplayWakePolicy = .wakeIfNeeded) async -> Bool {
-        if canCreateTerminal { return true }
+        if canCreateTerminal { lastFailedWake = nil; return true }
         guard policy == .wakeIfNeeded else { return false }
-        return await displayWaker.wakeAndWaitForDrawable(timeout: Self.wakeTimeout)
+        if let last = lastFailedWake, now().timeIntervalSince(last) < Self.wakeRetryCooldown {
+            return false
+        }
+        let woken = await displayWaker.wakeAndWaitForDrawable(timeout: Self.wakeTimeout)
+        lastFailedWake = woken ? nil : now()
+        return woken
     }
 
     /// Whether this tab's terminal actually forked a shell.
