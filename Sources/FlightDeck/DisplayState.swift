@@ -106,10 +106,12 @@ struct DisplayWaker: DisplayWaking {
         // costs one `CGDisplayIsActive` call and never sleeps.
         if display.isDrawable { return true }
         declareUserActivity()
-        var waited: TimeInterval = 0
-        while waited < timeout {
+        // A deadline, not an accumulated total of the requested interval: `sleep` overshoots
+        // every call, so summing `pollInterval` drifts past `timeout` with no ceiling. This is
+        // the wall clock the 1.5s keepalive-headroom argument actually needs.
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
             sleep(pollInterval)
-            waited += pollInterval
             if display.isDrawable { return true }
         }
         return false

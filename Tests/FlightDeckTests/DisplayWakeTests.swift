@@ -167,9 +167,11 @@ final class DisplayWakeTests: XCTestCase {
         XCTAssertTrue(store.displayWaker is DisplayWaker)
     }
 
-    /// The waker must poll the same probe the guard reads. Wired to a default-constructed
-    /// `DisplayState()` instead, it would answer about a different display on a multi-display
-    /// Mac, and the two could disagree indefinitely.
+    /// A deliberately weak check: `DisplayState` is a stateless struct that always reads
+    /// `CGMainDisplayID()`, so no two instances of it can disagree and identity cannot be
+    /// asserted. This pins the narrower thing that matters — that the wired waker polls a
+    /// real display probe, not a stub or the inert default — which is what building it around
+    /// the store's own probe is for.
     func testTheWiredWakerPollsTheStoresOwnProbe() throws {
         let store = SessionStore(ghostty: nil, persistence: nil)
         let waker = try XCTUnwrap(store.displayWaker as? DisplayWaker)

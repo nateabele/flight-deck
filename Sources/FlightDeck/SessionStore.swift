@@ -1218,8 +1218,9 @@ final class SessionStore: ObservableObject {
         // Beside `display` and load-bearing in the same way: the default waker is inert, so
         // without this line every sleeping display is a refusal again and no test notices.
         // `DisplayWakerTests` covers the waker; `testTheRealWakerIsWiredIn` covers this line.
-        // Built around the probe just assigned, so the thing that decides "drawable" and the
-        // thing that waits for it can never be asking about different displays.
+        // Built around the probe just assigned on principle, not because a different one
+        // could disagree — `DisplayState` is a stateless struct that always reads
+        // `CGMainDisplayID()`, so any instance of it answers identically to any other.
         displayWaker = DisplayWaker(display: display)
         self.notifier = notifier
         // Both assigned before `startStatusWatching()` below, which reads them when it builds
