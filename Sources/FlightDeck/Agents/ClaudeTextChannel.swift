@@ -49,7 +49,10 @@ struct ClaudeTextChannel: AgentTextChannel {
         // Claude Code needs a moment to repaint before the screen reflects the kill.
         settle {
             guard stillWanted() else { return }
-            let after = injector.readViewport().flatMap(InputBar.read(fromViewport:))?.content
+            // A closure rather than the `InputBar.read(fromViewport:)` function reference:
+            // the reader now takes a marker, and a defaulted parameter cannot be spelled as
+            // a bare function reference.
+            let after = injector.readViewport().flatMap { InputBar.read(fromViewport: $0) }?.content
             injector.sendText(text)
             injector.sendReturn()
             // Restore only on a *confirmed* change. If the screen went unreadable we do not

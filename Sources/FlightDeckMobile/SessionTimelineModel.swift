@@ -932,7 +932,10 @@ final class SessionTimelineModel {
             case "unknown_session":
                 return "This session is no longer open on your Mac."
             case "unsupported_agent":
-                return "Flight Deck can only type into a Claude session from here."
+                // Deliberately does not name the typeable agents. This is the LATE refusal,
+                // from a Mac that may be running a newer build than the phone — so the phone
+                // must not claim a list it cannot know is current.
+                return "Flight Deck can't type into this kind of session from here."
             case "not_running":
                 return "There's no agent running in this tab right now."
             case PromptText.Rejection.tooLong.rawValue:

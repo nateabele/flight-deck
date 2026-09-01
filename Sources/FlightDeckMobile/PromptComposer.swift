@@ -65,12 +65,12 @@ struct PromptComposer: View {
         // unrecognised agent falls here, which is right — an agent nobody has heard of has no
         // known input box either.
         //
-        // codex is refused for two reasons that both stand alone. Its tab holds the thread's
-        // writer lock, so the app-server cannot start a turn while a message is being typed;
-        // and the terminal route has no input box that can be found safely — `InputBar.read`
-        // locks onto a line beginning `❯`, which a plain shell draws too.
-        guard session.agent == "claude" else {
-            return "Flight Deck can only type into a Claude session from here."
+        // claude and codex are both typeable, by the same route: text into the tab's pty.
+        // Neither goes through an agent API — codex's would refuse anyway, because its tab
+        // holds the thread's writer lock. An agent this build has never heard of is refused
+        // here, which is right: nobody knows where its input box is or what it looks like.
+        guard session.agent == "claude" || session.agent == "codex" else {
+            return "Flight Deck can't type into a \(session.agent) session from here."
         }
         // `nil` is "no agent process registered" and is NOT `idle` — a statusless tab has no
         // input box. `"shell"` used to be refused alongside it on the theory that it was a

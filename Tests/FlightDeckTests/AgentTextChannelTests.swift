@@ -85,14 +85,24 @@ final class AgentTextChannelTests: XCTestCase {
 
     // MARK: - The capability itself
 
-    /// Read through `AgentID`, but *answered* by the adapters — giving
-    /// `CodexAdapter.textChannel` a value has to fail this, or the enum is deciding a
-    /// capability the agent should be stating for itself.
-    func testOnlyClaudeHasATextChannel() {
+    /// Read through `AgentID`, but *answered* by the adapters. Both shipped agents now have a
+    /// channel; what this pins is that the enum forwards the adapter's answer rather than
+    /// deciding a capability itself, so the two can never disagree.
+    func testTheEnumForwardsEachAdaptersOwnChannel() {
         XCTAssertNotNil(AgentID.claude.textChannel)
         XCTAssertNotNil(ClaudeAdapter.textChannel)
-        XCTAssertNil(AgentID.codex.textChannel)
-        XCTAssertNil(CodexAdapter.textChannel)
+        XCTAssertNotNil(AgentID.codex.textChannel)
+        XCTAssertNotNil(CodexAdapter.textChannel)
+    }
+
+    /// The channels are not interchangeable, and this is what stops the capability question
+    /// from quietly becoming "any agent can be typed into". Each reads its own marker glyph;
+    /// pointed at the other's screen, each finds nothing.
+    func testEachChannelReadsOnlyItsOwnAgentsComposer() {
+        let codexScreen = "› Ask Codex to do anything\n\n  gpt-5.6-sol default · /tmp/w"
+        let claudeScreen = "❯ \u{00A0}"
+        XCTAssertNil(InputBar.read(fromViewport: codexScreen, marker: InputBar.claudeMarker))
+        XCTAssertNil(InputBar.read(fromViewport: claudeScreen, marker: InputBar.codexMarker))
     }
 
     // MARK: - restore: nothing is queued
@@ -136,19 +146,26 @@ final class AgentTextChannelTests: XCTestCase {
         return (store, codexID, claudeID, spy)
     }
 
-    func testARestoredBusyCodexTabQueuesNoResumePrompt() async {
+    /// **Codex now queues a resume prompt like claude, and the safety moved rather than
+    /// vanished.** Giving codex a text channel switches on all three sites at once — that is
+    /// the point of one capability question — so the auto-resume gate opens too.
+    ///
+    /// What stops a stray `"Keep going"` is no longer "codex is refused by name"; it is
+    /// `CodexTextChannel` refusing a screen that is not codex's composer. The shared
+    /// `SpyInjector` renders `❯`, claude's glyph, with no codex status line — so the prompt
+    /// is queued and still nothing is typed. That is the property worth pinning, because it
+    /// is the one that protects a codex tab sitting at a bare shell.
+    func testARestoredBusyCodexTabQueuesAResumePromptButNothingIsTypedAtANonCodexScreen() async {
         let (store, codexID, _, spy) = restoreBothAgents()
-        XCTAssertNil(
-            store.pendingPrompts[codexID],
-            #"nothing may be queued for a pty whose input box this build cannot find"#
-        )
+        XCTAssertEqual(store.pendingPrompts[codexID]?.text, SessionStore.resumePrompt,
+                       "codex has a channel now, so the same gate that opens for claude opens here")
 
         await store.codexRestoreTask?.value
 
-        // The other half of the same guard: refusing the *prompt* must not refuse the tab's
-        // own launch. Resume commands go to the shell through `sendToShell`, which never
-        // touches `inject`, so a codex tab still comes back exactly as it did.
-        XCTAssertEqual(spy.sent, ["codex resume \(ScriptedTransport.thread)"])
+        // The tab's own launch goes to the shell through `sendToShell`, which never touches
+        // `inject` — so the resume command is there and the prompt is NOT.
+        XCTAssertEqual(spy.sent, ["codex resume \(ScriptedTransport.thread)"],
+                       "a claude-shaped screen is not codex's composer; nothing may be typed into it")
     }
 
     /// The neighbour. A mutation that deletes the auto-resume gate outright kills this and not

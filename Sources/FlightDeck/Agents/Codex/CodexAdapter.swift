@@ -10,27 +10,22 @@ import Foundation
 struct CodexAdapter: AgentAdapter {
     static let id: AgentID = .codex
 
-    /// **Not yet — and this is a capability answer, not a permanent verdict.** Whoever makes
-    /// codex typeable writes the channel and returns it here; nothing else in `SessionStore`
-    /// or `PromptService` re-decides it by name.
+    /// **Typed at the pty, never through the app-server — and the distinction is permanent.**
     ///
-    /// Two halves, and they no longer have the same status:
+    /// The app-server route is genuinely closed: a codex tab is a `codex resume <id>` TUI
+    /// holding the thread's writer lock, and `prepare`'s own probe recorded the answer,
+    /// `thread/resume failed: thread <id> already has an active writer (code -32600)`.
+    /// Metadata survives that lock — which is why `thread/name/set` renames work — but a turn
+    /// does not. Nothing here changes that; `CodexTextChannel` types at the terminal, exactly
+    /// as a person would.
     ///
-    /// - **Typing a turn is foreclosed on the app-server route, permanently.** A codex tab is
-    ///   a `codex resume <id>` TUI holding the thread's writer lock, and `prepare`'s own probe
-    ///   recorded the answer: `thread/resume failed: thread <id> already has an active writer
-    ///   (code -32600)`. Metadata survives that lock — which is why `thread/name/set` renames
-    ///   work — but a turn does not.
-    /// - **Typing at the pty is unbuilt, not impossible.** A capture against codex-cli 0.148.0
-    ///   settles what the shipped refusal assumed: codex's input marker is `›` (U+203A) and
-    ///   claude's is `❯` (U+276F), and `InputBar.read` keys on `❯` as the first
-    ///   character — so it matches *nothing at all* on a codex screen. The near-miss
-    ///   `SessionStore.rename` records was never "InputBar found codex's box"; it was
-    ///   "InputBar keys on a glyph a bare shell prompt also draws" — a risk about the shell,
-    ///   and unchanged. What is still missing is a reader that accepts codex's composer and
-    ///   rejects a shell prompt, and an answer to `inject`'s draft dance: Ctrl-Y restores
-    ///   only because Claude Code keeps a deleted-text ring, and codex has not been shown to.
-    static let textChannel: AgentTextChannel? = nil
+    /// The pty route was never closed either, only unbuilt on a reason that was wrong. The
+    /// shipped refusal held that `InputBar` "keys on `❯`, a glyph a bare shell prompt also
+    /// draws" — but codex draws `›` (U+203A), so `InputBar` matched nothing on a codex screen
+    /// and could not have confused the two. See `CodexTextChannel` for what actually makes it
+    /// safe (codex's own status line, as a positive discriminator) and for why the draft is
+    /// restored by re-typing rather than by the Ctrl-Y ring codex was never shown to keep.
+    static let textChannel: AgentTextChannel? = CodexTextChannel()
 
     /// **The closer of the two, and now a separate question.** Driving a dialog needs no
     /// input box and no kill ring, so everything blocking `textChannel` above is irrelevant

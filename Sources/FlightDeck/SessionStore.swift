@@ -3419,16 +3419,18 @@ final class SessionStore: ObservableObject {
     /// than re-decided here.** `AgentAdapter.textChannel` holds the refusal and its evidence,
     /// and a `nil` there IS the refusal; this is one of the three places that consult it —
     /// `inject` and `restore`'s auto-resume gate are the others — so no two of them can come
-    /// to different conclusions about one agent. Claude's route is the one `rename`
+    /// to different conclusions about one agent. Both shipped agents take the route `rename`
     /// already takes: type into the pty through `inject`, the single funnel where an idle
-    /// status, a readable one-row `InputBar` and the kill-and-yank draft dance are all
-    /// decided. Guessing at a second TUI's input box with the user's own words is a worse
-    /// version of a bug this codebase has already paid for — see `rename`, which is the
-    /// reason that dispatch exists at all.
+    /// status, a readable one-row composer and the draft dance are all decided. Each brings
+    /// its own reading of that composer — `ClaudeTextChannel` and `CodexTextChannel`, keyed
+    /// on different marker glyphs — so this stays a capability question and never becomes a
+    /// name check. Guessing at a TUI's input box with the user's own words is a bug this
+    /// codebase has already paid for — see `rename` — which is why a channel must be *built*
+    /// against that agent's captured screens before it appears here.
     ///
     /// **The order of the checks is load-bearing twice.** The capability test comes before
-    /// the status test, so a codex tab is told `unsupportedAgent` — never on this tab — rather
-    /// than `notRunning`, which would invite a retry that can never succeed. And the token
+    /// the status test, so an agent with no channel is told `unsupportedAgent` — never on this
+    /// tab — rather than `notRunning`, which would invite a retry that can never succeed. And the token
     /// test comes before the text is validated, so a retry of something already accepted is
     /// idempotent even if the two sends disagreed about the text; they cannot, since a token
     /// is minted per composed message, and if they ever did the first send is the one the

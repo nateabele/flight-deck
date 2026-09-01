@@ -113,13 +113,13 @@ final class PhonePromptDispatchTests: XCTestCase {
     /// the right enum and still typed the text would pass an enum-only test — which is exactly
     /// the failure `SessionStore.rename`'s comment records for codex.
     ///
-    /// What this fixture pins on its own is the *order* of the two guards: the tab has no
-    /// registry status, so an implementation that asked "is there something to type into"
-    /// first would answer `notRunning` — "not right now" for a tab where the answer is never.
-    /// It cannot, however, catch a paste, because with no status `inject` refuses anyway;
-    /// `testAnIdleCodexTabIsToldNeverRatherThanNotYet` is the fixture where the paste is
-    /// reachable and the spy assertion can actually fail.
-    func testACodexTabIsRefusedRatherThanPastedInto() async throws {
+    /// Codex has a text channel now, so the capability gate passes and the *status* gate is
+    /// what answers: this tab has no registry status, so `notRunning` — "not right now",
+    /// which is the honest answer for a codex tab whose agent is not reporting.
+    ///
+    /// The spy assertion is the half that still matters and is unchanged: whatever the enum
+    /// says, nothing may be pasted into a screen that is not codex's composer.
+    func testACodexTabWithNoStatusIsToldNotRunningAndNothingIsPasted() async throws {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
@@ -138,20 +138,24 @@ final class PhonePromptDispatchTests: XCTestCase {
         }
         spy.events.removeAll()
 
-        XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .unsupportedAgent)
+        XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .notRunning)
         XCTAssertTrue(spy.events.isEmpty,
-                      "codex has no safe route: the app-server refuses a turn on a thread the "
-                      + "TUI holds the writer lock on, and `InputBar` reads claude's box only")
+                      "a tab with no reported status has nothing to type into, whatever its agent")
     }
 
-    /// **The fixture where the paste is actually reachable.** An idle codex tab clears every
-    /// gate `inject` has — idle status, a readable one-row bar — so the agent guard is the
-    /// only thing standing between the user's own words and a `codex resume` TUI's input
-    /// box. Drop that guard here and the text is typed; drop it in
-    /// `testACodexTabIsRefusedRatherThanPastedInto`, whose tab has no status, and nothing is
-    /// typed because the idle gate refuses second. The two fixtures are not redundant: that
-    /// one proves the guard order, this one proves the guard prevents the paste.
-    func testAnIdleCodexTabIsToldNeverRatherThanNotYet() async throws {
+    /// **The fixture where the paste is actually reachable — and the one that now proves the
+    /// guard moved rather than went away.**
+    ///
+    /// An idle codex tab clears every gate `submitPrompt` has, so the prompt is accepted and
+    /// queued. What stops the user's words reaching a `codex resume` TUI is no longer an
+    /// agent name check; it is `CodexTextChannel` refusing to type into a screen that is not
+    /// codex's composer. This spy renders `❯` — claude's glyph, and one a bare shell prompt
+    /// draws too — with no codex status line beneath it, so the channel must refuse it.
+    ///
+    /// That is the property worth pinning here, because it is the one protecting a codex tab
+    /// that has fallen back to a bare shell. The positive path — a real codex screen, text
+    /// typed — is proved in `CodexTextChannelTests` against captured output.
+    func testAnIdleCodexTabIsQueuedButNeverPastedIntoANonCodexScreen() async throws {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
@@ -173,8 +177,11 @@ final class PhonePromptDispatchTests: XCTestCase {
                        "the fixture is only meaningful if the status guard would have passed")
         spy.events.removeAll()
 
-        XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .unsupportedAgent)
-        XCTAssertTrue(spy.events.isEmpty)
+        XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .queued,
+                       "codex has a channel now; the composer reading is what refuses, not the name")
+        XCTAssertTrue(spy.events.isEmpty,
+                      "a `❯` screen with no codex status line is not codex's composer — and is "
+                      + "exactly what a codex tab fallen back to a bare shell looks like")
     }
 
     func testAnUnknownTabIsRefused() {
