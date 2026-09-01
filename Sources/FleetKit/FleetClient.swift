@@ -21,6 +21,12 @@ public final class FleetClient: @unchecked Sendable {
     /// Network and Security only — `UIDevice` is not reachable from this module, and the
     /// `FleetKitiOS` target exists to keep it that way.
     private let deviceName: String?
+    /// What this client tells the Mac it can be *asked*, sent in `hello`.
+    ///
+    /// Injectable so a test can present a peer that claims nothing — which is what every
+    /// phone in the field is, and the state the Mac must not send a `phoneRequest` into. See
+    /// `FleetCapability` for why the guarantee lives in a claim rather than in a version.
+    private let caps: [String]
     private let queue: DispatchQueue
     private var connection: NWConnection?
     private var nextCID = 1
@@ -44,9 +50,13 @@ public final class FleetClient: @unchecked Sendable {
     /// `deviceName` defaults to `nil` — "claims nothing" — because that is a real wire state
     /// the server has to handle anyway (every phone built before `hello` carried a name is
     /// in it), not a convenience for callers.
-    public init(key: FleetDeviceKey, deviceName: String? = nil, queue: DispatchQueue = .main) {
+    public init(
+        key: FleetDeviceKey, deviceName: String? = nil,
+        caps: [String] = FleetCapability.supported, queue: DispatchQueue = .main
+    ) {
         self.key = key
         self.deviceName = deviceName
+        self.caps = caps
         self.queue = queue
     }
 
@@ -67,7 +77,9 @@ public final class FleetClient: @unchecked Sendable {
                 // `hello` goes out the instant the socket is usable. TLS-PSK has already
                 // established who we are, so this is a resume point, not a credential.
                 FleetSocket.send(
-                    ClientFrame.hello(lastSeq: lastSeq, device: self.deviceName),
+                    ClientFrame.hello(
+                        lastSeq: lastSeq, device: self.deviceName, caps: self.caps
+                    ),
                     over: connection
                 )
                 self.onReady?()
@@ -92,6 +104,31 @@ public final class FleetClient: @unchecked Sendable {
             self.onFrame?(frame)
         } onEnd: { [weak self] error in
             self?.end(error)
+        } onUndecodable: { [weak self] data in
+            // The mirror of `FleetSocketServer.accept`'s salvage, added the moment this half
+            // of the wire gained a request of its own. A Mac newer than this phone can send a
+            // `PhoneRequest` op this build has no case for; `PhoneRequest`'s decoder throws on
+            // one, deliberately, and without this the throw took the socket with it — no
+            // reply, no close frame — so the phone would read a bare hang-up as a disconnect,
+            // reconnect, and be asked the same unanswerable question again. A one-second flap,
+            // forever, over one unknown enum value.
+            //
+            // Only an `ask` is salvaged, and that narrowness is the load-bearing part rather
+            // than caution: `FleetSocket.receive`'s tear-down exists so the two ends cannot
+            // silently disagree about state, and that reasoning is right about every frame
+            // that carries state. A request carries none — it is correlated by a `cid` and
+            // answered on it — so refusing this one and reading the next leaves both ends
+            // believing exactly what they believed before.
+            guard let self, !self.hasEnded,
+                  let salvaged = try? JSONDecoder().decode(
+                      FleetSocket.CorrelatedFrame.self, from: data
+                  ),
+                  salvaged.t == "ask"
+            else { return false }
+            FleetSocket.send(
+                ClientFrame.refused(cid: salvaged.cid, code: "unsupported"), over: connection
+            )
+            return true
         }
         connection.start(queue: queue)
     }
@@ -137,5 +174,16 @@ public final class FleetClient: @unchecked Sendable {
         nextCID += 1
         FleetSocket.send(ClientFrame.req(cid: cid, request), over: connection)
         return cid
+    }
+
+    /// Answer a `ServerFrame.phoneRequest` on the `cid` the Mac chose.
+    ///
+    /// Separate from `send` and returning nothing, because it mints no correlation id: this
+    /// echoes one back. Dropped in silence when there is no connection, which is the right
+    /// answer for a reply nobody is waiting on any more — the Mac's own pending entry is
+    /// released by the drop that took this socket away.
+    public func answer(_ frame: ClientFrame) {
+        guard let connection else { return }
+        FleetSocket.send(frame, over: connection)
     }
 }

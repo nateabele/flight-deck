@@ -2373,4 +2373,20 @@ class CachedValue<T> {
 
         return result
     }
+
+    /// Flight Deck: drop the stored value, so the next `get()` fetches again.
+    ///
+    /// Upstream this cache only ever expires on its own clock, which is right for a reader
+    /// that POLLS — 500ms of staleness is invisible to a rename or an accessibility query.
+    /// It is wrong for a reader that has just CHANGED what it is about to read. Flight Deck's
+    /// answer drive presses a key, waits 120ms for the repaint and reads back to confirm the
+    /// cursor moved (`SessionStore.perform`); served from a cache that may be 500ms old it is
+    /// handed the screen from before its own keystroke, concludes the key never landed, and
+    /// abandons a half-answered dialog. Whoever sends the keystroke calls this
+    /// (`TextInjecting`), so only reads that follow an injection pay for a re-fetch.
+    func invalidate() {
+        value = nil
+        expiryTask?.cancel()
+        expiryTask = nil
+    }
 }

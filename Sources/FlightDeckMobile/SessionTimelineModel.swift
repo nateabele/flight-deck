@@ -63,9 +63,10 @@ protocol PromptSending: AnyObject {
 /// blocked on.
 ///
 /// **There is no `pendingPrompt` verb beside it, and that absence is the design.** What the
-/// session is blocked on is *derived* from the feed this model already holds and the `activity`
-/// the fleet already pushes — see `blocked(activity:)`. Nothing about a question is fetched,
-/// so there is nothing here to fetch it with.
+/// session is blocked on is *derived* from the feed this model already holds and the status the
+/// fleet already pushes — see `blocked(agent:activity:call:)`. The status names *which* dialog
+/// is open, never what it says, so nothing about a question is fetched and there is nothing
+/// here to fetch it with.
 ///
 /// A third protocol rather than a third method on either existing one, for the reason there are
 /// two already: a stub must be able to leave one verb outstanding while answering another, and
@@ -195,7 +196,8 @@ final class SessionTimelineModel {
         case idle
         /// Dispatched. `ack` means *dispatched, not done* — the Mac's driver refuses to press
         /// Return on a screen it cannot confirm — so what clears this card is the transcript:
-        /// the `tool_result` arrives, `blocked(activity:)` returns nil, and the card goes.
+        /// the `tool_result` arrives, `blocked(agent:activity:call:)` returns nil, and the card
+        /// goes.
         case sent(call: String)
         /// The Mac refused, or nobody confirmed. The question stays visible with the reason
         /// under it, because the reader has to see what they were being asked.
@@ -495,9 +497,14 @@ final class SessionTimelineModel {
     /// arrives — a codex tab, a body this build cannot parse — must not become a poll that
     /// runs for the life of the screen. That objection is why the original was a single shot;
     /// the answer is a bound, not one attempt.
-    func chaseBlockedPrompt(agent: String?, activity: String?) async {
+    ///
+    /// **It chases a changed dialog too, not only a missing one.** `call` goes through
+    /// `blocked` unchanged, so a Mac naming a call this feed has never seen reads here exactly
+    /// like a record that has not arrived yet — which is what it is. That is the supersede
+    /// case, and it needs no second mechanism.
+    func chaseBlockedPrompt(agent: String?, activity: String?, call: OpenPromptIdentity) async {
         for delay in promptRetries {
-            guard blocked(agent: agent, activity: activity) == nil else { return }
+            guard blocked(agent: agent, activity: activity, call: call) == nil else { return }
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             loadNewer()
@@ -516,16 +523,84 @@ final class SessionTimelineModel {
     /// **Derived, never fetched.** `OpenPrompt.find` is the same function the Mac runs over the
     /// same transcript — shared in `FleetKit` precisely so the two cannot drift — and it runs
     /// here over `feed.items`, which the history channel has already delivered. That is why
-    /// this feature adds no request, no reply frame and no event: a question appearing is an
-    /// `activity` change (already pushed) plus records (already fetched on that change), and a
-    /// question being answered on the Mac is a `tool_result` arriving on the next fetch.
+    /// this feature adds no request and no reply frame: a question appearing is a status change
+    /// (already pushed) plus records (already fetched on that change), and a question being
+    /// answered on the Mac is a `tool_result` arriving on the next fetch. What the status
+    /// gained is the call's *id* — `call` below — and never a word of the question.
     ///
-    /// A function of `agent` and `activity` rather than a stored property, so it cannot go
-    /// stale: the screen passes the live `WireSession` fields it is already reading. Both are
-    /// `find`'s to judge — including whether this Mac can answer for that agent at all, which
-    /// is why a codex tab is blocked on nothing here however it is drawn elsewhere.
-    func blocked(agent: String?, activity: String?) -> OpenPrompt? {
-        OpenPrompt.find(in: feed.items, agent: agent, activity: activity)
+    /// A function of `agent`, `activity` and `call` rather than a stored property, so it
+    /// cannot go stale: the screen passes the live `WireSession` fields it is already reading.
+    /// The first two are `find`'s to judge — including whether this Mac can answer for that
+    /// agent at all, which is why a codex tab is blocked on nothing here however it is drawn
+    /// elsewhere.
+    ///
+    /// **`call` is the Mac's veto, and it is the half `find` cannot supply.** The derivation
+    /// runs over `feed.items`, so it is only ever as current as the last fetch — and the case
+    /// this feature exists for is precisely the one where the feed is behind: the dialog was
+    /// answered at the keyboard and claude raised the next one without the session leaving
+    /// `waiting`, so nothing here changed and this went on returning a call the Mac has left.
+    /// A derived prompt the Mac does not name is therefore not shown at all: a card that draws
+    /// nothing for the beat it takes `loadNewer` to land is a great deal better than one that
+    /// offers Allow for a command nobody is being asked about. `.unreported` is the one state
+    /// that defers to this end — see `OpenPromptIdentity`; a Mac too old to send the field
+    /// still gets today's behaviour rather than a phone that shows no cards at all.
+    func blocked(agent: String?, activity: String?, call: OpenPromptIdentity) -> OpenPrompt? {
+        let derived = OpenPrompt.find(in: feed.items, agent: agent, activity: activity)
+        let shown = Self.shown(derived: derived, call: call)
+        note(derived: derived, macSays: call, shown: shown)
+        return shown
+    }
+
+    /// The veto, factored out of `blocked` so that method reads as "derive, record, return".
+    /// Unchanged in behaviour: `.unreported` defers to this end, `.noPrompt` overrides it, and
+    /// a named call must match the one derived here.
+    private static func shown(derived: OpenPrompt?, call: OpenPromptIdentity) -> OpenPrompt? {
+        guard let derived else { return nil }
+        switch call {
+        case .unreported: return derived
+        case .noPrompt: return nil
+        case .call(let id): return id == derived.callID ? derived : nil
+        }
+    }
+
+    /// The last line `note` wrote, so an unchanged one is not written again.
+    ///
+    /// `@ObservationIgnored`, and that is load-bearing rather than tidiness: this is written
+    /// from inside a view update — see `note` — and an observed mutation there would invalidate
+    /// the very view being built.
+    @ObservationIgnored private var lastNotedPrompt: String?
+
+    /// One line per **change** in what this screen believes is open, and never one per call.
+    ///
+    /// `blocked(agent:activity:call:)` is read from a view body, so it runs on every render —
+    /// logging there directly would produce hundreds of identical lines and drown the fetch
+    /// that has to carry them. What is worth recording is the transition, and the transition is
+    /// the whole of the stale-card report: `derived` is what this phone found in the transcript
+    /// it holds, `macSays` is the call the Mac claims is open right now, and `shown` is which of
+    /// the two won. Side by side they say which end was behind — the same reading
+    /// `PromptLifecycleRecord.answer` was built to give on the Mac.
+    private func note(
+        derived: OpenPrompt?, macSays: OpenPromptIdentity, shown: OpenPrompt?
+    ) {
+        // Counts and ids only — never a question, a header or an option label. See `PhoneLog`.
+        let line = "derived=\(derived?.callID ?? "none") mac=\(Self.describe(macSays))"
+            + " shown=\(shown?.callID ?? "none")"
+        guard lastNotedPrompt != line else { return }
+        lastNotedPrompt = line
+        PhoneLog.prompt.notice(
+            "\("prompt session=\(self.sessionID.uuidString) " + line, privacy: .public)"
+        )
+    }
+
+    /// The three states of `WireSession.openPromptCall`, spelled out. `unreported` is the one
+    /// that matters most in a log: it is a Mac too old to name the open dialog, so this phone
+    /// is deciding on its own and the Mac's veto is not in play at all.
+    private static func describe(_ call: OpenPromptIdentity) -> String {
+        switch call {
+        case .unreported: return "unreported"
+        case .noPrompt: return "none"
+        case .call(let id): return id
+        }
     }
 
     /// Answer the dialog `call` names.
@@ -547,6 +622,16 @@ final class SessionTimelineModel {
         let token = UUID()
         answerInFlight = token
         answerState = .sent(call: call)
+        // Which call this thumb came down on, and what shape of answer — never which option.
+        // The Mac writes the other half of this line (`PromptLifecycleRecord.answer`, with the
+        // call IT believed was open), and the pair is what says which end was wrong.
+        //
+        // Composed first, then logged as one interpolation, here and at every other call site
+        // in this file: `OSLogMessage` is not a `String` and cannot be concatenated, and one
+        // `notice` per fragment would split a record across lines in the file the Mac fetches.
+        let sent = "sent session=\(sessionID.uuidString) call=\(call)"
+            + " kind=\(Self.describe(answer))"
+        PhoneLog.answer.notice("\(sent, privacy: .public)")
 
         // Armed BEFORE the send, because the send can complete before it returns:
         // `FleetConnector.send(_:then:)` answers `.disconnected` synchronously by design, the
@@ -564,12 +649,38 @@ final class SessionTimelineModel {
             guard let self, self.claimAnswer(token) else { return }
             switch result {
             case .success:
+                PhoneLog.answer.notice("acked call=\(call, privacy: .public)")
                 // Stays `.sent`. What retires the card is the transcript — so pull it, for the
                 // same reason `send(_:)` does: the Mac emits no frame when a Return lands.
                 self.loadNewer()
             case .failure(let error):
+                // The refusal a person reads as "Your Mac has moved on from this". Logged with
+                // the Mac's own code rather than the copy shown on screen, because the code is
+                // what correlates with the Mac's side of the same second.
+                let refusal = "refused call=\(call) code=\(Self.describe(error))"
+                PhoneLog.answer.error("\(refusal, privacy: .public)")
                 self.answerState = .failed(call: call, Self.answerMessage(for: error))
             }
+        }
+    }
+
+    /// The shape of an answer, never its content: which of `PromptAnswer`'s cases went out,
+    /// and for a set, how many questions it covered. An option label is the user's own text
+    /// and does not cross the device boundary — see `PhoneLog`.
+    private static func describe(_ answer: PromptAnswer) -> String {
+        switch answer {
+        case .option: return "option"
+        case .answers(let selections): return "answers questions=\(selections.count)"
+        case .allow: return "allow"
+        case .deny: return "deny"
+        }
+    }
+
+    /// The Mac's own refusal code, or `disconnected` when there was no Mac to refuse.
+    private static func describe(_ error: FleetRequestError) -> String {
+        switch error {
+        case .disconnected: return "disconnected"
+        case .server(let code): return code
         }
     }
 
@@ -830,7 +941,10 @@ final class SessionTimelineModel {
             case "unknown_session":
                 return "This session is no longer open on your Mac."
             case "unsupported_agent":
-                return "Flight Deck can only type into a Claude session from here."
+                // Deliberately does not name the typeable agents. This is the LATE refusal,
+                // from a Mac that may be running a newer build than the phone — so the phone
+                // must not claim a list it cannot know is current.
+                return "Flight Deck can't type into this kind of session from here."
             case "not_running":
                 return "There's no agent running in this tab right now."
             case PromptText.Rejection.tooLong.rawValue:

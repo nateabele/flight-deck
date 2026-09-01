@@ -2,6 +2,7 @@
 import AppKit
 import FleetKit
 import Foundation
+import OSLog
 import SwiftUI
 
 /// One session's status edge across a single registry tick.
@@ -41,6 +42,38 @@ final class SessionStore: ObservableObject {
     /// .reportsBackgroundWork`), so a `busy` tick carries the last known value forward and
     /// only a plain `idle` — or a vanished agent — clears it.
     @Published private(set) var backgroundWorkSessions: Set<UUID> = []
+
+    /// Which dialog each blocked tab is on, by the blocked call's `tool_use_id`. Absent for
+    /// every tab this Mac cannot name a dialog for, which is nearly all of them.
+    ///
+    /// **The third axis of `commitStatuses`, and the reason it exists.** `activity` was the
+    /// only thing a client was ever told about a dialog, so one prompt superseded by another
+    /// while the session stayed `waiting` moved nothing on the wire and a phone went on
+    /// drawing — and offering buttons for — a dialog this Mac had already left. This is
+    /// projected into `WireSession.openPromptCall`, so a change of dialog is itself a change
+    /// a client can see.
+    ///
+    /// Not `@Published`: nothing on the desktop renders it. The sidebar shows *that* a tab is
+    /// waiting, which `statuses` already says, and publishing a value that moves on a tick
+    /// nothing else moved on would invalidate the whole sidebar for no visible difference.
+    ///
+    /// Rebuilt wholesale by every commit, like `statuses`, so an entry cannot outlive the tab
+    /// it names or the dialog it describes.
+    private(set) var openPromptCalls: [UUID: String] = [:]
+
+    /// How this store learns which dialog a tab is blocked on.
+    ///
+    /// A closure rather than a call into `PromptService`, for two reasons. That service holds
+    /// *this* store, so naming it here would be a cycle; and the derivation it runs is
+    /// transcript grammar (`OpenPrompt.find` over a tail) that this file has no business
+    /// learning a second copy of. `FleetService` installs the real one over the same
+    /// `PromptService` an inbound answer is judged against, so what is pushed and what a tap
+    /// is refused against are one object reading one transcript.
+    ///
+    /// Nil by default: a store with no fleet behind it reports no dialogs, which is what the
+    /// hundred-odd tests that never open a socket want, and costs them no transcript reads.
+    var openPromptCallReader: (UUID) -> String? = { _ in nil }
+
     /// `didSet` persists every change, including one made through `SessionSidebar`'s
     /// `List(selection:)` binding — the only way selection actually changes in
     /// production, since that binding writes here directly rather than through
@@ -872,7 +905,9 @@ final class SessionStore: ObservableObject {
     private func wire(_ session: Session) -> WireSession {
         FleetProjection.project(
             session, status: statuses[session.id], unread: unreadIdle,
-            hasBackgroundWork: backgroundWorkSessions.contains(session.id), planGates: planGates
+            hasBackgroundWork: backgroundWorkSessions.contains(session.id),
+            openPromptCall: openPromptCalls[session.id],
+            planGates: planGates
         )
     }
 
@@ -1774,7 +1809,8 @@ final class SessionStore: ObservableObject {
             emit(.projectAdded(
                 FleetProjection.project(
                     repos[repoIndex], statuses: statuses, unread: unreadIdle,
-                    backgroundWork: backgroundWorkSessions, planGates: planGates
+                    backgroundWork: backgroundWorkSessions,
+                    openPromptCalls: openPromptCalls, planGates: planGates
                 ),
                 at: repoIndex
             ))
@@ -2674,7 +2710,8 @@ final class SessionStore: ObservableObject {
                 emit(.projectAdded(
                     FleetProjection.project(
                         repo, statuses: statuses, unread: unreadIdle,
-                        backgroundWork: backgroundWorkSessions, planGates: planGates
+                        backgroundWork: backgroundWorkSessions,
+                        openPromptCalls: openPromptCalls, planGates: planGates
                     ), at: at
                 ))
             }
@@ -3214,6 +3251,13 @@ final class SessionStore: ObservableObject {
     /// `@discardableResult` because every existing caller is a local UI action that has
     /// already validated its own field; the Bool exists for the fleet command, which has to
     /// answer a phone that sent a title this agent cannot use.
+    /// Read with:
+    /// `log show --predicate 'subsystem == "dev.flightdeck.FlightDeck" AND category == "rename"' --last 30m`
+    static let renameLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
+        category: "rename"
+    )
+
     @discardableResult
     func rename(_ id: UUID, to newTitle: String) -> Bool {
         guard let at = locate(id),
@@ -3259,7 +3303,25 @@ final class SessionStore: ObservableObject {
             // Fire and forget: the sidebar already has the name, and a thread that refuses
             // the rename (or an app-server that is gone) must not block the user's edit or
             // pop an alert over a cosmetic failure.
-            Task { try? await adapter.rename(binding, to: name) }
+            //
+            // Fire-and-forget is NOT fire-and-say-nothing, and the difference is the whole
+            // reason this is logged. When the request never lands, codex keeps the old name;
+            // `CodexNameWatcher` then tails that name out of `session_index.jsonl` and pushes
+            // it back UP into the sidebar, so the user's rename appears to revert on its own
+            // and the working up-path is what disguises the broken down-path. Swallowing the
+            // error with a bare `try?` left no evidence anywhere — not a log line, not a
+            // failed test — which is why "renames don't reach codex" could only be reported
+            // as a symptom and never traced. Cosmetic enough not to alert, never so cosmetic
+            // that it should be invisible.
+            Task {
+                do {
+                    try await adapter.rename(binding, to: name)
+                } catch {
+                    Self.renameLogger.error(
+                        "codex rename failed for thread \(binding.conversationID.uuidString.lowercased(), privacy: .public): \(String(describing: error), privacy: .public)"
+                    )
+                }
+            }
         }
         // True means the name was ACCEPTED and the local title changed — not that the agent
         // has been told. The codex arm above is deliberately fire-and-forget and the claude
@@ -3387,16 +3449,18 @@ final class SessionStore: ObservableObject {
     /// than re-decided here.** `AgentAdapter.textChannel` holds the refusal and its evidence,
     /// and a `nil` there IS the refusal; this is one of the three places that consult it —
     /// `inject` and `restore`'s auto-resume gate are the others — so no two of them can come
-    /// to different conclusions about one agent. Claude's route is the one `rename`
+    /// to different conclusions about one agent. Both shipped agents take the route `rename`
     /// already takes: type into the pty through `inject`, the single funnel where an idle
-    /// status, a readable one-row `InputBar` and the kill-and-yank draft dance are all
-    /// decided. Guessing at a second TUI's input box with the user's own words is a worse
-    /// version of a bug this codebase has already paid for — see `rename`, which is the
-    /// reason that dispatch exists at all.
+    /// status, a readable one-row composer and the draft dance are all decided. Each brings
+    /// its own reading of that composer — `ClaudeTextChannel` and `CodexTextChannel`, keyed
+    /// on different marker glyphs — so this stays a capability question and never becomes a
+    /// name check. Guessing at a TUI's input box with the user's own words is a bug this
+    /// codebase has already paid for — see `rename` — which is why a channel must be *built*
+    /// against that agent's captured screens before it appears here.
     ///
     /// **The order of the checks is load-bearing twice.** The capability test comes before
-    /// the status test, so a codex tab is told `unsupportedAgent` — never on this tab — rather
-    /// than `notRunning`, which would invite a retry that can never succeed. And the token
+    /// the status test, so an agent with no channel is told `unsupportedAgent` — never on this
+    /// tab — rather than `notRunning`, which would invite a retry that can never succeed. And the token
     /// test comes before the text is validated, so a retry of something already accepted is
     /// idempotent even if the two sends disagreed about the text; they cannot, since a token
     /// is minted per composed message, and if they ever did the first send is the one the
@@ -3568,6 +3632,14 @@ final class SessionStore: ObservableObject {
     /// and a shared list would let one silence the other.
     private var answeredPromptTokens: [UUID: [UUID]] = [:]
 
+    /// Where an aborted drive's description goes. See `AnswerAbort`, and `AnswerAbortLog` for
+    /// the two places production puts one.
+    ///
+    /// A seam on the SINK rather than a `#if DEBUG` around the recording: the failure this
+    /// exists for reproduces only on the installed Release build, so what gets recorded must be
+    /// identical in both configurations and it is only the destination a test replaces.
+    var answerAbortSink: (AnswerAbort) -> Void = AnswerAbortLog.record
+
     /// A client answered the dialog tab `id` is blocked on.
     ///
     /// `open` is the Mac's **own** derivation, from `PromptService`, never the client's claim.
@@ -3654,7 +3726,7 @@ final class SessionStore: ObservableObject {
             return drive(
                 from: current, to: driver.allowRow,
                 confirm: { driver.focusedRow(inViewport: $0) == driver.allowRow },
-                injector: injector, id: id, token: token
+                driver: driver, injector: injector, id: id, token: token
             )
 
         case .answers(let selections):
@@ -3723,7 +3795,7 @@ final class SessionStore: ObservableObject {
                     driver.focusedRow(inViewport: $0) == index
                         && driver.row(index, reads: label, inViewport: $0)
                 },
-                injector: injector, id: id, token: token
+                driver: driver, injector: injector, id: id, token: token
             )
         }
     }
@@ -3781,12 +3853,28 @@ final class SessionStore: ObservableObject {
         guard index < steps.count else { injecting.remove(id); return }
         let step = steps[index]
 
-        guard let screen = injector.readViewport(),
-              driver.focusedRow(inViewport: screen) == step.from,
-              Self.rowLabel(for: step, questions: questions).map({
-                  driver.row(step.to, reads: $0, inViewport: screen)
-              }) == true
-        else { injecting.remove(id); return }
+        // One guard per check, where a single compound one would do. The conditions, their
+        // order and their short-circuiting are unchanged — what the split buys is a NAME for
+        // whichever one refused, because an abort sends no further key and is otherwise
+        // indistinguishable from a drive that finished.
+        guard let screen = injector.readViewport() else {
+            note(.unreadableBeforePress, step: index, step, viewport: nil)
+            injecting.remove(id)
+            return
+        }
+        let focused = driver.focusedRow(inViewport: screen)
+        guard focused == step.from else {
+            note(.cursorBeforePress, step: index, step, focused: focused, viewport: screen)
+            injecting.remove(id)
+            return
+        }
+        let expected = Self.rowLabel(for: step, questions: questions)
+        guard let expected, driver.row(step.to, reads: expected, inViewport: screen) else {
+            note(.labelBeforePress, step: index, step, expected: expected,
+                 focused: focused, viewport: screen)
+            injecting.remove(id)
+            return
+        }
 
         let distance = step.to - step.from
         for _ in 0..<abs(distance) {
@@ -3797,15 +3885,42 @@ final class SessionStore: ObservableObject {
             guard let self else { return }
             // Re-read after the move: the row under the cursor must STILL be the one the plan
             // named. This is the check that survives a human touching the terminal mid-drive.
-            guard let landed = injector.readViewport(),
-                  driver.focusedRow(inViewport: landed) == step.to
-            else { self.injecting.remove(id); return }
+            guard let landed = injector.readViewport() else {
+                self.note(.unreadableAfterMove, step: index, step, expected: expected,
+                          viewport: nil)
+                self.injecting.remove(id)
+                return
+            }
+            let arrived = driver.focusedRow(inViewport: landed)
+            guard arrived == step.to else {
+                self.note(.landingAfterMove, step: index, step, expected: expected,
+                          focused: arrived, viewport: landed)
+                self.injecting.remove(id)
+                return
+            }
             injector.sendReturn()
             self.injectionSettle { [weak self] in
                 self?.perform(steps, at: index + 1, questions: questions,
                               driver: driver, injector: injector, id: id)
             }
         }
+    }
+
+    /// Files one abort against `answerAbortSink`. A method rather than the literal at each
+    /// site: the step is the source of every field except the one that failed, so only the
+    /// difference is written out where the drive can be read.
+    private func note(
+        _ check: AnswerAbort.Check,
+        step index: Int,
+        _ step: AnswerPlan.Step,
+        expected: String? = nil,
+        focused: Int? = nil,
+        viewport: String?
+    ) {
+        answerAbortSink(AnswerAbort(
+            check: check, step: index, purpose: step.purpose, from: step.from, to: step.to,
+            expected: expected, focused: focused, viewport: viewport
+        ))
     }
 
     /// What the row a step is about must read, or `nil` when the plan is inconsistent with the
@@ -3830,6 +3945,7 @@ final class SessionStore: ObservableObject {
         from current: Int,
         to target: Int,
         confirm: @escaping (String) -> Bool,
+        driver: any AgentDialogDriver,
         injector: TextInjecting,
         id: UUID,
         token: UUID
@@ -3846,7 +3962,25 @@ final class SessionStore: ObservableObject {
         // production, that a kill waits out.
         injectionSettle { [weak self] in
             defer { self?.injecting.remove(id) }
-            guard let screen = injector.readViewport(), confirm(screen) else { return }
+            // Split for the reason `perform`'s is, and one more: `confirm` is a closure the
+            // caller composed, so the only thing that can be said about its refusal here is
+            // where the marker ended up — which is worth saying, because that is the number
+            // the caller disagreed with.
+            guard let screen = injector.readViewport() else {
+                self?.answerAbortSink(AnswerAbort(
+                    check: .unreadableAfterMove, step: nil, purpose: nil,
+                    from: current, to: target, expected: nil, focused: nil, viewport: nil
+                ))
+                return
+            }
+            guard confirm(screen) else {
+                self?.answerAbortSink(AnswerAbort(
+                    check: .landingAfterMove, step: nil, purpose: nil,
+                    from: current, to: target, expected: nil,
+                    focused: driver.focusedRow(inViewport: screen), viewport: screen
+                ))
+                return
+            }
             injector.sendReturn()
         }
         return .dispatched
@@ -4407,25 +4541,46 @@ final class SessionStore: ObservableObject {
     /// the `previous` snapshot the next tick diffs against, so a later tick could fabricate
     /// or swallow an edge that never happened.
     private func commitStatuses(_ next: [UUID: SessionStatus], backgroundWork: Set<UUID>) {
-        // BOTH, not just `statuses`. A task starting or ending under an otherwise-idle tab
-        // moves this set and nothing else — guarding on `statuses` alone swallowed that tick
-        // entirely, so the badge never lit and no event ever reached the phone.
-        guard next != statuses || backgroundWork != backgroundWorkSessions else { return }
+        let previous = statuses
+        let previousBackgroundWork = backgroundWorkSessions
+        let previousOpenPromptCalls = openPromptCalls
+        // Installed **above** the guard rather than below it, because the third axis is
+        // derived FROM them: `openPromptCallReader` asks this store what each tab is doing,
+        // and asking it against the statuses this tick is replacing would report no dialog on
+        // the very tick a tab first blocks — a card a poll late for no reason. Written through
+        // an equality check so an unchanged tick still publishes nothing, which is what the
+        // single `guard` used to buy: both of these are `@Published`, and re-assigning an
+        // equal value at 2 Hz would invalidate the whole sidebar twice a second.
+        if next != statuses { statuses = next }
+        if backgroundWork != backgroundWorkSessions { backgroundWorkSessions = backgroundWork }
+        openPromptCalls = derivedOpenPromptCalls()
+        // THREE axes, not one. A task starting or ending under an otherwise-idle tab moves
+        // only `backgroundWork` — guarding on `statuses` alone swallowed that tick entirely,
+        // so the badge never lit and no event ever reached the phone. One dialog replaced by
+        // the next moves only `openPromptCalls`: same activity, often the same `waitingFor`,
+        // and until this axis existed the tick was swallowed the same way, leaving a phone
+        // holding a card for a dialog that was gone.
+        guard next != previous
+            || backgroundWork != previousBackgroundWork
+            || openPromptCalls != previousOpenPromptCalls
+        else { return }
         // A session that HAD a status and no longer does means its `claude` exited.
         // Drop its sub-agent count too, so a later process reusing the same session
         // UUID does not inherit a count from the dead one. Counts for sessions that
         // never had a status are deliberately left alone — that is the
         // count-arrives-before-registry case.
-        for id in statuses.keys where next[id] == nil {
+        for id in previous.keys where next[id] == nil {
             subagentCounts.removeValue(forKey: id)
         }
-        let previous = statuses
-        let previousBackgroundWork = backgroundWorkSessions
-        // Also `emitActivity`'s second axis, below: a tick can move this set alone, with
-        // every `SessionStatus` unchanged, and that tick still has to reach the wire.
+        // Also `emitActivity`'s second and third axes, below: a tick can move either of these
+        // alone, with every `SessionStatus` unchanged, and that tick still has to reach the
+        // wire.
         let backgroundWorkChanged = previousBackgroundWork.symmetricDifference(backgroundWork)
-        statuses = next
-        backgroundWorkSessions = backgroundWork
+        let openPromptChanged = Set(previousOpenPromptCalls.keys).union(openPromptCalls.keys)
+            .filter { previousOpenPromptCalls[$0] != openPromptCalls[$0] }
+        // `openPromptChanged` is deliberately not unioned in: a tab with a dialog has a status,
+        // so it is already in `next.keys`, and adding it would only be a way for this set to
+        // disagree with itself.
         let touched = Set(previous.keys)
             .union(next.keys)
             .union(backgroundWorkChanged)
@@ -4440,13 +4595,13 @@ final class SessionStore: ObservableObject {
         // activity having changed with no event on the wire for it yet, which is real
         // drift, just not a bug: the fix is recording activity first, not silencing the
         // check.
-        emitActivity(transitions, backgroundWorkChanged: backgroundWorkChanged)
+        emitActivity(transitions, backgroundWorkChanged: backgroundWorkChanged,
+                     openPromptChanged: openPromptChanged)
         applyReadState(transitions)
         deliverNotifications(transitions)
         cancelSupersededPrompts(transitions)
-        // Below the `guard next != statuses || backgroundWork != backgroundWorkSessions`
-        // above, so this writes only on a real transition — a handful of small atomic
-        // writes a minute, not one per poll.
+        // Below the three-axis guard above, so this writes only on a real transition — a
+        // handful of small atomic writes a minute, not one per poll.
         // Recording activity here rather than at quit is what covers a SIGKILL (which is
         // how scripts/swap-release.sh stops the app) and a panic, and an unplanned exit is
         // the case auto-resume is most wanted for.
@@ -4517,13 +4672,19 @@ final class SessionStore: ObservableObject {
     /// `old == new` throughout. Filtering on `old != new` alone would drop it — the sidebar
     /// (Task 5) would still update, because it reads `backgroundWorkSessions` directly, but a
     /// connected phone would hear nothing until some other field on that session happened to
-    /// change too. `changed` is therefore two axes, not one: it does not read off quite the
-    /// same diff `applyReadState`, `deliverNotifications` and `cancelSupersededPrompts` do.
+    /// change too. `openPromptChanged` is the same argument again for a different field, and
+    /// the one this Mac's stale-card reports were about: which dialog is up is invisible to
+    /// `SessionStatus` equality, so a supersede produces `old == new` throughout too.
+    /// `changed` is therefore three axes, not one: it does not read off quite the same diff
+    /// `applyReadState`, `deliverNotifications` and `cancelSupersededPrompts` do.
     private func emitActivity(
-        _ transitions: [StatusTransition], backgroundWorkChanged: Set<UUID>
+        _ transitions: [StatusTransition], backgroundWorkChanged: Set<UUID>,
+        openPromptChanged: Set<UUID>
     ) {
         let changed = transitions.filter {
-            $0.old != $0.new || backgroundWorkChanged.contains($0.id)
+            $0.old != $0.new
+                || backgroundWorkChanged.contains($0.id)
+                || openPromptChanged.contains($0.id)
         }
         emit(changed.map { transition in
             .activityChanged(
@@ -4533,9 +4694,37 @@ final class SessionStore: ObservableObject {
                 activity: transition.new?.activity.rawValue,
                 waitingFor: transition.new?.waitingFor,
                 subagentCount: transition.new?.subagentCount ?? 0,
-                hasBackgroundWork: backgroundWorkSessions.contains(transition.id)
+                hasBackgroundWork: backgroundWorkSessions.contains(transition.id),
+                openPromptCall: openPromptIdentity(of: transition.id)
             )
         })
+    }
+
+    /// Which dialog every blocked tab is on, as this Mac reads it right now.
+    ///
+    /// **Re-derived on every commit and never cached, exactly as `PromptService` re-derives on
+    /// every answer** — see that type for why a `served` table fails the case this whole
+    /// feature is about: claude answers one dialog and raises the next without the session
+    /// leaving `waiting`, and a cache still matches while a re-derivation does not.
+    ///
+    /// Only `waiting` tabs are asked, so the cost is bounded to the state a human is being
+    /// waited on in: an idle or busy fleet reads nothing at all, and the tail a blocked tab
+    /// does cost is `PromptService.tailRecords` records once per poll for as long as its
+    /// dialog is up. `openPromptCallReader` refuses a codex tab on the agent alone, before any
+    /// transcript is resolved, so an agent this build cannot read a dialog for is free too.
+    private func derivedOpenPromptCalls() -> [UUID: String] {
+        var derived: [UUID: String] = [:]
+        for (id, status) in statuses where status.activity == .waiting {
+            derived[id] = openPromptCallReader(id)
+        }
+        return derived
+    }
+
+    /// One tab's identity as it goes on the wire. Never `.unreported` — this build always
+    /// looks, so nothing found is this Mac asserting there is nothing to answer, which is the
+    /// assertion that retires a phone's card. Same rule `FleetProjection` states.
+    private func openPromptIdentity(of id: UUID) -> OpenPromptIdentity {
+        openPromptCalls[id].map(OpenPromptIdentity.call) ?? .noPrompt
     }
 
     /// Click-to-activate. The window ordering is the AppDelegate's job; this only moves
@@ -4604,7 +4793,13 @@ final class SessionStore: ObservableObject {
         emit(.activityChanged(
             id: id, activity: status.activity.rawValue,
             waitingFor: status.waitingFor, subagentCount: status.subagentCount,
-            hasBackgroundWork: backgroundWorkSessions.contains(id)
+            hasBackgroundWork: backgroundWorkSessions.contains(id),
+            // Carried, not re-derived: a sub-agent count arriving is not news about a dialog,
+            // and reading a transcript to say so would put a tail read on the watcher's path.
+            // Omitting it is not an option either — the fold overwrites unconditionally, so an
+            // event without it would replace a live call id with `.unreported` and drop this
+            // Mac's assertion on the floor.
+            openPromptCall: openPromptIdentity(of: id)
         ))
     }
 
@@ -4753,7 +4948,8 @@ final class SessionStore: ObservableObject {
             emit(.projectAdded(
                 FleetProjection.project(
                     repos[destination], statuses: statuses, unread: unreadIdle,
-                    backgroundWork: backgroundWorkSessions, planGates: planGates
+                    backgroundWork: backgroundWorkSessions,
+                    openPromptCalls: openPromptCalls, planGates: planGates
                 ),
                 at: destination
             ))
@@ -4949,5 +5145,128 @@ final class SessionStore: ObservableObject {
             }
         }
         return nil
+    }
+}
+
+/// Why an answer drive stopped, described well enough to diagnose it without the handset.
+///
+/// **A drive aborts silently on purpose, and that silence used to reach the log too.** Sending
+/// no further key is the right behaviour — a stopped drive leaves a dialog a person can still
+/// finish, a Return on the wrong row leaves nothing — but it recorded nothing at all, so a
+/// four-option checkbox question that ticked one box and stopped could not be told apart from
+/// one that never started. Which check refused, and what it refused against, cost a human a
+/// round trip on a phone to find out.
+///
+/// Every field here answers a question that round trip was spent on. `viewport` is the one
+/// that matters: without the actual screen there is no way to say whether the terminal drew
+/// something unexpected or the parser misread something ordinary.
+struct AnswerAbort: Equatable {
+    /// Which check refused, named apart rather than collapsed into "failed". The repairs are
+    /// unrelated: a cursor that did not start where the plan said is a screen that moved under
+    /// the plan, a label mismatch is this Mac's copy disagreeing with what is drawn, a landing
+    /// failure is a keystroke the TUI dropped or has yet to repaint, and an unreadable viewport
+    /// is not about the dialog at all.
+    enum Check: String, Equatable {
+        case unreadableBeforePress = "unreadable-viewport-before-press"
+        case cursorBeforePress = "pre-press-cursor"
+        case labelBeforePress = "pre-press-label"
+        case unreadableAfterMove = "unreadable-viewport-after-move"
+        case landingAfterMove = "post-move-landing"
+    }
+
+    let check: Check
+    /// Which step of the plan, or `nil` for the one-step drive that walks no plan.
+    let step: Int?
+    let purpose: AnswerPlan.Step.Purpose?
+    let from: Int
+    let to: Int
+    /// The label the check wanted the row to read, verbatim — the string that was compared,
+    /// not a description of it, because a trailing space or a stripped glyph is exactly the
+    /// kind of difference this is here to expose.
+    let expected: String?
+    /// What `focusedRow` returned. `nil` covers both "no marker found on the screen" and "no
+    /// screen to look at", which the `check` tells apart.
+    let focused: Int?
+    /// The whole screen the check saw, and the reason any of this goes to a file.
+    let viewport: String?
+
+    /// The one-line form. Kept short deliberately: os_log truncates a message, and everything
+    /// here has to survive that — which is why the viewport is not part of it.
+    var summary: String {
+        "answer abort check=\(check.rawValue) step=\(step.map(String.init) ?? "-")"
+            + " purpose=\(Self.describe(purpose)) from=\(from) to=\(to)"
+            + " focused=\(focused.map(String.init) ?? "nil")"
+            + " expected=\(expected.map { "\"\($0)\"" } ?? "-")"
+    }
+
+    private static func describe(_ purpose: AnswerPlan.Step.Purpose?) -> String {
+        switch purpose {
+        case .option(let question, let option): return "option(q\(question),o\(option))"
+        case .action(let question, let isLast):
+            return "action(q\(question),\(AnswerPlan.actionLabel(isLast: isLast)))"
+        case .submit: return "submit"
+        case nil: return "-"
+        }
+    }
+}
+
+/// Puts an `AnswerAbort` in the two places it can be read after the fact.
+///
+/// **Two channels because neither is enough alone.** The unified log is where every other
+/// subsystem's summary goes and where a person already looks, but os_log truncates — and the
+/// field that decides whether the terminal or the parser was at fault is a whole 40-row screen.
+/// So the summary goes to `Logger` and the screen to a file beside it, delimited so consecutive
+/// dumps come apart again.
+///
+/// Unconditional: not `#if DEBUG`, and not behind a preference. The failure this exists for
+/// reproduces only on the installed Release build, and an abort is rare enough that always
+/// writing one costs nothing worth measuring.
+enum AnswerAbortLog {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
+        category: "answer"
+    )
+
+    /// Beside the system's own logs, where `Console.app` lists it and a `tail -f` finds it
+    /// without knowing anything about this app. Not in a container — this build is unsandboxed,
+    /// and a path a human can type is the whole point.
+    static let fileURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/flight-deck-answer.log")
+
+    static func record(_ abort: AnswerAbort) {
+        logger.error("\(abort.summary, privacy: .public)")
+        write(abort, to: fileURL)
+    }
+
+    /// Appends one record: a timestamp, the same fields, then the screen between markers.
+    ///
+    /// **Every failure is swallowed, and the file is only ever appended to.** This runs inside
+    /// a drive a person is waiting on, so a log that cannot be written is not a reason to
+    /// behave differently from one that can — and an unopenable file is left alone rather than
+    /// replaced, because the history already in it is worth more than this one record.
+    static func write(_ abort: AnswerAbort, to url: URL) {
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        // Local time, with its offset, because the other half of this record is in the unified
+        // log — which Console shows in local time — and correlating the two should not need
+        // arithmetic.
+        stamp.timeZone = .current
+        let record = """
+            \(stamp.string(from: Date())) \(abort.summary)
+            --- viewport begin ---
+            \(abort.viewport ?? "(none — readViewport() returned nil)")
+            --- viewport end ---
+
+            """
+        let manager = FileManager.default
+        if !manager.fileExists(atPath: url.path) {
+            try? manager.createDirectory(at: url.deletingLastPathComponent(),
+                                         withIntermediateDirectories: true)
+            manager.createFile(atPath: url.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data(record.utf8))
     }
 }

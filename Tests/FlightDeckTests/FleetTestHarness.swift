@@ -36,6 +36,11 @@ final class FleetTestHarness {
             )
         )
         service = FleetService(store: self.store, preferences: preferences, armer: PairingArmer())
+        // Silenced by default, because the production sink appends to the developer's own
+        // `~/Library/Logs/flight-deck-prompt.log` and every status change in every fleet test
+        // would land in it. A test that wants the records replaces this closure — see
+        // `PromptLifecycleTests`.
+        service.promptLifecycleForTesting = { _ in }
     }
 
     @discardableResult

@@ -25,6 +25,7 @@ extension FleetEvent: Codable {
         case project, session, projectId
         case activity, waitingFor, subagentCount, isUnread, isCollapsed, hasBackgroundWork
         case gate
+        case openPromptCall
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -67,7 +68,7 @@ extension FleetEvent: Codable {
             try c.encode(title, forKey: .title)
             try c.encode(origin, forKey: .origin)
         case .activityChanged(let id, let activity, let waitingFor, let subagentCount,
-                              let hasBackgroundWork):
+                              let hasBackgroundWork, let openPromptCall):
             try c.encode(FleetEventTag.activityChanged, forKey: .t)
             try c.encode(id, forKey: .id)
             // `encode` not `encodeIfPresent`: an absent key and an explicit null are the
@@ -78,6 +79,11 @@ extension FleetEvent: Codable {
             try c.encodeIfPresent(waitingFor, forKey: .waitingFor)
             try c.encode(subagentCount, forKey: .subagentCount)
             try c.encode(hasBackgroundWork, forKey: .hasBackgroundWork)
+            // Writes the key even when it is null — see `OpenPromptIdentity`. A dump that
+            // shows `"openPromptCall": null` beside `"activity": "waiting"` is this Mac
+            // saying it is blocked on something it cannot name, which is a real state and the
+            // one report 4 was.
+            try c.encode(openPromptCall, forKey: .openPromptCall)
         case .unreadChanged(let id, let isUnread):
             try c.encode(FleetEventTag.unreadChanged, forKey: .t)
             try c.encode(id, forKey: .id)
@@ -132,7 +138,8 @@ extension FleetEvent: Codable {
                 waitingFor: try c.decodeIfPresent(String.self, forKey: .waitingFor),
                 subagentCount: try c.decode(Int.self, forKey: .subagentCount),
                 hasBackgroundWork: try c.decodeIfPresent(
-                    Bool.self, forKey: .hasBackgroundWork) ?? false
+                    Bool.self, forKey: .hasBackgroundWork) ?? false,
+                openPromptCall: try c.decode(OpenPromptIdentity.self, forKey: .openPromptCall)
             )
         case .unreadChanged:
             self = .unreadChanged(id: try c.decode(UUID.self, forKey: .id),

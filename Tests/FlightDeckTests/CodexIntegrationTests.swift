@@ -492,6 +492,74 @@ final class CodexIntegrationTests: XCTestCase {
         // every time, with `creator` still alive exactly as it is here.
     }
 
+    /// Sidebar → codex, through the real `SessionStore.rename` against a real app-server.
+    ///
+    /// `CodexRenameTests` already pins this path with a scripted transport, and it passes — so
+    /// if a rename still does not reach codex in production, the divergence is in something a
+    /// stub cannot model: the real request/response round trip, or a transport that is not
+    /// actually running behind the adapter the store hands back. This is the test that can
+    /// tell those apart, because it asserts against what codex itself reports rather than
+    /// against what we sent.
+    func testRenamingThroughTheStoreReachesCodexsOwnThreadName() async throws {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let cwd = home.appendingPathComponent("work", isDirectory: true)
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        try """
+        [projects."\(cwd.path)"]
+        trust_level = "trusted"
+        """.write(to: home.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+
+        let auth = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/auth.json")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: auth.path),
+                          "needs a logged-in codex: ~/.codex/auth.json")
+        try FileManager.default.copyItem(at: auth, to: home.appendingPathComponent("auth.json"))
+
+        let transport = CodexProcessTransport(home: home)
+        try transport.start()
+        defer { transport.stop() }
+        let rpc = CodexRPC(transport: transport)
+        try await CodexProcessTransport.verifyHandshake(rpc)
+
+        // Same reason as the writer-lock test above: a directly-constructed adapter does not
+        // get `historyMode` from `SessionStore.startCodex`, so it must be set by hand or
+        // `prepare` fails its own history-contract guard before this test starts.
+        let adapter = CodexAdapter(rpc: rpc, historyMode: "legacy")
+
+        let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.transcriptsRootOverride = cwd
+        store.codexIndexURLOverride = home.appendingPathComponent("session_index.jsonl")
+        store.overrideAdapter(adapter, for: .codex, account: nil)
+
+        let result = await store.createSession(agent: .codex, in: cwd.path)
+        guard case .success(let tabID) = result else {
+            return XCTFail("codex tab creation failed: \(result)")
+        }
+        let tab = try XCTUnwrap(store.repos.flatMap(\.sessions).first { $0.id == tabID })
+        let threadID = tab.pinnedConversationID.uuidString.lowercased()
+
+        XCTAssertTrue(store.rename(tabID, to: "renamed through the store"))
+
+        // The rename arm is `Task { … }`, so poll codex rather than assume it has landed.
+        // Asking codex is the whole point: asserting on what we sent would prove nothing a
+        // stub has not already proven.
+        var reported: String?
+        for _ in 0..<40 {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            let read = try await rpc.request("thread/read", ["threadId": threadID])
+            reported = (read["thread"] as? [String: Any])?["name"] as? String
+            if reported == "renamed through the store" { break }
+        }
+
+        XCTAssertEqual(reported, "renamed through the store",
+                       "the sidebar's rename must reach codex's own thread name")
+
+        _ = try? await rpc.request("thread/archive", ["threadId": threadID])
+    }
+
     // MARK: - Test doubles
 
     private final class FakePersistence: SessionPersisting {

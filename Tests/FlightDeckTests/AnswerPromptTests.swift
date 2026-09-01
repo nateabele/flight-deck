@@ -66,6 +66,10 @@ final class AnswerPromptTests: XCTestCase {
         let spy = SpyInjector()
         store.injectorOverride = spy
         store.injectionSettle = { $0() }
+        // Silenced: several tests here abort a drive on purpose, and the default sink writes
+        // to the real `~/Library/Logs/flight-deck-answer.log` a person diagnoses from. What an
+        // abort records is `AnswerDiagnosticsTests`' subject, not this file's.
+        store.answerAbortSink = { _ in }
         let session = store.newSession(in: tmp)
         store.applyRegistry([1: entry(session.pinnedConversationID, activity, cwd: tmp.path)])
         spy.events.removeAll()
@@ -88,6 +92,10 @@ final class AnswerPromptTests: XCTestCase {
         let spy = SpyInjector()
         store.injectorOverride = spy
         store.injectionSettle = { $0() }
+        // Silenced: several tests here abort a drive on purpose, and the default sink writes
+        // to the real `~/Library/Logs/flight-deck-answer.log` a person diagnoses from. What an
+        // abort records is `AnswerDiagnosticsTests`' subject, not this file's.
+        store.answerAbortSink = { _ in }
         guard case .success(let id) = await store.createSession(agent: .codex, in: tmp.path) else {
             XCTFail("codex tab creation must succeed against a scripted transport")
             throw CodexTabUnavailable()

@@ -29,11 +29,25 @@ enum InputBar {
     }
 
     /// U+276F, the prompt marker Claude Code draws at the start of the input box.
-    private static let marker: Character = "❯"
+    static let claudeMarker: Character = "❯"
+
+    /// U+203A, the marker codex draws instead. A *different glyph*, not a variant spelling:
+    /// on a codex screen `❯` matches nothing at all, which is why this reader used to return
+    /// nil for every codex tab rather than mis-reading one. Verified against
+    /// `Fixtures/Codex/tui-idle.captured.txt`.
+    static let codexMarker: Character = "›"
 
     /// Reads the *last* box on screen. Earlier markers are echoes of submitted messages
-    /// sitting in the scrollback; locking onto one would read a frozen old prompt.
-    static func read(fromViewport viewport: String) -> Reading? {
+    /// sitting in the scrollback; locking onto one would read a frozen old prompt. Both
+    /// agents echo submitted prompts with their own marker, so this rule is shared, not
+    /// claude-specific — see `Fixtures/Codex/tui-working.captured.txt`, which carries `›`
+    /// twice.
+    ///
+    /// `marker` is a parameter rather than a constant because the two agents draw different
+    /// glyphs; everything else about the shape — one marker line, continuation rows, a blank
+    /// line or a rule closing the run — is common to both, checked against each agent's own
+    /// captured screens.
+    static func read(fromViewport viewport: String, marker: Character = claudeMarker) -> Reading? {
         let lines = viewport.components(separatedBy: "\n")
         guard let start = lines.lastIndex(where: { $0.first == marker }) else { return nil }
 

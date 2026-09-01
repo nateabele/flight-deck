@@ -18,6 +18,24 @@ public struct FleetAttachment: Equatable, Sendable {
     /// client typed it onto the wire, and nothing checks it. Display it, never authorize on
     /// it.
     public let name: String?
+    /// What this client said it can be *asked*, in its `hello`. Empty means it claimed
+    /// nothing, which is every phone built before `FleetCapability` existed.
+    ///
+    /// Read before sending a `ServerFrame.phoneRequest`, and that read is the whole
+    /// compatibility mechanism: a phone with no case for that frame cannot decode it, and an
+    /// undecodable `ServerFrame` ends the socket. Same kind of fact as `name` — merely
+    /// *claimed*, never authenticated — but the consequence of trusting it wrongly is a frame
+    /// the peer ignores rather than any authority it did not have.
+    public let caps: Set<String>
+
+    /// `caps` defaults to empty — "claims nothing" — because that is a real wire state the
+    /// server has to handle anyway, not a convenience for callers.
+    public init(id: UUID, slot: UUID?, name: String?, caps: Set<String> = []) {
+        self.id = id
+        self.slot = slot
+        self.name = name
+        self.caps = caps
+    }
 }
 
 /// The listener, and one attached-client registry. Knows nothing about what a fleet is —
@@ -99,6 +117,21 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// Settable so the test does not have to wait the production value.
     public var handshakeDeadline: TimeInterval = 10
 
+    /// How long a `phoneRequest` may go unanswered before its caller is told the phone did
+    /// not reply.
+    ///
+    /// Ten seconds, sized against what is actually being waited on: a phone reading its own
+    /// `OSLogStore` and encoding at most `PhoneLogLimits.maxEntries` records, over a LAN link
+    /// that has already carried a handshake. A phone that has not answered by then is asleep,
+    /// backgrounded or gone, and none of those get better by waiting.
+    ///
+    /// It exists because the alternative is a leak with a person on the end of it: without a
+    /// deadline, a completion filed in `asks` for a socket that never drops is never resolved,
+    /// and `scripts/answer-trigger.sh logs` sits at a blank prompt forever.
+    ///
+    /// Settable so the test does not have to wait the production value.
+    public var askDeadline: TimeInterval = 10
+
     /// Answers a client's first frame. Returns the frames to send back — a snapshot, or a
     /// folded replay.
     public var onHello: ((_ client: FleetAttachment, _ lastSeq: Int) -> [ServerFrame])?
@@ -169,6 +202,23 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// of the connection so a later `cmd` on the same socket is attributed exactly as its
     /// `hello` was — a client says who it is once, not on every frame.
     private var names: [UUID: String] = [:]
+    /// What each connection claimed it can be asked, by connection id. Kept for the life of
+    /// the connection for the reason `names` is: a client says what it can do once, in its
+    /// `hello`, and every later decision about it reads this rather than asking again.
+    private var caps: [UUID: Set<String>] = [:]
+    /// Outstanding `phoneRequest`s, by connection id and then by this server's own `cid`.
+    ///
+    /// **Its own `cid` space, minted by `nextAskCID`, and it cannot collide with a client's.**
+    /// A client's numbers arrive in `req`/`cmd` and are answered in `page`/`ack`/`err`; these
+    /// go out in `phoneRequest` and come back in `logs`/`refused`. Neither end ever looks a
+    /// number up in the other's table, because the frame types that carry them are disjoint.
+    ///
+    /// Keyed by connection first so `drop(_:)` can release a whole socket's worth at once.
+    /// Every entry MUST be resolved exactly once — the same rule, and the same reason, as
+    /// `FleetConnector.pending`: a caller left waiting on a phone that went into a pocket is a
+    /// shell command that never returns.
+    private var asks: [UUID: [Int: (Result<WirePhoneLogs, FleetRequestError>) -> Void]] = [:]
+    private var nextAskCID = 1
     /// What each peer's handshake said it was. Written by the PSK selection block that
     /// `FleetTLS.listenerParameters(keys:identities:)` installs, on this same `queue`.
     private let identities: FleetPSKIdentities
@@ -355,8 +405,18 @@ public final class FleetSocketServer: @unchecked Sendable {
         // every time.
         slots.removeAll()
         names.removeAll()
+        caps.removeAll()
         ready.removeAll()
         identities.removeAll()
+        // Drained, not merely dropped, and the distinction is the whole rule `asks` states: a
+        // completion that is discarded is a shell command that never returns. `removeAll()`
+        // before the loop, so a completion that re-enters through `stop()` finds nothing left
+        // to answer twice.
+        let outstanding = asks
+        asks.removeAll()
+        for byCID in outstanding.values {
+            for completion in byCID.values { completion(.failure(.disconnected)) }
+        }
         if hadAttachments { onAttachedSlotsChanged?([]) }
     }
 
@@ -414,6 +474,96 @@ public final class FleetSocketServer: @unchecked Sendable {
         for connection in attached.values {
             FleetSocket.send(frame, over: connection)
         }
+    }
+
+    /// Ask one attached client something, and get exactly one answer.
+    ///
+    /// **The one place the Mac talks first**, and the mirror of `FleetConnector.request`: the
+    /// completion runs exactly once — with the phone's answer, with `.server(code:)` for a
+    /// refusal or a peer that cannot be asked, or with `.disconnected` when the socket goes
+    /// away — and it answers **synchronously** when there is nothing to ask, for the reason
+    /// that method documents: a dropped request is a caller waiting forever.
+    ///
+    /// The `caps` guard is refused here rather than sent and left to fail, because sending is
+    /// what fails: a phone with no case for `ServerFrame.phoneRequest` cannot decode it, and
+    /// an undecodable `ServerFrame` tears the socket down at the far end. So an unsupported
+    /// peer costs a `unsupported_peer` string; an *unguarded* send would cost that phone its
+    /// connection to this Mac, repeatedly. See `FleetCapability`.
+    public func request(
+        _ request: PhoneRequest, of client: UUID,
+        then completion: @escaping (Result<WirePhoneLogs, FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let connection = attached[client] else {
+            return completion(.failure(.disconnected))
+        }
+        guard caps[client]?.contains(Self.capability(for: request)) == true else {
+            return completion(.failure(.server(code: "unsupported_peer")))
+        }
+        let cid = nextAskCID
+        nextAskCID += 1
+        asks[client, default: [:]][cid] = completion
+        FleetSocket.send(ServerFrame.phoneRequest(cid: cid, request), over: connection)
+        // `DispatchQueue.asyncAfter` cannot be cancelled, so this recognises on its own that
+        // it is stale — the entry is gone once the reply landed, and `resolveAsk` does nothing
+        // when it finds nothing filed. The same idiom `FleetConnector`'s race timeout uses,
+        // and it needs no generation counter here because the `cid` is never reused.
+        queue.asyncAfter(deadline: .now() + askDeadline) { [weak self] in
+            self?.resolveAsk(cid, of: client, with: .failure(.server(code: "timed_out")))
+        }
+    }
+
+    /// What a peer must have claimed in its `hello` before this request may be sent to it.
+    ///
+    /// A `switch` rather than a constant, though there is one case today: a second
+    /// `PhoneRequest` added without deciding what it is advertised as would otherwise inherit
+    /// `logs`'s claim and be sent to a phone that cannot decode it — which is precisely the
+    /// failure `caps` exists to prevent. This is the line that will not compile until that
+    /// decision is made.
+    private static func capability(for request: PhoneRequest) -> String {
+        switch request {
+        case .logs: return FleetCapability.logs
+        }
+    }
+
+    /// Resolves one outstanding `phoneRequest`, or does nothing if nothing is waiting on that
+    /// number. Removed before it is invoked, which is what makes it exactly once — the same
+    /// rule, and the same reason, as `FleetConnector.resolve`.
+    private func resolveAsk(
+        _ cid: Int, of client: UUID, with result: Result<WirePhoneLogs, FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = asks[client]?.removeValue(forKey: cid) else { return }
+        if asks[client]?.isEmpty == true { asks.removeValue(forKey: client) }
+        completion(result)
+    }
+
+    /// Every client attached right now, described exactly as `onHello` saw it.
+    ///
+    /// A list where `onAttachedSlotsChanged` is a set of slots, because the question is
+    /// different: that signal drives per-slot UI, while this answers "who can I ask, and what
+    /// will they answer" for a diagnostic fetch — which needs the connection id to address and
+    /// the caps to decide. Includes a connection whose PSK identity could not be read back,
+    /// for the reason `attachedCount` counts one: it is a phone receiving frames, and omitting
+    /// it would say there is nobody to ask when there is.
+    public var attachments: [FleetAttachment] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return attached.keys.map {
+            FleetAttachment(id: $0, slot: slots[$0], name: names[$0], caps: caps[$0] ?? [])
+        }
+    }
+
+    /// How many clients a `broadcast` right now would reach.
+    ///
+    /// A count where `onAttachedSlotsChanged` is a set, because the question is different:
+    /// that signal drives per-slot UI and needs to know *which* phone, while this answers "did
+    /// what I just sent leave the machine, and to how many" for a diagnostic log. It counts
+    /// every attachment, including one whose PSK identity could not be read back — such a
+    /// connection is absent from the slot set and is still a phone receiving frames, and a
+    /// count that omitted it would say "nobody was listening" about a push that arrived.
+    public var attachedCount: Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return attached.count
     }
 
     /// Which paired slot this connection's peer holds the key for — the PSK identity its
@@ -527,12 +677,18 @@ public final class FleetSocketServer: @unchecked Sendable {
             dispatchPrecondition(condition: .onQueue(self.queue))
             // Recorded before the attachment is built, so the `hello` that carries the claim
             // is itself attributed with it rather than only the frames after it.
-            if case .hello(_, let device) = frame, let device { self.names[id] = device }
+            if case .hello(_, let device, let caps) = frame {
+                if let device { self.names[id] = device }
+                // Recorded even when empty, so a re-`hello` on the same socket cannot leave a
+                // stale claim from an earlier one standing.
+                self.caps[id] = Set(caps)
+            }
             let attachment = FleetAttachment(
-                id: id, slot: self.slot(of: connection, id: id), name: self.names[id]
+                id: id, slot: self.slot(of: connection, id: id), name: self.names[id],
+                caps: self.caps[id] ?? []
             )
             switch frame {
-            case .hello(let lastSeq, _):
+            case .hello(let lastSeq, _, _):
                 if self.attached[id] == nil {
                     self.pending.removeValue(forKey: id)
                     self.attached[id] = connection
@@ -581,6 +737,18 @@ public final class FleetSocketServer: @unchecked Sendable {
                     guard self.attached[id] != nil else { return }
                     FleetSocket.send(frame, over: connection)
                 }
+            case .logs(let cid, let logs):
+                // The answer to something THIS Mac asked. Gated on attachment like every
+                // other frame — a peer that never said `hello` was never asked anything, so a
+                // reply from one is a frame nobody is waiting on.
+                guard self.attached[id] != nil else { return connection.cancel() }
+                self.resolveAsk(cid, of: id, with: .success(logs))
+            case .refused(let cid, let code):
+                guard self.attached[id] != nil else { return connection.cancel() }
+                // Carried through verbatim rather than interpreted, the same rule
+                // `FleetConnector`'s `.err` arm keeps: `unhandled`, `unsupported` and
+                // `unreadable` are on this wire today and a newer phone may invent more.
+                self.resolveAsk(cid, of: id, with: .failure(.server(code: code)))
             }
         } onEnd: { [weak self] _ in
             guard let self else { return }
@@ -610,7 +778,9 @@ public final class FleetSocketServer: @unchecked Sendable {
             // that carries state. A request carries none — it is correlated by a `cid` and
             // answered on it — so refusing this one and reading the next leaves both ends
             // believing exactly what they believed before.
-            guard let salvaged = try? JSONDecoder().decode(SalvagedFrame.self, from: data),
+            guard let salvaged = try? JSONDecoder().decode(
+                      FleetSocket.CorrelatedFrame.self, from: data
+                  ),
                   salvaged.t == "req",
                   // The same gate the parseable `.req` arm applies: an unattached peer is
                   // told nothing and hung up on, whether or not this build understood it.
@@ -621,16 +791,6 @@ public final class FleetSocketServer: @unchecked Sendable {
             )
             return true
         }
-    }
-
-    /// The two fields every frame that can be refused in isolation must have: what kind of
-    /// frame it claimed to be, and the correlation id to refuse it on. Decoded from the raw
-    /// bytes of a message `ClientFrame` threw on, which is why it names its own keys rather
-    /// than reusing `ClientFrame.CodingKeys` — the point is to read the little that is
-    /// legible in a frame whose remainder is not.
-    private struct SalvagedFrame: Decodable {
-        let t: String
-        let cid: Int
     }
 
     /// Ends one connection and forgets everything filed under its id, from whichever of the
@@ -646,6 +806,15 @@ public final class FleetSocketServer: @unchecked Sendable {
         // in `attached` and returns below, but it can still have had its slot resolved.
         slots.removeValue(forKey: id)
         names.removeValue(forKey: id)
+        caps.removeValue(forKey: id)
+        // Drained, not cleared, and before the `attached` check for the reason `slots` is
+        // removed before it: a connection can be asked and then die without ever reaching the
+        // arm below. Removed from the table BEFORE the loop, so a completion that re-enters —
+        // asking again is exactly what a caller hearing `.disconnected` does — finds nothing
+        // left to answer a second time. Same discipline as `FleetConnector.drainPending`.
+        if let outstanding = asks.removeValue(forKey: id) {
+            for completion in outstanding.values { completion(.failure(.disconnected)) }
+        }
         guard let connection = attached.removeValue(forKey: id) else { return }
         connection.cancel()
         onAttachedSlotsChanged?(attachedSlots())

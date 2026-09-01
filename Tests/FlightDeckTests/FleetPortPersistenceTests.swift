@@ -65,6 +65,9 @@ final class FleetPortPersistenceTests: XCTestCase {
             preferences: PreferencesStore(persistence: persistence),
             armer: PairingArmer()
         )
+        // Silenced for `FleetTestHarness`'s reason: the default prompt-lifecycle sink
+        // appends to the developer's own `~/Library/Logs/flight-deck-prompt.log`.
+        service.promptLifecycleForTesting = { _ in }
         services.append(service)
         return service
     }

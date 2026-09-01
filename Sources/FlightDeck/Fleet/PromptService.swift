@@ -10,9 +10,15 @@ import Foundation
 /// **There is no cache and there must not be one.** The open call is re-derived from the
 /// transcript on every answer. A `served` table would be faster and would fail the case this
 /// service exists for: the user approves a dialog in the terminal, claude raises the next one
-/// immediately, and the session **never leaves `waiting`** — so no event is emitted, the
-/// phone's card still shows the old dialog, and a cached entry still matches it. The
-/// re-derivation does not match, because the new dialog is a different call.
+/// immediately, and the session **never leaves `waiting`** — so the phone's card can still be
+/// showing the old dialog when a thumb comes down, and a cached entry would still match it.
+/// The re-derivation does not match, because the new dialog is a different call.
+///
+/// `WireSession.openPromptCall` now pushes that supersede, so a phone should learn about it and
+/// stop offering the old card. That reduces how often a stale answer is *sent*; it does not
+/// make this check optional. A frame can be in flight, dropped, or applied by a client that
+/// ignores the field, and this is the only thing standing between any of those and a keystroke
+/// at a real terminal.
 ///
 /// The read is a tail — `TimelineLimits.window` at most, `tailRecords` records — done once per
 /// human tap, on the main queue, inside `FleetSocketServer`'s synchronous `onCommand`. That is
@@ -43,6 +49,16 @@ final class PromptService {
     /// dangerous direction.
     static let tailRecords = 8
 
+    /// Where a `PromptLifecycleRecord` goes. A seam on the SINK rather than a `#if DEBUG`
+    /// around the recording, for the reason `SessionStore.answerAbortSink` is one: the failure
+    /// this exists for reproduces only on the installed Release build, so what gets recorded
+    /// must be identical in both configurations and only the destination is replaced in a test.
+    ///
+    /// `PromptLifecycleObserver` files through this property too rather than owning a second
+    /// one, so a dialog's whole life — opened on the push side, refused here — reads as one
+    /// stream and a test substitutes one closure to see all of it.
+    var lifecycleSink: (PromptLifecycleRecord) -> Void = PromptLifecycleLog.record
+
     init(store: SessionStore) {
         self.store = store
     }
@@ -61,9 +77,81 @@ final class PromptService {
     /// `AgentAdapter.dialogDriver` — the *same question* the store asks, of the same object —
     /// plus `openPrompt`, which is this file's own half and is asked of the same adapter
     /// rather than hardcoded to one agent's transcript grammar.
+    ///
+    /// The three refusals themselves live in `openPrompt(inSession:)`, so a caller that needs
+    /// to *see* the open dialog reads it through the same gauntlet this answers against — see
+    /// that method for why it is not a second copy.
     func answer(
         session: UUID, call: String, answer: PromptAnswer, token: UUID
     ) -> Result<Void, TimelineErrorCode> {
+        switch openPrompt(inSession: session) {
+        case .failure(let code):
+            // **The pairing the prompt log exists for, in the case that produces the report.**
+            // A tap refused here reaches the phone as *"Your Mac has moved on from this"* with
+            // nothing anywhere saying what this Mac thought was open instead — and `open=none`
+            // is a different fault from `open=<some other call>`: the first is a Mac that has
+            // no dialog at all while a phone draws one, the second is an ordinary race.
+            record(session, sent: call, open: nil, code: code.code)
+            return .failure(code)
+        case .success(let open):
+            // **The comparison this whole service exists for.** The derivation says what the
+            // terminal is blocked on now; `call` says what the phone was showing when a thumb
+            // came down. They are only the same dialog if they are the same call.
+            guard open.callID == call else {
+                record(session, sent: call, open: open.callID, code: "prompt_changed")
+                return .failure("prompt_changed")
+            }
+
+            let outcome = store.answerPrompt(open, with: answer, in: session, token: token)
+            // Accepted answers are recorded too, and that is not noise: without a line for the
+            // tap that matched, a log holding no refusal cannot be told apart from one where
+            // the tap never arrived at the Mac at all.
+            record(session, sent: call, open: open.callID, code: outcome.errorCode)
+            if let code = outcome.errorCode { return .failure(TimelineErrorCode(code)) }
+            return .success(())
+        }
+    }
+
+    private func record(_ session: UUID, sent: String, open: String?, code: String?) {
+        lifecycleSink(PromptLifecycleRecord(
+            session: session, event: .answer(sent: sent, open: open, code: code)
+        ))
+    }
+
+    /// The same question `openPrompt` answers, asked the way the **push** side has to ask it:
+    /// without waking anything up.
+    ///
+    /// Two callers, both of which run on a schedule rather than on a tap —
+    /// `SessionStore.commitStatuses` on every registry tick, and `PromptLifecycleObserver` on
+    /// every activity edge. The agent test runs FIRST and exists only to keep this free of
+    /// side effects: `openPrompt` resolves the tab's transcript, and that resolution builds
+    /// and memoizes the agent's adapter — for codex, a whole `CodexStack` with a runtime and
+    /// an index watcher in it. Reporting what is on screen must never be the thing that brings
+    /// one into existence.
+    ///
+    /// The refusal is the same string from the same property `openPrompt` would have returned,
+    /// so nothing is decided differently here; only the order is.
+    func pushedOpenPrompt(inSession session: UUID) -> Result<OpenPrompt, TimelineErrorCode> {
+        guard let agent = store.agent(of: session),
+              agent.dialogDriver != nil,
+              agent.openPromptReader != nil
+        else { return .failure("unsupported_agent") }
+        return openPrompt(inSession: session)
+    }
+
+    /// What `session` is blocked on right now, or why nothing here can be answered.
+    ///
+    /// **Split out of `answer` rather than copied for it.** The answer path and any reader of
+    /// the open dialog must agree on all four questions below — is the tab there, is it
+    /// waiting, can this build drive and read its agent, and does it have a transcript — and
+    /// two copies of that sequence would drift the first time one of them gained a case. The
+    /// call-id comparison deliberately stays in `answer`: it is a fact about what the *client*
+    /// was looking at, not about what the terminal is blocked on, and a reader has nothing to
+    /// compare against.
+    ///
+    /// Every code returned here is one `answer` has always returned, in the order it has
+    /// always returned them.
+    func openPrompt(inSession session: UUID) -> Result<OpenPrompt, TimelineErrorCode> {
         // Resolved once, up front. A tab closed between the tap and here is the ordinary case,
         // not an edge one — the same ruling `TimelineService.page` makes.
         let source = store.timelineSource(of: session)
@@ -105,16 +193,12 @@ final class PromptService {
         // thing that code now means.
         guard case .file(_, let url) = source else { return .failure("prompt_changed") }
         let lines = tail(url, Self.tailRecords)
-        // **The comparison this whole service exists for.** The derivation says what the
-        // terminal is blocked on now; `call` says what the phone was showing when a thumb
-        // came down. They are only the same dialog if they are the same call.
-        guard let open = reader.openPrompt(inTranscriptTail: lines, activity: activity),
-              open.callID == call
+        // A tab that is waiting on something this reader cannot name in the transcript. The
+        // terminal has a dialog up; nothing here knows which call it belongs to, so there is
+        // nothing safe to answer and nothing honest to show.
+        guard let open = reader.openPrompt(inTranscriptTail: lines, activity: activity)
         else { return .failure("prompt_changed") }
-
-        let outcome = store.answerPrompt(open, with: answer, in: session, token: token)
-        if let code = outcome.errorCode { return .failure(TimelineErrorCode(code)) }
-        return .success(())
+        return .success(open)
     }
 }
 

@@ -31,8 +31,14 @@ public enum FleetEvent: Equatable, Sendable {
     /// The whole status triple at once, never one field of it. `SessionStatus` is committed
     /// as a unit by `commitStatuses`, and splitting it here would let a client render a
     /// `waitingFor` string against an activity that had already moved on.
+    ///
+    /// `openPromptCall` rides along for the same reason, and it is the one field here that
+    /// can move on its own: a dialog replaced by the next one leaves every other field of
+    /// this event identical, which is precisely why nothing used to be sent at all. See
+    /// `OpenPromptIdentity`, and `SessionStore.emitActivity`'s third axis.
     case activityChanged(id: UUID, activity: String?, waitingFor: String?,
-                         subagentCount: Int, hasBackgroundWork: Bool)
+                         subagentCount: Int, hasBackgroundWork: Bool,
+                         openPromptCall: OpenPromptIdentity = .unreported)
     case unreadChanged(id: UUID, isUnread: Bool)
 
     /// A plan gate opened, changed subject, or closed on this session.
@@ -67,7 +73,7 @@ extension FleetEvent {
         switch self {
         case .sessionAdded(let s, _, _): return s.id
         case .sessionRemoved(let id), .sessionMoved(let id, _, _),
-             .renamed(let id, _, _), .activityChanged(let id, _, _, _, _),
+             .renamed(let id, _, _), .activityChanged(let id, _, _, _, _, _),
              .unreadChanged(let id, _), .planGateChanged(let id, _),
              .promptExpired(let id, _):
             return id

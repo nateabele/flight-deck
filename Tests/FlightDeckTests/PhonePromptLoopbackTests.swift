@@ -116,9 +116,14 @@ final class PhonePromptLoopbackTests: XCTestCase {
     }
 
     /// The other half, in the same store, so a Mac that refused EVERYTHING could not pass
-    /// both tests. This one names the code, because `unsupported_agent` and `not_running`
-    /// send the reader in opposite directions.
-    func testACodexTabIsRefusedWithUnsupportedAgent() async throws {
+    /// both tests. It still names the code, because the codes send the reader in opposite
+    /// directions — but the code changed, and that IS the feature: a freshly created codex
+    /// tab reports no registry status, so it is `not_running` ("not right now") rather than
+    /// `unsupported_agent` ("never on this tab"). Codex has a text channel now.
+    ///
+    /// The spy assertion is unchanged and is the half that guards the user's words: whatever
+    /// the code, nothing may be typed into a screen that is not codex's composer.
+    func testACodexTabWithNoStatusIsRefusedWithNotRunning() async throws {
         let (harness, spy, client, _) = try await standUp()
         guard case .success(let codexID) =
                 await harness.store.createSession(agent: .codex, in: tmp.path) else {
@@ -131,9 +136,9 @@ final class PhonePromptLoopbackTests: XCTestCase {
         await fulfillment(of: [landed], timeout: 10)
 
         guard case .err(cid, let code) = try XCTUnwrap(frame()) else {
-            return XCTFail("a codex tab must be refused, not acked")
+            return XCTFail("a codex tab with no status must be refused, not acked")
         }
-        XCTAssertEqual(code, "unsupported_agent")
+        XCTAssertEqual(code, "not_running")
         XCTAssertTrue(spy.events.isEmpty)
     }
 

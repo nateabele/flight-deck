@@ -28,11 +28,20 @@ state that is small and that *every* client wants all of.
 does the New Session menu. This is for bulk only one client wants, and for questions whose
 answer is not state at all.
 
+**Pulled the other way: the Mac asking the phone.** `ServerFrame.phoneRequest` carries a
+`PhoneRequest`; the phone answers on the same `cid` with `ClientFrame.logs` or
+`ClientFrame.refused`. One case exists (`phone.logs` — see below) and it is the only frame on
+this wire that travels Mac → phone as a question rather than an answer. Its `cid` comes from the
+server's own space, which cannot collide with a client's: a client's numbers appear in
+`req`/`cmd` and come back in `page`/`ack`/`err`, the Mac's appear in `phoneRequest` and come back
+in `logs`/`refused`, and neither end ever looks a number up in the other's table.
+
 **A reply must never carry a `seq`.** It is the rule most easily broken by accident and the
 damage is invisible: a phone paging back through an hour of transcript would move the resume
-point it hands back on its next `hello`, and reconnect from the wrong place. All three reply
-frames say so in their own doc comments — `ServerFrame.page`, `ServerFrame.newSessionOptions`
-and `ServerFrame.macEndpoints`. Say it again in the fourth, and update this count when you do.
+point it hands back on its next `hello`, and reconnect from the wrong place. Every reply frame
+says so in its own doc comment — `ServerFrame.page`, `newSessionOptions`, `macEndpoints`,
+`conversations`, `searchHits` and `session`, plus `phoneRequest` in the other direction. Say it
+again in the next one.
 
 ### Which one is my new thing?
 
@@ -40,6 +49,8 @@ and `ServerFrame.macEndpoints`. Say it again in the fourth, and update this coun
   assertion below before you decide yes.
 - Does it ask the Mac to *do* something? → a `FleetCommand`. `ack` means dispatched, not done.
 - Does it ask the Mac to *tell* you something? → a `FleetRequest`.
+- Does it ask the **phone** to tell the Mac something? → a `PhoneRequest`, and read
+  "Asking the phone" below first: this direction has a compatibility hazard the others do not.
 
 The trap is the fourth case: something that looks like state, is derived from something that is
 not fleet state, and therefore cannot be an event. That is the next section, and it is the one
@@ -124,6 +135,56 @@ Assume both are in the field, because they are.
 - **Hold "absent" and "empty" apart.** They usually mean opposite things. No answer yet is "ask
   again later, meanwhile assume the default"; an answer carrying nothing is "there is genuinely
   nothing here, disable the control". Collapsing them offers the user a tap that can only fail.
+
+## Asking the phone
+
+`PhoneRequest` is the reverse direction, and it is not symmetric with `FleetRequest` — the
+compatibility story is genuinely harder and gets its own mechanism.
+
+**Why a new `ServerFrame` tag is dangerous where a new `ClientFrame` tag is not.** The Mac
+salvages what it cannot parse: `FleetSocketServer`'s `onUndecodable` refuses an unknown `req` on
+its own `cid` and reads the next frame. Nothing in the field does that in the other direction —
+a phone built before a tag existed falls through `ServerFrame`'s decoder to the `event` arm,
+finds no `seq`, throws, and `FleetSocket.receive` ends the socket. So sending a new frame type
+blind to an already-paired handset does not degrade it; it hangs it up, every time, forever.
+
+**So a peer is asked only what it said it can answer.** `ClientFrame.hello` carries `caps`, a
+list of strings from `FleetCapability.supported`. `FleetSocketServer.request` refuses with
+`unsupported_peer` — **without sending anything** — when the connection's `caps` do not name the
+capability. That refusal, not the far end's handling, is the compatibility guarantee;
+`PhoneLogPlumbingTests.testAPhoneThatDidNotAdvertiseLogsIsRefusedWithoutBeingSentAnything`
+asserts the *absence* of the frame, because a test that only checked the returned error would
+pass an implementation that sent it anyway.
+
+`FleetClient` now salvages an `ask` it cannot parse, exactly as the Mac salvages a `req`, so the
+*next* capability added after `logs` degrades cleanly from both ends. `caps` is what covers the
+phones that are already out there.
+
+**Checklist, beyond the one above.** Add the capability string to `FleetCapability.supported`;
+add the case to `PhoneRequest` with a dotted `op`; add the reply to `ClientFrame` with an
+undotted `Tag`; file the completion in `FleetSocketServer.asks` and drain it in both `drop(_:)`
+and `cancelConnections()`, or a caller waits forever; and give it a deadline — `askDeadline`
+exists because a phone in a pocket answers nothing and never disconnects.
+
+### `phone.logs`
+
+The phone logs its own connection lifecycle, prompt derivation and answers through
+`FlightDeckMobile.PhoneLog` (`os.Logger`, subsystem `dev.flightdeck.FlightDeckMobile`, categories
+`connection` / `prompt` / `answer`), and the Mac pulls them with
+`scripts/answer-trigger.sh logs [seconds]` — behind the same `FlightDeckAnswerTrigger` gate as
+the answer drive, because pulling logs off a phone belongs behind the gate that drives a
+terminal. What comes back is appended to `~/Library/Logs/flight-deck-phone.log`, beside
+`flight-deck-answer.log` and `flight-deck-prompt.log`, with the phone's own timestamps.
+
+Two properties to keep. **Nothing but structure crosses the boundary** — ids, counts, states and
+timings, never option text, transcript content or anything a person typed; these lines land in a
+file on a Mac. And **the phone streams nothing on its own**: it answers this frame and is
+otherwise silent.
+
+`OSLogStore(scope: .currentProcessIdentifier)` is the only scope an iOS app may open without an
+entitlement, so a fetch sees what the *current launch* logged and nothing before it. An empty
+answer means the app restarted, not that nothing happened. The file on the Mac is what
+accumulates across fetches.
 
 ## Pairing
 

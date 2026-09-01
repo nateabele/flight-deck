@@ -21,6 +21,33 @@ final class PlanFrameCodingTests: XCTestCase {
         XCTAssertEqual(try roundTrip(gate), gate)
     }
 
+    /// **The gate has to survive `WireSession`'s own coding, not just its own.**
+    /// `testPlanGateRoundTrips` above encodes a `WirePlanGate` directly, and
+    /// `testSessionWithoutAGateEncodesNoKey` below passes just as well when the key is never
+    /// written under any circumstance — so between them they can both stay green while the
+    /// field never reaches a phone. `WireSession` stopped relying on the synthesized encoder
+    /// (which gave every optional `encodeIfPresent` for free) when `openPromptCall` forced a
+    /// hand-written one; a member left out of that encoder or its `CodingKeys` is silently
+    /// dropped rather than rejected. This is the test that notices.
+    func testSessionWithAGateRoundTrips() throws {
+        let gate = WirePlanGate(
+            callID: "toolu_01ABC", tier: "annotate", plan: "# Title\n\nBody.",
+            startedAt: "2026-08-29T17:40:36.186Z", annotationCount: 2
+        )
+        let session = WireSession(
+            id: UUID(), title: "t", agent: "claude", activity: "busy", planGate: gate
+        )
+        let data = try JSONEncoder().encode(session)
+        // The key is on the wire at all — the assertion the encoder trap fails.
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        XCTAssertNotNil(json["planGate"], "planGate never reached the wire")
+        let decoded = try JSONDecoder().decode(WireSession.self, from: data)
+        XCTAssertEqual(decoded.planGate, gate)
+        XCTAssertEqual(decoded, session)
+    }
+
     /// A session with no gate is the ordinary case and must not grow a key.
     func testSessionWithoutAGateEncodesNoKey() throws {
         let session = WireSession(id: UUID(), title: "t", agent: "claude")

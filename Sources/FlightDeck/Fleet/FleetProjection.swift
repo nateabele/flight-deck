@@ -25,7 +25,9 @@ enum FleetProjection {
         return FleetSnapshot(projects: store.repos.map {
             project(
                 $0, statuses: store.statuses, unread: store.unreadIdle,
-                backgroundWork: store.backgroundWorkSessions, planGates: planGates
+                backgroundWork: store.backgroundWorkSessions,
+                openPromptCalls: store.openPromptCalls,
+                planGates: planGates
             )
         })
     }
@@ -33,7 +35,8 @@ enum FleetProjection {
     @MainActor
     static func project(
         _ repo: Repo, statuses: [UUID: SessionStatus], unread: Set<UUID>,
-        backgroundWork: Set<UUID>, planGates: PlanGateService? = nil
+        backgroundWork: Set<UUID>, openPromptCalls: [UUID: String],
+        planGates: PlanGateService? = nil
     ) -> WireProject {
         WireProject(
             id: repo.id,
@@ -43,7 +46,9 @@ enum FleetProjection {
             sessions: repo.sessions.map {
                 project(
                     $0, status: statuses[$0.id], unread: unread,
-                    hasBackgroundWork: backgroundWork.contains($0.id), planGates: planGates
+                    hasBackgroundWork: backgroundWork.contains($0.id),
+                    openPromptCall: openPromptCalls[$0.id],
+                    planGates: planGates
                 )
             }
         )
@@ -51,7 +56,8 @@ enum FleetProjection {
 
     @MainActor
     static func project(
-        _ session: Session, status: SessionStatus?, unread: Set<UUID>, hasBackgroundWork: Bool,
+        _ session: Session, status: SessionStatus?, unread: Set<UUID>,
+        hasBackgroundWork: Bool, openPromptCall: String?,
         planGates: PlanGateService? = nil
     ) -> WireSession {
         WireSession(
@@ -68,7 +74,11 @@ enum FleetProjection {
             // `nil` when no `PlanGateService` was threaded in — a projection built in a test
             // with no service must still produce a `WireSession`, exactly as one with no
             // status must.
-            planGate: planGates?.gate(for: session.id)
+            planGate: planGates?.gate(for: session.id),
+            // Never `.unreported`: this build always looks, so "no entry" is this Mac saying
+            // it can name no open dialog — which is the assertion that retires a phone's card.
+            // `.unreported` is reserved for a peer that predates the field.
+            openPromptCall: openPromptCall.map(OpenPromptIdentity.call) ?? .noPrompt
         )
     }
 }

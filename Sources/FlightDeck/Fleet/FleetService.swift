@@ -48,6 +48,10 @@ final class FleetService: ObservableObject {
     /// the single instance every `FleetProjection` call site reads — the oracle snapshot
     /// below included — so a gate can never be present in one and absent in the other.
     private let planGates: PlanGateService
+    /// Records what this Mac decides about each session's dialog and what it pushes about it.
+    /// Observability only — it reads the store and the frames already sent, and changes
+    /// nothing. See `PromptLifecycleObserver` for why the push side needs its own witness.
+    private let promptLifecycle: PromptLifecycleObserver
     private(set) var boundPort: NWEndpoint.Port?
     /// The window's own listener, and the port it is on. Both are `nil` whenever no window is
     /// open, which is invariant 2 stated as a field rather than as a comment.
@@ -121,12 +125,25 @@ final class FleetService: ObservableObject {
             return FleetProjection.snapshot(of: store, planGates: planGates)
         }
         self.timeline = TimelineService(store: store)
-        self.prompts = PromptService(store: store)
+        let prompts = PromptService(store: store)
+        self.prompts = prompts
+        // Built on the same `PromptService`, deliberately: what the log says is open has to be
+        // the same call an answer is judged against, which means one object over one transcript.
+        self.promptLifecycle = PromptLifecycleObserver(store: store, prompts: prompts)
         self.serviceName = Self.derivedServiceName(preferences: preferences)
         store.replicator = replicator
         // The single live instance every `FleetProjection` call site reads — see the
         // `planGates` doc comment above.
         store.planGates = planGates
+        // The same `PromptService` again, and that is the point: what this Mac *pushes* as the
+        // open dialog and what it *refuses an answer against* are now one object reading one
+        // transcript. Two would be two opinions, and a phone told one thing and judged by
+        // another is the failure this field exists to close.
+        store.openPromptCallReader = { [weak prompts] session in
+            guard case .success(let open) = prompts?.pushedOpenPrompt(inSession: session)
+            else { return nil }
+            return open.callID
+        }
         wireHandlers()
         Self.current = self
     }
@@ -280,9 +297,15 @@ final class FleetService: ObservableObject {
         // `armer.claim` is the sole witness that pairing finished.
         armer.onWindowClosed = { [weak self] in self?.closePairingListener() }
         replicator.onEvents = { [weak self] batch in
+            guard let self else { return }
             for entry in batch {
-                self?.server.broadcast(.event(seq: entry.seq, entry.event))
+                self.server.broadcast(.event(seq: entry.seq, entry.event))
             }
+            // After the sends, never before: a record that says a closure was pushed to one
+            // client is only true once it has been. The client count is read here for the
+            // whole batch — `attached` moves only on this queue, so it cannot have changed
+            // across the loop above.
+            self.promptLifecycle.observe(batch, clients: self.server.attachedCount)
         }
         server.onHello = { [weak self] attachment, lastSeq in
             guard let self else { return [] }
@@ -479,13 +502,21 @@ final class FleetService: ObservableObject {
     /// re-snapshot is the point: silently resuming from wherever the server happens to be is
     /// how a phone ends up confidently displaying a fleet that no longer exists.
     private func frames(resumingFrom lastSeq: Int) -> [ServerFrame] {
+        let answer: [ServerFrame]
         switch replicator.resume(from: lastSeq) {
         case .replay(let events):
-            return events.map { .event(seq: $0.seq, $0.event) }
+            answer = events.map { .event(seq: $0.seq, $0.event) }
         case .resnapshot(let reason):
             let current = replicator.snapshot()
-            return [.snapshot(seq: current.seq, fleet: current.fleet, reason: reason)]
+            answer = [.snapshot(seq: current.seq, fleet: current.fleet, reason: reason)]
         }
+        // A phone that was away across a dialog closing learns about it from this answer and
+        // from nothing later, so what it was handed is the other half of any stale-card
+        // question — see `PromptLifecycleObserver.observeResume`.
+        promptLifecycle.observeResume(
+            lastSeq: lastSeq, frames: answer, clients: server.attachedCount
+        )
+        return answer
     }
 
     /// `async` because `FleetSocketServer.start` awaits the OS reporting its bound port
@@ -735,6 +766,41 @@ final class FleetService: ObservableObject {
     var promptTailForTesting: @Sendable (URL, Int) -> [SourceLine] {
         get { prompts.tail }
         set { prompts.tail = newValue }
+    }
+
+    /// Test seam, forwarding to `PromptService.lifecycleSink` — the one destination both halves
+    /// of the prompt log file through, so substituting it here captures the push side and the
+    /// answer side together. No production caller.
+    ///
+    /// Every fleet test sets this, because the default sink appends to the developer's real
+    /// `~/Library/Logs/flight-deck-prompt.log`; see `FleetTestHarness`.
+    var promptLifecycleForTesting: (PromptLifecycleRecord) -> Void {
+        get { prompts.lifecycleSink }
+        set { prompts.lifecycleSink = newValue }
+    }
+
+    /// Every phone attached right now, as `onHello` saw it.
+    ///
+    /// Exposed for `AnswerTrigger`'s `logs` op and for nothing else. A list rather than the
+    /// `attachedSlots` set already published above, because a log fetch needs what that set
+    /// throws away: the connection to address, the name to print beside the answer, and the
+    /// capabilities that decide whether this phone can be asked at all.
+    var attachedClients: [FleetAttachment] { server.attachments }
+
+    /// Ask one attached phone for its own log. See `PhoneRequest` for why the Mac may ask this
+    /// at all, and `FleetSocketServer.request` for what the completion promises: exactly one
+    /// answer, `.disconnected` when there is no such connection, `unsupported_peer` for a phone
+    /// that never claimed it could answer, and `timed_out` for one that simply did not.
+    ///
+    /// Nothing here writes and nothing enters `FleetSnapshot` — the same property every
+    /// request handler in `wireHandlers()` keeps, and the reason `ServerFrame.phoneRequest`
+    /// carries no `seq`: a diagnostic fetch is not fleet state, so there is nothing for
+    /// `FleetReplicator`'s drift check to guard.
+    func fetchPhoneLogs(
+        from client: UUID, seconds: Int, limit: Int,
+        then completion: @escaping (Result<WirePhoneLogs, FleetRequestError>) -> Void
+    ) {
+        server.request(.logs(seconds: seconds, limit: limit), of: client, then: completion)
     }
 
     /// Convenience for the tests and for nothing else — production dials a discovered or
