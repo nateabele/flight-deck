@@ -233,6 +233,58 @@ final class FleetServiceTests: XCTestCase {
         XCTAssertEqual(store.repos.first?.sessions.count, 1, "no second tab was created")
     }
 
+    /// A waker that fails the test the moment it is asked to do anything, for a test whose
+    /// entire point is that it must never be reached.
+    private final class MustNotBeCalledWaker: DisplayWaking, @unchecked Sendable {
+        func wakeAndWaitForDrawable(timeout: TimeInterval) -> Bool {
+            XCTFail("an unknown project must be refused before any wake is attempted")
+            return false
+        }
+        func wakeAndWaitForDrawable(timeout: TimeInterval) async -> Bool {
+            XCTFail("an unknown project must be refused before any wake is attempted")
+            return false
+        }
+    }
+
+    /// **The ordering `apply`'s own `.newSession` arm documents — "after the project lookup,
+    /// so an unknown project still says so rather than being masked by this" — must survive
+    /// `onCommand`'s deferral too.** Without the project gated alongside `canCreateTerminal`
+    /// in `FleetService.onCommand`, a stale phone snapshot naming a project the Mac has since
+    /// closed would, on a sleeping display, physically wake the screen for a command that was
+    /// always going to be refused, and would answer `terminal_unavailable` instead of
+    /// `unknown_project` if the wake happened to fail — exactly the masking that comment
+    /// forbids. A provider is required, same reason as the test above: with none,
+    /// `canCreateTerminal` is unconditionally true and this display state would never gate
+    /// anything.
+    func testANewSessionForAnUnknownProjectWithTheDisplayAsleepAnswersUnknownProjectNotTerminalUnavailable() async throws {
+        let provider = StubProvider()
+        retainedProviders.append(provider)
+        let store = SessionStore(provider: provider, persistence: nil)
+        store.display = Display(isDrawable: false)
+        store.displayWaker = MustNotBeCalledWaker()
+
+        let harness = FleetTestHarness(store: store)
+        self.harness = harness
+        self.service = harness.service
+        let (_, key, port) = (harness.store, harness.key, try await harness.start())
+
+        let refused = expectation(description: "unknown_project")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                // No project in this store has this id — `store.repos` was never seeded.
+                _ = client.send(.newSession(project: UUID(), agent: nil, accountIndex: nil))
+            }
+            if case .err(_, let code) = frame {
+                XCTAssertEqual(code, "unknown_project")
+                refused.fulfill()
+            }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [refused], timeout: 10)
+    }
+
     /// A stub the display guard can flip mid-test — `Display` above is a `let`-only struct,
     /// which cannot express "becomes drawable once woken" from inside a `DisplayWaking`.
     private final class MutableDisplay: DisplayInspecting, @unchecked Sendable {
@@ -273,9 +325,11 @@ final class FleetServiceTests: XCTestCase {
 
     /// The companion to the refusal above: a phone `+` reaching an asleep display must
     /// attempt a wake, not refuse outright — this is `Finding 1`'s regression test.
-    /// `ensureTerminalCreatable`, not `canCreateTerminal`, is what the handler must call, and
-    /// a `Waker` that always succeeds is what tells the two apart: with `canCreateTerminal`
-    /// still read directly, this display never becomes drawable and the phone gets refused.
+    /// `onCommand`'s gate reads `canCreateTerminal` only to decide whether a wake is worth
+    /// attempting; it is `awaitTerminalCreatable` that must actually be called, and a `Waker`
+    /// that always succeeds is what tells the two apart: a handler that stopped there,
+    /// content with the plain read, would never make this display drawable and the phone
+    /// would still be refused.
     func testANewSessionFromThePhoneWakesTheDisplayAndSucceeds() async throws {
         let provider = StubProvider()
         retainedProviders.append(provider)

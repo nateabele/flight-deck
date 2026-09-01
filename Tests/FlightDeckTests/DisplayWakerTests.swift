@@ -32,6 +32,10 @@ final class DisplayWakerTests: XCTestCase {
             display: probe,
             pollInterval: 0.001,
             sleep: { _ in },
+            // A no-op, same reasoning as `sleep` above: without it the async cases would
+            // burn real wall-clock time on `Task.sleep`, which `pollInterval: 0.001` does not
+            // save them from since the default ignores it.
+            asyncSleep: { _ in },
             declareUserActivity: { declared.increment() }
         )
     }
