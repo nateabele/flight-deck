@@ -940,6 +940,15 @@ final class SessionStore: ObservableObject {
         return displayWaker.wakeAndWaitForDrawable(timeout: Self.wakeTimeout)
     }
 
+    /// `ensureTerminalCreatable`, for a caller that can afford to await instead of blocking.
+    /// The phone's `.newSession` is the only one. Behaviour is identical in every other
+    /// respect, including the `provider == nil` short-circuit inherited from `canCreateTerminal`.
+    func awaitTerminalCreatable(_ policy: DisplayWakePolicy = .wakeIfNeeded) async -> Bool {
+        if canCreateTerminal { return true }
+        guard policy == .wakeIfNeeded else { return false }
+        return await displayWaker.wakeAndWaitForDrawable(timeout: Self.wakeTimeout)
+    }
+
     /// Whether this tab's terminal actually forked a shell.
     ///
     /// **Not `surfaces[id] != nil`.** `makeSurfaceView` returns a non-optional and its init is

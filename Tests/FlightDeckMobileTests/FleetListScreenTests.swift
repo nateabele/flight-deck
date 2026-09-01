@@ -140,7 +140,7 @@ final class FleetListScreenTests: XCTestCase {
         let server = FleetSocketServer()
         self.server = server
         server.onHello = { _, _ in [.snapshot(seq: 0, fleet: Self.fleet, reason: .initial)] }
-        server.onCommand = { _, cid, _ in .ack(cid: cid) }
+        server.onCommand = { _, cid, _, reply in reply(.ack(cid: cid)) }
         // Answered rather than left hanging: the screen a selection pushes asks for a page as
         // it opens, and an unanswered request leaves a fetch in flight for fifteen seconds —
         // which outlives the test and lands its deadline in the next one.

@@ -36,7 +36,7 @@ final class FleetConnectorTests: XCTestCase {
     ) async throws -> NWEndpoint.Port {
         let server = FleetSocketServer()
         server.onHello = { _, _ in [.snapshot(seq: 1, fleet: fleet, reason: .initial)] }
-        server.onCommand = { _, cid, _ in .ack(cid: cid) }
+        server.onCommand = { _, cid, _, reply in reply(.ack(cid: cid)) }
         servers.append(server)
         return try await server.start(keys: [key], port: nil)
     }

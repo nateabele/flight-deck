@@ -55,7 +55,7 @@ final class FleetConnectorAckTests: XCTestCase {
     }
 
     func testACommandWithACompletionIsAnsweredByItsAck() async throws {
-        server.onCommand = { _, cid, _ in .ack(cid: cid) }
+        server.onCommand = { _, cid, _, reply in reply(.ack(cid: cid)) }
         let connector = try await startConnector()
 
         let answered = expectation(description: "acked")
@@ -74,7 +74,7 @@ final class FleetConnectorAckTests: XCTestCase {
     /// caller. The request is deliberately left OUTSTANDING and asserted so, because "the
     /// command completion fired" alone passes just as happily when the fetch was stolen.
     func testACommandsErrReachesItsOwnCompletionAndLeavesAFetchAlone() async throws {
-        server.onCommand = { _, cid, _ in .err(cid: cid, code: "unsupported_agent") }
+        server.onCommand = { _, cid, _, reply in reply(.err(cid: cid, code: "unsupported_agent")) }
         // Deliberately never answered, so the test can assert it is still waiting.
         server.onRequest = { _, _, _, _ in }
         let connector = try await startConnector()
@@ -113,7 +113,7 @@ final class FleetConnectorAckTests: XCTestCase {
         server.onRequest = { _, cid, _, reply in reply(.ack(cid: cid)) }
         // Swallowed, so the command stays outstanding and the test can assert it was not
         // answered by an `ack` that was never its own.
-        server.onCommand = { _, _, _ in .ack(cid: 0) }
+        server.onCommand = { _, _, _, reply in reply(.ack(cid: 0)) }
         let connector = try await startConnector()
 
         // Sent first, so it holds the LOWER cid: a table that ignores the number and takes
@@ -142,7 +142,7 @@ final class FleetConnectorAckTests: XCTestCase {
     func testASocketThatDiesMidCommandAnswersDisconnected() async throws {
         // Swallowed: the command is received and never answered, so only the teardown can
         // resolve it.
-        server.onCommand = { _, _, _ in .ack(cid: 0) }
+        server.onCommand = { _, _, _, reply in reply(.ack(cid: 0)) }
         let connector = try await startConnector()
 
         let answered = expectation(description: "drained")
