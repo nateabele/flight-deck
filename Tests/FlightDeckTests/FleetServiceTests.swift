@@ -232,4 +232,282 @@ final class FleetServiceTests: XCTestCase {
         await fulfillment(of: [refused], timeout: 10)
         XCTAssertEqual(store.repos.first?.sessions.count, 1, "no second tab was created")
     }
+
+    /// A stub the display guard can flip mid-test — `Display` above is a `let`-only struct,
+    /// which cannot express "becomes drawable once woken" from inside a `DisplayWaking`.
+    private final class MutableDisplay: DisplayInspecting, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _drawable: Bool
+        init(_ drawable: Bool) { _drawable = drawable }
+        var isDrawable: Bool { lock.lock(); defer { lock.unlock() }; return _drawable }
+        func set(_ v: Bool) { lock.lock(); _drawable = v; lock.unlock() }
+    }
+
+    /// A waker that succeeds and, like the real one, leaves the display actually drawable —
+    /// same shape as `DisplayWakeTests`'s own `Waker`, redeclared here rather than shared for
+    /// the same reason `Display` above is. Flipping `display` on success matters here and not
+    /// just in `DisplayWakeTests`: `store.newSession(inProject:)` calls `ensureTerminalCreatable`
+    /// again internally, and a waker that returned `true` without making `isDrawable` true
+    /// would be woken twice for one tap.
+    private final class Waker: DisplayWaking, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls = 0
+        var calls: Int { lock.lock(); defer { lock.unlock() }; return _calls }
+        private let onWake: @Sendable () -> Void
+        init(onWake: @escaping @Sendable () -> Void) { self.onWake = onWake }
+        func wakeAndWaitForDrawable(timeout: TimeInterval) -> Bool {
+            lock.lock(); _calls += 1; lock.unlock()
+            onWake()
+            return true
+        }
+    }
+
+    /// The companion to the refusal above: a phone `+` reaching an asleep display must
+    /// attempt a wake, not refuse outright — this is `Finding 1`'s regression test.
+    /// `ensureTerminalCreatable`, not `canCreateTerminal`, is what the handler must call, and
+    /// a `Waker` that always succeeds is what tells the two apart: with `canCreateTerminal`
+    /// still read directly, this display never becomes drawable and the phone gets refused.
+    func testANewSessionFromThePhoneWakesTheDisplayAndSucceeds() async throws {
+        let provider = StubProvider()
+        retainedProviders.append(provider)
+        let store = SessionStore(provider: provider, persistence: nil)
+        store.display = Display(isDrawable: true)
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/target"))
+        let project = try XCTUnwrap(store.repos.first?.id)
+        // Flipped only after the project exists, same as the refusal test above.
+        let display = MutableDisplay(false)
+        store.display = display
+        let waker = Waker(onWake: { display.set(true) })
+        store.displayWaker = waker
+
+        let harness = FleetTestHarness(store: store)
+        self.harness = harness
+        self.service = harness.service
+        let (_, key, port) = (harness.store, harness.key, try await harness.start())
+
+        let acked = expectation(description: "ack")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.newSession(project: project, agent: nil, accountIndex: nil))
+            }
+            if case .err(_, "terminal_unavailable") = frame {
+                XCTFail("a display that can be woken must not be refused")
+            }
+            if case .ack = frame { acked.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [acked], timeout: 10)
+        XCTAssertEqual(waker.calls, 1)
+        XCTAssertEqual(store.repos.first?.sessions.count, 2, "the woken display got its tab")
+    }
+
+    /// **The wire half of the same bug `OpenConversationTests` pins at the store level.** With
+    /// the Mac already sitting on an unrelated tab, `search.open` for a conversation whose
+    /// account assignment is dangling must come back `err(launch_failed)` — never
+    /// `session(cid:, id)` naming the tab that merely happened to be selected beforehand. The
+    /// earlier shape here read `store.selectedSessionID` after the call and would have replied
+    /// with `elsewhere`'s id on exactly this path; this test fails against that shape and
+    /// passes against `FleetService.openConversation`'s `Result`-based one.
+    ///
+    /// Built by hand rather than through `FleetTestHarness`/`standUp()`: those wire the
+    /// `PreferencesStore` only to `FleetService`, not to the `SessionStore` underneath it
+    /// (`SessionStore(provider:persistence:)` leaves `preferences` at its default `nil`), so
+    /// `launchAccount` takes its `guard let preferences else { return .success(nil) }` escape
+    /// and a dangling assignment can never be reached at all. This fixture wires the same
+    /// `PreferencesStore` into both, the way the real app does.
+    func testAnOpenConversationRequestWhoseLaunchFailsIsRefusedNotConfusedWithAPreviouslySelectedTab() async throws {
+        let preferences = PreferencesStore(persistence: nil)
+        preferences.preferences.storedProjectSettings = [
+            "/w/alpha": ProjectSettings(accounts: [.claude: UUID()])
+        ]
+        let store = SessionStore(provider: nil, persistence: nil, preferences: preferences)
+        let key = FleetDeviceKey.mint()
+        preferences.upsert(
+            PairedDevice(slot: key.slot, name: "test device", secret: key.secret,
+                        pairedAt: Date(), lastSeenAt: nil, armedUntil: nil)
+        )
+        let service = FleetService(store: store, preferences: preferences, armer: PairingArmer())
+        self.service = service
+        let port = try await service.start(port: nil)
+
+        let elsewhere = store.newSession(in: URL(fileURLWithPath: "/w/elsewhere"))
+        store.selectSession(elsewhere.id)
+
+        let conversation = UUID()
+        let refused = expectation(description: "err")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.openConversation(
+                    conversationID: conversation.uuidString, projectPath: "/w/alpha"
+                ))
+            }
+            if case .session = frame {
+                XCTFail("a refused launch must never be reported as a session")
+            }
+            if case .err(_, "launch_failed") = frame { refused.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [refused], timeout: 10)
+
+        XCTAssertEqual(store.selectedSessionID, elsewhere.id,
+                       "selection is untouched by the refusal — the previously-selected tab a stale read would have named")
+    }
+
+    /// `WireSearchHits.indexing` must reflect whatever backfill `FleetService.indexingProgress`
+    /// currently holds, and must be `nil` the instant nothing is running — reporting `0 of 0`
+    /// permanently would put a meaningless footer on the phone. A working `StubSearchIndex` is
+    /// installed so the reply travels the `.searchHits` path at all — see
+    /// `testASearchRequestWithNoIndexIsRefusedRatherThanAnsweredEmpty` below for the nil case,
+    /// which this test used to (wrongly) share a harness with; this one exercises only the
+    /// progress plumbing, not the index itself.
+    func testASearchReplyCarriesIndexingProgressWhileABackfillIsInFlightAndNilOtherwise() async throws {
+        let (store, key, port) = try await standUp()
+        store.searchIndex = StubSearchIndex()
+
+        let inFlight = expectation(description: "in flight")
+        var duringBackfill: WireIndexingProgress?
+        service?.indexingProgress = SearchIndexBuilder.Progress(indexed: 312, total: 484)
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame { _ = client.send(.search(query: "hello", limit: 10)) }
+            if case .searchHits(_, let hits) = frame {
+                duringBackfill = hits.indexing
+                inFlight.fulfill()
+            }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [inFlight], timeout: 10)
+        XCTAssertEqual(duringBackfill, WireIndexingProgress(done: 312, total: 484))
+
+        // The backfill finishes: `AppDelegate` clears the progress the same way it does at
+        // the end of `SearchIndexBuilder.build`.
+        service?.indexingProgress = nil
+        let afterwards = expectation(description: "afterwards")
+        var afterBackfill: WireIndexingProgress? = WireIndexingProgress(done: 1, total: 1)
+        client.onFrame = { frame in
+            if case .searchHits(_, let hits) = frame {
+                afterBackfill = hits.indexing
+                afterwards.fulfill()
+            }
+        }
+        _ = client.send(.search(query: "hello", limit: 10))
+        await fulfillment(of: [afterwards], timeout: 10)
+        XCTAssertNil(afterBackfill, "an absent backfill must not leave a stale footer on screen")
+    }
+
+    // MARK: An unavailable index must be refused, never answered as empty
+
+    /// **The regression this exists for.** `try? store.searchIndex?.search(...) ?? []`
+    /// collapsed "no index open" into an empty hit list, which `SessionSearchModel.apply`
+    /// reads as `.empty` and renders as "No Results" — a claim about the corpus the Mac is in
+    /// no position to make (spec §9), reachable for the life of the process whenever
+    /// `AppDelegate`'s `try? SQLiteSearchIndex(at:)` fails. `store.searchIndex` is nil by
+    /// default in this harness — nothing needs to be configured to reach it. This test would
+    /// fail against the old `try?`-collapsing line, which answered `.searchHits(hits: [])`
+    /// here instead of refusing.
+    func testASearchRequestWithNoIndexIsRefusedRatherThanAnsweredEmpty() async throws {
+        let (_, key, port) = try await standUp()
+
+        let arrived = expectation(description: "reply")
+        var reply: ServerFrame?
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame { _ = client.send(.search(query: "hello", limit: 10)) }
+            if case .searchHits = frame { reply = frame; arrived.fulfill() }
+            if case .err = frame { reply = frame; arrived.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [arrived], timeout: 10)
+
+        guard case .err(_, let code) = reply else {
+            return XCTFail("a search with no index must be refused, not answered: \(String(describing: reply))")
+        }
+        XCTAssertEqual(code, "index_unavailable")
+    }
+
+    /// The other half of the same collapse: an index that is open but whose read itself
+    /// throws — a locked or corrupt file — must be refused the same way as no index at all,
+    /// not answered with whatever `try?` happened to swallow into `[]`.
+    func testASearchRequestWhenTheIndexThrowsIsRefusedRatherThanAnsweredEmpty() async throws {
+        let (store, key, port) = try await standUp()
+        let index = StubSearchIndex()
+        index.shouldThrow = true
+        store.searchIndex = index
+
+        let arrived = expectation(description: "reply")
+        var reply: ServerFrame?
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame { _ = client.send(.search(query: "hello", limit: 10)) }
+            if case .searchHits = frame { reply = frame; arrived.fulfill() }
+            if case .err = frame { reply = frame; arrived.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [arrived], timeout: 10)
+
+        guard case .err(_, let code) = reply else {
+            return XCTFail("a throwing index must be refused, not answered: \(String(describing: reply))")
+        }
+        XCTAssertEqual(code, "index_unavailable")
+    }
+
+    /// The same collapse existed in `conversationCatalogue()`, with the milder consequence the
+    /// finding names — the name half of search silently loses all history — but it is the
+    /// identical lie: an empty catalogue reads as "the Mac has no history for you at all"
+    /// rather than "the Mac could not read its index right now".
+    func testAConversationsRequestWithNoIndexIsRefusedRatherThanAnsweredEmpty() async throws {
+        let (_, key, port) = try await standUp()
+
+        let arrived = expectation(description: "reply")
+        var reply: ServerFrame?
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame { _ = client.send(.conversations) }
+            if case .conversations = frame { reply = frame; arrived.fulfill() }
+            if case .err = frame { reply = frame; arrived.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [arrived], timeout: 10)
+
+        guard case .err(_, let code) = reply else {
+            return XCTFail("a conversations request with no index must be refused, not answered: \(String(describing: reply))")
+        }
+        XCTAssertEqual(code, "index_unavailable")
+    }
 }
+
+/// A minimal `SearchIndex` for exercising `FleetService`'s wiring without a real SQLite file.
+/// `shouldThrow` flips `search`/`conversationNames` into throwing, the shape a corrupt or
+/// mid-migration index takes — the state `FleetService`'s `try? index.search(...)` must turn
+/// into `index_unavailable` rather than an empty answer.
+private final class StubSearchIndex: SearchIndex {
+    var hits: [TranscriptHit] = []
+    var conversations: [String: IndexedConversation] = [:]
+    var shouldThrow = false
+
+    func ingest(_: [IndexedMessage], from: URL, projectPath: String, offset: UInt64?) throws {}
+    func readOffset(for: URL) -> UInt64 { 0 }
+    func setConversationName(_: String, projectPath: String, for: String) throws {}
+    func prune(keepingSources: Set<URL>, projects: Set<String>) throws {}
+    func messageCount(forConversation: String) throws -> Int { 0 }
+
+    func search(_ query: String, projects: [String], limit: Int) throws -> [TranscriptHit] {
+        if shouldThrow { throw StubSearchIndexError.boom }
+        return hits
+    }
+
+    func conversationNames() throws -> [String: IndexedConversation] {
+        if shouldThrow { throw StubSearchIndexError.boom }
+        return conversations
+    }
+}
+
+private enum StubSearchIndexError: Error { case boom }

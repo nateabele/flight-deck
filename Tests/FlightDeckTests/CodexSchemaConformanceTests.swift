@@ -100,10 +100,12 @@ final class CodexSchemaConformanceTests: XCTestCase {
     /// `CodexAdapter` or `CodexProcessTransport` without adding it here is the omission this
     /// suite is meant to make loud. Grep `rpc.request(` — these are all of them.
     private static let sentMethods = [
-        "initialize",         // CodexProcessTransport.verifyHandshake
-        "thread/start",       // CodexAdapter.prepare
-        "thread/name/set",    // CodexAdapter.prepare, CodexAdapter.rename
-        "thread/read",        // CodexAdapter.read
+        "initialize",          // CodexProcessTransport.verifyHandshake
+        "thread/start",        // CodexAdapter.prepare
+        "thread/name/set",     // CodexAdapter.prepare, CodexAdapter.rename
+        "thread/read",         // CodexAdapter.read
+        "thread/archive",      // CodexAdapter.prepare
+        "thread/unarchive",    // CodexAdapter.prepare
     ]
 
     func testEveryMethodTheAdapterSendsExists() throws {
@@ -164,8 +166,13 @@ final class CodexSchemaConformanceTests: XCTestCase {
         let fields = try propertyNames(of: "ThreadStartParams")
         let params = CodexThreadOptions(
             model: "m", sandbox: "read-only", approvalPolicy: "never", addDirs: ["/w/b"]
-        ).asThreadStartParams(cwd: "/w/a")
+        ).asThreadStartParams(cwd: "/w/a", historyMode: nil)
 
+        // `historyMode` is deliberately not in this list. The pinned 0.147.0 schema this test
+        // checks against defines `ThreadHistoryMode` but leaves it orphaned —
+        // `ThreadStartParams` has no such property there — so asserting it here would fail
+        // until the fixture is regenerated against a newer codex, which is out of scope for
+        // this change. Passed as `nil` above for the same reason.
         for key in ["cwd", "model", "sandbox", "approvalPolicy", "config"] {
             XCTAssertTrue(params.keys.contains(key), "the fixture for this test stopped sending \(key)")
             XCTAssertTrue(fields.contains(key), "`\(key)` is not a ThreadStartParams field")

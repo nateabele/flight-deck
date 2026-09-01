@@ -5,21 +5,21 @@ import Foundation
 /// Shared with transcript hits, which always occupy the last tier — see `SearchRanker`.
 /// `Comparable` on the raw value so "better" is `<`, which reads correctly at every call
 /// site (`.exact < .fuzzy`).
-enum MatchTier: Int, Comparable, Sendable {
+public enum MatchTier: Int, Comparable, Sendable {
     case exact = 0
     case prefix = 1
     case fuzzy = 2
     case transcript = 3
 
-    static func < (lhs: MatchTier, rhs: MatchTier) -> Bool { lhs.rawValue < rhs.rawValue }
+    public static func < (lhs: MatchTier, rhs: MatchTier) -> Bool { lhs.rawValue < rhs.rawValue }
 }
 
 /// One name's match, and where it matched.
-struct NameMatch: Equatable {
-    let tier: MatchTier
+public struct NameMatch: Equatable {
+    public let tier: MatchTier
     /// Ranges into the *original* candidate, so the row can underline them without
     /// re-deriving anything from a lowercased copy.
-    let matchedRanges: [Range<String.Index>]
+    public let matchedRanges: [Range<String.Index>]
 }
 
 /// Fuzzy matching for session, project and conversation names.
@@ -32,13 +32,13 @@ struct NameMatch: Equatable {
 /// match from March better than a fuzzy match from ten minutes ago" with a magic constant,
 /// and every such constant is wrong for somebody. Tiering the *kind* of match and letting
 /// recency order within a tier makes both halves explainable.
-enum NameMatcher {
+public enum NameMatcher {
     /// Below this length a subsequence match is meaningless — one or two characters appear
     /// in order inside almost any name, so fuzzy matching on the first keystroke would bury
     /// the exact and prefix hits under the entire fleet.
     private static let minimumFuzzyQueryLength = 3
 
-    static func score(_ candidate: String, against query: String) -> NameMatch? {
+    public static func score(_ candidate: String, against query: String) -> NameMatch? {
         let needle = query.lowercased()
         let haystack = candidate.lowercased()
         guard !needle.isEmpty, needle.count <= haystack.count else { return nil }

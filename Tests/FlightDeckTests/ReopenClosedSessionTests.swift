@@ -192,7 +192,12 @@ final class ReopenClosedSessionTests: XCTestCase {
         let provider = CapturingProvider()
         let store = makeStore(provider: provider)
         let transport = ScriptedTransport()
-        store.overrideAdapter(CodexAdapter(rpc: CodexRPC(transport: transport)), for: .codex, account: nil)
+        // The fixture's rollout path does not exist on disk; stubbed true so creation reaches
+        // success rather than tripping `prepare`'s history-contract check.
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: transport), rolloutExists: { _ in true }),
+            for: .codex, account: nil
+        )
         let injector = SpyInjector()
         store.injectorOverride = injector
         store.injectionSettle = { $0() }

@@ -175,10 +175,12 @@ final class AgentTextChannelTests: XCTestCase {
         let id: UUID
         if agent == .codex {
             // No `PreferencesStore` on this store, so every tab resolves to the nil account —
-            // the key `createSession` will look this up under.
+            // the key `createSession` will look this up under. `/r/x.jsonl` above does not
+            // exist on disk, so `rolloutExists` is stubbed true rather than left at the
+            // production default.
             store.overrideAdapter(
-                CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport())), for: .codex,
-                account: nil
+                CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport()), rolloutExists: { _ in true }),
+                for: .codex, account: nil
             )
             guard case .success(let created) =
                 await store.createSession(agent: .codex, in: tmp.path)

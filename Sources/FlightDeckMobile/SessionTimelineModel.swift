@@ -286,9 +286,51 @@ final class SessionTimelineModel {
     /// what is new rather than for the end of the file (see below). An unread mark for a
     /// session that is already read costs one frame and changes nothing — the Mac's
     /// `setUnread` returns early on an unchanged flag and emits no event.
+    ///
+    /// **`openAt(_:)` is consumed here, not read directly by `.task(id:)`.** The fleet list
+    /// sets it before pushing a session opened from a search hit; a screen returning to a
+    /// kept model later must fall through to the ordinary `loadLatest` rather than jumping
+    /// back to a line the reader has long since scrolled past.
     func open() {
         fleet.markRead(sessionID)
-        loadLatest()
+        if let offset = pendingOffset {
+            pendingOffset = nil
+            fetch(anchor: .around(offset), older: false)
+        } else {
+            loadLatest()
+        }
+    }
+
+    /// Land this screen's very next `open()` scrolled to `offset` instead of at the live
+    /// edge. Set by the fleet list right before pushing a session a search hit opened —
+    /// before `FleetModel.timelineModel(for:)` (the same cached instance) reaches
+    /// `SessionTimelineScreen`'s `.task(id:)`.
+    func openAt(_ offset: Int) {
+        pendingOffset = offset
+    }
+
+    @ObservationIgnored private var pendingOffset: Int?
+
+    /// The item a search hit asked to land on, once its `.around` fetch lands — `nil` for
+    /// every ordinary fetch. `SessionTimelineScreen` scrolls to it and shows a fading
+    /// highlight; the value is left set afterwards rather than cleared, since a `List` row
+    /// id is all a screen needs to know WHICH row, not a signal to react to twice.
+    private(set) var scrollTarget: String?
+
+    /// Which item `.around(offset)` landed on, among however many share that offset.
+    ///
+    /// **A record can yield several items at one offset** — a wrapped user message splits
+    /// into its harness notices and the reader's own words, an assistant turn sits beside
+    /// its tool calls — and `TranscriptExtractor` only ever indexed the text ones (see its
+    /// own doc comment on why tool content is excluded). So the first `.userTurn` or
+    /// `.assistantText` sharing the offset is preferred; falling back to whatever else
+    /// shares it rather than to nothing, since a page that has the offset at all should
+    /// still land somewhere close to what was searched.
+    static func highlightTarget(offset: Int, in items: [TimelineItem]) -> String? {
+        let prefix = "\(offset)#"
+        let candidates = items.filter { $0.id.hasPrefix(prefix) }
+        return candidates.first { $0.kind == .userTurn || $0.kind == .assistantText }?.id
+            ?? candidates.first?.id
     }
 
     /// Make the screen current: the opening fetch, the fetch on coming back to a screen whose
@@ -622,6 +664,11 @@ final class SessionTimelineModel {
                 // so start again from the end rather than leaving a blank screen that will
                 // never fill in. `newerAnchor` is `.latest` again by itself now.
                 if page.reset { return self.loadLatest() }
+                // The page a search hit's `.around` fetch just landed — find what it asked
+                // to be shown, so the screen can scroll to it and flash it once.
+                if case .around(let offset) = anchor {
+                    self.scrollTarget = Self.highlightTarget(offset: offset, in: self.feed.items)
+                }
                 if older {
                     self.olderRun += 1
                     self.olderFailure = nil
@@ -631,6 +678,14 @@ final class SessionTimelineModel {
                 }
                 self.drain()
             case .failure(let error):
+                // An old Mac refuses `.around` outright — it predates `TimelineAnchor`'s own
+                // case and `FleetSocketServer.onUndecodable` answers `err`/`unsupported`
+                // rather than dropping the socket. That is a worse answer to the right
+                // question, not a failure: fall back to the live edge and land in the
+                // conversation without the scroll, exactly as `.latest` always has.
+                if case .around = anchor, case .server("unsupported") = error {
+                    return self.loadLatest()
+                }
                 if older {
                     // Quiet in `phase`, loud where the missing history is. The runway stops
                     // here rather than spending its remaining pages on a link that just

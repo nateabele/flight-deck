@@ -31,7 +31,9 @@ not repeated: "`makeSurface` returned nil" (it cannot — non-optional, non-fail
 ## What is live in `/Applications` right now
 
 Merged to master as `63d2268`, swapped in at 09:12 on 2026-08-31 (backup
-`~/Library/Application Support/Flight Deck/backups/20260831-091211/`).
+`~/Library/Application Support/Flight Deck/backups/20260831-091211/`). **The wake described
+under B below is implemented on branch `display-wake` and has NOT been swapped in** — the
+build in `/Applications` still only refuses; it does not yet wake.
 
 - `DisplayInspecting` / `DisplayState` — `CGDisplayIsActive(CGMainDisplayID()) != 0`. Defaults
   to a permissive `AlwaysDrawableDisplay()`; the real probe is injected in
@@ -80,23 +82,89 @@ Remaining routes, all expensive — do not start one without deciding it is wort
 
 **Recommendation: C is not viable on this timescale. Proceed to B.**
 
-### B — wake the display just long enough to fork
+### B — wake the display just long enough to fork. **SPIKE DONE: ALL THREE TESTS ANSWERED, AFFIRMATIVELY. IMPLEMENTED.**
 
-`IOPMAssertionDeclareUserActivity(… kIOPMUserActiveLocal …)` around surface creation, released
-straight after. Cost: the screen lights for a second or two when you tap `+`.
+`IOPMAssertionDeclareUserActivity(… kIOPMUserActiveLocal …)` around surface creation. Measured
+on 2026-08-31 on this machine, `pmset displaysleepnow` with the slept condition verified held
+before each of four trials:
 
-**Test these in order — the third is the one that decides it:**
-1. Does the wake complete *before* `ghostty_surface_new` runs? It is asynchronous; a naive call
-   followed immediately by `makeSurface` may still find no drawable. Measure, don't assume.
-2. Does `CGDisplayIsActive` go true, and how long does it take?
-3. **Does it work while the screen is LOCKED?** Waking a locked Mac shows the login window. Does
-   that provide a drawable to a background app's surface? **Unknown, and it is the crux** — the
-   phone case is almost always locked. If a locked wake yields no drawable, B does not solve the
-   real scenario either, and the honest answer becomes C-via-upstream or accepting the
-   limitation.
+1. **Does the wake complete before `ghostty_surface_new` runs?** No, not immediately — it is
+   asynchronous, confirming the spike's own caution. A naive declare-then-create would still find
+   no drawable. The implementation polls for a drawable after declaring rather than firing and
+   proceeding.
+2. **Does `CGDisplayIsActive` go true, and how long does it take?** Yes — **0.173 / 0.194 / 0.295
+   / 0.342 s** across four trials. Once active, the display stayed active for the ≥3s the trials
+   checked, so one declaration is enough; nothing needs to be held or released around the whole
+   creation path.
+3. **Does it work while the screen is LOCKED? This was the crux.** Yes. The Mac auto-locks
+   within ~5s of display sleep, so all four measurements above were already taken with the
+   screen locked (`locked=1`) — there was never an unlocked baseline to isolate, because by the
+   time the assertion could be measured, the phone's real-world case (locked) was already the
+   only case there was.
 
-Keep the existing guard under B. It stays correct for the cases a wake cannot rescue; it just
-stops being the routine outcome.
+**Sufficiency confirmed, n=1.** With the display woken from a locked, slept state, a session
+created from the phone forked a complete, healthy tab: `Flight Deck → /usr/bin/login → zsh →
+claude`, with the session id matching `sessions.json`. Not an inert tab. This is a single
+observation, not a distribution — repeat before trusting it as a rate rather than a
+demonstration.
+
+**What is implemented:** a `DisplayWaking` protocol / `DisplayWaker` collaborator; an
+`ensureTerminalCreatable(_:)` funnel in `SessionStore` that all four creation guard sites now
+call through; the real waker injected in `convenience init(ghostty:)`. `seedInitialSession`
+deliberately opts out with `.never` — it runs inline inside `SessionStore.init`, so waking there
+would light the screen on an unattended relaunch and would block startup on the poll.
+
+**The guard-site inventory is five, not four.** The spec (`docs/superpowers/specs/
+2026-08-31-display-wake-design.md`) enumerated only the four inside `SessionStore` —
+`newSession(in:)`, `createSession(agent:in:)`, `openSignInSession(for:in:using:)`,
+`respawnSurface(for:)` — and missed `FleetService`'s `.newSession` wire handler, which read
+`store.canCreateTerminal` directly rather than going through the funnel. That is the phone's
+only creation command, so the miss closed the whole path this feature exists for: with the
+display asleep, the phone was refused before `ensureTerminalCreatable` was ever reached, on
+every phone-originated creation. Caught in a whole-branch review, fixed by routing that guard
+through `ensureTerminalCreatable()` too. **`rg -n 'canCreateTerminal' Sources/` is the check**
+that finds every direct reader of the pure query in seconds — run it before any future change
+to this guard, so a sixth site cannot go missing the same way.
+
+**The guard is NOT removed.** A wake can still fail — clamshell mode, no display attached — and
+must still refuse rather than birth an inert tab. B makes refusal the exception instead of the
+routine outcome; it does not make refusal impossible.
+
+**Still out of scope, and still true:** `restore()` and `reopenClosedSession()` remain unguarded
+and non-waking (see Loose ends below) — a relaunch with the display asleep can still bring back
+a deck of inert tabs, `respawnSurface` remains the only remedy, and auto-respawn on display wake
+still does not exist.
+
+**Verified end-to-end against the shipped app, 2026-09-01 09:31.** A Release build was swapped
+into `/Applications`, the display slept and the Mac auto-locked (`active=false asleep=true
+locked=true`, confirmed held), and a `+` tap on the phone produced:
+
+```
+89959  Flight Deck            <- the post-swap pid
+ └─ 17649  /usr/bin/login
+     └─ 17650  fish
+         └─ 17712  claude --session-id f15601e3-...-8486d79d4029
+```
+
+with the session id matching the new `sessions.json` entry and the display reading
+`active=true locked=true` at the moment of creation. **Per-tab evidence — a new pid parented to
+the post-swap app and tied to the new session id — never a net shell count.**
+
+This also retires the one risk the code review could not: that `CGDisplayIsActive` might be
+served from a per-process value refreshed on the main run loop, which a poll running with the
+main thread blocked would never observe. It observes it. The spike harness polled from a
+separate process; the shipped app polls from the blocked main actor, and both see the flip.
+
+**Follow-up, not done: make the phone's guard async.** `FleetService`'s `.newSession` handler
+now blocks the caller's thread for up to 1.5s inside `ensureTerminalCreatable()` before either
+creation branch runs. It is the one site that need not: the agent/account branch already
+dispatches its own work into a `Task`, so restructuring the handler to check-then-launch
+asynchronously would cost it nothing, and would free the frame-handling thread for the
+duration of the wake. The plain-`+` branch is why this was not just done here — it currently
+distinguishes `unknown_project` from `terminal_unavailable` synchronously, and threading that
+distinction through an `async` reshape is real work, not a one-line change. Ruled out of this
+fix wave: the worst case (1.5s) sits far inside the 10s TCP keepalive idle the connection
+tolerates, so the synchronous form is not a correctness problem, only a missed efficiency.
 
 ### A — rejected
 
@@ -133,3 +201,12 @@ render as a generic fallback.
   would lose the deck. So a relaunch with the display asleep can bring back a whole deck of
   inert tabs, and `respawnSurface` is the only remedy. An auto-respawn on display wake would
   close this properly and does not exist.
+- **`DisplayState.isDrawable` asks about `CGMainDisplayID()` only.** On a Mac with more than
+  one display, a main display that has slept while a secondary stays awake and in active use
+  reads as not-drawable, and the guard blocks the main actor for up to 1.5s in front of someone
+  who is actively looking at a screen — just not the main one. A single-display probe is
+  deciding a question that is really machine-wide; nothing in this change addresses that.
+- **No memoisation of a recently-failed wake.** Each `+` pays the full attempted-wake cost
+  independently — up to 1.5s — with nothing remembering that the last attempt, moments ago,
+  timed out. In clamshell mode or with no display attached, every tap recurs the same cost with
+  the same outcome; there is no backoff or short-lived "don't bother" cache.

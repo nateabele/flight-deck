@@ -16,8 +16,8 @@ import Foundation
 /// arriving late from the debounced index query can only ever append *below* what is already
 /// on screen. The highlighted row can never be shoved out from under the user by results
 /// landing — which is why `SearchModel` can track selection by identity and have it hold.
-enum SearchRanker {
-    static func rank(
+public enum SearchRanker {
+    public static func rank(
         names: [NameCandidate], query: String, transcripts: [TranscriptHit]
     ) -> [SearchResult] {
         // Nothing typed: the deck, most recent first. Projects are left out because a list
@@ -70,7 +70,11 @@ enum SearchRanker {
 
         var grouped: [SearchResult] = []
         for group in groups {
-            for (offset, hit) in group.prefix(maxMatchesPerConversation).enumerated() {
+            // `position`, not `offset` — this is an enumeration index into the group, and
+            // `hit.offset` two lines below is a byte offset into the transcript. Both are
+            // legitimately named `offset` on their own, so this file is the one place they
+            // would sit beside each other under the same name if either kept it.
+            for (position, hit) in group.prefix(maxMatchesPerConversation).enumerated() {
                 grouped.append(SearchResult(
                     // `hit.rowID` is `message.id`, unique per row unlike `(conversationID,
                     // timestamp)` — see the `TranscriptHit.rowID` doc comment for why that
@@ -85,7 +89,8 @@ enum SearchRanker {
                     highlightedRanges: [],
                     snippet: hit.snippet,
                     conversationID: hit.conversationID,
-                    isContinuation: offset > 0
+                    isContinuation: position > 0,
+                    offset: hit.offset
                 ))
             }
         }
@@ -102,7 +107,7 @@ enum SearchRanker {
     /// Three is deliberately small. The point of showing more than one is evidence that the
     /// conversation is the right one; past a few, extra matches stop informing that judgement and
     /// start pushing other conversations out of the visible rows.
-    static let maxMatchesPerConversation = 3
+    public static let maxMatchesPerConversation = 3
 
     private static func byTierThenRecency(_ lhs: SearchResult, _ rhs: SearchResult) -> Bool {
         if lhs.tier != rhs.tier { return lhs.tier < rhs.tier }
