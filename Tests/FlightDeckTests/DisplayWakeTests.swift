@@ -13,13 +13,17 @@ final class DisplayWakeTests: XCTestCase {
     /// Starts un-drawable and becomes drawable the moment the waker is used, which is the
     /// real sequence compressed: declare activity, then the display comes up.
     private final class Waker: DisplayWaking, @unchecked Sendable {
-        let succeeds: Bool
         private let onWake: @Sendable () -> Void
         private let lock = NSLock()
         private var _calls = 0
+        private var _succeeds: Bool
         var calls: Int { lock.lock(); defer { lock.unlock() }; return _calls }
+        var succeeds: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return _succeeds }
+            set { lock.lock(); _succeeds = newValue; lock.unlock() }
+        }
         init(succeeds: Bool, onWake: @escaping @Sendable () -> Void = {}) {
-            self.succeeds = succeeds
+            self._succeeds = succeeds
             self.onWake = onWake
         }
         func wakeAndWaitForDrawable(timeout: TimeInterval) -> Bool {
@@ -176,5 +180,80 @@ final class DisplayWakeTests: XCTestCase {
         let store = SessionStore(ghostty: nil, persistence: nil)
         let waker = try XCTUnwrap(store.displayWaker as? DisplayWaker)
         XCTAssertTrue(waker.display is DisplayState)
+    }
+
+    /// A mutable clock so the cooldown can be driven without sleeping.
+    private final class Clock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _now: Date
+        init(_ now: Date = Date()) { _now = now }
+        func advance(by interval: TimeInterval) { lock.lock(); _now.addTimeInterval(interval); lock.unlock() }
+        func now() -> Date { lock.lock(); defer { lock.unlock() }; return _now }
+    }
+
+    /// A burst of taps while the display cannot wake must cost one timeout, not one per tap.
+    func testASecondAttemptInsideTheCooldownDoesNotRewake() {
+        let (store, _, waker) = makeStore(drawable: false, wakeSucceeds: false)
+        let clock = Clock()
+        store.now = clock.now
+        XCTAssertFalse(store.ensureTerminalCreatable())
+        XCTAssertEqual(waker.calls, 1)
+        clock.advance(by: SessionStore.wakeRetryCooldown - 1)
+        XCTAssertFalse(store.ensureTerminalCreatable())
+        XCTAssertEqual(waker.calls, 1, "still inside the cooldown; must not re-attempt the wake")
+    }
+
+    /// Once the cooldown elapses, a display that might have come back is worth trying again.
+    func testAnAttemptAfterTheCooldownRewakes() {
+        let (store, _, waker) = makeStore(drawable: false, wakeSucceeds: false)
+        let clock = Clock()
+        store.now = clock.now
+        XCTAssertFalse(store.ensureTerminalCreatable())
+        XCTAssertEqual(waker.calls, 1)
+        clock.advance(by: SessionStore.wakeRetryCooldown)
+        XCTAssertFalse(store.ensureTerminalCreatable())
+        XCTAssertEqual(waker.calls, 2, "the cooldown has elapsed; the wake must be retried")
+    }
+
+    /// A successful wake clears the memo, so a later, unrelated failure is not suppressed by a
+    /// cooldown left over from a wake that actually worked.
+    func testASuccessfulWakeClearsTheMemo() {
+        let provider = StubProvider()
+        retainedProviders.append(provider)
+        let store = SessionStore(provider: provider, persistence: nil)
+        let display = MutableDisplay(false)
+        let waker = Waker(succeeds: true, onWake: { display.set(true) })
+        store.display = display
+        store.displayWaker = waker
+        let clock = Clock()
+        store.now = clock.now
+        XCTAssertTrue(store.ensureTerminalCreatable())
+        XCTAssertEqual(waker.calls, 1)
+
+        // The display sleeps again immediately; a suppressed memo from the earlier success
+        // would silently skip this wake attempt.
+        display.set(false)
+        waker.succeeds = false
+        XCTAssertFalse(store.ensureTerminalCreatable())
+        XCTAssertEqual(waker.calls, 2, "the earlier success must not suppress this attempt")
+    }
+
+    /// Same cooldown, same memo, threaded through the async funnel used by the phone's
+    /// `.newSession`.
+    func testTheAsyncFunnelAlsoRespectsTheCooldown() async {
+        let (store, _, waker) = makeStore(drawable: false, wakeSucceeds: false)
+        let clock = Clock()
+        store.now = clock.now
+        let first = await store.awaitTerminalCreatable()
+        XCTAssertFalse(first)
+        XCTAssertEqual(waker.calls, 1)
+        clock.advance(by: SessionStore.wakeRetryCooldown - 1)
+        let second = await store.awaitTerminalCreatable()
+        XCTAssertFalse(second)
+        XCTAssertEqual(waker.calls, 1, "still inside the cooldown; must not re-attempt the wake")
+        clock.advance(by: 1)
+        let third = await store.awaitTerminalCreatable()
+        XCTAssertFalse(third)
+        XCTAssertEqual(waker.calls, 2, "the cooldown has elapsed; the wake must be retried")
     }
 }
