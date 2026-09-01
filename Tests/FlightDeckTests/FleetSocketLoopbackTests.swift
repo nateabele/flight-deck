@@ -49,7 +49,8 @@ final class FleetSocketLoopbackTests: XCTestCase {
     private func startServer(
         key: FleetDeviceKey,
         hello: @escaping (FleetAttachment, Int) -> [ServerFrame],
-        command: @escaping (FleetAttachment, Int, FleetCommand) -> ServerFrame = { _, cid, _ in .ack(cid: cid) }
+        command: @escaping (FleetAttachment, Int, FleetCommand, @escaping (ServerFrame) -> Void) -> Void =
+            { _, cid, _, reply in reply(.ack(cid: cid)) }
     ) async throws -> NWEndpoint.Port {
         let server = FleetSocketServer()
         server.onHello = hello
@@ -123,10 +124,10 @@ final class FleetSocketLoopbackTests: XCTestCase {
         let port = try await startServer(
             key: key,
             hello: { _, _ in [.snapshot(seq: 1, fleet: self.fleet("one"), reason: .initial)] },
-            command: { _, cid, command in
+            command: { _, cid, command, reply in
                 XCTAssertEqual(command, .markRead(id: self.sessionID))
                 delivered.fulfill()
-                return .ack(cid: cid)
+                reply(.ack(cid: cid))
             }
         )
 
@@ -404,9 +405,9 @@ final class FleetSocketLoopbackTests: XCTestCase {
         let port = try await startServer(key: key, hello: { _, _ in
             XCTFail("hello must not have been reached")
             return []
-        }, command: { _, cid, _ in
+        }, command: { _, cid, _, reply in
             XCTFail("a command before hello must not be answered")
-            return .ack(cid: cid)
+            reply(.ack(cid: cid))
         })
 
         let options = NWProtocolWebSocket.Options()

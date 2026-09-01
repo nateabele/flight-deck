@@ -135,14 +135,23 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// Answers a client's first frame. Returns the frames to send back — a snapshot, or a
     /// folded replay.
     public var onHello: ((_ client: FleetAttachment, _ lastSeq: Int) -> [ServerFrame])?
-    /// Answers a command. Returns the single frame to reply with (`ack` or `err`).
+    /// Answers a command. Like `onRequest`, the answer comes back through `reply` rather than
+    /// as a return value: most commands still answer synchronously, on the way out of this
+    /// closure, but `.newSession` on a sleeping display awaits the wake first, and a return
+    /// value cannot represent an answer that arrives after an `await`.
+    ///
+    /// `reply` must be called on `queue`, and it asserts that. It answers at most once — a
+    /// second call is dropped rather than trusted — and calling it after the connection has
+    /// ended is safe and does nothing.
     public var onCommand: (
-        (_ client: FleetAttachment, _ cid: Int, _ command: FleetCommand) -> ServerFrame
+        (_ client: FleetAttachment, _ cid: Int, _ command: FleetCommand,
+         _ reply: @escaping (ServerFrame) -> Void) -> Void
     )?
-    /// Answers a request. Unlike `onCommand`, the answer comes back through `reply` rather
-    /// than as a return value, and that difference is forced rather than stylistic: a command
-    /// is dispatched on the way out of the frame handler, while a page is a file read that
-    /// would otherwise block `queue` — which in production is the main queue.
+    /// Answers a request. Same reply-callback shape `onCommand` has, forced rather than
+    /// stylistic in both directions: most commands are still dispatched on the way out of the
+    /// frame handler, but a page is a file read that would otherwise block `queue` — which in
+    /// production is the main queue — and `.newSession` on a sleeping display is a command
+    /// that has grown the same problem.
     ///
     /// `reply` must be called on `queue`, and it asserts that. It answers at most once —
     /// a second call is dropped rather than trusted — and calling it after the connection has
@@ -701,8 +710,22 @@ public final class FleetSocketServer: @unchecked Sendable {
                 // A command before `hello` is a client that skipped the handshake step;
                 // answering it would let an unattached peer drive the Mac.
                 guard self.attached[id] != nil else { return connection.cancel() }
-                let reply = self.onCommand?(attachment, cid, command) ?? .err(cid: cid, code: "unhandled")
-                FleetSocket.send(reply, over: connection)
+                guard let onCommand = self.onCommand else {
+                    FleetSocket.send(ServerFrame.err(cid: cid, code: "unhandled"), over: connection)
+                    return
+                }
+                // Same answered-once wrapper as `onRequest`, for the same reason: a command
+                // that awaits a display wake can now outlive this frame handler, and the
+                // connection can end while it waits.
+                var answered = false
+                onCommand(attachment, cid, command) { [weak self, weak connection] frame in
+                    guard let self, let connection else { return }
+                    dispatchPrecondition(condition: .onQueue(self.queue))
+                    guard !answered else { return }
+                    answered = true
+                    guard self.attached[id] != nil else { return }
+                    FleetSocket.send(frame, over: connection)
+                }
             case .req(let cid, let request):
                 // Same rule as `cmd`, for a stronger reason: answering an unattached peer's
                 // command lets it drive the Mac, and answering its request lets it READ one.

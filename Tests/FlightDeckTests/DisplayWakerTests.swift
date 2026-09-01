@@ -65,4 +65,40 @@ final class DisplayWakerTests: XCTestCase {
     func testNeverWakingDisplayDoesNothing() {
         XCTAssertFalse(NeverWakingDisplay().wakeAndWaitForDrawable(timeout: 1.5))
     }
+
+    // MARK: - Async twin
+
+    /// Same contract as `testAlreadyDrawableReturnsImmediatelyWithoutDeclaringActivity`, for
+    /// the `async` overload the phone path calls instead of blocking.
+    func testAsyncAlreadyDrawableReturnsImmediatelyWithoutDeclaringActivity() async {
+        let declarations = Counter()
+        let waker = makeWaker(probe: Probe(flipsAfter: 0), declared: declarations)
+        let result: Bool = await waker.wakeAndWaitForDrawable(timeout: 1.5)
+        XCTAssertTrue(result)
+        XCTAssertEqual(declarations.count, 0, "an awake display must not be poked")
+    }
+
+    /// Same contract as `testWakesAndWaitsUntilDrawable`: the drawable arrives some polls
+    /// after the declaration, this time yielding via `Task.sleep` rather than blocking.
+    func testAsyncWakesAndWaitsUntilDrawable() async {
+        let declarations = Counter()
+        let waker = makeWaker(probe: Probe(flipsAfter: 3), declared: declarations)
+        let result: Bool = await waker.wakeAndWaitForDrawable(timeout: 1.5)
+        XCTAssertTrue(result)
+        XCTAssertEqual(declarations.count, 1)
+    }
+
+    /// Same contract as `testGivesUpAtTheTimeout`: a display that never wakes must not be
+    /// awaited forever.
+    func testAsyncGivesUpAtTheTimeout() async {
+        let waker = makeWaker(probe: Probe(flipsAfter: .max), declared: Counter())
+        let result: Bool = await waker.wakeAndWaitForDrawable(timeout: 0.05)
+        XCTAssertFalse(result)
+    }
+
+    /// Same contract as `testNeverWakingDisplayDoesNothing`, for the async overload.
+    func testAsyncNeverWakingDisplayDoesNothing() async {
+        let result: Bool = await NeverWakingDisplay().wakeAndWaitForDrawable(timeout: 1.5)
+        XCTAssertFalse(result)
+    }
 }

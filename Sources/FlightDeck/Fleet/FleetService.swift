@@ -285,8 +285,22 @@ final class FleetService: ObservableObject {
             self.noteAttached(attachment)
             return self.frames(resumingFrom: lastSeq)
         }
-        server.onCommand = { [weak self] client, cid, command in
-            self?.apply(command, from: client, cid: cid) ?? .err(cid: cid, code: "stopped")
+        server.onCommand = { [weak self] client, cid, command, reply in
+            guard let self else { return reply(.err(cid: cid, code: "stopped")) }
+            // The ONLY command that can need to wait, and only when the display is not
+            // already drawable — which is to say, almost never. Every other command, and
+            // every creation on an awake Mac, still answers on the way out of the frame
+            // handler exactly as before.
+            if case .newSession = command, !self.store.canCreateTerminal {
+                Task { @MainActor in
+                    guard await self.store.awaitTerminalCreatable() else {
+                        return reply(.err(cid: cid, code: "terminal_unavailable"))
+                    }
+                    reply(self.apply(command, from: client, cid: cid))
+                }
+                return
+            }
+            reply(self.apply(command, from: client, cid: cid))
         }
         server.onRequest = { [weak self] _, cid, request, reply in
             guard let self else { return reply(.err(cid: cid, code: "stopped")) }

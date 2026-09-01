@@ -66,6 +66,12 @@ struct AlwaysDrawableDisplay: DisplayInspecting {
 protocol DisplayWaking: Sendable {
     /// Wake the display if needed and block until it is drawable. Returns whether it is.
     func wakeAndWaitForDrawable(timeout: TimeInterval) -> Bool
+
+    /// Async twin of `wakeAndWaitForDrawable`. Same contract, but **yields** between polls
+    /// instead of blocking, so a caller on the main actor releases it while the display comes
+    /// up. Only the phone path uses this; every Mac-local creation path is synchronous and
+    /// documented as needing to stay that way.
+    func wakeAndWaitForDrawable(timeout: TimeInterval) async -> Bool
 }
 
 /// The real one.
@@ -116,6 +122,17 @@ struct DisplayWaker: DisplayWaking {
         }
         return false
     }
+
+    func wakeAndWaitForDrawable(timeout: TimeInterval) async -> Bool {
+        if display.isDrawable { return true }
+        declareUserActivity()
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+            if display.isDrawable { return true }
+        }
+        return false
+    }
 }
 
 /// `SessionStore.displayWaker`'s default: never wakes, never blocks, always reports failure.
@@ -125,4 +142,5 @@ struct DisplayWaker: DisplayWaking {
 /// `DisplayWaker` in a test would physically wake the developer's screen, once per call.
 struct NeverWakingDisplay: DisplayWaking {
     func wakeAndWaitForDrawable(timeout: TimeInterval) -> Bool { false }
+    func wakeAndWaitForDrawable(timeout: TimeInterval) async -> Bool { false }
 }

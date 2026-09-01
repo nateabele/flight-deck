@@ -260,6 +260,15 @@ final class FleetServiceTests: XCTestCase {
             onWake()
             return true
         }
+        // The phone's `.newSession` reaches `awaitTerminalCreatable`, which calls this
+        // overload, not the sync one above — so this is the one the test below actually
+        // exercises. Both are kept in sync (pun unavoidable) since `DisplayWaking` requires
+        // both and nothing here needs them to differ.
+        func wakeAndWaitForDrawable(timeout: TimeInterval) async -> Bool {
+            lock.lock(); _calls += 1; lock.unlock()
+            onWake()
+            return true
+        }
     }
 
     /// The companion to the refusal above: a phone `+` reaching an asleep display must
@@ -278,6 +287,70 @@ final class FleetServiceTests: XCTestCase {
         let display = MutableDisplay(false)
         store.display = display
         let waker = Waker(onWake: { display.set(true) })
+        store.displayWaker = waker
+
+        let harness = FleetTestHarness(store: store)
+        self.harness = harness
+        self.service = harness.service
+        let (_, key, port) = (harness.store, harness.key, try await harness.start())
+
+        let acked = expectation(description: "ack")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.newSession(project: project, agent: nil, accountIndex: nil))
+            }
+            if case .err(_, "terminal_unavailable") = frame {
+                XCTFail("a display that can be woken must not be refused")
+            }
+            if case .ack = frame { acked.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [acked], timeout: 10)
+        XCTAssertEqual(waker.calls, 1)
+        XCTAssertEqual(store.repos.first?.sessions.count, 2, "the woken display got its tab")
+    }
+
+    /// A waker whose async twin genuinely awaits before flipping the display, rather than
+    /// resolving on the calling turn the way `Waker` above does. This is the case
+    /// `onCommand`'s reply-callback shape exists for: the sync twin is never called here, so a
+    /// test that passed only because `await` happened to resolve immediately would not tell
+    /// the two apart.
+    private final class SlowWaker: DisplayWaking, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls = 0
+        var calls: Int { lock.lock(); defer { lock.unlock() }; return _calls }
+        private let onWake: @Sendable () -> Void
+        init(onWake: @escaping @Sendable () -> Void) { self.onWake = onWake }
+        func wakeAndWaitForDrawable(timeout: TimeInterval) -> Bool {
+            XCTFail("the phone's creation path must use the async twin, never the blocking one")
+            return false
+        }
+        func wakeAndWaitForDrawable(timeout: TimeInterval) async -> Bool {
+            lock.lock(); _calls += 1; lock.unlock()
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            onWake()
+            return true
+        }
+    }
+
+    /// The point of Task 1: a slow wake must not block anything, and the phone still gets
+    /// answered once it completes. `SlowWaker` genuinely suspends inside its async twin, so
+    /// this fails against an `onCommand` shape that cannot answer after an `await` — the
+    /// return-value shape that preceded the reply-callback one — the same way it would fail
+    /// if the handler still called the synchronous `wakeAndWaitForDrawable`.
+    func testANewSessionFromThePhoneAwaitsASlowWakeAndStillSucceeds() async throws {
+        let provider = StubProvider()
+        retainedProviders.append(provider)
+        let store = SessionStore(provider: provider, persistence: nil)
+        store.display = Display(isDrawable: true)
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/target"))
+        let project = try XCTUnwrap(store.repos.first?.id)
+        // Flipped only after the project exists, same as the tests above.
+        let display = MutableDisplay(false)
+        store.display = display
+        let waker = SlowWaker(onWake: { display.set(true) })
         store.displayWaker = waker
 
         let harness = FleetTestHarness(store: store)
