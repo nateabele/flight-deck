@@ -40,18 +40,21 @@ struct SessionStatusGlyph: View {
             // Unread is expressed HERE, in the status column, not as a separate badge on the
             // trailing edge. That is where the Mac puts it — `SessionStatusIcon` draws an
             // idle-and-unread session as a full-strength accent `circle.fill` and an
-            // idle-and-read one as `.secondary` knocked back — and a badge on the opposite
+            // idle-and-read one as `.primary` at α 0.10 — and a badge on the opposite
             // side of the row for the same fact is the kind of split vocabulary this file
             // exists to prevent. It also made VoiceOver say the state twice.
             //
-            // The distinction is tint, exactly as on the Mac; the size is 8pt rather than the
+            // The distinction is tint, exactly as on the Mac: unread is full-strength accent,
+            // read is 10% off the background — `.primary` at α 0.10 rather than a literal grey,
+            // so it steps off the row's own fill in either appearance, and so the resting state
+            // of nearly every row in the list stays quiet. The size is 8pt rather than the
             // Mac's 6 because this is read at arm's length on a phone rather than at desk
             // distance, and both branches share it so the column cannot ragged.
             glyph(
                 Circle()
                     .fill(session.isUnread ? AnyShapeStyle(Color.accentColor)
-                                           : AnyShapeStyle(HierarchicalShapeStyle.secondary))
-                    .opacity(session.isUnread ? 1 : 0.8)
+                                           : AnyShapeStyle(HierarchicalShapeStyle.primary))
+                    .opacity(session.isUnread ? 1 : 0.1)
                     .frame(width: 8, height: 8),
                 label: label
             )

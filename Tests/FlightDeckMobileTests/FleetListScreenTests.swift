@@ -229,4 +229,186 @@ final class FleetListScreenTests: XCTestCase {
         XCTAssertTrue(FleetListScreen.agentGroups(in: []).isEmpty)
     }
 
+    // MARK: The leading swipe lane
+
+    /// A read session's button offers to mark it unread, not the other way round — the
+    /// ordinary case, and the one a toggle wired backwards would get wrong first.
+    func testUnreadActionOnAReadSessionOffersToMarkItUnread() {
+        let session = WireSession(id: UUID(), title: "Home", agent: "claude", isUnread: false)
+        let action = FleetListScreen.unreadAction(for: session)
+        XCTAssertEqual(action.title, "Unread")
+        XCTAssertEqual(action.systemImage, "circle.fill")
+        XCTAssertTrue(action.marksUnread)
+    }
+
+    /// The toggle's other half, and the reason it exists at all: an unread session offers
+    /// Read, so the same swipe that set the mark by accident takes it back off again without
+    /// opening the session — which is exactly what would have marked it read anyway.
+    func testUnreadActionOnAnUnreadSessionOffersToMarkItRead() {
+        let session = WireSession(id: UUID(), title: "Home", agent: "claude", isUnread: true)
+        let action = FleetListScreen.unreadAction(for: session)
+        XCTAssertEqual(action.title, "Read")
+        XCTAssertEqual(action.systemImage, "circle")
+        XCTAssertFalse(action.marksUnread)
+    }
+
+    // MARK: A search result's tap destination
+
+    private func result(
+        _ kind: SearchResultKind, title: String = "session", projectPath: String = "/proj"
+    ) -> SearchResult {
+        SearchResult(
+            id: title, kind: kind, title: title, projectName: "proj", projectPath: projectPath,
+            tier: .exact, recency: Date(timeIntervalSince1970: 1), highlightedRanges: [],
+            snippet: nil, conversationID: nil
+        )
+    }
+
+    /// A `.session` result already names its open tab, so the destination is the id it carries
+    /// — no lookup at all, and unaffected by whatever the fleet happens to hold.
+    func testASessionResultsDestinationIsTheIdItAlreadyCarries() {
+        let id = UUID()
+        let destination = FleetListScreen.localDestination(for: result(.session(id)), in: [])
+
+        XCTAssertEqual(destination, id)
+    }
+
+    /// **The regression this exists for.** A `.project` result's `conversationID` is always
+    /// `nil` — see `PhoneSearchCandidates.build` — so it cannot be opened through the Mac the
+    /// way a transcript hit is; the brief said it should be, and the Mac's own
+    /// `FleetService.openConversation` would refuse it every time. Activating it must resolve
+    /// locally to the project's first session instead, per `SearchResultKind.project`'s own doc
+    /// comment.
+    func testAProjectResultsDestinationIsTheProjectsFirstSession() {
+        let first = UUID()
+        let projects = [
+            WireProject(id: UUID(), name: "nate", path: "/proj", sessions: [
+                WireSession(id: first, title: "one", agent: "claude"),
+                WireSession(id: UUID(), title: "two", agent: "claude"),
+            ])
+        ]
+
+        let destination = FleetListScreen.localDestination(
+            for: result(.project, projectPath: "/proj"), in: projects
+        )
+
+        XCTAssertEqual(destination, first, "the FIRST session, not any session in the project")
+    }
+
+    /// A project result naming a project the fleet no longer holds — closed while the search
+    /// was open — resolves to nothing to push, rather than crashing on a force unwrap.
+    func testAProjectResultsDestinationIsNilWhenTheProjectIsNoLongerInTheFleet() {
+        let destination = FleetListScreen.localDestination(
+            for: result(.project, projectPath: "/gone"), in: []
+        )
+
+        XCTAssertNil(destination)
+    }
+
+    /// `.conversation` is never resolved locally — it may name a conversation with no tab of
+    /// its own at all, which only the Mac can open. A `nil` here is what sends
+    /// `handleSearchTap` down the `requestOpenConversation` path instead of pushing directly.
+    func testAConversationResultsDestinationIsNeverResolvedLocally() {
+        let projects = [
+            WireProject(id: UUID(), name: "nate", path: "/proj", sessions: [
+                WireSession(id: UUID(), title: "one", agent: "claude"),
+            ])
+        ]
+
+        let destination = FleetListScreen.localDestination(
+            for: result(.conversation("abc"), projectPath: "/proj"), in: projects
+        )
+
+        XCTAssertNil(destination, "a conversation hit always needs the Mac's round trip")
+    }
+
+    // MARK: What the candidate wiring actually composes
+
+    /// A session the fleet is showing right now must be a candidate the ranker can match —
+    /// the one thing the `.onChange(of: model.fleet)` trigger exists to keep current. If the
+    /// wiring passed the wrong projects, or nothing at all, this session would never rank.
+    func testASessionInTheFleetIsAmongTheComposedCandidates() {
+        let projects = [WireProject(
+            id: UUID(), name: "flight-deck", path: "/proj",
+            sessions: [WireSession(id: UUID(), title: "rename fix", agent: "claude")]
+        )]
+
+        let candidates = FleetListScreen.searchCandidates(projects: projects, catalogue: nil)
+
+        XCTAssertTrue(candidates.contains { $0.name == "rename fix" })
+    }
+
+    /// No catalogue reply yet — the Mac hasn't answered, or the phone only just connected —
+    /// must not crash and must not invent a conversation candidate out of nothing. This is the
+    /// nil-coalescing this function does in place of a `WireConversationCatalogue.empty` that
+    /// doesn't exist; if it were removed, a nil catalogue would trap instead of composing.
+    func testANilCatalogueComposesOnlyFromTheFleet() {
+        let projects = [WireProject(
+            id: UUID(), name: "flight-deck", path: "/proj",
+            sessions: [WireSession(id: UUID(), title: "only session", agent: "claude")]
+        )]
+
+        let candidates = FleetListScreen.searchCandidates(projects: projects, catalogue: nil)
+
+        XCTAssertEqual(candidates.map(\.name), ["only session", "flight-deck"])
+    }
+
+    /// The catalogue arriving AFTER the fleet — the ordinary case, since the Mac answers the
+    /// fleet snapshot before the search backfill — contributes its own conversations once it
+    /// does. This is the `.onChange(of: model.conversationCatalogue)` trigger's whole reason to
+    /// exist: without a second call to this function on that reply, an unclaimed past
+    /// conversation would stay unfindable until the screen was torn down and rebuilt.
+    func testACatalogueArrivingAfterTheFleetContributesItsConversations() {
+        let projects = [WireProject(id: UUID(), name: "flight-deck", path: "/proj")]
+        let withoutCatalogue = FleetListScreen.searchCandidates(projects: projects, catalogue: nil)
+        XCTAssertFalse(withoutCatalogue.contains { $0.name == "old chat" })
+
+        let catalogue = WireConversationCatalogue(
+            conversations: [WireConversation(id: "abc123", name: "old chat", projectPath: "/proj")],
+            sessionActivity: [:]
+        )
+        let withCatalogue = FleetListScreen.searchCandidates(projects: projects, catalogue: catalogue)
+
+        XCTAssertTrue(withCatalogue.contains { $0.name == "old chat" })
+    }
+
+    // MARK: A search tap's failure is surfaced, not silent
+
+    /// **The regression this exists for.** `handleSearchTap`'s completion used to be
+    /// `guard case .success(let id) = outcome else { return }`, which folded
+    /// `unknown_conversation`, `launch_failed` AND `.disconnected` into the same silent
+    /// nothing — a tap that did nothing at all, with no way to tell a dropped socket from a
+    /// dangling account. This asserts the three named outcomes produce three DIFFERENT
+    /// messages, which a mapping collapsed back to `return`, or back to one shared string,
+    /// could not do.
+    func testEachSearchTapFailureProducesItsOwnMessage() {
+        let disconnected = FleetListScreen.searchOpenFailureMessage(
+            for: .disconnected, macName: "Nate's Mac"
+        )
+        let unknown = FleetListScreen.searchOpenFailureMessage(
+            for: .server(code: "unknown_conversation"), macName: "Nate's Mac"
+        )
+        let launchFailed = FleetListScreen.searchOpenFailureMessage(
+            for: .server(code: "launch_failed"), macName: "Nate's Mac"
+        )
+
+        XCTAssertNotEqual(disconnected, unknown)
+        XCTAssertNotEqual(disconnected, launchFailed)
+        XCTAssertNotEqual(unknown, launchFailed)
+        XCTAssertTrue(disconnected.contains("Nate's Mac"), "names the Mac, per this file's style")
+        XCTAssertTrue(unknown.contains("Nate's Mac"))
+        XCTAssertTrue(launchFailed.contains("Nate's Mac"))
+    }
+
+    /// An old Mac's code this build has never heard of — or a future one's — falls to a
+    /// generic message rather than staying silent. `FleetRequestError.server`'s own doc
+    /// comment requires exactly this of every client on the channel.
+    func testAnUnrecognisedServerCodeFallsToAGenericMessageRatherThanSilence() {
+        let message = FleetListScreen.searchOpenFailureMessage(
+            for: .server(code: "some_future_code"), macName: "Nate's Mac"
+        )
+
+        XCTAssertFalse(message.isEmpty)
+        XCTAssertTrue(message.contains("Nate's Mac"))
+    }
 }

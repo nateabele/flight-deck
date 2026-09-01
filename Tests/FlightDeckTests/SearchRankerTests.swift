@@ -1,4 +1,5 @@
 import XCTest
+import FleetKit
 @testable import FlightDeck
 
 /// The order results come back in.
@@ -33,7 +34,7 @@ final class SearchRankerTests: XCTestCase {
     ) -> TranscriptHit {
         TranscriptHit(
             rowID: rowID, conversationID: conversation, projectPath: "/w/flight-deck",
-            conversationName: conversation, snippet: snippet, timestamp: ago(activity)
+            conversationName: conversation, snippet: snippet, timestamp: ago(activity), offset: 0
         )
     }
 

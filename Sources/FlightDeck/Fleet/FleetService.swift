@@ -69,6 +69,24 @@ final class FleetService: ObservableObject {
     /// per-install id so it survives relaunches.
     let serviceName: String
 
+    /// The most recently constructed service.
+    ///
+    /// A fallback for `AppDelegate`, the same seam `SessionStore.current` is — see that
+    /// property's doc comment. `AppDelegate` builds the search index and its backfill well
+    /// after `FleetService` is constructed (`startSearch` runs off `.flightDeckStoreReady`,
+    /// which `FlightDeckApp`'s `@StateObject` autoclosures reach independently), so there is
+    /// no construction-time seam to inject a progress provider through; this is how the
+    /// backfill's progress reaches `indexingProgress` below. Weak so this service's lifetime
+    /// is still owned by the `@StateObject` that holds it.
+    static weak var current: FleetService?
+
+    /// How far the Mac's search backfill has got, or `nil` when none is running. Set by
+    /// `AppDelegate` from the same closure that drives `SearchModel.indexingProgressChanged`
+    /// — see `SearchIndexBuilder.build`'s `progress` callback. Read by the `.search` request
+    /// handler to populate `WireSearchHits.indexing`, so a phone searching mid-backfill sees
+    /// why its results are partial instead of a silent undercount.
+    var indexingProgress: SearchIndexBuilder.Progress?
+
     init(store: SessionStore, preferences: PreferencesStore, armer: PairingArmer) {
         self.store = store
         self.preferences = preferences
@@ -83,6 +101,7 @@ final class FleetService: ObservableObject {
         self.serviceName = Self.derivedServiceName(preferences: preferences)
         store.replicator = replicator
         wireHandlers()
+        Self.current = self
     }
 
     /// The rows of one project's New Session menu, or nil when there is no such project.
@@ -105,6 +124,114 @@ final class FleetService: ObservableObject {
             agents: agents, preferences: preferences.preferences,
             resolved: preferences.resolvedAccounts(for: agents, project: path)
         )
+    }
+
+    /// Projects currently in the sidebar. `SearchCandidates.build` filters a phone's own
+    /// name matches to this same set, for the same reason: a historical conversation whose
+    /// project has since left the sidebar is a match the Mac cannot honour without silently
+    /// re-adding the project the user removed.
+    private func openProjectPaths() -> [String] { store.repos.map(\.url.path) }
+
+    /// The whole catalogue of conversations the Mac's index has a name for, filtered to
+    /// `openProjectPaths()`, plus every open tab's transcript recency — see
+    /// `WireConversationCatalogue`'s doc comment for why recency travels here rather than on
+    /// `WireSession`.
+    ///
+    /// Reads `store.searchIndex` rather than holding a second reference to it: `AppDelegate`
+    /// opens the one `SQLiteSearchIndex` for the process and hands it to `SessionStore` so
+    /// `ClaudeRuntime` can report live text into it — see `SessionStore.searchIndex`'s doc
+    /// comment. Building a second `SQLiteSearchIndex` here, on the same file, would be a
+    /// second writer; reading the store's is the same seam `SearchCandidates.build` and
+    /// `AppDelegate.presentSearch` already use.
+    ///
+    /// `nil` — never an empty catalogue — when there is no index to read, or reading it threw:
+    /// `AppDelegate.presentSearch`'s `try? SQLiteSearchIndex(at:)` can leave `store.searchIndex`
+    /// nil for the life of the process, and collapsing that into "no history" here would be the
+    /// same quiet lie §9 forbids on `.search`, just for the name half instead of the transcript
+    /// half. The caller turns `nil` into `err(index_unavailable)`.
+    private func conversationCatalogue() -> WireConversationCatalogue? {
+        guard let index = store.searchIndex else { return nil }
+        guard let known = try? index.conversationNames() else { return nil }
+        let open = Set(openProjectPaths())
+        let conversations = known
+            .filter { open.contains($0.value.projectPath) }
+            .map { WireConversation(
+                id: $0.key, name: $0.value.name, projectPath: $0.value.projectPath
+            ) }
+            .sorted { $0.id < $1.id }
+        let sessionActivity = Dictionary(
+            store.repos.flatMap(\.sessions).map { ($0.id.uuidString, transcriptModified($0)) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return WireConversationCatalogue(
+            conversations: conversations, sessionActivity: sessionActivity
+        )
+    }
+
+    /// A live tab's transcript modification date, read the same way
+    /// `AppDelegate.presentSearch` reads it for `SearchCandidates.build` — a syscall, not a
+    /// read of file content, so there is nothing here worth hopping off this actor for.
+    private func transcriptModified(_ session: Session) -> Date {
+        let url = ClaudeSession.transcriptURL(
+            sessionID: session.pinnedConversationID, workingDirectory: session.transcriptDirectory
+        )
+        return (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate ?? .distantPast
+    }
+
+    /// Why `FleetService.openConversation` below could not open one.
+    private enum OpenConversationFailure: Error {
+        /// `conversationID` is not a UUID at all — nothing `SearchActivation.plan`'s
+        /// conversation branch, or `SessionStore.openConversation`'s pinning, could ever act
+        /// on. Wire code: `unknown_conversation`.
+        case unknownConversation
+        /// A well-formed conversation id whose launch `SessionStore.openConversation` itself
+        /// refused — a dangling or relocated account, the two `AgentLaunchError` cases
+        /// `launchAccount` documents. Wire code: `launch_failed`.
+        case launchFailed
+    }
+
+    /// Resumes — or selects — conversation `conversationID` from project `projectPath`, over
+    /// the same seam the desktop's ⌘K Return and the search panel's `onSelect` already use:
+    /// build a `SearchResult`, hand it to `SearchActivation.plan` for the select-vs-resume
+    /// decision, then let `SessionStore.openConversation` re-resolve the real transcript
+    /// directory and act. Nothing about select-vs-resume is reimplemented here.
+    ///
+    /// Reads `SessionStore.openConversation`'s return value directly rather than
+    /// `store.selectedSessionID` afterward — the earlier shape here read that property, and on
+    /// `SessionStore.openConversation`'s `launchAccount`-failure branch (a dangling or
+    /// relocated account; see its own doc comment) that call returns having filed nothing and
+    /// changed no selection, so the property still named whatever tab was selected *before*
+    /// this request — a confident `.session(cid:, id)` reply naming an unrelated conversation.
+    /// `SessionStore.openConversation` now returns the id it actually opened or selected, `nil`
+    /// on every path that filed nothing, which is what makes that failure mode unrepresentable
+    /// here rather than merely untested.
+    private func openConversation(
+        conversationID: String, projectPath: String
+    ) -> Result<UUID, OpenConversationFailure> {
+        guard UUID(uuidString: conversationID) != nil else { return .failure(.unknownConversation) }
+        let known = (try? store.searchIndex?.conversationNames()) ?? [:]
+        let title = known[conversationID]?.name ?? conversationID
+        let result = SearchResult(
+            id: "conversation:\(conversationID)",
+            kind: .conversation(conversationID),
+            title: title,
+            projectName: URL(fileURLWithPath: projectPath).lastPathComponent,
+            projectPath: projectPath,
+            tier: .transcript,
+            recency: .distantPast,
+            highlightedRanges: [],
+            snippet: nil,
+            conversationID: conversationID
+        )
+        let open = store.repos.flatMap(\.sessions).map {
+            SearchActivation.ActiveSession(id: $0.id, conversationID: $0.pinnedConversationID)
+        }
+        let plan = SearchActivation.plan(
+            for: result, openSessions: open, projects: openProjectPaths()
+        )
+        guard let id = store.openConversation(plan) else { return .failure(.launchFailed) }
+        return .success(id)
     }
 
     private static func derivedServiceName(preferences: PreferencesStore) -> String {
@@ -188,6 +315,65 @@ final class FleetService: ObservableObject {
                     cid: cid,
                     LocalEndpoints.routable(port: boundPort.rawValue, limit: 4)
                 ))
+            case .conversations:
+                // Answered synchronously, the same as `newSessionOptions` and `macEndpoints`:
+                // `SQLiteSearchIndex` is already called this way off a debounce timer in
+                // `SearchModel`, on this same actor — see `AppDelegate.presentSearch`. Nothing
+                // here writes and nothing enters `FleetSnapshot`.
+                //
+                // `nil` — no index, or the read threw — is refused rather than answered with an
+                // empty catalogue; see `conversationCatalogue`'s doc comment.
+                guard let catalogue = self.conversationCatalogue() else {
+                    return reply(.err(cid: cid, code: "index_unavailable"))
+                }
+                reply(.conversations(cid: cid, catalogue))
+            case .search(let query, let limit):
+                // A query FTS5 cannot match — empty or all whitespace — is not a failure. It
+                // is a query with nothing to match, and an empty hit list is the honest
+                // answer, not `err`.
+                guard let match = FTS5Query.match(for: query) else {
+                    return reply(.searchHits(cid: cid, WireSearchHits(hits: [], indexing: nil)))
+                }
+                // No index yet, or a genuinely failed read, is refused rather than answered
+                // with an empty hit list — folding "not open" and "threw" into `[]` would tell
+                // the phone "No Results", a claim about the corpus this Mac is in no position
+                // to make (§9). This is the one state `SearchLimits` and the empty-query guard
+                // above do not cover: a query FTS5 *can* match, but there is nothing to ask.
+                guard let index = self.store.searchIndex else {
+                    return reply(.err(cid: cid, code: "index_unavailable"))
+                }
+                // Clamped with `SearchLimits.maxHits`, not `SearchModel.transcriptLimit`:
+                // that property is `@MainActor`-isolated for `SearchModel`'s own state, and
+                // `FleetKit` gives both sides the same ceiling with no actor to cross.
+                let capped = min(limit, SearchLimits.maxHits)
+                guard let hits = try? index.search(
+                    match, projects: self.openProjectPaths(), limit: capped
+                ) else {
+                    return reply(.err(cid: cid, code: "index_unavailable"))
+                }
+                // `nil` outside a backfill — an absent `indexingProgress` means "not
+                // indexing", not "0 of 0", and reporting the latter would put a meaningless
+                // footer on the phone permanently. See `indexingProgress`'s doc comment for
+                // where this is set.
+                let indexing = self.indexingProgress.map {
+                    WireIndexingProgress(done: $0.indexed, total: $0.total)
+                }
+                reply(.searchHits(cid: cid, WireSearchHits(hits: hits, indexing: indexing)))
+            case .openConversation(let conversationID, let projectPath):
+                switch self.openConversation(conversationID: conversationID, projectPath: projectPath) {
+                case .success(let id):
+                    reply(.session(cid: cid, id))
+                case .failure(.unknownConversation):
+                    reply(.err(cid: cid, code: "unknown_conversation"))
+                case .failure(.launchFailed):
+                    // The conversation is real; launching it is what failed — a dangling or
+                    // relocated account, the same refusal `SessionStore.openConversation`
+                    // reports to `launchFailureReporter` on the desktop. A distinct code, not
+                    // `unknown_conversation`, so the phone can tell "no such conversation"
+                    // from "found it, could not open it" rather than folding both into one
+                    // dead end.
+                    reply(.err(cid: cid, code: "launch_failed"))
+                }
             }
         }
         server.onAttachedSlotsChanged = { [weak self] slots in
@@ -606,6 +792,15 @@ final class FleetService: ObservableObject {
         case .newSession(let project, let agent, let accountIndex):
             guard let path = store.projectPath(project) else {
                 return .err(cid: cid, code: "unknown_project")
+            }
+            // After the project lookup, so an unknown project still says so rather than being
+            // masked by this. Checked once, ahead of both branches below (the plain `+` tap and
+            // the agent/account variant): `store.newSession`/`createSession` would otherwise
+            // refuse silently — `newSession(inProject:)` still returns a non-nil `Session`, an
+            // un-inserted one, so the phone would see an ordinary ack for a tab that was never
+            // created.
+            guard store.canCreateTerminal else {
+                return .err(cid: cid, code: "terminal_unavailable")
             }
             // Both nil is a plain `+` tap: the project's defaults, exactly as before this
             // feature existed and exactly what an older phone sends.

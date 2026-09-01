@@ -56,17 +56,38 @@ final class AnswerFrameCodingTests: XCTestCase {
         XCTAssertNil(json["label"])
     }
 
-    /// **The guard on the security property, and the only test that fails when a fourth case
-    /// appears.** `PromptAnswer`'s three cases are what makes "Yes, and don't ask again for
-    /// Bash commands in /Users/nate" unnameable from a phone; every other test here would
-    /// stay green beside a `.allowAlways` nobody sent yet. `Tag` is the vocabulary actually on
-    /// the wire, so counting it catches a case added to the enum and to the codec both.
+    /// **The guard on the security property, and the only test that fails when a case
+    /// appears.** `PromptAnswer`'s cases are what makes "Yes, and don't ask again for Bash
+    /// commands in /Users/nate" unnameable from a phone; every other test here would stay
+    /// green beside a `.allowAlways` nobody sent yet. `Tag` is the vocabulary actually on the
+    /// wire, so counting it catches a case added to the enum and to the codec both.
+    ///
+    /// **`answers` was added deliberately and cannot reach that row.** It names options inside
+    /// an `AskUserQuestion`, and `SessionStore.answerPrompt` refuses it for anything but
+    /// `.question` — a permission dialog has no `questions` for its indices to mean anything
+    /// in, so there is no path from this case to a permission dialog's rows at all. Each index
+    /// is additionally checked against the transcript's own option list and its label before a
+    /// single arrow is counted. Updating this list is a decision, not a formality: read
+    /// `SessionStore.answerPrompt` before you change the expectation again.
     func testThereIsNoCaseThatReachesTheDontAskAgainRow() {
-        XCTAssertEqual(PromptAnswer.Tag.allCases.map(\.rawValue), ["option", "allow", "deny"])
+        XCTAssertEqual(PromptAnswer.Tag.allCases.map(\.rawValue),
+                       ["option", "allow", "deny", "answers"])
+    }
+
+    /// The reason `answers` is safe, asserted rather than argued: it is refused outright
+    /// against a permission dialog, which is the only shape with a durable-grant row.
+    func testAnAnswerSetIsRefusedAgainstAPermissionDialog() {
+        XCTAssertNil(
+            AnswerPlan.plan(for: [], answers: []),
+            "no questions, no plan — a permission dialog offers nothing for an index to index"
+        )
     }
 
     func testEachAnswerRoundTripsThroughClientFrame() throws {
-        for answer: PromptAnswer in [.option(index: 0, label: "Yes"), .allow, .deny] {
+        for answer: PromptAnswer in [
+            .option(index: 0, label: "Yes"), .allow, .deny,
+            .answers([[.init(index: 1, label: "Go")], [.init(index: 0, label: "Vim")]]),
+        ] {
             let sent = ClientFrame.cmd(cid: 9, .answerPrompt(
                 id: session, token: token, call: "toolu_A", answer: answer
             ))

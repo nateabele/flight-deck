@@ -277,6 +277,11 @@ private struct SessionRow: View {
                 .accessibilityIdentifier("session-mark-unread")
             Divider()
             Button("Rename") { beginRename() }
+            // Shown only for a tab whose terminal never forked a shell — the only tab it can
+            // help. A menu item that is usually a no-op teaches people to ignore it.
+            if !store.hasShellProcess(for: session.id) {
+                Button("Restart Terminal") { store.respawnSurface(for: session.id) }
+            }
             Button("Close Session") { store.closeSession(session.id) }
         }
     }

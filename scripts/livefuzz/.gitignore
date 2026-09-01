@@ -1,0 +1,10 @@
+# The pty session's throwaway project directory: claude writes local trust markers and
+# scratch files into it while a run drives through it. Keep the directory (the harness needs
+# it to exist) but not anything a live run leaves behind.
+capture-workspace/*
+!capture-workspace/.gitkeep
+
+# Never commit a compiled probe or a venv — see README.md.
+probe
+*.log
+__pycache__/
