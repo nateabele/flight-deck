@@ -483,6 +483,91 @@ final class SessionTimelineScreenTests: XCTestCase {
         XCTAssertNil(SessionTimelineScreen.transcriptPlan(for: gate, in: items))
     }
 
+    // MARK: The review a tap opens
+
+    /// **The tap builds the review; the destination only reads it.** `review(of:in:)` is
+    /// called from the banner's `Button` action and its result is kept in `@State`, because a
+    /// model built inside the `navigationDestination` closure would be replaced on every
+    /// evaluation of that closure — and this feature's own loop re-evaluates it, since a sent
+    /// comment bumps `annotationCount` and so changes `session.planGate`. Each replacement
+    /// would drop the comments already sent, the typed feedback and the resolved latch.
+    ///
+    /// **What this file cannot reach is the re-evaluation itself.** Nothing here renders (see
+    /// the header, and `scripts/test-ios.sh`'s own note), so no assertion here can watch a body
+    /// run twice and check that the same model came back out — `@State` is private to a view
+    /// that is installed in a rendering context, and neither the banner's tap nor the push is
+    /// reachable without XCUITest. docs/MOBILE.md's checklist owns that half. What IS reachable
+    /// is this construction site: that it is a function of the tapped gate and this session,
+    /// and that calling it a second time is destructive — which is exactly why only the tap
+    /// calls it.
+    @MainActor
+    func testTheTapBuildsAReviewOfTheGateItWasDrawnForWiredToThisSessionsSend() {
+        let fleet = RecordingFleet()
+        let session = UUID()
+        let timeline = SessionTimelineModel(sessionID: session, fleet: fleet)
+        let gate = WirePlanGate(callID: "toolu_plan1", tier: "annotate", plan: "A.\n\nB.",
+                                startedAt: "t", annotationCount: 0)
+
+        let review = SessionTimelineScreen.review(of: gate, in: timeline)
+
+        XCTAssertEqual(review.session, session)
+        XCTAssertEqual(review.gate.callID, "toolu_plan1")
+        XCTAssertEqual(review.blocks, PlanBlocks.split("A.\n\nB.").blocks)
+
+        review.comment(on: 0, text: "needs a rollback")
+        guard case .annotatePlan(let id, _, let call, let text, _) = fleet.sent.first else {
+            return XCTFail("expected the review's send to reach this session's fleet")
+        }
+        XCTAssertEqual(id, session)
+        XCTAssertEqual(call, "toolu_plan1")
+        XCTAssertEqual(text, "needs a rollback")
+    }
+
+    /// The `verdict` tier's plan comes out of the conversation the screen already holds, and it
+    /// is resolved HERE, at the tap, rather than in the destination — `feed.items` keeps
+    /// arriving while the reader is on the pushed screen, and the plan under review is the one
+    /// the banner was tapped for.
+    @MainActor
+    func testTheTapResolvesTheTranscriptPlanForAGateThatCarriesNone() {
+        let session = UUID()
+        let fleet = RecordingFleet()
+        fleet.page = TimelinePage(
+            session: session,
+            items: [exitPlanModeCall(id: "2000#0", callID: "toolu_plan1",
+                                     plan: "# Title\n\nDo it.")],
+            start: 1900, end: 2100, hasMore: false, reset: false
+        )
+        let timeline = SessionTimelineModel(sessionID: session, fleet: fleet)
+        timeline.open()
+        XCTAssertFalse(timeline.feed.items.isEmpty, "precondition: the conversation is loaded")
+        let gate = WirePlanGate(callID: "toolu_plan1", tier: "verdict", plan: nil,
+                                startedAt: "t", annotationCount: 0)
+
+        let review = SessionTimelineScreen.review(of: gate, in: timeline)
+
+        XCTAssertEqual(review.blocks, PlanBlocks.split("# Title\n\nDo it.").blocks,
+                       "the plan the gate does not carry, read out of the timeline")
+    }
+
+    /// **Building is destructive, which is why the tap is the only caller.** A second call
+    /// carries none of the first one's comments — the state a re-render used to throw away.
+    @MainActor
+    func testASecondCallIsAFreshReviewCarryingNoneOfTheFirstOnesWork() {
+        let timeline = SessionTimelineModel(sessionID: UUID(), fleet: RecordingFleet())
+        let gate = WirePlanGate(callID: "toolu_plan1", tier: "annotate", plan: "A.\n\nB.",
+                                startedAt: "t", annotationCount: 0)
+
+        let first = SessionTimelineScreen.review(of: gate, in: timeline)
+        first.feedback = "ship it"
+        first.comment(on: 0, text: "needs a rollback")
+        let second = SessionTimelineScreen.review(of: gate, in: timeline)
+
+        XCTAssertFalse(first === second, "a call builds a model, it does not fetch one")
+        XCTAssertEqual(first.sent[0]?.count, 1)
+        XCTAssertNil(second.sent[0], "everything the reader did is in the model, and only there")
+        XCTAssertEqual(second.feedback, "")
+    }
+
     /// The banner's subtitle, read off the gate's own `startedAt`. Both timestamps are
     /// hours (or days) in the past rather than minutes, so a slow test run cannot tip the
     /// answer over a unit boundary between building the fixture and asserting on it.
@@ -574,4 +659,38 @@ final class SessionTimelineScreenTests: XCTestCase {
             hasBackgroundWork: hasBackgroundWork
         )
     }
+}
+
+/// A fleet stand-in for the two things a tap-built review needs from one: a conversation to
+/// read the `verdict` tier's plan out of, and somewhere for the review's own commands to land.
+/// Answers inline rather than holding the completion — none of this is about timing, which is
+/// `SessionTimelineModelTests.StubPager`'s subject and not this file's.
+@MainActor
+private final class RecordingFleet: TimelinePaging, PromptSending, PromptAnswering,
+                                    PresenceReporting {
+    /// Answered to every page request, or nothing at all when it is nil.
+    var page: TimelinePage?
+    private(set) var sent: [FleetCommand] = []
+
+    func viewing(_ session: UUID?) {}
+    func markRead(_ id: UUID) {}
+
+    func timelinePage(
+        _ request: FleetRequest,
+        then completion: @escaping (Result<TimelinePage, FleetRequestError>) -> Void
+    ) {
+        if let page { completion(.success(page)) }
+    }
+
+    func sendPrompt(
+        _ command: FleetCommand,
+        then completion: @escaping (Result<Void, FleetRequestError>) -> Void
+    ) {
+        sent.append(command)
+    }
+
+    func answerPrompt(
+        _ command: FleetCommand,
+        then completion: @escaping (Result<Void, FleetRequestError>) -> Void
+    ) {}
 }

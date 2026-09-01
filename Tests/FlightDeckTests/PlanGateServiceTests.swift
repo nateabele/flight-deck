@@ -45,6 +45,62 @@ final class PlanGateServiceTests: XCTestCase {
         XCTAssertEqual(resolveCallCount, 1, "the gate must be resolved exactly once")
     }
 
+    /// **The same ruling, for the other verb.** Spec §6 gives `token` to `plan.annotate` as
+    /// well as to `plan.resolve` — *"the same idempotency `answeredPromptTokens` gives
+    /// `prompt.answer`"* — and this is what makes the parameter real. Nothing retries a command
+    /// today (`FleetModel.sendPrompt` is at-most-once), so a token that is accepted, named and
+    /// then dropped would read as implemented right up to the day a retry layer lands and every
+    /// comment goes out twice.
+    @MainActor
+    func testTheSameTokenAnnotatesOnlyOnce() async {
+        let (service, transport) = makeService(plan: "First block.\n\nSecond block.", callID: "c")
+        await service.refresh()
+        let token = UUID()
+        let first = await service.annotate(session: service.knownSession, call: "c",
+                                           text: "needs a rollback", block: 1, token: token)
+        let second = await service.annotate(session: service.knownSession, call: "c",
+                                            text: "needs a rollback", block: 1, token: token)
+        XCTAssertNil(first.failureCode)
+        XCTAssertNil(second.failureCode, "a duplicate is an ack, not an error")
+        let annotateCallCount = await transport.annotateCallCount
+        XCTAssertEqual(annotateCallCount, 1, "the comment must reach the gate exactly once")
+        XCTAssertEqual(service.gate(for: service.knownSession)?.annotationCount, 1,
+                       "and the badge counts what was posted, not what was asked for")
+    }
+
+    /// The check is on the token and never on the text: two comments a reader genuinely typed
+    /// twice are two comments, however alike they read.
+    @MainActor
+    func testADifferentTokenIsADifferentComment() async {
+        let (service, transport) = makeService(plan: "First block.\n\nSecond block.", callID: "c")
+        await service.refresh()
+        _ = await service.annotate(session: service.knownSession, call: "c",
+                                   text: "same words", block: 1, token: UUID())
+        _ = await service.annotate(session: service.knownSession, call: "c",
+                                   text: "same words", block: 1, token: UUID())
+        let annotateCallCount = await transport.annotateCallCount
+        XCTAssertEqual(annotateCallCount, 2)
+    }
+
+    /// A POST the gate refused releases its token again — the same trade `resolve` makes on its
+    /// own failure. Swallowing the token would turn one dropped connection into a comment the
+    /// reader can never send, and they have no way to tell that from a comment that landed.
+    @MainActor
+    func testARefusedCommentReleasesItsTokenSoARetryCanLand() async {
+        let (service, transport) = makeService(plan: "First block.\n\nSecond block.", callID: "c")
+        await service.refresh()
+        await transport.failNextAnnotation()
+        let token = UUID()
+        let failed = await service.annotate(session: service.knownSession, call: "c",
+                                            text: "needs a rollback", block: 1, token: token)
+        XCTAssertEqual(failed.failureCode, "unreadable_screen")
+        let retry = await service.annotate(session: service.knownSession, call: "c",
+                                           text: "needs a rollback", block: 1, token: token)
+        XCTAssertNil(retry.failureCode)
+        let annotateCallCount = await transport.annotateCallCount
+        XCTAssertEqual(annotateCallCount, 1, "the retry, and only the retry, reached the gate")
+    }
+
     /// The block index is resolved against the Mac's own split. A phone naming a block this
     /// plan does not have gets nothing pinned.
     @MainActor
@@ -294,10 +350,14 @@ private actor RecordingTransport {
     let registryDirectory: URL
     private(set) var planFetchCount = 0
     private(set) var resolveCallCount = 0
+    /// How many comments actually reached the server. `lastAnnotation` alone cannot answer the
+    /// token question — two identical posts leave exactly the same last one behind as one does.
+    private(set) var annotateCallCount = 0
     private(set) var lastAnnotation: (text: String, originalText: String?)?
 
     private var shouldPauseNextPlanFetch = false
     private var shouldFailNextPlanFetch = false
+    private var shouldFailNextAnnotation = false
     private var pauseContinuation: CheckedContinuation<Void, Never>?
     private var pausedContinuation: CheckedContinuation<Void, Never>?
 
@@ -315,6 +375,12 @@ private actor RecordingTransport {
     /// shape `PlanGateClient.plan()` reports as `nil`, the same as a dropped connection.
     func failNextPlanFetch() {
         shouldFailNextPlanFetch = true
+    }
+
+    /// Arranges for the *next* comment POST to come back non-2xx — the shape
+    /// `PlanGateClient.annotate` reports as `false`, i.e. the gate did not take it.
+    func failNextAnnotation() {
+        shouldFailNextAnnotation = true
     }
 
     /// Waits until a paused fetch has actually reached its pause point, so a test never races
@@ -348,6 +414,11 @@ private actor RecordingTransport {
             let body = (try? JSONSerialization.data(withJSONObject: ["plan": plan])) ?? Data()
             return (body, 200)
         case "/api/external-annotations":
+            if shouldFailNextAnnotation {
+                shouldFailNextAnnotation = false
+                return (Data(), 500)
+            }
+            annotateCallCount += 1
             if let bodyData = request.httpBody,
                let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
                 lastAnnotation = (json["text"] as? String ?? "", json["originalText"] as? String)

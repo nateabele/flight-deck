@@ -10,9 +10,19 @@ import Foundation
 /// publish, or memoize — an assertion that changed the thing it was asserting about would be
 /// worse than no assertion.
 enum FleetProjection {
+    /// **`planGates` defaults to the store's own, and that default is what makes the drift
+    /// assertion trustworthy.** Every other field here is read off `store`; when this one had
+    /// to be threaded in by hand, an oracle built by a caller that forgot it projected
+    /// `planGate: nil` for a session whose gate the event-fold mirror had already folded — so
+    /// any store test that attached `attachedReplicator` and opened a gate failed with a
+    /// *false* drift report, and the plan-gate integration tests had to route around the real
+    /// harness to stay green. Reading it off the store closes that whole class: a call site can
+    /// no longer forget. Passing a service explicitly still wins, and passing none for a store
+    /// that has none still projects no gates, exactly as before.
     @MainActor
     static func snapshot(of store: SessionStore, planGates: PlanGateService? = nil) -> FleetSnapshot {
-        FleetSnapshot(projects: store.repos.map {
+        let planGates = planGates ?? store.planGates
+        return FleetSnapshot(projects: store.repos.map {
             project(
                 $0, statuses: store.statuses, unread: store.unreadIdle,
                 backgroundWork: store.backgroundWorkSessions, planGates: planGates

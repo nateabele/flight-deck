@@ -121,4 +121,30 @@ final class PlanGateClientTests: XCTestCase {
         let ok = await client(recorder).resolve(approved: true, feedback: nil)
         XCTAssertFalse(ok)
     }
+
+    /// **A port no URL can be built from refuses, it does not crash.** `URL(string:)` answers
+    /// nil for `http://127.0.0.1:-1/...`, and this used to be force-unwrapped — one malformed
+    /// line in a registry file nothing here wrote would take the whole Mac app down on the next
+    /// poll. `PlannotatorRegistry.decode` now bounds the port, so this is the second line of
+    /// the same defence rather than the only one, and every verb has to hold it: a request that
+    /// cannot be built is a request that was never sent, which is the transport failure both
+    /// callers already model.
+    func testAPortNoURLCanBeBuiltFromRefusesRatherThanCrashing() async {
+        let recorder = Recorder()
+        await recorder.push((Data(##"{"plan":"# Title"}"##.utf8), 200))
+        await recorder.push((Data("{}".utf8), 200))
+        await recorder.push((Data("{}".utf8), 200))
+        let client = PlanGateClient(port: -1, transport: { await recorder.record($0) })
+
+        let plan = await client.plan()
+        let annotated = await client.annotate(text: "n", originalText: nil)
+        let resolved = await client.resolve(approved: true, feedback: nil)
+
+        XCTAssertNil(plan)
+        XCTAssertFalse(annotated)
+        XCTAssertFalse(resolved)
+        let requests = await recorder.all()
+        XCTAssertTrue(requests.isEmpty,
+                      "nothing can be sent, so nothing must reach the transport")
+    }
 }

@@ -79,6 +79,39 @@ final class PlannotatorRegistryTests: XCTestCase {
         XCTAssertTrue(gates.isEmpty)
     }
 
+    /// **A port that cannot name a server is not a gate.** Everything downstream builds
+    /// `http://127.0.0.1:<port>` out of this number, and `URL(string:)` answers nil for a
+    /// negative one — so an unchecked `-1` reaches `PlanGateClient` and used to take the whole
+    /// Mac app down on the next poll. The range is the file's own fail-closed rule applied to a
+    /// number: 0 and 65536 are not ports either, and neither describes anything worth polling.
+    func testRefusesAPortThatIsNotAPort() {
+        for port in [-1, 0, 65536, 70000] {
+            XCTAssertNil(
+                PlannotatorRegistry.decode(Data("""
+                {"pid":1,"port":\(port),"url":"http://localhost","mode":"plan",\
+                "project":"p","startedAt":"2026-08-29T17:40:36.186Z"}
+                """.utf8)),
+                "\(port) is not a port"
+            )
+        }
+    }
+
+    /// And end to end: a registry file carrying one takes the same road every other
+    /// unrecognised entry takes — the caller sees no gate, rather than a gate that crashes.
+    func testAnEntryWithAnImpossiblePortYieldsNoGate() throws {
+        let dir = try makeRegistry([
+            "1.json": """
+            {"pid":1,"port":-1,"url":"http://localhost","mode":"plan",\
+            "project":"p","startedAt":"2026-08-29T17:40:36.186Z"}
+            """,
+            "2.json": entryJSON(pid: 2, mode: "plan"),
+        ])
+        let gates = PlannotatorRegistry.planGates(
+            in: dir, isAlive: { _ in true }, parentOf: { $0 + 100 }
+        )
+        XCTAssertEqual(Set(gates.keys), [102], "only the well-formed entry is a gate")
+    }
+
     // MARK: Helpers
 
     private func entryJSON(pid: Int, mode: String, project: String = "p") -> String {

@@ -39,12 +39,20 @@ struct PlanGateClient {
         return (data, http.statusCode)
     }
 
-    private func url(_ path: String) -> URL {
-        URL(string: "http://127.0.0.1:\(port)\(path)")!
+    /// **Failable, and never force-unwrapped.** `port` arrives from a file on disk that nothing
+    /// here wrote: `PlannotatorRegistry.decode` bounds it to a real port, but a client is
+    /// constructible without going through the registry at all, and `URL(string:)` answers nil
+    /// for a negative one — so a `!` here is a crash of the whole Mac app on the next poll, for
+    /// a malformed line in someone else's JSON. `nil` folds into the shape the transport
+    /// already models: a request that could not be made is a transport failure, which both
+    /// callers below already have an answer for.
+    private func url(_ path: String) -> URL? {
+        URL(string: "http://127.0.0.1:\(port)\(path)")
     }
 
     private func post(_ path: String, _ body: [String: Any]) async -> Bool {
-        var request = URLRequest(url: url(path))
+        guard let url = url(path) else { return false }
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -53,7 +61,8 @@ struct PlanGateClient {
     }
 
     func plan() async -> String? {
-        var request = URLRequest(url: url("/api/plan"))
+        guard let url = url("/api/plan") else { return nil }
+        var request = URLRequest(url: url)
         request.httpMethod = "GET"
         guard let (data, status) = await transport(request), (200..<300).contains(status),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]

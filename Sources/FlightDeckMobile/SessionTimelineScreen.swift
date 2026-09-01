@@ -55,12 +55,25 @@ struct SessionTimelineScreen: View {
     /// `onAppear` has already fired for a row that is still visible, so without this a read
     /// that failed while the reader sat at the top would never be attempted again.
     @State private var isNearOldest = false
-    /// The gate the reader tapped the banner for, captured once at the tap rather than read
-    /// live from `session?.planGate` inside the destination — a live re-read would collapse
-    /// the pushed screen out from under a reader still mid-review the instant the Mac's gate
-    /// clears (which `resolve` itself causes a heartbeat after the reader's own tap). `nil`
-    /// both drives `.navigationDestination(isPresented:)` and holds the value it presents.
-    @State private var reviewingGate: WirePlanGate?
+    /// The review the reader is in: built once, in the banner's own `Button` action, and kept
+    /// here for as long as the pushed screen is up. `nil` both drives
+    /// `.navigationDestination(isPresented:)` and holds what it presents.
+    ///
+    /// **The MODEL is the state, not the gate it was built from, and that is the whole point.**
+    /// `PlanReviewScreen` takes the model rather than owning it, so a model constructed inside
+    /// the destination closure would be a *new* one on every evaluation of that closure — and
+    /// the feature's own main loop re-evaluates it: a successful comment bumps
+    /// `annotationCount`, which changes `session.planGate`, which re-runs this body. Each
+    /// rebuild would drop `sent`, the typed `feedback` and the `resolved` latch, so sending one
+    /// comment would erase the badge it just earned and the note under it — the same defect
+    /// `SessionTimelineModel` is cached in `FleetModel` to avoid (see `model` above, and
+    /// `FleetModel.timelineModel(for:)`).
+    ///
+    /// **Captured at the tap rather than read live from `session?.planGate`** for the second
+    /// reason the old `reviewingGate` gave: a live re-read would collapse the pushed screen out
+    /// from under a reader still mid-review the instant the Mac's gate clears — which `resolve`
+    /// itself causes a heartbeat after the reader's own tap.
+    @State private var reviewModel: PlanReviewModel?
 
     var body: some View {
         ScrollViewReader { scroll in
@@ -198,22 +211,16 @@ struct SessionTimelineScreen: View {
             )
         }
         // A second `.navigationDestination`, keyed on presence rather than on a value: this
-        // is `WirePlanGate` and `WirePlanGate` is only `Equatable`, not `Hashable`, so the
-        // `for:` form above — which needs a `Hashable` value to match a pushed item back to
-        // its case — cannot be reused for it. `reviewingGate` is both the trigger and the
-        // payload, captured once at the tap; see its own comment for why that capture, and
-        // not a live `session?.planGate`, is what the destination reads.
+        // is a `PlanReviewModel` and the `for:` form above needs a `Hashable` value to match a
+        // pushed item back to its case. `reviewModel` is both the trigger and the payload,
+        // built once at the tap; see its own comment for why the destination READS a model it
+        // does not build, and why the gate behind it is captured rather than read live.
         .navigationDestination(isPresented: Binding(
-            get: { reviewingGate != nil },
-            set: { isPresented in if !isPresented { reviewingGate = nil } }
+            get: { reviewModel != nil },
+            set: { isPresented in if !isPresented { reviewModel = nil } }
         )) {
-            if let gate = reviewingGate {
-                PlanReviewScreen(model: PlanReviewModel(
-                    session: model.sessionID,
-                    gate: gate,
-                    transcriptPlan: Self.transcriptPlan(for: gate, in: model.feed.items),
-                    send: { model.sendPlanCommand($0) }
-                ))
+            if let reviewModel {
+                PlanReviewScreen(model: reviewModel)
             }
         }
         // Keyed on the session, not on nothing: a `.task` re-firing over the SAME model is
@@ -787,14 +794,33 @@ struct SessionTimelineScreen: View {
 
     // MARK: The plan gate
 
+    /// The review one tap opens: the gate the banner was drawn for, and the plan behind it.
+    ///
+    /// **Called from the tap and nowhere else** — see `reviewModel`, which keeps what this
+    /// returns. Building it is destructive by nature: a `PlanReviewModel` carries everything the
+    /// reader has done on the pushed screen, so a second call replaces all of it.
+    ///
+    /// `transcriptPlan` is resolved here, at the tap, for the same reason the gate is: it reads
+    /// `feed.items`, which keeps arriving while the reader is on the pushed screen, and the plan
+    /// under review is the one the banner was tapped for.
+    @MainActor
+    static func review(of gate: WirePlanGate, in model: SessionTimelineModel) -> PlanReviewModel {
+        PlanReviewModel(
+            session: model.sessionID,
+            gate: gate,
+            transcriptPlan: transcriptPlan(for: gate, in: model.feed.items),
+            send: { model.sendPlanCommand($0) }
+        )
+    }
+
     /// The whole banner: what it is waiting on, and how long it has been. A `Button` rather
     /// than a `NavigationLink(value:)` for the same reason the destination below is keyed on
-    /// `isPresented` rather than `for:` — `WirePlanGate` is not `Hashable` — and the tap is
-    /// what captures `reviewingGate`, once, rather than the destination reading a live value
-    /// that can clear while the reader is still on the pushed screen.
+    /// `isPresented` rather than `for:` — neither `WirePlanGate` nor `PlanReviewModel` is
+    /// `Hashable` — and the tap is what BUILDS the review, once, rather than the destination
+    /// building a fresh one on every evaluation and the reader losing what they wrote into it.
     private func planGateBanner(_ gate: WirePlanGate) -> some View {
         Button {
-            reviewingGate = gate
+            reviewModel = Self.review(of: gate, in: model)
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "doc.text.magnifyingglass")

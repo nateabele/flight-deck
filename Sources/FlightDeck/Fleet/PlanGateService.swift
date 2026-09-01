@@ -36,6 +36,14 @@ final class PlanGateService {
 
     private var gates: [UUID: Gate] = [:]
     private var resolvedTokens: [UUID: [UUID]] = [:]
+    /// Comment tokens already posted, per session — `resolvedTokens`' twin, and spec §6 asks
+    /// for both: *"`token` gives the same idempotency `answeredPromptTokens` gives
+    /// `prompt.answer`"*, for `plan.annotate` as much as for `plan.resolve`. Nothing retries a
+    /// command today (`FleetModel.sendPrompt` is at-most-once), so this changes no behaviour
+    /// now — it is what stops the day someone adds a retry layer from silently double-posting
+    /// every comment, and what stops the parameter from reading as implemented while being
+    /// dropped on the floor.
+    private var annotatedTokens: [UUID: Set<UUID>] = [:]
     /// Call ids this Mac has already resolved. The Plannotator hook sleeps for a beat before
     /// its server stops, so the registry file backing a gate we just resolved can outlive the
     /// resolve by ~1.5s — long enough for the next poll to see it as still open. A tombstone
@@ -122,6 +130,14 @@ final class PlanGateService {
 
     func gate(for session: UUID) -> WirePlanGate? {
         guard let gate = gates[session] else { return nil }
+        // **`tier` is a constant here, and that is the scope cut rather than an oversight.**
+        // This build only ever mints `"annotate"`: a gate exists only because a Plannotator
+        // server was found for it, and a live server is exactly what pinning needs. The
+        // `verdict` tier — a gate with no server behind it, resolved through `answerPrompt`
+        // instead — is a stated scope cut: the plan's own self-review says its Tier 2 path is
+        // "not implemented by any task above" (line 1843). So the phone's readers of that tier
+        // (`WirePlanGate.tier`, `PlanReviewScreen.limitedNotice`) describe a shape nothing on
+        // this side produces yet, and `Wire.swift`'s doc comments read as though both ship.
         return WirePlanGate(
             callID: gate.callID, tier: "annotate", plan: gate.plan,
             startedAt: gate.entry.startedAt, annotationCount: gate.annotationCount
@@ -129,9 +145,14 @@ final class PlanGateService {
     }
 
     /// Post one comment. `block` is resolved against **this** Mac's split of the plan.
+    ///
+    /// `token` is checked exactly as `resolve`'s is, and for the same reason: a retry must
+    /// comment once. See `annotatedTokens`.
     func annotate(
         session: UUID, call: String, text: String, block: Int?, token: UUID
     ) async -> Result<Void, TimelineErrorCode> {
+        // Before anything is sent, as in `resolve`: a retry posts nothing twice.
+        if annotatedTokens[session, default: []].contains(token) { return .success(()) }
         guard let gate = gates[session] else { return .failure("not_waiting") }
         guard gate.callID == call else { return .failure("prompt_changed") }
 
@@ -148,9 +169,19 @@ final class PlanGateService {
             originalText = resolved.isTarget ? resolved.text : nil
         }
 
+        // Claimed before the await rather than after the POST, exactly as `resolve` claims
+        // its own: two calls carrying one token can overlap here, and a claim taken after
+        // the answer comes back would let the second one through while the first is still
+        // in flight — the window the token exists to close.
+        annotatedTokens[session, default: []].insert(token)
         let ok = await makeClient(gate.entry.port)
             .annotate(text: text, originalText: originalText)
-        guard ok else { return .failure("unreadable_screen") }
+        guard ok else {
+            // The gate did not take it — let a retry through rather than swallowing the
+            // reader's words. Same trade `resolve` makes on its own failure.
+            annotatedTokens[session]?.remove(token)
+            return .failure("unreadable_screen")
+        }
         gates[session]?.annotationCount += 1
         return .success(())
     }

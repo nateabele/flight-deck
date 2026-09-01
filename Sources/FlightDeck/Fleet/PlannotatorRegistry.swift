@@ -24,11 +24,18 @@ enum PlannotatorRegistry {
         let startedAt: String
     }
 
+    /// **The port is range-checked here and nowhere else, which is the fail-closed rule above
+    /// applied to a number rather than to a string.** Everything downstream builds
+    /// `http://127.0.0.1:<port>` out of it, and `URL(string:)` answers nil for a negative one —
+    /// so an entry carrying `-1` is not a gate that talks to the wrong place, it is a gate that
+    /// cannot be talked to at all. A file this malformed describes no server worth reaching,
+    /// and refusing it here means the caller simply sees no gate, exactly as it does for a
+    /// missing `mode` or a dead pid.
     static func decode(_ data: Data) -> Entry? {
         guard let object = try? JSONSerialization.jsonObject(with: data),
               let root = object as? [String: Any],
               let pid = root["pid"] as? Int,
-              let port = root["port"] as? Int,
+              let port = root["port"] as? Int, (1..<65536).contains(port),
               let url = root["url"] as? String,
               let mode = root["mode"] as? String,
               let project = root["project"] as? String,
