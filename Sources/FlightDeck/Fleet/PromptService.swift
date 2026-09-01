@@ -21,8 +21,9 @@ import Foundation
 /// at a real terminal.
 ///
 /// The read is a tail — `TimelineLimits.window` at most, `tailRecords` records — done once per
-/// human tap, on the main queue, inside `FleetSocketServer`'s synchronous `onCommand`. That is
-/// a deliberate trade against a cache and it is the cheaper of the two: `TimelineService` takes
+/// human tap, on the main queue, inline in `FleetService.apply`'s `.answerPrompt` arm, which
+/// (unlike `.newSession`) always answers synchronously. That is a deliberate trade against a
+/// cache and it is the cheaper of the two: `TimelineService` takes
 /// its read off the main actor because a *page* is parsed on every activity change, which is
 /// two orders of magnitude more often and larger.
 ///

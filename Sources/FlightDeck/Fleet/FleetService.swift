@@ -287,11 +287,18 @@ final class FleetService: ObservableObject {
         }
         server.onCommand = { [weak self] client, cid, command, reply in
             guard let self else { return reply(.err(cid: cid, code: "stopped")) }
-            // The ONLY command that can need to wait, and only when the display is not
-            // already drawable — which is to say, almost never. Every other command, and
-            // every creation on an awake Mac, still answers on the way out of the frame
-            // handler exactly as before.
-            if case .newSession = command, !self.store.canCreateTerminal {
+            // The ONLY command that can need to wait, and only when its project still
+            // exists and the display is not already drawable — which is to say, almost
+            // never. Gated on `store.projectPath(project) != nil` too: `apply`'s own
+            // `.newSession` arm checks the project before the terminal on purpose (see its
+            // comment), so a stale phone naming a project the Mac no longer has must still
+            // get `unknown_project` without this ever waking the screen or asking the waker
+            // anything. Every other command, and every creation on an awake Mac or against a
+            // dead project, still answers on the way out of the frame handler exactly as
+            // before.
+            if case .newSession(let project, _, _) = command,
+               self.store.projectPath(project) != nil,
+               !self.store.canCreateTerminal {
                 Task { @MainActor in
                     guard await self.store.awaitTerminalCreatable() else {
                         return reply(.err(cid: cid, code: "terminal_unavailable"))
@@ -950,8 +957,9 @@ final class FleetService: ObservableObject {
             // `sessionExists` the two read marks do, which `PromptService` answers as
             // `unknown_session` from the source it has to resolve anyway.
             //
-            // Synchronous, and it must stay synchronous: `onCommand` answers inline, and
-            // `PromptService.answer`'s read is a tail sized for exactly that.
+            // Synchronous, and it must stay synchronous: this arm, unlike `.newSession`,
+            // always answers inline on the way out of `apply`, and `PromptService.answer`'s
+            // read is a tail sized for exactly that.
             if case .failure(let code) = prompts.answer(
                 session: id, call: call, answer: answer, token: token
             ) {

@@ -92,6 +92,13 @@ struct DisplayWaker: DisplayWaking {
     /// 25ms against a 173-342ms wake is 7-14 samples across the expected range.
     var pollInterval: TimeInterval = 0.025
     var sleep: @Sendable (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    /// The async twin's poll wait. A separate seam from `sleep` rather than a shared one:
+    /// `sleep` blocks the calling thread and the async twin must never do that, so one
+    /// closure cannot honestly serve both signatures. Defaults to a real `Task.sleep`;
+    /// injected as a no-op in tests so the async cases cost no wall-clock time either.
+    var asyncSleep: @Sendable (TimeInterval) async -> Void = {
+        try? await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000))
+    }
     /// Injected so no test can wake the machine running the suite.
     var declareUserActivity: @Sendable () -> Void = DisplayWaker.declareLocalUserActivity
 
@@ -128,7 +135,7 @@ struct DisplayWaker: DisplayWaking {
         declareUserActivity()
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+            await asyncSleep(pollInterval)
             if display.isDrawable { return true }
         }
         return false

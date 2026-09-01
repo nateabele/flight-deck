@@ -217,6 +217,102 @@ final class FleetRequestPlumbingTests: XCTestCase {
         XCTAssertEqual(frames, [.page(cid: cid, page())])
     }
 
+    // MARK: - `onCommand`'s answered-once wrapper
+
+    /// The `cmd` twin of the test above. `onCommand` copied `onRequest`'s answered-once
+    /// wrapper exactly (see `FleetSocketServer.swift`'s `case .cmd`), so it owes the same
+    /// proof: a second `reply(...)` on one command must be dropped, not delivered behind the
+    /// first on a `cid` the client has already closed out.
+    func testASecondReplyOnTheSameCommandIsDropped() async throws {
+        let endpoint = try await start()
+        server.onCommand = { _, cid, _, reply in
+            reply(.ack(cid: cid))
+            reply(.err(cid: cid, code: "second"))
+        }
+
+        let received = expectation(description: "one frame")
+        var cid = 0
+        var frames: [ServerFrame] = []
+        client = FleetClient(key: key)
+        client.onReady = { [weak self] in
+            guard let self else { return }
+            cid = self.client.send(.markRead(id: self.session))
+        }
+        client.onFrame = { frame in
+            frames.append(frame)
+            if frames.count == 1 { received.fulfill() }
+        }
+        client.connect(to: endpoint, lastSeq: 0)
+        await fulfillment(of: [received], timeout: 10)
+        // Same margin as the request twin above: the second frame would be written
+        // immediately behind the first, over the same socket.
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(frames, [.ack(cid: cid)])
+    }
+
+    /// The companion rule the class doc above states and, for `req`, declines to test: a
+    /// reply that arrives after the phone's own connection has ended must not be delivered —
+    /// and, unlike the `req` case, this asserts more than "no crash," because `attached[id]`
+    /// being gone is put in evidence first (`onAttachedSlotsChanged` firing empty), so the
+    /// captured `reply` below is provably invoked exactly on the `guard self.attached[id] !=
+    /// nil` early-return branch, not merely by luck before the teardown reached it. What is
+    /// NOT proven, for the same reason the class doc gives, is whether a reply from a still-open
+    /// connection would have differed observably from this one — only that this path is safe: it
+    /// neither crashes nor wedges `queue`, evidenced by the ordinary command a fresh connection
+    /// sends immediately afterward still being answered.
+    func testAReplyAfterTheClientIsGoneIsSafe() async throws {
+        let endpoint = try await start()
+        var capturedReply: ((ServerFrame) -> Void)?
+        let captured = expectation(description: "command reached the server")
+        server.onCommand = { _, _, _, reply in
+            capturedReply = reply
+            captured.fulfill()
+        }
+        let gone = expectation(description: "the connection dropped")
+        // `onAttachedSlotsChanged` can report the same empty set more than once (a listener
+        // restart drops every attachment at once, per its own doc comment) — this only needs
+        // to observe the first one.
+        gone.assertForOverFulfill = false
+        server.onAttachedSlotsChanged = { slots in if slots.isEmpty { gone.fulfill() } }
+
+        client = FleetClient(key: key)
+        client.onReady = { [weak self] in
+            guard let self else { return }
+            _ = self.client.send(.markRead(id: self.session))
+        }
+        client.connect(to: endpoint, lastSeq: 0)
+        await fulfillment(of: [captured], timeout: 10)
+        client.disconnect()
+        await fulfillment(of: [gone], timeout: 10)
+
+        // The guard under test: `attached[id]` is confirmed gone above, so this must return
+        // early rather than write to a cancelled connection — and, above all, must not crash
+        // or hang the queue it asserts it is running on.
+        let dropped = expectation(description: "the stale reply returned without incident")
+        DispatchQueue.main.async {
+            capturedReply?(.ack(cid: 0))
+            dropped.fulfill()
+        }
+        await fulfillment(of: [dropped], timeout: 10)
+
+        // Proof `queue` is still healthy: a fresh connection right behind it gets answered
+        // normally.
+        let answered = expectation(description: "a later connection still works")
+        server.onCommand = { _, cid, _, reply in reply(.ack(cid: cid)) }
+        let second = FleetClient(key: key)
+        client = second
+        var secondCid = 0
+        second.onReady = { [weak self] in
+            guard let self else { return }
+            secondCid = second.send(.markRead(id: self.session))
+        }
+        second.onFrame = { frame in
+            if case .ack(secondCid) = frame { answered.fulfill() }
+        }
+        second.connect(to: endpoint, lastSeq: 0)
+        await fulfillment(of: [answered], timeout: 10)
+    }
+
     // MARK: - A request this build cannot parse
 
     /// A phone newer than the Mac fetches history with an anchor this build has never heard
