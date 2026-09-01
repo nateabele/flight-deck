@@ -22,13 +22,24 @@ protocol DisplayInspecting: Sendable {
 }
 
 struct DisplayState: DisplayInspecting {
-    /// `CGDisplayIsActive` rather than `!CGDisplayIsAsleep`: they are not complements. A
-    /// display that is off, disconnected, or in mirroring teardown is inactive without being
-    /// asleep, and every one of those is equally unable to back a surface. Active is the
-    /// narrower, safer question for a caller about to decide whether creation can succeed.
+    /// **Any** online display being active, not just the main one. libghostty needs *a*
+    /// drawable, and a Mac with a slept main display and an awake secondary has one — asking
+    /// only about `CGMainDisplayID()` made a single display decide a machine-wide question and
+    /// would block, and light a screen, in front of someone looking at another one.
     ///
-    /// `boolean_t` is a `UInt32`, hence the explicit comparison.
-    var isDrawable: Bool { CGDisplayIsActive(CGMainDisplayID()) != 0 }
+    /// Falls back to the main display if enumeration fails: an unexpected CoreGraphics error
+    /// should degrade to the previous behaviour, not to an unconditional yes.
+    var isDrawable: Bool {
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else {
+            return CGDisplayIsActive(CGMainDisplayID()) != 0
+        }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else {
+            return CGDisplayIsActive(CGMainDisplayID()) != 0
+        }
+        return ids.prefix(Int(count)).contains { CGDisplayIsActive($0) != 0 }
+    }
 }
 
 /// `SessionStore.display`'s default, deliberately permissive rather than deliberately real —
