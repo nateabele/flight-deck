@@ -138,12 +138,13 @@ struct CodexAdapter: AgentAdapter {
     ///
     /// `thread/start` does not persist anything: no `threads` row, no rollout file, even
     /// with the app-server left alive. `thread/name/set` — issued to the same app-server
-    /// process — commits it. This is the `legacy` history contract, which `historyMode`
-    /// (task 2) pins on codex builds new enough to accept it; see the guard below for what
-    /// changes under `paginated`, codex-cli 0.151.0's new default. Skip the name and `codex
-    /// resume <id>` dies with `ERROR: No saved session found with ID …`, which is a tab that
-    /// can never launch. Naming costs nothing anyway: the tab already has the title we want
-    /// to set. The archive/unarchive round trip that follows releases the writer lock
+    /// process — commits it. This is the `legacy` history contract, which
+    /// `CodexAdapter.historyMode` pins on codex builds new enough to accept it; see the guard
+    /// below for what changes under `paginated`, codex-cli 0.151.0's new default. Skip the
+    /// name and `codex resume <id>` dies with `ERROR: No saved session found with ID …`,
+    /// which is a tab that can never launch. Naming costs nothing anyway: the tab already
+    /// has the title we want to set. The archive/unarchive round trip that follows releases
+    /// the writer lock
     /// `thread/start` took out — see the comment at that call below for why it exists and
     /// must come after naming, not before.
     func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
@@ -194,9 +195,10 @@ struct CodexAdapter: AgentAdapter {
         // thread that has taken no turn yet — so `thread/archive` below would instead fail
         // with codex's own `-32600 no rollout found for thread id <id>`, a message that names
         // a symptom of codex's internals rather than a cause anyone reading it can act on.
-        // `historyMode` (task 2) already pins `legacy` on codex builds new enough to accept
-        // it, which is why this should never actually fire on a supported install — it exists
-        // to report the next contract change by name, rather than as another opaque `-32600`.
+        // `historyMode` (`CodexAdapter.historyMode`) already pins `legacy` on codex builds new
+        // enough to accept it, which is why this should never actually fire on a supported
+        // install — it exists to report the next contract change by name, rather than as
+        // another opaque `-32600`.
         // The two branches below read `historyMode` rather than the probed codex version
         // (which this adapter does not hold) because they say genuinely different things: a
         // `nil` codex was sent no pin at all and may simply be too old to have one; a

@@ -470,7 +470,8 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
   untested: codex-cli 0.149.x–0.150.x, which sit below the `supportsHistoryMode` threshold
   and so receive no `historyMode` pin at all — if `paginated` was already default there, the
   same failure this fix addresses would reproduce, and `AgentLaunchError.prepareFailed`'s
-  diagnostic (task 3) is what should report it rather than an opaque `-32600`.
+  diagnostic (the `rolloutExists` guard in `CodexAdapter.prepare`) is what should report it
+  rather than an opaque `-32600`.
 - **`SessionStore.newSession` returns a `Session` it did not create** when the project's claude
   account no longer resolves. The refusal is real — nothing is filed, no surface exists, and
   `launchFailureReporter` tells the user — but the return value is an unfiled draft, because
