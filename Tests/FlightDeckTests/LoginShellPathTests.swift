@@ -65,12 +65,13 @@ final class LoginShellPathTests: XCTestCase {
 
     // MARK: - repairing
 
-    func testRepairingSubstitutesThePathAndLeavesEverythingElse() {
+    func testRepairingAppendsMissingDirectoriesAndLeavesEverythingElse() {
         let repaired = LoginShellPath.repairing(
             ["PATH": "/usr/bin:/bin", "CODEX_HOME": "/tmp/h", "TERM": "xterm"],
             path: "/Users/nate/.local/bin:/usr/bin"
         )
-        XCTAssertEqual(repaired["PATH"], "/Users/nate/.local/bin:/usr/bin")
+        XCTAssertEqual(repaired["PATH"], "/usr/bin:/bin:/Users/nate/.local/bin",
+                       "inherited entries keep their order; only unseen ones are appended")
         XCTAssertEqual(repaired["CODEX_HOME"], "/tmp/h", "unrelated variables must survive")
         XCTAssertEqual(repaired["TERM"], "xterm")
     }
@@ -83,6 +84,29 @@ final class LoginShellPathTests: XCTestCase {
             path: "/Users/nate/.local/bin:/usr/bin:/bin"
         )
         XCTAssertTrue(repaired["PATH"]?.contains("/Users/nate/.local/bin") == true)
+    }
+
+    /// The regression that made this an append rather than a substitution: a wholesale replace
+    /// silently discarded a PATH the caller had set on purpose, which defeated
+    /// `CodexIntegrationTests`' stub-`codex`-first mechanism — and would equally defeat a
+    /// user's shim or version manager.
+    func testADeliberatelyPlacedBinaryStillWinsOverTheLoginShellsCopy() {
+        let repaired = LoginShellPath.repairing(
+            ["PATH": "/tmp/stub-bin:/usr/bin"],
+            path: "/Users/nate/.local/bin:/usr/bin"
+        )
+        let entries = (repaired["PATH"] ?? "").split(separator: ":").map(String.init)
+        XCTAssertEqual(entries.first, "/tmp/stub-bin",
+                       "an entry the caller put first must stay first")
+        XCTAssertTrue(entries.contains("/Users/nate/.local/bin"))
+    }
+
+    func testAlreadyReachableDirectoriesAreNotDuplicated() {
+        let repaired = LoginShellPath.repairing(
+            ["PATH": "/usr/bin:/bin"],
+            path: "/bin:/usr/bin"
+        )
+        XCTAssertEqual(repaired["PATH"], "/usr/bin:/bin", "nothing to add, nothing changed")
     }
 
     func testAFailedLookupLeavesTheEnvironmentExactlyAsFound() {

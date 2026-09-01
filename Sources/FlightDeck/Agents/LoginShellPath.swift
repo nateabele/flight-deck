@@ -81,16 +81,30 @@ enum LoginShellPath {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-    /// `base` with the login shell's PATH substituted in, or `base` unchanged when the lookup
-    /// failed. Callers hand this to `Process.environment` so `/usr/bin/env` resolves the agent
-    /// the way the user's own terminal would.
+    /// `base` with the login shell's directories APPENDED to whatever PATH it already had —
+    /// never replacing it, and never reordering it.
+    ///
+    /// **Append, do not substitute.** Substituting looks equivalent and is not: it discards a
+    /// PATH the caller set on purpose. `CodexIntegrationTests` forces a `startCodex` failure by
+    /// putting a stub `codex` FIRST on PATH, and a wholesale replacement silently found the
+    /// real codex instead and collapsed the test's premise — the same way it would silently
+    /// defeat a user's shim, a version manager, or anything else deliberately placed ahead of
+    /// the default. The rule this encodes is narrow and defensible: add directories the app
+    /// could not see, change nothing about the ones it could.
+    ///
+    /// The cost is that a duplicate binary already reachable on the inherited PATH still wins.
+    /// That is the correct trade — it is also what would happen in the user's own terminal.
     static func repairing(
         _ base: [String: String] = ProcessInfo.processInfo.environment,
         path: String? = resolve()
     ) -> [String: String] {
         guard let path else { return base }
+        let inherited = (base["PATH"] ?? "").split(separator: ":").map(String.init)
+        let known = Set(inherited)
+        let additions = path.split(separator: ":").map(String.init).filter { !$0.isEmpty && !known.contains($0) }
+        guard !additions.isEmpty else { return base }
         var environment = base
-        environment["PATH"] = path
+        environment["PATH"] = (inherited + additions).joined(separator: ":")
         return environment
     }
 }
