@@ -195,16 +195,27 @@ struct CodexAdapter: AgentAdapter {
         // thread that has taken no turn yet — so `thread/archive` below would instead fail
         // with codex's own `-32600 no rollout found for thread id <id>`, a message that names
         // a symptom of codex's internals rather than a cause anyone reading it can act on.
-        // `historyMode` (`CodexAdapter.historyMode`) already pins `legacy` on codex builds new
-        // enough to accept it, which is why this should never actually fire on a supported
-        // install — it exists to report the next contract change by name, rather than as
-        // another opaque `-32600`.
+        // `historyMode` already pins `legacy` on codex builds new enough to accept it, which
+        // is why this should never actually fire on a supported install — it exists to report
+        // the next contract change by name, rather than as another opaque `-32600`.
         // The two branches below read `historyMode` rather than the probed codex version
         // (which this adapter does not hold) because they say genuinely different things: a
         // `nil` codex was sent no pin at all and may simply be too old to have one; a
         // `"legacy"` codex was asked for the contract explicitly and still did not honor it.
-        guard let path = thread["path"] as? String, rolloutExists(URL(fileURLWithPath: path))
-        else {
+        //
+        // Two guards, not one, because an absent `path` and a present-but-missing rollout are
+        // different failures with different causes: the first means codex's `thread/start`
+        // response itself changed shape (a `path` field renamed or dropped), which a
+        // history-contract message would misdiagnose; the second is the history-contract
+        // problem this whole check exists to catch. Still one point-in-time check apiece — no
+        // retry, no polling.
+        guard let path = thread["path"] as? String else {
+            throw AgentLaunchError.prepareFailed(
+                "Codex's thread/start response named no rollout path for this thread, so "
+                    + "Flight Deck cannot confirm it was persisted."
+            )
+        }
+        guard rolloutExists(URL(fileURLWithPath: path)) else {
             throw AgentLaunchError.prepareFailed(historyMode == nil
                 ? "this Codex build did not persist the new thread's history, and Flight "
                     + "Deck sent it no history-mode pin because it predates the 0.151.0 "
@@ -249,7 +260,7 @@ struct CodexAdapter: AgentAdapter {
 
         return AgentBinding(
             conversationID: id,
-            transcriptURL: (thread["path"] as? String).map { URL(fileURLWithPath: $0) }
+            transcriptURL: URL(fileURLWithPath: path)
         )
     }
 

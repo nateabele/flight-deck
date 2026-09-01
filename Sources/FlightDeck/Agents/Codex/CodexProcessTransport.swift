@@ -77,9 +77,11 @@ enum CodexVersionProbe {
     /// accept the param: the pinned 0.147.0 schema
     /// (`Tests/FlightDeckTests/Fixtures/Codex/codex-app-server-v2.generated.json`) defines
     /// `ThreadHistoryMode` but leaves it orphaned there — `ThreadStartParams` has no such
-    /// property — so 0.147.0 rejects it. 0.148.0 and earlier default to `legacy` anyway, so
-    /// sending nothing is already correct for them. 0.149.x–0.150.x are untested: that gap is
-    /// what the diagnostic added in a later task exists to report.
+    /// property — so the param has no defined effect on 0.147.0. Whether an older codex drops
+    /// an unknown `historyMode` or refuses it outright was never probed. 0.148.0 and earlier
+    /// default to `legacy` anyway, so sending nothing is already correct for them. 0.149.x–
+    /// 0.150.x are untested: that gap is what `CodexAdapter.prepare`'s `rolloutExists`
+    /// diagnostic exists to report.
     static let historyModeMinimumVersion = "0.151.0"
 
     /// Whether `version` is new enough to accept `historyMode` on `thread/start`. See

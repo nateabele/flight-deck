@@ -172,8 +172,7 @@ final class CodexSchemaConformanceTests: XCTestCase {
         // checks against defines `ThreadHistoryMode` but leaves it orphaned —
         // `ThreadStartParams` has no such property there — so asserting it here would fail
         // until the fixture is regenerated against a newer codex, which is out of scope for
-        // this change. Passed as `nil` above for the same reason: a non-nil value would add
-        // the key and immediately fail the "only real fields" assertion below.
+        // this change. Passed as `nil` above for the same reason.
         for key in ["cwd", "model", "sandbox", "approvalPolicy", "config"] {
             XCTAssertTrue(params.keys.contains(key), "the fixture for this test stopped sending \(key)")
             XCTAssertTrue(fields.contains(key), "`\(key)` is not a ThreadStartParams field")

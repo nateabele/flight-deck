@@ -472,6 +472,21 @@ Everything below was found by that branch's reviews, triaged, and deliberately n
   same failure this fix addresses would reproduce, and `AgentLaunchError.prepareFailed`'s
   diagnostic (the `rolloutExists` guard in `CodexAdapter.prepare`) is what should report it
   rather than an opaque `-32600`.
+- **`SessionStore.swift:1408` (`stack.adapter.historyMode = ...`) — the single line that makes
+  production use the right history mode — is not covered by any test, hermetic or live.**
+  Deleting it leaves all 1959 hermetic and 5 live tests green.
+  `CodexIntegrationTests.testARestoredCodexTabReattachesAfterAStartCodexFailure` does NOT cover
+  it: that test deliberately makes `checkOffMainActor` throw, so execution never reaches the
+  assignment. The fix is to give `SessionStore.startCodex` an injectable probe seam — a `run:`-
+  style closure threaded through to `CodexVersionProbe.checkOffMainActor` — plus a testing read
+  of the adapter's `historyMode`, which would let two hermetic tests exist: "a 0.151.0 codex
+  gets `legacy`" and "a 0.147.0 codex gets `nil`".
+  Also worth noting for whoever eventually migrates off `legacy`: if codex ever answers
+  `-32600 no rollout found for thread id <id>` for a RESTORED thread under `paginated`,
+  `CodexAdapter.isThreadGone` will match on "no rollout" plus the echoed id and `rebind` will
+  re-pin the tab onto a fresh empty thread — the exact loss `isThreadGone` exists to prevent.
+  This is pre-existing and harmless while `legacy` holds (restored threads always have a
+  rollout under `legacy`), but it needs handling before `paginated` becomes real.
 - **`SessionStore.newSession` returns a `Session` it did not create** when the project's claude
   account no longer resolves. The refusal is real — nothing is filed, no surface exists, and
   `launchFailureReporter` tells the user — but the return value is an unfiled draft, because
