@@ -175,7 +175,7 @@ touched, and the macOS run does not cover it.
   `err` without dropping the socket.
 - `FleetAccountEmissionTests` — no account id or home path reaches an encoded
   `WireClosedSession`.
-- `NewSessionOptionsProjectionTests` (or a sibling) — the projection from
+- `ClosedSessionProjectionTests` (new) — the projection from
   `ClosedSessionHistory` to `[WireClosedSession]` drops nested children.
 
 **iOS (`Tests/FlightDeckMobileTests`)**
