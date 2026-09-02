@@ -31,12 +31,28 @@ class LiveProbeTests(unittest.TestCase):
     def test_resume_command_text_names_the_conversation(self):
         with AgentSandbox() as sb:
             _, p = run(["prepare", "claude", "--cwd", sb.root], sb.env("claude"))
+            # `prepare` canonicalizes on lowercase (see its comment in probe.swift) so that
+            # every consumer of a probe id can compare it verbatim against the agents' own
+            # command text, which is always lowercase. Assert both halves of that contract:
+            # the id `prepare` handed back is already lowercase, and it appears verbatim —
+            # no case-folding needed by the caller — in what `resume-command` prints.
+            self.assertEqual(p["conversationID"], p["conversationID"].lower())
             _, r = run(["resume-command", "claude", "--id", p["conversationID"],
                         "--cwd", sb.root], sb.env("claude"))
-            # Case-insensitive: `prepare` emits Swift's `UUID.uuidString` (uppercase), while
-            # `ClaudeSession.resumeCommand` deliberately lowercases the id for the command
-            # line it hands to a real shell. Same conversation, different hex case.
-            self.assertIn(p["conversationID"].lower(), r["text"].lower())
+            self.assertIn(p["conversationID"], r["text"])
+
+    def test_rename_claude_refuses_without_crashing_the_harness(self):
+        # `ClaudeAdapter.rename` is a deliberate `assertionFailure` trap in production — see
+        # its own doc comment — because claude renames dispatch inline through
+        # `SessionStore`, never through the adapter. The probe must not reach it: a bare
+        # SIGTRAP is indistinguishable from a real crash, and a `rename` capability row
+        # needs to tell "this agent doesn't rename through the adapter" apart from "the
+        # harness died". Exit 1 with parseable JSON is what makes that distinction possible.
+        with AgentSandbox() as sb:
+            rc, r = run(["rename", "claude", "--id", "31938ae3-29f8-47b5-97c2-6d51a4032873",
+                         "--to", "whatever"], sb.env("claude"))
+            self.assertEqual(rc, 1)
+            self.assertIn("SessionStore", r["error"])
 
 
 if __name__ == "__main__":
