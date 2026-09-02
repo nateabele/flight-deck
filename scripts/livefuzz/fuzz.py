@@ -11,8 +11,11 @@ production: the driver refused a step because the screen did not read what it ex
 `FAIL` names exactly which step and why.
 """
 import json, os, glob, re, subprocess, sys, tempfile, time
-import pty, select, fcntl, termios, struct, pyte
 from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 "adapterprobe"))
+from ptyscreen import PtyScreen
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -20,8 +23,6 @@ CHOICE_DIALOG = os.path.join(REPO_ROOT, "Sources/FlightDeck/ChoiceDialog.swift")
 PROBE_SRC = os.path.join(HERE, "probe.swift")
 PROBE_BIN = os.path.join(tempfile.gettempdir(), "livefuzz-probe")
 
-COLS, ROWS = 136, 34
-NEG = re.compile(rb"\x1b\[[<>?][0-9;]*[usmhl]")
 WD = "capture-workspace"
 
 
@@ -203,40 +204,17 @@ def drive(prompt, answers, timeout=200):
     # The harness reuses one throwaway workspace across every run in a batch, so a stale
     # transcript from an earlier run always exists alongside this one's.
     run_started = time.time()
-    screen = pyte.Screen(COLS, ROWS); stream = pyte.ByteStream(screen)
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.chdir(WD); os.environ["TERM"] = "xterm-256color"
-        os.environ.pop("CLAUDE_CODE_CHILD_SESSION", None)
-        os.environ["CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"] = "1"
-        os.execvp("claude", ["claude"])
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
-
-    def pump(sec):
-        end = time.time() + sec
-        while time.time() < end:
-            r, _, _ = select.select([fd], [], [], 0.2)
-            if fd in r:
-                try: d = os.read(fd, 65536)
-                except OSError: return
-                if not d: return
-                stream.feed(NEG.sub(b"", d))
-
-    def disp(): return "\n".join(screen.display)
-
-    def wait(markers, limit):
-        end = time.time() + limit
-        while time.time() < end:
-            pump(0.4)
-            if any(m in disp() for m in markers): return True
-        return False
+    os.environ.pop("CLAUDE_CODE_CHILD_SESSION", None)
+    term = PtyScreen(["claude"], cwd=WD, env={"CLAUDE_CODE_FORCE_SESSION_PERSISTENCE": "1"})
+    pump, disp, wait = term.pump, term.display, term.wait
+    def write(b): term.send(b)
 
     abort = None
     result_text = None
     try:
-        if wait(["safety check", "trust this folder"], 40): os.write(fd, b"\r"); pump(3)
+        if wait(["safety check", "trust this folder"], 40): write(b"\r"); pump(3)
         if not wait(["Claude Code v"], 60): return None, "no boot", None
-        pump(3); os.write(fd, prompt.encode()); pump(1.5); os.write(fd, b"\r")
+        pump(3); write(prompt.encode()); pump(1.5); write(b"\r")
         if not wait(["Enter to select", "to navigate"], timeout): return None, "no dialog", None
         pump(3)
 
@@ -289,7 +267,7 @@ def drive(prompt, answers, timeout=200):
             distance = step["to"] - step["frm"]
             key = b"\x1b[B" if distance > 0 else b"\x1b[A"
             for _ in range(abs(distance)):
-                os.write(fd, key)
+                write(key)
             pump(0.6)
 
             # 4. re-read: the move must have landed exactly where the plan says.
@@ -300,7 +278,7 @@ def drive(prompt, answers, timeout=200):
                 break
 
             # 5. press, and settle before the next step's checks.
-            os.write(fd, b"\r")
+            write(b"\r")
             pump(0.8)
 
         pump(3)
@@ -323,12 +301,9 @@ def drive(prompt, answers, timeout=200):
                 # actually names the options that were chosen and driven onto the screen.
                 abort = answer_mismatch(result_text, questions, answers)
         final = disp()
-        os.write(fd, b"\x04"); pump(1)
+        write(b"\x04"); pump(1)
     finally:
-        try: os.close(fd)
-        except OSError: pass
-        try: os.waitpid(pid, os.WNOHANG)
-        except ChildProcessError: pass
+        term.close()
     return final, abort, result_text
 
 
