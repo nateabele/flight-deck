@@ -65,4 +65,37 @@ struct ClosedSessionHistory {
     mutating func takeLast() -> Entry? {
         entries.popLast()
     }
+
+    /// The top-level closed sessions, most recent first — what a menu lists.
+    ///
+    /// **Top-level only.** A `ClosedProject`'s children are deliberately absent: offering one
+    /// on its own would let a reopen consume half a project entry, and the later ⌘⇧T that
+    /// reopened the project would try to reinsert a tab that is already open. A project comes
+    /// back whole or not at all, which is the promise `record(.project(_:))` makes.
+    ///
+    /// Reversed rather than stored reversed, because `record` and `takeLast` both want the
+    /// newest at the end and they are the hot path.
+    var sessionEntries: [ClosedSession] {
+        entries.reversed().compactMap { entry in
+            guard case .session(let closed) = entry else { return nil }
+            return closed
+        }
+    }
+
+    /// Removes and returns the top-level `.session` entry for `id`, or nil when there is none.
+    ///
+    /// **Removal is forced, not a policy.** `SessionStore.reinsertClosed` rebuilds the tab from
+    /// the recorded `Session` value, reusing its `id` — that is what makes it resume the real
+    /// conversation. Leaving the entry behind would let a later ⌘⇧T insert a second tab with
+    /// the same UUID, and `locate(id)` would then find one of two.
+    ///
+    /// Removes from the middle. `takeLast` goes on popping whatever is left on top.
+    mutating func takeSession(id: UUID) -> ClosedSession? {
+        let found = entries.firstIndex { entry in
+            guard case .session(let closed) = entry else { return false }
+            return closed.session.id == id
+        }
+        guard let found, case .session(let closed) = entries.remove(at: found) else { return nil }
+        return closed
+    }
 }
