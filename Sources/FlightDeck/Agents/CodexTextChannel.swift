@@ -33,18 +33,34 @@ struct CodexTextChannel: AgentTextChannel {
     /// whether to *offer* to type, never whether it is safe to restore.
     static let placeholder = "Ask Codex to do anything"
 
-    /// The status line under the composer: model, mode, then cwd, separated by `·`.
-    /// Requiring it is what distinguishes codex's composer from a shell prompt that happens
-    /// to draw `›`.
-    private func hasCodexFooter(_ viewport: String) -> Bool {
-        viewport.components(separatedBy: "\n").contains { line in
+    /// codex's status line — model, mode, cwd, separated by ` · ` — sitting DIRECTLY BELOW
+    /// the composer, which is the only place it counts.
+    ///
+    /// **Position is the guard, not mere presence.** This is the single check standing between
+    /// the user's words and a shell that happens to draw `›`, where those words would not be
+    /// typed into a composer but RUN as a command. Scanning the whole screen for `" · "` would
+    /// pass on any transcript that merely mentioned it — a listing, a path, a diff — so the
+    /// window is pinned to the rows the real captures put it in: blank line, then footer,
+    /// two below the marker in both `tui-idle` and `tui-working`. Three rows of slack, and
+    /// no more.
+    private func hasFooter(below start: Int, in lines: [String]) -> Bool {
+        // Bounds first, THEN the range. `a...b` traps at construction when a > b, which is
+        // every screen whose composer is the last line — a bare `› ls -la` at the bottom of a
+        // shell, which is precisely the case this guard exists to reject.
+        let lower = start + 1
+        let upper = min(start + 3, lines.count - 1)
+        guard lower <= upper else { return false }
+        return lines[lower...upper].contains { line in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             return trimmed.contains(" · ") && !trimmed.hasPrefix(String(InputBar.codexMarker))
         }
     }
 
     private func composer(_ injector: TextInjecting) -> InputBar.Reading? {
-        guard let viewport = injector.readViewport(), hasCodexFooter(viewport),
+        guard let viewport = injector.readViewport() else { return nil }
+        let lines = viewport.components(separatedBy: "\n")
+        guard let start = lines.lastIndex(where: { $0.first == InputBar.codexMarker }),
+              hasFooter(below: start, in: lines),
               let bar = InputBar.read(fromViewport: viewport, marker: InputBar.codexMarker),
               // One row only, for the same reason as claude: a draft spanning rows cannot be
               // taken apart and put back a row at a time.

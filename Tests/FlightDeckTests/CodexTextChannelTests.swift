@@ -75,7 +75,8 @@ final class CodexTextChannelTests: XCTestCase {
     }
 
     /// The discriminator that makes this safe on a tab sitting at a bare shell. A prompt theme
-    /// drawing `›` with no codex status line beneath it is not a composer.
+    /// drawing `›` with no codex status line beneath it is not a composer — and here the words
+    /// would not be typed into a box, they would be RUN.
     func testAShellPromptDrawingTheSameGlyphIsRefused() {
         let injector = FakeInjector(viewport: "› ls -la\n")
         XCTAssertFalse(channel.isComposerEmpty(injector))
@@ -83,6 +84,31 @@ final class CodexTextChannelTests: XCTestCase {
             channel.submit("x", into: injector, settle: { $0() }, stillWanted: { true }, onSent: {}),
             "no codex status line means this is not codex's composer"
         )
+    }
+
+    /// Presence of ` · ` somewhere on screen is not the test — POSITION is. A shell whose
+    /// scrollback merely mentions the separator must not be mistaken for a composer, or the
+    /// guard is defeated by any tab that once ran `ls` over a path containing it.
+    func testAFooterFarAboveTheMarkerDoesNotQualify() {
+        let injector = FakeInjector(viewport: """
+          gpt-5.6-sol default · /tmp/work
+        some other output
+        more output
+        still more
+        › ls -la
+        """)
+        XCTAssertFalse(channel.isComposerEmpty(injector),
+                       "the status line must sit directly below the composer, not anywhere")
+    }
+
+    func testAFooterWithinThreeRowsBelowTheMarkerQualifies() {
+        let injector = FakeInjector(viewport: """
+        › \(CodexTextChannel.placeholder)
+
+          gpt-5.6-sol default · /tmp/work
+        """)
+        XCTAssertTrue(channel.isComposerEmpty(injector),
+                      "blank line then footer is exactly what both real captures show")
     }
 
     // MARK: - submit
