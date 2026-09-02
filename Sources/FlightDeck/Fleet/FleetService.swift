@@ -471,12 +471,14 @@ final class FleetService: ObservableObject {
                 // **Per client, not all-or-nothing, and `attachments` rather than `slots` is
                 // what makes that possible.** This was `if slots.isEmpty { removeAll() }`,
                 // which only ever fired when the LAST phone detached — so a client that went
-                // away while any other was still attached left its entry behind forever. That
-                // is not an edge case: it is every wake of every phone. The handset rebuilds
-                // its connector on returning from the background (see `RedialOnReturn`), the
-                // old connection dies and a new one arrives with a new id, and `slots` never
-                // passes through empty in between, so the Mac kept a viewer that no longer
-                // existed and drew the badge for it.
+                // away while any other was still attached left its entry behind forever. An
+                // ordinary single-phone wake with a clean teardown does not hit this:
+                // `FleetModel.connect()` stops the old connector before dialling the new one,
+                // so `slots` genuinely does pass through empty and the old prune fired. The
+                // bug is with a second phone attached, or simply with the new connection
+                // landing before the old one is reaped — either way `slots` never passes
+                // through empty, so the Mac kept a viewer that no longer existed and drew the
+                // badge for it.
                 //
                 // `slots` is the wrong key to prune on even now: a slot is the paired DEVICE,
                 // and two connections from one device — precisely what a reconnect produces

@@ -628,12 +628,17 @@ final class FleetServiceTests: XCTestCase {
     /// `slots` never passes through empty. The Mac went on drawing "a phone is viewing this
     /// session" for a connection that no longer existed.
     ///
-    /// **Two distinct paired devices, and the SECOND one is the one dropped.** Two connections
-    /// sharing one slot could not tell a per-client prune from a per-slot one, which is the
-    /// entire distinction under test; and dropping the second rather than the first is the
-    /// same care `FleetSlotAttributionTests.testDroppingOneDeviceLeavesTheOtherOnItsOwnSlot`
-    /// takes, for the same reason — a wrong implementation that recomputes from the
-    /// last-registered client happens to look right when you drop the first.
+    /// **Two distinct paired devices, and the SECOND one is the one dropped.** Two same-slot
+    /// connections viewing different sessions would still discriminate a per-client prune from
+    /// a per-slot one — per-client drops only the dead connection's session; a slot with
+    /// another connection still attached would look untouched to a per-slot prune, and the
+    /// dead one's session would stay. The two strategies collapse into each other only when
+    /// both connections on the same slot are viewing the same session, which is not the case
+    /// worth isolating here. Two distinct devices sidesteps the slot question entirely, and
+    /// dropping the second rather than the first is the same care
+    /// `FleetSlotAttributionTests.testDroppingOneDeviceLeavesTheOtherOnItsOwnSlot` takes, for
+    /// the same reason — a wrong implementation that recomputes from the last-registered
+    /// client happens to look right when you drop the first.
     ///
     /// No sessions are created in the store: the `.viewing` handler deliberately has no
     /// `sessionExists` guard, so two bare UUIDs are the honest fixture.
