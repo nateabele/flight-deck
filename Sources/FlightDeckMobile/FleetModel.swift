@@ -216,6 +216,10 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // something they believe they revoked — and it is what the next pairing, to a
         // different Mac, would open a session onto if a tab id ever collided.
         timelineModels.removeAll()
+        // Same reasoning as the transcripts above: a closed tab's title is this pairing's
+        // content, not fleet-independent fact, and the next Mac's project paths coinciding
+        // with this one's would otherwise render titles that Mac never closed.
+        recentlyClosed = []
         state = .idle
         lastLive = nil
         pairingProgress = nil
@@ -328,10 +332,11 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     ///
     /// One flat list rather than a per-project dictionary, because the Mac keeps one stack:
     /// `FleetListScreen.closedRows(in:forProjectAt:)` buckets it by `projectPath` at render
-    /// time. Empty until the first answer, and empty is also what an older Mac leaves it —
-    /// it refuses the request — so the section simply never renders there. Absent and empty
-    /// do not need holding apart here, unlike `newSessionOptions`: both mean "no rows to show"
-    /// and neither changes anything else on the screen.
+    /// time. Empty until the first answer, and `refreshRecentlyClosed` puts it back to empty
+    /// on every refusal too — an older Mac, or one downgraded under a live phone, always
+    /// leaves this empty — so the section simply never renders there. Absent and empty do not
+    /// need holding apart here, unlike `newSessionOptions`: both mean "no rows to show" and
+    /// neither changes anything else on the screen.
     private(set) var recentlyClosed: [WireClosedSession] = []
 
     /// Ask for the whole reopen stack.
@@ -345,11 +350,24 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         guard let connector else { return }
         connector.requestRecentlyClosed { [weak self] result in
             guard let self else { return }
-            // A failure leaves the last answer standing rather than blanking the section: an
-            // older Mac refuses every time (`unsupported`), and a phone that cleared on each
-            // refusal would be doing so on a fact that never changes.
-            guard case .success(let closed) = result else { return }
-            self.recentlyClosed = closed
+            switch result {
+            case .success(let closed):
+                self.recentlyClosed = closed
+            case .failure(.disconnected):
+                // Transient: the socket died, not the Mac's opinion of this request. A phone
+                // that blanked the section on every dropped Wi-Fi bar would lose it and win
+                // it back on a flicker, which is worse than showing a beat-stale list until
+                // the next reconnect answers for real.
+                break
+            case .failure(.server):
+                // A refusal from *this* Mac — `unsupported`, from a build too old to decode
+                // the request — and that will not change while it stays this build. Clearing
+                // here is what keeps `reopenClosed` unreachable per the property `FleetCommand`
+                // documents: a Mac downgraded under a live phone must lose the section, not
+                // just fail to refresh it, or the last-cached row survives to be tapped
+                // against a Mac that cannot decode the command it sends.
+                self.recentlyClosed = []
+            }
         }
     }
 

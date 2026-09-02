@@ -97,6 +97,91 @@ final class FleetListScreenTests: XCTestCase {
         XCTAssertEqual(model.recentlyClosed, Self.closed)
     }
 
+    /// **The safety property `FleetCommand.reopenClosed` rests on.** That command is
+    /// unreachable until a request has been answered — an old Mac refuses instead — but a
+    /// Mac downgraded under a live phone process has already answered once. If the cached
+    /// list survived a later refusal, its row would stay tappable into a `cmd` the downgraded
+    /// Mac cannot decode, tearing the socket down. `refreshRecentlyClosed` has to clear on a
+    /// `.server` failure specifically, not merely fail to refresh, for the property to hold
+    /// across a downgrade rather than only for a Mac that was always old.
+    func testRefreshRecentlyClosedClearsTheListOnAMacsRefusal() async throws {
+        let refusing = Box(false)
+        let model = try await connectedModel { cid, reply in
+            if refusing.value {
+                reply(.err(cid: cid, code: "unsupported"))
+            } else {
+                reply(.recentlyClosed(cid: cid, Self.closed))
+            }
+        }
+
+        let deadline = Date().addingTimeInterval(10)
+        while model.recentlyClosed.isEmpty, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(model.recentlyClosed, Self.closed, "the premise: an answer already landed")
+
+        refusing.value = true
+        model.refreshRecentlyClosed()
+
+        let refusalDeadline = Date().addingTimeInterval(10)
+        while !model.recentlyClosed.isEmpty, Date() < refusalDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(
+            model.recentlyClosed.isEmpty,
+            "a refusal must drop the cached list, not leave a row tappable into a command " +
+                "the refusing Mac cannot decode"
+        )
+    }
+
+    /// The other half of the same fix, and why the split exists at all: a dropped Wi-Fi bar
+    /// is not the Mac's opinion of this request, and blanking the section on every one would
+    /// lose it and win it back on a flicker. `refreshRecentlyClosed` must keep the last answer
+    /// standing through `.disconnected` — only a `.server` refusal clears it.
+    func testRefreshRecentlyClosedKeepsTheListThroughADisconnect() async throws {
+        let model = try await connectedModel()
+
+        let deadline = Date().addingTimeInterval(10)
+        while model.recentlyClosed.isEmpty, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(model.recentlyClosed, Self.closed, "the premise: an answer already landed")
+
+        server.stop()
+        model.refreshRecentlyClosed()
+        // No deadline loop: there is nothing to wait for landing. The assertion is that
+        // nothing changes, so the only thing a wait would buy is more time for a wrongly
+        // implemented clear to sneak in before it runs.
+        try await Task.sleep(for: .milliseconds(200))
+
+        XCTAssertEqual(
+            model.recentlyClosed, Self.closed,
+            "a dropped socket must not blank a section the Mac will still answer on reconnect"
+        )
+    }
+
+    /// The other place the reopen list belongs to a pairing rather than surviving it, next to
+    /// `FleetModelTests.testUnpairingDropsHeldConversationsRatherThanKeepingThemInMemory`'s
+    /// `timelineModels`. Without this, a previous Mac's closed-tab titles render under a new
+    /// one whose project paths happen to coincide — the same "revoked but still showing it"
+    /// shape `unpair()`'s other clears exist to avoid.
+    func testUnpairClearsTheReopenList() async throws {
+        let model = try await connectedModel()
+
+        let deadline = Date().addingTimeInterval(10)
+        while model.recentlyClosed.isEmpty, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(model.recentlyClosed, Self.closed, "the premise: an answer already landed")
+
+        model.unpair()
+
+        XCTAssertTrue(
+            model.recentlyClosed.isEmpty,
+            "an unpaired phone must not keep the old Mac's closed tabs on offer to reopen"
+        )
+    }
+
     // MARK: Driving the list
 
     /// A tap, as far as a `List` is concerned: UIKit's own recogniser ends in exactly this
@@ -146,6 +231,20 @@ final class FleetListScreenTests: XCTestCase {
         view.subviews + view.subviews.flatMap { descendants(of: $0) }
     }
 
+    /// Flips `connectedModel`'s answer for `.recentlyClosed` mid-test. A class, not a
+    /// captured `var`: `onRequest` runs on the server's own queue, not the test's, so a
+    /// plain local would be a data race under Swift 6 — same reasoning as `DisplayWakerTests`'
+    /// `Counter`.
+    private final class Box: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Bool
+        init(_ value: Bool) { stored = value }
+        var value: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return stored }
+            set { lock.lock(); stored = newValue; lock.unlock() }
+        }
+    }
+
     // MARK: The fixture
 
     /// A `FleetModel` holding the fixture fleet, filled from a real socket.
@@ -154,7 +253,16 @@ final class FleetListScreenTests: XCTestCase {
     /// only by a connector, and adding a setter so a test could skip the socket would be a
     /// seam the app could drift into using for anything else. `FleetSocketServer` is in
     /// `FleetKit`, builds for iOS, and listens on the simulator's own loopback.
-    private func connectedModel() async throws -> FleetModel {
+    ///
+    /// `answerRecentlyClosed` defaults to the fixture answer every test but the refusal ones
+    /// wants; those override it to reply `.err` instead, which is the natural way to drive
+    /// `FleetModel.refreshRecentlyClosed`'s refusal path through a real socket rather than
+    /// faking a `FleetRequestError` past the connector.
+    private func connectedModel(
+        answerRecentlyClosed: @escaping (Int, @escaping (ServerFrame) -> Void) -> Void = {
+            cid, reply in reply(.recentlyClosed(cid: cid, FleetListScreenTests.closed))
+        }
+    ) async throws -> FleetModel {
         let key = FleetDeviceKey.mint()
         let server = FleetSocketServer()
         self.server = server
@@ -165,7 +273,7 @@ final class FleetListScreenTests: XCTestCase {
         // which outlives the test and lands its deadline in the next one.
         server.onRequest = { _, cid, request, reply in
             if case .recentlyClosed = request {
-                return reply(.recentlyClosed(cid: cid, Self.closed))
+                return answerRecentlyClosed(cid, reply)
             }
             guard case .timeline(let session, _, _) = request else { return }
             reply(.page(cid: cid, TimelinePage(
