@@ -22,9 +22,81 @@ struct Probe {
         case "declare":
             guard args.count == 2, let agent = agentID(args[1]) else { usage() }
             await emit(declare(agent))
+
+        case "sanitize":
+            guard args.count == 3, let agent = agentID(args[1]) else { usage() }
+            await emit(["sanitized": agent.sanitizedTitle(args[2]) as Any])
+
+        case "title-from-transcript":
+            guard args.count == 3, let agent = agentID(args[1]) else { usage() }
+            let url = URL(fileURLWithPath: args[2])
+            await emit(["title": agent.title(fromTranscriptAt: url) as Any])
+
+        case "timeline":
+            guard args.count == 2, let agent = agentID(args[1]) else { usage() }
+            let lines = stdinText().split(separator: "\n", omittingEmptySubsequences: true)
+            var items = 0
+            var barren: [Int] = []
+            for (i, line) in lines.enumerated() {
+                let produced = await MainActor.run { agent.timelineItems(inLine: String(line), at: i) }
+                if produced.isEmpty { barren.append(i) } else { items += produced.count }
+            }
+            await emit(["lines": lines.count, "items": items, "barrenLines": barren])
+
+        case "identity":
+            guard args.count == 2, let agent = agentID(args[1]) else { usage() }
+            let data = Data(stdinText().utf8)
+            let id = await MainActor.run { agent.identity(fromHomeData: data) }
+            await emit(["identity": id?.email as Any])
+
+        case "composer-empty":
+            guard args.count == 2, let agent = agentID(args[1]) else { usage() }
+            let screen = stdinText()
+            let answer: [String: Any] = await MainActor.run {
+                guard let channel = agent.textChannel else { return ["error": "no text channel"] }
+                return ["empty": channel.isComposerEmpty(ViewportInjector(screen))]
+            }
+            await emit(answer)
+
+        case "focused-row":
+            guard args.count == 2, let agent = agentID(args[1]) else { usage() }
+            let screen = stdinText()
+            let answer: [String: Any] = await MainActor.run {
+                guard let driver = agent.dialogDriver else { return ["error": "no dialog driver"] }
+                return ["row": driver.focusedRow(inViewport: screen) as Any]
+            }
+            await emit(answer)
+
+        case "row-reads":
+            guard args.count >= 4, let agent = agentID(args[1]), let n = Int(args[2]) else { usage() }
+            let label = args[3...].joined(separator: " ")
+            let screen = stdinText()
+            let answer: [String: Any] = await MainActor.run {
+                guard let driver = agent.dialogDriver else { return ["error": "no dialog driver"] }
+                return ["reads": driver.row(n, reads: label, inViewport: screen)]
+            }
+            await emit(answer)
+
+        case "open-prompt":
+            guard args.count == 2, let agent = agentID(args[1]) else { usage() }
+            let tail = stdinText()
+            let answer: [String: Any] = await MainActor.run {
+                guard let reader = agent.openPromptReader else { return ["unsupported": true] }
+                let lines = tail.split(separator: "\n").enumerated().map {
+                    SourceLine(offset: $0.offset, text: String($0.element))
+                }
+                return ["kind": reader.openPrompt(inTranscriptTail: lines, activity: nil)
+                            .map { String(describing: $0) } as Any]
+            }
+            await emit(answer)
+
         default:
             usage()
         }
+    }
+
+    static func stdinText() -> String {
+        String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
     }
 
     @MainActor
@@ -62,4 +134,23 @@ struct Probe {
         FileHandle.standardError.write(Data("usage: probe declare <claude|codex>\n".utf8))
         exit(2)
     }
+}
+
+/// A `TextInjecting` over a captured screen. Reads answer `viewport`; writes are recorded so a
+/// probe can report the keystrokes a driver produced without a real surface to send them at.
+@MainActor
+final class ViewportInjector: TextInjecting {
+    let viewport: String
+    private(set) var sent: [String] = []
+
+    init(_ viewport: String) { self.viewport = viewport }
+
+    func sendText(_ text: String) { sent.append("text:\(text)") }
+    func sendReturn()             { sent.append("return") }
+    func sendKillLine()           { sent.append("killline") }
+    func sendYank()               { sent.append("yank") }
+    func sendArrowDown()          { sent.append("down") }
+    func sendArrowUp()            { sent.append("up") }
+    func sendEscape()             { sent.append("escape") }
+    func readViewport() -> String? { viewport }
 }
