@@ -24,16 +24,22 @@ import os
 import uuid
 from collections import namedtuple
 
-Row = namedtuple("Row", "key group agents tier flags run")
+Row = namedtuple("Row", "key group agents tier flags run kind")
+Row.__new__.__defaults__ = ("capability",)   # every row is a "capability" claim unless marked
 Observation = namedtuple("Observation", "declared observed absent_reason_holds detail")
 Observation.__new__.__defaults__ = (None, None, None, "")
 
 
-def verdict(declared, observed, absent_reason_holds=None):
+def verdict(declared, observed, absent_reason_holds=None, kind="capability"):
     if observed == "needs-auth":
         return "needs-auth"
     if observed == "error" or observed is None:
         return "error"
+    if kind == "fact":
+        # A symmetric boolean claim ("does this negotiate identity?"), not a capability that
+        # can be absent for a reason. `False` here is not a refusal to justify — it is just
+        # the other value the claim can take, and is checked exactly like `True` is.
+        return "ok" if observed == declared else "broken"
     if declared:
         return "ok" if observed else "broken"
     # Declared absent. The refusal is only trustworthy if its stated reason was probed.
@@ -80,7 +86,8 @@ def _bytes_under(path):
 
 def _negotiates_identity(ctx, agent):
     """A fabricated pin that never came from the agent: codex must hand back its own id
-    (negotiated), claude must keep exactly the one we proposed (nothing to negotiate)."""
+    (negotiated), claude must keep exactly the one we proposed (nothing to negotiate). This is
+    a symmetric fact, not a capability that can be absent for a reason — `kind="fact"` below."""
     declared = ctx.probe(["declare", agent])["negotiatesIdentity"]
     out = ctx.probe(["rebind", agent, "--pin", str(uuid.uuid4()), "--cwd", ctx.sandbox.root])
     if "error" in out:
@@ -91,7 +98,8 @@ def _negotiates_identity(ctx, agent):
 def _needs_runtime_start(ctx, agent):
     """Does bringing an identity into being also require standing up a persistent stack?
     Measured by whether `prepare` writes anything into the agent's own home at all — codex's
-    RPC process negotiates and persists a thread as a side effect, claude's does not."""
+    RPC process negotiates and persists a thread as a side effect, claude's does not. Also a
+    symmetric fact (`kind="fact"`), not a capability with a reason to probe."""
     declared = ctx.probe(["declare", agent])["needsRuntimeStart"]
     home = _agent_home(ctx, agent)
     before = set(os.listdir(home))
@@ -104,7 +112,10 @@ def _needs_runtime_start(ctx, agent):
 
 def _has_status_registry(ctx, agent):
     """Claude writes one status file per *live* session into `<home>/sessions` — no full model
-    turn is needed to see it appear, just a process that is actually running."""
+    turn is needed to see it appear, just a process that is actually running. Codex's declared
+    `False` is the same kind of symmetric fact ("codex has no status registry"), not a
+    capability that is absent for a reason, hence `kind="fact"` below rather than
+    `absent_reason_holds`."""
     declared = ctx.probe(["declare", agent])["hasStatusRegistry"]
     prep = ctx.probe(["prepare", agent, "--cwd", ctx.sandbox.root])
     cid = prep["conversationID"]
@@ -163,6 +174,9 @@ def _open_prompt_reader(ctx, agent):
     # whether the agent's home actually stayed silent while it was showing. That needs a
     # live turn, which is why this row is `tier="full"` rather than the other declarations'
     # "cheap" — the one deliberate exception, called out where the row is registered below.
+    # This is also the only row that keeps `kind="capability"` and sets
+    # `absent_reason_holds` — it is a genuine refusal with a stated reason, unlike the three
+    # `kind="fact"` rows above.
     declared = ctx.probe(["declare", "codex"])["openPromptReader"]
     prep = ctx.probe(["prepare", "codex", "--cwd", ctx.sandbox.root])
     cid = prep["conversationID"]
@@ -341,32 +355,77 @@ def _rebind(ctx, agent):
 
 
 def _rename(ctx, agent):
-    """Outbound rename lands, and the name is still there after a relaunch.
+    """Outbound: rename, then read the *persisted record* back — never the live screen — to
+    confirm it landed. Inbound: relaunch through the real `resumeCommand`, then read the
+    persisted record again; this second half is the reported symptom (tabs not picking names
+    back up).
 
-    Codex renames through the real adapter method, so it goes straight through the probe.
-    Claude does not: `probe rename claude` is a deliberate refusal (see `probe.swift` — claude
-    renames dispatch inline through `SessionStore`, never through the adapter, and the
-    production method traps on purpose as a tripwire). So claude's half of this row drives the
-    real thing `SessionStore` does instead — typing `/rename <name>` at a live pty — rather
-    than calling a method production code never calls."""
+    Neither branch decides the verdict off a screen. A prior version of this row waited for
+    `"probe-renamed"` to appear on-screen after typing `/rename probe-renamed` at claude — but
+    claude renders keystrokes into its own composer live, before Enter is even processed (see
+    `Fixtures/Claude/busy-draft-below-echo.captured.txt`, a draft visible mid-type). That wait
+    matches the echo of what was just typed on the very first poll, regardless of whether
+    `/rename` did anything at all, so it could report `ok` against a completely broken rename —
+    the worst failure mode this suite has. Codex's branch never had that problem, because it
+    already read the effect back through `probe read` rather than a screen; claude's branch now
+    does the equivalent read through `probe title-from-transcript`.
+    """
+    prep = ctx.probe(["prepare", agent, "--cwd", ctx.sandbox.root])
+    cid = prep["conversationID"]
+
     if agent == "codex":
-        prep = ctx.probe(["prepare", "codex", "--cwd", ctx.sandbox.root])
-        cid = prep["conversationID"]
+        # Codex renames through the real adapter method, so both halves go straight through
+        # the probe: rename, read (outbound), resume, read again (inbound).
         out = ctx.probe(["rename", "codex", "--id", cid, "--to", "probe-renamed"])
         if "error" in out:
             return Observation(declared=True, observed=False, detail=out["error"])
-        back = ctx.probe(["read", "codex", "--id", cid])
-        return Observation(declared=True, observed=back.get("title") == "probe-renamed",
-                            detail=f"read back {back.get('title')!r}")
+        outbound = ctx.probe(["read", "codex", "--id", cid])
+        if outbound.get("title") != "probe-renamed":
+            return Observation(declared=True, observed=False,
+                                detail=f"outbound: read back {outbound.get('title')!r}")
+        resume_text = ctx.probe(["resume-command", "codex", "--id", cid,
+                                  "--cwd", ctx.sandbox.root])["text"]
+        with ctx.pty("codex", ["/bin/sh", "-lc", resume_text]) as term:
+            attached = term.wait([_UP_MARKER["codex"]], 30)
+        if not attached:
+            return Observation(declared=True, observed=False,
+                                detail="resumeCommand never attached; rename can't be re-checked")
+        inbound = ctx.probe(["read", "codex", "--id", cid])
+        return Observation(declared=True, observed=inbound.get("title") == "probe-renamed",
+                            detail=f"inbound: read back {inbound.get('title')!r}")
 
-    prep = ctx.probe(["prepare", "claude", "--cwd", ctx.sandbox.root])
-    cid = prep["conversationID"]
+    # Claude never renames through the adapter — `probe rename claude` is a deliberate
+    # refusal (see `probe.swift`'s own comment: renames dispatch inline through
+    # `SessionStore`, never through the adapter, and the production method traps on purpose
+    # as a tripwire). So the outbound half drives the real thing `SessionStore` does — typing
+    # `/rename <name>` at a live pty — and then reads the effect back out of claude's own
+    # transcript file, exactly as codex's branch reads its effect back through `read`.
+    transcript = prep.get("transcriptURL")
+    if not transcript:
+        return Observation(declared=True, observed=None,
+                            detail="prepare returned no transcriptURL")
     text = ctx.probe(["launch-command", "claude", "--id", cid, "--cwd", ctx.sandbox.root])["text"]
     with ctx.pty("claude", ["/bin/sh", "-lc", text]) as term:
         term.wait([_UP_MARKER["claude"]], 30)
         term.send(b"/rename probe-renamed\r")
-        renamed = term.wait(["probe-renamed"], 20)
-    return Observation(declared=True, observed=renamed)
+        # Deliberately not waited on: any text match here would be the same live-echo problem
+        # described above. This is a fixed dwell to let the write land, nothing more — the
+        # verdict comes only from re-reading the transcript below.
+        term.pump(3)
+    outbound = ctx.probe(["title-from-transcript", "claude", transcript])
+    if outbound.get("title") != "probe-renamed":
+        return Observation(declared=True, observed=False,
+                            detail=f"outbound: transcript reads {outbound.get('title')!r}")
+    resume_text = ctx.probe(["resume-command", "claude", "--id", cid,
+                              "--cwd", ctx.sandbox.root])["text"]
+    with ctx.pty("claude", ["/bin/sh", "-lc", resume_text]) as term:
+        attached = term.wait([_UP_MARKER["claude"]], 30)
+    if not attached:
+        return Observation(declared=True, observed=False,
+                            detail="resumeCommand never attached; rename can't be re-checked")
+    inbound = ctx.probe(["title-from-transcript", "claude", transcript])
+    return Observation(declared=True, observed=inbound.get("title") == "probe-renamed",
+                        detail=f"inbound: transcript reads {inbound.get('title')!r}")
 
 
 def _login_invocation(ctx, agent):
@@ -394,14 +453,19 @@ BOTH = ("claude", "codex")
 
 ROWS = [
     # Declarations
-    Row("negotiatesIdentity", "declarations", BOTH, "cheap", (), _negotiates_identity),
-    Row("needsRuntimeStart", "declarations", BOTH, "cheap", (), _needs_runtime_start),
-    Row("hasStatusRegistry", "declarations", BOTH, "cheap", (), _has_status_registry),
+    Row("negotiatesIdentity", "declarations", BOTH, "cheap", (), _negotiates_identity,
+        kind="fact"),
+    Row("needsRuntimeStart", "declarations", BOTH, "cheap", (), _needs_runtime_start,
+        kind="fact"),
+    Row("hasStatusRegistry", "declarations", BOTH, "cheap", (), _has_status_registry,
+        kind="fact"),
     Row("textChannel", "declarations", BOTH, "cheap", (), _text_channel),
     Row("dialogDriver", "declarations", BOTH, "cheap", ("sandbox-config",), _dialog_driver),
     # The one deliberate tier exception among the declarations: see `_open_prompt_reader`'s
     # own comment for why probing codex's stated reason needs a real approval list, not a
-    # captured screen.
+    # captured screen. Also the one row that keeps `kind="capability"` and uses
+    # `absent_reason_holds` — it is a genuine refusal with a stated reason, not a symmetric
+    # fact like the three rows above.
     Row("openPromptReader", "declarations", BOTH, "full", ("sandbox-config",),
         _open_prompt_reader),
     Row("homeMarkerFile", "declarations", BOTH, "cheap", (), _home_marker_file),

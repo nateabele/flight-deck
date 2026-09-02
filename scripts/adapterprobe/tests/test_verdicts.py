@@ -1,4 +1,9 @@
 # scripts/adapterprobe/tests/test_verdicts.py
+#
+# The brief's own selector, `-k "Verdict or RowTable"`, is a pytest-ism. Stdlib unittest's
+# `-k` takes one fnmatch pattern per flag and ORs repeats together -- it does not parse "or"
+# as an expression, so that exact string matches nothing and silently runs zero tests. Use:
+#   python -m unittest discover -s scripts/adapterprobe/tests -v -k Verdict -k RowTable
 import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from capabilities import ROWS, verdict
@@ -27,6 +32,37 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(verdict(declared=True, observed="needs-auth"), "needs-auth")
 
 
+class FactKindVerdictTests(unittest.TestCase):
+    """`kind="fact"` is for a symmetric boolean claim (declared False is just the other
+    value, not a refusal that needs a reason) -- distinct from `kind="capability"`
+    (default), where a declared absence is only trustworthy once its reason is probed."""
+
+    def test_fact_true_matching_observed_true_is_ok(self):
+        self.assertEqual(verdict(declared=True, observed=True, kind="fact"), "ok")
+
+    def test_fact_true_but_observed_false_is_broken(self):
+        self.assertEqual(verdict(declared=True, observed=False, kind="fact"), "broken")
+
+    def test_fact_false_matching_observed_false_is_ok(self):
+        self.assertEqual(verdict(declared=False, observed=False, kind="fact"), "ok")
+
+    def test_fact_false_but_observed_true_is_broken(self):
+        self.assertEqual(verdict(declared=False, observed=True, kind="fact"), "broken")
+
+    def test_fact_kind_does_not_bypass_needs_auth(self):
+        self.assertEqual(verdict(declared=True, observed="needs-auth", kind="fact"),
+                          "needs-auth")
+
+    def test_fact_kind_does_not_bypass_error(self):
+        self.assertEqual(verdict(declared=True, observed=None, kind="fact"), "error")
+
+    def test_capability_kind_absent_with_no_reason_probed_is_still_error(self):
+        # Regression guard: adding `kind="fact"` must not loosen the default
+        # `kind="capability"` path -- an unprobed absence still can't be blessed.
+        self.assertEqual(
+            verdict(declared=False, observed=False, kind="capability"), "error")
+
+
 class RowTableTests(unittest.TestCase):
     def test_every_row_key_is_unique(self):
         keys = [r.key for r in ROWS]
@@ -41,6 +77,15 @@ class RowTableTests(unittest.TestCase):
         for r in ROWS:
             self.assertIn(r.tier, ("cheap", "full"), r.key)
             self.assertTrue(r.agents, r.key)
+
+    def test_exactly_the_three_symmetric_facts_are_kind_fact(self):
+        fact_keys = {r.key for r in ROWS if r.kind == "fact"}
+        self.assertEqual(
+            fact_keys, {"negotiatesIdentity", "needsRuntimeStart", "hasStatusRegistry"})
+
+    def test_open_prompt_reader_stays_a_capability(self):
+        row = next(r for r in ROWS if r.key == "openPromptReader")
+        self.assertEqual(row.kind, "capability")
 
 
 if __name__ == "__main__":
