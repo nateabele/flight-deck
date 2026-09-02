@@ -515,8 +515,78 @@ final class SessionTimelineModel {
     func dismiss(_ id: UUID) { outbox.dismiss(id) }
 
     /// The screen appeared or went away. Reported so the Mac can show, beside the tab, that a
-    /// phone is on this conversation.
-    func viewing(_ isViewing: Bool) { fleet.viewing(isViewing ? sessionID : nil) }
+    /// phone is on this conversation — and remembered here too, so `linkResumed()` below can
+    /// tell whether this particular model is the one the reader is looking at right now.
+    func viewing(_ isViewing: Bool) {
+        isOnScreen = isViewing
+        fleet.viewing(isViewing ? sessionID : nil)
+    }
+
+    /// Whether the screen backed by this model is the one currently on screen.
+    ///
+    /// **Not the same as "this model's screen is the frontmost thing."** A push over the
+    /// timeline — `TimelineItemDetailScreen` or `PlanReviewScreen`, both reached via
+    /// `.navigationDestination` on `SessionTimelineScreen` — fires `.onDisappear` on the
+    /// covered view, so this goes false while that detail screen sits on top, and a resume
+    /// landing in that moment refreshes nothing here. It self-heals on pop: `.onAppear` and
+    /// `open()`'s `.task(id:)` both fire again once the pushed screen is gone, and until then
+    /// this stays exactly consistent with what `viewing(_:)` above last told the Mac's badge
+    /// — which is the one thing `linkResumed()` actually needs it for.
+    ///
+    /// **`@ObservationIgnored` is deliberate, not an oversight.** Nothing draws from this —
+    /// it exists only for `linkResumed()` below to read — so it is control state rather than
+    /// display state, marked the same way its neighbours are (`inFlight`, `deferredNewer`,
+    /// `pendingOffset`).
+    @ObservationIgnored private(set) var isOnScreen = false
+
+    /// The socket came back after a drop — sleep, backgrounding, a dead Wi-Fi hop — and
+    /// `FleetModel` is telling every session it holds a model for, whether or not this one is
+    /// on screen right now.
+    ///
+    /// **Gated on `isOnScreen`, not fanned out unconditionally.** `FleetModel.timelineModels`
+    /// is never evicted short of `unpair()` — every tab a reader has ever opened keeps its
+    /// model — so a resumed link that refetched all of them would turn one reconnect into a
+    /// burst of requests for conversations nobody is looking at. Only the screen actually on
+    /// screen has anything to gain from asking now; the rest will ask for themselves in their
+    /// own `open()` when the reader comes back to them.
+    ///
+    /// **Why this exists at all: none of the model's other five triggers fire on a resume.**
+    /// `.task(id:)` only runs on mount, the `.onChange` pair only fires on a value that
+    /// differs from what it already held — and a reconnect is very often answered with
+    /// `.replay([])`, or with the same `activity` and `call` the screen already has, because
+    /// the Mac has nothing new to say. A screen sitting on exactly the state it had before
+    /// the phone slept stays on that state forever without this.
+    ///
+    /// **`fleet.viewing(sessionID)` before `loadNewer()`, not after.** The presence report
+    /// is what puts this phone's badge back on the Mac's tab, and the new socket carries none
+    /// of the state the old one had — `viewing(_:)` above never ran on this connection, so
+    /// without this call the Mac would show the session as unwatched until the reader's next
+    /// appear/disappear, which a sleep does not produce either. Sending it first means the
+    /// badge is already right by the time the page the fetch below asks for lands.
+    ///
+    /// **`loadNewer()`, never `loadLatest()` — and the reason is the failure path, not the
+    /// anchor.** The two ask for the same thing here: `loadLatest` also fetches from
+    /// `feed.newerAnchor`, which is `.after(newest)` on any feed that holds a range, so on a
+    /// loaded screen the request they produce is byte-for-byte identical. What differs there
+    /// is `quiet`: `loadNewer` passes `quiet: true`, so a resume fetch against a feed that
+    /// already holds a range leaves `phase` alone on failure, where `loadLatest` sets
+    /// `phase = .failed`. On an empty feed the two collapse into the same call anyway —
+    /// `loadNewer()` falls through to `loadLatest()` itself when `!feed.hasLoadedAnything` —
+    /// so a resume that lands before anything has ever loaded fails loudly either way; see
+    /// `loadNewer()`'s own comment for why that case is fine to leave loud.
+    ///
+    /// That is the whole point on this path. A resume runs unprompted, against a link that
+    /// has just come back and may be flaky — the phone woke on a marginal Wi-Fi hop, the Mac
+    /// is still settling. A reader who unlocks their phone to a conversation they were
+    /// mid-way through must not have it replaced by an error banner because a fetch they
+    /// never asked for did not land. The content on screen is still the last thing the Mac
+    /// said, and the fleet list's own connection banner already reports the link. Same
+    /// reasoning as the poll, which is why `loadNewer` is where it is written down.
+    func linkResumed() {
+        guard isOnScreen else { return }
+        fleet.viewing(sessionID)
+        loadNewer()
+    }
 
     /// What this session is blocked on, or nil.
     ///

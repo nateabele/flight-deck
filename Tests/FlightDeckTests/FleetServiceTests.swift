@@ -1,3 +1,4 @@
+import Combine
 import Network
 import XCTest
 import FleetKit
@@ -608,6 +609,106 @@ final class FleetServiceTests: XCTestCase {
             return XCTFail("a conversations request with no index must be refused, not answered: \(String(describing: reply))")
         }
         XCTAssertEqual(code, "index_unavailable")
+    }
+
+    // MARK: Phone presence
+
+    /// **A viewer must lose its badge when ITS connection goes, not only when the last phone
+    /// on the Mac disconnects.**
+    ///
+    /// `viewingByClient` is keyed by connection id, and the `.viewing` handler says why in as
+    /// many words: "one phone reconnecting is two connections". The prune did not agree — it
+    /// was `if slots.isEmpty { removeAll() }`, which fires only when the very last attachment
+    /// goes, so any client that left while another stayed attached kept its entry forever.
+    ///
+    /// That is not a corner case; it is every wake of every phone. The handset rebuilds its
+    /// connector on returning from the background (`RedialOnReturn` on the iOS side), so the
+    /// old connection dies and a new one arrives with a new id — and with a second phone
+    /// attached, or simply with the new connection landing before the old one is reaped,
+    /// `slots` never passes through empty. The Mac went on drawing "a phone is viewing this
+    /// session" for a connection that no longer existed.
+    ///
+    /// **Two distinct paired devices, and the SECOND one is the one dropped.** Two same-slot
+    /// connections viewing different sessions would still discriminate a per-client prune from
+    /// a per-slot one — per-client drops only the dead connection's session; a slot with
+    /// another connection still attached would look untouched to a per-slot prune, and the
+    /// dead one's session would stay. The two strategies collapse into each other only when
+    /// both connections on the same slot are viewing the same session, which is not the case
+    /// worth isolating here. Two distinct devices sidesteps the slot question entirely, and
+    /// dropping the second rather than the first is the same care
+    /// `FleetSlotAttributionTests.testDroppingOneDeviceLeavesTheOtherOnItsOwnSlot` takes, for
+    /// the same reason — a wrong implementation that recomputes from the last-registered
+    /// client happens to look right when you drop the first.
+    ///
+    /// No sessions are created in the store: the `.viewing` handler deliberately has no
+    /// `sessionExists` guard, so two bare UUIDs are the honest fixture.
+    func testPresenceDropsWithItsOwnClientAndLeavesTheOtherViewerAlone() async throws {
+        let preferences = PreferencesStore(persistence: nil)
+        let store = SessionStore(provider: nil, persistence: nil, preferences: preferences)
+        let staying = FleetDeviceKey.mint()
+        let leaving = FleetDeviceKey.mint()
+        for key in [staying, leaving] {
+            preferences.upsert(PairedDevice(
+                slot: key.slot, name: "phone", secret: key.secret,
+                pairedAt: Date(), lastSeenAt: nil, armedUntil: nil
+            ))
+        }
+        let service = FleetService(store: store, preferences: preferences, armer: PairingArmer())
+        self.service = service
+        let port = try await service.start(port: nil)
+
+        let watched = UUID()
+        let abandoned = UUID()
+
+        // Sequenced rather than raced, so "the second device" is unambiguous.
+        let stayingClient = viewer(staying, viewing: watched, port: port)
+        self.client = stayingClient
+        await presence(on: service, reaches: "the first viewer") { $0.contains(watched) }
+
+        let leavingClient = viewer(leaving, viewing: abandoned, port: port)
+        await presence(on: service, reaches: "the second viewer") { $0.contains(abandoned) }
+
+        XCTAssertEqual(service.phoneActiveSessions, [watched, abandoned],
+                       "the premise: two phones, each on its own session")
+
+        leavingClient.disconnect()
+        await presence(on: service, reaches: "the departed viewer pruned") { !$0.contains(abandoned) }
+
+        XCTAssertEqual(
+            service.phoneActiveSessions, [watched],
+            "only the client that left loses its badge — the phone still attached is still watching"
+        )
+    }
+
+    /// A client that reports itself viewing `session` the moment it is attached.
+    private func viewer(
+        _ key: FleetDeviceKey, viewing session: UUID, port: NWEndpoint.Port
+    ) -> FleetClient {
+        let client = FleetClient(key: key)
+        client.onFrame = { frame in
+            if case .snapshot = frame { _ = client.send(.viewing(session: session)) }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        return client
+    }
+
+    /// Waits for `phoneActiveSessions` to satisfy `predicate`.
+    ///
+    /// Checked once up front as well as subscribed, because `@Published` emits on `willSet`:
+    /// a state already reached before the sink is installed produces no further element, and
+    /// waiting for one that will never come is a ten-second timeout rather than a pass.
+    private func presence(
+        on service: FleetService, reaches description: String,
+        _ predicate: @escaping @Sendable (Set<UUID>) -> Bool
+    ) async {
+        if predicate(service.phoneActiveSessions) { return }
+        let met = expectation(description: description)
+        // The predicate can be satisfied by more than one publish — a second phone attaching
+        // after the first already matched — and an over-fulfilled expectation is a failure.
+        met.assertForOverFulfill = false
+        let token = service.$phoneActiveSessions.sink { if predicate($0) { met.fulfill() } }
+        await fulfillment(of: [met], timeout: 10)
+        token.cancel()
     }
 }
 
