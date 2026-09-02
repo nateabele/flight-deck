@@ -302,9 +302,11 @@ class UnsafeHome(Exception):
 def guard_home(path):
     """Refuse any agent home that is, or is inside, the user's real home.
 
-    Resolved before comparison so a symlink cannot smuggle a real home through.
+    Resolved before comparison so a symlink cannot smuggle a real home through, and so a `~`
+    that a caller never expanded cannot bypass the check either (`os.path.realpath` alone does
+    not expand `~` — only `os.path.expanduser` does).
     """
-    real = os.path.realpath(path)
+    real = os.path.realpath(os.path.expanduser(path))
     if real == HOME or real.startswith(HOME + os.sep):
         raise UnsafeHome(
             f"refusing to run an agent with its home at {path!r} (resolves to {real!r}, "
@@ -320,13 +322,21 @@ class AgentSandbox:
 
     def __enter__(self):
         self.root = tempfile.mkdtemp(prefix="adapterprobe-")
-        self.claude_home = os.path.join(self.root, "claude-home")
-        self.codex_home = os.path.join(self.root, "codex-home")
-        for h in (self.claude_home, self.codex_home):
+        try:
             guard_home(self.root)
-            os.makedirs(h, exist_ok=True)
-            guard_home(h)
-        self._copy_credentials()
+            self.claude_home = os.path.join(self.root, "claude-home")
+            self.codex_home = os.path.join(self.root, "codex-home")
+            for h in (self.claude_home, self.codex_home):
+                os.makedirs(h, exist_ok=True)
+                guard_home(h)
+            self._copy_credentials()
+        except BaseException:
+            # A failed construction always cleans up, regardless of `keep` — `keep` is for
+            # inspecting a *successful* run, not for preserving a partial, broken tree.
+            # Without this, an exception inside __enter__ means __exit__ never runs and the
+            # partial tree leaks permanently.
+            shutil.rmtree(self.root, ignore_errors=True)
+            raise
         return self
 
     def _copy_credentials(self):
@@ -353,7 +363,9 @@ class AgentSandbox:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `/tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v`
-Expected: 12 tests, PASS
+Expected: 14 tests, PASS — including one asserting `guard_home("~/.claude")` raises (a literal
+tilde must not slip through) and one forcing `_copy_credentials` to raise and asserting the root
+is gone afterwards.
 
 - [ ] **Step 5: Commit**
 
