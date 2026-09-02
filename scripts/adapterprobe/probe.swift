@@ -116,7 +116,11 @@ struct Probe {
                     }
                 }
                 await emit([
-                    "conversationID": binding.conversationID.uuidString,
+                    // Lowercased: both `*-command` cases below print the agents' own
+                    // command text, which already spells the id lowercase (`.uuidString`
+                    // is Swift's uppercase form) — the probe matches that here so every
+                    // caller compares one case rather than each having to normalise.
+                    "conversationID": binding.conversationID.uuidString.lowercased(),
                     "transcriptURL": binding.transcriptURL?.path as Any,
                 ])
             } catch {
@@ -142,7 +146,8 @@ struct Probe {
                     }
                 }
                 await emit([
-                    "conversationID": binding.conversationID.uuidString,
+                    // Lowercased for the same reason `prepare` is — see that emission site.
+                    "conversationID": binding.conversationID.uuidString.lowercased(),
                     "transcriptURL": binding.transcriptURL?.path as Any,
                     "repointed": binding.conversationID != pin,
                 ])
@@ -155,13 +160,24 @@ struct Probe {
                   let idRaw = flag(args, "--id"), let id = UUID(uuidString: idRaw),
                   let title = flag(args, "--to") else { usage() }
             let binding = AgentBinding(conversationID: id, transcriptURL: nil)
+            // `.claude` is a deliberate refusal, not a dispatch — never call `ClaudeAdapter
+            // .rename`. Its own doc comment records why: claude renames go inline through
+            // `SessionStore.rename`, never through the adapter, so this method traps
+            // (`assertionFailure`) in Debug on purpose, as a tripwire for a future
+            // refactor that starts routing claude through it. Calling it from here would
+            // make this probe a way to trip that tripwire and SIGTRAP the harness — an
+            // ambiguous signal a `rename` capability row cannot tell apart from a real
+            // crash. Answering the refusal directly, as structured JSON, is what lets that
+            // row see "claude doesn't rename through the adapter" as the expected answer
+            // it is.
+            if agent == .claude {
+                await emit([
+                    "error": "unreachable: claude renames dispatch inline through "
+                        + "SessionStore, never through the adapter",
+                ], exit: 1)
+            }
             do {
-                switch agent {
-                case .claude:
-                    try await MainActor.run { claudeAdapter() }.rename(binding, to: title)
-                case .codex:
-                    try await withCodex { try await $0.rename(binding, to: title) }
-                }
+                try await withCodex { try await $0.rename(binding, to: title) }
                 await emit(["renamed": true])
             } catch {
                 await emit(["error": String(describing: error)], exit: 1)
