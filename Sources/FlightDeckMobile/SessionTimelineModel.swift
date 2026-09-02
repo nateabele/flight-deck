@@ -524,9 +524,19 @@ final class SessionTimelineModel {
 
     /// Whether the screen backed by this model is the one currently on screen.
     ///
+    /// **Not the same as "this model's screen is the frontmost thing."** A push over the
+    /// timeline — `TimelineItemDetailScreen` or `PlanReviewScreen`, both reached via
+    /// `.navigationDestination` on `SessionTimelineScreen` — fires `.onDisappear` on the
+    /// covered view, so this goes false while that detail screen sits on top, and a resume
+    /// landing in that moment refreshes nothing here. It self-heals on pop: `.onAppear` and
+    /// `open()`'s `.task(id:)` both fire again once the pushed screen is gone, and until then
+    /// this stays exactly consistent with what `viewing(_:)` above last told the Mac's badge
+    /// — which is the one thing `linkResumed()` actually needs it for.
+    ///
     /// **`@ObservationIgnored` is deliberate, not an oversight.** Nothing draws from this —
-    /// it exists only for `linkResumed()` below to read — and making it observable would
-    /// invalidate the screen on every appear and disappear for a value the screen never uses.
+    /// it exists only for `linkResumed()` below to read — so it is control state rather than
+    /// display state, marked the same way its neighbours are (`inFlight`, `deferredNewer`,
+    /// `pendingOffset`).
     @ObservationIgnored private(set) var isOnScreen = false
 
     /// The socket came back after a drop — sleep, backgrounding, a dead Wi-Fi hop — and
@@ -557,9 +567,13 @@ final class SessionTimelineModel {
     /// **`loadNewer()`, never `loadLatest()` — and the reason is the failure path, not the
     /// anchor.** The two ask for the same thing here: `loadLatest` also fetches from
     /// `feed.newerAnchor`, which is `.after(newest)` on any feed that holds a range, so on a
-    /// loaded screen the request they produce is byte-for-byte identical. What differs is
-    /// `quiet`. `loadNewer` passes `quiet: true`, so a resume fetch that fails leaves `phase`
-    /// alone; `loadLatest` leaves it false, and its failure arm sets `phase = .failed`.
+    /// loaded screen the request they produce is byte-for-byte identical. What differs there
+    /// is `quiet`: `loadNewer` passes `quiet: true`, so a resume fetch against a feed that
+    /// already holds a range leaves `phase` alone on failure, where `loadLatest` sets
+    /// `phase = .failed`. On an empty feed the two collapse into the same call anyway —
+    /// `loadNewer()` falls through to `loadLatest()` itself when `!feed.hasLoadedAnything` —
+    /// so a resume that lands before anything has ever loaded fails loudly either way; see
+    /// `loadNewer()`'s own comment for why that case is fine to leave loud.
     ///
     /// That is the whole point on this path. A resume runs unprompted, against a link that
     /// has just come back and may be flaky — the phone woke on a marginal Wi-Fi hop, the Mac

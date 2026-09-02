@@ -280,8 +280,8 @@ final class SessionTimelineModelTests: XCTestCase {
 
         XCTAssertEqual(pager.requests.count, 2, "the initial load, then exactly one more for the resume")
         XCTAssertEqual(pager.anchors.last, .after(1200), "forward from the held boundary")
-        XCTAssertEqual(pager.viewingReports.last, session,
-                       "the new link carries none of the old one's presence state")
+        XCTAssertEqual(pager.viewingReports, [session, session],
+                       "the resume re-sends presence: the new socket carries none of the old one's state")
 
         pager.answer(.failure(.disconnected))
 
