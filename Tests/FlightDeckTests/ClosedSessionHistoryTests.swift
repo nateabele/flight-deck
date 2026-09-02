@@ -65,4 +65,54 @@ final class ClosedSessionHistoryTests: XCTestCase {
         XCTAssertEqual(drained.count, ClosedSessionHistory.depth)
         XCTAssertFalse(drained.contains(.session(oldest)), "the oldest close is the one forgotten")
     }
+
+    /// The menu reads most-recent-first, the opposite of the array's push order.
+    func testSessionEntriesComeBackMostRecentFirst() {
+        var history = ClosedSessionHistory()
+        history.record(.session(closed("one")))
+        history.record(.session(closed("two")))
+
+        XCTAssertEqual(history.sessionEntries.map(\.session.title), ["two", "one"])
+    }
+
+    /// A project's children are not separately offerable: taking one would leave the project
+    /// entry half-consumed, and reopening the project afterwards would reinsert a tab that is
+    /// already open.
+    func testSessionEntriesSkipsSessionsNestedInAClosedProject() {
+        var history = ClosedSessionHistory()
+        history.record(.session(closed("loose")))
+        history.record(.project(ClosedSessionHistory.ClosedProject(
+            path: "/w/a", isCollapsed: false, indexInSidebar: 0,
+            sessions: [closed("nested", at: 0)]
+        )))
+
+        XCTAssertEqual(history.sessionEntries.map(\.session.title), ["loose"])
+    }
+
+    func testTakingASessionByIDRemovesOnlyThatEntry() {
+        var history = ClosedSessionHistory()
+        let first = closed("one")
+        let middle = closed("two")
+        let last = closed("three")
+        history.record(.session(first))
+        history.record(.session(middle))
+        history.record(.session(last))
+
+        XCTAssertEqual(history.takeSession(id: middle.session.id), middle)
+        XCTAssertEqual(history.sessionEntries.map(\.session.title), ["three", "one"])
+        // ⌘⇧T goes on popping whatever is now on top, which is the entry above the hole.
+        XCTAssertEqual(history.takeLast(), .session(last))
+    }
+
+    func testTakingAnUnknownOrNestedSessionYieldsNothing() {
+        var history = ClosedSessionHistory()
+        let nested = closed("nested", at: 0)
+        history.record(.project(ClosedSessionHistory.ClosedProject(
+            path: "/w/a", isCollapsed: false, indexInSidebar: 0, sessions: [nested]
+        )))
+
+        XCTAssertNil(history.takeSession(id: nested.session.id))
+        XCTAssertNil(history.takeSession(id: UUID()))
+        XCTAssertFalse(history.isEmpty, "a failed take must not consume the project entry")
+    }
 }
