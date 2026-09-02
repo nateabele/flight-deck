@@ -324,6 +324,41 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         }
     }
 
+    /// Every reopenable tab the Mac is holding, across all projects, most recent first.
+    ///
+    /// One flat list rather than a per-project dictionary, because the Mac keeps one stack:
+    /// `FleetListScreen.closedRows(in:forProjectAt:)` buckets it by `projectPath` at render
+    /// time. Empty until the first answer, and empty is also what an older Mac leaves it —
+    /// it refuses the request — so the section simply never renders there. Absent and empty
+    /// do not need holding apart here, unlike `newSessionOptions`: both mean "no rows to show"
+    /// and neither changes anything else on the screen.
+    private(set) var recentlyClosed: [WireClosedSession] = []
+
+    /// Ask for the whole reopen stack.
+    ///
+    /// Hung off `connect()`'s `onFleet`, which fires on snapshots **and on every folded
+    /// event** — so a close at either end refreshes this without needing a hook of its own.
+    /// That matters more here than for `refreshNewSessionOptions`, which shares the hook: a
+    /// session the phone itself just closed has to appear in that project's `+` immediately,
+    /// not after a background-and-return.
+    func refreshRecentlyClosed() {
+        guard let connector else { return }
+        connector.requestRecentlyClosed { [weak self] result in
+            guard let self else { return }
+            // A failure leaves the last answer standing rather than blanking the section: an
+            // older Mac refuses every time (`unsupported`), and a phone that cleared on each
+            // refusal would be doing so on a fact that never changes.
+            guard case .success(let closed) = result else { return }
+            self.recentlyClosed = closed
+        }
+    }
+
+    /// Reopen a closed tab on the Mac. Fire-and-forget, exactly like `newSession`: the tab
+    /// arrives as a `sessionAdded` event and the list redraws itself.
+    func reopenClosed(_ id: UUID) {
+        connector?.send(.reopenClosed(session: id))
+    }
+
     /// The model behind one session screen, made once and kept.
     ///
     /// **Cached because the alternative is a screen that empties itself.** A
@@ -470,6 +505,9 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
                 // fleet state (see `conversationCatalogue`'s doc comment), so this is the only
                 // hook it gets.
                 self?.refreshConversations()
+                // Same hook, and here the "every folded event" half is the point rather than a
+                // side effect — see `refreshRecentlyClosed`.
+                self?.refreshRecentlyClosed()
             }
         }
         // Routed to the tab's own model rather than held here: the outbox belongs to the
