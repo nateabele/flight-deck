@@ -178,11 +178,26 @@ codebase orders replies by arrival — every client correlates a reply to its re
 independent of when it arrives — so a reordered reply is indistinguishable from a slow one. See
 `docs/NETWORKING.md` for where this is recorded for a phone-side implementer.
 
-**Caveat on the end-to-end verification above.** The "Verified end-to-end against the shipped
-app" run earlier in this document exercised the *synchronous*, main-actor-blocking waker — the
-code path this follow-up just replaced. That evidence does not carry over unexamined to the
-async path introduced here; a fresh manual run against a build with this follow-up is still
-owed.
+**The async path is verified end-to-end too, 2026-09-02 15:40.** The earlier "Verified
+end-to-end against the shipped app" run exercised the *synchronous*, main-actor-blocking waker —
+the code path this follow-up replaced — so it did not carry over, and the re-run was owed. It has
+now been done, against a `/Applications` build containing `awaitTerminalCreatable` (confirmed by
+`nm`, not `strings`: these are symbol names, and `strings` finds only literals — a check that
+briefly and wrongly suggested the follow-ups were missing from the bundle).
+
+Display slept and the Mac auto-locked (`active=false asleep=true locked=true`, held), then a `+`
+tap on the phone produced:
+
+```
+38691  Flight Deck            <- the post-swap pid
+ └─ 55892  /usr/bin/login     <- ppid 38691
+     └─ 55893  fish
+         └─ 56023  claude --session-id 189d91c0-...-9e5e3dc63e07
+```
+
+reading `active=true locked=true` at the moment of creation, with the session id matching the new
+`sessions.json` entry. Per-tab evidence, never a net shell count. Both wake paths — synchronous
+for Mac-local creation, async for the phone — are now each verified against a shipped build.
 
 ### A — rejected
 
