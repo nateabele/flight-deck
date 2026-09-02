@@ -227,6 +227,68 @@ final class ReopenClosedSessionTests: XCTestCase {
         XCTAssertEqual(store.codexServerRequestsForTesting, 0)
     }
 
+    // MARK: - Reopen by id
+
+    /// The phone's reopen is ⌘⇧T aimed at one entry, and it must land the tab back among
+    /// its siblings rather than at the bottom.
+    func testReopeningByIDRebuildsTheTabAtItsRecordedIndex() {
+        let store = makeStore()
+        _ = store.newSession(in: projectA)
+        let target = store.newSession(in: projectA)
+        _ = store.newSession(in: projectA)
+        XCTAssertEqual(store.repos.first?.sessions[1].id, target.id, "fixture assumption")
+
+        store.closeSession(target.id)
+        store.reopenClosedSession(id: target.id, directoryExists: { _ in true })
+
+        XCTAssertEqual(store.repos.first?.sessions.count, 3)
+        XCTAssertEqual(store.repos.first?.sessions[1].id, target.id, "not appended")
+        XCTAssertEqual(store.selectedSessionID, target.id)
+    }
+
+    /// The consumed entry must leave the stack, or ⌘⇧T would insert a second tab carrying an
+    /// id the sidebar already holds.
+    func testReopeningByIDConsumesTheEntrySoCommandShiftTPopsTheNextOne() {
+        let store = makeStore()
+        let older = store.newSession(in: projectA)
+        let newer = store.newSession(in: projectA)
+
+        store.closeSession(older.id)
+        store.closeSession(newer.id)
+        // Reach past the top of the stack — what a menu does and ⌘⇧T cannot.
+        store.reopenClosedSession(id: older.id, directoryExists: { _ in true })
+        store.reopenLastClosed(directoryExists: { _ in true })
+
+        let ids = store.repos.first?.sessions.map(\.id) ?? []
+        XCTAssertEqual(ids.count, 2)
+        XCTAssertEqual(Set(ids).count, 2, "no duplicate tab ids")
+        XCTAssertEqual(Set(ids), [older.id, newer.id])
+        XCTAssertTrue(store.recentlyClosedSessions.isEmpty)
+    }
+
+    func testReopeningAnUnknownIDDoesNothing() {
+        let store = makeStore()
+        let session = store.newSession(in: projectA)
+
+        store.reopenClosedSession(id: UUID(), directoryExists: { _ in true })
+
+        XCTAssertEqual(store.repos.first?.sessions.map(\.id), [session.id])
+    }
+
+    /// A tab reopened into a collapsed project would come back invisible — `SidebarRow.rows`
+    /// renders only the header for a collapsed repo. The rule `reopenLastClosed` follows.
+    func testReopeningByIDUncollapsesItsProject() throws {
+        let store = makeStore()
+        let session = store.newSession(in: projectA)
+        let project = try XCTUnwrap(store.repos.first).id
+
+        store.closeSession(session.id)
+        store.setCollapsed(true, forProjectAt: project)
+        store.reopenClosedSession(id: session.id, directoryExists: { _ in true })
+
+        XCTAssertEqual(store.repos.first?.isCollapsed, false)
+    }
+
     final class ScriptedTransport: CodexTransport {
         var onLine: ((String) -> Void)?
         private(set) var methods: [String] = []

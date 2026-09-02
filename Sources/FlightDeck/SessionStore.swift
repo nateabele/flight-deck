@@ -2707,20 +2707,8 @@ final class SessionStore: ObservableObject {
 
         switch entry {
         case .session(let closed):
-            if reinsertClosed(closed, directoryExists: directoryExists) {
-                deferredCodexResumes.append(closed.session.id)
-            }
-            // Matching `addSession` rather than `insertSession`: a tab reopened into a
-            // collapsed project would otherwise come back invisible, since `SidebarRow.rows`
-            // renders only the header for a collapsed repo. The `.project` case below
-            // deliberately does not do this — a project that was collapsed when it was closed
-            // is restored collapsed, because that is the state being undone.
-            let url = URL(fileURLWithPath: closed.projectPath, isDirectory: true)
-            if let target = indexOfRepo(for: url), repos[target].isCollapsed {
-                repos[target].isCollapsed = false
-                emit(.projectCollapsed(id: repos[target].id, isCollapsed: false))
-            }
-            selectedSessionID = closed.session.id
+            reopenSession(closed, directoryExists: directoryExists,
+                          deferredCodexResumes: &deferredCodexResumes)
 
         case .project(let closed):
             let url = URL(fileURLWithPath: closed.path, isDirectory: true)
@@ -2752,15 +2740,70 @@ final class SessionStore: ObservableObject {
             if let first = closed.sessions.first { selectedSessionID = first.session.id }
         }
 
+        settleReopen(deferredCodexResumes)
+    }
+
+    /// Rebuilds one recorded tab, un-collapses its project and selects it. The body ⌘⇧T's
+    /// `.session` case and the phone's `reopenClosedSession` both run, so the two surfaces
+    /// cannot disagree about what a reopen does.
+    ///
+    /// Appends to `deferredCodexResumes` rather than settling anything itself: a caller
+    /// reopening a whole project has several of these to collect before it starts one task.
+    private func reopenSession(
+        _ closed: ClosedSessionHistory.ClosedSession,
+        directoryExists: (String) -> Bool,
+        deferredCodexResumes: inout [UUID]
+    ) {
+        if reinsertClosed(closed, directoryExists: directoryExists) {
+            deferredCodexResumes.append(closed.session.id)
+        }
+        // Matching `addSession` rather than `insertSession`: a tab reopened into a collapsed
+        // project would otherwise come back invisible, since `SidebarRow.rows` renders only
+        // the header for a collapsed repo. The `.project` case deliberately does not do this —
+        // a project that was collapsed when it was closed is restored collapsed, because that
+        // is the state being undone.
+        let url = URL(fileURLWithPath: closed.projectPath, isDirectory: true)
+        if let target = indexOfRepo(for: url), repos[target].isCollapsed {
+            repos[target].isCollapsed = false
+            emit(.projectCollapsed(id: repos[target].id, isCollapsed: false))
+        }
+        selectedSessionID = closed.session.id
+    }
+
+    /// Persist, then start any codex tab whose resume text still has to be settled.
+    ///
+    /// Reuses `restore`'s task handle rather than adding a second one: the two never run
+    /// concurrently in production — `restore` happens once at launch, before any tab can be
+    /// closed — and sharing it keeps one place to await a settling codex tab.
+    private func settleReopen(_ deferredCodexResumes: [UUID]) {
         persist()
-        // Reuses `restore`'s task handle rather than adding a second one: the two never run
-        // concurrently in production — `restore` happens once at launch, before any tab can
-        // be closed — and sharing it keeps one place to await a settling codex tab.
         if !deferredCodexResumes.isEmpty {
             codexRestoreTask = Task { [weak self] in
                 await self?.resumeRestoredCodex(deferredCodexResumes)
             }
         }
+    }
+
+    /// The top-level closed tabs, most recent first — what `FleetService` projects onto the
+    /// wire for the phone's Recently Closed section.
+    var recentlyClosedSessions: [ClosedSessionHistory.ClosedSession] {
+        closedSessions.sessionEntries
+    }
+
+    /// Reopen one recorded tab by id, rather than whatever is on top of the stack.
+    ///
+    /// The phone's counterpart to ⌘⇧T. A no-op when the id is not in the history — ⌘⇧T got
+    /// there first, or it aged past `depth`. Deliberately silent: the tab is in the fleet list
+    /// either way, so there is nothing to tell the phone that it cannot already see.
+    func reopenClosedSession(
+        id: UUID,
+        directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) {
+        guard let closed = closedSessions.takeSession(id: id) else { return }
+        var deferredCodexResumes: [UUID] = []
+        reopenSession(closed, directoryExists: directoryExists,
+                      deferredCodexResumes: &deferredCodexResumes)
+        settleReopen(deferredCodexResumes)
     }
 
     /// Rebuilds one tab onto an existing conversation and starts it resuming.
