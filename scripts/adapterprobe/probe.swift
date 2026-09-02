@@ -78,14 +78,24 @@ struct Probe {
             await emit(answer)
 
         case "open-prompt":
-            guard args.count == 2, let agent = agentID(args[1]) else { usage() }
+            // `--activity <idle|busy|waiting>` is optional; absent, `activity` stays nil exactly
+            // as before. Codex has no reader at all, so it must short-circuit to "unsupported"
+            // ahead of validating the flag's value — an invalid `--activity` must not turn a
+            // codex probe into a usage error, and must not turn a claude probe into a silent nil.
+            guard args.count == 2 || args.count == 4, let agent = agentID(args[1]) else { usage() }
+            if args.count == 4 { guard args[2] == "--activity" else { usage() } }
             let tail = stdinText()
             let answer: [String: Any] = await MainActor.run {
                 guard let reader = agent.openPromptReader else { return ["unsupported": true] }
+                var activity: SessionActivity?
+                if args.count == 4 {
+                    guard let parsed = SessionActivity(rawValue: args[3]) else { usage() }
+                    activity = parsed
+                }
                 let lines = tail.split(separator: "\n").enumerated().map {
                     SourceLine(offset: $0.offset, text: String($0.element))
                 }
-                return ["kind": reader.openPrompt(inTranscriptTail: lines, activity: nil)
+                return ["kind": reader.openPrompt(inTranscriptTail: lines, activity: activity)
                             .map { String(describing: $0) } as Any]
             }
             await emit(answer)
