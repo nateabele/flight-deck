@@ -485,7 +485,21 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         connector.onState = { [weak self] state in
             MainActor.assumeIsolated {
                 self?.state = state
-                if case .connected = state { self?.lastLive = Date() }
+                if case .connected = state {
+                    self?.lastLive = Date()
+                    // Every model is told, not only the one on screen: `timelineModels` is
+                    // never evicted, so a reader who has opened ten sessions holds ten of
+                    // these, and each decides for itself via `isOnScreen` whether a resumed
+                    // link is its business. `.connected` is the right signal to fan out here
+                    // because it fires once per successful dial and covers snapshot, replay
+                    // and empty-replay alike — unlike the open session's own triggers
+                    // (`.task(id:)`, its two `.onChange`s, the busy poll), none of which fire
+                    // on a reconnect that changes nothing the screen was already watching.
+                    // `FleetConnector.accept()` sets `winner` before reporting `.connected`
+                    // (FleetConnector.swift:521,530), so `linkResumed()`'s own calls back out
+                    // through `fleet` already ride the new link rather than a dead one.
+                    self?.timelineModels.values.forEach { $0.linkResumed() }
+                }
                 PhoneLog.connection.notice("state \(Self.describe(state), privacy: .public)")
             }
         }
