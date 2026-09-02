@@ -467,8 +467,30 @@ final class FleetService: ObservableObject {
                 // A phone that vanished mid-session never sends `viewing(nil)`, so presence is
                 // pruned from the authoritative attached set rather than trusted to clean up
                 // after itself — otherwise a badge glows for a phone that is gone.
-                if slots.isEmpty, !self.viewingByClient.isEmpty {
-                    self.viewingByClient.removeAll()
+                //
+                // **Per client, not all-or-nothing, and `attachments` rather than `slots` is
+                // what makes that possible.** This was `if slots.isEmpty { removeAll() }`,
+                // which only ever fired when the LAST phone detached — so a client that went
+                // away while any other was still attached left its entry behind forever. That
+                // is not an edge case: it is every wake of every phone. The handset rebuilds
+                // its connector on returning from the background (see `RedialOnReturn`), the
+                // old connection dies and a new one arrives with a new id, and `slots` never
+                // passes through empty in between, so the Mac kept a viewer that no longer
+                // existed and drew the badge for it.
+                //
+                // `slots` is the wrong key to prune on even now: a slot is the paired DEVICE,
+                // and two connections from one device — precisely what a reconnect produces
+                // for the moment they overlap — share one. `viewingByClient` is keyed by
+                // connection id, and `attachments` is the server's live set of those
+                // (`FleetSocketServer.attachments`), so the two line up exactly.
+                //
+                // Reading `attachments` here is safe for the same reason the `assumeIsolated`
+                // above is: it asserts `.onQueue(queue)`, and this handler already runs on the
+                // server's queue, which is `.main`.
+                let live = Set(self.server.attachments.map(\.id))
+                let kept = self.viewingByClient.filter { live.contains($0.key) }
+                if kept.count != self.viewingByClient.count {
+                    self.viewingByClient = kept
                     self.publishPhonePresence()
                 }
             }
