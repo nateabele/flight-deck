@@ -1,0 +1,4 @@
+# Compiled probe, venv leftovers and caches — see README.md.
+probe
+*.log
+__pycache__/
