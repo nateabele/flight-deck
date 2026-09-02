@@ -135,8 +135,12 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// **Unreachable until `FleetRequest.recentlyClosed` has been answered, and that ordering
     /// is load-bearing.** `FleetCommand` throws on an unknown op and a `cmd` is NOT salvaged by
     /// `FleetSocketServer`'s `onUndecodable` — only a `req` is — so sending this to a Mac built
-    /// before the feature would drop the connection. It is safe only because an old Mac refuses
-    /// the request, which leaves the phone with no section and no row to tap.
+    /// before the feature would drop the connection. It is safe because an old Mac refuses the
+    /// request, which leaves the phone with no section and no row to tap, and because
+    /// `FleetModel.refreshRecentlyClosed` clears its cached list on that refusal rather than
+    /// leaving the last answer standing — so a Mac downgraded under a live phone loses the
+    /// section on its next refresh instead of leaving a cached row from before it that is now
+    /// tappable into an undecodable command.
     ///
     /// A no-op on the Mac when the entry has gone: ⌘⇧T consumed it, or it aged past
     /// `ClosedSessionHistory.depth`. Answered with `ack` either way — the tab is in the fleet
