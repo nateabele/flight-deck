@@ -171,65 +171,69 @@ git commit -m "feat: let the reopen stack be read and taken from by id"
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `Tests/FlightDeckTests/ReopenClosedSessionTests.swift`. Match the fixture style
-already in that file for building a store with projects and sessions — read it first and reuse
-its helpers rather than inventing new ones.
+Append to `Tests/FlightDeckTests/ReopenClosedSessionTests.swift`, inside the existing class.
+That file already has the fixture these use: `makeStore(provider:)`, `projectA`, and a
+`store.newSession(in:)` that appends and returns the `Session`.
 
 ```swift
-    /// The phone's reopen is ⌘⇧T aimed at one entry, and must land the tab in the same place.
-    @MainActor
+    /// The phone's reopen is ⌘⇧T aimed at one entry, and it must land the tab back among
+    /// its siblings rather than at the bottom.
     func testReopeningByIDRebuildsTheTabAtItsRecordedIndex() {
-        let store = makeStore(projects: ["/w/a"], sessionsPerProject: 3)
-        let target = store.repos[0].sessions[1].id
+        let store = makeStore()
+        _ = store.newSession(in: projectA)
+        let target = store.newSession(in: projectA)
+        _ = store.newSession(in: projectA)
+        XCTAssertEqual(store.repos.first?.sessions[1].id, target.id, "fixture assumption")
 
-        store.closeSession(target)
-        store.reopenClosedSession(id: target, directoryExists: { _ in true })
+        store.closeSession(target.id)
+        store.reopenClosedSession(id: target.id, directoryExists: { _ in true })
 
-        XCTAssertEqual(store.repos[0].sessions.count, 3)
-        XCTAssertEqual(store.repos[0].sessions[1].id, target, "back among its siblings")
-        XCTAssertEqual(store.selectedSessionID, target)
+        XCTAssertEqual(store.repos.first?.sessions.count, 3)
+        XCTAssertEqual(store.repos.first?.sessions[1].id, target.id, "not appended")
+        XCTAssertEqual(store.selectedSessionID, target.id)
     }
 
-    /// The consumed entry must not still be on the stack, or ⌘⇧T would insert a duplicate id.
-    @MainActor
+    /// The consumed entry must leave the stack, or ⌘⇧T would insert a second tab carrying an
+    /// id the sidebar already holds.
     func testReopeningByIDConsumesTheEntrySoCommandShiftTPopsTheNextOne() {
-        let store = makeStore(projects: ["/w/a"], sessionsPerProject: 3)
-        let older = store.repos[0].sessions[0].id
-        let newer = store.repos[0].sessions[1].id
+        let store = makeStore()
+        let older = store.newSession(in: projectA)
+        let newer = store.newSession(in: projectA)
 
-        store.closeSession(older)
-        store.closeSession(newer)
-        // Reach past the top of the stack, which is what a menu does and ⌘⇧T cannot.
-        store.reopenClosedSession(id: older, directoryExists: { _ in true })
+        store.closeSession(older.id)
+        store.closeSession(newer.id)
+        // Reach past the top of the stack — what a menu does and ⌘⇧T cannot.
+        store.reopenClosedSession(id: older.id, directoryExists: { _ in true })
         store.reopenLastClosed(directoryExists: { _ in true })
 
-        XCTAssertEqual(store.repos[0].sessions.count, 3)
-        XCTAssertEqual(Set(store.repos[0].sessions.map(\.id)).count, 3, "no duplicate tab ids")
+        let ids = store.repos.first?.sessions.map(\.id) ?? []
+        XCTAssertEqual(ids.count, 2)
+        XCTAssertEqual(Set(ids).count, 2, "no duplicate tab ids")
+        XCTAssertEqual(Set(ids), [older.id, newer.id])
         XCTAssertTrue(store.recentlyClosedSessions.isEmpty)
     }
 
-    @MainActor
     func testReopeningAnUnknownIDDoesNothing() {
-        let store = makeStore(projects: ["/w/a"], sessionsPerProject: 2)
-        let before = store.repos[0].sessions.map(\.id)
+        let store = makeStore()
+        let session = store.newSession(in: projectA)
 
         store.reopenClosedSession(id: UUID(), directoryExists: { _ in true })
 
-        XCTAssertEqual(store.repos[0].sessions.map(\.id), before)
+        XCTAssertEqual(store.repos.first?.sessions.map(\.id), [session.id])
     }
 
     /// A tab reopened into a collapsed project would come back invisible — `SidebarRow.rows`
-    /// renders only the header for a collapsed repo. Same rule `reopenLastClosed` follows.
-    @MainActor
-    func testReopeningByIDUncollapsesItsProject() {
-        let store = makeStore(projects: ["/w/a"], sessionsPerProject: 2)
-        let target = store.repos[0].sessions[0].id
+    /// renders only the header for a collapsed repo. The rule `reopenLastClosed` follows.
+    func testReopeningByIDUncollapsesItsProject() throws {
+        let store = makeStore()
+        let session = store.newSession(in: projectA)
+        let project = try XCTUnwrap(store.repos.first).id
 
-        store.closeSession(target)
-        store.setCollapsed(true, forProjectAt: store.repos[0].id)
-        store.reopenClosedSession(id: target, directoryExists: { _ in true })
+        store.closeSession(session.id)
+        store.setCollapsed(true, forProjectAt: project)
+        store.reopenClosedSession(id: session.id, directoryExists: { _ in true })
 
-        XCTAssertFalse(store.repos[0].isCollapsed)
+        XCTAssertEqual(store.repos.first?.isCollapsed, false)
     }
 ```
 
@@ -524,17 +528,43 @@ git commit -m "feat: wire vocabulary for reopening a closed tab from a client"
 
 - [ ] **Step 1: Write the failing tests**
 
-Read `Tests/FlightDeckTests/FleetConnectorRequestTests.swift` first and reuse its existing
-harness for standing up a connector against a `FleetSocketServer`. Add, in that file's style:
+Append to `Tests/FlightDeckTests/FleetConnectorRequestTests.swift`. That file's
+`startConnector()` already answers the `macEndpoints` refresh every connect makes and
+delegates everything else to the `server.onRequest` set **before** it is called — so install
+the handler first, exactly as `testARequestResolvesWithItsPage` does.
 
 ```swift
-    func testRecentlyClosedResolvesOnItsOwnCID() async throws { /* … mirror the newSessionOptions test in this file, with FleetRequest.recentlyClosed and a ServerFrame.recentlyClosed reply … */ }
+    func testARecentlyClosedRequestResolvesWithItsOwnList() async throws {
+        let expected = [WireClosedSession(id: UUID(), title: "fix the pager",
+                                          agent: "claude", projectPath: "/w/a")]
+        server.onRequest = { _, cid, request, reply in
+            guard case .recentlyClosed = request else { return XCTFail("wrong verb") }
+            reply(.recentlyClosed(cid: cid, expected))
+        }
+        let (connector, _) = try await startConnector()
 
-    func testAnErrForARecentlyClosedRequestFailsThatCompletionOnce() async throws { /* … mirror the newSessionOptions err test: reply .err(cid:code: "unsupported"), assert one .failure(.server(code: "unsupported")) and no second call … */ }
+        let answered = expectation(description: "answered")
+        var result: Result<[WireClosedSession], FleetRequestError>?
+        connector.requestRecentlyClosed { result = $0; answered.fulfill() }
+        await fulfillment(of: [answered], timeout: 10)
+        XCTAssertEqual(result, .success(expected))
+    }
+
+    /// A Mac built before this feature refuses the request rather than dropping the socket —
+    /// `FleetSocketServer`'s `onUndecodable` salvages a `req` it cannot parse into an `err` on
+    /// that cid. The phone has to see one failure, on its own completion, so the section simply
+    /// never renders there.
+    func testAnErrForARecentlyClosedRequestFailsThatCompletionExactlyOnce() async throws {
+        server.onRequest = { _, cid, _, reply in reply(.err(cid: cid, code: "unsupported")) }
+        let (connector, _) = try await startConnector()
+
+        let answered = expectation(description: "answered")
+        var results: [Result<[WireClosedSession], FleetRequestError>] = []
+        connector.requestRecentlyClosed { results.append($0); answered.fulfill() }
+        await fulfillment(of: [answered], timeout: 10)
+        XCTAssertEqual(results, [.failure(.server(code: "unsupported"))])
+    }
 ```
-
-Write both out in full against the harness that file already has — do not leave the comment
-placeholders above in the committed test.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -670,10 +700,45 @@ final class ClosedSessionProjectionTests: XCTestCase {
 }
 ```
 
-In `Tests/FlightDeckTests/FleetAccountEmissionTests.swift`, extend the existing
-"nothing that resolves to a home reaches the wire" assertion to cover an encoded
-`ServerFrame.recentlyClosed` — read that file and follow whatever shape its current
-assertion uses rather than inventing a parallel one.
+Append to `Tests/FlightDeckTests/FleetAccountEmissionTests.swift`, beside
+`testAnAccountsHomeNeverReachesTheNewSessionMenu` and following its shape — encoded and
+searched rather than inspected field by field, so it survives somebody adding a field to
+`WireClosedSession`:
+
+```swift
+    /// The same assertion, over the reopen list.
+    ///
+    /// A `ClosedSession` holds the **whole** recorded `Session` — `accountID`,
+    /// `pinnedConversationID` and `transcriptDirectory` with it — so `ClosedSessionProjection`
+    /// is the only thing standing between that value and the wire. That makes this the highest
+    /// leak risk in the feature, not a formality.
+    func testAnAccountsHomeNeverReachesTheRecentlyClosedList() throws {
+        let (preferences, work) = configured(.claude)
+        let store = makeStore(preferences)
+        let session = store.newSession(in: projectURL)
+        XCTAssertEqual(session.accountID, work.id, "the tab really is account-bearing")
+        store.closeSession(session.id)
+
+        let rows = ClosedSessionProjection.rows(for: store.recentlyClosedSessions)
+        XCTAssertFalse(rows.isEmpty, "a closed tab must produce a row, or this asserts nothing")
+
+        // Unescaped before searching, for the reason the snapshot assertion above gives:
+        // `JSONEncoder` writes `/` as `\/`, so a raw `contains(somePath)` would be false no
+        // matter what the rows held and every assertion below would pass vacuously.
+        let encoded = try XCTUnwrap(
+            String(data: JSONEncoder().encode(rows), encoding: .utf8)
+        ).replacingOccurrences(of: "\\/", with: "/")
+
+        XCTAssertFalse(encoded.contains(work.home.path), "a config directory is not wire state")
+        XCTAssertFalse(encoded.contains(work.id.uuidString), "nor is the id that resolves to one")
+        if let conversation = session.pinnedConversationID {
+            XCTAssertFalse(encoded.contains(conversation.uuidString),
+                           "a reopen is named by tab id; the conversation stays on the Mac")
+        }
+        XCTAssertTrue(encoded.contains(projectURL.path),
+                      "the project root still travels — it is what buckets the menu")
+    }
+```
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -814,9 +879,55 @@ that is where this screen's decisions are assertable from a unit-test bundle:
     }
 ```
 
-In `Tests/FlightDeckMobileTests/FleetModelTests.swift`, add a test in that file's existing style
-asserting that a snapshot delivered through the connector leaves `recentlyClosed` populated from
-the Mac's answer. Read the file first and reuse its harness.
+The wiring test goes in `FleetListScreenTests` too, **not** `FleetModelTests` — that file has
+no socket harness (its tests are about pairing and pure functions), while this one already
+stands a real `FleetSocketServer` up in `connectedModel()`.
+
+First add a fixture and one arm to `connectedModel()`'s `onRequest`, above its `.timeline`
+guard — that guard `return`s on every other verb, and an unanswered request leaves a fetch in
+flight for fifteen seconds:
+
+```swift
+    private static let closed = [
+        WireClosedSession(id: UUID(), title: "fix the pager",
+                          agent: "claude", projectPath: "/Users/nate")
+    ]
+```
+
+```swift
+        server.onRequest = { _, cid, request, reply in
+            if case .recentlyClosed = request {
+                return reply(.recentlyClosed(cid: cid, Self.closed))
+            }
+            guard case .timeline(let session, _, _) = request else { return }
+            reply(.page(cid: cid, TimelinePage(
+                session: session, items: [], start: 0, end: 0, hasMore: false, reset: false
+            )))
+        }
+```
+
+Then the test:
+
+```swift
+    /// **The wiring, which the pure tests above cannot reach.**
+    ///
+    /// `refreshRecentlyClosed` hangs off `onFleet`, which fires on snapshots *and* on every
+    /// folded event — that is what makes a tab the phone just closed appear in the `+` without
+    /// a background-and-return. A model that never asked would leave `closedRows` filtering an
+    /// empty list forever, and every assertion above would still be green. This file exists
+    /// because that is exactly how this screen has failed before.
+    func testTheModelAsksForTheReopenListOnConnect() async throws {
+        let model = try await connectedModel()
+
+        let deadline = Date().addingTimeInterval(10)
+        while model.recentlyClosed.isEmpty, Date() < deadline {
+            // A sleep rather than a run-loop spin, for `connectedModel`'s reason: yielding the
+            // main actor is what lets the connector's own main-queue callbacks land.
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(model.recentlyClosed, Self.closed)
+    }
+```
 
 - [ ] **Step 2: Run to verify they fail**
 
