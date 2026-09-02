@@ -157,6 +157,20 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     /// out of the log.
     case newSessionOptions(project: UUID)
 
+    /// Every reopenable tab the Mac is holding, across all projects.
+    ///
+    /// **A request rather than snapshot state**, for the reason `newSessionOptions` records and
+    /// a sharper one: the history is not rebuildable from fleet events. `sessionRemoved` carries
+    /// an id and nothing else — no project path, no index, no pinned conversation — so a
+    /// `FleetReplicator` replay could not reconstruct it and its drift assertion would fail.
+    ///
+    /// **Global rather than per-project, unlike `newSessionOptions`.** That one is per-project
+    /// because each project resolves genuinely different rows out of preferences; here there is
+    /// one stack on the Mac and bucketing it by `projectPath` on the phone is a filter, not a
+    /// second implementation. It is also one frame per refresh instead of N, which matters
+    /// because the phone refreshes this on every fleet event.
+    case recentlyClosed
+
     /// Every address this Mac can currently be reached on, best-first.
     ///
     /// **A request rather than snapshot state**, for the reason `newSessionOptions` records:
@@ -191,6 +205,7 @@ public enum FleetRequest: Codable, Equatable, Sendable {
     private enum Op: String, Codable {
         case timeline = "timeline.page"
         case newSessionOptions = "session.newOptions"
+        case recentlyClosed = "session.recentlyClosed"
         case macEndpoints = "mac.endpoints"
         case conversations = "search.conversations"
         case search = "search.query"
@@ -211,6 +226,8 @@ public enum FleetRequest: Codable, Equatable, Sendable {
         case .newSessionOptions(let project):
             try c.encode(Op.newSessionOptions, forKey: .op)
             try c.encode(project, forKey: .project)
+        case .recentlyClosed:
+            try c.encode(Op.recentlyClosed, forKey: .op)
         case .macEndpoints:
             try c.encode(Op.macEndpoints, forKey: .op)
         case .conversations:
@@ -249,6 +266,8 @@ public enum FleetRequest: Codable, Equatable, Sendable {
             )
         case .newSessionOptions:
             self = .newSessionOptions(project: try c.decode(UUID.self, forKey: .project))
+        case .recentlyClosed:
+            self = .recentlyClosed
         case .macEndpoints:
             self = .macEndpoints
         case .conversations:

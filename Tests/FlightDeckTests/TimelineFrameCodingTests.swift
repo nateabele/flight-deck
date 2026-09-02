@@ -207,6 +207,17 @@ final class TimelineFrameCodingTests: XCTestCase {
         XCTAssertEqual(json["projectPath"] as? String, "/proj")
     }
 
+    func testTheRecentlyClosedRequestRoundTrips() throws {
+        let frame = ClientFrame.req(cid: 9, .recentlyClosed)
+        let data = try JSONEncoder().encode(frame)
+        XCTAssertEqual(try JSONDecoder().decode(ClientFrame.self, from: data), frame)
+        // The op reads as one line in a packet dump, flattened beside the cid.
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        XCTAssertEqual(json["op"] as? String, "session.recentlyClosed")
+    }
+
     // MARK: The page
 
     func testAPageRoundTrips() throws {

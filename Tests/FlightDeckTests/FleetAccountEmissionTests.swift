@@ -246,6 +246,51 @@ final class FleetAccountEmissionTests: XCTestCase {
         XCTAssertTrue(encoded.contains("Work"), "the display name is what a row is for")
     }
 
+    /// The same assertion, over the reopen list.
+    ///
+    /// A `ClosedSession` holds the **whole** recorded `Session` — `accountID`,
+    /// `pinnedConversationID` and `transcriptDirectory` with it — so `ClosedSessionProjection`
+    /// is the only thing standing between that value and the wire. That makes this the highest
+    /// leak risk in the feature, not a formality.
+    func testAnAccountsHomeNeverReachesTheRecentlyClosedList() throws {
+        let (preferences, work) = configured(.claude)
+        let store = makeStore(preferences)
+        let session = store.newSession(in: projectURL)
+        XCTAssertEqual(session.accountID, work.id, "the tab really is account-bearing")
+        store.closeSession(session.id)
+
+        let recorded = try XCTUnwrap(
+            store.recentlyClosedSessions.first,
+            "a closed tab must be recorded, or this asserts nothing"
+        )
+        // Repointed at a conversation of its own before projecting, exactly as an in-session
+        // `/resume` does. `pinnedConversationID` is the tab's **own id** at birth, and the tab
+        // id is deliberately on the wire — so a freshly closed tab would make the assertion
+        // below pass no matter what the projection carried.
+        let conversation = UUID()
+        var repinned = recorded.session
+        repinned.pinnedConversationID = conversation
+        let rows = ClosedSessionProjection.rows(for: [ClosedSessionHistory.ClosedSession(
+            session: repinned, projectPath: recorded.projectPath,
+            indexInProject: recorded.indexInProject
+        )])
+        XCTAssertFalse(rows.isEmpty, "a closed tab must produce a row, or this asserts nothing")
+
+        // Unescaped before searching, for the reason the snapshot assertion above gives:
+        // `JSONEncoder` writes `/` as `\/`, so a raw `contains(somePath)` would be false no
+        // matter what the rows held and every assertion below would pass vacuously.
+        let encoded = try XCTUnwrap(
+            String(data: JSONEncoder().encode(rows), encoding: .utf8)
+        ).replacingOccurrences(of: "\\/", with: "/")
+
+        XCTAssertFalse(encoded.contains(work.home.path), "a config directory is not wire state")
+        XCTAssertFalse(encoded.contains(work.id.uuidString), "nor is the id that resolves to one")
+        XCTAssertFalse(encoded.contains(conversation.uuidString),
+                       "a reopen is named by tab id; the conversation stays on the Mac")
+        XCTAssertTrue(encoded.contains(projectURL.path),
+                      "the project root still travels — it is what buckets the menu")
+    }
+
     // MARK: - Fixtures
 
     /// Discards every write, so nothing here reaches the developer's `sessions.json`.

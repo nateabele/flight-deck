@@ -469,4 +469,35 @@ final class FleetConnectorRequestTests: XCTestCase {
         await fulfillment(of: [answered], timeout: 10)
         XCTAssertEqual(store.load()?.lastSeq, 500, "a history fetch is not fleet history")
     }
+
+    func testARecentlyClosedRequestResolvesWithItsOwnList() async throws {
+        let expected = [WireClosedSession(id: UUID(), title: "fix the pager",
+                                          agent: "claude", projectPath: "/w/a")]
+        server.onRequest = { _, cid, request, reply in
+            guard case .recentlyClosed = request else { return XCTFail("wrong verb") }
+            reply(.recentlyClosed(cid: cid, expected))
+        }
+        let (connector, _) = try await startConnector()
+
+        let answered = expectation(description: "answered")
+        var result: Result<[WireClosedSession], FleetRequestError>?
+        connector.requestRecentlyClosed { result = $0; answered.fulfill() }
+        await fulfillment(of: [answered], timeout: 10)
+        XCTAssertEqual(result, .success(expected))
+    }
+
+    /// A Mac built before this feature refuses the request rather than dropping the socket —
+    /// `FleetSocketServer`'s `onUndecodable` salvages a `req` it cannot parse into an `err` on
+    /// that cid. The phone has to see one failure, on its own completion, so the section simply
+    /// never renders there.
+    func testAnErrForARecentlyClosedRequestFailsThatCompletionExactlyOnce() async throws {
+        server.onRequest = { _, cid, _, reply in reply(.err(cid: cid, code: "unsupported")) }
+        let (connector, _) = try await startConnector()
+
+        let answered = expectation(description: "answered")
+        var results: [Result<[WireClosedSession], FleetRequestError>] = []
+        connector.requestRecentlyClosed { results.append($0); answered.fulfill() }
+        await fulfillment(of: [answered], timeout: 10)
+        XCTAssertEqual(results, [.failure(.server(code: "unsupported"))])
+    }
 }
