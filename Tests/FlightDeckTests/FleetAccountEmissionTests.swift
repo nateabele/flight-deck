@@ -263,13 +263,24 @@ final class FleetAccountEmissionTests: XCTestCase {
             store.recentlyClosedSessions.first,
             "a closed tab must be recorded, or this asserts nothing"
         )
-        // Repointed at a conversation of its own before projecting, exactly as an in-session
-        // `/resume` does. `pinnedConversationID` is the tab's **own id** at birth, and the tab
-        // id is deliberately on the wire — so a freshly closed tab would make the assertion
-        // below pass no matter what the projection carried.
+        // Every field named in this test's doc comment is given a value of its own before
+        // projecting, so each one is independently detectable. Left as the fixture records
+        // them, none of them are: `pinnedConversationID` is the tab's **own id** at birth and
+        // the tab id is deliberately on the wire; `transcriptDirectory` equals
+        // `workingDirectory` — the project root this test asserts is *present*; and a claude
+        // tab reports no `transcriptPath` at all, so it encodes as nothing. A projection that
+        // emitted any of the three would pass on the untouched values.
+        //
+        // `transcriptPath` is the sharp one, and the reason it is pointed under the account
+        // home here: codex fills it from `binding.transcriptURL`, an absolute rollout path
+        // beneath the agent/account home, which is exactly the leak this test exists to catch.
         let conversation = UUID()
+        let transcriptDirectory = work.home.appendingPathComponent("projects/leaky").path
+        let transcriptPath = work.home.appendingPathComponent("sessions/leaky.jsonl").path
         var repinned = recorded.session
         repinned.pinnedConversationID = conversation
+        repinned.transcriptDirectory = transcriptDirectory
+        repinned.transcriptPath = transcriptPath
         let rows = ClosedSessionProjection.rows(for: [ClosedSessionHistory.ClosedSession(
             session: repinned, projectPath: recorded.projectPath,
             indexInProject: recorded.indexInProject
@@ -287,6 +298,10 @@ final class FleetAccountEmissionTests: XCTestCase {
         XCTAssertFalse(encoded.contains(work.id.uuidString), "nor is the id that resolves to one")
         XCTAssertFalse(encoded.contains(conversation.uuidString),
                        "a reopen is named by tab id; the conversation stays on the Mac")
+        XCTAssertFalse(encoded.contains(transcriptDirectory),
+                       "where the Mac tails a transcript is not wire state either")
+        XCTAssertFalse(encoded.contains(transcriptPath),
+                       "nor is the rollout file a codex tab reports")
         XCTAssertTrue(encoded.contains(projectURL.path),
                       "the project root still travels — it is what buckets the menu")
     }
