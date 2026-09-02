@@ -197,6 +197,11 @@ final class SessionTimelinePromptTests: XCTestCase {
     /// Each refusal sends the reader somewhere different, which is why the wire distinguishes
     /// them at all. One generic message would leave someone retyping a message that will
     /// never be taken.
+    ///
+    /// The copy asserted here is the LATE refusal, and it deliberately does not name the
+    /// typeable agents — see `SessionTimelineModel.promptMessage(for:)`. It stopped naming
+    /// them when codex became typeable, because a Mac on a newer build than the phone knows a
+    /// list the phone does not.
     func testARefusalCarriesTheMacsOwnReason() {
         let fleet = StubFleet()
         let model = model(fleet)
@@ -205,7 +210,7 @@ final class SessionTimelinePromptTests: XCTestCase {
 
         XCTAssertEqual(
             model.outbox.entries.map(\.state),
-            [.failed("Flight Deck can only type into a Claude session from here.")]
+            [.failed("Flight Deck can't type into this kind of session from here.")]
         )
     }
 

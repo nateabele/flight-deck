@@ -44,6 +44,10 @@ final class FleetService: ObservableObject {
     /// command for the reason `timeline` is: it holds the store, and there is exactly one of
     /// it — a command carries its own session id, so nothing about it is per-connection.
     private let prompts: PromptService
+    /// Finds, describes and acts on plan gates. Also assigned to `store.planGates`, which is
+    /// the single instance every `FleetProjection` call site reads — the oracle snapshot
+    /// below included — so a gate can never be present in one and absent in the other.
+    private let planGates: PlanGateService
     /// Records what this Mac decides about each session's dialog and what it pushes about it.
     /// Observability only — it reads the store and the frames already sent, and changes
     /// nothing. See `PromptLifecycleObserver` for why the push side needs its own witness.
@@ -96,9 +100,29 @@ final class FleetService: ObservableObject {
         self.preferences = preferences
         self.armer = armer
         self.server = FleetSocketServer()
+        // The three closures are the production wiring for the test seams `PlanGateService`
+        // declares. `callID` re-derives the open `ExitPlanMode` call from a transcript tail —
+        // `PromptService`'s own read, sized the same — through `ClaudeOpenPlanGate`, which
+        // (unlike `ClaudeOpenCall`/`OpenPrompt.find`) does not gate on `waiting`: gating on it
+        // is exactly the defect a plan gate exists to fix, since claude reports `busy` while
+        // one is open.
+        let planGates = PlanGateService(
+            callID: { [weak store] session in
+                guard let store,
+                      case .file(.claude, let url) = store.timelineSource(of: session)
+                else { return nil }
+                let lines = TranscriptPager.page(
+                    url: url, anchor: .latest, limit: PromptService.tailRecords
+                )?.lines ?? []
+                return ClaudeOpenPlanGate.find(in: lines)
+            },
+            pid: { [weak store] session in store?.claudePID(of: session) },
+            sessions: { [weak store] in store?.allSessionIDs() ?? [] }
+        )
+        self.planGates = planGates
         self.replicator = FleetReplicator { [weak store] in
             guard let store else { return .empty }
-            return FleetProjection.snapshot(of: store)
+            return FleetProjection.snapshot(of: store, planGates: planGates)
         }
         self.timeline = TimelineService(store: store)
         let prompts = PromptService(store: store)
@@ -108,6 +132,9 @@ final class FleetService: ObservableObject {
         self.promptLifecycle = PromptLifecycleObserver(store: store, prompts: prompts)
         self.serviceName = Self.derivedServiceName(preferences: preferences)
         store.replicator = replicator
+        // The single live instance every `FleetProjection` call site reads — see the
+        // `planGates` doc comment above.
+        store.planGates = planGates
         // The same `PromptService` again, and that is the point: what this Mac *pushes* as the
         // open dialog and what it *refuses an answer against* are now one object reading one
         // transcript. Two would be two opinions, and a phone told one thing and judged by
@@ -964,6 +991,45 @@ final class FleetService: ObservableObject {
                 session: id, call: call, answer: answer, token: token
             ) {
                 return .err(cid: cid, code: code.code)
+            }
+        case .annotatePlan(let id, let token, let call, let text, let block):
+            // Dispatched, not awaited — `onCommand` answers inline and has no reply channel
+            // of its own, the same constraint `.newSession` is under. A refusal here is
+            // logged rather than surfaced: the phone already has its ack, and the next
+            // `plan.*` poll or command against a stale `call` will refuse again with a code
+            // it *can* see, so nothing is silently lost — only slower to notice than a
+            // synchronous `.err` would have been.
+            Task { @MainActor in
+                if case .failure(let code) = await self.planGates.annotate(
+                    session: id, call: call, text: text, block: block, token: token
+                ) {
+                    Self.logger.error(
+                        "plan annotate from phone failed: \(code.code, privacy: .public)"
+                    )
+                }
+                // A successful annotate mutates `planGates.gates[id]` (the annotation count,
+                // a `WirePlanGate` field) directly, off the poll cycle `deliverPlanGateNotifications`
+                // otherwise relies on. Between now and the next `applyRegistry` tick, the
+                // oracle's live read of this gate is ahead of the event-fold mirror — the same
+                // shape of drift `deliverPlanGateNotifications`'s own batching fix closes for
+                // `refresh()`, just reached from the command path instead. Calling it here
+                // closes the window immediately instead of leaving it open for however long
+                // until the next tick happens to run; it is a no-op on the failure branch,
+                // since nothing there changed the gate.
+                self.store.deliverPlanGateNotifications()
+            }
+        case .resolvePlan(let id, let token, let call, let approve, let feedback):
+            Task { @MainActor in
+                if case .failure(let code) = await self.planGates.resolve(
+                    session: id, call: call, approve: approve, feedback: feedback, token: token
+                ) {
+                    Self.logger.error(
+                        "plan resolve from phone failed: \(code.code, privacy: .public)"
+                    )
+                }
+                // Same reasoning as `.annotatePlan` above: a successful resolve clears
+                // `planGates.gates[id]` directly, ahead of the next poll tick.
+                self.store.deliverPlanGateNotifications()
             }
         }
         // `ack` means dispatched, not done. For the two read marks the observable effect is

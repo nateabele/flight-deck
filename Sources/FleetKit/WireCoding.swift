@@ -15,6 +15,7 @@ enum FleetEventTag: String, Codable {
     case renamed = "session.renamed"
     case activityChanged = "session.activity"
     case unreadChanged = "session.unread"
+    case planGateChanged = "session.planGate"
     case promptExpired = "prompt.expired"
 }
 
@@ -23,6 +24,7 @@ extension FleetEvent: Codable {
         case t, id, at, order, title, origin, token
         case project, session, projectId
         case activity, waitingFor, subagentCount, isUnread, isCollapsed, hasBackgroundWork
+        case gate
         case openPromptCall
     }
 
@@ -86,6 +88,12 @@ extension FleetEvent: Codable {
             try c.encode(FleetEventTag.unreadChanged, forKey: .t)
             try c.encode(id, forKey: .id)
             try c.encode(isUnread, forKey: .isUnread)
+        case .planGateChanged(let id, let gate):
+            try c.encode(FleetEventTag.planGateChanged, forKey: .t)
+            try c.encode(id, forKey: .id)
+            // Absent, not `null`: a decoder on an older build that has never heard of this
+            // key must see exactly what it would from a Mac that predates the case entirely.
+            try c.encodeIfPresent(gate, forKey: .gate)
         case .promptExpired(let id, let token):
             try c.encode(FleetEventTag.promptExpired, forKey: .t)
             try c.encode(id, forKey: .id)
@@ -136,6 +144,11 @@ extension FleetEvent: Codable {
         case .unreadChanged:
             self = .unreadChanged(id: try c.decode(UUID.self, forKey: .id),
                                   isUnread: try c.decode(Bool.self, forKey: .isUnread))
+        case .planGateChanged:
+            self = .planGateChanged(
+                id: try c.decode(UUID.self, forKey: .id),
+                gate: try c.decodeIfPresent(WirePlanGate.self, forKey: .gate)
+            )
         case .promptExpired:
             self = .promptExpired(id: try c.decode(UUID.self, forKey: .id),
                                   token: try c.decode(UUID.self, forKey: .token))

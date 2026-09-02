@@ -79,6 +79,9 @@ extension FleetSnapshot {
 
         case .unreadChanged(let id, let isUnread):
             mutate(id) { $0.isUnread = isUnread }
+
+        case .planGateChanged(let id, let gate):
+            mutate(id) { $0.planGate = gate }
         }
     }
 

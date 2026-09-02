@@ -39,6 +39,23 @@ final class FleetReplayFoldTests: XCTestCase {
         assertFoldPreservesOutcome(flaps)
     }
 
+    /// A gate can open, close, and reopen inside one resume gap — the poll runs every couple
+    /// of seconds and a plan can be revised more than once while a phone is away. Only the
+    /// last state is real by the time a reconnecting client would see it.
+    func testRepeatedPlanGateChangesCollapseToTheLast() {
+        let gate1 = WirePlanGate(callID: "c1", tier: "annotate", plan: "# A",
+                                startedAt: "2026-08-29T17:40:36.186Z", annotationCount: 0)
+        let gate2 = WirePlanGate(callID: "c2", tier: "annotate", plan: "# B",
+                                startedAt: "2026-08-29T17:41:00.000Z", annotationCount: 0)
+        let flaps: [FleetEvent] = [
+            .planGateChanged(id: a, gate: gate1),
+            .planGateChanged(id: a, gate: nil),
+            .planGateChanged(id: a, gate: gate2)
+        ]
+        XCTAssertEqual(FleetReplay.fold(flaps), [.planGateChanged(id: a, gate: gate2)])
+        assertFoldPreservesOutcome(flaps)
+    }
+
     func testRepeatedRenamesCollapseToTheLast() {
         let renames: [FleetEvent] = ["x", "y", "z"].map {
             .renamed(id: a, title: $0, origin: .agent)

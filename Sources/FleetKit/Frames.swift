@@ -222,9 +222,23 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// read, so a retry must be free.
     case answerPrompt(id: UUID, token: UUID, call: String, answer: PromptAnswer)
 
+    /// One comment on an open plan gate. `block` is an **index into the Mac's own
+    /// `PlanBlocks.split` of the plan**, never the text: the Mac resolves it against its own
+    /// copy, so a phone cannot name a phrase this plan never held. Same principle as
+    /// `PromptAnswer.option` carrying a label the Mac cross-checks — applied one level up,
+    /// where the payload is prose rather than a keystroke.
+    ///
+    /// `nil` is a global comment, which needs no anchor.
+    case annotatePlan(id: UUID, token: UUID, call: String, text: String, block: Int?)
+
+    /// Approve or request changes. **Both carry feedback**, because approving with notes is a
+    /// real outcome — `POST /api/approve` takes a `feedback` field for exactly that.
+    case resolvePlan(id: UUID, token: UUID, call: String, approve: Bool, feedback: String?)
+
     enum CodingKeys: String, CodingKey {
         case op, id, token, text, call, answer, index, label
         case isCollapsed, project, title, agent, accountIndex
+        case block, approve, feedback
     }
 
     private enum Op: String, Codable {
@@ -237,6 +251,8 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case newSession = "session.new"
         case renameSession = "session.rename"
         case viewing = "session.viewing"
+        case annotatePlan = "plan.annotate"
+        case resolvePlan = "plan.resolve"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -286,6 +302,20 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             // into a single JSON object, and one command reading as one line is what makes a
             // dump usable.
             try answer.encode(to: encoder)
+        case .annotatePlan(let id, let token, let call, let text, let block):
+            try c.encode(Op.annotatePlan, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(call, forKey: .call)
+            try c.encode(text, forKey: .text)
+            try c.encodeIfPresent(block, forKey: .block)
+        case .resolvePlan(let id, let token, let call, let approve, let feedback):
+            try c.encode(Op.resolvePlan, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+            try c.encode(call, forKey: .call)
+            try c.encode(approve, forKey: .approve)
+            try c.encodeIfPresent(feedback, forKey: .feedback)
         }
     }
 
@@ -346,6 +376,22 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 token: try c.decode(UUID.self, forKey: .token),
                 call: try c.decode(String.self, forKey: .call),
                 answer: try PromptAnswer(from: decoder)
+            )
+        case .annotatePlan:
+            self = .annotatePlan(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                call: try c.decode(String.self, forKey: .call),
+                text: try c.decode(String.self, forKey: .text),
+                block: try c.decodeIfPresent(Int.self, forKey: .block)
+            )
+        case .resolvePlan:
+            self = .resolvePlan(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token),
+                call: try c.decode(String.self, forKey: .call),
+                approve: try c.decode(Bool.self, forKey: .approve),
+                feedback: try c.decodeIfPresent(String.self, forKey: .feedback)
             )
         }
     }
