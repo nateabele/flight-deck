@@ -230,6 +230,73 @@ final class SessionTimelineModelTests: XCTestCase {
                           "the page's own end, not the last item's offset")
     }
 
+    // MARK: A resumed link
+
+    /// **The guard `linkResumed()` exists for.** `FleetModel.timelineModels` is never evicted
+    /// short of `unpair()`, so a reader who has opened ten sessions and moved on holds ten
+    /// live models — and `FleetModel` tells every one of them a link resumed, with no idea
+    /// which of them, if any, is on screen. A model that fetched unconditionally would turn
+    /// one reconnect into a burst of requests for conversations nobody is looking at, and a
+    /// screen the reader never returns to would keep polling a Mac for no reader at all. A
+    /// fresh model has never been told `viewing(true)`, so this is the ordinary case for most
+    /// of the ten, not an edge case for one.
+    func testAModelThatIsNotOnScreenIgnoresAResumedLink() {
+        let pager = StubPager()
+        let model = model(pager)
+
+        model.linkResumed()
+
+        XCTAssertEqual(pager.requests.count, 0, "nothing here is on screen to refresh")
+        XCTAssertTrue(pager.viewingReports.isEmpty, "and no presence report for a session no one is viewing")
+    }
+
+    /// **The fix itself.** A session on screen when the phone slept comes back to a link that
+    /// answers with a replay the `.onChange` triggers cannot see — same `activity`, same
+    /// `call`, sometimes literally `.replay([])` — so nothing else in the model reacts to the
+    /// reconnect at all. `linkResumed()` is the one path that does not wait for a value to
+    /// change: it re-sends presence, because the new socket carries none of the old one's
+    /// state and the Mac's badge would otherwise sit wrong until an appear/disappear a sleep
+    /// never produces, and it fetches forward from the boundary the feed already holds.
+    ///
+    /// **The anchor is asserted specifically, not just the request count.** `.after(1200)` is
+    /// the fix; `.latest` is the regression this whole feature exists to avoid — merging a
+    /// `.latest` page over a feed that already holds this range would leave an invisible hole
+    /// between the loaded tail and whatever the Mac sends back, which is exactly the defect
+    /// `loadNewer()`'s own doc comment (and `testComingBackToALoadedSessionAsksForWhatIsNewRatherThanForTheLatestAgain`
+    /// above) is about.
+    func testAModelOnScreenReassertsPresenceAndFetchesForward() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.viewing(true)
+        model.loadLatest()
+        pager.answer(tail())
+
+        model.linkResumed()
+
+        XCTAssertEqual(pager.requests.count, 2, "the initial load, then exactly one more for the resume")
+        XCTAssertEqual(pager.anchors.last, .after(1200),
+                       "forward from the held boundary — a .latest here reopens the mid-feed hole")
+        XCTAssertEqual(pager.viewingReports.last, session,
+                       "the new link carries none of the old one's presence state")
+    }
+
+    /// **The other half of the guard.** A reader who leaves a session mid-read and goes back
+    /// to the fleet list calls `viewing(false)` on the way out (`SessionTimelineScreen`'s
+    /// `.onDisappear`), and the model is still one of the ten `timelineModels` keeps forever.
+    /// A resume must not treat "was on screen a minute ago" as "is on screen now" — that is
+    /// the same over-fetch `testAModelThatIsNotOnScreenIgnoresAResumedLink` guards, reached
+    /// by a different route, so both are asserted rather than assuming one implies the other.
+    func testLeavingTheScreenStopsAResumedLinkFromFetching() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.viewing(true)
+        model.viewing(false)
+
+        model.linkResumed()
+
+        XCTAssertEqual(pager.requests.count, 0, "the reader left before the link came back")
+    }
+
     // MARK: Paging up
 
     /// `olderAnchor` is non-nil at the top of history too — the feed still has a perfectly
