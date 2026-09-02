@@ -43,6 +43,17 @@ class GrammarTests(unittest.TestCase):
             _, r = run(["composer-empty", "claude"], stdin=f.read())
         self.assertTrue(r["empty"])
 
+    def test_claude_derives_an_open_prompt_once_activity_is_threaded_through(self):
+        path = os.path.join(FIX, "Claude", "question-single.captured.jsonl")
+        with open(path) as f:
+            rc, r = run(["open-prompt", "claude", "--activity", "waiting"], stdin=f.read())
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(r["kind"])
+
+    def test_an_unrecognized_activity_value_is_a_usage_error(self):
+        rc, _ = run(["open-prompt", "claude", "--activity", "bogus"], stdin="{}\n")
+        self.assertEqual(rc, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
