@@ -1,4 +1,5 @@
 import os, sys, tempfile, unittest
+from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sandbox import AgentSandbox, UnsafeHome, guard_home
 
@@ -30,6 +31,13 @@ class GuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             guard_home(d)  # must not raise
 
+    def test_expands_tilde_before_resolving(self):
+        # os.path.realpath alone does NOT expand `~` — only os.path.expanduser does. This does
+        # not depend on cwd: expanduser resolves `~` from $HOME, not from the working directory.
+        for p in ("~/.claude", "~/.codex"):
+            with self.assertRaises(UnsafeHome):
+                guard_home(p)
+
 
 class SandboxTests(unittest.TestCase):
     def test_creates_both_homes_and_removes_the_tree(self):
@@ -54,6 +62,17 @@ class SandboxTests(unittest.TestCase):
             root = sb.root
         self.assertTrue(os.path.exists(root))
         import shutil; shutil.rmtree(root)
+
+    def test_a_failed_construction_never_leaves_a_partial_tree_behind(self):
+        sb = AgentSandbox()
+        with mock.patch.object(
+            AgentSandbox, "_copy_credentials", side_effect=RuntimeError("boom")
+        ):
+            with self.assertRaises(RuntimeError):
+                sb.__enter__()
+        # Cleanup on a failed construction is unconditional — even with keep=True (not the case
+        # here, but the property __enter__ must hold regardless).
+        self.assertFalse(os.path.exists(sb.root))
 
 
 if __name__ == "__main__":
