@@ -462,14 +462,30 @@ mkdir -p "$OUT"
 
 # -enable-testing on the app target is what makes `@testable import FlightDeck` legal here;
 # Debug already sets it, which is how FlightDeckTests imports the same module.
-swiftc -O \
+#
+# The four non-obvious flags below were each established by compiling a throwaway probe against
+# this exact tree; without any one of them the build fails, so do not "simplify" them away:
+#
+#   -parse-as-library          A ONE-file swiftc invocation is script mode, and `@main` is
+#                              illegal in a module with top-level code. (scripts/livefuzz's
+#                              probe escapes this only by compiling two files.)
+#   -Xcc -I<GhosttyEmbed>      `@testable import` pulls in the module's bridging header, which
+#                              #imports ObjCExceptionCatcher.h / VibrantLayer.h.
+#   -Xcc -I<boringssl include> FleetKit's BoringSSLShim module map needs openssl/curve25519.h.
+#   -Xcc -I<products>/include  The GhosttyKit module map (umbrella header ghostty.h).
+#
+# The two -Xcc header paths are exactly FlightDeck's own HEADER_SEARCH_PATHS from
+# project.yml:101; if that line ever changes, change these with it.
+swiftc -O -parse-as-library \
   scripts/adapterprobe/probe.swift \
   -I "$PRODUCTS" \
   -F "$PRODUCTS" \
+  -Xcc -I"$PWD/Sources/FlightDeck/GhosttyEmbed" \
+  -Xcc -I"$PWD/vendor/boringssl-artifacts/include" \
+  -Xcc -I"$PWD/$PRODUCTS/include" \
   -framework FleetKit \
   "$DYLIB" \
   -Xlinker -rpath -Xlinker "$APPMACOS" \
-  -Xlinker -rpath -Xlinker "$PWD/${PRODUCTS}/Flight Deck.app/Contents/Frameworks" \
   -Xlinker -rpath -Xlinker "$PWD/$PRODUCTS" \
   -o "$OUT/probe"
 
@@ -552,6 +568,10 @@ struct Probe {
 
 Run: `/tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v -k Declare`
 Expected: 3 tests, PASS. The build takes a few minutes on a cold DerivedData.
+
+This linkage is already proven against this worktree: a throwaway probe with the exact flags above compiled, linked and ran, printing real values read out of the production adapter (`codex openPromptReader != nil: false`, `homeMarkerFile: auth.json`). If your build fails, the cause is almost certainly a dropped or reordered flag — compare against the list above before changing anything else.
+
+Expect a harmless `umbrella header for module 'GhosttyKit' does not include header '/ghostty/vt.h'` warning. It is pre-existing and not yours to fix.
 
 If `@testable import FlightDeck` fails with "module was not compiled for testing", confirm the Debug configuration sets `ENABLE_TESTABILITY=YES` in `project.yml` — `FlightDeckTests` already depends on it, so it should already be set; do not add a new build setting to work around a stale DerivedData, clean and rebuild instead.
 
