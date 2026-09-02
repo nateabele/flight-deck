@@ -1283,8 +1283,8 @@ final class SessionStore: ObservableObject {
         // without this line every sleeping display is a refusal again and no test notices.
         // `DisplayWakerTests` covers the waker; `testTheRealWakerIsWiredIn` covers this line.
         // Built around the probe just assigned on principle, not because a different one
-        // could disagree — `DisplayState` is a stateless struct that always reads
-        // `CGMainDisplayID()`, so any instance of it answers identically to any other.
+        // could disagree — `DisplayState` is a stateless struct that reads only CoreGraphics,
+        // so any instance of it answers identically to any other.
         displayWaker = DisplayWaker(display: display)
         self.notifier = notifier
         // Both assigned before `startStatusWatching()` below, which reads them when it builds

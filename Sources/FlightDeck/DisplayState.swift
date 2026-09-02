@@ -29,6 +29,8 @@ struct DisplayState: DisplayInspecting {
     ///
     /// Falls back to the main display if enumeration fails: an unexpected CoreGraphics error
     /// should degrade to the previous behaviour, not to an unconditional yes.
+    ///
+    /// `CGDisplayIsActive` returns `boolean_t`, a `UInt32`, not `Bool` — hence the `!= 0` below.
     var isDrawable: Bool {
         var count: UInt32 = 0
         guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else {
