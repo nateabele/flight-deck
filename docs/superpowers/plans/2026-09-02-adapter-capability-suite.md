@@ -737,15 +737,21 @@ Extend the `switch op` in `main()`. `stdinText()` reads the whole of stdin.
         }
         await emit(answer)
 
+    // `--activity` is NOT optional decoration: `OpenPrompt.find`
+    // (Sources/FleetKit/OpenPrompt.swift:218) opens with
+    // `guard activity == "waiting" else { return nil }`, so a probe that always passed nil
+    // could never return a prompt — and the capability row built on it would record claude's
+    // openPromptReader as falsely `broken`. An unrecognised value is a usage error rather than
+    // a silent nil, so the always-null path cannot come back by accident.
     case "open-prompt":
-        guard args.count == 2, let agent = agentID(args[1]) else { usage() }
+        guard args.count == 2 || args.count == 4, let agent = agentID(args[1]) else { usage() }
         let tail = stdinText()
         let answer: [String: Any] = await MainActor.run {
             guard let reader = agent.openPromptReader else { return ["unsupported": true] }
             let lines = tail.split(separator: "\n").enumerated().map {
                 SourceLine(offset: $0.offset, text: String($0.element))
             }
-            return ["kind": reader.openPrompt(inTranscriptTail: lines, activity: nil)
+            return ["kind": reader.openPrompt(inTranscriptTail: lines, activity: activity)
                         .map { String(describing: $0) } as Any]
         }
         await emit(answer)
@@ -779,7 +785,10 @@ final class ViewportInjector: TextInjecting {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `scripts/adapterprobe/build-probe.sh && /tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v -k Grammar`
-Expected: 6 tests, PASS
+Expected: 8 tests, PASS — the six above plus two covering `--activity`: that
+`open-prompt claude --activity waiting` against
+`Tests/FlightDeckTests/Fixtures/Claude/question-single.captured.jsonl` returns a NON-null
+`kind`, and that an unrecognised `--activity` value exits 2.
 
 - [ ] **Step 5: Commit**
 
