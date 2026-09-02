@@ -245,7 +245,9 @@ class SandboxTests(unittest.TestCase):
             root = sb.root
             self.assertTrue(os.path.isdir(sb.claude_home))
             self.assertTrue(os.path.isdir(sb.codex_home))
-            self.assertNotIn(HOME, os.path.realpath(root).split(os.sep)[:3] and root)
+            # The property the sandbox exists to guarantee: nothing under the real home.
+            self.assertFalse(
+                os.path.realpath(root).startswith(os.path.realpath(HOME) + os.sep))
         self.assertFalse(os.path.exists(root))
 
     def test_env_names_the_sandbox_home_for_each_agent(self):
@@ -574,7 +576,13 @@ git commit -m "feat: probe CLI linking the built FlightDeck module, with declare
 
 - [ ] **Step 1: Write the failing test**
 
-Uses the fixtures already committed under `Tests/FlightDeckTests/Fixtures/Claude` and `.../Codex`. Locate the exact filenames first with `ls Tests/FlightDeckTests/Fixtures/Claude Tests/FlightDeckTests/Fixtures/Codex` and substitute them for `DIALOG_FIXTURE` / `ROLLOUT_FIXTURE` below.
+Uses fixtures already committed in the repo. These paths are verified to exist — use them exactly, do not go looking for substitutes:
+
+- `Tests/FlightDeckTests/Fixtures/Codex/rollout.captured.jsonl` — codex's rollout
+- `Tests/FlightDeckTests/Fixtures/Claude/transcript.captured.jsonl` — claude's transcript
+- `Tests/FlightDeckTests/Fixtures/Claude/question-single.captured.txt` — a claude dialog screen
+- `Tests/FlightDeckTests/Fixtures/Claude/idle-empty-box.captured.txt` — a claude idle screen
+- `Tests/FlightDeckTests/Fixtures/Codex/tui-idle.captured.txt` — a codex idle screen
 
 ```python
 # scripts/adapterprobe/tests/test_grammars.py
@@ -612,6 +620,16 @@ class GrammarTests(unittest.TestCase):
     def test_codex_has_no_open_prompt_reader_and_says_so(self):
         _, r = run(["open-prompt", "codex"], stdin="{}\n")
         self.assertTrue(r["unsupported"])
+
+    def test_the_captured_claude_transcript_still_yields_a_title(self):
+        path = os.path.join(FIX, "Claude", "transcript.captured.jsonl")
+        _, c = run(["title-from-transcript", "claude", path])
+        self.assertIsNotNone(c["title"])
+
+    def test_claude_reads_its_own_idle_screen_as_an_empty_composer(self):
+        with open(os.path.join(FIX, "Claude", "idle-empty-box.captured.txt")) as f:
+            _, r = run(["composer-empty", "claude"], stdin=f.read())
+        self.assertTrue(r["empty"])
 
 
 if __name__ == "__main__":
@@ -729,7 +747,7 @@ final class ViewportInjector: TextInjecting {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `scripts/adapterprobe/build-probe.sh && /tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v -k Grammar`
-Expected: 4 tests, PASS
+Expected: 6 tests, PASS
 
 - [ ] **Step 5: Commit**
 
@@ -885,6 +903,20 @@ git commit -m "feat: probe subcommands for the live adapter members"
 
 **Interfaces:**
 - Consumes: `sandbox.AgentSandbox`, `ptyscreen.PtyScreen`.
+- Produces: **the `ProbeContext` contract** (stated here, implemented by `run.py` in Task 7 —
+  every row calls through it and nothing else):
+
+  ```
+  probe(args: list[str], stdin: str = "") -> dict   # runs the probe CLI, parses its JSON
+  sandbox: AgentSandbox                              # the live sandbox for this run
+  pty(agent: str, cmd: list[str]) -> PtyScreen       # cwd=sandbox.root, env=sandbox.env(agent)
+  seed_one_turn(agent: str, cid: str) -> None        # full tier only; drives one real turn
+  seeded_marker: str                                 # text seed_one_turn guarantees on screen
+  versions: dict[str, str]                           # {"codex": ..., "claude": ...}
+  ```
+
+  Write this block as a module docstring at the top of `capabilities.py`. Task 7 implements it
+  exactly; a row must never reach for anything not on this list.
 - Produces: `verdict(declared, observed, absent_reason_holds=None) -> str` returning one of `ok`/`broken`/`by-design`/`rotted`/`needs-auth`/`error`; `ROWS: list[Row]` where `Row = namedtuple("Row", "key group agents tier flags run")`; `run` is `callable(ctx) -> Observation` and `Observation = namedtuple("Observation", "declared observed absent_reason_holds detail")`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1044,7 +1076,7 @@ git commit -m "feat: capability rows and verdict derivation"
 - Create: `scripts/adapterprobe/tests/test_baseline.py`
 
 **Interfaces:**
-- Consumes: `capabilities.ROWS`, `capabilities.verdict`, `sandbox.AgentSandbox`, `ptyscreen.PtyScreen`.
+- Consumes: `capabilities.ROWS`, `capabilities.verdict`, `sandbox.AgentSandbox`, `ptyscreen.PtyScreen`, and **the `ProbeContext` contract defined in `capabilities.py`'s module docstring** — `run.py` provides the concrete object implementing exactly those six members, no more.
 - Produces: `diff_baseline(baseline: dict, matrix: dict) -> dict` with keys `changed`, `added`, `removed`, `versions_changed`; `render(matrix: dict) -> str`; CLI `run.py [--tier cheap|full] [--capture] [--keep] [--update-baseline] [--json PATH]`. Exit codes: `0` no drift, `1` capability drift, `3` harness failure (any `error` cell where the baseline expected otherwise), `4` unsafe home refused.
 
 - [ ] **Step 1: Write the failing test**
