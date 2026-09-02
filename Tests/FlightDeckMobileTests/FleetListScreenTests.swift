@@ -78,6 +78,25 @@ final class FleetListScreenTests: XCTestCase {
         }
     }
 
+    /// **The wiring, which the pure tests above cannot reach.**
+    ///
+    /// `refreshRecentlyClosed` hangs off `onFleet`, which fires on snapshots *and* on every
+    /// folded event — that is what makes a tab the phone just closed appear in the `+` without
+    /// a background-and-return. A model that never asked would leave `closedRows` filtering an
+    /// empty list forever, and every assertion above would still be green. This file exists
+    /// because that is exactly how this screen has failed before.
+    func testTheModelAsksForTheReopenListOnConnect() async throws {
+        let model = try await connectedModel()
+
+        let deadline = Date().addingTimeInterval(10)
+        while model.recentlyClosed.isEmpty, Date() < deadline {
+            // A sleep rather than a run-loop spin, for `connectedModel`'s reason: yielding the
+            // main actor is what lets the connector's own main-queue callbacks land.
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(model.recentlyClosed, Self.closed)
+    }
+
     // MARK: Driving the list
 
     /// A tap, as far as a `List` is concerned: UIKit's own recogniser ends in exactly this
@@ -145,6 +164,9 @@ final class FleetListScreenTests: XCTestCase {
         // it opens, and an unanswered request leaves a fetch in flight for fifteen seconds —
         // which outlives the test and lands its deadline in the next one.
         server.onRequest = { _, cid, request, reply in
+            if case .recentlyClosed = request {
+                return reply(.recentlyClosed(cid: cid, Self.closed))
+            }
             guard case .timeline(let session, _, _) = request else { return }
             reply(.page(cid: cid, TimelinePage(
                 session: session, items: [], start: 0, end: 0, hasMore: false, reset: false
@@ -186,6 +208,12 @@ final class FleetListScreenTests: XCTestCase {
             ]
         )
     ])
+
+    private static let closed = [
+        WireClosedSession(id: UUID(), title: "fix the pager",
+                          agent: "claude", projectPath: "/Users/nate")
+    ]
+
     // MARK: The New Session menu
 
     private func option(
@@ -227,6 +255,31 @@ final class FleetListScreenTests: XCTestCase {
 
     func testNoOptionsIsNoGroups() {
         XCTAssertTrue(FleetListScreen.agentGroups(in: []).isEmpty)
+    }
+
+    func testClosedRowsAreFilteredToTheProjectAndCappedAtFive() {
+        let mine = (0..<7).map {
+            WireClosedSession(id: UUID(), title: "mine \($0)", agent: "claude", projectPath: "/w/a")
+        }
+        let theirs = WireClosedSession(
+            id: UUID(), title: "theirs", agent: "claude", projectPath: "/w/b"
+        )
+
+        let rows = FleetListScreen.closedRows(in: mine + [theirs], forProjectAt: "/w/a")
+
+        XCTAssertEqual(rows.count, 5)
+        XCTAssertEqual(rows.map(\.title), ["mine 0", "mine 1", "mine 2", "mine 3", "mine 4"],
+                       "arrival order is most-recent-first and is preserved")
+        XCTAssertFalse(rows.contains(theirs))
+    }
+
+    func testAProjectWithNoClosedSessionsGetsNoRows() {
+        let rows = FleetListScreen.closedRows(
+            in: [WireClosedSession(id: UUID(), title: "theirs", agent: "claude",
+                                   projectPath: "/w/b")],
+            forProjectAt: "/w/a"
+        )
+        XCTAssertTrue(rows.isEmpty)
     }
 
     // MARK: The leading swipe lane

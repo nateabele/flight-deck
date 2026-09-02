@@ -435,6 +435,22 @@ struct FleetListScreen: View {
                 Label("New session", systemImage: "plus")
             }
         }
+
+        // Below the New rows, and only when there is something to offer: an empty section
+        // would render its header over nothing. This is the phone's only undo for a close —
+        // ⌘⇧T is a Mac chord and the swipe that closes a tab has no counterpart here.
+        let closed = Self.closedRows(in: model.recentlyClosed, forProjectAt: project.path)
+        if !closed.isEmpty {
+            Section("Recently Closed") {
+                ForEach(closed) { session in
+                    Button {
+                        model.reopenClosed(session.id)
+                    } label: {
+                        Label(session.title, systemImage: "arrow.uturn.backward")
+                    }
+                }
+            }
+        }
     }
 
     /// One row. The tick marks the account a plain tap would use, and **only inside a
@@ -484,6 +500,20 @@ struct FleetListScreen: View {
 
     private func agentGroups(in options: [WireNewSessionOption]) -> [AgentGroup] {
         Self.agentGroups(in: options)
+    }
+
+    /// This project's reopenable tabs, most recent first, capped for the menu.
+    ///
+    /// **The cap is applied here, not on the wire.** `ClosedSessionHistory.depth` is the Mac's
+    /// own business and a second cap on the wire would be a number to keep in sync; this is a
+    /// statement about how long a phone menu should be, which is only ever a phone question.
+    ///
+    /// Order is the Mac's and is never re-sorted, for `agentGroups`' reason: the stack decides
+    /// recency and a phone that sorted its copy would disagree with ⌘⇧T about what is newest.
+    static func closedRows(
+        in closed: [WireClosedSession], forProjectAt path: String
+    ) -> [WireClosedSession] {
+        Array(closed.lazy.filter { $0.projectPath == path }.prefix(5))
     }
 
     struct UnreadAction: Equatable {
