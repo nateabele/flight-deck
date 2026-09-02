@@ -837,8 +837,7 @@ git commit -m "feat: answer the recently-closed request and act on a reopen"
 - Modify: `Sources/FlightDeckMobile/FleetModel.swift` (state near `newSessionOptions` at ~282;
   `connect()`'s `onFleet` closure at ~457)
 - Modify: `Sources/FlightDeckMobile/FleetListScreen.swift` (`newSessionMenu(for:)` at ~415)
-- Test: `Tests/FlightDeckMobileTests/FleetModelTests.swift`,
-  `Tests/FlightDeckMobileTests/FleetListScreenTests.swift`
+- Test: `Tests/FlightDeckMobileTests/FleetListScreenTests.swift`
 
 **Interfaces:**
 - Consumes: `FleetConnector.requestRecentlyClosed(then:)`, `FleetCommand.reopenClosed(session:)`,
@@ -1040,7 +1039,7 @@ Expected: PASS on both. Both are required — the macOS run does not cover
 - [ ] **Step 6: Commit**
 
 ```bash
-git add Sources/FlightDeckMobile/FleetModel.swift Sources/FlightDeckMobile/FleetListScreen.swift Tests/FlightDeckMobileTests/FleetModelTests.swift Tests/FlightDeckMobileTests/FleetListScreenTests.swift
+git add Sources/FlightDeckMobile/FleetModel.swift Sources/FlightDeckMobile/FleetListScreen.swift Tests/FlightDeckMobileTests/FleetListScreenTests.swift
 git commit -m "feat: a Recently Closed section in the phone's + menu"
 ```
 
