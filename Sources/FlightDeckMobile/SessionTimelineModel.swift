@@ -554,14 +554,20 @@ final class SessionTimelineModel {
     /// appear/disappear, which a sleep does not produce either. Sending it first means the
     /// badge is already right by the time the page the fetch below asks for lands.
     ///
-    /// **`loadNewer()`, never `loadLatest()`.** `loadNewer` asks `feed.newerAnchor`, which is
-    /// `.after(newest)` on a feed that already holds a range and only falls back to `.latest`
-    /// when the feed is empty (see `loadNewer`'s own doc comment) — so it can only ever
-    /// extend what is held. `loadLatest()` always asks `.latest`, and `.latest` merged over a
-    /// feed that already holds an older range leaves the invisible mid-feed hole `loadLatest`
-    /// itself is written to avoid opening. A resumed link finds this feed already loaded in
-    /// every ordinary case, so reaching for `loadLatest()` here would reopen exactly the hole
-    /// the rest of the model exists to keep closed.
+    /// **`loadNewer()`, never `loadLatest()` — and the reason is the failure path, not the
+    /// anchor.** The two ask for the same thing here: `loadLatest` also fetches from
+    /// `feed.newerAnchor`, which is `.after(newest)` on any feed that holds a range, so on a
+    /// loaded screen the request they produce is byte-for-byte identical. What differs is
+    /// `quiet`. `loadNewer` passes `quiet: true`, so a resume fetch that fails leaves `phase`
+    /// alone; `loadLatest` leaves it false, and its failure arm sets `phase = .failed`.
+    ///
+    /// That is the whole point on this path. A resume runs unprompted, against a link that
+    /// has just come back and may be flaky — the phone woke on a marginal Wi-Fi hop, the Mac
+    /// is still settling. A reader who unlocks their phone to a conversation they were
+    /// mid-way through must not have it replaced by an error banner because a fetch they
+    /// never asked for did not land. The content on screen is still the last thing the Mac
+    /// said, and the fleet list's own connection banner already reports the link. Same
+    /// reasoning as the poll, which is why `loadNewer` is where it is written down.
     func linkResumed() {
         guard isOnScreen else { return }
         fleet.viewing(sessionID)

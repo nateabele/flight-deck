@@ -258,13 +258,18 @@ final class SessionTimelineModelTests: XCTestCase {
     /// state and the Mac's badge would otherwise sit wrong until an appear/disappear a sleep
     /// never produces, and it fetches forward from the boundary the feed already holds.
     ///
-    /// **The anchor is asserted specifically, not just the request count.** `.after(1200)` is
-    /// the fix; `.latest` is the regression this whole feature exists to avoid — merging a
-    /// `.latest` page over a feed that already holds this range would leave an invisible hole
-    /// between the loaded tail and whatever the Mac sends back, which is exactly the defect
-    /// `loadNewer()`'s own doc comment (and `testComingBackToALoadedSessionAsksForWhatIsNewRatherThanForTheLatestAgain`
-    /// above) is about.
-    func testAModelOnScreenReassertsPresenceAndFetchesForward() {
+    /// **The refusal at the end is the half that discriminates, and it is here because the
+    /// obvious assertion does not.** The tempting check is that the resume anchors at
+    /// `.after(1200)` rather than `.latest` — but `loadLatest()` fetches from
+    /// `feed.newerAnchor` too, so on a loaded feed it produces the identical anchor and an
+    /// anchor assertion passes against either. Mutating `linkResumed`'s `loadNewer()` to
+    /// `loadLatest()` left every assertion in this test green; only the refusal below turns
+    /// red. What actually separates them is `quiet`, and therefore what a FAILED resume does
+    /// to the screen: `loadNewer` leaves `phase` alone, `loadLatest` sets `.failed` and
+    /// replaces a conversation the reader was mid-way through with an error banner for a
+    /// fetch they never asked for. A resume runs unprompted against a link that has only just
+    /// come back, so that is the case, not the corner.
+    func testAModelOnScreenReassertsPresenceAndFetchesForwardWithoutRiskingTheScreen() {
         let pager = StubPager()
         let model = model(pager)
         model.viewing(true)
@@ -274,10 +279,16 @@ final class SessionTimelineModelTests: XCTestCase {
         model.linkResumed()
 
         XCTAssertEqual(pager.requests.count, 2, "the initial load, then exactly one more for the resume")
-        XCTAssertEqual(pager.anchors.last, .after(1200),
-                       "forward from the held boundary — a .latest here reopens the mid-feed hole")
+        XCTAssertEqual(pager.anchors.last, .after(1200), "forward from the held boundary")
         XCTAssertEqual(pager.viewingReports.last, session,
                        "the new link carries none of the old one's presence state")
+
+        pager.answer(.failure(.disconnected))
+
+        XCTAssertEqual(model.phase, .idle,
+                       "a resume nobody asked for must not replace the conversation with an error")
+        XCTAssertEqual(model.feed.items.map(\.body.text), ["first", "second"],
+                       "and what the Mac last said is still on screen")
     }
 
     /// **The other half of the guard.** A reader who leaves a session mid-read and goes back
