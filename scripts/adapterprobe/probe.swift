@@ -100,6 +100,129 @@ struct Probe {
             }
             await emit(answer)
 
+        case "prepare":
+            guard let agent = args.count > 1 ? agentID(args[1]) : nil,
+                  let cwd = flag(args, "--cwd") else { usage() }
+            let session = Session(title: "adapterprobe", workingDirectory: cwd)
+            do {
+                let binding: AgentBinding
+                switch agent {
+                case .claude:
+                    binding = try await MainActor.run { claudeAdapter() }
+                        .prepare(for: session, options: .claude(FlagSet()))
+                case .codex:
+                    binding = try await withCodex {
+                        try await $0.prepare(for: session, options: .codex(CodexThreadOptions()))
+                    }
+                }
+                await emit([
+                    "conversationID": binding.conversationID.uuidString,
+                    "transcriptURL": binding.transcriptURL?.path as Any,
+                ])
+            } catch {
+                await emit(["error": String(describing: error)], exit: 1)
+            }
+
+        case "rebind":
+            guard let agent = args.count > 1 ? agentID(args[1]) : nil,
+                  let pinRaw = flag(args, "--pin"), let pin = UUID(uuidString: pinRaw),
+                  let cwd = flag(args, "--cwd") else { usage() }
+            let session = Session(
+                title: "adapterprobe", workingDirectory: cwd, pinnedConversationID: pin
+            )
+            do {
+                let binding: AgentBinding
+                switch agent {
+                case .claude:
+                    binding = try await MainActor.run { claudeAdapter() }
+                        .rebind(for: session, options: .claude(FlagSet()))
+                case .codex:
+                    binding = try await withCodex {
+                        try await $0.rebind(for: session, options: .codex(CodexThreadOptions()))
+                    }
+                }
+                await emit([
+                    "conversationID": binding.conversationID.uuidString,
+                    "transcriptURL": binding.transcriptURL?.path as Any,
+                    "repointed": binding.conversationID != pin,
+                ])
+            } catch {
+                await emit(["error": String(describing: error)], exit: 1)
+            }
+
+        case "rename":
+            guard let agent = args.count > 1 ? agentID(args[1]) : nil,
+                  let idRaw = flag(args, "--id"), let id = UUID(uuidString: idRaw),
+                  let title = flag(args, "--to") else { usage() }
+            let binding = AgentBinding(conversationID: id, transcriptURL: nil)
+            do {
+                switch agent {
+                case .claude:
+                    try await MainActor.run { claudeAdapter() }.rename(binding, to: title)
+                case .codex:
+                    try await withCodex { try await $0.rename(binding, to: title) }
+                }
+                await emit(["renamed": true])
+            } catch {
+                await emit(["error": String(describing: error)], exit: 1)
+            }
+
+        case "read":
+            guard let agent = args.count > 1 ? agentID(args[1]) : nil,
+                  let idRaw = flag(args, "--id"), let id = UUID(uuidString: idRaw) else { usage() }
+            let binding = AgentBinding(conversationID: id, transcriptURL: nil)
+            do {
+                let result: (title: String?, activity: SessionActivity?)
+                switch agent {
+                case .claude:
+                    // `AgentAdapter` carries no live `read` — claude's title/activity come
+                    // from `ConversationTitle`/`SessionStatusWatcher`, both outside the
+                    // adapter surface this probe exercises. A probe answers what the
+                    // protocol actually offers rather than reaching around it.
+                    result = (title: nil, activity: nil)
+                case .codex:
+                    result = try await withCodex { try await $0.read(binding) }
+                }
+                await emit([
+                    "title": result.title as Any,
+                    "activity": result.activity.map { String(describing: $0) } as Any,
+                ])
+            } catch {
+                await emit(["error": String(describing: error)], exit: 1)
+            }
+
+        case "launch-command", "resume-command":
+            guard let agent = args.count > 1 ? agentID(args[1]) : nil,
+                  let idRaw = flag(args, "--id"), let id = UUID(uuidString: idRaw),
+                  let cwd = flag(args, "--cwd") else { usage() }
+            let session = Session(
+                title: "adapterprobe", workingDirectory: cwd, pinnedConversationID: id
+            )
+            let binding = AgentBinding(conversationID: id, transcriptURL: nil)
+            do {
+                let text: String
+                switch agent {
+                case .claude:
+                    let claude = await MainActor.run { claudeAdapter() }
+                    text = await MainActor.run {
+                        op == "launch-command"
+                            ? claude.launchCommand(binding, session, .claude(FlagSet()))
+                            : claude.resumeCommand(binding, session, .claude(FlagSet()))
+                    }
+                case .codex:
+                    text = try await withCodex { adapter in
+                        await MainActor.run {
+                            op == "launch-command"
+                                ? adapter.launchCommand(binding, session, .codex(CodexThreadOptions()))
+                                : adapter.resumeCommand(binding, session, .codex(CodexThreadOptions()))
+                        }
+                    }
+                }
+                await emit(["text": text])
+            } catch {
+                await emit(["error": String(describing: error)], exit: 1)
+            }
+
         default:
             usage()
         }
@@ -107,6 +230,39 @@ struct Probe {
 
     static func stdinText() -> String {
         String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    }
+
+    /// `--name value` out of an argument list, or nil when the flag or its value is absent.
+    static func flag(_ args: [String], _ name: String) -> String? {
+        guard let i = args.firstIndex(of: name), args.index(after: i) < args.endIndex else { return nil }
+        return args[args.index(after: i)]
+    }
+
+    /// A `ClaudeAdapter` pointed at the sandbox, when one is in play. `projectsRoot` defaults
+    /// to `ClaudeSession.defaultProjectsRoot`, which resolves against the REAL home — a probe
+    /// run under `AgentSandbox` sets `CLAUDE_CONFIG_DIR`, and this is what keeps every claude
+    /// subcommand's reads and derivations inside it instead.
+    @MainActor
+    static func claudeAdapter() -> ClaudeAdapter {
+        var claude = ClaudeAdapter()
+        if let home = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"] {
+            claude.projectsRoot = { URL(fileURLWithPath: home).appendingPathComponent("projects") }
+        }
+        return claude
+    }
+
+    /// A real codex stack for one probe invocation, torn down on every exit path.
+    @MainActor
+    static func withCodex<T>(_ body: (CodexAdapter) async throws -> T) async throws -> T {
+        let home = ProcessInfo.processInfo.environment["CODEX_HOME"].map { URL(fileURLWithPath: $0) }
+        let transport = CodexProcessTransport(executable: "codex", home: home)
+        try transport.start()
+        defer { transport.stop() }
+        let rpc = CodexRPC(transport: transport)
+        try await CodexProcessTransport.verifyHandshake(rpc)
+        var adapter = CodexAdapter(rpc: rpc)
+        adapter.historyMode = "legacy"   // the commit rule; see CodexIntegrationTests
+        return try await body(adapter)
     }
 
     @MainActor
