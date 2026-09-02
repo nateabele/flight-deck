@@ -130,6 +130,19 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// is the one that already exists rather than a second one invented for the phone.
     case closeSession(id: UUID)
 
+    /// Reopen the closed tab `session`, exactly as ⌘⇧T aimed at that entry would.
+    ///
+    /// **Unreachable until `FleetRequest.recentlyClosed` has been answered, and that ordering
+    /// is load-bearing.** `FleetCommand` throws on an unknown op and a `cmd` is NOT salvaged by
+    /// `FleetSocketServer`'s `onUndecodable` — only a `req` is — so sending this to a Mac built
+    /// before the feature would drop the connection. It is safe only because an old Mac refuses
+    /// the request, which leaves the phone with no section and no row to tap.
+    ///
+    /// A no-op on the Mac when the entry has gone: ⌘⇧T consumed it, or it aged past
+    /// `ClosedSessionHistory.depth`. Answered with `ack` either way — the tab is in the fleet
+    /// list in both outcomes, so there is nothing a refusal would tell the phone.
+    case reopenClosed(session: UUID)
+
     /// Which session this client is looking at, or `nil` when it has left one.
     ///
     /// Presence, not state: the Mac shows it beside the tab so somebody at the desk can see
@@ -247,6 +260,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case prompt = "session.prompt"
         case answerPrompt = "prompt.answer"
         case closeSession = "session.close"
+        case reopenClosed = "session.reopen"
         case setProjectCollapsed = "project.collapse"
         case newSession = "session.new"
         case renameSession = "session.rename"
@@ -267,6 +281,12 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case .closeSession(let id):
             try c.encode(Op.closeSession, forKey: .op)
             try c.encode(id, forKey: .id)
+        case .reopenClosed(let session):
+            try c.encode(Op.reopenClosed, forKey: .op)
+            // Under `.id`, which already means "the session this command addresses" in
+            // `markRead`, `closeSession` and `renameSession`. A new key for the same meaning
+            // would be a second spelling of one idea.
+            try c.encode(session, forKey: .id)
         case .viewing(let session):
             try c.encode(Op.viewing, forKey: .op)
             // Absent rather than null when leaving: one short line in a dump either way.
@@ -343,6 +363,8 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             self = .markUnread(id: try c.decode(UUID.self, forKey: .id))
         case .closeSession:
             self = .closeSession(id: try c.decode(UUID.self, forKey: .id))
+        case .reopenClosed:
+            self = .reopenClosed(session: try c.decode(UUID.self, forKey: .id))
         case .viewing:
             self = .viewing(session: try c.decodeIfPresent(UUID.self, forKey: .id))
         case .renameSession:
@@ -527,6 +549,10 @@ public enum ServerFrame: Codable, Equatable, Sendable {
     /// `newSessionOptions` are: a list of addresses is not fleet state, and giving it a `seq`
     /// would move the resume point a client hands back on its next `hello`.
     case macEndpoints(cid: Int, [String])
+    /// The reply to `FleetRequest.recentlyClosed`. Unsequenced for the same reason `page` and
+    /// `newSessionOptions` are: a reopen list is not fleet state, and giving it a `seq` would
+    /// move the resume point a client hands back on its next `hello`.
+    case recentlyClosed(cid: Int, [WireClosedSession])
     /// The reply to `FleetRequest.conversations`. Unsequenced for the same reason `page` is:
     /// see `WireConversationCatalogue`'s doc comment for why its recency field lives here
     /// and not on `FleetSnapshot`.
@@ -550,13 +576,13 @@ public enum ServerFrame: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case t, seq, fleet, reason, cid, code, page, options, endpoints
-        case conversations, hits, session
+        case conversations, hits, session, closed
     }
 
-    /// Undotted, deliberately, and the newer four along with it — see the decoder below.
+    /// Undotted, deliberately, and the newer five along with it — see the decoder below.
     private enum Tag: String, Codable {
         case snapshot, ack, err, page, options, endpoints, conversations, hits, session
-        case ask
+        case ask, closed
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -591,6 +617,10 @@ public enum ServerFrame: Codable, Equatable, Sendable {
             try c.encode(Tag.endpoints, forKey: .t)
             try c.encode(cid, forKey: .cid)
             try c.encode(list, forKey: .endpoints)
+        case .recentlyClosed(let cid, let closed):
+            try c.encode(Tag.closed, forKey: .t)
+            try c.encode(cid, forKey: .cid)
+            try c.encode(closed, forKey: .closed)
         case .conversations(let cid, let catalogue):
             try c.encode(Tag.conversations, forKey: .t)
             try c.encode(cid, forKey: .cid)
@@ -617,7 +647,7 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         // Try the frame's own tags first; anything else is an event's tag, which is why
         // the two namespaces must never collide. `FleetEventTag`'s values are all dotted
-        // and these ten are not, which keeps that a property rather than a promise.
+        // and these eleven are not, which keeps that a property rather than a promise.
         if let tag = try? c.decode(Tag.self, forKey: .t) {
             switch tag {
             case .snapshot:
@@ -641,6 +671,11 @@ public enum ServerFrame: Codable, Equatable, Sendable {
                 self = .macEndpoints(
                     cid: try c.decode(Int.self, forKey: .cid),
                     try c.decode([String].self, forKey: .endpoints)
+                )
+            case .closed:
+                self = .recentlyClosed(
+                    cid: try c.decode(Int.self, forKey: .cid),
+                    try c.decode([WireClosedSession].self, forKey: .closed)
                 )
             case .conversations:
                 self = .conversations(

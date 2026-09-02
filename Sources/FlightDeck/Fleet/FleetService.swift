@@ -371,6 +371,23 @@ final class FleetService: ObservableObject {
                     return reply(.err(cid: cid, code: "unknown_project"))
                 }
                 reply(.newSessionOptions(cid: cid, options))
+            case .recentlyClosed:
+                // Answered synchronously, the same as `newSessionOptions` and `macEndpoints`:
+                // the stack is in memory on this actor, so there is nothing to hop a `Task`
+                // for and `reply` lands on `queue` as `onRequest` requires.
+                //
+                // Nothing here writes and nothing enters `FleetSnapshot` — the history is not
+                // rebuildable from fleet events at all (`sessionRemoved` carries an id and
+                // nothing else), which is the sharpest version of the shape
+                // `FleetReplicator`'s drift assertion catches.
+                //
+                // An empty list is a real answer and is sent as one: it means nothing has been
+                // closed this run. The phone renders no section, which is the same outcome as
+                // never having asked — but this end has no reason to distinguish them.
+                reply(.recentlyClosed(
+                    cid: cid,
+                    ClosedSessionProjection.rows(for: self.store.recentlyClosedSessions)
+                ))
             case .macEndpoints:
                 // Answered synchronously: enumerating interfaces is a syscall, not file I/O,
                 // so there is nothing to hop a `Task` for and `reply` lands on `queue` as
@@ -900,6 +917,15 @@ final class FleetService: ObservableObject {
             // reopened by the same undo a tab closed on the Mac can. A phone-specific close
             // that skipped history would be the one destructive action with no way back.
             store.closeSession(id)
+        case .reopenClosed(let session):
+            // No `guard`, and deliberately no `err`. The entry may have gone since the phone
+            // last asked — ⌘⇧T consumed it, or it aged past `ClosedSessionHistory.depth` — and
+            // `reopenClosedSession` is a no-op on an id it does not hold. Both outcomes leave
+            // the tab visible in the fleet list or genuinely gone, so a refusal would tell the
+            // phone nothing it cannot already see. Compare `newSession`'s stale-`accountIndex`
+            // fallback, which is refused for the opposite reason: there, a silent wrong account
+            // is worse than an error.
+            store.reopenClosedSession(id: session)
         case .setProjectCollapsed(let id, let isCollapsed):
             guard store.projectExists(id) else { return .err(cid: cid, code: "unknown_project") }
             store.setCollapsed(isCollapsed, forProjectAt: id)

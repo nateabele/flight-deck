@@ -151,6 +151,10 @@ public final class FleetConnector: @unchecked Sendable {
     private var pendingSearch: [Int: (Result<WireSearchHits, FleetRequestError>) -> Void] = [:]
     /// A seventh answer type, same reasoning.
     private var pendingSession: [Int: (Result<UUID, FleetRequestError>) -> Void] = [:]
+    /// An eighth answer type, same reasoning as the seven above: one table per answer shape,
+    /// all sharing the single `cid` space `FleetClient.send` mints from, so a number is filed
+    /// in at most one and `apply` tries each in turn.
+    private var pendingClosed: [Int: (Result<[WireClosedSession], FleetRequestError>) -> Void] = [:]
     private var browser: NWBrowser?
     private var fleet = FleetSnapshot.empty
     private var attempt = 0
@@ -342,6 +346,18 @@ public final class FleetConnector: @unchecked Sendable {
         pendingSession[cid] = completion
     }
 
+    /// Ask for every reopenable tab the Mac is holding. Same contract as `request(_:then:)` —
+    /// exactly one answer, `.disconnected` synchronously when there is nothing to ask.
+    public func requestRecentlyClosed(
+        then completion: @escaping (Result<[WireClosedSession], FleetRequestError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let winner else { return completion(.failure(.disconnected)) }
+        let cid = winner.send(FleetRequest.recentlyClosed)
+        guard cid != 0 else { return completion(.failure(.disconnected)) }
+        pendingClosed[cid] = completion
+    }
+
     /// Takes the Mac's list as authoritative for membership, keeping the promoted address in
     /// front when the Mac still claims it.
     private func adoptEndpoints(_ list: [String]) {
@@ -403,6 +419,14 @@ public final class FleetConnector: @unchecked Sendable {
     ) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let completion = pendingSession.removeValue(forKey: cid) else { return }
+        completion(result)
+    }
+
+    private func resolveClosed(
+        _ cid: Int, with result: Result<[WireClosedSession], FleetRequestError>
+    ) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let completion = pendingClosed.removeValue(forKey: cid) else { return }
         completion(result)
     }
 
@@ -599,6 +623,11 @@ public final class FleetConnector: @unchecked Sendable {
             adoptEndpoints(list)
             resolveEndpoints(cid, with: .success(list))
             return
+        case .recentlyClosed(let cid, let closed):
+            // Unsequenced, exactly like `page` and `newSessionOptions` and for the same
+            // reason — a reopen list is not fleet state and must not move the resume point.
+            resolveClosed(cid, with: .success(closed))
+            return
         case .err(let cid, let code):
             // Commands first, then requests. The tables share one `cid` space
             // (`FleetClient.nextCID` mints for all of them), so a number is in at most one of
@@ -627,6 +656,10 @@ public final class FleetConnector: @unchecked Sendable {
             }
             if pendingSession[cid] != nil {
                 resolveSession(cid, with: .failure(.server(code: code)))
+                return
+            }
+            if pendingClosed[cid] != nil {
+                resolveClosed(cid, with: .failure(.server(code: code)))
                 return
             }
             resolve(cid, with: .failure(.server(code: code)))
@@ -863,6 +896,11 @@ public final class FleetConnector: @unchecked Sendable {
         let outstandingSession = pendingSession
         pendingSession.removeAll()
         for completion in outstandingSession.values { completion(.failure(.disconnected)) }
+        // And the reopen list, for the same reason: a phone whose socket dies with that fetch
+        // outstanding must be told, or its `+` menu waits on a section that never arrives.
+        let outstandingClosed = pendingClosed
+        pendingClosed.removeAll()
+        for completion in outstandingClosed.values { completion(.failure(.disconnected)) }
     }
 
     private func report(_ state: State) { onState?(state) }

@@ -235,6 +235,39 @@ final class FleetFrameCodingTests: XCTestCase {
         }
     }
 
+    // MARK: Reopening a closed tab
+
+    func testTheRecentlyClosedReplyRoundTripsAndCarriesNoSeq() throws {
+        let frame = ServerFrame.recentlyClosed(cid: 4, [
+            WireClosedSession(id: UUID(), title: "fix the pager",
+                              agent: "claude", projectPath: "/w/a")
+        ])
+        let data = try JSONEncoder().encode(frame)
+        XCTAssertEqual(try JSONDecoder().decode(ServerFrame.self, from: data), frame)
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        XCTAssertNil(json["seq"], "a reopen list is not fleet state and must not move the resume point")
+    }
+
+    /// The same non-collision property `testTheNewFrameTagsDoNotCollideWithEventTags` states,
+    /// for the tag this reply adds. Read off an encoded frame rather than spelled as a
+    /// literal, for the reason given there: `ServerFrame.Tag` is private, so only the raw
+    /// value that actually ships can be asserted against.
+    func testTheRecentlyClosedTagDoesNotCollideWithAnEventTag() throws {
+        let tag = try XCTUnwrap(
+            try fields(of: ServerFrame.recentlyClosed(cid: 5, []))["t"] as? String
+        )
+        XCTAssertFalse(tag.contains("."), "\(tag) is shaped like an event tag")
+        XCTAssertNil(FleetEventTag(rawValue: tag))
+    }
+
+    func testTheReopenCommandRoundTrips() throws {
+        let frame = ClientFrame.cmd(cid: 7, .reopenClosed(session: UUID()))
+        let data = try JSONEncoder().encode(frame)
+        XCTAssertEqual(try JSONDecoder().decode(ClientFrame.self, from: data), frame)
+    }
+
     // MARK: The log fetch, which is the one request that travels Mac → phone
 
     /// Flattened into the frame, exactly as `ClientFrame.req` flattens its request: one
