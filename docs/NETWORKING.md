@@ -115,7 +115,15 @@ The mechanical checklist, in the order the compiler will ask for it.
    comment on it in `drainPending()`.
 5. **The Mac end.** `FleetService.onCommand` / `onRequest`. Answer synchronously if the work is
    already on the main actor; hop through a `Task` if it is file I/O, as the timeline does, and
-   note that `reply` must land back on the socket's queue.
+   note that `reply` must land back on the socket's queue. **A deferred reply can arrive out of
+   order.** `onCommand` gained the same deferred-`reply` shape `onRequest` already had so
+   `.newSession` could await a display wake instead of blocking the frame-handling thread (see
+   `docs/superpowers/HANDOFF-2026-08-31-display-sleep.md`); a reply answered from inside a `Task`
+   can land after the reply to a command sent later. This is safe only because nothing here
+   orders replies by arrival — every client correlates a reply to its request by `cid` alone
+   (`pendingAcks` and friends in `FleetConnector`, item 4 above), so a reordered reply is
+   indistinguishable from a slow one. Any new deferred reply must keep that property rather than
+   assume FIFO.
 6. **Refusals.** Return `.err(cid:code:)` with a code a client can act on. Two more arrive from
    the socket rather than from you: `unhandled` (no handler wired at all) and `unsupported` (a
    request this Mac cannot parse). **A client must treat any unrecognised code as a soft

@@ -155,16 +155,34 @@ served from a per-process value refreshed on the main run loop, which a poll run
 main thread blocked would never observe. It observes it. The spike harness polled from a
 separate process; the shipped app polls from the blocked main actor, and both see the flip.
 
-**Follow-up, not done: make the phone's guard async.** `FleetService`'s `.newSession` handler
-now blocks the caller's thread for up to 1.5s inside `ensureTerminalCreatable()` before either
-creation branch runs. It is the one site that need not: the agent/account branch already
-dispatches its own work into a `Task`, so restructuring the handler to check-then-launch
-asynchronously would cost it nothing, and would free the frame-handling thread for the
-duration of the wake. The plain-`+` branch is why this was not just done here — it currently
-distinguishes `unknown_project` from `terminal_unavailable` synchronously, and threading that
-distinction through an `async` reshape is real work, not a one-line change. Ruled out of this
-fix wave: the worst case (1.5s) sits far inside the 10s TCP keepalive idle the connection
-tolerates, so the synchronous form is not a correctness problem, only a missed efficiency.
+**Follow-up, done: the phone's guard is now async.** `FleetService`'s `.newSession` handler used
+to block the caller's thread for up to 1.5s inside `ensureTerminalCreatable()` before either
+creation branch ran. `FleetSocketServer.onCommand` gained the same deferred-`reply` shape
+`onRequest` already had — `reply` is a closure passed in rather than a return value, callable
+after an `await` — and `FleetService.onCommand` uses it: when the command is `.newSession`, the
+named project still exists, and `canCreateTerminal` is already false, it awaits
+`store.awaitTerminalCreatable()` inside a `Task` and replies from there instead of blocking the
+frame-handling thread for the wake. The project check runs first and gates the whole thing: a
+stale phone naming a project the Mac no longer has still gets `unknown_project` synchronously,
+on the way out of the frame handler, and never wakes the screen or asks the waker anything for a
+command that was going to be refused regardless. Every other command, and every `.newSession`
+against an already-awake Mac, still answers exactly as before — synchronously, on the way out.
+`awaitTerminalCreatable` is `ensureTerminalCreatable`'s async twin: identical policy, identical
+10s failed-wake cooldown (see below), the only difference is `await`ing the waker instead of
+blocking on it.
+
+**This changes reply ordering, and that is safe by construction, not by luck.** A `.newSession`
+reply can now land after replies to commands the phone sent later, because the deferred branch
+answers from inside a `Task` rather than on the way out of the frame handler. Nothing in this
+codebase orders replies by arrival — every client correlates a reply to its request by `cid`,
+independent of when it arrives — so a reordered reply is indistinguishable from a slow one. See
+`docs/NETWORKING.md` for where this is recorded for a phone-side implementer.
+
+**Caveat on the end-to-end verification above.** The "Verified end-to-end against the shipped
+app" run earlier in this document exercised the *synchronous*, main-actor-blocking waker — the
+code path this follow-up just replaced. That evidence does not carry over unexamined to the
+async path introduced here; a fresh manual run against a build with this follow-up is still
+owed.
 
 ### A — rejected
 
@@ -201,12 +219,20 @@ render as a generic fallback.
   would lose the deck. So a relaunch with the display asleep can bring back a whole deck of
   inert tabs, and `respawnSurface` is the only remedy. An auto-respawn on display wake would
   close this properly and does not exist.
-- **`DisplayState.isDrawable` asks about `CGMainDisplayID()` only.** On a Mac with more than
-  one display, a main display that has slept while a secondary stays awake and in active use
-  reads as not-drawable, and the guard blocks the main actor for up to 1.5s in front of someone
-  who is actively looking at a screen — just not the main one. A single-display probe is
-  deciding a question that is really machine-wide; nothing in this change addresses that.
-- **No memoisation of a recently-failed wake.** Each `+` pays the full attempted-wake cost
-  independently — up to 1.5s — with nothing remembering that the last attempt, moments ago,
-  timed out. In clamshell mode or with no display attached, every tap recurs the same cost with
-  the same outcome; there is no backoff or short-lived "don't bother" cache.
+- **DONE — `DisplayState.isDrawable` used to ask about `CGMainDisplayID()` only.** On a Mac with
+  more than one display, a main display that had slept while a secondary stayed awake and in
+  active use read as not-drawable, and the guard blocked in front of someone who was actively
+  looking at a screen — just not the main one. It now enumerates every online display with
+  `CGGetOnlineDisplayList` and answers true if **any** of them is active, falling back to
+  `CGMainDisplayID()` alone if enumeration itself fails — an unexpected CoreGraphics error
+  degrades to the previous behaviour rather than to an unconditional yes.
+- **DONE — no memoisation of a recently-failed wake.** Each `+` used to pay the full
+  attempted-wake cost independently — up to 1.5s — with nothing remembering that the last
+  attempt, moments ago, timed out. A failed wake is now memoised in `lastFailedWake` and
+  consulted for `SessionStore.wakeRetryCooldown` (10s): `ensureTerminalCreatable` and
+  `awaitTerminalCreatable` both check it, but only after `canCreateTerminal` has already
+  answered false, so a display that comes back on its own inside the cooldown is never
+  suppressed by a stale memo — the very next `canCreateTerminal` check sees it and clears
+  `lastFailedWake`. In clamshell mode or with no display attached, this still leaves the first
+  tap in every 10s window paying the full wake cost; it is the repeats within that window that
+  are now cheap.
