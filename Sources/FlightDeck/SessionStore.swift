@@ -858,6 +858,21 @@ final class SessionStore: ObservableObject {
     /// Test seam. Production sets this from the convenience init.
     var notifier: Notifying?
 
+    /// Where plan gates come from. Nil by default, like `notifier` and `replicator`: most
+    /// tests build a store with no phone-facing services attached. Assigned once by
+    /// `FleetService.init`, then driven by `applyRegistry`'s existing tick — see
+    /// `pollPlanGates()`. Not `private`: `FleetService` reads it to thread the same instance
+    /// into every `FleetProjection` call site, so the oracle snapshot and the event-fold
+    /// mirror never disagree about a gate.
+    var planGates: PlanGateService?
+
+    /// What each session's gate looked like last time `pollPlanGates()` ran, so
+    /// `deliverPlanGateNotifications` can tell a re-poll of the same gate from a closed one or
+    /// a revised one — the same job `statuses` does for `commitStatuses`, but plan gates never
+    /// touch `statuses` (that is the defect this feature exists to fix), so they need their
+    /// own remembered "before."
+    private var previousPlanGates: [UUID: WirePlanGate] = [:]
+
     /// Where fleet changes are reported for replication to paired devices. Optional and nil
     /// by default, exactly like `notifier`: nearly every test builds a store with no client
     /// attached and must not be made to care.
@@ -899,7 +914,8 @@ final class SessionStore: ObservableObject {
         FleetProjection.project(
             session, status: statuses[session.id], unread: unreadIdle,
             hasBackgroundWork: backgroundWorkSessions.contains(session.id),
-            openPromptCall: openPromptCalls[session.id]
+            openPromptCall: openPromptCalls[session.id],
+            planGates: planGates
         )
     }
 
@@ -1820,7 +1836,8 @@ final class SessionStore: ObservableObject {
             emit(.projectAdded(
                 FleetProjection.project(
                     repos[repoIndex], statuses: statuses, unread: unreadIdle,
-                    backgroundWork: backgroundWorkSessions, openPromptCalls: openPromptCalls
+                    backgroundWork: backgroundWorkSessions,
+                    openPromptCalls: openPromptCalls, planGates: planGates
                 ),
                 at: repoIndex
             ))
@@ -2721,7 +2738,7 @@ final class SessionStore: ObservableObject {
                     FleetProjection.project(
                         repo, statuses: statuses, unread: unreadIdle,
                         backgroundWork: backgroundWorkSessions,
-                        openPromptCalls: openPromptCalls
+                        openPromptCalls: openPromptCalls, planGates: planGates
                     ), at: at
                 ))
             }
@@ -3222,6 +3239,19 @@ final class SessionStore: ObservableObject {
     func agent(of id: UUID) -> AgentID? {
         guard let at = locate(id) else { return nil }
         return repos[at.repo].sessions[at.session].agent
+    }
+
+    /// The `claude` pid backing a tab, for `PlanGateService`'s `pid` closure — the same field
+    /// `applyRegistry` already keys `rows[anchor.pid]` on, so a plan gate and a status read
+    /// agree about which process they mean.
+    func claudePID(of id: UUID) -> pid_t? {
+        anchors[id]?.pid
+    }
+
+    /// Every session this Mac knows, for `PlanGateService`'s `sessions` closure. Order is
+    /// whatever `repos` is in; `PlanGateService` only ever uses this to scan, never to display.
+    func allSessionIDs() -> [UUID] {
+        repos.flatMap(\.sessions).map(\.id)
     }
 
     /// Sidebar → the agent. Updates the title immediately, then tells the agent, by whatever
@@ -4446,6 +4476,86 @@ final class SessionStore: ObservableObject {
         }
 
         commitStatuses(next, backgroundWork: nextBackgroundWork)
+
+        // Driven off this same tick, deliberately not a second timer: one poll of two
+        // directories (the registry above, `PlannotatorRegistry` inside `refresh()`) is
+        // cheaper than two, and two would let a gate and a status be read at different
+        // instants — see the brief this method was written against.
+        pollPlanGates()
+    }
+
+    /// Re-reads `PlannotatorRegistry` through `planGates` and delivers any resulting
+    /// notification. Fire-and-forget: this tick's caller (`applyRegistry`) does not await it,
+    /// the same way `.newSession`'s command handler does not await its own dispatch — a poll
+    /// that is a tick late is a poll, not a failure.
+    private func pollPlanGates() {
+        guard let planGates else { return }
+        Task { @MainActor [weak self] in
+            await planGates.refresh()
+            self?.deliverPlanGateNotifications()
+        }
+    }
+
+    /// The plan-gate half of `deliverNotifications`, and why it cannot be folded into that
+    /// one method: a gate opening moves neither `statuses` nor `backgroundWorkSessions` —
+    /// claude's registry still reports `busy` while a gate is open, which is the defect this
+    /// feature exists to fix — so `commitStatuses`'s diff never produces a `StatusTransition`
+    /// for it. This runs on its own tick, after `refresh()`, against its own remembered map of
+    /// what each session's gate was last time, so a re-poll of an unchanged gate is not a
+    /// re-notify and a closed one still gets its banner withdrawn.
+    ///
+    /// **Emits `.planGateChanged` on every real change, independent of `notifier`.** The wire
+    /// event is what lets `FleetSnapshot.apply` fold `planGate` at all — without it, a client
+    /// resuming from a replay window never learns a gate opened or closed, and the projection
+    /// oracle (which reads `planGates` live) permanently disagrees with the event-fold mirror.
+    /// That has to hold even when this Mac has no local notifier — a headless `SessionStore`,
+    /// or one under test — so only the OS-banner half below is gated on `notifier`'s presence.
+    ///
+    /// **Batched into one `emit`, not one per session — the same reason `emitActivity` batches
+    /// its whole transition list.** `refresh()` (the caller's caller, `pollPlanGates()`) already
+    /// updated `planGates.gates` for every session before this method runs, so the oracle's
+    /// live read reflects *all* of this tick's changes from the first line. Emitting per
+    /// session inside the loop would `record([event])` — and therefore `checkForDrift()` — one
+    /// session at a time: the very first emit, for session A, would already see the oracle
+    /// projecting session B's new gate while the mirror still held B's old one (no event for B
+    /// has been recorded yet), and trip the DEBUG drift assertion on two gates changing in one
+    /// tick. Collecting the events and emitting once after the loop folds the whole tick before
+    /// any drift check runs, closing that window the same way `emitActivity` already does for
+    /// activity transitions. Not `internal` for the batching to hold, `func` rather than
+    /// `private` only so `FleetService` can call this directly after a successful
+    /// `annotate`/`resolve` — see the doc comment there for the matching window on that path.
+    func deliverPlanGateNotifications() {
+        guard let planGates else { return }
+        let active = appIsActive()
+        var events: [FleetEvent] = []
+        for id in repos.flatMap(\.sessions).map(\.id) {
+            let gate = planGates.gate(for: id)
+            let previous = previousPlanGates[id]
+            // Unchanged: `old.status == new.status` always below (both read `statuses[id]` at
+            // this same instant), so when the gate itself has not moved, `action` was already
+            // guaranteed `.none` — this is a fast path, not a behavior change.
+            guard gate != previous else { continue }
+            previousPlanGates[id] = gate
+
+            events.append(.planGateChanged(id: id, gate: gate))
+
+            guard let notifier else { continue }
+            let old = SessionNotificationPolicy.Input(status: statuses[id], planGate: previous)
+            let new = SessionNotificationPolicy.Input(status: statuses[id], planGate: gate)
+            switch SessionNotificationPolicy.action(old: old, new: new, appActive: active) {
+            case .none:
+                continue
+            case .notify:
+                guard let named = titleAndProject(of: id) else { continue }
+                notifier.notify(
+                    sessionID: id, title: named.title, subtitle: named.project,
+                    body: "A plan is ready for your review."
+                )
+            case .withdraw:
+                notifier.withdraw(sessionID: id)
+            }
+        }
+        emit(events)
     }
 
     /// The single writer of `statuses`, and the one place a status change turns into its
@@ -4549,8 +4659,24 @@ final class SessionStore: ObservableObject {
         guard let notifier else { return }
         let active = appIsActive()
         for transition in transitions {
+            // **The session's CURRENT gate on both sides, not `nil` on both sides.** This
+            // pipeline only ever sees status edges — a gate opening moves neither `statuses`
+            // nor `backgroundWorkSessions`, so it produces no `StatusTransition` at all, and
+            // `deliverPlanGateNotifications` is where that half of `Input` changes. But
+            // `wantsYou` is *"waiting OR a gate"*, so passing `nil` here does not mean "the
+            // gate is not this pipeline's business", it means "there is no gate" — and a
+            // `waiting`→`busy` edge under an open gate then computed
+            // `true`→`false` = `.withdraw`, pulling the banner off a plan still waiting to be
+            // read. Nothing could put it back: the gate itself had not changed, so
+            // `deliverPlanGateNotifications`'s `guard gate != previous` skips the session
+            // forever after. Identical on both sides is what makes this pipeline blind to
+            // gates instead of wrong about them — same `wantsYou`, same `subject`, so a
+            // status edge under a standing gate neither re-notifies nor withdraws.
+            let gate = planGates?.gate(for: transition.id)
             switch SessionNotificationPolicy.action(
-                old: transition.old, new: transition.new, appActive: active
+                old: .init(status: transition.old, planGate: gate),
+                new: .init(status: transition.new, planGate: gate),
+                appActive: active
             ) {
             case .none:
                 continue
@@ -4849,7 +4975,8 @@ final class SessionStore: ObservableObject {
             emit(.projectAdded(
                 FleetProjection.project(
                     repos[destination], statuses: statuses, unread: unreadIdle,
-                    backgroundWork: backgroundWorkSessions, openPromptCalls: openPromptCalls
+                    backgroundWork: backgroundWorkSessions,
+                    openPromptCalls: openPromptCalls, planGates: planGates
                 ),
                 at: destination
             ))

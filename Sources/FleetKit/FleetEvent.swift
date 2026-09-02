@@ -41,6 +41,16 @@ public enum FleetEvent: Equatable, Sendable {
                          openPromptCall: OpenPromptIdentity = .unreported)
     case unreadChanged(id: UUID, isUnread: Bool)
 
+    /// A plan gate opened, changed subject, or closed on this session.
+    ///
+    /// Without this case, `planGate` was a field the projection oracle could see
+    /// (`FleetProjection.snapshot(of:planGates:)`) that no event could ever produce — the
+    /// event-fold mirror and the oracle disagreed by construction the moment any gate was
+    /// open, which is exactly the class of bug `promptExpired` exists to prevent on the other
+    /// side of this same feature. `nil` closes the gate; a non-nil value with a new `callID`
+    /// is a fresh gate superseding whatever was open before.
+    case planGateChanged(id: UUID, gate: WirePlanGate?)
+
     /// A prompt this Mac accepted from a phone, and then never typed.
     ///
     /// `submitPrompt` answers `.queued` when the tab's input box is busy, and the queue is
@@ -64,7 +74,8 @@ extension FleetEvent {
         case .sessionAdded(let s, _, _): return s.id
         case .sessionRemoved(let id), .sessionMoved(let id, _, _),
              .renamed(let id, _, _), .activityChanged(let id, _, _, _, _, _),
-             .unreadChanged(let id, _), .promptExpired(let id, _):
+             .unreadChanged(let id, _), .planGateChanged(let id, _),
+             .promptExpired(let id, _):
             return id
         case .projectAdded, .projectRemoved, .projectCollapsed,
              .projectsReordered, .sessionsReordered:
@@ -80,7 +91,7 @@ extension FleetEvent {
              .sessionsReordered(let id, _):
             return id
         case .sessionAdded, .sessionRemoved, .sessionMoved, .projectsReordered,
-             .renamed, .activityChanged, .unreadChanged, .promptExpired:
+             .renamed, .activityChanged, .unreadChanged, .planGateChanged, .promptExpired:
             return nil
         }
     }

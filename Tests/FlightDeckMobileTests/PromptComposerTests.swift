@@ -17,14 +17,14 @@ final class PromptComposerTests: XCTestCase {
             hasBackgroundWork: hasBackgroundWork)
     }
 
-    /// Refused on the phone as well as on the Mac, and the two are not redundant: the Mac's
-    /// refusal is the guarantee, and this one is the difference between a disabled field with
-    /// a sentence under it and a message someone typed, sent, and got an error for.
-    func testACodexTabSaysWhyRatherThanOfferingAFieldThatWillFail() {
-        XCTAssertEqual(
-            PromptComposer.unavailable(for: session(agent: "codex")),
-            "Flight Deck can only type into a Claude session from here."
-        )
+    /// **Codex is typeable, by the same route as claude: text into the tab's pty.** This test
+    /// used to assert the opposite — that a codex tab was refused with "Flight Deck can only
+    /// type into a Claude session from here." — on the theory that `InputBar.read` might
+    /// mistake codex's composer for a shell's. It could not: codex draws `›` (U+203A) and
+    /// `InputBar` locked onto `❯`, so it matched nothing on a codex screen at all. See
+    /// `CodexTextChannel` and `PromptComposer.unavailable`.
+    func testACodexTabIsOfferedAField() {
+        XCTAssertNil(PromptComposer.unavailable(for: session(agent: "codex")))
     }
 
     /// An agent this build has never heard of is refused too. `WireSession.agent` is a

@@ -9,6 +9,12 @@ import FleetKit
 /// inline, because the assertion is only worth anything if it is on by default: a test that
 /// forgot to install it would pass over exactly the missing-emission bug the assertion
 /// exists to catch.
+///
+/// The oracle below is deliberately the bare `snapshot(of:)`, with nothing threaded in: it
+/// reads every field — `planGates` included — off the store itself, so a projection field
+/// added later cannot leave this harness half-blind and reporting false drift. See that
+/// method's own comment; making `planGates` default to the store's is what let this file stay
+/// a one-liner.
 @MainActor
 func attachedReplicator(
     to store: SessionStore, file: StaticString = #filePath, line: UInt = #line

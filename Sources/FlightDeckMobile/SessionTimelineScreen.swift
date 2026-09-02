@@ -55,6 +55,25 @@ struct SessionTimelineScreen: View {
     /// `onAppear` has already fired for a row that is still visible, so without this a read
     /// that failed while the reader sat at the top would never be attempted again.
     @State private var isNearOldest = false
+    /// The review the reader is in: built once, in the banner's own `Button` action, and kept
+    /// here for as long as the pushed screen is up. `nil` both drives
+    /// `.navigationDestination(isPresented:)` and holds what it presents.
+    ///
+    /// **The MODEL is the state, not the gate it was built from, and that is the whole point.**
+    /// `PlanReviewScreen` takes the model rather than owning it, so a model constructed inside
+    /// the destination closure would be a *new* one on every evaluation of that closure — and
+    /// the feature's own main loop re-evaluates it: a successful comment bumps
+    /// `annotationCount`, which changes `session.planGate`, which re-runs this body. Each
+    /// rebuild would drop `sent`, the typed `feedback` and the `resolved` latch, so sending one
+    /// comment would erase the badge it just earned and the note under it — the same defect
+    /// `SessionTimelineModel` is cached in `FleetModel` to avoid (see `model` above, and
+    /// `FleetModel.timelineModel(for:)`).
+    ///
+    /// **Captured at the tap rather than read live from `session?.planGate`** for the second
+    /// reason the old `reviewingGate` gave: a live re-read would collapse the pushed screen out
+    /// from under a reader still mid-review the instant the Mac's gate clears — which `resolve`
+    /// itself causes a heartbeat after the reader's own tap.
+    @State private var reviewModel: PlanReviewModel?
     /// The row a search jump landed on, briefly. Mirrors `model.scrollTarget` but fades on its
     /// own clock rather than being cleared by the model, so a reader who lingers keeps seeing
     /// the row that answered their tap for exactly as long as the fade takes and not a frame
@@ -227,6 +246,19 @@ struct SessionTimelineScreen: View {
                 agent: session?.agent
             )
         }
+        // A second `.navigationDestination`, keyed on presence rather than on a value: this
+        // is a `PlanReviewModel` and the `for:` form above needs a `Hashable` value to match a
+        // pushed item back to its case. `reviewModel` is both the trigger and the payload,
+        // built once at the tap; see its own comment for why the destination READS a model it
+        // does not build, and why the gate behind it is captured rather than read live.
+        .navigationDestination(isPresented: Binding(
+            get: { reviewModel != nil },
+            set: { isPresented in if !isPresented { reviewModel = nil } }
+        )) {
+            if let reviewModel {
+                PlanReviewScreen(model: reviewModel)
+            }
+        }
         // Keyed on the session, not on nothing: a `.task` re-firing over the SAME model is
         // harmless by construction — `loadLatest` asks `feed.newerAnchor`, which is
         // `.after(newest)` on a feed that holds anything, so returning to a loaded screen
@@ -264,6 +296,17 @@ struct SessionTimelineScreen: View {
                     model: model
                 )
                 PromptComposer(session: session, model: model)
+            }
+        }
+        // The top inset, and the reason it exists at all: `ExitPlanMode` is the one tool call
+        // a hook blocks WITHOUT claude ever reporting `waiting` (see `ClaudeOpenPlanGate`'s own
+        // comment), so a session gated on a plan draws no `PromptCard` at the bottom of this
+        // screen and no waiting badge in the fleet list either — nothing on either screen says
+        // anything is happening. `session?.planGate` is the one signal that survives that gap,
+        // and this banner is what "replaces a spinner that says nothing" (spec's own words).
+        .safeAreaInset(edge: .top) {
+            if let gate = session?.planGate {
+                planGateBanner(gate)
             }
         }
         // The event trigger. `activity` and the title change live on the fleet socket, and a
@@ -831,5 +874,104 @@ struct SessionTimelineScreen: View {
     static func pairedResult(for item: TimelineItem, in items: [TimelineItem]) -> TimelineItem? {
         guard item.kind == .toolCall, let callID = item.body.callID else { return nil }
         return items.first { $0.kind == .toolResult && $0.body.callID == callID }
+    }
+
+    // MARK: The plan gate
+
+    /// The review one tap opens: the gate the banner was drawn for, and the plan behind it.
+    ///
+    /// **Called from the tap and nowhere else** — see `reviewModel`, which keeps what this
+    /// returns. Building it is destructive by nature: a `PlanReviewModel` carries everything the
+    /// reader has done on the pushed screen, so a second call replaces all of it.
+    ///
+    /// `transcriptPlan` is resolved here, at the tap, for the same reason the gate is: it reads
+    /// `feed.items`, which keeps arriving while the reader is on the pushed screen, and the plan
+    /// under review is the one the banner was tapped for.
+    @MainActor
+    static func review(of gate: WirePlanGate, in model: SessionTimelineModel) -> PlanReviewModel {
+        PlanReviewModel(
+            session: model.sessionID,
+            gate: gate,
+            transcriptPlan: transcriptPlan(for: gate, in: model.feed.items),
+            send: { model.sendPlanCommand($0) }
+        )
+    }
+
+    /// The whole banner: what it is waiting on, and how long it has been. A `Button` rather
+    /// than a `NavigationLink(value:)` for the same reason the destination below is keyed on
+    /// `isPresented` rather than `for:` — neither `WirePlanGate` nor `PlanReviewModel` is
+    /// `Hashable` — and the tap is what BUILDS the review, once, rather than the destination
+    /// building a fresh one on every evaluation and the reader losing what they wrote into it.
+    private func planGateBanner(_ gate: WirePlanGate) -> some View {
+        Button {
+            reviewModel = Self.review(of: gate, in: model)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.title3)
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Waiting on your review of a plan")
+                        .font(.subheadline.weight(.semibold))
+                    if let elapsed = Self.elapsedText(since: gate.startedAt) {
+                        Text(elapsed)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.footnote)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(.secondarySystemBackground))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// "Started 5 minutes ago" from the gate's own `startedAt`, or `nil` when the timestamp
+    /// cannot be parsed — the banner still reads correctly with just its headline in that case.
+    ///
+    /// Its own ISO8601 fallback rather than a call into `TimelineStyle.date(_:)`: that helper
+    /// is `private` to that file, and this is the only other place in the app that needs to
+    /// parse a wire timestamp, so a second two-formatter pair (fractional seconds, then
+    /// without) is the smaller duplication.
+    static func elapsedText(since startedAt: String) -> String? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let whole = ISO8601DateFormatter()
+        whole.formatOptions = [.withInternetDateTime]
+        guard let date = withFraction.date(from: startedAt) ?? whole.date(from: startedAt)
+        else { return nil }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return "Started " + formatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    /// The `verdict` tier's plan source. There the gate itself carries none (see
+    /// `WirePlanGate.plan`'s own comment), so this reads `ExitPlanMode`'s own `input.plan` out
+    /// of the timeline body the phone already holds — the very call the gate names by
+    /// `callID`, so there is no question of which among several plan-shaped calls this is for.
+    ///
+    /// Informed by, but not reusing, `ClaudeOpenPlanGate.find` on the Mac: that walks raw
+    /// transcript lines looking for the newest UNANSWERED `ExitPlanMode` call, because it is
+    /// the one deciding whether a gate is open at all. This is only ever asked about a call the
+    /// Mac has already told the phone is open, against `TimelineItem`s the feed already holds
+    /// — so matching directly on `callID` is enough; there is no "which one is newest" left to
+    /// resolve. `nil` both when the call has not reached this feed's window and when its body
+    /// does not parse, and either way `PlanReviewModel` falls back to an empty plan rather than
+    /// crashing on it.
+    static func transcriptPlan(for gate: WirePlanGate, in items: [TimelineItem]) -> String? {
+        guard let call = items.first(where: {
+            $0.kind == .toolCall && $0.body.tool == "ExitPlanMode" && $0.body.callID == gate.callID
+        }) else { return nil }
+        guard let document = TimelineStyle.jsonDocument(for: call),
+              case .object(let members) = document,
+              case .string(let plan) = members.first(where: { $0.key == "plan" })?.value
+        else { return nil }
+        return plan
     }
 }

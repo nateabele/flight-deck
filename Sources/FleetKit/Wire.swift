@@ -38,6 +38,40 @@ public struct WireProject: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// An open `ExitPlanMode` gate, as it goes on the wire.
+///
+/// **This is carried, not derived, and that is the one place this feature departs from
+/// `OpenPrompt`.** Every other blocked state is re-derived on both ends from a transcript they
+/// both hold, precisely so a cache cannot disagree with a screen. A plan gate cannot be: while
+/// one is open, claude's registry reports `status: "busy"` — measured over 33 minutes against
+/// pid 66955 on 2026-08-29 — so there is nothing in the transcript or the status file that
+/// says a human is needed. Only the Mac can know, because only the Mac can read Plannotator's
+/// session registry. So the fact travels.
+public struct WirePlanGate: Codable, Equatable, Sendable {
+    /// The `ExitPlanMode` call this gate is for. The phone sends it back with every command,
+    /// and the Mac refuses anything naming a different one — the check `PromptService` makes
+    /// for a dialog, made here for a gate.
+    public let callID: String
+    /// `"annotate"` when Plannotator is live and inline comments will pin; `"verdict"` when it
+    /// is not and only a whole-plan reply is possible. A `String` rather than an enum for
+    /// `WireSession.agent`'s reason: a tier added later must render degraded, not throw.
+    public let tier: String
+    /// The plan markdown, when the Mac read it from `GET /api/plan`. Absent in the `verdict`
+    /// tier, where the phone reads it from the transcript body it already holds.
+    public let plan: String?
+    public let startedAt: String
+    public let annotationCount: Int
+
+    public init(callID: String, tier: String, plan: String?,
+                startedAt: String, annotationCount: Int) {
+        self.callID = callID
+        self.tier = tier
+        self.plan = plan
+        self.startedAt = startedAt
+        self.annotationCount = annotationCount
+    }
+}
+
 /// Which dialog a session is blocked on, named by the blocked tool call's `tool_use_id`.
 ///
 /// **Identity, and deliberately nothing else.** What the dialog *says* is still derived on
@@ -117,6 +151,9 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     /// value of it: the Mac reports `activity: "idle"` and this together for a tab sitting at
     /// its prompt with a dev server up.
     public var hasBackgroundWork: Bool
+    /// The plan gate this tab is blocked on, or `nil`. See `WirePlanGate` for why this is
+    /// carried rather than derived.
+    public var planGate: WirePlanGate?
     /// Which dialog this session is blocked on. See `OpenPromptIdentity` for why it is
     /// three-valued and what each state obliges a client to do; `activity == "waiting"` says
     /// only *that* something is blocked, and used to be the whole story.
@@ -129,6 +166,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         activity: String? = nil, waitingFor: String? = nil,
         subagentCount: Int = 0, isUnread: Bool = false,
         hasBackgroundWork: Bool = false,
+        planGate: WirePlanGate? = nil,
         openPromptCall: OpenPromptIdentity = .unreported
     ) {
         self.id = id
@@ -139,6 +177,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         self.subagentCount = subagentCount
         self.isUnread = isUnread
         self.hasBackgroundWork = hasBackgroundWork
+        self.planGate = planGate
         self.openPromptCall = openPromptCall
     }
 
@@ -146,9 +185,17 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     /// whole point is a state that is the *absence* of a key, which no synthesized member can
     /// express. `activity` and `waitingFor` keep `encodeIfPresent` so the bytes an older phone
     /// receives for a session with no status are the ones it has always received.
+    ///
+    /// **`planGate` must be listed here and written below.** It used to ride on the synthesized
+    /// encoder, which gives every optional `encodeIfPresent` for free. Spelling the encoder out
+    /// took that away: a member omitted from this enum is not a compile error on the encode
+    /// side, it is a field that silently never reaches the wire — and the test that a gateless
+    /// session encodes no key passes just as happily when the key is never encoded at all. So
+    /// the gate is enumerated here and `encodeIfPresent`ed below, and
+    /// `testSessionWithAGateRoundTrips` is what keeps it that way.
     enum CodingKeys: String, CodingKey {
         case id, title, agent, activity, waitingFor, subagentCount, isUnread
-        case hasBackgroundWork, openPromptCall
+        case hasBackgroundWork, planGate, openPromptCall
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -161,6 +208,9 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         try c.encode(subagentCount, forKey: .subagentCount)
         try c.encode(isUnread, forKey: .isUnread)
         try c.encode(hasBackgroundWork, forKey: .hasBackgroundWork)
+        // Absent, not `null`, exactly as the synthesized encoder used to write it — a build
+        // that predates the gate must see the same bytes for a tab with none.
+        try c.encodeIfPresent(planGate, forKey: .planGate)
         try c.encode(openPromptCall, forKey: .openPromptCall)
     }
 
@@ -193,5 +243,9 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
             activity = decodedActivity
             hasBackgroundWork = decodedBackgroundWork
         }
+        // Absent from a Mac built before this feature, and from any tab with no gate open —
+        // both decode as no gate, not as an error. See `WirePlanGate` for why the fact is
+        // carried at all rather than derived like everything else here.
+        planGate = try c.decodeIfPresent(WirePlanGate.self, forKey: .planGate)
     }
 }
