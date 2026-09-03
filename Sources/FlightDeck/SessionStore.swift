@@ -4694,7 +4694,7 @@ final class SessionStore: ObservableObject {
     /// behavior, and the two would be free to disagree the moment either changed shape.
     private func checkStuckPrompts(_ rows: [pid_t: ClaudeStatusFile.Entry]) {
         guard let openPromptProbe else { return }
-        for session in repos.flatMap(\.sessions) {
+        for session in repos.flatMap(\.sessions) where session.agent.hasStatusRegistry {
             let id = session.id
             guard statuses[id]?.activity == .waiting else { stuckPromptTicks[id] = 0; continue }
             guard let code = openPromptProbe(id) else { stuckPromptTicks[id] = 0; continue }
@@ -4706,11 +4706,6 @@ final class SessionStore: ObservableObject {
             let watched = watchedTranscriptURL(of: id)
             let registryCWD = rows.values
                 .first { $0.sessionID == session.pinnedConversationID }?.cwd
-            // Raw equality, never `comparablePath`: `ClaudeSession.encodedProjectDirName` maps
-            // every non-alphanumeric byte to `-`, so a symlink and the directory it points at
-            // encode to two different project directories. Normalizing here would call that a
-            // match and never repair it.
-            //
             // `projectsRoot` is threaded through explicitly rather than left at its default:
             // `watched` came from an adapter built by `makeClaudeAdapter(account:)`, which
             // resolves its root from *this* account's `transcriptsRoot(forAccount:)` — the same
@@ -4724,7 +4719,7 @@ final class SessionStore: ObservableObject {
                     projectsRoot: transcriptsRoot(forAccount: session.accountID)
                 )
             }
-            let matches = watched != nil && expected != nil && watched!.path == expected!.path
+            let matches = Self.pathMatches(watched: watched, expected: expected)
 
             PromptLifecycleLog.record(PromptLifecycleRecord(
                 session: id,
@@ -4743,6 +4738,21 @@ final class SessionStore: ObservableObject {
                 retarget(id, to: cwd)
             }
         }
+    }
+
+    /// Whether the transcript this Mac is watching is the one the registry's `cwd` derives.
+    /// Raw equality, never `comparablePath`: `ClaudeSession.encodedProjectDirName` maps every
+    /// non-alphanumeric byte to `-`, so a symlink and the directory it points at encode to two
+    /// different project directories. Normalizing here would call that a match and never repair
+    /// it — the opposite of what this field exists to report.
+    ///
+    /// Pulled out to its own pure function, rather than inlined at the call site, because
+    /// nothing in `checkStuckPrompts` else forces its two arguments apart: `!matches` alone
+    /// never decides a retarget in this file's tests unless this rule — raw-equality, with
+    /// `expected` resolved through the caller's own `projectsRoot` — is asserted directly.
+    static func pathMatches(watched: URL?, expected: URL?) -> Bool {
+        guard let watched, let expected else { return false }
+        return watched.path == expected.path
     }
 
     /// Age of `url`'s last write, or `nil` when it cannot be stat'd — deleted between the probe
