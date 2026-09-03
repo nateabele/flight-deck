@@ -1,4 +1,5 @@
 import Foundation
+import FleetKit
 
 /// Pure rules for locating and reading a Claude Code session transcript, and for
 /// building the launch command. No I/O and no state so every rule is unit-testable.
@@ -154,6 +155,13 @@ enum ClaudeSession {
         case agentStarted(String)
         case agentFinished(String)
         case turnEnded
+        /// This record IS a failed turn: `claude` asked the API, the API refused, and the retry
+        /// loop gave up. One record per dead turn — the retries happen inside the request loop and
+        /// never reach the transcript — so this needs no de-duplication.
+        case apiError(SessionAPIError)
+        /// The conversation moved past whatever came before. Emitted for any assistant record that
+        /// is not an error and any user record, which is what clears a stale `apiError`.
+        case progressed
     }
 
     /// Parses one JSONL line into zero or more events. A single assistant record can
@@ -187,21 +195,43 @@ enum ClaudeSession {
             return obj["subtype"] as? String == "turn_duration" ? [.turnEnded] : []
 
         case "assistant":
-            return contentBlocks(obj).compactMap { block in
+            // The tool_use scan runs for error records too. An error message's content is a single
+            // text block, so it finds nothing — but depending on that buys nothing and costs a
+            // silently dropped `agentStarted` the day it stops being true.
+            var events: [TranscriptEvent] = contentBlocks(obj).compactMap { block in
                 guard block["type"] as? String == "tool_use",
                       block["name"] as? String == "Agent",
                       let id = block["id"] as? String
                 else { return nil }
                 return .agentStarted(id)
             }
+            if obj["isApiErrorMessage"] as? Bool == true {
+                let kind = obj["error"] as? String
+                events.append(.apiError(SessionAPIError(
+                    status: obj["apiErrorStatus"] as? Int,
+                    kind: kind,
+                    // The CLI's own predicate, evaluated here because this is the only place that
+                    // still has the record. `apiErrorIsTransient` is set explicitly only for
+                    // capacity-shaped 429s; these two kinds are transient without carrying it.
+                    isTransient: obj["apiErrorIsTransient"] as? Bool == true
+                        || kind == "overloaded" || kind == "server_error")))
+            } else {
+                events.append(.progressed)
+            }
+            return events
 
         case "user":
-            return contentBlocks(obj).compactMap { block in
+            var events: [TranscriptEvent] = contentBlocks(obj).compactMap { block in
                 guard block["type"] as? String == "tool_result",
                       let id = block["tool_use_id"] as? String
                 else { return nil }
                 return .agentFinished(id)
             }
+            // Including tool results: a result arriving means the turn is alive. Ordering is what
+            // makes this safe — the failure sequence is prompt → call fails → error record, so an
+            // error always arrives after the prompt that provoked it and is never cleared by it.
+            events.append(.progressed)
+            return events
 
         default:
             return []
