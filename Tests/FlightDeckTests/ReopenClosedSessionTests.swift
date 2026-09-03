@@ -235,11 +235,14 @@ final class ReopenClosedSessionTests: XCTestCase {
         let store = makeStore()
         _ = store.newSession(in: projectA)
         let target = store.newSession(in: projectA)
-        _ = store.newSession(in: projectA)
+        // Each `newSession` selects what it just made, so this is the one selected once the
+        // fixture settles — named rather than only captured below, so the final assertion
+        // pins a real id and cannot pass vacuously if selection ever went nil.
+        let elsewhere = store.newSession(in: projectA)
         XCTAssertEqual(store.repos.first?.sessions[1].id, target.id, "fixture assumption")
+        XCTAssertEqual(store.selectedSessionID, elsewhere.id, "fixture assumption")
 
         store.closeSession(target.id)
-        let selectedBeforeReopen = store.selectedSessionID
         store.reopenClosedSession(id: target.id, directoryExists: { _ in true })
 
         XCTAssertEqual(store.repos.first?.sessions.count, 3)
@@ -248,7 +251,7 @@ final class ReopenClosedSessionTests: XCTestCase {
         // the client-selection rule it must not move the desk off whatever `closeSession` left
         // selected — that is the behaviour change this method exists to pin at the store level;
         // `FleetServiceTests` pins the same rule over the real socket.
-        XCTAssertEqual(store.selectedSessionID, selectedBeforeReopen,
+        XCTAssertEqual(store.selectedSessionID, elsewhere.id,
                        "a phone reopen must not move the desk's selection")
     }
 

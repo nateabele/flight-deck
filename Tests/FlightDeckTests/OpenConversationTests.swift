@@ -202,6 +202,27 @@ final class OpenConversationTests: XCTestCase {
                           "a project added this way must not fall through to the nameless-tab title")
     }
 
+    /// **Round 2's finding.** The new-project side above delegates to `addProject(at:)`, which
+    /// used to take no `selecting:` of its own and so always selected through `newSession`'s
+    /// default — a hole guarded only by `FleetService` pre-validating the UUID before this
+    /// branch is ever reachable from a client, not by this method itself. Pins that the hole is
+    /// closed: a client landing on a project new to the sidebar must not move the desk's
+    /// selection, same as every other path through `openConversation`.
+    func testAProjectResultForAProjectNotInTheSidebarFromAClientLeavesTheDesksSelectionAlone() {
+        let store = makeStore()
+        let elsewhere = store.newSession(in: projectA)
+
+        let opened = store.openConversation(.addProjectThenResume(
+            projectPath: projectB.path, conversationID: "", title: "fd", transcriptDirectory: projectB.path
+        ), directoryExists: { _ in true }, selecting: false)
+
+        let repo = store.repos.first { $0.url.path == projectB.path }
+        XCTAssertEqual(repo?.sessions.count, 1, "the project really was added")
+        XCTAssertEqual(opened, repo?.sessions.first?.id, "the caller still needs the new tab's id")
+        XCTAssertEqual(store.selectedSessionID, elsewhere.id,
+                       "a client's search must not move the desk's selection off elsewhere, even onto a brand new project")
+    }
+
     // MARK: - Item 1: the account stamp
 
     func testResumingStampsTheProjectsResolvedAccount() {

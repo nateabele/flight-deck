@@ -582,10 +582,16 @@ final class FleetServiceTests: XCTestCase {
     }
 
     /// **The common case, and the one round 1 missed.** Most phone searches land on a
-    /// conversation that already has an open tab — the already-live recheck below the resume
-    /// branch — not a fresh resume. Asserting the reply still carries the live tab's id is what
-    /// keeps this from passing on a request the Mac quietly refused: the phone still needs that
-    /// id to navigate its own side even though the Mac's selection does not move.
+    /// conversation that already has an open tab. `FleetService.openConversation` builds
+    /// `SearchActivation.plan`'s `openSessions` fresh from `store.repos` every call, so that
+    /// match happens in `plan` itself and this reaches `openConversation`'s `.select` branch —
+    /// not the already-live recheck further down (that recheck exists for a caller that fills
+    /// `openSessions` wrong, which is not how `FleetService` is wired, so it is not reachable
+    /// from this level; `OpenConversationTests` exercises it directly by calling
+    /// `store.openConversation(.resume(...))` for a conversation id that is already live).
+    /// Asserting the reply still carries the live tab's id is what keeps this from passing on a
+    /// request the Mac quietly refused: the phone still needs that id to navigate its own side
+    /// even though the Mac's selection does not move.
     func testASearchOpenForAnAlreadyOpenTabLeavesTheDesksSelectionAlone() async throws {
         let (store, key, port) = try await standUp()
         // A session's `pinnedConversationID` defaults to its own id (see `Session.init`),
