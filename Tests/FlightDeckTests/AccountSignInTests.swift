@@ -13,6 +13,7 @@ final class AccountSignInTests: XCTestCase {
             return nil
         }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     /// `SessionStore.provider` is weak, so a provider held only by the store deallocates

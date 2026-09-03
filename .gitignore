@@ -18,5 +18,7 @@ vendor/.build-shim
 *.profraw
 scripts/.smoke.log
 scripts/.release-build.log
+scripts/.adapterprobe.log
+scripts/adapterprobe/corpus/
 .superpowers/
 .claude/

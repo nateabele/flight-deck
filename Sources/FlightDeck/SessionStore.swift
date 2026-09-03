@@ -1023,6 +1023,9 @@ final class SessionStore: ObservableObject {
         var config = Ghostty.SurfaceConfiguration()
         config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
         config.workingDirectory = session.transcriptDirectory
+        // `nil` when unset: `withCValue` already maps that to `0`, meaning "inherit
+        // libghostty's configured default" — the same thing a never-touched size means.
+        config.fontSize = preferences?.preferences.terminalFontSize
         // Adapter and options resolved exactly as `newSession(in:)` does: `launchCommand` takes
         // a NON-optional `AgentOptions`, and the adapter comes from the tab's instance, not
         // from `AgentID`.
@@ -1149,6 +1152,12 @@ final class SessionStore: ObservableObject {
             return
         }
         surfaces[id]?.sizeDidChange(size)
+    }
+
+    /// Applies a new global terminal font size to every live surface.
+    func applyTerminalFontSize(_ points: Float) {
+        let action = TerminalFontSize.action(points: points)
+        for surface in surfaces.values { surface.performBindingAction(action) }
     }
 
     /// Test seam. Production waits for a drag to settle before touching background surfaces;
@@ -1913,6 +1922,9 @@ final class SessionStore: ObservableObject {
         var config = Ghostty.SurfaceConfiguration()
         config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
         config.workingDirectory = session.transcriptDirectory
+        // `nil` when unset: `withCValue` already maps that to `0`, meaning "inherit
+        // libghostty's configured default" — the same thing a never-touched size means.
+        config.fontSize = preferences?.preferences.terminalFontSize
         config.initialInput = initialInput
         // The account is what actually makes this tab run as its login: the shell libghostty
         // forks below inherits these, and the agent reads its home out of one of them. Every
@@ -4972,6 +4984,12 @@ final class SessionStore: ObservableObject {
     func surface(for id: UUID) -> Ghostty.SurfaceView? { surfaces[id] }
 
     func tick() { provider?.tick() }
+
+    /// libghostty's configured default terminal font size, in points. `FontSizeCommands`
+    /// resolves against this rather than reaching for `GhosttyApp.shared` directly, so it
+    /// stays testable against a stub provider. No provider at all falls back to 12, matching
+    /// `GhosttyApp.defaultFontSize`'s own initializer default.
+    var defaultFontSize: Float { provider?.defaultFontSize ?? 12 }
 
     // MARK: - Helpers
 

@@ -1,0 +1,6 @@
+{
+  "versions": {
+    "claude": "2.1.240 (Claude Code)",
+    "codex": "codex-cli 0.148.0"
+  }
+}

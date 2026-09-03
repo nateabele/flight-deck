@@ -15,6 +15,7 @@ final class CreateFromMenuAgentTests: XCTestCase {
     private final class StubProvider: SurfaceProvider {
         func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? { nil }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     // Same reason as `SessionCreationTests`: `SessionStore.provider` is `weak`, so an
