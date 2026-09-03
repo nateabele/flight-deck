@@ -49,6 +49,27 @@ struct PromptLifecycleRecord: Equatable {
         case sessionRemoved
     }
 
+    /// What this Mac's own dialog derivation said at the instant a blind Escape was considered.
+    ///
+    /// **The field the abort escape hatch's whole safety story rests on.** `.answer` carries
+    /// `open` so a reader can see what the Mac believed about the call a thumb came down on; an
+    /// abort names no call, so without this the log could not answer the one question anyone
+    /// will ask of it after the fact — *was this Escape aimed at a genuinely unnameable dialog,
+    /// or at one the Mac could have answered properly?* A `.nameable` beside a dispatched abort
+    /// would be this feature doing exactly the harm it was built to avoid; a `.nameable` beside
+    /// `code=prompt_nameable` is the guard that now prevents it, visible as having fired.
+    enum AbortProbe: Equatable {
+        /// The probe named a dialog: this Mac could have answered it targetedly.
+        case nameable
+        /// The probe refused, with this code — nothing here can name the dialog, which is the
+        /// only state a blind Escape exists for.
+        case unnameable(code: String)
+        /// No probe was installed. A bare `SessionStore` in a test, and never production —
+        /// `FleetService.init` always installs one. Distinct from `.unnameable` on purpose: an
+        /// absent derivation is not a derivation that came back empty.
+        case unavailable
+    }
+
     /// What an outbound frame says about whether a dialog is up.
     enum Assertion: String, Equatable {
         /// `activity == waiting`: the phone will draw a card.
@@ -82,9 +103,10 @@ struct PromptLifecycleRecord: Equatable {
         /// now, or `nil` when it believes none is. Side by side they say which machine was
         /// wrong. `code` is `nil` for an answer that was accepted.
         case answer(sent: String, open: String?, code: String?)
-        /// A dialog this Mac still cannot name a second tick after it first could not.
+        /// A dialog this Mac still cannot name, seconds after it first could not — and again
+        /// later, while that is still true.
         ///
-        /// **One tick of `unnamed` is ordinary** — claude writes its status file and its
+        /// **A second or so of `unnamed` is ordinary** — claude writes its status file and its
         /// transcript by independent paths, so `waiting` routinely arrives first and the very
         /// next poll names the call (16:37:57 `unnamed` → 16:37:58 `opened`). This case is the
         /// state that is NOT that: still blocked, still unnameable, and now worth a person's
@@ -92,6 +114,12 @@ struct PromptLifecycleRecord: Equatable {
         /// the whole question — `pathMatches == false` is this Mac reading a file `claude`
         /// left, and `pathMatches == true` with a stale `lastRecordAgeMs` is a record that was
         /// never written, which is upstream and not ours.
+        ///
+        /// **Read the ages against the record's own age in the episode.** The first record of an
+        /// episode is written seconds in, when `fileAgeMs` and `lastRecordAgeMs` are young by
+        /// construction and cannot separate a stall from a race that is about to resolve; the
+        /// later ones are where a `lastRecordAgeMs` growing in step with the wall clock says the
+        /// record is not coming. `SessionStore.stuckPromptReportLadder` is the schedule, and why.
         case stuck(
             code: String, watched: String?, registryCWD: String?, pathMatches: Bool,
             fileAgeMS: Int?, lastRecordAgeMS: Int?, tailRecords: Int
@@ -100,7 +128,12 @@ struct PromptLifecycleRecord: Equatable {
         /// it: `answer` carries `sent` and `open` so a reader can see which machine was wrong
         /// about *which call*, and an abort names no call on either side. Forcing a sentinel
         /// through those fields would make "no call id by construction" read as a truncated line.
-        case aborted(code: String?)
+        ///
+        /// `sent` is whether a key was actually typed, and it is **not** derivable from `code`:
+        /// a dispatch and a replayed token both report no error, so a `code`-only record could
+        /// not count the Escapes this Mac really sent. `probe` is what this Mac believed about
+        /// the dialog at that instant — see `AbortProbe`, which is where the reason lives.
+        case aborted(code: String?, sent: Bool, probe: AbortProbe)
     }
 
     /// `nil` only for `resumed`, which is about a connection rather than a session.
@@ -154,8 +187,16 @@ struct PromptLifecycleRecord: Equatable {
                 + " fileAgeMs=\(fileAge.map(String.init) ?? "-")"
                 + " lastRecordAgeMs=\(recordAge.map(String.init) ?? "-")"
                 + " tailRecords=\(tail)"
-        case .aborted(let code):
-            return "abort code=\(code ?? "ok")"
+        case .aborted(let code, let sent, let probe):
+            return "abort code=\(code ?? "ok") sent=\(sent) probe=\(Self.describe(probe))"
+        }
+    }
+
+    private static func describe(_ probe: AbortProbe) -> String {
+        switch probe {
+        case .nameable: return "nameable"
+        case .unnameable(let code): return "unnameable-\(code)"
+        case .unavailable: return "-"
         }
     }
 

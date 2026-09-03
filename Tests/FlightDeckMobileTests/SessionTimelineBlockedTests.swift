@@ -473,13 +473,15 @@ final class SessionTimelineBlockedTests: XCTestCase {
 
         XCTAssertFalse(
             PromptCard.showsBlocked(
-                exhausted: model.blockedChaseExhausted, allowsAbort: true, hasCard: liveHasCard
+                exhausted: model.blockedChaseExhausted, allowsAbort: true, hasCard: liveHasCard,
+                activity: "waiting", call: .noPrompt
             ),
             "fed the live reading, Blocked must stand down now that the card exists"
         )
         XCTAssertTrue(
             PromptCard.showsBlocked(
-                exhausted: model.blockedChaseExhausted, allowsAbort: true, hasCard: staleHasCard
+                exhausted: model.blockedChaseExhausted, allowsAbort: true, hasCard: staleHasCard,
+                activity: "waiting", call: .noPrompt
             ),
             "the stale reading is what would leave Blocked on screen wrongly — a cached " +
             "hasCard reproduces exactly this"

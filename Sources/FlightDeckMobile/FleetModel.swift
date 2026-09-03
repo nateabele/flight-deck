@@ -47,13 +47,25 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// own comment for why this must not outlive the episode it was minted for, and
     /// `noteSessionActivity(_:waiting:)` for how it is dropped once that episode resolves.
     @ObservationIgnored private var blockedAbortTokens: [UUID: UUID] = [:]
-    /// Every `FleetCommand` handed to `sendPrompt`, in order. Exists for tests only:
+    /// The last few `FleetCommand`s handed to `sendPrompt`, in order. Exists for tests only:
     /// `FleetModel.fixture()` leaves `connector` nil, so `sendPrompt` completes synchronously
     /// with `.disconnected` and there would otherwise be nothing to assert `abortBlockedPrompt`
     /// against — no protocol stub sits between it and `sendPrompt`, both being methods on this
-    /// same type. Cleared in `unpair()`, alongside `blockedAbortTokens`, so a long-lived pairing
-    /// does not accumulate every prompt a person ever typed for the life of the process.
+    /// same type.
+    ///
+    /// **Bounded, because `unpair()` clearing it is not enough.** `.prompt(id:token:text:)`
+    /// carries the user's own typed words, and a pairing that is never revoked — the ordinary
+    /// case for a phone that stays paired to one Mac — would otherwise hold every prompt that
+    /// person ever sent, in memory, for the life of the process, for a table whose only reader
+    /// is a test. A ring in the shape `SessionStore` bounds its own token lists with: oldest
+    /// evicted first, deep enough that no test can outrun it. `unpair()` still clears it, for
+    /// the separate reason recorded there.
     @ObservationIgnored private(set) var sentCommands: [FleetCommand] = []
+
+    /// Deep enough for any test that inspects the table (the largest asserts on three sends),
+    /// shallow enough that what is retained is a handful of recent commands rather than a
+    /// session's worth of prompt text.
+    private static let maxRememberedSentCommands = 16
 
     init(store: any PairedMacStoring = KeychainPairedMacStore()) {
         self.store = store
@@ -458,6 +470,9 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         then completion: @escaping (Result<Void, FleetRequestError>) -> Void
     ) {
         sentCommands.append(command)
+        if sentCommands.count > Self.maxRememberedSentCommands {
+            sentCommands.removeFirst(sentCommands.count - Self.maxRememberedSentCommands)
+        }
         guard let connector else { return completion(.failure(.disconnected)) }
         connector.send(command, then: completion)
     }

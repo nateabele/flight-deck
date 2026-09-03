@@ -41,6 +41,11 @@ struct PromptCard: View {
     /// assumed — a Mac too old to run the driver that honours `FleetCommand.abortPrompt` has
     /// nothing on the other end of this button.
     let allowsBlockedAbort: Bool
+    /// The Mac's own `activity` for this session, straight off the wire, and the Mac's own
+    /// verdict on whether it can name a dialog there. Both are `showsBlocked` inputs, and
+    /// neither is derived here — see that predicate for what each rules out.
+    let activity: String?
+    let openPromptCall: OpenPromptIdentity
     /// Sends `FleetCommand.abortPrompt`, via `FleetModel.abortBlockedPrompt(session:)`.
     ///
     /// A closure rather than a fourth verb on `model`'s `fleet` protocols: those three exist
@@ -75,7 +80,7 @@ struct PromptCard: View {
     /// Blocked replaces the bare "Waiting for you" only once the chase has actually given up
     /// (~18s), never on a single failed fetch — the ordinary race must keep looking like one.
     ///
-    /// **All three inputs are required; no pair of them is enough on its own.** `exhausted`
+    /// **Five inputs, and no subset of them is enough.** `exhausted`
     /// alone would draw Blocked on a Mac too old to send `allowsBlockedAbort` — a button whose
     /// tap nothing on the other end honours. `allowsAbort` alone would draw it on the very
     /// first failed fetch, before the chase has even run. And dropping `hasCard` would draw it
@@ -89,8 +94,34 @@ struct PromptCard: View {
     /// render as this one** — never a value cached alongside `exhausted`, and never `open`
     /// read back from a previous evaluation. A stale `hasCard` is precisely the exhausted-flag
     /// bug this predicate exists to not repeat, just moved one call up.
-    static func showsBlocked(exhausted: Bool, allowsAbort: Bool, hasCard: Bool) -> Bool {
-        exhausted && allowsAbort && !hasCard
+    ///
+    /// **`activity` and `call` are the two liveness inputs, and they were the hole.** The three
+    /// above are all *phone-side* facts; every one of them can hold while the Mac says the
+    /// session is not blocked at all, and the card would then draw a destructive Abort over a
+    /// session that has moved on. Two reachable ways, both found by review:
+    ///
+    /// - **The latch outlives the episode.** `SessionTimelineScreen`'s chase task re-keys on
+    ///   `BlockedState` but returns without entering `chaseBlockedPrompt` when the session is no
+    ///   longer `waiting`, and that method is the only thing that clears `blockedChaseExhausted`.
+    ///   So a stuck episode that resolves — someone hits Escape at the Mac, the agent moves on —
+    ///   leaves the flag `true` forever while `blocked(...)` returns nil (`OpenPrompt.find`
+    ///   gates on `waiting`), which is `exhausted && allowsAbort && !hasCard` on a busy or idle
+    ///   session, indefinitely. `activity == "waiting"` is what ends that card with the episode.
+    /// - **The Mac can name the dialog and this phone cannot.** A body this build cannot parse,
+    ///   or a page that never landed, exhausts the chase while the Mac's `openPromptCall` names
+    ///   the call perfectly well. Blocked would then say *"This Mac can't read the dialog on
+    ///   screen"* — which is false — and its Abort would blind-deny a real tool call the reader
+    ///   was never shown. `.noPrompt` is the Mac agreeing it cannot name one; `.call` is it
+    ///   naming one, and `.unreported` is a Mac too old to say, which cannot reach here anyway
+    ///   because such a Mac sends no `allowsBlockedAbort` either.
+    ///
+    /// Both are read from the same `session` snapshot as `hasCard`'s `blocked(...)` call, for
+    /// the same reason: a cached liveness input is no liveness input.
+    static func showsBlocked(
+        exhausted: Bool, allowsAbort: Bool, hasCard: Bool,
+        activity: String?, call: OpenPromptIdentity
+    ) -> Bool {
+        exhausted && allowsAbort && !hasCard && activity == "waiting" && call == .noPrompt
     }
 
     /// Record a tap. Single-select replaces; multiSelect toggles.
@@ -270,7 +301,8 @@ struct PromptCard: View {
             exhausted: blockedChaseExhausted, allowsAbort: allowsBlockedAbort,
             // `false`, not stale: `open` above is itself the live `blocked(...)` result this
             // render was handed, and this branch only runs once it has already tested nil.
-            hasCard: false
+            hasCard: false,
+            activity: activity, call: openPromptCall
         ) {
             blockedCard
         }

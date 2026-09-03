@@ -144,15 +144,23 @@ final class FleetService: ObservableObject {
             else { return nil }
             return open.callID
         }
-        // Unlike `openPromptCallReader` above, this drives `checkStuckPrompts`'s repair rather
-        // than a routine push, so it takes `openPrompt` — the full derivation an actual tap
-        // would get — rather than `pushedOpenPrompt`'s side-effect-free variant. `[weak prompts]`
-        // is required for the same reason `PlanGateService`'s closures above capture `store`
-        // weakly: `FleetService` already holds `prompts` strongly, and a strong capture here
-        // would be the second half of a cycle back through `store`.
+        // `pushedOpenPrompt`, exactly as `openPromptCallReader` above, and for the reason that
+        // method's own doc states as a rule rather than a preference: **a caller on a schedule
+        // must not resolve a transcript**, because that resolution builds and memoizes the
+        // agent's adapter — for codex a whole `CodexStack`, with a runtime and an index watcher
+        // in it. This probe runs from `checkStuckPrompts` on every registry tick, which is a
+        // schedule by any reading; `PromptLifecycleObserver` cites the same rule for the same
+        // reason. It was `openPrompt` and was safe only by accident: `checkStuckPrompts` filters
+        // on `hasStatusRegistry`, a different predicate that happens to select claude alone
+        // today. The two return identically for a claude tab, so this costs nothing and stops
+        // the invariant resting on that coincidence.
+        //
+        // `[weak prompts]` is required for the same reason `PlanGateService`'s closures above
+        // capture `store` weakly: `FleetService` already holds `prompts` strongly, and a strong
+        // capture here would be the second half of a cycle back through `store`.
         store.openPromptProbe = { [weak prompts] id in
             guard let prompts else { return nil }
-            if case .failure(let code) = prompts.openPrompt(inSession: id) {
+            if case .failure(let code) = prompts.pushedOpenPrompt(inSession: id) {
                 // `.code`, not `String(describing:)`: `TimelineErrorCode` has no
                 // `CustomStringConvertible`, so `describing` would render the struct dump
                 // `TimelineErrorCode(code: "prompt_changed")` into the `.stuck` record's
@@ -1123,9 +1131,15 @@ final class FleetService: ObservableObject {
             // because the store is never reached on this branch and so never gets the chance to
             // write its own `.aborted` record — the same reason `PromptService.answer` records
             // its own refusals rather than leaving that to `SessionStore.answerPrompt`.
+            //
+            // `probe: .unavailable` and not a derivation taken here: this branch refuses before
+            // any transcript is read, and the record must say what this Mac *consulted*, not
+            // what it could have. Running the probe just to fill the field in would make a
+            // refused abort cost a tail read and would report a belief no decision was made on.
             guard preferences.allowsBlockedPromptAbort else {
                 prompts.lifecycleSink(PromptLifecycleRecord(
-                    session: id, event: .aborted(code: "abort_disabled")
+                    session: id,
+                    event: .aborted(code: "abort_disabled", sent: false, probe: .unavailable)
                 ))
                 return .err(cid: cid, code: "abort_disabled")
             }
