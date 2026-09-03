@@ -43,9 +43,15 @@ struct ClaudePreferences: Codable, Equatable {
     /// once they have resumed and settled. Off by default: picking work back up unattended
     /// is a decision the user has to make deliberately, not one to inherit from an upgrade.
     var autoResumeRunningSessions: Bool
+    /// Whether a paired phone may send Escape at a dialog this Mac cannot name. See
+    /// `PreferencesStore.allowsBlockedPromptAbort` for why it defaults off. Optional for the
+    /// same reason every field on this struct must be, per the type's doc comment: an
+    /// existing `"claude": {...}` blob on disk has no such key, and it must go on decoding.
+    var allowsBlockedPromptAbort: Bool?
 
-    init(autoResumeRunningSessions: Bool = false) {
+    init(autoResumeRunningSessions: Bool = false, allowsBlockedPromptAbort: Bool? = nil) {
         self.autoResumeRunningSessions = autoResumeRunningSessions
+        self.allowsBlockedPromptAbort = allowsBlockedPromptAbort
     }
 }
 

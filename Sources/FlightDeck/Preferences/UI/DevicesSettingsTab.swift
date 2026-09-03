@@ -96,6 +96,25 @@ struct DevicesSettingsTab: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+
+            Section("Blocked Prompts") {
+                // Off by default — see `PreferencesStore.allowsBlockedPromptAbort`. This is
+                // the only place the switch is surfaced; nothing reads it yet, so turning it
+                // on today changes nothing until a later build ships the command it gates.
+                Toggle(
+                    "Allow phones to dismiss unreadable dialogs",
+                    isOn: Binding(
+                        get: { preferences.allowsBlockedPromptAbort },
+                        set: { preferences.allowsBlockedPromptAbort = $0 }
+                    )
+                )
+                .accessibilityIdentifier("prefs-allows-blocked-prompt-abort")
+
+                Text("When Flight Deck cannot tell what a session is waiting on, a paired phone may send Escape without knowing which prompt it is answering.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .formStyle(.grouped)
         // `.sheet(item:)`, not `.sheet(isPresented:)` with a companion optional. The latter
