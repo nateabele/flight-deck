@@ -2,7 +2,16 @@
  * performs the real attach handshake (MSG_ATTACH then MSG_RESIZE, replicated
  * from vendor/fd-abduco/client.c's client_mainloop()), and asserts a marker
  * printed by the session's child process arrives via history replay before
- * (or without needing) any further live output. */
+ * (or without needing) any further live output.
+ *
+ * WANT_MARKER (default "MARKER-12345") must be present in the replayed
+ * bytes. WANT_ABSENT, if defined (no default), must NOT be present -- used
+ * by run_trim_test.sh to prove the output-log budget trim actually dropped
+ * the early bulk of a session's output. */
+#ifndef WANT_MARKER
+#define WANT_MARKER "MARKER-12345"
+#endif
+
 #include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -68,12 +77,15 @@ int main(int argc, char **argv) {
 			break;
 		got += (size_t)n;
 		buf[got] = 0;
-		if (memmem(buf, got, "MARKER-12345", 12)) {
+		if (memmem(buf, got, WANT_MARKER, strlen(WANT_MARKER))) {
 			found = 1;
 			break;
 		}
 	}
 	assert(found);
+#ifdef WANT_ABSENT
+	assert(memmem(buf, got, WANT_ABSENT, strlen(WANT_ABSENT)) == NULL);
+#endif
 	printf("replay OK\n");
 	close(fd);
 	return 0;
