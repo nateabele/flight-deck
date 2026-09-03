@@ -36,6 +36,17 @@ class BaselineDiffTests(unittest.TestCase):
         self.assertEqual(diff_baseline(BASE, m)["versions_changed"],
                          {"codex": ("0.152.1", "0.153.0")})
 
+    def test_a_pty_resolved_version_drift_is_reported_even_when_the_plain_one_matches(self):
+        # `codex`/`claude` name whatever this process's own PATH resolves; `*_pty` names
+        # whatever a live pty row's login shell resolves -- a machine with two binaries on
+        # different paths can drift in the second without the first ever moving, and that
+        # drift must not be silently absorbed just because the plain key still matches.
+        base = {**BASE, "versions": {**BASE["versions"], "codex_pty": "0.142.4"}}
+        m = {"versions": {**base["versions"], "codex_pty": "0.148.0"},
+             "cells": dict(BASE["cells"])}
+        self.assertEqual(diff_baseline(base, m)["versions_changed"],
+                         {"codex_pty": ("0.142.4", "0.148.0")})
+
 
 class RenderTests(unittest.TestCase):
     def test_every_cell_and_its_glyph_appear(self):

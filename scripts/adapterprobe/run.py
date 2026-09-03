@@ -70,13 +70,58 @@ assert ROW_TIMEOUT["full"] > _WORST_FULL_CHAIN, (
 
 
 def agent_versions():
+    """The probe/app-server binaries -- resolved through THIS process's own `PATH`, which is
+    what `codex`/`claude` mean everywhere in this module except a live pty row. `_path` is the
+    absolute binary `shutil.which` finds under that same `PATH`, so a machine with more than one
+    `codex`/`claude` installed can be told apart later without re-deriving anything.
+    """
     def v(cmd):
         try:
             return subprocess.run(cmd, capture_output=True, text=True, timeout=20
                                   ).stdout.strip().splitlines()[0]
         except Exception:
             return "unavailable"
-    return {"codex": v(["codex", "--version"]), "claude": v(["claude", "--version"])}
+    return {
+        "codex": v(["codex", "--version"]),
+        "codex_path": shutil.which("codex") or "unavailable",
+        "claude": v(["claude", "--version"]),
+        "claude_path": shutil.which("claude") or "unavailable",
+    }
+
+
+def pty_agent_version(sandbox, agent, cmd_name):
+    """The SAME binary a live pty row actually launches -- not a second guess at it.
+
+    `ctx.pty` runs `["/bin/sh", "-lc", text]` under `sandbox.child_env(agent)`; `text` invokes
+    `cmd_name` by bare name, so which binary answers depends on the login shell's own `PATH`
+    resolution (macOS's `path_helper`, run by `/etc/profile` on `-l`), not on whatever `PATH`
+    this Python process happened to inherit. Spawning the identical `PtyScreen(cmd, cwd, env)`
+    triple a row would use (rather than a bare `subprocess.run`) means this can never quietly
+    drift from what a row's own pty actually runs.
+
+    This is deliberately NOT claimed to be "the same shell Flight Deck itself uses" --
+    `Sources/FlightDeck/Agents/LoginShellPath.swift` resolves `ShellResolver.resolve()`
+    (the account's real `$SHELL`, `fish` on this machine) and its own `-lc` lookup, not `/bin/sh
+    -lc`. Checked directly: `fish -lc 'codex --version'` and `zsh -lc 'codex --version'` both
+    land on the SAME `codex` `agent_versions()` already reports (`~/.local/bin`), while `/bin/sh
+    -lc` -- what `ctx.pty` actually hardcodes -- lands on a different one (`/opt/homebrew/bin`).
+    So `*_pty` names what THIS HARNESS'S OWN pty rows exercise, which on a machine with more
+    than one `codex` on different paths need not be (and here, is not) the binary
+    `LoginShellPath` resolves for a real launch. See the README's version note for the numbers.
+    """
+    marker = f"__adapterprobe_pty_version_{uuid.uuid4().hex[:8]}__"
+    script = f"command -v {cmd_name}; {cmd_name} --version; echo {marker}"
+    term = PtyScreen(["/bin/sh", "-lc", script], cwd=sandbox.root, env=sandbox.child_env(agent))
+    try:
+        term.wait([marker], 20)
+        lines = [line.strip() for line in term.display().splitlines() if line.strip()]
+    finally:
+        term.close()
+    path = next((line for line in lines if line.startswith("/")), "unavailable")
+    version = next(
+        (line for line in lines if line and marker not in line and not line.startswith("/")),
+        "unavailable")
+    return version, path
 
 
 def diff_baseline(baseline, matrix, tiers=None):
@@ -154,6 +199,15 @@ class ProbeContext:
         # agent that nothing left running would ever go on to close.
         self._accepting_ptys = True
         self._dismiss_codex_onboarding()
+        # The version every pty-driven row actually exercises, which is not necessarily the
+        # `codex`/`claude` above -- see `pty_agent_version`'s own comment. Computed once here,
+        # after onboarding is dismissed, using the exact `PtyScreen`/`child_env` triple a row
+        # would use, so `self.versions` never has to be trusted as a guess about what a live
+        # row ran.
+        for agent, cmd_name in (("codex", "codex"), ("claude", "claude")):
+            version, path = pty_agent_version(sandbox, agent, cmd_name)
+            self.versions[f"{agent}_pty"] = version
+            self.versions[f"{agent}_pty_path"] = path
 
     def _dismiss_codex_onboarding(self):
         """Two pieces of codex-cli's own first-run UX, neither of which is the adapter
@@ -454,6 +508,15 @@ def main(argv=None):
         label = skipped_tiers[0] if len(skipped_tiers) == 1 else "other-tier"
         print(f"{len(diff['skipped'])} {label}-tier cells not exercised "
               f"(run --tier {label} to check them)")
+
+    for agent in ("codex", "claude"):
+        probe_v, pty_v = matrix["versions"].get(agent), matrix["versions"].get(f"{agent}_pty")
+        if probe_v is not None and pty_v is not None and probe_v != pty_v:
+            print(
+                f"NOTE: this machine has more than one {agent} on PATH -- the probe/app-server "
+                f"rows ran {probe_v!r} ({matrix['versions'].get(f'{agent}_path')}), but every "
+                f"live pty row ran {pty_v!r} ({matrix['versions'].get(f'{agent}_pty_path')}). "
+                f"Findings from pty-driven rows are about the second one.")
 
     print(render(matrix))
 
