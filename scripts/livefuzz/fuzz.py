@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                  "adapterprobe"))
 from ptyscreen import PtyScreen
+from sandbox import _CLAUDE_SESSION_MARKERS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -204,7 +205,11 @@ def drive(prompt, answers, timeout=200):
     # The harness reuses one throwaway workspace across every run in a batch, so a stale
     # transcript from an earlier run always exists alongside this one's.
     run_started = time.time()
-    os.environ.pop("CLAUDE_CODE_CHILD_SESSION", None)
+    # All nine markers, not just one -- a pty fork inherits the parent's real environment and
+    # only overlays whatever keys `env=` names below, so any marker left in `os.environ` rides
+    # straight through to this claude the same way it would to `adapterprobe`'s sandbox.
+    for key in _CLAUDE_SESSION_MARKERS:
+        os.environ.pop(key, None)
     term = PtyScreen(["claude"], cwd=WD, env={"CLAUDE_CODE_FORCE_SESSION_PERSISTENCE": "1"})
     pump, disp, wait = term.pump, term.display, term.wait
     def write(b): term.send(b)

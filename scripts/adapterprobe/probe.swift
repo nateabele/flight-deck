@@ -207,6 +207,26 @@ struct Probe {
                 await emit(["error": String(describing: error)], exit: 1)
             }
 
+        case "environment":
+            // Every conformer's `environment(for:)` is the protocol's shared default (see
+            // `AgentAdapter.swift`) -- neither `ClaudeAdapter` nor `CodexAdapter` overrides
+            // it, so calling it through the claude witness below runs the exact same code a
+            // codex-typed `self` would. Spinning up the real app-server just to reach a pure
+            // `[String: String]` computation would pay a live turn for nothing this probe
+            // can observe. The point of this subcommand is not which instance answers — it
+            // is that a row calls `environment(for:)` at all, instead of asserting on the
+            // probe's own hand-rolled `CLAUDE_CONFIG_DIR`/`CODEX_HOME` plumbing.
+            guard args.count == 2, let agent = agentID(args[1]) else { usage() }
+            guard let home = ProcessInfo.processInfo.environment[agent.homeEnvironmentKey] else {
+                await emit([
+                    "error": "\(agent.homeEnvironmentKey) is unset in the probe's own environment",
+                ], exit: 1)
+            }
+            let account = AgentAccount(agent: agent, displayName: "adapterprobe",
+                                        home: URL(fileURLWithPath: home))
+            let env = await MainActor.run { claudeAdapter().environment(for: account) }
+            await emit(env.mapValues { $0 as Any })
+
         case "launch-command", "resume-command":
             guard let agent = args.count > 1 ? agentID(args[1]) : nil,
                   let idRaw = flag(args, "--id"), let id = UUID(uuidString: idRaw),

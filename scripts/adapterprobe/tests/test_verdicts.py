@@ -78,10 +78,15 @@ class RowTableTests(unittest.TestCase):
             self.assertIn(r.tier, ("cheap", "full"), r.key)
             self.assertTrue(r.agents, r.key)
 
-    def test_exactly_the_three_symmetric_facts_are_kind_fact(self):
+    def test_exactly_the_four_symmetric_facts_are_kind_fact(self):
+        # `homeMarkerFile` joined this set once its row stopped asserting a checkable
+        # capability (see `_home_marker_file`'s docstring): declared/observed are the same
+        # declared string, so "checked" here means the symmetric match itself, same as the
+        # three original fact rows.
         fact_keys = {r.key for r in ROWS if r.kind == "fact"}
         self.assertEqual(
-            fact_keys, {"negotiatesIdentity", "needsRuntimeStart", "hasStatusRegistry"})
+            fact_keys,
+            {"negotiatesIdentity", "needsRuntimeStart", "hasStatusRegistry", "homeMarkerFile"})
 
     def test_open_prompt_reader_stays_a_capability(self):
         row = next(r for r in ROWS if r.key == "openPromptReader")

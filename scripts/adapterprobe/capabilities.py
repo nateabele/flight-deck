@@ -9,7 +9,7 @@ implements it exactly; a row must never reach for anything not on this list:
 
     probe(args: list[str], stdin: str = "") -> dict   # runs the probe CLI, parses its JSON
     sandbox: AgentSandbox                              # the live sandbox for this run
-    pty(agent: str, cmd: list[str]) -> PtyScreen       # cwd=sandbox.root, env=sandbox.env(agent)
+    pty(agent: str, cmd: list[str]) -> PtyScreen       # cwd=sandbox.root, env=sandbox.child_env(agent)
     seed_one_turn(agent: str, cid: str) -> None        # full tier only; drives one real turn
     seeded_marker: str                                 # text seed_one_turn guarantees on screen
     versions: dict[str, str]                           # {"codex": ..., "claude": ...}
@@ -22,6 +22,7 @@ from — that keeps "cheap" rows free of any live agent, per the design's §3.5 
 """
 import json
 import os
+import time
 import uuid
 from collections import namedtuple
 
@@ -81,6 +82,21 @@ def _bytes_under(path):
             except OSError:
                 pass
     return total
+
+
+def _poll(fn, limit, interval=0.3, until=bool):
+    """Calls `fn()` roughly every `interval` seconds until `until(result)` is true or `limit`
+    seconds have elapsed, then returns whatever `fn()` last produced either way -- a timeout is
+    reported with what was actually seen, not silently collapsed to `None`. Bounded, not dwelled:
+    a fixed dwell only ever encodes a guess about how long a write takes to land; this returns
+    the moment the condition is actually true, and still gives up on a hard cap rather than
+    spinning forever."""
+    end = time.time() + limit
+    result = fn()
+    while not until(result) and time.time() < end:
+        time.sleep(interval)
+        result = fn()
+    return result
 
 
 # --- Declarations: is the static answer still honest? ---------------------------------------
@@ -213,7 +229,21 @@ def _open_prompt_reader(ctx, agent):
     # This is also the only row that keeps `kind="capability"` and sets
     # `absent_reason_holds` — it is a genuine refusal with a stated reason, unlike the three
     # `kind="fact"` rows above.
+    #
+    # `ProbeContext._dismiss_codex_onboarding` writes `trust_level = "trusted"` for this
+    # sandbox's root so every OTHER row in the run skips the one-time "do you trust this
+    # directory" prompt. That same trust plausibly removes the approval friction this row
+    # exists to raise, which would make a 45s wait for it a coin flip against the wrong
+    # thing. So this row appends `approval_policy = "on-request"` to the same
+    # `[projects."<root>"]` table (TOML lets a bare `key = value` land in the table most
+    # recently opened, so this shares the trust entry's table rather than opening a second
+    # one) — the config knob that keeps prompting for approval even in a trusted directory,
+    # confirmed against this machine's installed `codex --help` output. That makes the row
+    # actually measure something instead of measuring its own trust override.
     declared = ctx.probe(["declare", "codex"])["openPromptReader"]
+    config_path = os.path.join(ctx.sandbox.codex_home, "config.toml")
+    with open(config_path, "a") as f:
+        f.write('approval_policy = "on-request"\n')
     prep = ctx.probe(["prepare", "codex", "--cwd", ctx.sandbox.root])
     cid = prep["conversationID"]
     text = ctx.probe(["launch-command", "codex", "--id", cid, "--cwd", ctx.sandbox.root])["text"]
@@ -223,10 +253,21 @@ def _open_prompt_reader(ctx, agent):
         term.send(b"Run the shell command: echo probe-approval-marker\r")
         appeared = term.wait(["Would you like to run the following command"], 45)
         if not appeared:
+            # Live-confirmed (not assumed): even with `approval_policy = "on-request"` set
+            # above -- and identically with it absent -- this exact message wedges the TUI
+            # at "Booting MCP server: codex_apps (0s ...)" and never progresses, for at
+            # least 180s. That screen is reached before any approval list could show, so
+            # this row's "never appeared" result right now traces to that boot stall, not
+            # to the trust override this row just named and worked around.
             return Observation(
                 declared=declared, observed=None,
-                detail="approval list never appeared; the stated reason is unconfirmed, "
-                       "not refuted",
+                detail="approval list never appeared; screen was still stuck at "
+                       "'Booting MCP server: codex_apps' after the wait, which reaching an "
+                       "approval prompt would require passing first -- trust_level "
+                       "\"trusted\" is written for this sandbox root, but "
+                       "approval_policy \"on-request\" was also set above and made no "
+                       "observable difference, so the boot stall is the blocker here, not "
+                       "the trust override",
             )
         before = _bytes_under(home)
         term.pump(3)
@@ -242,10 +283,20 @@ def _open_prompt_reader(ctx, agent):
 
 
 def _home_marker_file(ctx, agent):
+    """Not a checkable capability -- a declared-string fact, and deliberately so.
+
+    This used to assert `os.path.exists(home/marker)`, but `AgentSandbox` copies exactly this
+    file (`.claude.json` / `auth.json`) into the sandbox home at CONSTRUCTION time, before any
+    row or adapter method has run (see `sandbox.py`'s `CREDENTIALS`) -- so that existence check
+    was always true regardless of anything this suite does. It could only ever go red on a
+    machine with no real credential file to seed from in the first place, which is a harness
+    fact, not an adapter one. `environment`'s row is what actually proves the sandbox
+    redirection now; this row's only honest job is to record which filename
+    `AgentID.homeMarkerFile` currently names, `kind="fact"` so a symmetric declared/observed
+    match is what "checked" means here, same as the other `kind="fact"` rows.
+    """
     marker = ctx.probe(["declare", agent])["homeMarkerFile"]
-    home = _agent_home(ctx, agent)
-    return Observation(declared=True, observed=os.path.exists(os.path.join(home, marker)),
-                        detail=marker)
+    return Observation(declared=marker, observed=marker, detail=marker)
 
 
 def _identity(ctx, agent):
@@ -266,12 +317,55 @@ def _environment(ctx, agent):
     """Self-validating: every other row in this suite silently depends on `environment(for:)`
     actually redirecting the home into the sandbox rather than the real one. `declared` is
     trivially true — the member is required on every adapter, not optional — so what this row
-    checks is whether the redirection took."""
-    marker = ctx.probe(["declare", agent])["homeMarkerFile"]
+    checks is whether the redirection took, from two angles neither of which the harness itself
+    can satisfy by accident:
+
+    The previous version of this row checked `os.path.exists(home/marker)` for
+    `marker = .claude.json` / `auth.json` — exactly the files `AgentSandbox` copies in at
+    CONSTRUCTION time, before any adapter runs, so that half was always true regardless of what
+    `prepare` did. Unlinking the marker first and requiring it back doesn't rescue the idea
+    either: verified live (a throwaway `codex app-server` run against a copied `auth.json`),
+    neither agent's `prepare` ever rewrites its credential file, so "does it come back" is either
+    permanently unfalsifiable or, if actually deleted, risks breaking codex's real auth handshake
+    for a reason that has nothing to do with this row.
+
+    `prepare` already hands back something that DOES encode which home it used:
+    `transcriptURL`. Claude's is a pure derivation off `projectsRoot()` with no filesystem write
+    at all (`ClaudeAdapter.prepare` touches no disk), so a broken redirect would point it at the
+    real `~/.claude/projects`, not the sandbox; codex's names a path under its own `sessions`
+    directory the same way. Requiring it under the sandbox home is a direct assertion on the
+    exact code path this row exists to protect, not a side effect that may or may not occur.
+    `os.path.realpath` on both sides because codex resolves `/var`'s macOS symlink into
+    `/private/var` before naming the path and claude does not, so a literal-prefix comparison
+    would spuriously fail on codex alone.
+
+    The second half calls the real `AgentAdapter.environment(for:)` through the new `probe
+    environment` subcommand — no existing subcommand ever called it before this row: probe.swift's
+    own `claudeAdapter()`/`withCodex` redirect the probe's OWN process straight off
+    `CLAUDE_CONFIG_DIR`/`CODEX_HOME`, bypassing `environment(for:)` entirely, so a probe that only
+    exercised those two functions could read `ok` here even if `environment(for:)` itself were
+    broken and named the wrong home.
+    """
     home = _agent_home(ctx, agent)
-    out = ctx.probe(["prepare", agent, "--cwd", ctx.sandbox.root])
-    redirected = "error" not in out and os.path.exists(os.path.join(home, marker))
-    return Observation(declared=True, observed=redirected)
+    prep = ctx.probe(["prepare", agent, "--cwd", ctx.sandbox.root])
+    if "error" in prep:
+        return Observation(declared=True, observed=None, detail=prep["error"])
+    transcript = prep.get("transcriptURL") or ""
+    transcript_in_sandbox = os.path.realpath(transcript).startswith(
+        os.path.realpath(home) + os.sep)
+
+    env = ctx.probe(["environment", agent])
+    if "error" in env:
+        return Observation(declared=True, observed=None, detail=env["error"])
+    names_sandbox_home = home in env.values()
+
+    observed = transcript_in_sandbox and names_sandbox_home
+    return Observation(
+        declared=True, observed=observed,
+        detail="" if observed else
+               f"transcriptURL={transcript!r} under sandbox={transcript_in_sandbox}, "
+               f"environment(for:)={env!r} names sandbox={names_sandbox_home}",
+    )
 
 
 # --- Grammars: does the parser still match what the agent writes today? ---------------------
@@ -321,8 +415,9 @@ def _prepare(ctx, agent):
     if "error" in out:
         return Observation(declared=True, observed=None, detail=out["error"])
     cid = out.get("conversationID") or ""
-    return Observation(declared=True, observed=bool(cid) and cid == cid.lower(),
-                        detail=f"unexpected id shape: {cid!r}")
+    ok = bool(cid) and cid == cid.lower()
+    return Observation(declared=True, observed=ok,
+                        detail="" if ok else f"unexpected id shape: {cid!r}")
 
 
 def _binding(ctx, agent):
@@ -334,7 +429,7 @@ def _binding(ctx, agent):
         return Observation(declared=True, observed=False, detail=out["error"])
     agrees = out.get("conversationID") == cid and not out.get("repointed", False)
     return Observation(declared=True, observed=agrees,
-                        detail=f"rebind returned {out.get('conversationID')!r}")
+                        detail="" if agrees else f"rebind returned {out.get('conversationID')!r}")
 
 
 def _location(ctx, agent):
@@ -440,18 +535,34 @@ def _rename(ctx, agent):
     if not transcript:
         return Observation(declared=True, observed=None,
                             detail="prepare returned no transcriptURL")
+    # A zero-turn session's transcript file may legitimately not exist on disk yet — polled
+    # rather than assumed, so "the file hasn't been created yet" reads as an honest `error` (a
+    # harness precondition unmet before this row even typed anything) instead of being folded
+    # into whatever a fixed dwell happened to see after typing, which is what left the original
+    # `claude.rename — broken` reading unable to rule out "3 seconds was too short."
+    if not _poll(lambda: os.path.exists(transcript), 30):
+        return Observation(
+            declared=True, observed="error",
+            detail=f"transcript {transcript!r} never appeared within 30s, before /rename was "
+                   f"even typed",
+        )
     text = ctx.probe(["launch-command", "claude", "--id", cid, "--cwd", ctx.sandbox.root])["text"]
     with ctx.pty("claude", ["/bin/sh", "-lc", text]) as term:
         term.wait([_UP_MARKER["claude"]], 30)
         term.send(b"/rename probe-renamed\r")
-        # Deliberately not waited on: any text match here would be the same live-echo problem
-        # described above. This is a fixed dwell to let the write land, nothing more — the
-        # verdict comes only from re-reading the transcript below.
-        term.pump(3)
-    outbound = ctx.probe(["title-from-transcript", "claude", transcript])
-    if outbound.get("title") != "probe-renamed":
+        # Polled, not dwelled — for the same reason the on-screen echo check above was
+        # rejected: an arbitrary "long enough" wait for a file write to land is exactly as
+        # unconfirmed as an arbitrary wait for text to appear on screen, just failing quietly
+        # instead of loudly. Polled inside the `with` so the pty (and the claude process
+        # holding it) stays alive for the full window rather than being torn down the instant
+        # a fixed dwell's clock ran out.
+        outbound_title = _poll(
+            lambda: ctx.probe(["title-from-transcript", "claude", transcript]).get("title"),
+            30, until=lambda t: t == "probe-renamed",
+        )
+    if outbound_title != "probe-renamed":
         return Observation(declared=True, observed=False,
-                            detail=f"outbound: transcript reads {outbound.get('title')!r}")
+                            detail=f"outbound: transcript reads {outbound_title!r}")
     resume_text = ctx.probe(["resume-command", "claude", "--id", cid,
                               "--cwd", ctx.sandbox.root])["text"]
     with ctx.pty("claude", ["/bin/sh", "-lc", resume_text]) as term:
@@ -473,15 +584,46 @@ def _login_invocation(ctx, agent):
 
 
 def _runtime_observation(ctx, agent):
-    """During a real turn: claude's status file transitions, codex's rollout tail grows."""
+    """During a real turn: claude's status file transitions to carry an entry for THIS
+    conversation, codex's OWN rollout file for THIS thread grows. Both snapshotted immediately
+    before `ctx.seed_one_turn` and required to change afterward -- the same discipline
+    `_has_status_registry` uses -- because a bare post-hoc existence check is contaminated the
+    moment anything else has happened in this run's shared sandbox: claude's `<home>/sessions`
+    is routinely non-empty from an earlier row's own launch of this or another conversation, and
+    codex's rollout file for THIS thread already exists with real content (a `session_meta`
+    record plus environment context, ~18KB, verified live) the instant `prepare` returns --
+    before this row's turn has sent or received a single byte. `_bytes_under(codex_home)`
+    against the WHOLE home is even less informative: `run.py`'s onboarding dismissal and every
+    earlier row's own `withCodex` bootstrap already made it nonzero long before this row runs.
+    """
     prep = ctx.probe(["prepare", agent, "--cwd", ctx.sandbox.root])
     cid = prep["conversationID"]
-    ctx.seed_one_turn(agent, cid)
     if agent == "claude":
         sessions_dir = os.path.join(ctx.sandbox.claude_home, "sessions")
-        observed = os.path.isdir(sessions_dir) and bool(os.listdir(sessions_dir))
+
+        def has_entry_for_cid():
+            if not os.path.isdir(sessions_dir):
+                return False
+            for name in os.listdir(sessions_dir):
+                try:
+                    with open(os.path.join(sessions_dir, name)) as f:
+                        entry = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                if isinstance(entry, dict) and entry.get("sessionId", "").lower() == cid.lower():
+                    return True
+            return False
+
+        before = has_entry_for_cid()
+        ctx.seed_one_turn(agent, cid)
+        after = has_entry_for_cid()
+        observed = after and not before
     else:
-        observed = _bytes_under(ctx.sandbox.codex_home) > 0
+        rollout = prep.get("transcriptURL")
+        before = os.path.getsize(rollout) if rollout and os.path.exists(rollout) else 0
+        ctx.seed_one_turn(agent, cid)
+        after = os.path.getsize(rollout) if rollout and os.path.exists(rollout) else 0
+        observed = after > before
     return Observation(declared=True, observed=observed)
 
 
@@ -504,7 +646,7 @@ ROWS = [
     # fact like the three rows above.
     Row("openPromptReader", "declarations", BOTH, "full", ("sandbox-config",),
         _open_prompt_reader),
-    Row("homeMarkerFile", "declarations", BOTH, "cheap", (), _home_marker_file),
+    Row("homeMarkerFile", "declarations", BOTH, "cheap", (), _home_marker_file, kind="fact"),
     Row("identity", "declarations", BOTH, "cheap", (), _identity),
     Row("environment", "declarations", BOTH, "cheap", (), _environment),
     # Grammars
