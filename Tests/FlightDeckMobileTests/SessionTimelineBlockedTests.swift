@@ -381,6 +381,31 @@ final class SessionTimelineBlockedTests: XCTestCase {
         XCTAssertFalse(model.blockedChaseExhausted)
     }
 
+    /// **The field the log line exists to carry, exercised on its `true` branch.** The other
+    /// exhaustion tests above exhaust against an empty feed, so `unansweredInFeed` was otherwise
+    /// only checked by inspection. Here the feed genuinely holds an unanswered call throughout —
+    /// `askItem` is a real `.prompt` row with no matching `.toolResult` — but `agent: "codex"`
+    /// keeps `OpenPrompt.find` returning nil regardless (see its own doc comment: an agent
+    /// nothing can drive is blocked on nothing), so `blocked(...)` never resolves and the chase
+    /// still exhausts. That is exactly the case the field distinguishes: not "no record ever
+    /// arrived" but "a record is here, and something else — the agent gate, here — is what kept
+    /// a card from being drawn."
+    func testAnUnansweredCallStillInTheFeedIsReportedWhenTheChaseExhausts() async {
+        let (model, stub) = makeModel()
+        model.promptRetries = Array(repeating: .milliseconds(30), count: 3)
+        model.loadLatest()
+        stub.answer(.success(page([askItem(callID: "toolu_open")], session: model.sessionID)))
+
+        async let chase: Void = model.chaseBlockedPrompt(
+            agent: "codex", activity: "waiting", call: .unreported
+        )
+        for _ in 0..<3 { await stub.answerWhenAsked(.success(page([], session: model.sessionID))) }
+        await chase
+
+        XCTAssertTrue(model.blockedChaseExhausted, "an agent this build cannot drive never resolves")
+        XCTAssertTrue(model.hasUnansweredCallInFeed)
+    }
+
     /// **The flag resets on every entry, not just once.** `SessionTimelineScreen` re-invokes
     /// `chaseBlockedPrompt` from a `.task(id:)` keyed on the blocked dialog, so a session that
     /// stalled once and then moved on must not go on reporting the stall that is over.
