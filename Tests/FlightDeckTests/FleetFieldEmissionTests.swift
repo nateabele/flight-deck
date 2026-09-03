@@ -148,4 +148,28 @@ final class FleetFieldEmissionTests: XCTestCase {
         store.applyRegistryForTesting([watched.id: SessionStatus(activity: .idle)])
         XCTAssertTrue(replicator.recorded.contains(.unreadChanged(id: watched.id, isUnread: true)))
     }
+
+    /// The mutation and its event must not be separable: a phone left un-notified is silently
+    /// wrong until it reconnects, and nothing crashes to tell you.
+    func testAPIErrorEmitsOnceAndOnlyOnChange() {
+        let store = store()
+        let session = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+        let replicator = attachedReplicator(to: store)
+        func emitted() -> Int {
+            replicator.recorded.filter {
+                if case .apiErrorChanged = $0 { return true } else { return false }
+            }.count
+        }
+
+        store.apply(.apiError(SessionAPIError(status: 529, kind: "overloaded")), to: session.id)
+        XCTAssertEqual(store.apiErrors[session.id]?.status, 529)
+        XCTAssertEqual(emitted(), 1)
+
+        store.apply(.apiError(SessionAPIError(status: 529, kind: "overloaded")), to: session.id)
+        XCTAssertEqual(emitted(), 1, "an unchanged error must not re-emit")
+
+        store.apply(.apiError(nil), to: session.id)
+        XCTAssertNil(store.apiErrors[session.id])
+        XCTAssertEqual(emitted(), 2)
+    }
 }

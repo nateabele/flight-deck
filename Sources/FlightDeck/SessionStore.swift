@@ -43,6 +43,12 @@ final class SessionStore: ObservableObject {
     /// only a plain `idle` — or a vanished agent — clears it.
     @Published private(set) var backgroundWorkSessions: Set<UUID> = []
 
+    /// Sessions whose last turn died on an API error, keyed by tab. Orthogonal to `statuses`,
+    /// like `backgroundWorkSessions`: a tab in here reports `activity: .idle`, because that is
+    /// what `claude` writes to its status file once the turn dies. Telling those two idles apart
+    /// is the whole point of the badge.
+    @Published private(set) var apiErrors: [UUID: SessionAPIError] = [:]
+
     /// Which dialog each blocked tab is on, by the blocked call's `tool_use_id`. Absent for
     /// every tab this Mac cannot name a dialog for, which is nearly all of them.
     ///
@@ -909,12 +915,24 @@ final class SessionStore: ObservableObject {
         return true
     }
 
+    /// The only writer of `apiErrors`, for `setUnread`'s reasons: the mutation and its event must
+    /// not be separable, or a connected phone goes silently wrong until it reconnects. The
+    /// unchanged guard also keeps a client from receiving an event per poll for a dead session.
+    @discardableResult
+    private func setAPIError(_ id: UUID, _ error: SessionAPIError?) -> Bool {
+        guard apiErrors[id] != error else { return false }
+        apiErrors[id] = error
+        emit(.apiErrorChanged(id: id, error: error))
+        return true
+    }
+
     /// The wire form of a session as it stands right now.
     private func wire(_ session: Session) -> WireSession {
         FleetProjection.project(
             session, status: statuses[session.id], unread: unreadIdle,
             hasBackgroundWork: backgroundWorkSessions.contains(session.id),
             openPromptCall: openPromptCalls[session.id],
+            apiError: apiErrors[session.id],
             planGates: planGates
         )
     }
@@ -2127,6 +2145,11 @@ final class SessionStore: ObservableObject {
             // `restore()` — has already run. Moving this insert to run after that wiring
             // would need it to emit like `setUnread` does.
             if hasBackgroundWork { backgroundWorkSessions.insert(entry.id) }
+            // Assigned directly rather than through `setAPIError`, for exactly the reason the
+            // `backgroundWorkSessions` insert above is: this runs inside `SessionStore.init`,
+            // before `FleetService` attaches the replicator, so an emit here would go nowhere.
+            // Moving it after that wiring would require it to emit.
+            if let error = entry.apiError { apiErrors[entry.id] = error }
 
             // `!orphaned`: offering to continue a tab that cannot be launched at all would
             // put the wrong-login resume one click behind a prompt the app raised itself.
@@ -2319,6 +2342,9 @@ final class SessionStore: ObservableObject {
                     // `nil` rather than `false` so the common case adds no noise, matching
                     // `unread` directly below.
                     hasBackgroundWork: backgroundWorkSessions.contains($0.id) ? true : nil,
+                    // `nil` for the common case, like `unread` and `hasBackgroundWork` above, so
+                    // the file stays readable.
+                    apiError: apiErrors[$0.id],
                     // `nil` rather than `false` so the common case adds no noise to a file
                     // that is meant to stay readable.
                     unread: unreadIdle.contains($0.id) ? true : nil,
@@ -2503,6 +2529,10 @@ final class SessionStore: ObservableObject {
         // side, and the store's own projection has no such session either — both sides
         // agree once the batch settles.
         setUnread(id, false)
+        // Same "would leak it forever" argument as `setUnread` just above: closing a tab
+        // removes its id from `repos` entirely, so no future transcript record will ever
+        // clear this entry, and it would sit in `apiErrors` for the life of the process.
+        setAPIError(id, nil)
         // Closing the row is the most literal case of "a prompt that will never resolve",
         // and applyRegistry cannot observe the waiting -> gone edge here because both its
         // before and after snapshots already lack this id.
@@ -5219,12 +5249,20 @@ final class SessionStore: ObservableObject {
     }
 
     /// One place where an agent's report becomes tab state, whichever agent reported it.
-    private func apply(_ event: AgentEvent, to tabID: UUID) {
+    ///
+    /// Internal rather than private so the fleet-emission and projection suites can deliver an
+    /// `AgentEvent` without standing up a runtime and a live transcript — the same seam
+    /// `applyRegistry` is for the status path.
+    func apply(_ event: AgentEvent, to tabID: UUID) {
         switch event {
         case .title(let title): applyExternalTitle(tabID, title)
         case .activity(let activity): applyActivity(activity, to: tabID)
         case .subagentCount(let count): applySubagentCount(tabID, count)
         case .turnEnded: applyTurnEnded(to: tabID)
+        // Persisted only when it actually changed: `.progressed` fires on every turn, and
+        // `setAPIError`'s guard is what keeps that from rewriting sessions.json each time.
+        case .apiError(let error):
+            if setAPIError(tabID, error) { persist() }
         }
     }
 
