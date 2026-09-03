@@ -477,6 +477,41 @@ final class SessionTimelineModel {
         .milliseconds(900), .milliseconds(1_500), .seconds(3), .seconds(5), .seconds(8),
     ]
 
+    /// The phone's own verdict that `chaseBlockedPrompt` ran its whole schedule out with
+    /// nothing to show — the pathological state its doc comment describes, not the ordinary
+    /// race the early retries already cover.
+    ///
+    /// **Exhaustion is the trigger, and a single failed fetch deliberately is not.** A miss on
+    /// the first look is not evidence of anything: `promptRetries` exists precisely because
+    /// that miss is the *ordinary* shape of the race, and it resolves inside one short poll
+    /// almost every time. Flagging it there would call a normal ~1s beat "pathological" and
+    /// flip back a moment later when the retry lands — noise on every blocked session, not a
+    /// diagnosis. Only running the whole ~18s bounded schedule out and still finding nothing
+    /// says something a single poll cannot: this session is not behind by a beat, it is stuck.
+    private(set) var blockedChaseExhausted = false
+
+    /// Whether the feed holds any call still waiting on its `tool_result`, independent of
+    /// `agent`, `activity`, or which call the Mac names — the coarser fact logged beside
+    /// `chaseBlockedPrompt`'s own exhaustion.
+    ///
+    /// **This is what separates the two causes of an exhausted chase, from the phone's own
+    /// side.** `false` means the record naming the open call never reached this feed at all —
+    /// the Mac never emitted it, or this build cannot parse what it emitted. `true` beside an
+    /// exhausted chase means a call is sitting there unanswered and `blocked(agent:activity:
+    /// call:)`'s own gates — the agent, the activity, or the Mac's veto — are what kept a card
+    /// from being drawn, not a missing record. The two point Task 6's reader at different
+    /// halves of the system.
+    private var hasUnansweredCallInFeed: Bool {
+        var answered: Set<String> = []
+        for item in feed.items where item.kind == .toolResult {
+            if let id = item.body.callID { answered.insert(id) }
+        }
+        return feed.items.contains { item in
+            guard let id = item.body.callID, !answered.contains(id) else { return false }
+            return item.kind == .toolCall || item.kind == .prompt
+        }
+    }
+
     /// Keep asking, while a blocked session has nothing to show for it.
     ///
     /// **The race, and why one retry was not enough.** claude writes its status file and its
@@ -502,13 +537,34 @@ final class SessionTimelineModel {
     /// `blocked` unchanged, so a Mac naming a call this feed has never seen reads here exactly
     /// like a record that has not arrived yet — which is what it is. That is the supersede
     /// case, and it needs no second mechanism.
+    ///
+    /// **Running the schedule out is also this phone's own diagnosis, not only a stopping
+    /// rule.** `blockedChaseExhausted` records it, and the log line below is what lets the
+    /// pathological hour-long stall be told apart from the ordinary beat this same method
+    /// spends riding out on every other blocked session — see `blockedChaseExhausted`'s own
+    /// comment for why exhaustion, and not the first miss, is the right moment to say so.
     func chaseBlockedPrompt(agent: String?, activity: String?, call: OpenPromptIdentity) async {
+        blockedChaseExhausted = false
         for delay in promptRetries {
-            guard blocked(agent: agent, activity: activity, call: call) == nil else { return }
+            guard blocked(agent: agent, activity: activity, call: call) == nil else {
+                blockedChaseExhausted = false
+                return
+            }
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             loadNewer()
         }
+        guard blocked(agent: agent, activity: activity, call: call) == nil else {
+            blockedChaseExhausted = false
+            return
+        }
+        blockedChaseExhausted = true
+        PhoneLog.prompt.notice("""
+            blocked-chase-exhausted session=\(self.sessionID.uuidString, privacy: .public) \
+            activity=\(activity ?? "-", privacy: .public) \
+            retries=\(self.promptRetries.count, privacy: .public) \
+            unansweredInFeed=\(self.hasUnansweredCallInFeed, privacy: .public)
+            """)
     }
 
     /// The reader has read a failure and wants the row gone.
