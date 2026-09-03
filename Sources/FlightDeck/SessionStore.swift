@@ -4706,19 +4706,7 @@ final class SessionStore: ObservableObject {
             let watched = watchedTranscriptURL(of: id)
             let registryCWD = rows.values
                 .first { $0.sessionID == session.pinnedConversationID }?.cwd
-            // `projectsRoot` is threaded through explicitly rather than left at its default:
-            // `watched` came from an adapter built by `makeClaudeAdapter(account:)`, which
-            // resolves its root from *this* account's `transcriptsRoot(forAccount:)` — the same
-            // override a test or a second login relies on (see that method's doc comment).
-            // Leaving this at `ClaudeSession.defaultProjectsRoot` would make every account other
-            // than the unconfigured default, and every test with a fixture root, read as a
-            // mismatch even when the two paths genuinely agree.
-            let expected = registryCWD.map {
-                ClaudeSession.transcriptURL(
-                    sessionID: session.pinnedConversationID, workingDirectory: $0,
-                    projectsRoot: transcriptsRoot(forAccount: session.accountID)
-                )
-            }
+            let expected = registryCWD.map { expectedTranscriptURL(for: session, cwd: $0) }
             let matches = Self.pathMatches(watched: watched, expected: expected)
 
             PromptLifecycleLog.record(PromptLifecycleRecord(
@@ -4738,6 +4726,23 @@ final class SessionStore: ObservableObject {
                 retarget(id, to: cwd)
             }
         }
+    }
+
+    /// Where the registry's `cwd` says `session`'s transcript should be, resolved through
+    /// *this* session's own account rather than the default.
+    ///
+    /// `watched` came from an adapter built by `makeClaudeAdapter(account:)`, which resolves its
+    /// root from this account's `transcriptsRoot(forAccount:)` — the same override a test or a
+    /// second login relies on (see that method's doc comment). Threading it through here, rather
+    /// than leaving `ClaudeSession.transcriptURL` at its default `projectsRoot`, is what makes
+    /// `pathMatches` meaningful for every account other than the unconfigured default: dropping
+    /// this argument would make every such account, and every test with a fixture root, read as
+    /// a mismatch even when the two paths genuinely agree.
+    func expectedTranscriptURL(for session: Session, cwd: String) -> URL {
+        ClaudeSession.transcriptURL(
+            sessionID: session.pinnedConversationID, workingDirectory: cwd,
+            projectsRoot: transcriptsRoot(forAccount: session.accountID)
+        )
     }
 
     /// Whether the transcript this Mac is watching is the one the registry's `cwd` derives.
