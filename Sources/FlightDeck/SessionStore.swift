@@ -1920,7 +1920,8 @@ final class SessionStore: ObservableObject {
                 FleetProjection.project(
                     repos[repoIndex], statuses: statuses, unread: unreadIdle,
                     backgroundWork: backgroundWorkSessions,
-                    openPromptCalls: openPromptCalls, planGates: planGates
+                    openPromptCalls: openPromptCalls, apiErrors: apiErrors,
+                    planGates: planGates
                 ),
                 at: repoIndex
             ))
@@ -2824,7 +2825,8 @@ final class SessionStore: ObservableObject {
                     FleetProjection.project(
                         repo, statuses: statuses, unread: unreadIdle,
                         backgroundWork: backgroundWorkSessions,
-                        openPromptCalls: openPromptCalls, planGates: planGates
+                        openPromptCalls: openPromptCalls, apiErrors: apiErrors,
+                        planGates: planGates
                     ), at: at
                 ))
             }
@@ -5159,7 +5161,8 @@ final class SessionStore: ObservableObject {
                 FleetProjection.project(
                     repos[destination], statuses: statuses, unread: unreadIdle,
                     backgroundWork: backgroundWorkSessions,
-                    openPromptCalls: openPromptCalls, planGates: planGates
+                    openPromptCalls: openPromptCalls, apiErrors: apiErrors,
+                    planGates: planGates
                 ),
                 at: destination
             ))
@@ -5259,8 +5262,10 @@ final class SessionStore: ObservableObject {
         case .activity(let activity): applyActivity(activity, to: tabID)
         case .subagentCount(let count): applySubagentCount(tabID, count)
         case .turnEnded: applyTurnEnded(to: tabID)
-        // Persisted only when it actually changed: `.progressed` fires on every turn, and
-        // `setAPIError`'s guard is what keeps that from rewriting sessions.json each time.
+        // Persisted only when it actually changed. The watcher already suppresses an unchanged
+        // report (`TranscriptWatcher.lastAPIError`), so this guard is the second line: it also
+        // covers a restore-seeded error re-reported identically by the first live scan, which
+        // would otherwise rewrite sessions.json for no change.
         case .apiError(let error):
             if setAPIError(tabID, error) { persist() }
         }
