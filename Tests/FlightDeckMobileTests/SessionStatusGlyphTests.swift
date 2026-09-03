@@ -96,26 +96,50 @@ final class SessionStatusGlyphTests: XCTestCase {
         XCTAssertEqual(label(activity: "compacting"), "Unrecognized status")
     }
 
+    /// The label is the Mac's, from the same function — not a re-pinned literal. That is the
+    /// whole reason `SessionAPIError` lives in FleetKit rather than being restated per platform.
+    func testAPIErrorLabelMatchesTheSharedOne() {
+        let error = SessionAPIError(status: 529, kind: "overloaded", isTransient: true)
+        XCTAssertEqual(label(activity: "idle", apiError: error), error.label)
+    }
+
+    /// The case that matters most: the session died AND its process exited, so `activity` is
+    /// nil. `baseLabel` returns nil for that and the glyph's nil branch renders no accessibility
+    /// element at all — so the error branch has to come first, or the badge never appears in
+    /// precisely the situation it exists for.
+    func testAPIErrorLabelSurvivesANilActivity() {
+        let error = SessionAPIError(status: 529, kind: "overloaded")
+        XCTAssertEqual(label(activity: nil, apiError: error), error.label)
+    }
+
+    /// The error outranks unread, matching the Mac's precedence in `SessionStatusIcon` exactly.
+    func testAPIErrorOutranksUnread() {
+        let error = SessionAPIError(status: 500, kind: "server_error")
+        XCTAssertEqual(label(activity: "idle", isUnread: true, apiError: error), error.label)
+    }
+
     private func label(
         activity: String?, waitingFor: String? = nil,
-        subagentCount: Int = 0, isUnread: Bool = false
+        subagentCount: Int = 0, isUnread: Bool = false,
+        apiError: SessionAPIError? = nil
     ) -> String? {
         SessionStatusGlyph.label(for: session(
             activity: activity, waitingFor: waitingFor,
-            subagentCount: subagentCount, isUnread: isUnread
+            subagentCount: subagentCount, isUnread: isUnread,
+            apiError: apiError
         ))
     }
 
     private func session(
         activity: String?, waitingFor: String? = nil,
         subagentCount: Int = 0, isUnread: Bool = false,
-        hasBackgroundWork: Bool = false
+        hasBackgroundWork: Bool = false, apiError: SessionAPIError? = nil
     ) -> WireSession {
         WireSession(
             id: UUID(), title: "flight-deck", agent: "claude",
             activity: activity, waitingFor: waitingFor,
             subagentCount: subagentCount, isUnread: isUnread,
-            hasBackgroundWork: hasBackgroundWork
+            hasBackgroundWork: hasBackgroundWork, apiError: apiError
         )
     }
 }

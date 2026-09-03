@@ -30,6 +30,25 @@ struct SessionStatusGlyph: View {
     let session: WireSession
 
     var body: some View {
+        // Ahead of the activity switch, and winning over every branch of it — the Mac's
+        // precedence, for the Mac's reason (see `SessionStatusIcon`). Critically it also wins
+        // over the `nil` branch, which renders no accessibility element at all: a session that
+        // died and whose process then exited has `activity == nil`, and that is the case this
+        // badge matters most for.
+        if let apiError = session.apiError {
+            glyph(
+                Image(systemName: "exclamationmark.triangle.fill").font(.caption)
+                    .foregroundStyle(.red),
+                label: apiError.label)
+        } else {
+            activityGlyph
+        }
+    }
+
+    /// The activity vocabulary, unchanged — moved out of `body` only so the error branch above
+    /// can precede it without nesting a switch inside an `if`.
+    @ViewBuilder
+    private var activityGlyph: some View {
         switch session.activity {
         case nil:
             // Matches the width of every other branch below so the column doesn't ragged
@@ -134,6 +153,11 @@ struct SessionStatusGlyph: View {
     /// and always last, so every label `baseLabel` produced before the flag existed is
     /// byte-identical when it is false.
     static func label(for session: WireSession) -> String? {
+        // Before `baseLabel`, deliberately: that function returns nil for a nil activity, and
+        // this state must still announce. Not appended like the background clause either — this
+        // replaces the label rather than decorating it, because the session is not in the state
+        // the base string would describe.
+        if let apiError = session.apiError { return apiError.label }
         guard let base = baseLabel(for: session) else { return nil }
         guard session.hasBackgroundWork else { return base }
         return base + " — background command running"

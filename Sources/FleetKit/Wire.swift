@@ -160,6 +160,10 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     ///
     /// `.unreported` by default, because a value nobody set is nobody's assertion.
     public var openPromptCall: OpenPromptIdentity
+    /// Why this session's last turn stopped, when the API refused it. Orthogonal to `activity`,
+    /// like `hasBackgroundWork`: the Mac reports `activity: "idle"` and this together for a tab
+    /// that died on a 529 and went quiet.
+    public var apiError: SessionAPIError?
 
     public init(
         id: UUID, title: String, agent: String,
@@ -167,7 +171,8 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         subagentCount: Int = 0, isUnread: Bool = false,
         hasBackgroundWork: Bool = false,
         planGate: WirePlanGate? = nil,
-        openPromptCall: OpenPromptIdentity = .unreported
+        openPromptCall: OpenPromptIdentity = .unreported,
+        apiError: SessionAPIError? = nil
     ) {
         self.id = id
         self.title = title
@@ -179,6 +184,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         self.hasBackgroundWork = hasBackgroundWork
         self.planGate = planGate
         self.openPromptCall = openPromptCall
+        self.apiError = apiError
     }
 
     /// Spelled out rather than synthesized, because `openPromptCall` is not `Codable` — its
@@ -195,7 +201,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     /// `testSessionWithAGateRoundTrips` is what keeps it that way.
     enum CodingKeys: String, CodingKey {
         case id, title, agent, activity, waitingFor, subagentCount, isUnread
-        case hasBackgroundWork, planGate, openPromptCall
+        case hasBackgroundWork, planGate, openPromptCall, apiError
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -212,6 +218,9 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         // that predates the gate must see the same bytes for a tab with none.
         try c.encodeIfPresent(planGate, forKey: .planGate)
         try c.encode(openPromptCall, forKey: .openPromptCall)
+        // Absent, not `null`, for the same reason `planGate` is: a build that predates this
+        // field must see exactly the bytes it has always seen for a session that has no error.
+        try c.encodeIfPresent(apiError, forKey: .apiError)
     }
 
     public init(from decoder: any Decoder) throws {
@@ -247,5 +256,16 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         // both decode as no gate, not as an error. See `WirePlanGate` for why the fact is
         // carried at all rather than derived like everything else here.
         planGate = try c.decodeIfPresent(WirePlanGate.self, forKey: .planGate)
+        // Absent from an older Mac, and from every healthy session — both decode as "no error",
+        // not as a failure. Same contract as `hasBackgroundWork` above, and the reason
+        // `FleetKitVersion.wire` is deliberately not bumped for this field either.
+        //
+        // This degrades cleanly only for the FIELD, on a `WireSession` decode — a full
+        // snapshot or a resync. It says nothing about `FleetEventTag.apiErrorChanged` in
+        // `WireCoding.swift`: an older phone's `FleetEventTag` decoder throws on a raw value
+        // it does not recognise, and that throw propagates out of `FleetEvent.init(from:)`
+        // rather than landing here. See `docs/FOLLOWUPS.md`'s API-error-badge section for
+        // what that costs.
+        apiError = try c.decodeIfPresent(SessionAPIError.self, forKey: .apiError)
     }
 }

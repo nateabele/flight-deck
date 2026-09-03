@@ -247,6 +247,33 @@ final class SessionTimelineScreenTests: XCTestCase {
         )
     }
 
+    /// An errored session announces regardless of what `activity` says, because `activity` is
+    /// stale the moment the error lands — the process that would update it is the one that
+    /// just died. Every activity is covered, including `nil`: a session whose process has
+    /// also exited by now is the case this badge matters most for, and it must not fall
+    /// through to the "nothing live to say" silence that a `nil` activity gets everywhere
+    /// else on this screen.
+    func testAnErroredSessionAnnouncesRegardlessOfActivity() {
+        let error = SessionAPIError(status: 529, kind: "overloaded")
+        for activity in ["busy", "waiting", "idle", nil] {
+            XCTAssertEqual(
+                SessionTimelineScreen.activityFooter(
+                    for: session(activity: activity, apiError: error)
+                ),
+                .error(error.label),
+                "activity: \(activity ?? "nil") must not change or suppress the error footer"
+            )
+        }
+        // `idle` with background work still running underneath the dead turn: the error wins
+        // over the background badge too, for the same reason it wins on the fleet list glyph.
+        XCTAssertEqual(
+            SessionTimelineScreen.activityFooter(
+                for: session(activity: "idle", hasBackgroundWork: true, apiError: error)
+            ),
+            .error(error.label)
+        )
+    }
+
     // MARK: One row per thing that happened
 
     /// **A command and its output are one thing, and the feed carries them as two records.**
@@ -681,12 +708,13 @@ final class SessionTimelineScreenTests: XCTestCase {
 
     private func session(
         agent: String = "claude", activity: String?, waitingFor: String? = nil,
-        subagentCount: Int = 0, hasBackgroundWork: Bool = false
+        subagentCount: Int = 0, hasBackgroundWork: Bool = false,
+        apiError: SessionAPIError? = nil
     ) -> WireSession {
         WireSession(
             id: UUID(), title: "flight-deck", agent: agent,
             activity: activity, waitingFor: waitingFor, subagentCount: subagentCount,
-            hasBackgroundWork: hasBackgroundWork
+            hasBackgroundWork: hasBackgroundWork, apiError: apiError
         )
     }
 }

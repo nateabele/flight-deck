@@ -1081,3 +1081,38 @@ the feature, and both written up where someone will hit them rather than here:
   The entry above this one records the rule; the working route (a window on the app's own
   `UIWindowScene` held across an `xcrun simctl io … screenshot`, with the two-file handshake
   that makes it possible) is in [docs/MOBILE.md](MOBILE.md) beside the technique.
+
+## API-error badge (2026-09-03)
+
+- **No backfill of API errors missed while closed.** `TailReader` starts a first look at an
+  existing transcript at its current end, so a session that died while Flight Deck was not
+  running gets no badge beyond whatever the `sessions.json` snapshot restored. Scanning
+  backwards for a trailing error record means finding the last assistant record and proving
+  nothing followed it — real complexity, deferred.
+
+- **The API-error badge is claude-only.** `WireSession.apiError` is agent-agnostic, but only
+  `ClaudeSession.events(inObject:)` ever raises it. Codex's failure shape needs its own probe
+  against a current `codex app-server`; a claim about an older version is not evidence.
+
+- **No notification when a session dies on an API error.** Deliberately deferred. A capacity
+  blip kills many sessions at once, so this edge needs its own suppression design in
+  `SessionNotificationPolicy` rather than riding the existing idle/waiting rules.
+
+- **No project-header rollup for the API-error badge.** `SessionActivity.summaryRank` ranks
+  activities and this is not one, so a collapsed project whose child died still shows that
+  child's activity.
+
+- **`FleetEventTag.apiErrorChanged` is not backward-degradable for an older phone.** The
+  `WireSession.apiError` FIELD degrades cleanly — `decodeIfPresent` on an absent key is "no
+  badge", not an error, and that half is real and tested. The new `FleetEvent` case is a
+  different thing: `FleetEventTag`'s decoder is a raw-value `Codable` enum, so a phone built
+  before this feature throws decoding a tag it does not recognise, and that throw propagates
+  out of `FleetEvent.init(from:)` and `ServerFrame.init(from:)`. `FleetClient`'s `onUndecodable`
+  salvage only rescues frames with `t == "ask"`, so the socket is torn down; the phone
+  reconnects at the same `lastSeq`, `FleetReplicator.resume(from:)` replays the same event off
+  the ring, and it throws again — a reconnect flap that only stops once the event ages past the
+  ring floor and a resnapshot takes over. `planGateChanged` and `promptExpired` shipped with the
+  identical exposure, so this is a third instance of a pre-existing repo-wide gap rather than
+  something this feature introduced, and it only bites when the phone build is older than the
+  Mac's — the ordinary direction of skew during a staged rollout, not the common case day to
+  day.

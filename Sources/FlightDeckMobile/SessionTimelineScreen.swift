@@ -793,6 +793,10 @@ struct SessionTimelineScreen: View {
         /// underneath it. Its symbol and tint match the fleet list's badge, not `working`'s
         /// spinner: nothing is running the model turn, only the background task is.
         case background(String)
+        /// The session's last turn died on an API error. Wins over every other case above —
+        /// see `activityFooter`'s own comment for why `activity` cannot be trusted to route
+        /// this once the error has landed.
+        case error(String)
     }
 
     /// What the session itself is doing, said the way the Mac says it.
@@ -810,8 +814,20 @@ struct SessionTimelineScreen: View {
     /// still running" is the one state this whole feature exists to surface, and staying
     /// silent about it here after showing a badge in the fleet list would tell a reader two
     /// different stories about the same session two taps apart.
+    ///
+    /// **`apiError` is checked before `activity`, not folded into one of its branches.**
+    /// `SessionStatusGlyph.label(for:)` already replaces the base label with the error's own
+    /// once a session has one, but `activity` itself is not updated by the same event — the
+    /// process that would flip it to `"idle"` is the one that just died on the API. Routing
+    /// on `activity` after that label swap produced exactly the two-different-stories bug this
+    /// comment warns about above: a spinner captioned "Stopped", an orange `waiting` glyph
+    /// captioned "Stopped", a green background badge captioned "Stopped", and — worst of the
+    /// four — `idle` with no background work returning `nil` outright, silent here while the
+    /// fleet list two taps back still shows a red triangle. The error is a fact about the
+    /// session, not about `activity`, so it is checked first and wins outright.
     static func activityFooter(for session: WireSession?) -> Activity? {
         guard let session, let label = SessionStatusGlyph.label(for: session) else { return nil }
+        if session.apiError != nil { return .error(label) }
         switch session.activity {
         case "busy":
             return .working(label)
@@ -855,6 +871,17 @@ struct SessionTimelineScreen: View {
             Label(text, systemImage: "terminal.fill")
                 .font(.footnote)
                 .foregroundStyle(.green)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .listRowInsets(Self.rowInsets)
+                .listRowSeparator(.hidden)
+        case .error(let text):
+            // Same symbol and tint as `SessionStatusGlyph`'s error branch and the fleet list's
+            // badge — `exclamationmark.triangle.fill` in `.red` — so a reader who tapped a red
+            // triangle to get here sees the same claim restated, not a different one.
+            Label(text, systemImage: "exclamationmark.triangle.fill")
+                .font(.footnote)
+                .foregroundStyle(.red)
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .listRowInsets(Self.rowInsets)
