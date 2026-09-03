@@ -22,7 +22,7 @@ Exact recorded versions: [TOOLING.md](TOOLING.md).
 
 ```bash
 git clone <flight-deck remote or path> flight-deck && cd flight-deck
-git submodule update --init            # checks out vendor/ghostty, vendor/boringssl, vendor/fd-abduco
+git submodule update --init            # checks out vendor/ghostty and vendor/boringssl
 ./scripts/build-libghostty.sh          # ~10 min first run (builds libghostty from source)
 ./scripts/build-boringssl.sh           # builds BoringSSL (SPAKE2, for pairing) from source
 ./scripts/build-fd-abduco.sh           # builds the fd-abduco daemon binary (seconds)
