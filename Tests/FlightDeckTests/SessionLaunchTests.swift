@@ -89,6 +89,33 @@ final class SessionLaunchTests: XCTestCase {
         XCTAssertEqual(provider.configs.last?.environmentVariables["FOO"], "bar")
     }
 
+    /// The line that makes the persisted font size actually do anything: without it, a
+    /// bumped `Preferences.terminalFontSize` would only ever reach surfaces already open at
+    /// bump time (via `SessionStore.applyTerminalFontSize`), and every session opened after
+    /// would silently come back at libghostty's config default.
+    func testPersistedFontSizeReachesTheSurfaceConfig() {
+        let preferences = PreferencesStore(persistence: PreferencesStoreTests.MemoryPersistence())
+        preferences.preferences.terminalFontSize = 18
+        let provider = CapturingProvider()
+        let store = SessionStore(provider: provider, persistence: nil, preferences: preferences)
+
+        store.newSession(in: URL(fileURLWithPath: "/tmp", isDirectory: true))
+
+        XCTAssertEqual(provider.configs.last?.fontSize, 18)
+    }
+
+    /// The other half: an unset size must reach the surface as `nil`, not as some
+    /// materialized default — `SurfaceConfiguration.withCValue` is what maps `nil` to `0`
+    /// ("inherit libghostty's configured default"), and only does that for an actual `nil`.
+    func testUnsetFontSizeReachesTheSurfaceConfigAsNil() {
+        let provider = CapturingProvider()
+        let store = SessionStore(provider: provider, persistence: nil)
+
+        store.newSession(in: URL(fileURLWithPath: "/tmp", isDirectory: true))
+
+        XCTAssertNil(provider.configs.last?.fontSize)
+    }
+
     func testStoreWithoutPreferencesStillLaunches() {
         let provider = CapturingProvider()
         let store = SessionStore(provider: provider, persistence: nil)

@@ -12,6 +12,19 @@ final class RespawnSurfaceTests: XCTestCase {
         func save(_ snapshot: SessionSnapshot) { stored = snapshot }
     }
 
+    /// Unlike `StubProvider`, records what it was handed. Only used by the respawn/font-size
+    /// test below, which needs to see the rebuilt `Ghostty.SurfaceConfiguration` rather than
+    /// just a health signal.
+    private final class CapturingProvider: SurfaceProvider {
+        var configs: [Ghostty.SurfaceConfiguration] = []
+        func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? {
+            configs.append(config)
+            return nil
+        }
+        func tick() {}
+        var defaultFontSize: Float { 12 }
+    }
+
     // Same reason as `DisplayDrawableGuardTests`: `SessionStore.provider` is `weak`, so an
     // unretained `StubProvider` would deallocate immediately.
     private var retainedProviders: [StubProvider] = []
@@ -62,5 +75,29 @@ final class RespawnSurfaceTests: XCTestCase {
     func testHealthIsTheRegistryNotTheSurface() {
         let (s, id) = inertStore(drawable: true)
         XCTAssertFalse(s.hasShellProcess(for: id))
+    }
+
+    /// The respawn path (~L1023) has its own `config.fontSize = ...` line, separate from
+    /// `newSession`'s — nothing here would catch a future edit that deleted only this one.
+    /// Not routed through `inertStore`/`store()`, which hardcode `StubProvider`: this needs a
+    /// provider that records the config it is handed, and a `PreferencesStore` to source the
+    /// size from.
+    func testRespawnSeedsTheNewSurfaceFromThePersistedFontSize() {
+        let id = UUID()
+        let entry = SessionSnapshot.Entry(id: id, title: "inert", workingDirectory: tmp.path)
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [entry], selectedSessionID: nil, sessionCounter: 1
+        )
+        let preferences = PreferencesStore(persistence: PreferencesStoreTests.MemoryPersistence())
+        preferences.preferences.terminalFontSize = 18
+        let provider = CapturingProvider()
+        let s = SessionStore(provider: provider, persistence: persistence, preferences: preferences)
+        s.display = Display(isDrawable: true)
+        _ = s.restore()
+
+        _ = s.respawnSurface(for: id)
+
+        XCTAssertEqual(provider.configs.last?.fontSize, 18)
     }
 }
