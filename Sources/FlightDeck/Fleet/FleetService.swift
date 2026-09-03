@@ -153,7 +153,12 @@ final class FleetService: ObservableObject {
         store.openPromptProbe = { [weak prompts] id in
             guard let prompts else { return nil }
             if case .failure(let code) = prompts.openPrompt(inSession: id) {
-                return String(describing: code)
+                // `.code`, not `String(describing:)`: `TimelineErrorCode` has no
+                // `CustomStringConvertible`, so `describing` would render the struct dump
+                // `TimelineErrorCode(code: "prompt_changed")` into the `.stuck` record's
+                // `code=` field instead of the bare wire string every other reader of this
+                // code expects — defeating the one thing that field exists to say.
+                return code.code
             }
             return nil
         }
