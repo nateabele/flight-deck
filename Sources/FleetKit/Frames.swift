@@ -252,6 +252,20 @@ public enum FleetCommand: Codable, Equatable, Sendable {
     /// real outcome — `POST /api/approve` takes a `feedback` field for exactly that.
     case resolvePlan(id: UUID, token: UUID, call: String, approve: Bool, feedback: String?)
 
+    /// Escape at a dialog this Mac cannot name.
+    ///
+    /// **It carries no call id, and that is the whole reason it exists.** `answerPrompt` is
+    /// judged against the call the client had on screen — derived independently on both ends,
+    /// then compared, which is what closes the race described on that case. Here there is no
+    /// call to derive on either end: the transcript record that would have named it was never
+    /// written (an upstream claude bug), so the Mac has nothing to re-derive and a phone has
+    /// nothing to have read off its own copy. A call id here would not be a cross-check, it
+    /// would be a client's unverifiable claim about a screen neither end can parse — exactly
+    /// the trust `answerPrompt.call` exists to avoid extending. So this acts on the session
+    /// rather than on a call, which is also why it is gated behind an explicit opt-in rather
+    /// than riding on `answerPrompt`'s existing plumbing: see `WireSession.allowsBlockedAbort`.
+    case abortPrompt(id: UUID, token: UUID)
+
     enum CodingKeys: String, CodingKey {
         case op, id, token, text, call, answer, index, label
         case isCollapsed, project, title, agent, accountIndex
@@ -271,6 +285,7 @@ public enum FleetCommand: Codable, Equatable, Sendable {
         case viewing = "session.viewing"
         case annotatePlan = "plan.annotate"
         case resolvePlan = "plan.resolve"
+        case abortPrompt = "prompt.abort"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -340,6 +355,10 @@ public enum FleetCommand: Codable, Equatable, Sendable {
             try c.encode(call, forKey: .call)
             try c.encode(approve, forKey: .approve)
             try c.encodeIfPresent(feedback, forKey: .feedback)
+        case .abortPrompt(let id, let token):
+            try c.encode(Op.abortPrompt, forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
         }
     }
 
@@ -418,6 +437,11 @@ public enum FleetCommand: Codable, Equatable, Sendable {
                 call: try c.decode(String.self, forKey: .call),
                 approve: try c.decode(Bool.self, forKey: .approve),
                 feedback: try c.decodeIfPresent(String.self, forKey: .feedback)
+            )
+        case .abortPrompt:
+            self = .abortPrompt(
+                id: try c.decode(UUID.self, forKey: .id),
+                token: try c.decode(UUID.self, forKey: .token)
             )
         }
     }

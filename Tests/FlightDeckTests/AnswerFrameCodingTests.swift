@@ -96,6 +96,28 @@ final class AnswerFrameCodingTests: XCTestCase {
         }
     }
 
+    /// **No `call` key at all, which is the whole point of the case.** Unlike `deny`, whose
+    /// `call` exists but goes unused for the row it picks, `abortPrompt` has no call to carry
+    /// in the first place — the transcript record that would have named one was never written.
+    /// A packet dump of this command should read as a session-scoped command, not an
+    /// answer-shaped one with a field quietly missing.
+    func testAbortPromptReadsAsOneFlatObjectWithNoCall() throws {
+        let json = try object(.cmd(cid: 12, .abortPrompt(id: session, token: token)))
+        XCTAssertEqual(json["t"] as? String, "cmd")
+        XCTAssertEqual(json["op"] as? String, "prompt.abort")
+        XCTAssertEqual(json["id"] as? String, session.uuidString)
+        XCTAssertEqual(json["token"] as? String, token.uuidString)
+        XCTAssertNil(json["call"], "there is no call to name")
+        XCTAssertNil(json["answer"], "abort is not an answer")
+        XCTAssertEqual(Set(json.keys), ["t", "cid", "op", "id", "token"])
+    }
+
+    func testAbortPromptRoundTripsThroughClientFrame() throws {
+        let sent = ClientFrame.cmd(cid: 13, .abortPrompt(id: session, token: token))
+        let data = try JSONEncoder().encode(sent)
+        XCTAssertEqual(try JSONDecoder().decode(ClientFrame.self, from: data), sent)
+    }
+
     func testAPromptStillDecodesFromTheShapeAlreadyOnTheWire() throws {
         let line = """
         {"t":"cmd","cid":7,"op":"session.prompt","id":"\(session.uuidString)",\

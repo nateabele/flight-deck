@@ -346,6 +346,148 @@ final class SessionTimelineBlockedTests: XCTestCase {
         XCTAssertNil(model.blocked(agent: "claude", activity: "waiting", call: .unreported))
     }
 
+    // MARK: The phone's own verdict
+
+    /// **Exhaustion is the phone's own diagnosis, not only a stopping rule.** Running the whole
+    /// schedule out with nothing to show is what separates this session from the ordinary race
+    /// every other blocked session rides out inside the early retries — see
+    /// `blockedChaseExhausted`'s own comment for why the first miss must not set this.
+    func testExhaustingTheChaseMarksTheSessionBlocked() async {
+        let (model, stub) = makeModel()
+        model.promptRetries = Array(repeating: .milliseconds(30), count: 3)
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+
+        async let chase: Void = model.chaseBlockedPrompt(
+            agent: "claude", activity: "waiting", call: .unreported
+        )
+        for _ in 0..<3 { await stub.answerWhenAsked(.success(page([], session: model.sessionID))) }
+        await chase
+
+        XCTAssertTrue(model.blockedChaseExhausted)
+    }
+
+    /// **The discriminating half of the pair above.** A model that always set the flag would
+    /// pass the exhaustion test and fail this one: the card is already on screen before the
+    /// chase's first look, so the schedule never even reaches its second attempt.
+    func testACardArrivingBeforeTheScheduleRunsOutLeavesItUnblocked() async {
+        let (model, stub) = makeModel()
+        model.promptRetries = Array(repeating: .milliseconds(30), count: 5)
+        model.loadLatest()
+        stub.answer(.success(page([askItem(callID: "toolu_here")], session: model.sessionID)))
+
+        await model.chaseBlockedPrompt(agent: "claude", activity: "waiting", call: .unreported)
+
+        XCTAssertFalse(model.blockedChaseExhausted)
+    }
+
+    /// **The field the log line exists to carry, exercised on its `true` branch.** The other
+    /// exhaustion tests above exhaust against an empty feed, so `unansweredInFeed` was otherwise
+    /// only checked by inspection. Here the feed genuinely holds an unanswered call throughout —
+    /// `askItem` is a real `.prompt` row with no matching `.toolResult` — but `agent: "codex"`
+    /// keeps `OpenPrompt.find` returning nil regardless (see its own doc comment: an agent
+    /// nothing can drive is blocked on nothing), so `blocked(...)` never resolves and the chase
+    /// still exhausts. That is exactly the case the field distinguishes: not "no record ever
+    /// arrived" but "a record is here, and something else — the agent gate, here — is what kept
+    /// a card from being drawn."
+    func testAnUnansweredCallStillInTheFeedIsReportedWhenTheChaseExhausts() async {
+        let (model, stub) = makeModel()
+        model.promptRetries = Array(repeating: .milliseconds(30), count: 3)
+        model.loadLatest()
+        stub.answer(.success(page([askItem(callID: "toolu_open")], session: model.sessionID)))
+
+        async let chase: Void = model.chaseBlockedPrompt(
+            agent: "codex", activity: "waiting", call: .unreported
+        )
+        for _ in 0..<3 { await stub.answerWhenAsked(.success(page([], session: model.sessionID))) }
+        await chase
+
+        XCTAssertTrue(model.blockedChaseExhausted, "an agent this build cannot drive never resolves")
+        XCTAssertTrue(model.hasUnansweredCallInFeed)
+    }
+
+    /// **The flag resets on every entry, not just once.** `SessionTimelineScreen` re-invokes
+    /// `chaseBlockedPrompt` from a `.task(id:)` keyed on the blocked dialog, so a session that
+    /// stalled once and then moved on must not go on reporting the stall that is over.
+    func testANewChaseClearsAPreviousExhaustion() async {
+        let (model, stub) = makeModel()
+        model.promptRetries = Array(repeating: .milliseconds(30), count: 2)
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+
+        async let firstChase: Void = model.chaseBlockedPrompt(
+            agent: "claude", activity: "waiting", call: .unreported
+        )
+        for _ in 0..<2 { await stub.answerWhenAsked(.success(page([], session: model.sessionID))) }
+        await firstChase
+        XCTAssertTrue(model.blockedChaseExhausted, "the premise: the first chase exhausted")
+
+        model.promptRetries = Array(repeating: .milliseconds(30), count: 2)
+        async let secondChase: Void = model.chaseBlockedPrompt(
+            agent: "claude", activity: "waiting", call: .call("toolu_new")
+        )
+        await stub.answerWhenAsked(
+            .success(page([askItem(callID: "toolu_new")], session: model.sessionID))
+        )
+        await secondChase
+
+        XCTAssertFalse(model.blockedChaseExhausted)
+    }
+
+    // MARK: - Task 6: the Blocked card's own live-input requirement
+
+    /// **The regression `PromptCard.showsBlocked`'s `hasCard` contract exists to prevent.** A
+    /// `hasCard` snapshot taken *before* the late record lands — exactly what latched
+    /// `blockedChaseExhausted` alone would tempt a caller into reusing, since the flag itself
+    /// does not change when the card finally arrives — says Blocked should stay up even after
+    /// the card exists. Only a `hasCard` re-evaluated from `blocked(...)` at the same moment as
+    /// `exhausted` is read gets this right; this test fails if `showsBlocked` were fed the stale
+    /// reading instead.
+    func testALateCardStandsBlockedDownOnlyWhenHasCardIsReEvaluatedLive() async {
+        let (model, stub) = makeModel()
+        model.promptRetries = Array(repeating: .milliseconds(30), count: 3)
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+
+        async let chase: Void = model.chaseBlockedPrompt(
+            agent: "claude", activity: "waiting", call: .unreported
+        )
+        for _ in 0..<3 { await stub.answerWhenAsked(.success(page([], session: model.sessionID))) }
+        await chase
+        XCTAssertTrue(model.blockedChaseExhausted, "the premise: the chase gave up")
+
+        // The reading a caller must not reuse: captured once, before the late record arrives.
+        let staleHasCard =
+            model.blocked(agent: "claude", activity: "waiting", call: .unreported) != nil
+        XCTAssertFalse(staleHasCard, "the premise: nothing was on screen when this was taken")
+
+        // The record lands late, on the SAME still-open call — the case `blockedChaseExhausted`
+        // does NOT clear for, per its own comment.
+        model.loadNewer()
+        stub.answer(.success(page([askItem(callID: "toolu_late")], session: model.sessionID)))
+        XCTAssertTrue(model.blockedChaseExhausted, "still latched: this was not a new dialog")
+
+        let liveHasCard =
+            model.blocked(agent: "claude", activity: "waiting", call: .unreported) != nil
+        XCTAssertTrue(liveHasCard, "the card is there once the record is")
+
+        XCTAssertFalse(
+            PromptCard.showsBlocked(
+                exhausted: model.blockedChaseExhausted, allowsAbort: true, hasCard: liveHasCard,
+                activity: "waiting", call: .noPrompt
+            ),
+            "fed the live reading, Blocked must stand down now that the card exists"
+        )
+        XCTAssertTrue(
+            PromptCard.showsBlocked(
+                exhausted: model.blockedChaseExhausted, allowsAbort: true, hasCard: staleHasCard,
+                activity: "waiting", call: .noPrompt
+            ),
+            "the stale reading is what would leave Blocked on screen wrongly — a cached " +
+            "hasCard reproduces exactly this"
+        )
+    }
+
     // MARK: - What the Mac says is open
 
     /// **The stale card, from this end.** The feed still holds `toolu_A` unanswered — the

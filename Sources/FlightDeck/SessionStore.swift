@@ -80,6 +80,21 @@ final class SessionStore: ObservableObject {
     /// hundred-odd tests that never open a socket want, and costs them no transcript reads.
     var openPromptCallReader: (UUID) -> String? = { _ in nil }
 
+    /// Whether a `waiting` tab's dialog can be named right now, for `checkStuckPrompts`'s use —
+    /// `nil` on success, the refusal code otherwise.
+    ///
+    /// A closure for the same reason `openPromptCallReader` is one and not a stored
+    /// `PromptService`: that service holds `store: SessionStore` strongly
+    /// (`PromptService.swift:35`), so a `SessionStore` holding a `PromptService` back would be a
+    /// retain cycle. `FleetService` installs the real one, weakly capturing the same
+    /// `PromptService` `openPromptCallReader` reads, so a stuck check and a phone's tap are
+    /// refused by one derivation, not two that could disagree.
+    ///
+    /// Nil by default, distinctly from `openPromptCallReader`'s empty-closure default: a store
+    /// built for a test with no fleet attached has no dialog derivation at all to probe, and
+    /// `checkStuckPrompts` must treat that as "nothing to check" rather than as "always stuck".
+    var openPromptProbe: ((UUID) -> String?)?
+
     /// `didSet` persists every change, including one made through `SessionSidebar`'s
     /// `List(selection:)` binding — the only way selection actually changes in
     /// production, since that binding writes here directly rather than through
@@ -3357,6 +3372,15 @@ final class SessionStore: ObservableObject {
         return repos[at.repo].sessions[at.session].pinnedConversationID
     }
 
+    /// The directory a tab's transcript watcher is pointed at right now — distinct from
+    /// `watchedTranscriptURL(of:)`, which names the file the watcher already resolved that
+    /// directory to. `checkStuckPrompts`'s tests read this before and after a tick to prove a
+    /// mismatched path was actually repaired, the same way `retarget(_:to:)` itself sets it.
+    func transcriptDirectory(of id: UUID) -> String? {
+        guard let at = locate(id) else { return nil }
+        return repos[at.repo].sessions[at.session].transcriptDirectory
+    }
+
     /// Test seam: which tabs are currently attached to an agent runtime. `attachments`
     /// itself stays private; this exposes just enough to assert a closed tab's late `repin`
     /// completion did not resurrect one.
@@ -3811,6 +3835,9 @@ final class SessionStore: ObservableObject {
         case notWaiting
         /// A shape this build will not drive — see `PromptQuestion.unanswerable`.
         case unanswerable
+        /// Abort only. This Mac **can** name the dialog on this tab, so a blind Escape is the
+        /// wrong instrument for it — see `dispatchAbort`'s own comment.
+        case promptNameable
         /// The terminal could not be read, the dialog was not on it, the answer named a
         /// different kind of dialog than the one derived, the index or the label named
         /// nothing, or another injection is already resolving for this tab.
@@ -3827,6 +3854,7 @@ final class SessionStore: ObservableObject {
             case .unsupportedAgent: return "unsupported_agent"
             case .notWaiting: return "not_waiting"
             case .unanswerable: return "unanswerable"
+            case .promptNameable: return "prompt_nameable"
             case .unreadableScreen: return "unreadable_screen"
             }
         }
@@ -3845,6 +3873,27 @@ final class SessionStore: ObservableObject {
     /// exists for reproduces only on the installed Release build, so what gets recorded must be
     /// identical in both configurations and it is only the destination a test replaces.
     var answerAbortSink: (AnswerAbort) -> Void = AnswerAbortLog.record
+
+    /// Where `abortPrompt` and `checkStuckPrompts` file their own `PromptLifecycleRecord`s.
+    /// Same shape as `answerAbortSink` above and for the same reason: `PromptLifecycleLog.record`
+    /// writes to a real file and os_log unconditionally, so a test that wants to see what this
+    /// store decided — dispatch, which guard refused, or a stuck-tick's diagnosis — replaces the
+    /// destination rather than the call site.
+    ///
+    /// **A second seam, not a reuse of `PromptService.lifecycleSink`, and that is a deliberate
+    /// departure from the convention that property's own doc states** — "files through this
+    /// property too rather than owning a second one, so a dialog's whole life … reads as one
+    /// stream." Both of this task's callers run on the store itself: `abortPrompt` can be
+    /// dispatched, and `checkStuckPrompts` runs on every registry tick, whether or not any
+    /// `PromptService` has ever been attached to this store (see `openPromptProbe`'s doc for why
+    /// a bare `SessionStore` in a test has none). Routing either through `PromptService` would
+    /// make the store depend on a service that exists only to serve the phone, for a write the
+    /// store can and must make on its own. Production behavior is identical either way — both
+    /// default to `PromptLifecycleLog.record` — so the "one stream" a person reading the log
+    /// sees is unaffected; only a test that wants every record now has two closures to redirect
+    /// instead of one, which `FleetTestHarness.init` and `AbortPromptLoopbackTests.standUp` both
+    /// do together for exactly this reason.
+    var promptLifecycleSink: (PromptLifecycleRecord) -> Void = PromptLifecycleLog.record
 
     /// A client answered the dialog tab `id` is blocked on.
     ///
@@ -4004,6 +4053,99 @@ final class SessionStore: ObservableObject {
                 driver: driver, injector: injector, id: id, token: token
             )
         }
+    }
+
+    /// Escape, sent blind, for a dialog this Mac cannot name at all.
+    ///
+    /// **Every attempt is logged, dispatch and every refusal alike** — unlike `answerPrompt`,
+    /// which is recorded by its caller (`PromptService.answer`, through `lifecycleSink`) because
+    /// that caller also knows `sent`/`open` call ids worth writing down. There is no such
+    /// caller here and no call ids to compare, so this writes its own `.aborted` record rather
+    /// than leaving that to whoever dispatches it — the store is the only thing that knows which
+    /// guard actually stopped it, and a record with no writer is a record that does not exist.
+    @discardableResult
+    func abortPrompt(in id: UUID, token: UUID) -> AnswerDispatch {
+        // Taken once, up front, and used twice: as the guard inside `dispatchAbort` and as this
+        // record's account of what this Mac believed at the instant Escape was considered.
+        // Once, because it is a transcript tail read — asking twice would be two reads and, far
+        // worse, two answers, so the line in the log could disagree with the decision it
+        // describes.
+        let probe = probeVerdict(for: id)
+        let outcome = dispatchAbort(in: id, token: token, probe: probe)
+        promptLifecycleSink(PromptLifecycleRecord(
+            session: id,
+            // `sent` and not just `code`: `.dispatched` and `.duplicate` both report no error,
+            // so without this the log could not say how many Escapes were actually typed — a
+            // replayed token no-ops before `driver.deny` and reads identically to a keystroke.
+            // That ambiguity was the previously-deferred one, and the abort story cannot be
+            // audited with it in place.
+            event: .aborted(code: outcome.errorCode, sent: outcome == .dispatched, probe: probe)
+        ))
+        return outcome
+    }
+
+    /// What this Mac's own dialog derivation says about `id` right now, in the shape the
+    /// `.aborted` record carries. See `openPromptProbe` for why it can be absent entirely.
+    private func probeVerdict(for id: UUID) -> PromptLifecycleRecord.AbortProbe {
+        guard let openPromptProbe else { return .unavailable }
+        guard let code = openPromptProbe(id) else { return .nameable }
+        return .unnameable(code: code)
+    }
+
+    /// `answerPrompt`'s own guards, in the same order, minus the call comparison it has nothing
+    /// to compare — there is no call on either side of this path, which is the entire premise
+    /// `FleetCommand.abortPrompt` documents. The action is `driver.deny`, one key event with no
+    /// viewport parse: the only answer that works on a screen this build cannot read, which is
+    /// exactly the screen this exists for.
+    ///
+    /// **`notWaiting` is not a formality.** A stray Escape typed into a live TUI is not free —
+    /// `answerPrompt`'s own comment on this same guard says so — so a session that left
+    /// `waiting` between the phone drawing its card and the tap landing is refused exactly as
+    /// hard here as it would be for a normal answer.
+    ///
+    /// **`promptNameable` is the guard that stops this Mac trusting the phone about its own
+    /// screen.** Everything the phone weighs before drawing Blocked is phone-side: its chase
+    /// exhausted, its feed holds no card. None of that is evidence that *this Mac* cannot name
+    /// the dialog — an unparseable body or a page that never landed produces the same phone
+    /// state over a call `PromptService.openPrompt` resolves perfectly well, and Escape there
+    /// blind-denies a real tool call nobody was shown. So when the probe can name it, this
+    /// command is refused as the wrong instrument: a nameable dialog has `answerPrompt`, which
+    /// carries a call id and can be checked. A distinct code, not one of the five above, because
+    /// none of them is true — the tab exists, its agent is drivable, it is waiting, and its
+    /// screen is readable.
+    ///
+    /// **Costs codex nothing.** `openPromptProbe` runs `PromptService.pushedOpenPrompt`, which
+    /// refuses a codex tab `unsupported_agent` before reading anything — a refusal, so
+    /// `.unnameable`, so codex tabs stay abortable exactly as before. A store with no probe at
+    /// all (`openPromptProbe` nil — every test with no fleet behind it) is `.unavailable` and
+    /// is not refused either: an absent derivation is not a naming.
+    private func dispatchAbort(
+        in id: UUID, token: UUID, probe: PromptLifecycleRecord.AbortProbe
+    ) -> AnswerDispatch {
+        guard let at = locate(id) else { return .unknownSession }
+        // Ahead of the activity check below, on purpose — see `answerPrompt`'s own comment on
+        // this same ordering, which this guard mirrors exactly. **Untestable by fixture today,
+        // for the reason `AnswerPromptTests.testAnIdleCodexTabIsRefusedByTheStatusGateLikeAnyOther`
+        // records rather than hides**: `AgentID` has exactly two cases and both now carry a real
+        // `dialogDriver` (`ClaudeAdapter`'s and `CodexAdapter`'s), so nothing reachable through
+        // `newSession` can make this `nil` — it would take a third agent. The order is pinned in
+        // prose here and in `answerPrompt`'s doc, not by a passing assertion, until one exists.
+        guard let driver = repos[at.repo].sessions[at.session].agent.dialogDriver else {
+            return .unsupportedAgent
+        }
+        if answeredPromptTokens[id, default: []].contains(token) { return .duplicate }
+        guard statuses[id]?.activity == .waiting else { return .notWaiting }
+        // After the status gate, because a tab that is not waiting has no dialog to name and
+        // `not_waiting` is the truer sentence; before the screen, because this is a question
+        // about the transcript and reaching a terminal to answer it would be backwards.
+        if probe == .nameable { return .promptNameable }
+        guard let injector = injector(for: id) else { return .unreadableScreen }
+        // The same set the other two users of this terminal hold, so a rename or a queued
+        // phone prompt mid-settle cannot interleave with a dialog being driven.
+        guard !injecting.contains(id) else { return .unreadableScreen }
+        remember(answered: token, for: id)
+        driver.deny(injector)
+        return .dispatched
     }
 
     /// Move the selection, wait for the repaint, re-read, and only then submit.
@@ -4560,20 +4702,7 @@ final class SessionStore: ObservableObject {
         // *was* guarded. Two loops over one list, one gated and one not, is how they come
         // apart; and were this one ever to fire, `repin` would hand a codex rollout to
         // `ConversationTitle.resolve`, which is a claude JSONL parser.
-        let resolutions: [(tab: UUID, resolution: ConversationPin.Resolution)] =
-            repos.flatMap(\.sessions).filter(\.agent.hasStatusRegistry).map { session in
-                (session.id, ConversationPin.resolve(
-                    conversationID: session.pinnedConversationID,
-                    // The transcript directory, not the project: this is the value echoed
-                    // back when no row names one, and what comes back feeds
-                    // `ClaudeSession.transcriptURL`. Passing the project would move a
-                    // worktree session's watcher back onto the project's transcript the
-                    // first time a row omitted its cwd.
-                    transcriptDirectory: session.transcriptDirectory,
-                    anchor: anchors[session.id],
-                    rows: rows
-                ))
-            }
+        let resolutions = pinResolutions(rows)
         // Two independent questions per tab, because a reported cwd now answers both: where
         // `claude` is writing (the transcript always follows it) and which project the tab
         // is filed under (it moves only into a project that is already open).
@@ -4661,6 +4790,36 @@ final class SessionStore: ObservableObject {
         // cheaper than two, and two would let a gate and a status be read at different
         // instants — see the brief this method was written against.
         pollPlanGates()
+
+        // After the resolution loop above, not before: a `retarget` that loop already applied
+        // this tick must be visible here, so a path it just fixed is not immediately flagged
+        // stuck again against the row that fixed it. Handed the same `resolutions` that loop
+        // ran on, never `rows` — see `checkStuckPrompts`'s own comment on why picking a row
+        // out of the registry by hand is the bug this argument exists to prevent.
+        checkStuckPrompts(Dictionary(uniqueKeysWithValues: resolutions.map { ($0.tab, $0.1) }))
+    }
+
+    /// Every claude tab reconciled against one registry read — pure, applying nothing.
+    ///
+    /// Its own method because `checkStuckPrompts` must be driven by the **same** mapping
+    /// `applyRegistry` applies, and a test seam that rebuilt the mapping its own way would be
+    /// testing something production does not do.
+    private func pinResolutions(
+        _ rows: [pid_t: ClaudeStatusFile.Entry]
+    ) -> [(tab: UUID, resolution: ConversationPin.Resolution)] {
+        repos.flatMap(\.sessions).filter(\.agent.hasStatusRegistry).map { session in
+            (session.id, ConversationPin.resolve(
+                conversationID: session.pinnedConversationID,
+                // The transcript directory, not the project: this is the value echoed
+                // back when no row names one, and what comes back feeds
+                // `ClaudeSession.transcriptURL`. Passing the project would move a
+                // worktree session's watcher back onto the project's transcript the
+                // first time a row omitted its cwd.
+                transcriptDirectory: session.transcriptDirectory,
+                anchor: anchors[session.id],
+                rows: rows
+            ))
+        }
     }
 
     /// Re-reads `PlannotatorRegistry` through `planGates` and delivers any resulting
@@ -4674,6 +4833,217 @@ final class SessionStore: ObservableObject {
             self?.deliverPlanGateNotifications()
         }
     }
+
+    /// One unbroken run of registry ticks on which a `waiting` tab's dialog could not be named.
+    /// Dropped the moment it can be, so an ordinary race never opens one for long.
+    private struct StuckEpisode {
+        /// When the run began, by `now()`. **Wall clock, not a tick count** — see
+        /// `stuckPromptReportLadder`.
+        let began: Date
+        /// How many rungs of that ladder this episode has already reported. Only grows.
+        var reported: Int
+    }
+    private var stuckPromptEpisodes: [UUID: StuckEpisode] = [:]
+
+    /// How long a dialog must stay unnameable before each successive `.stuck` record, in
+    /// seconds of continuous unnameability.
+    ///
+    /// **Wall clock, because a tick count could not carry the discriminator this event exists
+    /// for.** The previous rule was "two consecutive ticks", and `WatchClock.foregroundInterval`
+    /// is 500 ms with `SessionStatusWatcher.drain` calling back on *every* tick rather than only
+    /// on a change — so it fired after ~0.5–1 s, which is the same order as the ordinary race it
+    /// was meant to exclude (16:37:57 `unnamed` → 16:37:58 `opened`). At one second in, a
+    /// 24-minute stall and a race that resolves at 1.2 s have identical `fileAgeMs` and
+    /// `lastRecordAgeMs`; the spec's stated discriminator — *"`pathMatches == true` with a stale
+    /// `lastRecordAgeMS` means the record was never written"* — therefore never fired at a
+    /// moment when it carried information, and the absent-record cause was identifiable only by
+    /// the negative (a `.stuck` with no `.opened` after it).
+    ///
+    /// **And it re-emits, because one line can only ever be an early one.** A single record per
+    /// episode is written seconds in, when every age is young by construction. The later rungs
+    /// are the ones that say something: at 2 minutes, at 10, at half an hour, a `lastRecordAgeMs`
+    /// that has grown in step with the wall clock *is* the absent-record signature, stated
+    /// positively and without waiting to see what does not follow.
+    ///
+    /// **Bounded by construction.** The ladder is finite, each rung fires at most once per
+    /// episode, and an episode ends the moment the dialog is named or the tab stops waiting —
+    /// so the worst case is six lines for a session blocked for hours, not one every 500 ms.
+    /// The observed failures ran 24 minutes to 3 hours, which this covers end to end.
+    private static let stuckPromptReportLadder: [TimeInterval] = [5, 30, 120, 600, 1_800, 7_200]
+
+    func stuckCheckForTesting(rows: [pid_t: ClaudeStatusFile.Entry]) {
+        checkStuckPrompts(Dictionary(uniqueKeysWithValues: pinResolutions(rows).map { ($0.tab, $0.1) }))
+    }
+    /// The open episode for `id`, or nil when none is — how long it has been running and how
+    /// many records it has produced.
+    func stuckEpisodeForTesting(_ id: UUID) -> (began: Date, reported: Int)? {
+        stuckPromptEpisodes[id].map { ($0.began, $0.reported) }
+    }
+
+    /// Assert that a blocked tab this Mac cannot read is at least being read from the right
+    /// file — and repair it when it is not.
+    ///
+    /// Runs on every registry tick and records on a schedule: `stuckPromptReportLadder` decides
+    /// when, and its comment is where the reasoning for both the delay and the repeats lives.
+    ///
+    /// **Branches on `resolutions`, this tick's own reconciliation of the registry — never on
+    /// the `PromptLifecycleLog` record below.** That log is observability only (see its own
+    /// header comment); a self-heal that read its own diagnostic back would make the log a
+    /// second, undocumented input to behavior, and the two would be free to disagree the moment
+    /// either changed shape.
+    ///
+    /// **The repair rides the same schedule as the record, rather than firing earlier.** So a
+    /// mismatch is now corrected here a few seconds in rather than a second in — which costs
+    /// nothing real, because this is a backstop: `applyRegistry`'s own resolution loop, twenty
+    /// lines above the call site, already retargets a tab the instant a row reports a new `cwd`.
+    /// What reaches here is the residue that loop's `else if` did not take, and one rule read
+    /// twice is worth more than a second threshold nobody would remember to keep aligned.
+    private func checkStuckPrompts(_ resolutions: [UUID: ConversationPin.Resolution]) {
+        guard let openPromptProbe else { return }
+        let now = now()
+        for session in repos.flatMap(\.sessions) where session.agent.hasStatusRegistry {
+            let id = session.id
+            guard statuses[id]?.activity == .waiting else {
+                stuckPromptEpisodes[id] = nil
+                continue
+            }
+            // **A second transcript tail read, per waiting tab, per tick** — `commitStatuses`
+            // already drives one through `openPromptCallReader` on this same tick, over the
+            // same file, for the same derivation. Triaged as acceptable and recorded here
+            // rather than left to be rediscovered: it costs one `TranscriptPager` page of at
+            // most `PromptService.tailRecords` lines, only for tabs that are actually
+            // `waiting`, and `PromptService` memoizes nothing that would make a shared read
+            // free. If the two are ever folded together, this is the read to fold into
+            // `derivedOpenPromptCalls` — one page, two consumers — and not a third one.
+            guard let code = openPromptProbe(id) else {
+                stuckPromptEpisodes[id] = nil
+                continue
+            }
+
+            var episode = stuckPromptEpisodes[id] ?? StuckEpisode(began: now, reported: 0)
+            let elapsed = now.timeIntervalSince(episode.began)
+            // How many rungs this episode has now passed. Compared against what it has already
+            // reported rather than tested for equality, so a tick that crosses two at once — an
+            // app that spent the interval in the background at `WatchClock.backgroundInterval`,
+            // or a Mac that slept — files the one record it is due and not a backlog of them.
+            let due = Self.stuckPromptReportLadder.prefix { elapsed >= $0 }.count
+            guard due > episode.reported else {
+                stuckPromptEpisodes[id] = episode
+                continue
+            }
+            episode.reported = due
+            stuckPromptEpisodes[id] = episode
+
+            let watched = watchedTranscriptURL(of: id)
+            // **Through the pin, never by hand.** This used to be
+            // `rows.values.first { $0.sessionID == session.pinnedConversationID }?.cwd`, which
+            // is exactly the rule `ConversationPin.resolve` exists to replace and whose own
+            // comment says why: `rows.values` has no defined order, and two processes really
+            // can hold one conversation once resumes are in play. So with two such rows the
+            // recorded `registryCwd` — and the `retarget` below, which is the same mutation the
+            // hardened path drives — were both non-deterministic between ticks, and a row the
+            // pin had deliberately refused as a recycled pid would be followed anyway. A wrong
+            // retarget on a genuinely stuck session moves this Mac off the correct transcript,
+            // manufacturing the very "wrong file" cause the record it sits beside had just
+            // reported.
+            //
+            // `reportedDirectory`, not `transcriptDirectory`: the latter echoes the tab's own
+            // directory back when no row named one, which would compare equal to itself and
+            // report a match on no evidence at all.
+            let registryCWD = resolutions[id]?.reportedDirectory
+            let expected = registryCWD.map { expectedTranscriptURL(for: session, cwd: $0) }
+            let matches = Self.pathMatches(watched: watched, expected: expected)
+
+            promptLifecycleSink(PromptLifecycleRecord(
+                session: id,
+                event: .stuck(
+                    code: code,
+                    watched: watched?.path, registryCWD: registryCWD, pathMatches: matches,
+                    fileAgeMS: watched.flatMap(Self.fileAgeMS(of:)),
+                    lastRecordAgeMS: watched.flatMap(Self.lastRecordAgeMS(of:)),
+                    tailRecords: PromptService.tailRecords
+                )
+            ))
+
+            // The repair, and the only branch above that is not observation. `registryCWD` is
+            // this tick's row, read fresh — never the record just written.
+            if !matches, let cwd = registryCWD, !cwd.isEmpty, cwd != session.transcriptDirectory {
+                retarget(id, to: cwd)
+            }
+        }
+    }
+
+    /// Where the registry's `cwd` says `session`'s transcript should be, resolved through
+    /// *this* session's own account rather than the default.
+    ///
+    /// `watched` came from an adapter built by `makeClaudeAdapter(account:)`, which resolves its
+    /// root from this account's `transcriptsRoot(forAccount:)` — the same override a test or a
+    /// second login relies on (see that method's doc comment). Threading it through here, rather
+    /// than leaving `ClaudeSession.transcriptURL` at its default `projectsRoot`, is what makes
+    /// `pathMatches` meaningful for every account other than the unconfigured default: dropping
+    /// this argument would make every such account, and every test with a fixture root, read as
+    /// a mismatch even when the two paths genuinely agree.
+    func expectedTranscriptURL(for session: Session, cwd: String) -> URL {
+        ClaudeSession.transcriptURL(
+            sessionID: session.pinnedConversationID, workingDirectory: cwd,
+            projectsRoot: transcriptsRoot(forAccount: session.accountID)
+        )
+    }
+
+    /// Whether the transcript this Mac is watching is the one the registry's `cwd` derives.
+    /// Raw equality, never `comparablePath`: `ClaudeSession.encodedProjectDirName` maps every
+    /// non-alphanumeric byte to `-`, so a symlink and the directory it points at encode to two
+    /// different project directories. Normalizing here would call that a match and never repair
+    /// it — the opposite of what this field exists to report.
+    ///
+    /// Pulled out to its own pure function, rather than inlined at the call site, because
+    /// nothing in `checkStuckPrompts` else forces its two arguments apart: `!matches` alone
+    /// never decides a retarget in this file's tests unless this rule — raw-equality, with
+    /// `expected` resolved through the caller's own `projectsRoot` — is asserted directly.
+    static func pathMatches(watched: URL?, expected: URL?) -> Bool {
+        guard let watched, let expected else { return false }
+        return watched.path == expected.path
+    }
+
+    /// Age of `url`'s last write, or `nil` when it cannot be stat'd — deleted between the probe
+    /// above and here, or never existed. Never throws: this runs inside a registry tick.
+    private static func fileAgeMS(of url: URL) -> Int? {
+        guard let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate
+        else { return nil }
+        return Int(Date().timeIntervalSince(mtime) * 1000)
+    }
+
+    /// Age of the newest record's own `timestamp`, read the same tail `PromptService` reads —
+    /// `PromptService.tailRecords` records back through `TranscriptPager`, the same reader
+    /// `openPrompt` itself pages with. `nil` when that window holds no parseable timestamp,
+    /// which alongside `pathMatches == true` is this event's whole point: the file is the right
+    /// one and still nothing named the call, so the record was never written — claude's bug,
+    /// not this Mac's file.
+    private static func lastRecordAgeMS(of url: URL) -> Int? {
+        guard let lines = TranscriptPager.page(
+            url: url, anchor: .latest, limit: PromptService.tailRecords
+        )?.lines else { return nil }
+        let stamps: [Date] = lines.compactMap { line in
+            guard let data = line.text.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let stamp = object["timestamp"] as? String
+            else { return nil }
+            return Self.timestampFormatter.date(from: stamp)
+        }
+        guard let newest = stamps.max() else { return nil }
+        return Int(Date().timeIntervalSince(newest) * 1000)
+    }
+
+    /// claude writes millisecond-precision timestamps (`2026-08-26T21:57:19.490Z`); without
+    /// `.withFractionalSeconds` every one of them fails to parse and `lastRecordAgeMS` reports
+    /// `nil` for every transcript that exists, which would make the field look unimplemented
+    /// rather than merely absent.
+    private static let timestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     /// The plan-gate half of `deliverNotifications`, and why it cannot be folded into that
     /// one method: a gate opening moves neither `statuses` nor `backgroundWorkSessions` —

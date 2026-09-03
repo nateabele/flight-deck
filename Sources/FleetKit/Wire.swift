@@ -164,6 +164,12 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     /// like `hasBackgroundWork`: the Mac reports `activity: "idle"` and this together for a tab
     /// that died on a 529 and went quiet.
     public var apiError: SessionAPIError?
+    /// Whether this Mac will honour `prompt.abort` for this tab.
+    ///
+    /// Carried rather than derived because it is a fact about the *Mac's* preferences, which
+    /// the phone has no other way to see. Defaulted so a snapshot written by an older Mac
+    /// decodes as off — the safe direction for a control that drives a terminal.
+    public var allowsBlockedAbort: Bool = false
 
     public init(
         id: UUID, title: String, agent: String,
@@ -172,7 +178,8 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         hasBackgroundWork: Bool = false,
         planGate: WirePlanGate? = nil,
         openPromptCall: OpenPromptIdentity = .unreported,
-        apiError: SessionAPIError? = nil
+        apiError: SessionAPIError? = nil,
+        allowsBlockedAbort: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -185,6 +192,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         self.planGate = planGate
         self.openPromptCall = openPromptCall
         self.apiError = apiError
+        self.allowsBlockedAbort = allowsBlockedAbort
     }
 
     /// Spelled out rather than synthesized, because `openPromptCall` is not `Codable` — its
@@ -201,7 +209,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     /// `testSessionWithAGateRoundTrips` is what keeps it that way.
     enum CodingKeys: String, CodingKey {
         case id, title, agent, activity, waitingFor, subagentCount, isUnread
-        case hasBackgroundWork, planGate, openPromptCall, apiError
+        case hasBackgroundWork, planGate, openPromptCall, apiError, allowsBlockedAbort
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -221,6 +229,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         // Absent, not `null`, for the same reason `planGate` is: a build that predates this
         // field must see exactly the bytes it has always seen for a session that has no error.
         try c.encodeIfPresent(apiError, forKey: .apiError)
+        try c.encode(allowsBlockedAbort, forKey: .allowsBlockedAbort)
     }
 
     public init(from decoder: any Decoder) throws {
@@ -267,5 +276,9 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         // rather than landing here. See `docs/FOLLOWUPS.md`'s API-error-badge section for
         // what that costs.
         apiError = try c.decodeIfPresent(SessionAPIError.self, forKey: .apiError)
+        // Absent from a Mac built before this preference existed, and from a Mac where the
+        // user never turned it on — both decode as off, the safe direction for a control
+        // that drives a terminal blind.
+        allowsBlockedAbort = try c.decodeIfPresent(Bool.self, forKey: .allowsBlockedAbort) ?? false
     }
 }

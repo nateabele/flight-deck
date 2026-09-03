@@ -213,4 +213,209 @@ final class PromptCardTests: XCTestCase {
         XCTAssertEqual(PromptCard.footnote(for: blocked, state: .idle),
                        "Flight Deck can't answer this one from here.")
     }
+
+    // MARK: - Blocked: the dialog nothing on this build can read
+
+    /// **Every input is required — see `showsBlocked`'s own comment for why no subset of them
+    /// is enough.** `exhausted` alone would draw Blocked over a card that is
+    /// simply present (row 2). `allowsAbort` alone would draw it before the chase has even
+    /// finished (implied by row 1, where nothing has exhausted yet). And dropping `hasCard`
+    /// would draw it whether or not a Mac too old to honour the abort ever gets asked (row 3).
+    /// Only the last row — everything lined up — is Blocked.
+    func testBlockedAppearsOnlyAfterTheChaseGivesUpAndOnlyWhenAllowed() {
+        XCTAssertFalse(PromptCard.showsBlocked(
+            exhausted: false, allowsAbort: true, hasCard: false,
+            activity: "waiting", call: .noPrompt))
+        XCTAssertFalse(PromptCard.showsBlocked(
+            exhausted: true, allowsAbort: true, hasCard: true,
+            activity: "waiting", call: .noPrompt))
+        XCTAssertFalse(PromptCard.showsBlocked(
+            exhausted: true, allowsAbort: false, hasCard: false,
+            activity: "waiting", call: .noPrompt))
+        XCTAssertTrue(PromptCard.showsBlocked(
+            exhausted: true, allowsAbort: true, hasCard: false,
+            activity: "waiting", call: .noPrompt))
+    }
+
+    /// **The latch outlives the episode, and this is what stops it drawing a card.**
+    /// `blockedChaseExhausted` is cleared only from inside `chaseBlockedPrompt`, and the
+    /// screen's chase task returns *before* entering it once the session stops being
+    /// `waiting` — so a stuck episode that resolves at the keyboard leaves the flag `true`,
+    /// `blocked(...)` returning nil (`OpenPrompt.find` gates on `waiting`), and every
+    /// phone-side input to this predicate pointing at Blocked. Without the activity test the
+    /// card would sit on a busy or idle session forever, offering a destructive Abort the Mac
+    /// refuses `not_waiting` — silently, because `abortBlockedPrompt` discards its completion.
+    func testBlockedIsWithdrawnOnceTheSessionIsNoLongerWaiting() {
+        for activity in ["busy", "idle", nil] {
+            XCTAssertFalse(
+                PromptCard.showsBlocked(
+                    exhausted: true, allowsAbort: true, hasCard: false,
+                    activity: activity, call: .noPrompt),
+                "a latched exhaustion must not outlive the episode it was latched during " +
+                "(activity=\(activity ?? "nil"))")
+        }
+    }
+
+    /// **The Mac naming the dialog is the phone's problem, not the Mac's.** A body this build
+    /// cannot parse or a page that never landed exhausts the chase while the Mac's
+    /// `openPromptCall` names the call fine. Drawing Blocked there tells the reader *"This Mac
+    /// can't read the dialog on screen"* — false — and puts a blind Escape under it aimed at a
+    /// real tool call they were never shown. Only `.noPrompt`, the Mac agreeing it can name
+    /// nothing, earns the card.
+    func testBlockedIsNotDrawnOverADialogTheMacCanName() {
+        XCTAssertFalse(
+            PromptCard.showsBlocked(
+                exhausted: true, allowsAbort: true, hasCard: false,
+                activity: "waiting", call: .call("toolu_REAL")),
+            "a call the Mac names is a card this phone failed to build, not an unreadable " +
+            "dialog — Abort here would deny a tool call nobody was shown")
+        XCTAssertFalse(
+            PromptCard.showsBlocked(
+                exhausted: true, allowsAbort: true, hasCard: false,
+                activity: "waiting", call: .unreported),
+            "a Mac too old to report the field has said nothing about this dialog either way")
+    }
+}
+
+extension FleetModel {
+    /// A `FleetModel` with nowhere to persist a pairing and no connector to reach — `sendPrompt`
+    /// therefore completes synchronously with `.disconnected`, which is exactly what
+    /// `abortBlockedPrompt` needs: nothing here asserts the send arrives anywhere, only that it
+    /// is sent, and sent once per token. `InMemoryPairedMacStore` is FleetKit's own "for tests
+    /// and previews" store — this file has no reason to reach for `FleetModelTests`' private
+    /// `RefusingPairedMacStore`, which exists to make `save` fail, not to stand in for a real one.
+    static func fixture() -> FleetModel {
+        FleetModel(store: InMemoryPairedMacStore())
+    }
+}
+
+/// `FleetModel.abortBlockedPrompt(session:)`'s token dedup, asserted directly against the model
+/// that mints and caches the token — see `PromptCard.swift`'s own comment on why this button's
+/// action is a plain closure rather than a fourth `SessionTimelineModel.fleet` protocol: there is
+/// no local state transition here for a stub's seam to exist for, so there is nothing for
+/// `SessionTimelineModelTests`-style fakes to add. This lives beside `PromptCardTests` rather
+/// than in `FleetModelTests` because it is this task's own escape hatch, not a general
+/// `FleetModel` behaviour.
+@MainActor
+final class FleetModelBlockedAbortTests: XCTestCase {
+    /// **Two taps, one command.** The button gives no feedback of its own — nothing tears the
+    /// Blocked card down until the Mac's status moves on — so a second tap is the ordinary
+    /// response to the first appearing to do nothing. Sent with the same token twice, the Mac's
+    /// `answeredPromptTokens` collapses the replay to `.duplicate` rather than pressing Escape
+    /// twice; this asserts the phone's half of that: the token, and therefore the intent, does
+    /// not change between taps.
+    func testAbortSendsOneTokenReusedOnASecondTap() async {
+        let model = FleetModel.fixture()
+        let id = UUID()
+
+        await model.abortBlockedPrompt(session: id)
+        await model.abortBlockedPrompt(session: id)
+
+        let tokens: [UUID] = model.sentCommands.compactMap {
+            if case .abortPrompt(let sentID, let token) = $0, sentID == id { return token }
+            return nil
+        }
+        XCTAssertEqual(tokens.count, 2, "both taps must still reach sendPrompt")
+        XCTAssertEqual(tokens.first, tokens.last, "reused, not re-minted, on the second tap")
+    }
+
+    /// A different session gets its own token — the cache is keyed per session, not global, so
+    /// one blocked tab's abort can never dedup another's.
+    func testAbortTokensAreScopedPerSession() async {
+        let model = FleetModel.fixture()
+        let first = UUID()
+        let second = UUID()
+
+        await model.abortBlockedPrompt(session: first)
+        await model.abortBlockedPrompt(session: second)
+
+        let tokens: [UUID: UUID] = model.sentCommands.reduce(into: [:]) { result, command in
+            if case .abortPrompt(let sentID, let token) = command { result[sentID] = token }
+        }
+        XCTAssertNotEqual(tokens[first], tokens[second])
+    }
+
+    /// **A genuinely new episode mints a genuinely new token.** Without `noteSessionActivity`
+    /// clearing the cache when a session leaves `waiting`, this session's second blocked dialog
+    /// would replay the first episode's token — which the Mac's `answeredPromptTokens` already
+    /// marked spent, so it would collapse to `.duplicate` *before* typing Escape, and Abort
+    /// would silently do nothing for the rest of the pairing. That is the failure this test
+    /// exists to catch; see `FleetModel.abortBlockedPrompt(session:)`'s own comment for the full
+    /// chain. This is deliberately a different assertion from
+    /// `testAbortSendsOneTokenReusedOnASecondTap` above, not its opposite: that test's two taps
+    /// both land on one still-open dialog, while these two calls are separated by the session
+    /// resolving and blocking again — the episode boundary is the whole point.
+    func testAGenuineSecondBlockedEpisodeMintsAFreshToken() async {
+        let model = FleetModel.fixture()
+        let id = UUID()
+
+        model.noteSessionActivity(id, waiting: true)
+        await model.abortBlockedPrompt(session: id)
+
+        model.noteSessionActivity(id, waiting: false)
+        model.noteSessionActivity(id, waiting: true)
+        await model.abortBlockedPrompt(session: id)
+
+        let tokens: [UUID] = model.sentCommands.compactMap {
+            if case .abortPrompt(let sentID, let token) = $0, sentID == id { return token }
+            return nil
+        }
+        XCTAssertEqual(tokens.count, 2, "both episodes must still reach sendPrompt")
+        XCTAssertNotEqual(
+            tokens.first, tokens.last,
+            "a resolved episode's token must not be replayed into a later one"
+        )
+    }
+
+    /// `testAGenuineSecondBlockedEpisodeMintsAFreshToken` above pins `noteSessionActivity`
+    /// directly, which leaves two things it cannot catch: the `for session in
+    /// fleet.projects.flatMap(\.sessions)` loop inside `connector.onFleet` that calls it, and
+    /// the `session.activity == "waiting"` string this maps from. Delete the loop, or change
+    /// the string, and that test still passes. This one drives `noteFleet(_:)` — the method the
+    /// loop was extracted into — with constructed `FleetSnapshot` values instead, so both are
+    /// exercised: a snapshot naming the session `"waiting"` twice must still share one token
+    /// (the loop runs and the string matches, so nothing is cleared in between), and a snapshot
+    /// naming it anything else must drop the token before the next `"waiting"` one mints a new
+    /// one. No `FleetConnector` needed — `noteFleet` takes the same `FleetSnapshot` its closure
+    /// would have handed it.
+    func testNoteFleetTracksWaitingAcrossSnapshotsForBothTheLoopAndTheString() async {
+        let model = FleetModel.fixture()
+        let id = UUID()
+        let projectID = UUID()
+
+        func snapshot(activity: String?) -> FleetSnapshot {
+            FleetSnapshot(projects: [
+                WireProject(
+                    id: projectID, name: "P", path: "/p",
+                    sessions: [WireSession(id: id, title: "T", agent: "claude", activity: activity)]
+                )
+            ])
+        }
+
+        // Still waiting across two snapshots — same episode, must keep one token.
+        model.noteFleet(snapshot(activity: "waiting"))
+        await model.abortBlockedPrompt(session: id)
+        model.noteFleet(snapshot(activity: "waiting"))
+        await model.abortBlockedPrompt(session: id)
+
+        // The episode resolves...
+        model.noteFleet(snapshot(activity: "busy"))
+        // ...and a second, genuine episode begins.
+        model.noteFleet(snapshot(activity: "waiting"))
+        await model.abortBlockedPrompt(session: id)
+
+        let tokens: [UUID] = model.sentCommands.compactMap {
+            if case .abortPrompt(let sentID, let token) = $0, sentID == id { return token }
+            return nil
+        }
+        XCTAssertEqual(tokens.count, 3, "all three taps must still reach sendPrompt")
+        XCTAssertEqual(
+            tokens[0], tokens[1],
+            "still \"waiting\" across snapshots must not clear the token mid-episode"
+        )
+        XCTAssertNotEqual(
+            tokens[1], tokens[2],
+            "a resolved episode (activity left \"waiting\") must not carry its token into the next"
+        )
+    }
 }

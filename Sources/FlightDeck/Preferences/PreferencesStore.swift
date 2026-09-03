@@ -334,6 +334,20 @@ final class PreferencesStore: ObservableObject {
         }
     }
 
+    /// Whether a paired phone may send Escape at a dialog this Mac cannot name.
+    ///
+    /// Default off. The action itself is the same Escape the Deny button already sends, but
+    /// it is sent *blind* — with no call id, because there is none — so it is opt-in until
+    /// the deferred-flush case it exists for is understood.
+    var allowsBlockedPromptAbort: Bool {
+        get { preferences.claude?.allowsBlockedPromptAbort ?? false }
+        set {
+            var claude = preferences.claude ?? ClaudePreferences()
+            claude.allowsBlockedPromptAbort = newValue
+            preferences.claude = claude
+        }
+    }
+
     // MARK: Tools
 
     /// The configured tools, in overlay order. The single accessor the menu, the overlay and

@@ -29,6 +29,11 @@ struct SessionTimelineScreen: View {
     /// is not merely a re-download, it is a screen that empties itself under the reader.
     /// `FleetModel.timelineModel(for:)` caches one per tab id for exactly that reason.
     let model: SessionTimelineModel
+    /// Forwarded straight to `FleetModel.abortBlockedPrompt(session:)` by `FleetListScreen`,
+    /// which is the only place in this screen's chain that holds a `FleetModel` at all —
+    /// `model` above is deliberately narrowed to the paging/answering protocols, and this one
+    /// button's action does not belong on that seam; see `PromptCard.onAbortBlocked`.
+    let onAbortBlocked: (UUID) async -> Void
 
     /// The newest item the screen has already scrolled to, so arriving pages move it once each
     /// rather than on every re-evaluation of the body.
@@ -293,7 +298,16 @@ struct SessionTimelineScreen: View {
                     ),
                     agent: session?.agent,
                     state: model.answerState,
-                    model: model
+                    model: model,
+                    blockedChaseExhausted: model.blockedChaseExhausted,
+                    allowsBlockedAbort: session?.allowsBlockedAbort ?? false,
+                    // The two liveness inputs `showsBlocked` needs, read from the same
+                    // `session` as the `blocked(...)` call above so the card's "is this
+                    // session still blocked, and does the Mac still agree it cannot name the
+                    // dialog" is asked of one snapshot rather than two.
+                    activity: session?.activity,
+                    openPromptCall: session?.openPromptCall ?? .unreported,
+                    onAbortBlocked: { await onAbortBlocked(model.sessionID) }
                 )
                 PromptComposer(session: session, model: model)
             }
