@@ -245,7 +245,9 @@ class SandboxTests(unittest.TestCase):
             root = sb.root
             self.assertTrue(os.path.isdir(sb.claude_home))
             self.assertTrue(os.path.isdir(sb.codex_home))
-            self.assertNotIn(HOME, os.path.realpath(root).split(os.sep)[:3] and root)
+            # The property the sandbox exists to guarantee: nothing under the real home.
+            self.assertFalse(
+                os.path.realpath(root).startswith(os.path.realpath(HOME) + os.sep))
         self.assertFalse(os.path.exists(root))
 
     def test_env_names_the_sandbox_home_for_each_agent(self):
@@ -300,9 +302,11 @@ class UnsafeHome(Exception):
 def guard_home(path):
     """Refuse any agent home that is, or is inside, the user's real home.
 
-    Resolved before comparison so a symlink cannot smuggle a real home through.
+    Resolved before comparison so a symlink cannot smuggle a real home through, and so a `~`
+    that a caller never expanded cannot bypass the check either (`os.path.realpath` alone does
+    not expand `~` — only `os.path.expanduser` does).
     """
-    real = os.path.realpath(path)
+    real = os.path.realpath(os.path.expanduser(path))
     if real == HOME or real.startswith(HOME + os.sep):
         raise UnsafeHome(
             f"refusing to run an agent with its home at {path!r} (resolves to {real!r}, "
@@ -318,13 +322,21 @@ class AgentSandbox:
 
     def __enter__(self):
         self.root = tempfile.mkdtemp(prefix="adapterprobe-")
-        self.claude_home = os.path.join(self.root, "claude-home")
-        self.codex_home = os.path.join(self.root, "codex-home")
-        for h in (self.claude_home, self.codex_home):
+        try:
             guard_home(self.root)
-            os.makedirs(h, exist_ok=True)
-            guard_home(h)
-        self._copy_credentials()
+            self.claude_home = os.path.join(self.root, "claude-home")
+            self.codex_home = os.path.join(self.root, "codex-home")
+            for h in (self.claude_home, self.codex_home):
+                os.makedirs(h, exist_ok=True)
+                guard_home(h)
+            self._copy_credentials()
+        except BaseException:
+            # A failed construction always cleans up, regardless of `keep` — `keep` is for
+            # inspecting a *successful* run, not for preserving a partial, broken tree.
+            # Without this, an exception inside __enter__ means __exit__ never runs and the
+            # partial tree leaks permanently.
+            shutil.rmtree(self.root, ignore_errors=True)
+            raise
         return self
 
     def _copy_credentials(self):
@@ -351,7 +363,9 @@ class AgentSandbox:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `/tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v`
-Expected: 12 tests, PASS
+Expected: 14 tests, PASS — including one asserting `guard_home("~/.claude")` raises (a literal
+tilde must not slip through) and one forcing `_copy_credentials` to raise and asserting the root
+is gone afterwards.
 
 - [ ] **Step 5: Commit**
 
@@ -460,14 +474,30 @@ mkdir -p "$OUT"
 
 # -enable-testing on the app target is what makes `@testable import FlightDeck` legal here;
 # Debug already sets it, which is how FlightDeckTests imports the same module.
-swiftc -O \
+#
+# The four non-obvious flags below were each established by compiling a throwaway probe against
+# this exact tree; without any one of them the build fails, so do not "simplify" them away:
+#
+#   -parse-as-library          A ONE-file swiftc invocation is script mode, and `@main` is
+#                              illegal in a module with top-level code. (scripts/livefuzz's
+#                              probe escapes this only by compiling two files.)
+#   -Xcc -I<GhosttyEmbed>      `@testable import` pulls in the module's bridging header, which
+#                              #imports ObjCExceptionCatcher.h / VibrantLayer.h.
+#   -Xcc -I<boringssl include> FleetKit's BoringSSLShim module map needs openssl/curve25519.h.
+#   -Xcc -I<products>/include  The GhosttyKit module map (umbrella header ghostty.h).
+#
+# The two -Xcc header paths are exactly FlightDeck's own HEADER_SEARCH_PATHS from
+# project.yml:101; if that line ever changes, change these with it.
+swiftc -O -parse-as-library \
   scripts/adapterprobe/probe.swift \
   -I "$PRODUCTS" \
   -F "$PRODUCTS" \
+  -Xcc -I"$PWD/Sources/FlightDeck/GhosttyEmbed" \
+  -Xcc -I"$PWD/vendor/boringssl-artifacts/include" \
+  -Xcc -I"$PWD/$PRODUCTS/include" \
   -framework FleetKit \
   "$DYLIB" \
   -Xlinker -rpath -Xlinker "$APPMACOS" \
-  -Xlinker -rpath -Xlinker "$PWD/${PRODUCTS}/Flight Deck.app/Contents/Frameworks" \
   -Xlinker -rpath -Xlinker "$PWD/$PRODUCTS" \
   -o "$OUT/probe"
 
@@ -551,6 +581,10 @@ struct Probe {
 Run: `/tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v -k Declare`
 Expected: 3 tests, PASS. The build takes a few minutes on a cold DerivedData.
 
+This linkage is already proven against this worktree: a throwaway probe with the exact flags above compiled, linked and ran, printing real values read out of the production adapter (`codex openPromptReader != nil: false`, `homeMarkerFile: auth.json`). If your build fails, the cause is almost certainly a dropped or reordered flag — compare against the list above before changing anything else.
+
+Expect a harmless `umbrella header for module 'GhosttyKit' does not include header '/ghostty/vt.h'` warning. It is pre-existing and not yours to fix.
+
 If `@testable import FlightDeck` fails with "module was not compiled for testing", confirm the Debug configuration sets `ENABLE_TESTABILITY=YES` in `project.yml` — `FlightDeckTests` already depends on it, so it should already be set; do not add a new build setting to work around a stale DerivedData, clean and rebuild instead.
 
 - [ ] **Step 6: Commit**
@@ -574,7 +608,13 @@ git commit -m "feat: probe CLI linking the built FlightDeck module, with declare
 
 - [ ] **Step 1: Write the failing test**
 
-Uses the fixtures already committed under `Tests/FlightDeckTests/Fixtures/Claude` and `.../Codex`. Locate the exact filenames first with `ls Tests/FlightDeckTests/Fixtures/Claude Tests/FlightDeckTests/Fixtures/Codex` and substitute them for `DIALOG_FIXTURE` / `ROLLOUT_FIXTURE` below.
+Uses fixtures already committed in the repo. These paths are verified to exist — use them exactly, do not go looking for substitutes:
+
+- `Tests/FlightDeckTests/Fixtures/Codex/rollout.captured.jsonl` — codex's rollout
+- `Tests/FlightDeckTests/Fixtures/Claude/transcript.captured.jsonl` — claude's transcript
+- `Tests/FlightDeckTests/Fixtures/Claude/question-single.captured.txt` — a claude dialog screen
+- `Tests/FlightDeckTests/Fixtures/Claude/idle-empty-box.captured.txt` — a claude idle screen
+- `Tests/FlightDeckTests/Fixtures/Codex/tui-idle.captured.txt` — a codex idle screen
 
 ```python
 # scripts/adapterprobe/tests/test_grammars.py
@@ -612,6 +652,16 @@ class GrammarTests(unittest.TestCase):
     def test_codex_has_no_open_prompt_reader_and_says_so(self):
         _, r = run(["open-prompt", "codex"], stdin="{}\n")
         self.assertTrue(r["unsupported"])
+
+    def test_the_captured_claude_transcript_still_yields_a_title(self):
+        path = os.path.join(FIX, "Claude", "transcript.captured.jsonl")
+        _, c = run(["title-from-transcript", "claude", path])
+        self.assertIsNotNone(c["title"])
+
+    def test_claude_reads_its_own_idle_screen_as_an_empty_composer(self):
+        with open(os.path.join(FIX, "Claude", "idle-empty-box.captured.txt")) as f:
+            _, r = run(["composer-empty", "claude"], stdin=f.read())
+        self.assertTrue(r["empty"])
 
 
 if __name__ == "__main__":
@@ -687,15 +737,21 @@ Extend the `switch op` in `main()`. `stdinText()` reads the whole of stdin.
         }
         await emit(answer)
 
+    // `--activity` is NOT optional decoration: `OpenPrompt.find`
+    // (Sources/FleetKit/OpenPrompt.swift:218) opens with
+    // `guard activity == "waiting" else { return nil }`, so a probe that always passed nil
+    // could never return a prompt — and the capability row built on it would record claude's
+    // openPromptReader as falsely `broken`. An unrecognised value is a usage error rather than
+    // a silent nil, so the always-null path cannot come back by accident.
     case "open-prompt":
-        guard args.count == 2, let agent = agentID(args[1]) else { usage() }
+        guard args.count == 2 || args.count == 4, let agent = agentID(args[1]) else { usage() }
         let tail = stdinText()
         let answer: [String: Any] = await MainActor.run {
             guard let reader = agent.openPromptReader else { return ["unsupported": true] }
             let lines = tail.split(separator: "\n").enumerated().map {
                 SourceLine(offset: $0.offset, text: String($0.element))
             }
-            return ["kind": reader.openPrompt(inTranscriptTail: lines, activity: nil)
+            return ["kind": reader.openPrompt(inTranscriptTail: lines, activity: activity)
                         .map { String(describing: $0) } as Any]
         }
         await emit(answer)
@@ -729,7 +785,10 @@ final class ViewportInjector: TextInjecting {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `scripts/adapterprobe/build-probe.sh && /tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v -k Grammar`
-Expected: 4 tests, PASS
+Expected: 8 tests, PASS — the six above plus two covering `--activity`: that
+`open-prompt claude --activity waiting` against
+`Tests/FlightDeckTests/Fixtures/Claude/question-single.captured.jsonl` returns a NON-null
+`kind`, and that an unrecognised `--activity` value exits 2.
 
 - [ ] **Step 5: Commit**
 
@@ -885,6 +944,20 @@ git commit -m "feat: probe subcommands for the live adapter members"
 
 **Interfaces:**
 - Consumes: `sandbox.AgentSandbox`, `ptyscreen.PtyScreen`.
+- Produces: **the `ProbeContext` contract** (stated here, implemented by `run.py` in Task 7 —
+  every row calls through it and nothing else):
+
+  ```
+  probe(args: list[str], stdin: str = "") -> dict   # runs the probe CLI, parses its JSON
+  sandbox: AgentSandbox                              # the live sandbox for this run
+  pty(agent: str, cmd: list[str]) -> PtyScreen       # cwd=sandbox.root, env=sandbox.env(agent)
+  seed_one_turn(agent: str, cid: str) -> None        # full tier only; drives one real turn
+  seeded_marker: str                                 # text seed_one_turn guarantees on screen
+  versions: dict[str, str]                           # {"codex": ..., "claude": ...}
+  ```
+
+  Write this block as a module docstring at the top of `capabilities.py`. Task 7 implements it
+  exactly; a row must never reach for anything not on this list.
 - Produces: `verdict(declared, observed, absent_reason_holds=None) -> str` returning one of `ok`/`broken`/`by-design`/`rotted`/`needs-auth`/`error`; `ROWS: list[Row]` where `Row = namedtuple("Row", "key group agents tier flags run")`; `run` is `callable(ctx) -> Observation` and `Observation = namedtuple("Observation", "declared observed absent_reason_holds detail")`.
 
 - [ ] **Step 1: Write the failing test**
@@ -941,7 +1014,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `/tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v -k "Verdict or RowTable"`
+Run: `/tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v -k Verdict -k RowTable`
 Expected: FAIL — `ModuleNotFoundError: No module named 'capabilities'`
 
 - [ ] **Step 3: Write `capabilities.py`**
@@ -1025,7 +1098,7 @@ Give `resumeCommand` and `rename` `tier="full"`, and every declaration/grammar r
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `/tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v -k "Verdict or RowTable"`
+Run: `/tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v -k Verdict -k RowTable`
 Expected: 9 tests, PASS
 
 - [ ] **Step 5: Commit**
@@ -1044,7 +1117,7 @@ git commit -m "feat: capability rows and verdict derivation"
 - Create: `scripts/adapterprobe/tests/test_baseline.py`
 
 **Interfaces:**
-- Consumes: `capabilities.ROWS`, `capabilities.verdict`, `sandbox.AgentSandbox`, `ptyscreen.PtyScreen`.
+- Consumes: `capabilities.ROWS`, `capabilities.verdict`, `sandbox.AgentSandbox`, `ptyscreen.PtyScreen`, and **the `ProbeContext` contract defined in `capabilities.py`'s module docstring** — `run.py` provides the concrete object implementing exactly those six members, no more.
 - Produces: `diff_baseline(baseline: dict, matrix: dict) -> dict` with keys `changed`, `added`, `removed`, `versions_changed`; `render(matrix: dict) -> str`; CLI `run.py [--tier cheap|full] [--capture] [--keep] [--update-baseline] [--json PATH]`. Exit codes: `0` no drift, `1` capability drift, `3` harness failure (any `error` cell where the baseline expected otherwise), `4` unsafe home refused.
 
 - [ ] **Step 1: Write the failing test**
