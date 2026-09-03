@@ -213,4 +213,78 @@ final class PromptCardTests: XCTestCase {
         XCTAssertEqual(PromptCard.footnote(for: blocked, state: .idle),
                        "Flight Deck can't answer this one from here.")
     }
+
+    // MARK: - Blocked: the dialog nothing on this build can read
+
+    /// **All three inputs are required — see `showsBlocked`'s own comment for why no pair of
+    /// them is enough on its own.** `exhausted` alone would draw Blocked over a card that is
+    /// simply present (row 2). `allowsAbort` alone would draw it before the chase has even
+    /// finished (implied by row 1, where nothing has exhausted yet). And dropping `hasCard`
+    /// would draw it whether or not a Mac too old to honour the abort ever gets asked (row 3).
+    /// Only row 4 — all three true — is Blocked.
+    func testBlockedAppearsOnlyAfterTheChaseGivesUpAndOnlyWhenAllowed() {
+        XCTAssertFalse(PromptCard.showsBlocked(exhausted: false, allowsAbort: true, hasCard: false))
+        XCTAssertFalse(PromptCard.showsBlocked(exhausted: true, allowsAbort: true, hasCard: true))
+        XCTAssertFalse(PromptCard.showsBlocked(exhausted: true, allowsAbort: false, hasCard: false))
+        XCTAssertTrue(PromptCard.showsBlocked(exhausted: true, allowsAbort: true, hasCard: false))
+    }
+}
+
+extension FleetModel {
+    /// A `FleetModel` with nowhere to persist a pairing and no connector to reach — `sendPrompt`
+    /// therefore completes synchronously with `.disconnected`, which is exactly what
+    /// `abortBlockedPrompt` needs: nothing here asserts the send arrives anywhere, only that it
+    /// is sent, and sent once per token. `InMemoryPairedMacStore` is FleetKit's own "for tests
+    /// and previews" store — this file has no reason to reach for `FleetModelTests`' private
+    /// `RefusingPairedMacStore`, which exists to make `save` fail, not to stand in for a real one.
+    static func fixture() -> FleetModel {
+        FleetModel(store: InMemoryPairedMacStore())
+    }
+}
+
+/// `FleetModel.abortBlockedPrompt(session:)`'s token dedup, asserted directly against the model
+/// that mints and caches the token — see `PromptCard.swift`'s own comment on why this button's
+/// action is a plain closure rather than a fourth `SessionTimelineModel.fleet` protocol: there is
+/// no local state transition here for a stub's seam to exist for, so there is nothing for
+/// `SessionTimelineModelTests`-style fakes to add. This lives beside `PromptCardTests` rather
+/// than in `FleetModelTests` because it is this task's own escape hatch, not a general
+/// `FleetModel` behaviour.
+@MainActor
+final class FleetModelBlockedAbortTests: XCTestCase {
+    /// **Two taps, one command.** The button gives no feedback of its own — nothing tears the
+    /// Blocked card down until the Mac's status moves on — so a second tap is the ordinary
+    /// response to the first appearing to do nothing. Sent with the same token twice, the Mac's
+    /// `answeredPromptTokens` collapses the replay to `.duplicate` rather than pressing Escape
+    /// twice; this asserts the phone's half of that: the token, and therefore the intent, does
+    /// not change between taps.
+    func testAbortSendsOneTokenReusedOnASecondTap() async {
+        let model = FleetModel.fixture()
+        let id = UUID()
+
+        await model.abortBlockedPrompt(session: id)
+        await model.abortBlockedPrompt(session: id)
+
+        let tokens: [UUID] = model.sentCommands.compactMap {
+            if case .abortPrompt(let sentID, let token) = $0, sentID == id { return token }
+            return nil
+        }
+        XCTAssertEqual(tokens.count, 2, "both taps must still reach sendPrompt")
+        XCTAssertEqual(tokens.first, tokens.last, "reused, not re-minted, on the second tap")
+    }
+
+    /// A different session gets its own token — the cache is keyed per session, not global, so
+    /// one blocked tab's abort can never dedup another's.
+    func testAbortTokensAreScopedPerSession() async {
+        let model = FleetModel.fixture()
+        let first = UUID()
+        let second = UUID()
+
+        await model.abortBlockedPrompt(session: first)
+        await model.abortBlockedPrompt(session: second)
+
+        let tokens: [UUID: UUID] = model.sentCommands.reduce(into: [:]) { result, command in
+            if case .abortPrompt(let sentID, let token) = command { result[sentID] = token }
+        }
+        XCTAssertNotEqual(tokens[first], tokens[second])
+    }
 }

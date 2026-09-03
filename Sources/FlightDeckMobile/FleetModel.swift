@@ -42,6 +42,16 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// update — and an observed mutation there would invalidate the very view that is being
     /// built. Nothing renders this dictionary; the screens observe the models in it.
     @ObservationIgnored private var timelineModels: [UUID: SessionTimelineModel] = [:]
+    /// One token per session that has asked to abort a blocked dialog, minted on first use and
+    /// reused after — see `abortBlockedPrompt(session:)`'s own comment for why this is scoped
+    /// to the pairing rather than to the blocked episode.
+    @ObservationIgnored private var blockedAbortTokens: [UUID: UUID] = [:]
+    /// Every `FleetCommand` handed to `sendPrompt`, in order. Exists for tests only:
+    /// `FleetModel.fixture()` leaves `connector` nil, so `sendPrompt` completes synchronously
+    /// with `.disconnected` and there would otherwise be nothing to assert `abortBlockedPrompt`
+    /// against — no protocol stub sits between it and `sendPrompt`, both being methods on this
+    /// same type.
+    @ObservationIgnored private(set) var sentCommands: [FleetCommand] = []
 
     init(store: any PairedMacStoring = KeychainPairedMacStore()) {
         self.store = store
@@ -220,6 +230,11 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // content, not fleet-independent fact, and the next Mac's project paths coinciding
         // with this one's would otherwise render titles that Mac never closed.
         recentlyClosed = []
+        // The dedup this guards is scoped to a pairing, not to a device: a token minted for
+        // this Mac's session id would collapse a genuinely new abort on a *different* Mac that
+        // later reuses the same id, which is exactly the reuse `unpair()` already guards against
+        // above for `timelineModels`.
+        blockedAbortTokens.removeAll()
         state = .idle
         lastLive = nil
         pairingProgress = nil
@@ -437,8 +452,33 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         _ command: FleetCommand,
         then completion: @escaping (Result<Void, FleetRequestError>) -> Void
     ) {
+        sentCommands.append(command)
         guard let connector else { return completion(.failure(.disconnected)) }
         connector.send(command, then: completion)
+    }
+
+    /// Escape at a dialog nothing on this build can read — see `FleetCommand.abortPrompt`'s own
+    /// comment for why it names a session rather than a call, and `PromptCard.showsBlocked` for
+    /// when this is ever offered at all.
+    ///
+    /// **One token per session, minted once and reused on every later call.** The button gives
+    /// no feedback of its own — nothing tears the Blocked card down until the Mac's status
+    /// actually moves on — so a second tap is the ordinary response to the first appearing to
+    /// do nothing. Sent with the same token, it reaches `SessionStore.answeredPromptTokens` as
+    /// a replay and collapses to `.duplicate` there rather than pressing Escape twice.
+    ///
+    /// **Scoped to the session for the pairing's lifetime, not to the blocked episode.**
+    /// Nothing held here distinguishes "the same dialog, tapped again" from "a new dialog on a
+    /// session that was blocked before" — both are just this session's id — and the Mac's own
+    /// table draws no finer a line either: it clears `id`'s tokens only when that tab closes
+    /// (`SessionStore`), not per dialog. A phone-side cache keyed any narrower would claim a
+    /// precision neither end of the wire actually has. `unpair()` clears this, alongside
+    /// `timelineModels`, for the same reason: a token minted for one Mac's session id must not
+    /// dedup an abort meant for a different Mac that later reuses it.
+    func abortBlockedPrompt(session id: UUID) async {
+        let token = blockedAbortTokens[id] ?? UUID()
+        blockedAbortTokens[id] = token
+        sendPrompt(.abortPrompt(id: id, token: token)) { _ in }
     }
 
     /// Answer a blocked dialog. Forwarded rather than absorbed, exactly as `sendPrompt` is:
