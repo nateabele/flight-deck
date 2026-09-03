@@ -19,7 +19,6 @@ PROBE = os.path.join(REPO, "DerivedData", "adapterprobe", "probe")
 BUILD_PROBE = os.path.join(HERE, "build-probe.sh")
 BASELINE = os.path.join(HERE, "baseline.json")
 CORPUS = os.path.join(HERE, "corpus.json")
-FIXTURES = os.path.join(REPO, "Tests", "FlightDeckTests", "Fixtures")
 
 # The same "up" markers `capabilities.py` keeps private to itself (`_UP_MARKER`) — duplicated
 # here rather than imported, because a row must only ever see the six-member contract, and
@@ -189,7 +188,11 @@ class ProbeContext:
         # ShellResolver.swift`'s own answer, reused via `probe login-shell` rather than
         # re-derived here, so every `ctx.pty` launch below runs through the SAME shell
         # `LoginShellPath`/`CodexProcessTransport` do, not a probe-side guess at it.
-        self.login_shell = self.probe(["login-shell"])["shell"]
+        login_shell_out = self.probe(["login-shell"])
+        if "shell" not in login_shell_out:
+            raise RuntimeError(
+                f"probe login-shell returned no 'shell' key: {login_shell_out!r}")
+        self.login_shell = login_shell_out["shell"]
         # Recorded here, not returned by any row: `main()`'s only way to find the transcript
         # a full-tier row produced, for `--capture`, without widening what a row may call.
         self.last_transcript = {}
@@ -446,6 +449,27 @@ def _real_agent_listing():
     }
 
 
+def _real_agent_regression(before, after):
+    """Only a removal or rename of something that already existed at `before` counts --
+    additions are ignored on purpose. This machine routinely runs more than one Claude Code
+    session against this same checkout; another one starting fresh in a new cwd mid-run adds
+    an entry to the real `~/.claude/projects` listing that has nothing to do with this run, and
+    treating that as a violation would discard a legitimate half-hour `--tier full` result over
+    someone else's unrelated session. A pre-existing entry disappearing or being renamed away,
+    by contrast, is not something any concurrent session does to another session's data, and is
+    exactly the redirection-leak spec invariant 9 exists to catch.
+    """
+    regressed = {}
+    for key, before_listing in before.items():
+        after_listing = after.get(key)
+        if before_listing is None:
+            continue
+        missing = sorted(set(before_listing) - set(after_listing or []))
+        if missing:
+            regressed[key] = missing
+    return regressed
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Run the adapter capability matrix.")
     ap.add_argument("--tier", choices=("cheap", "full"), default="cheap")
@@ -484,9 +508,15 @@ def main(argv=None):
         return 4
 
     real_after = _real_agent_listing()
-    if real_after != real_before:
+    # Printed here, before the invariant check below, so a genuine `exit 5` still reports a
+    # half-hour `--tier full` run's actual findings on stderr's way past rather than
+    # discarding them -- an early `return 5` used to skip straight past this.
+    print(render(matrix))
+    regression = _real_agent_regression(real_before, real_after)
+    if regression:
         print(f"error: this run touched the REAL agent state it must never reach -- "
-              f"before={real_before!r} after={real_after!r}", file=sys.stderr)
+              f"before={real_before!r} after={real_after!r} regressed={regression!r}",
+              file=sys.stderr)
         return 5
 
     corpus = {}
@@ -523,15 +553,15 @@ def main(argv=None):
                 f"live pty row ran {pty_v!r} ({matrix['versions'].get(f'{agent}_pty_path')}). "
                 f"Findings from pty-driven rows are about the second one.")
 
-    print(render(matrix))
-
     if args.json:
         with open(args.json, "w") as f:
             json.dump(matrix, f, indent=2, sort_keys=True)
+            f.write("\n")
 
     if args.update_baseline:
         with open(BASELINE, "w") as f:
             json.dump(matrix, f, indent=2, sort_keys=True)
+            f.write("\n")
         return 0
 
     if not found_baseline:
