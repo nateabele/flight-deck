@@ -22,13 +22,18 @@ enum FleetProjection {
     @MainActor
     static func snapshot(of store: SessionStore, planGates: PlanGateService? = nil) -> FleetSnapshot {
         let planGates = planGates ?? store.planGates
+        // Read off the store's own preferences, for the same reason `planGates` defaults off
+        // the store rather than being threaded by every caller: a call site that forgot the
+        // parameter would otherwise project the gate as off even for a Mac that turned it on.
+        let allowsBlockedAbort = store.preferences?.allowsBlockedPromptAbort ?? false
         return FleetSnapshot(projects: store.repos.map {
             project(
                 $0, statuses: store.statuses, unread: store.unreadIdle,
                 backgroundWork: store.backgroundWorkSessions,
                 openPromptCalls: store.openPromptCalls,
                 apiErrors: store.apiErrors,
-                planGates: planGates
+                planGates: planGates,
+                allowsBlockedAbort: allowsBlockedAbort
             )
         })
     }
@@ -38,7 +43,7 @@ enum FleetProjection {
         _ repo: Repo, statuses: [UUID: SessionStatus], unread: Set<UUID>,
         backgroundWork: Set<UUID>, openPromptCalls: [UUID: String],
         apiErrors: [UUID: SessionAPIError],
-        planGates: PlanGateService? = nil
+        planGates: PlanGateService? = nil, allowsBlockedAbort: Bool = false
     ) -> WireProject {
         WireProject(
             id: repo.id,
@@ -51,7 +56,8 @@ enum FleetProjection {
                     hasBackgroundWork: backgroundWork.contains($0.id),
                     openPromptCall: openPromptCalls[$0.id],
                     apiError: apiErrors[$0.id],
-                    planGates: planGates
+                    planGates: planGates,
+                    allowsBlockedAbort: allowsBlockedAbort
                 )
             }
         )
@@ -62,7 +68,7 @@ enum FleetProjection {
         _ session: Session, status: SessionStatus?, unread: Set<UUID>,
         hasBackgroundWork: Bool, openPromptCall: String?,
         apiError: SessionAPIError?,
-        planGates: PlanGateService? = nil
+        planGates: PlanGateService? = nil, allowsBlockedAbort: Bool = false
     ) -> WireSession {
         WireSession(
             id: session.id,
@@ -83,7 +89,11 @@ enum FleetProjection {
             // it can name no open dialog — which is the assertion that retires a phone's card.
             // `.unreported` is reserved for a peer that predates the field.
             openPromptCall: openPromptCall.map(OpenPromptIdentity.call) ?? .noPrompt,
-            apiError: apiError
+            apiError: apiError,
+            // A store-wide preference, not a per-session fact, but it rides on every session
+            // because that is the shape a client reads: nothing else on the wire names "this
+            // Mac" independent of a tab.
+            allowsBlockedAbort: allowsBlockedAbort
         )
     }
 }
