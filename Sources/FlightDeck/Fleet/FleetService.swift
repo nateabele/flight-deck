@@ -1106,6 +1106,32 @@ final class FleetService: ObservableObject {
                 // `planGates.gates[id]` directly, ahead of the next poll tick.
                 self.store.deliverPlanGateNotifications()
             }
+        case .abortPrompt(let id, let token):
+            // Gated here, before the store is touched at all — unlike every other refusal on
+            // this path, which is the store's alone to make. `allowsBlockedPromptAbort` is not
+            // a fact about this session's agent, status, transcript or screen the way those
+            // refusals are; it is a standing choice about whether this Mac permits a blind
+            // keystroke at all, and the store has no such concept to ask.
+            //
+            // The code is `abort_disabled`, deliberately not `unsupported_agent` — the store's
+            // own code for "this build cannot drive that agent's terminal." Reusing it here
+            // would tell a phone the wrong thing about a session `PromptService.openPrompt`
+            // would happily drive: a codex approval list, for instance, is fully drivable and
+            // only unnameable, which `unsupported_agent` denies outright and untruthfully.
+            //
+            // Recorded directly through `prompts.lifecycleSink` rather than through the store,
+            // because the store is never reached on this branch and so never gets the chance to
+            // write its own `.aborted` record — the same reason `PromptService.answer` records
+            // its own refusals rather than leaving that to `SessionStore.answerPrompt`.
+            guard preferences.allowsBlockedPromptAbort else {
+                prompts.lifecycleSink(PromptLifecycleRecord(
+                    session: id, event: .aborted(code: "abort_disabled")
+                ))
+                return .err(cid: cid, code: "abort_disabled")
+            }
+            if let code = store.abortPrompt(in: id, token: token).errorCode {
+                return .err(cid: cid, code: code)
+            }
         }
         // `ack` means dispatched, not done. For the two read marks the observable effect is
         // the northbound `session.unread` event the store call just recorded; for a prompt it

@@ -3838,6 +3838,12 @@ final class SessionStore: ObservableObject {
     /// identical in both configurations and it is only the destination a test replaces.
     var answerAbortSink: (AnswerAbort) -> Void = AnswerAbortLog.record
 
+    /// Where `abortPrompt` files its own `.aborted` record. Same shape as `answerAbortSink`
+    /// above and for the same reason: `PromptLifecycleLog.record` writes to a real file and
+    /// os_log unconditionally, so a test that wants to see what this store decided — dispatch
+    /// or which guard refused — replaces the destination rather than the call site.
+    var promptLifecycleSink: (PromptLifecycleRecord) -> Void = PromptLifecycleLog.record
+
     /// A client answered the dialog tab `id` is blocked on.
     ///
     /// `open` is the Mac's **own** derivation, from `PromptService`, never the client's claim.
@@ -3996,6 +4002,49 @@ final class SessionStore: ObservableObject {
                 driver: driver, injector: injector, id: id, token: token
             )
         }
+    }
+
+    /// Escape, sent blind, for a dialog this Mac cannot name at all.
+    ///
+    /// **Every attempt is logged, dispatch and every refusal alike** — unlike `answerPrompt`,
+    /// which is recorded by its caller (`PromptService.answer`, through `lifecycleSink`) because
+    /// that caller also knows `sent`/`open` call ids worth writing down. There is no such
+    /// caller here and no call ids to compare, so this writes its own `.aborted` record rather
+    /// than leaving that to whoever dispatches it — the store is the only thing that knows which
+    /// guard actually stopped it, and a record with no writer is a record that does not exist.
+    @discardableResult
+    func abortPrompt(in id: UUID, token: UUID) -> AnswerDispatch {
+        let outcome = dispatchAbort(in: id, token: token)
+        promptLifecycleSink(PromptLifecycleRecord(
+            session: id, event: .aborted(code: outcome.errorCode)
+        ))
+        return outcome
+    }
+
+    /// `answerPrompt`'s own guards, in the same order, minus the call comparison it has nothing
+    /// to compare — there is no call on either side of this path, which is the entire premise
+    /// `FleetCommand.abortPrompt` documents. The action is `driver.deny`, one key event with no
+    /// viewport parse: the only answer that works on a screen this build cannot read, which is
+    /// exactly the screen this exists for.
+    ///
+    /// **`notWaiting` is not a formality.** A stray Escape typed into a live TUI is not free —
+    /// `answerPrompt`'s own comment on this same guard says so — so a session that left
+    /// `waiting` between the phone drawing its card and the tap landing is refused exactly as
+    /// hard here as it would be for a normal answer.
+    private func dispatchAbort(in id: UUID, token: UUID) -> AnswerDispatch {
+        guard let at = locate(id) else { return .unknownSession }
+        guard let driver = repos[at.repo].sessions[at.session].agent.dialogDriver else {
+            return .unsupportedAgent
+        }
+        if answeredPromptTokens[id, default: []].contains(token) { return .duplicate }
+        guard statuses[id]?.activity == .waiting else { return .notWaiting }
+        guard let injector = injector(for: id) else { return .unreadableScreen }
+        // The same set the other two users of this terminal hold, so a rename or a queued
+        // phone prompt mid-settle cannot interleave with a dialog being driven.
+        guard !injecting.contains(id) else { return .unreadableScreen }
+        remember(answered: token, for: id)
+        driver.deny(injector)
+        return .dispatched
     }
 
     /// Move the selection, wait for the repaint, re-read, and only then submit.
