@@ -307,7 +307,14 @@ static void server_mainloop(void) {
 
 			FD_SET_MAX(c->socket, &new_readfds, new_fdmax);
 
-			if (pty_data)
+			/* Flight Deck fork (Task 3 fix): a client is STATE_CONNECTED from
+			 * accept() until its MSG_RESIZE lands (a separate select() iteration
+			 * from its MSG_ATTACH) -- during that gap it must not receive live PTY
+			 * output, or those same bytes (already captured into server.outlog)
+			 * arrive twice: once here, live, and again moments later as the head
+			 * of the MSG_RESIZE replay. Gate on STATE_ATTACHED so live forwarding
+			 * only ever reaches a client whose replay has already been sent. */
+			if (pty_data && c->state == STATE_ATTACHED)
 				server_send_packet(c, &server_packet);
 			if (!server.running) {
 				if (server.exit_status != -1) {
