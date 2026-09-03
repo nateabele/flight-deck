@@ -694,7 +694,14 @@ struct FleetListScreen: View {
                 Image(systemName: "terminal.fill")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.green)
-                    .accessibilityHidden(true)   // `SessionStatusGlyph.label` already says it
+                    // `SessionStatusGlyph.label` already says it — except when `session.apiError`
+                    // is set: `label(for:)` REPLACES the base label with the error's own rather
+                    // than appending the background clause to it, so this badge's own claim is
+                    // silent in that one state. Deliberately left silent rather than un-hidden:
+                    // the error is what a reader needs to hear, and restoring this badge's
+                    // accessibility element would just add a second, uncaptioned green triangle
+                    // to what VoiceOver reads for the row.
+                    .accessibilityHidden(true)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(SessionSearchResults.highlighted(session.title, ranges: ranges))

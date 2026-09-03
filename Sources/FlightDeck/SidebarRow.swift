@@ -1,4 +1,3 @@
-import FleetKit
 import Foundation
 
 /// One row of the sidebar, flattened.

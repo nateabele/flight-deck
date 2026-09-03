@@ -229,4 +229,26 @@ final class TranscriptWatcherTests: XCTestCase {
 
         XCTAssertEqual(seen, [nil], "one net change per scan, and it is the last one")
     }
+
+    /// The other direction of `testLastEventInAScanWins`. That test alone would pass under a
+    /// fold that always resolved to `nil` regardless of order — this pins that the last event
+    /// wins even when the last event is the error, not only when it clears one.
+    func testLastEventInAScanWinsTheOtherDirectionToo() throws {
+        let sid = UUID()
+        let url = dir.appendingPathComponent("m.jsonl")
+        FileManager.default.createFile(atPath: url.path, contents: Data())
+        var seen: [SessionAPIError?] = []
+        let w = TranscriptWatcher(sessionID: sid, url: url, onTitle: { _ in },
+                                  onSubagentCount: { _ in }, onAPIError: { seen.append($0) })
+        w.drain()
+
+        try (plainAssistant + apiErrorRecord(529, "overloaded"))
+            .write(to: url, atomically: true, encoding: .utf8)
+        w.drain()
+
+        XCTAssertEqual(
+            seen, [SessionAPIError(status: 529, kind: "overloaded", isTransient: true)],
+            "one net change per scan, and it is the last one"
+        )
+    }
 }
