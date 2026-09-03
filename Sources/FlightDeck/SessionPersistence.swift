@@ -1,4 +1,5 @@
 // Sources/FlightDeck/SessionPersistence.swift
+import FleetKit
 import Foundation
 import OSLog
 
@@ -39,6 +40,11 @@ struct SessionSnapshot: Codable, Equatable {
         /// written. Optional, and `nil` rather than `false` for the common case, so the file
         /// stays readable — the same reason `unread` is optional.
         var hasBackgroundWork: Bool?
+        /// Why this session's last turn died, if it died on an API error. Absent means it did not.
+        /// Optional for the same load-bearing reason as `activity`: synthesized `Codable` decodes
+        /// an optional with `decodeIfPresent`, so every existing `sessions.json` still decodes
+        /// instead of throwing and wiping every tab on the first launch after this change.
+        var apiError: SessionAPIError?
         /// Whether this session finished while the user was looking elsewhere. Absent
         /// reads as false. Optional for the same reason as `activity`.
         var unread: Bool?
@@ -62,6 +68,7 @@ struct SessionSnapshot: Codable, Equatable {
             pinnedConversationID: UUID? = nil,
             activity: String? = nil,
             hasBackgroundWork: Bool? = nil,
+            apiError: SessionAPIError? = nil,
             unread: Bool? = nil,
             agent: AgentID? = nil,
             accountID: UUID? = nil,
@@ -74,6 +81,7 @@ struct SessionSnapshot: Codable, Equatable {
             self.pinnedConversationID = pinnedConversationID
             self.activity = activity
             self.hasBackgroundWork = hasBackgroundWork
+            self.apiError = apiError
             self.unread = unread
             self.agent = agent
             self.accountID = accountID
