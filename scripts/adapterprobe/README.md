@@ -127,36 +127,29 @@ cell.
 
 ## First capture — 2026-09-02
 
-**Two different `codex` binaries answer, depending on how a row launches it — `baseline.json`
-records both.** `codex`/`claude` in `versions` name whatever this runner's own `PATH` resolves
-(`agent_versions()`); `codex_pty`/`claude_pty` name whatever a live pty row's *login shell*
-resolves (`pty_agent_version()`), because `ctx.pty` launches every live row as `/bin/sh -lc
-<command>` — a login shell, which re-derives `PATH` via macOS's `path_helper` regardless of what
-this process inherited. On this machine that split is real, not theoretical: `codex` resolves
-`/Users/nate/.local/bin/codex` (`codex-cli 0.152.1`), the version the app-server/declaration
-rows exercised, while `codex_pty` resolves `/opt/homebrew/bin/codex` (`codex-cli 0.142.4`), the
-version every pty-driven row (`launchCommand`, `location`, `dialogDriver`, `resumeCommand`,
-`openPromptReader`, claude's `rename`) actually exercised. `claude` has only one binary on this
-machine, so `claude`/`claude_pty` agree.
+**`ctx.pty` deliberately launches through the same shell Flight Deck itself resolves, not a
+hardcoded one — because a probe that launches a different binary than the app measures nothing
+about the app.** Every live-pty row (`launchCommand`, `location`, `dialogDriver`,
+`resumeCommand`, `openPromptReader`, claude's `rename`) and `pty_agent_version()` (which fills in
+`codex_pty`/`claude_pty` in `versions`, next to the plain `codex`/`claude` `agent_versions()`
+already reports) launch via `ProbeContext.login_shell` — `Sources/FlightDeck/Agents/
+ShellResolver.swift`'s own `resolve()` answer, fetched once per run through a `probe
+login-shell` subcommand rather than re-derived here, so this harness can never independently
+drift from what `LoginShellPath`/`CodexProcessTransport` actually launch through for a real
+spawn. This was found the hard way: an earlier revision hardcoded `/bin/sh -lc` for every pty
+launch, and on this machine `/bin/sh -lc` and the account's real login shell resolve `codex` to
+two *different* installs — `/opt/homebrew/bin/codex` (`0.142.4`) vs. `~/.local/bin/codex`
+(`0.152.1`) — which meant every pty-driven row, including `codex.resumeCommand`, the reported
+symptom this whole suite exists to check, had been measured against a `codex` build Flight Deck
+itself does not run. Fixed by resolving the login shell instead of guessing at one; `codex_pty`/
+`codex_pty_path` now agree with `codex`/`codex_path` on this machine, and re-running `--tier
+full` against the corrected binary changed no verdict — see below. The loud `NOTE:` `run.py`
+prints on any future divergence between the two is kept: a machine where they still differ is a
+real hazard, not a bug in this harness.
 
-**Checked directly, and it is NOT the binary Flight Deck itself launches.**
-`Sources/FlightDeck/Agents/LoginShellPath.swift` exists because Flight Deck deliberately spawns
-`codex` through a login shell's `PATH` (`ShellResolver.resolve()`, this account's registered
-`$SHELL` — `fish` on this machine) rather than `/bin/sh`. Run directly: `fish -lc 'codex
---version'` and `zsh -lc 'codex --version'` both land on `~/.local/bin/codex` (`0.152.1`) — the
-SAME binary `codex`/`codex_path` above already name — while `/bin/sh -lc`, what `ctx.pty`
-actually hardcodes for every live row in this harness, lands on `/opt/homebrew/bin/codex`
-(`0.142.4`) instead. So `codex_pty` is a fact about THIS HARNESS's own pty plumbing, not a
-second confirmation of what production runs: **`codex.resumeCommand: broken` was observed
-against `codex-cli 0.142.4`, a binary Flight Deck's own login-shell resolution does not
-currently select on this machine.** Worth a follow-up to either make `ctx.pty` resolve through
-the same `$SHELL`-based mechanism `LoginShellPath` uses (which would very likely change this
-row's verdict and needs its own dedicated `--tier full` run to find out) or to re-run this
-specific finding against `0.152.1` by hand before treating it as urgent.
-
-Taken against `claude-cli 2.1.259 (Claude Code)` and `codex-cli 0.152.1` for every
-declaration/app-server row and `codex-cli 0.142.4` for every pty-driven row, `--tier full`,
-committed as `baseline.json`. 6 rows were red or admittedly inconclusive out of 42 cells:
+Taken against `claude-cli 2.1.259 (Claude Code)` and `codex-cli 0.152.1` for every row, pty-driven
+or not, `--tier full`, committed as `baseline.json`. 6 rows were red or admittedly inconclusive
+out of 42 cells:
 
 - **`codex.sanitizedTitle` — broken.** Codex's declared contract is "no sanitizing; the RPC
   channel needs none" — but the real CLI strips `\n` and `\t` from a hostile title anyway. The
@@ -165,31 +158,24 @@ committed as `baseline.json`. 6 rows were red or admittedly inconclusive out of 
   reads back the way `AgentAdapter`'s driver expects — apparent grammar drift in that screen.
 - **`codex.resumeCommand` — broken.** This is the reported symptom that commissioned this whole
   suite: typing codex's own `resumeCommand` at a fresh pty does not reattach to prior history —
-  the seeded marker from an earlier turn never reappears on screen.
-- **`claude.rename` — broken** (`outbound: transcript reads None`). Typing `/rename
-  probe-renamed` at a live claude pty, then reading the persisted title back out of claude's own
-  transcript file, found no `custom-title` record and no fallback first-user-text either —
-  reproduced identically across three independent live runs taken while capturing this baseline
-  and re-verifying the gate. Plausibly real (this exercises, live, a code path — `SessionStore`'s
-  claude rename injection — that until this run had only ever been driven against mocked ptys),
-  but the row's own outbound check is a fixed 3-second dwell with **no confirmatory wait** (its
-  own comment explains why: a wait keyed on-screen would match claude's live keystroke echo
-  regardless of whether the rename actually landed), so a genuine product regression is not yet
-  fully distinguished from "3 seconds was too short for a fresh session's transcript file to
-  exist yet." Recorded as-is; not weakened, not re-run further to chase certainty.
+  the seeded marker from an earlier turn never reappears on screen. Confirmed against the
+  binary Flight Deck actually launches (`0.152.1`, not the `0.142.4` an earlier revision of this
+  harness accidentally measured) — the finding holds, now correctly attributed.
+- **`codex.runtimeObservation` — broken.** A pre/post-turn delta that should show a live turn
+  actually ran does not appear — also confirmed against `0.152.1`.
+- **`claude.rename` — error** (`transcript '<sandbox path>.jsonl' never appeared within 30s,
+  before /rename was even typed`). The session transcript file itself never showed up in time,
+  so the row cannot say whether a rename would have taken — a harness/timing question, not yet a
+  confirmed product finding either way.
 - **`codex.needsRuntimeStart` — error, by design.** Every codex probe subcommand bootstraps a
   live app-server connection before doing anything else, so there is no cheap way to ask "does
   *prepare* need a runtime" without the probe itself starting one just to ask. Admitted rather
   than guessed — see the row's own comment in `capabilities.py`.
-- **`codex.openPromptReader` — error** (`approval list never appeared; the stated reason is
-  unconfirmed, not refuted`). Likely a harness confound, not a codex finding: this run's own
-  onboarding dismissal (`ProbeContext._dismiss_codex_onboarding`) marks the sandbox's project
-  directory `trust_level = "trusted"` in codex's config — the same setting the real Flight Deck
-  checkout already carries for itself in `~/.codex/config.toml` — which plausibly lowers or
-  removes the approval friction this row is trying to observe. The row waited the full 45s cap
-  with no approval list ever appearing, which is consistent with commands running without asking
-  rather than with a slow model turn. Worth a follow-up to confirm before trusting this reading
-  either way.
+- **`codex.openPromptReader` — error** (`approval list never appeared; screen was still stuck at
+  'Booting MCP server: codex_apps'`). A `codex_apps` MCP-boot stall in `codex-cli 0.152.1`, not a
+  trust-override artifact of this harness — `approval_policy "on-request"` was set specifically
+  to rule that out and made no observable difference. A finding about this environment's codex
+  install, not about this harness or (so far) about the adapter.
 
 Every other cell — including both `loginInvocation` rows (`needs-auth`, by design: the sandbox
 is authenticated on purpose, so an honest login probe is impossible without destroying that) —
