@@ -141,15 +141,16 @@ final class SessionStoreStuckPromptTests: XCTestCase {
         XCTAssertEqual(store.openPromptProbe?(tab), "prompt_changed")
     }
 
-    // MARK: - pathMatches
+    // MARK: - pathMatches and expectedTranscriptURL
     //
     // `checkStuckPrompts` gates every retarget in the tests above on `!matches`, but every one
     // of them also flips `cwd != session.transcriptDirectory` at the same time, so `matches`
     // itself is never the deciding factor there. These tests call `SessionStore.pathMatches`
-    // directly so the raw-equality rule, and the `projectsRoot` it is fed, are pinned on their
-    // own — and so a future edit that "tidies" the comparison to `comparablePath`, or drops the
-    // `projectsRoot:` argument at the call site, fails a test instead of silently changing what
-    // a person reading the log believes about a wrong-file failure.
+    // and `SessionStore.expectedTranscriptURL(for:cwd:)` directly so the raw-equality rule and
+    // the `projectsRoot` threading it depends on are each pinned on their own — and so a future
+    // edit that "tidies" the comparison to `comparablePath`, or drops the `projectsRoot:`
+    // argument inside `expectedTranscriptURL`, fails a test instead of silently changing what a
+    // person reading the log believes about a wrong-file failure.
 
     func testPathMatchesTrueForIdenticalTranscriptURLs() {
         let url = ClaudeSession.transcriptURL(
@@ -191,24 +192,31 @@ final class SessionStoreStuckPromptTests: XCTestCase {
             "normalized away")
     }
 
-    /// The other case the review named: `expected` computed with `projectsRoot` left at its
-    /// default instead of threaded through `transcriptsRoot(forAccount:)`. A call site that
-    /// dropped that argument would make every fixture-rooted account read as a permanent
-    /// mismatch even when the two paths genuinely agree — this pins that dropping it changes
-    /// the verdict.
-    func testPathMatchesFailsWhenExpectedUsesADefaultedProjectsRoot() {
-        let sessionID = UUID()
+    /// The other case the review named: `expectedTranscriptURL` is the one place that threads
+    /// `transcriptsRoot(forAccount:)` instead of leaving `ClaudeSession.transcriptURL` at its
+    /// default. Calling `pathMatches` with two independently pre-built URLs (the prior version
+    /// of this test) only proves two literal strings differ — true of any implementation,
+    /// correct or broken — and never touches this method at all. Calling the method itself,
+    /// against a session whose store carries a fixture root override, is what a dropped
+    /// `projectsRoot:` argument inside it would actually break.
+    func testExpectedTranscriptURLUsesThisSessionsAccountRootNotTheDefault() throws {
+        let harness = FleetTestHarness()
+        self.harness = harness
+        harness.store.transcriptsRootOverride = projectsRoot
+        let session = harness.store.newSession(in: tmp)
         let cwd = "/tmp/some-project"
-        let watched = ClaudeSession.transcriptURL(
-            sessionID: sessionID, workingDirectory: cwd, projectsRoot: projectsRoot)
-        let expectedWithFixtureRoot = ClaudeSession.transcriptURL(
-            sessionID: sessionID, workingDirectory: cwd, projectsRoot: projectsRoot)
-        let expectedWithDefaultedRoot = ClaudeSession.transcriptURL(
-            sessionID: sessionID, workingDirectory: cwd)
 
-        XCTAssertTrue(SessionStore.pathMatches(watched: watched, expected: expectedWithFixtureRoot))
-        XCTAssertFalse(
-            SessionStore.pathMatches(watched: watched, expected: expectedWithDefaultedRoot),
-            "a defaulted projectsRoot must not accidentally agree with the fixture-rooted watch")
+        let expected = harness.store.expectedTranscriptURL(for: session, cwd: cwd)
+        let defaulted = ClaudeSession.transcriptURL(
+            sessionID: session.pinnedConversationID, workingDirectory: cwd)
+
+        XCTAssertTrue(
+            expected.path.hasPrefix(projectsRoot.path),
+            "expectedTranscriptURL must resolve under this session's fixture-rooted account, " +
+            "not wherever the default root happens to be")
+        XCTAssertNotEqual(
+            expected, defaulted,
+            "dropping the projectsRoot: argument inside expectedTranscriptURL must change the " +
+            "verdict, not silently agree with the defaulted-root computation")
     }
 }
