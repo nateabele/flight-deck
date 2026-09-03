@@ -488,6 +488,18 @@ final class SessionTimelineModel {
     /// flip back a moment later when the retry lands — noise on every blocked session, not a
     /// diagnosis. Only running the whole ~18s bounded schedule out and still finding nothing
     /// says something a single poll cannot: this session is not behind by a beat, it is stuck.
+    ///
+    /// **The contract: this latches, and it is not "blocked right now."** Nothing outside
+    /// `chaseBlockedPrompt` clears it, and re-entry is gated by `SessionTimelineScreen`'s
+    /// `.task(id: BlockedState(session))`, keyed on the *Mac's* `(activity, openPromptCall)` —
+    /// not on this model's own derived `blocked(...)`. So if the record for the very call this
+    /// chase gave up on lands late, after exhaustion, `blocked(...)` starts returning a card
+    /// again but this stays `true`: the dialog identity never changed from the Mac's point of
+    /// view, so nothing re-triggers a chase to clear it. A genuinely new dialog does reset it
+    /// (a fresh `chaseBlockedPrompt` call resets on entry), it is only this same-dialog
+    /// late-arrival case that latches. Any consumer must read this alongside a live
+    /// `blocked(...)` check, never on its own — it means "the chase ran out at least once for
+    /// this dialog," not "there is no card to show right now."
     private(set) var blockedChaseExhausted = false
 
     /// Whether the feed holds any call still waiting on its `tool_result`, independent of
@@ -501,7 +513,10 @@ final class SessionTimelineModel {
     /// call:)`'s own gates — the agent, the activity, or the Mac's veto — are what kept a card
     /// from being drawn, not a missing record. The two point Task 6's reader at different
     /// halves of the system.
-    private var hasUnansweredCallInFeed: Bool {
+    ///
+    /// Not `private` — tests assert on it directly rather than reaching for it through the
+    /// log line, which is not a seam worth parsing just to check one boolean.
+    var hasUnansweredCallInFeed: Bool {
         var answered: Set<String> = []
         for item in feed.items where item.kind == .toolResult {
             if let id = item.body.callID { answered.insert(id) }
@@ -543,6 +558,18 @@ final class SessionTimelineModel {
     /// pathological hour-long stall be told apart from the ordinary beat this same method
     /// spends riding out on every other blocked session — see `blockedChaseExhausted`'s own
     /// comment for why exhaustion, and not the first miss, is the right moment to say so.
+    ///
+    /// **The recheck after the loop catches a late arrival, but not the very last one.**
+    /// `loadNewer()` kicks off `fetch(...)` and returns immediately — it does not suspend, and
+    /// nothing between the loop's final `loadNewer()` and the recheck below awaits that
+    /// fetch's response. So the recheck can only see a page that had *already* landed during
+    /// the final sleep, from a fetch the loop issued earlier; it cannot see the response to the
+    /// very last `loadNewer()` call, because that response has not arrived yet at the moment
+    /// this method reads `blocked(...)` and returns. A card that only shows up in that final
+    /// fetch's own response is still reported as exhausted. That is a known, accepted gap, not
+    /// a bug: this recheck is still strictly better than the brief's original pseudocode, which
+    /// dropped every late response equally, and closing the gap fully would mean awaiting the
+    /// final fetch here — a larger change than this task buys.
     func chaseBlockedPrompt(agent: String?, activity: String?, call: OpenPromptIdentity) async {
         blockedChaseExhausted = false
         for delay in promptRetries {
