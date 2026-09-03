@@ -144,6 +144,19 @@ final class FleetService: ObservableObject {
             else { return nil }
             return open.callID
         }
+        // Unlike `openPromptCallReader` above, this drives `checkStuckPrompts`'s repair rather
+        // than a routine push, so it takes `openPrompt` — the full derivation an actual tap
+        // would get — rather than `pushedOpenPrompt`'s side-effect-free variant. `[weak prompts]`
+        // is required for the same reason `PlanGateService`'s closures above capture `store`
+        // weakly: `FleetService` already holds `prompts` strongly, and a strong capture here
+        // would be the second half of a cycle back through `store`.
+        store.openPromptProbe = { [weak prompts] id in
+            guard let prompts else { return nil }
+            if case .failure(let code) = prompts.openPrompt(inSession: id) {
+                return String(describing: code)
+            }
+            return nil
+        }
         wireHandlers()
         Self.current = self
     }
