@@ -485,6 +485,162 @@ final class FleetServiceTests: XCTestCase {
                        "selection is untouched by the refusal — the previously-selected tab a stale read would have named")
     }
 
+    // MARK: - The client-selection rule: a command from a client never moves the desk's tab
+
+    /// **The reported bug, at the wire.** With the Mac sitting on an unrelated tab, a phone `+`
+    /// tap must file its tab without also reactivating it on the desktop — that yanks the desk's
+    /// focus off whatever is on screen for a change nobody at the desk asked for. Asserting the
+    /// tab really was created is what keeps this from passing on a silently swallowed command.
+    func testANewSessionFromThePhoneLeavesTheDesksSelectionAlone() async throws {
+        let (store, key, port) = try await standUp()
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/target"))
+        let elsewhere = store.newSession(in: URL(fileURLWithPath: "/w/elsewhere"))
+        store.selectSession(elsewhere.id)
+        let project = try XCTUnwrap(store.repos.first { $0.url.path == "/w/target" }?.id)
+
+        let acked = expectation(description: "ack")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.newSession(project: project, agent: nil, accountIndex: nil))
+            }
+            if case .ack = frame { acked.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [acked], timeout: 10)
+
+        XCTAssertEqual(
+            store.repos.first { $0.url.path == "/w/target" }?.sessions.count, 2,
+            "the phone's + really created a tab"
+        )
+        XCTAssertEqual(store.selectedSessionID, elsewhere.id,
+                       "a client's + must not move the desk's selection off elsewhere")
+    }
+
+    /// The same rule for the reported path itself: a phone reopening a tab must not reactivate
+    /// it on the desktop. `store.repos` is checked to confirm the reopen actually happened —
+    /// the failure mode this exists to catch is a selection assertion that would pass just as
+    /// happily against a command that silently did nothing.
+    func testAReopenFromThePhoneLeavesTheDesksSelectionAlone() async throws {
+        let (store, key, port) = try await standUp()
+        let closed = store.newSession(in: URL(fileURLWithPath: "/w/target"))
+        let elsewhere = store.newSession(in: URL(fileURLWithPath: "/w/elsewhere"))
+        store.closeSession(closed.id)
+        store.selectSession(elsewhere.id)
+
+        let acked = expectation(description: "ack")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.reopenClosed(session: closed.id))
+            }
+            if case .ack = frame { acked.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [acked], timeout: 10)
+
+        XCTAssertTrue(store.repos.flatMap(\.sessions).contains { $0.id == closed.id },
+                     "the phone's reopen really brought the tab back")
+        XCTAssertEqual(store.selectedSessionID, elsewhere.id,
+                       "a client's reopen must not move the desk's selection off elsewhere")
+    }
+
+    /// **Where the bug actually lived.** `:448` above pins the refused half of `search.open`;
+    /// this pins the successful half — a conversation resumed fresh, not merely selected among
+    /// already-open tabs, which is the branch `SessionStore.openConversation` reaches for most
+    /// phone searches.
+    func testASuccessfulSearchOpenFromThePhoneLeavesTheDesksSelectionAlone() async throws {
+        let (store, key, port) = try await standUp()
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+        let elsewhere = store.newSession(in: URL(fileURLWithPath: "/w/elsewhere"))
+        store.selectSession(elsewhere.id)
+        let conversation = UUID()
+
+        let opened = expectation(description: "session")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.openConversation(
+                    conversationID: conversation.uuidString, projectPath: "/w/alpha"
+                ))
+            }
+            if case .err = frame { XCTFail("this launch must succeed") }
+            if case .session = frame { opened.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [opened], timeout: 10)
+
+        XCTAssertEqual(
+            store.repos.first { $0.url.path == "/w/alpha" }?.sessions.count, 2,
+            "the phone's search.open really resumed a tab"
+        )
+        XCTAssertEqual(store.selectedSessionID, elsewhere.id,
+                       "a client's search.open must not move the desk's selection off elsewhere")
+    }
+
+    /// **The judgement call, pinned so it cannot be simplified away.** With nothing selected on
+    /// the Mac, there is no focus for a client action to steal, and the alternative is a sidebar
+    /// showing tabs over an empty pane — so a client action selects anyway, exactly as a desk
+    /// action would.
+    func testANewSessionFromThePhoneSelectsWhenTheDeskHasNoSelection() async throws {
+        let (store, key, port) = try await standUp()
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/target"))
+        store.selectedSessionID = nil
+        let project = try XCTUnwrap(store.repos.first?.id)
+
+        let acked = expectation(description: "ack")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.newSession(project: project, agent: nil, accountIndex: nil))
+            }
+            if case .ack = frame { acked.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [acked], timeout: 10)
+
+        let created = try XCTUnwrap(store.repos.first?.sessions.last, "the phone's + really created a tab")
+        XCTAssertEqual(store.selectedSessionID, created.id,
+                       "a client action selects when nothing else has focus to steal")
+    }
+
+    /// **The second, riding-along behaviour change.** Not selecting also means not marking
+    /// read — `selectedSessionID`'s `didSet` is what clears `unreadIdle`, so a reopen that
+    /// leaves the desk's selection alone must also leave the reopened tab's unread mark alone.
+    /// `markUnread` seeds the mark directly (it does not require the session to be currently
+    /// live), which is what lets this test isolate the read-state consequence from the reopen
+    /// itself.
+    func testAReopenFromThePhoneLeavesTheReopenedTabUnread() async throws {
+        let (store, key, port) = try await standUp()
+        let closed = store.newSession(in: URL(fileURLWithPath: "/w/target"))
+        let elsewhere = store.newSession(in: URL(fileURLWithPath: "/w/elsewhere"))
+        store.closeSession(closed.id)
+        store.selectSession(elsewhere.id)
+        store.markUnread(closed.id)
+        XCTAssertTrue(store.unreadIdle.contains(closed.id), "fixture assumption")
+
+        let acked = expectation(description: "ack")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.reopenClosed(session: closed.id))
+            }
+            if case .ack = frame { acked.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [acked], timeout: 10)
+
+        XCTAssertTrue(store.repos.flatMap(\.sessions).contains { $0.id == closed.id },
+                     "the phone's reopen really brought the tab back")
+        XCTAssertTrue(store.unreadIdle.contains(closed.id),
+                     "a phone reopen must not silently mark the tab read on the Mac")
+    }
+
     /// `WireSearchHits.indexing` must reflect whatever backfill `FleetService.indexingProgress`
     /// currently holds, and must be `nil` the instant nothing is running — reporting `0 of 0`
     /// permanently would put a meaningless footer on the phone. A working `StubSearchIndex` is
