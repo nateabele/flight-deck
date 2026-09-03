@@ -26,11 +26,19 @@ FIXTURES = os.path.join(REPO, "Tests", "FlightDeckTests", "Fixtures")
 # `run.py` is not a row.
 UP_MARKER = {"claude": "Claude Code", "codex": "OpenAI Codex"}
 
-# Where `--capture` writes the transcripts a full-tier row produced. Same files
-# `capabilities.py`'s `_CLAUDE_TRANSCRIPT` / `_CODEX_ROLLOUT` read back as the checked-in corpus.
+# Where `--capture` writes the transcripts a full-tier row produced. NEVER the Swift fixtures
+# under `Tests/FlightDeckTests/Fixtures/` — those are sha256-pinned by `TimelineFixtureTests`,
+# so a `--capture` writing there would deterministically break the Swift suite on the very next
+# `--tier full` run, and codex writes its home's `~/.agents/skills` inventory regardless of
+# `CODEX_HOME` (see `Fixtures/Codex/rollout.captured.provenance.json`'s own account of a real
+# leak caught only by hand-scanning a capture after the fact) — a sandbox does not make a
+# capture clean enough to land directly on a pinned fixture unreviewed. This directory is
+# gitignored; promoting a capture into the checked-in corpus is a deliberate, reviewed, separate
+# step, never this flag's side effect.
+CORPUS_CAPTURE_DIR = os.path.join(HERE, "corpus")
 CORPUS_DEST = {
-    "claude": os.path.join(FIXTURES, "Claude", "transcript.captured.jsonl"),
-    "codex": os.path.join(FIXTURES, "Codex", "rollout.captured.jsonl"),
+    "claude": os.path.join(CORPUS_CAPTURE_DIR, "claude.transcript.captured.jsonl"),
+    "codex": os.path.join(CORPUS_CAPTURE_DIR, "codex.rollout.captured.jsonl"),
 }
 
 GLYPH = {"ok": "✓", "broken": "✗", "by-design": "⊘", "rotted": "!",
@@ -186,6 +194,11 @@ class ProbeContext:
     def probe(self, args, stdin=""):
         agent = args[1] if len(args) > 1 else None
         env = self.sandbox.child_env(agent) if agent in ("claude", "codex") else dict(os.environ)
+        # `probe` is built from a coverage-instrumented `FlightDeck` dylib (Debug always sets
+        # `-enable-testing`, and this checkout also profiles), so every one of the hundreds of
+        # invocations a run makes would otherwise drop its own `default.profraw` -- ~165 MB a
+        # run, and none of it examined by anything this suite does.
+        env["LLVM_PROFILE_FILE"] = "/dev/null"
         try:
             proc = subprocess.run(
                 [self._probe_path, *args], input=stdin, capture_output=True, text=True,
@@ -315,6 +328,12 @@ def _run_matrix(ctx, tiers):
 
 
 def _capture(ctx):
+    """Stages this run's transcripts under the gitignored `CORPUS_CAPTURE_DIR` -- never over
+    the pinned `Fixtures/{Claude,Codex}/*.captured.jsonl` files, and never touches the
+    committed `corpus.json` either. Both of those are promotion steps: a raw capture has not
+    been scanned for anything a throwaway sandbox failed to keep private (see `CORPUS_DEST`'s
+    own comment), so this function's job ends at "here is what came out, and here is what
+    version it came from" -- a human decides whether that is fit to promote."""
     captured = {}
     for agent, dest in CORPUS_DEST.items():
         src = ctx.last_transcript.get(agent)
@@ -325,16 +344,9 @@ def _capture(ctx):
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         shutil.copy2(src, dest)
         captured[agent] = ctx.versions[agent]
-    if not captured:
-        return
-    existing = {}
-    if os.path.exists(CORPUS):
-        with open(CORPUS) as f:
-            existing = json.load(f)
-    existing.setdefault("versions", {}).update(captured)
-    with open(CORPUS, "w") as f:
-        json.dump(existing, f, indent=2, sort_keys=True)
-        f.write("\n")
+    for agent, version in captured.items():
+        print(f"--capture: staged {CORPUS_DEST[agent]} (captured against {version}); "
+              f"review by hand before promoting into Fixtures/ and updating corpus.json")
 
 
 def _exit_code(diff):
@@ -358,6 +370,23 @@ def build_probe():
     subprocess.run([BUILD_PROBE], check=True, cwd=REPO)
 
 
+def _real_agent_listing():
+    """`~/.codex/sessions` and `~/.claude/projects` as they stand in the REAL home -- spec
+    invariant 9. Every live agent this run drives runs inside `AgentSandbox`'s throwaway
+    `codex_home`/`claude_home`, so nothing in this run has any legitimate reason to add,
+    remove, or rename anything these two real directories list; `main()` snapshots this before
+    the sandbox opens and asserts it is unchanged after the sandbox is gone, so a redirection
+    leak (the exact failure mode `_environment`'s row exists to catch on the adapter side) would
+    also be caught here as a harness-level guarantee, independent of any one row's own verdict.
+    """
+    def listing(path):
+        return sorted(os.listdir(path)) if os.path.isdir(path) else None
+    return {
+        "codex_sessions": listing(os.path.expanduser("~/.codex/sessions")),
+        "claude_projects": listing(os.path.expanduser("~/.claude/projects")),
+    }
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Run the adapter capability matrix.")
     ap.add_argument("--tier", choices=("cheap", "full"), default="cheap")
@@ -370,6 +399,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     tiers = {"cheap"} if args.tier == "cheap" else {"cheap", "full"}
+    real_before = _real_agent_listing()
 
     try:
         build_probe()
@@ -393,6 +423,12 @@ def main(argv=None):
     except UnsafeHome as e:
         print(f"refusing to proceed: {e}", file=sys.stderr)
         return 4
+
+    real_after = _real_agent_listing()
+    if real_after != real_before:
+        print(f"error: this run touched the REAL agent state it must never reach -- "
+              f"before={real_before!r} after={real_after!r}", file=sys.stderr)
+        return 5
 
     corpus = {}
     if os.path.exists(CORPUS):

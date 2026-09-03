@@ -19,5 +19,6 @@ vendor/.build-shim
 scripts/.smoke.log
 scripts/.release-build.log
 scripts/.adapterprobe.log
+scripts/adapterprobe/corpus/
 .superpowers/
 .claude/

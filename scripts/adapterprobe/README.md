@@ -56,15 +56,39 @@ above is optional — it exists for running the hermetic tests directly:
 ./scripts/test-adapters.sh                          # cheap tier: no live agent, < 1 minute
 ./scripts/test-adapters.sh --tier full               # adds the rows needing a real turn
 ./scripts/test-adapters.sh --update-baseline         # write this run's matrix as the new baseline
-./scripts/test-adapters.sh --capture                 # (full tier) refresh the grammar corpus
+./scripts/test-adapters.sh --capture                 # (full tier) stage fresh transcripts under scripts/adapterprobe/corpus/
 ./scripts/test-adapters.sh --keep                    # keep the sandbox tree after the run, for inspection
 ./scripts/test-adapters.sh --json PATH               # also write the matrix as JSON to PATH
 ```
 
+**`--capture` never writes into `Tests/FlightDeckTests/Fixtures/`.** Those files are
+sha256-pinned by `TimelineFixtureTests`, and codex writes its home's `~/.agents/skills`
+inventory into a rollout regardless of `CODEX_HOME` — a sandbox does not make a capture clean
+enough to land, unreviewed, on a pinned fixture (`Fixtures/Codex/rollout.captured.provenance.json`
+records exactly this leak, caught only by hand-scanning a past capture after the fact). Instead
+`--capture` stages `scripts/adapterprobe/corpus/{claude,codex}.*.captured.jsonl` — gitignored
+working files, not test fixtures. Promoting one into the checked-in corpus (and
+updating `corpus.json`'s recorded version below) is a separate, deliberate, reviewed step: scan
+it by hand first, then copy it over the matching `Fixtures/{Claude,Codex}/*.captured.jsonl` file
+yourself.
+
+**`corpus.json` is what makes the corpus-staleness guard real.** It records the agent versions
+the checked-in `Fixtures/{Claude,Codex}/*.captured.*` corpus was actually captured against;
+`run.py` compares that against `agent_versions()`'s live read on every run and prints `corpus
+stale: {...}` the moment either agent has moved on. It has to be committed to do anything — an
+absent file makes every comparison vacuously pass, which is exactly the state this repo shipped
+in until this file existed. `--capture` updates its recorded version to whatever it just staged
+under `scripts/adapterprobe/corpus/`, whether or not that capture is ever promoted into
+`Fixtures/` — so the warning tracks "have I looked at this agent's output recently", not "is the
+promoted corpus current"; treat a `corpus stale` print as a prompt to go capture and review, not
+as something to silence by editing this file directly.
+
 Exit code: `0` clean (matches `baseline.json`), `1` capability drift (a cell changed or is new),
 `3` a harness failure (a cell that used to read something else now reads `error`, or a brand-new
 cell reads `error` outright — always outranks plain drift), `4` the sandbox guard refused to run
-at all (see below).
+at all (see below), `5` the real `~/.codex/sessions` or `~/.claude/projects` listing changed
+during the run — spec invariant 9, checked unconditionally around the whole sandbox lifetime,
+never just trusted.
 
 **`baseline.json` was captured at `--tier full`, and records each cell's own tier alongside its
 verdict.** A bare `./scripts/test-adapters.sh` (cheap only) diffs cleanly against it: a
@@ -143,14 +167,26 @@ Every other cell — including both `loginInvocation` rows (`needs-auth`, by des
 is authenticated on purpose, so an honest login probe is impossible without destroying that) —
 came back `ok`.
 
+**A structural limit of `claude.rename`, independent of any single run's verdict:** the row's
+"inbound" check, after `resumeCommand` reattaches, re-reads the SAME transcript file the
+"outbound" check already read right after typing `/rename`. The two reported symptoms this
+suite exists to check are "a rename doesn't take" and "a rename doesn't survive a resume" — but
+a resumed claude process keeps appending to that one transcript rather than opening a new file,
+so this row cannot structurally tell "the title was never written" apart from "the title was
+written but a resume forgot it": both read as the same missing record in the same file. Proving
+the second symptom for claude, as opposed to the first, would need a distinct signal a resume
+produces (e.g. the sidecar `session_index`/status entry codex's own resume path is checked
+against) rather than a second read of the file the first check already inspected.
+
 ## See also
 
 - `docs/superpowers/specs/2026-09-02-adapter-capability-suite-design.md` and
   `docs/superpowers/plans/2026-09-02-adapter-capability-suite.md` — the spec and plan this suite
   was built from.
-- `scripts/livefuzz/README.md` — the sibling harness this one borrows its pty driver
-  (`ptyscreen.py` here, its own driver there) and its "keep the venv out of the repo" convention
-  from; that one fuzzes `ChoiceDialog` alone, this one covers a whole `AgentAdapter`.
+- `scripts/livefuzz/README.md` — the sibling harness this one shares its pty driver with: both
+  import the same `ptyscreen.py` (extracted from livefuzz in `93cfd18`, before this suite
+  existed), and this one's "keep the venv out of the repo" convention comes from there too. That
+  one fuzzes `ChoiceDialog` alone, this one covers a whole `AgentAdapter`.
 - `Tests/FlightDeckTests/CodexIntegrationTests.swift` — five specific codex behaviours pinned as
   Swift assertions against a real app-server (thread start/naming, killing a live process,
   restore-after-failure, a real resumed turn's rollout, the writer-lock handoff, and renaming

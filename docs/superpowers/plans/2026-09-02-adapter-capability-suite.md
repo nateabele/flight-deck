@@ -1014,7 +1014,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `/tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v -k "Verdict or RowTable"`
+Run: `/tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v -k Verdict -k RowTable`
 Expected: FAIL — `ModuleNotFoundError: No module named 'capabilities'`
 
 - [ ] **Step 3: Write `capabilities.py`**
@@ -1098,7 +1098,7 @@ Give `resumeCommand` and `rename` `tier="full"`, and every declaration/grammar r
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `/tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v -k "Verdict or RowTable"`
+Run: `/tmp/adapterprobe-venv/bin/python -m unittest discover -s scripts/adapterprobe/tests -v -k Verdict -k RowTable`
 Expected: 9 tests, PASS
 
 - [ ] **Step 5: Commit**
