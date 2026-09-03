@@ -1,6 +1,6 @@
 import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from run import corpus_staleness, diff_baseline, render
+from run import _exit_code, corpus_staleness, diff_baseline, render
 
 BASE = {"versions": {"codex": "0.152.1", "claude": "2.1.258"},
         "cells": {"codex.rename": "ok", "codex.resumeCommand": "broken"}}
@@ -77,6 +77,46 @@ class CorpusStalenessTests(unittest.TestCase):
         self.assertEqual(
             corpus_staleness(corpus, {"codex": "0.152.1", "claude": "2.1.258"}),
             {"codex": ("0.150.0", "0.152.1")})
+
+
+class ExitCodeTests(unittest.TestCase):
+    """`error` never satisfies a baseline expectation and never reads as a statement about the
+    adapter -- so it must outrank plain drift whether it lands in `changed` or in `added`."""
+
+    def test_an_identical_matrix_is_exit_0(self):
+        m = {"versions": BASE["versions"], "cells": dict(BASE["cells"])}
+        code, failures = _exit_code(diff_baseline(BASE, m))
+        self.assertEqual(code, 0)
+        self.assertEqual(failures, {})
+
+    def test_a_regression_with_no_error_involved_is_exit_1(self):
+        m = {"versions": BASE["versions"], "cells": {**BASE["cells"], "codex.rename": "broken"}}
+        code, failures = _exit_code(diff_baseline(BASE, m))
+        self.assertEqual(code, 1)
+        self.assertEqual(failures, {})
+
+    def test_a_changed_cell_turning_to_error_is_exit_3_not_1(self):
+        m = {"versions": BASE["versions"], "cells": {**BASE["cells"], "codex.rename": "error"}}
+        code, failures = _exit_code(diff_baseline(BASE, m))
+        self.assertEqual(code, 3)
+        self.assertEqual(failures, {"codex.rename": ("ok", "error")})
+
+    def test_an_added_error_cell_is_exit_3_even_with_no_baseline_yet(self):
+        # This is the repo's exact current state: no `baseline.json` exists yet, so every cell
+        # shows up as `added` -- a wholly broken harness must not read as "capability drift".
+        diff = diff_baseline({"versions": {}, "cells": {}},
+                              {"versions": {}, "cells": {"codex.rebind": "error"}})
+        code, failures = _exit_code(diff)
+        self.assertEqual(code, 3)
+        self.assertEqual(failures, {"codex.rebind": "error"})
+
+    def test_a_cell_that_was_already_error_in_the_baseline_and_stays_error_is_not_a_new_failure(
+            self):
+        base = {"versions": {}, "cells": {"codex.needsRuntimeStart": "error"}}
+        m = {"versions": {}, "cells": {"codex.needsRuntimeStart": "error"}}
+        code, failures = _exit_code(diff_baseline(base, m))
+        self.assertEqual(code, 0)
+        self.assertEqual(failures, {})
 
 
 if __name__ == "__main__":

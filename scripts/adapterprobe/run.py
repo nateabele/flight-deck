@@ -3,9 +3,9 @@
 
 Implements the `ProbeContext` contract documented at the top of `capabilities.py` — exactly
 those six members (`probe`, `sandbox`, `pty`, `seed_one_turn`, `seeded_marker`, `versions`).
-Everything else on this class (`last_transcript`, `_probe_path`, `_timeout`, `_ptys`) is
-`run.py`'s own bookkeeping — for `--capture`, and for pty cleanup/timeout enforcement between
-rows; no row is allowed to reach for any of it.
+Everything else on this class (`last_transcript`, `_probe_path`, `_timeout`, `_ptys`,
+`_accepting_ptys`) is `run.py`'s own bookkeeping — for `--capture`, and for pty cleanup/timeout
+enforcement between rows; no row is allowed to reach for any of it.
 """
 import argparse, json, os, shutil, subprocess, sys, threading, time, traceback, uuid
 
@@ -36,11 +36,29 @@ CORPUS_DEST = {
 GLYPH = {"ok": "✓", "broken": "✗", "by-design": "⊘", "rotted": "!",
          "needs-auth": "🔒", "error": "?"}
 
-# A hard wall-clock cap per row. Nothing any row does -- a hung live pty, a wedged subprocess --
-# is allowed to cost more than this before the runner declares it dead, kills whatever it spawned,
-# and moves on. A single row spinning forever with no output is indistinguishable from the whole
-# run being dead; this is what makes that distinguishable.
-ROW_TIMEOUT = 120
+# A hard wall-clock cap per row, keyed by `row.tier` -- nothing any row does (a hung live pty, a
+# wedged subprocess) is allowed to cost more than this before the runner declares it dead, kills
+# whatever it spawned, and moves on. A single row spinning forever with no output is
+# indistinguishable from the whole run being dead; this is what makes that distinguishable.
+#
+# The cap must exceed the worst *bounded* chain a row of that tier can legitimately take before
+# any of its own component timeouts would have given up on their own -- otherwise a merely slow
+# (not hung) agent gets force-recorded as `error` on exactly the rows this suite exists to
+# measure, and the next task pins that wrong verdict into `baseline.json`.
+#
+# `_resume_command` (full tier) is the worst case: `prepare` (<= PROBE_TIMEOUT) + `seed_one_turn`
+# (its own launch-command probe <= PROBE_TIMEOUT, plus two 30s `term.wait`s, plus a fixed 20s
+# `term.pump`) + its own `resume-command` probe (<= PROBE_TIMEOUT) + a 60s attach `term.wait`.
+PROBE_TIMEOUT = 45  # ProbeContext.__init__'s own default `timeout=`
+_SEED_ONE_TURN_CHAIN = PROBE_TIMEOUT + 30 + 30 + 20  # == 125
+_WORST_FULL_CHAIN = PROBE_TIMEOUT + _SEED_ONE_TURN_CHAIN + PROBE_TIMEOUT + 60  # == 275
+
+ROW_TIMEOUT = {"cheap": 120, "full": 420}
+assert ROW_TIMEOUT["full"] > _WORST_FULL_CHAIN, (
+    "ROW_TIMEOUT['full'] must stay strictly greater than the worst bounded chain a full-tier "
+    "row can legitimately take -- if capabilities.py grows a longer chain than the one this "
+    "constant is computed from, update both."
+)
 
 
 def agent_versions():
@@ -97,6 +115,11 @@ class ProbeContext:
         # every row, whether that row returned, raised, or was abandoned mid-`wait()` by a
         # timeout. Closing an already-closed `PtyScreen` must be harmless.
         self._ptys = []
+        # Set by `_run_one` for the duration of exactly one row's execution. A pty is only ever
+        # legitimate while its owning row is still the one running; an orphaned daemon thread
+        # from a row that has already timed out has no business starting a fresh, credentialed
+        # agent that nothing left running would ever go on to close.
+        self._accepting_ptys = True
         self._dismiss_codex_onboarding()
 
     def _dismiss_codex_onboarding(self):
@@ -161,6 +184,10 @@ class ProbeContext:
         return out
 
     def pty(self, agent, cmd):
+        if not self._accepting_ptys:
+            raise RuntimeError(
+                "ctx.pty() called after this row already finished -- refusing to fork a "
+                "fresh agent that nothing would ever go on to close")
         term = PtyScreen(cmd, cwd=self.sandbox.root, env=self.sandbox.child_env(agent))
         self._ptys.append(term)
         return term
@@ -207,6 +234,7 @@ def _run_one(ctx, row, agent):
     returns regardless, records `error`, and lets process exit reap the thread later.
     """
     result = {}
+    cap = ROW_TIMEOUT[row.tier]
 
     def target():
         try:
@@ -214,18 +242,23 @@ def _run_one(ctx, row, agent):
         except Exception:
             result["exc"] = traceback.format_exc()
 
+    ctx._accepting_ptys = True
     start = time.time()
     t = threading.Thread(target=target, daemon=True)
     t.start()
-    t.join(ROW_TIMEOUT)
+    t.join(cap)
     elapsed = time.time() - start
     timed_out = t.is_alive()
+    # From here on, any pty this row's thread (or an orphan of it) still tries to open is
+    # refused -- see `ProbeContext.pty`'s guard -- before we close out whatever it already
+    # opened.
+    ctx._accepting_ptys = False
     try:
         ctx._close_ptys()
     except Exception:
         pass
     if timed_out:
-        return "error", f"row timed out after {elapsed:.1f}s (cap {ROW_TIMEOUT}s)", elapsed
+        return "error", f"row timed out after {elapsed:.1f}s (cap {cap}s)", elapsed
     if "exc" in result:
         return "error", result["exc"], elapsed
     obs = result["obs"]
@@ -276,6 +309,23 @@ def _capture(ctx):
         f.write("\n")
 
 
+def _exit_code(diff):
+    """0 clean, 1 capability drift, 3 harness failure -- and `error` never satisfies any
+    baseline expectation, so it always outranks plain drift. That has to hold whether the
+    `error` cell shows up in `changed` (something that used to read `ok` now reads `error`) or
+    in `added` (a cell with no baseline entry at all reads `error`) -- the latter is this
+    repo's exact current state before any `baseline.json` exists, and a wholly broken harness
+    must not be reported as mere "capability drift"."""
+    harness_failures = {k: v for k, v in diff["changed"].items()
+                         if v[1] == "error" and v[0] != "error"}
+    harness_failures.update({k: v for k, v in diff["added"].items() if v == "error"})
+    if harness_failures:
+        return 3, harness_failures
+    if diff["changed"] or diff["added"] or diff["removed"]:
+        return 1, harness_failures
+    return 0, harness_failures
+
+
 def build_probe():
     subprocess.run([BUILD_PROBE], check=True, cwd=REPO)
 
@@ -302,9 +352,16 @@ def main(argv=None):
     try:
         with AgentSandbox(keep=args.keep) as sb:
             ctx = ProbeContext(sb)
-            matrix = _run_matrix(ctx, tiers)
-            if args.capture:
-                _capture(ctx)
+            try:
+                matrix = _run_matrix(ctx, tiers)
+                if args.capture:
+                    _capture(ctx)
+            finally:
+                # `_run_one` already closes out every row's own ptys, but this is the backstop
+                # for anything a still-running orphan thread stashed in `ctx._ptys` after its
+                # row's own cleanup ran -- nothing is allowed to survive past the sandbox tree
+                # being torn down, no matter what state any leftover thread is in.
+                ctx._close_ptys()
     except UnsafeHome as e:
         print(f"refusing to proceed: {e}", file=sys.stderr)
         return 4
@@ -348,16 +405,10 @@ def main(argv=None):
         for k, (old, new) in sorted(diff["versions_changed"].items()):
             print(f"  v {k}: {old} -> {new}")
 
-    # A cell that turned to `error` where the baseline expected something else is the harness
-    # itself failing, not a capability regressing — must be distinguishable from plain drift.
-    harness_failures = {k: v for k, v in diff["changed"].items()
-                         if v[1] == "error" and v[0] != "error"}
+    code, harness_failures = _exit_code(diff)
     if harness_failures:
         print(f"harness failure: {harness_failures}", file=sys.stderr)
-        return 3
-    if diff["changed"] or diff["added"] or diff["removed"]:
-        return 1
-    return 0
+    return code
 
 
 if __name__ == "__main__":
