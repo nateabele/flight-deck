@@ -89,29 +89,29 @@ def agent_versions():
     }
 
 
-def pty_agent_version(sandbox, agent, cmd_name):
+def pty_agent_version(sandbox, agent, cmd_name, login_shell):
     """The SAME binary a live pty row actually launches -- not a second guess at it.
 
-    `ctx.pty` runs `["/bin/sh", "-lc", text]` under `sandbox.child_env(agent)`; `text` invokes
+    `ctx.pty` runs `[login_shell, "-lc", text]` under `sandbox.child_env(agent)`; `text` invokes
     `cmd_name` by bare name, so which binary answers depends on the login shell's own `PATH`
-    resolution (macOS's `path_helper`, run by `/etc/profile` on `-l`), not on whatever `PATH`
-    this Python process happened to inherit. Spawning the identical `PtyScreen(cmd, cwd, env)`
-    triple a row would use (rather than a bare `subprocess.run`) means this can never quietly
-    drift from what a row's own pty actually runs.
+    resolution (macOS's `path_helper`, run by `/etc/profile` on `-l`, plus that shell's own
+    profile), not on whatever `PATH` this Python process happened to inherit. Spawning the
+    identical `PtyScreen(cmd, cwd, env)` triple a row would use (rather than a bare
+    `subprocess.run`) means this can never quietly drift from what a row's own pty actually runs.
 
-    This is deliberately NOT claimed to be "the same shell Flight Deck itself uses" --
-    `Sources/FlightDeck/Agents/LoginShellPath.swift` resolves `ShellResolver.resolve()`
-    (the account's real `$SHELL`, `fish` on this machine) and its own `-lc` lookup, not `/bin/sh
-    -lc`. Checked directly: `fish -lc 'codex --version'` and `zsh -lc 'codex --version'` both
-    land on the SAME `codex` `agent_versions()` already reports (`~/.local/bin`), while `/bin/sh
-    -lc` -- what `ctx.pty` actually hardcodes -- lands on a different one (`/opt/homebrew/bin`).
-    So `*_pty` names what THIS HARNESS'S OWN pty rows exercise, which on a machine with more
-    than one `codex` on different paths need not be (and here, is not) the binary
-    `LoginShellPath` resolves for a real launch. See the README's version note for the numbers.
+    `login_shell` is `ProbeContext.login_shell` -- `Sources/FlightDeck/Agents/
+    ShellResolver.swift`'s own `resolve()` answer, fetched via `probe login-shell`, the exact
+    shell `LoginShellPath`/`CodexProcessTransport` launch through for a real spawn. This
+    deliberately mirrors the app's own shell resolution rather than reimplementing it: a probe
+    that launched a different shell than the app would resolve a different binary and measure
+    nothing about the app -- checked the hard way, when this used to hardcode `/bin/sh -lc` and
+    silently landed on a `codex` (`/opt/homebrew/bin`, `0.142.4`) the app never runs, while
+    `agent_versions()` and a real launch both land on `~/.local/bin` (`0.152.1`). See the
+    README's version note for the numbers.
     """
     marker = f"__adapterprobe_pty_version_{uuid.uuid4().hex[:8]}__"
     script = f"command -v {cmd_name}; {cmd_name} --version; echo {marker}"
-    term = PtyScreen(["/bin/sh", "-lc", script], cwd=sandbox.root, env=sandbox.child_env(agent))
+    term = PtyScreen([login_shell, "-lc", script], cwd=sandbox.root, env=sandbox.child_env(agent))
     try:
         term.wait([marker], 20)
         lines = [line.strip() for line in term.display().splitlines() if line.strip()]
@@ -185,6 +185,11 @@ class ProbeContext:
         self.seeded_marker = f"adapterprobe-seed-{uuid.uuid4().hex[:8]}: reply with exactly OK"
         self._probe_path = probe_path
         self._timeout = timeout
+        # The exact shell a real launch resolves -- `Sources/FlightDeck/Agents/
+        # ShellResolver.swift`'s own answer, reused via `probe login-shell` rather than
+        # re-derived here, so every `ctx.pty` launch below runs through the SAME shell
+        # `LoginShellPath`/`CodexProcessTransport` do, not a probe-side guess at it.
+        self.login_shell = self.probe(["login-shell"])["shell"]
         # Recorded here, not returned by any row: `main()`'s only way to find the transcript
         # a full-tier row produced, for `--capture`, without widening what a row may call.
         self.last_transcript = {}
@@ -205,7 +210,7 @@ class ProbeContext:
         # would use, so `self.versions` never has to be trusted as a guess about what a live
         # row ran.
         for agent, cmd_name in (("codex", "codex"), ("claude", "claude")):
-            version, path = pty_agent_version(sandbox, agent, cmd_name)
+            version, path = pty_agent_version(sandbox, agent, cmd_name, self.login_shell)
             self.versions[f"{agent}_pty"] = version
             self.versions[f"{agent}_pty_path"] = path
 
@@ -302,7 +307,7 @@ class ProbeContext:
         without depending on the model complying with the request folded into it."""
         text = self.probe(
             ["launch-command", agent, "--id", cid, "--cwd", self.sandbox.root])["text"]
-        with self.pty(agent, ["/bin/sh", "-lc", text]) as term:
+        with self.pty(agent, [self.login_shell, "-lc", text]) as term:
             if not term.wait([UP_MARKER[agent]], 30):
                 raise RuntimeError(f"{agent} never came up for seed_one_turn")
             term.send((self.seeded_marker + "\r").encode())

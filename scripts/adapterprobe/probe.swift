@@ -227,6 +227,15 @@ struct Probe {
             let env = await MainActor.run { claudeAdapter().environment(for: account) }
             await emit(env.mapValues { $0 as Any })
 
+        case "login-shell":
+            // The exact resolution `CodexProcessTransport.spawnEnvironment` relies on
+            // (`LoginShellPath` -> `ShellResolver.resolve()`) -- reused here, not
+            // reimplemented, so a probe-side guess about "the user's shell" can never drift
+            // from what a real launch actually asks for. No `override` is passed: this probe
+            // has no Preferences to read one from, and `nil` is exactly what a real launch
+            // with no override configured also passes.
+            await emit(["shell": ShellResolver.resolve()])
+
         case "launch-command", "resume-command":
             guard let agent = args.count > 1 ? agentID(args[1]) : nil,
                   let idRaw = flag(args, "--id"), let id = UUID(uuidString: idRaw),

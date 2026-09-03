@@ -164,7 +164,7 @@ def _has_status_registry(ctx, agent):
     text = ctx.probe(["launch-command", agent, "--id", cid, "--cwd", ctx.sandbox.root])["text"]
     home = _agent_home(ctx, agent)
     sessions_dir = os.path.join(home, "sessions")
-    with ctx.pty(agent, ["/bin/sh", "-lc", text]) as term:
+    with ctx.pty(agent, [ctx.login_shell, "-lc", text]) as term:
         term.pump(5)
         wrote_for_this_id = False
         if os.path.isdir(sessions_dir):
@@ -248,7 +248,7 @@ def _open_prompt_reader(ctx, agent):
     cid = prep["conversationID"]
     text = ctx.probe(["launch-command", "codex", "--id", cid, "--cwd", ctx.sandbox.root])["text"]
     home = ctx.sandbox.codex_home
-    with ctx.pty("codex", ["/bin/sh", "-lc", text]) as term:
+    with ctx.pty("codex", [ctx.login_shell, "-lc", text]) as term:
         term.wait([_UP_MARKER["codex"]], 30)
         term.send(b"Run the shell command: echo probe-approval-marker\r")
         appeared = term.wait(["Would you like to run the following command"], 45)
@@ -437,7 +437,7 @@ def _location(ctx, agent):
     prep = ctx.probe(["prepare", agent, "--cwd", ctx.sandbox.root])
     cid = prep["conversationID"]
     text = ctx.probe(["launch-command", agent, "--id", cid, "--cwd", ctx.sandbox.root])["text"]
-    with ctx.pty(agent, ["/bin/sh", "-lc", text]) as term:
+    with ctx.pty(agent, [ctx.login_shell, "-lc", text]) as term:
         up = term.wait([_UP_MARKER[agent]], 30)
         screen = term.display()
     named = ctx.sandbox.root in screen or os.path.basename(ctx.sandbox.root) in screen
@@ -449,7 +449,7 @@ def _launch_command(ctx, agent):
     prep = ctx.probe(["prepare", agent, "--cwd", ctx.sandbox.root])
     cid = prep["conversationID"]
     text = ctx.probe(["launch-command", agent, "--id", cid, "--cwd", ctx.sandbox.root])["text"]
-    with ctx.pty(agent, ["/bin/sh", "-lc", text]) as term:
+    with ctx.pty(agent, [ctx.login_shell, "-lc", text]) as term:
         up = term.wait([_UP_MARKER[agent]], 30)
     return Observation(declared=True, observed=up)
 
@@ -460,7 +460,7 @@ def _resume_command(ctx, agent):
     cid = prep["conversationID"]
     ctx.seed_one_turn(agent, cid)            # tier "full" only; see run.py
     text = ctx.probe(["resume-command", agent, "--id", cid, "--cwd", ctx.sandbox.root])["text"]
-    with ctx.pty(agent, ["/bin/sh", "-lc", text]) as term:
+    with ctx.pty(agent, [ctx.login_shell, "-lc", text]) as term:
         attached = term.wait([ctx.seeded_marker], 60)
         picker = any(m in term.display() for m in
                      ("Select a session", "Resume a session", "to navigate"))
@@ -516,7 +516,7 @@ def _rename(ctx, agent):
                                 detail=f"outbound: read back {outbound.get('title')!r}")
         resume_text = ctx.probe(["resume-command", "codex", "--id", cid,
                                   "--cwd", ctx.sandbox.root])["text"]
-        with ctx.pty("codex", ["/bin/sh", "-lc", resume_text]) as term:
+        with ctx.pty("codex", [ctx.login_shell, "-lc", resume_text]) as term:
             attached = term.wait([_UP_MARKER["codex"]], 30)
         if not attached:
             return Observation(declared=True, observed=False,
@@ -547,7 +547,7 @@ def _rename(ctx, agent):
                    f"even typed",
         )
     text = ctx.probe(["launch-command", "claude", "--id", cid, "--cwd", ctx.sandbox.root])["text"]
-    with ctx.pty("claude", ["/bin/sh", "-lc", text]) as term:
+    with ctx.pty("claude", [ctx.login_shell, "-lc", text]) as term:
         term.wait([_UP_MARKER["claude"]], 30)
         term.send(b"/rename probe-renamed\r")
         # Polled, not dwelled — for the same reason the on-screen echo check above was
@@ -565,7 +565,7 @@ def _rename(ctx, agent):
                             detail=f"outbound: transcript reads {outbound_title!r}")
     resume_text = ctx.probe(["resume-command", "claude", "--id", cid,
                               "--cwd", ctx.sandbox.root])["text"]
-    with ctx.pty("claude", ["/bin/sh", "-lc", resume_text]) as term:
+    with ctx.pty("claude", [ctx.login_shell, "-lc", resume_text]) as term:
         attached = term.wait([_UP_MARKER["claude"]], 30)
     if not attached:
         return Observation(declared=True, observed=False,
