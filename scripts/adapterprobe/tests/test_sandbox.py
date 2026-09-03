@@ -1,7 +1,7 @@
 import os, sys, tempfile, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from sandbox import AgentSandbox, UnsafeHome, guard_home
+from sandbox import AgentSandbox, UnsafeHome, guard_home, _CLAUDE_SESSION_MARKERS
 
 HOME = os.path.expanduser("~")
 
@@ -73,6 +73,44 @@ class SandboxTests(unittest.TestCase):
         # Cleanup on a failed construction is unconditional — even with keep=True (not the case
         # here, but the property __enter__ must hold regardless).
         self.assertFalse(os.path.exists(sb.root))
+
+
+class ChildEnvTests(unittest.TestCase):
+    """`child_env` needs no live agent — it is pure environment bookkeeping."""
+
+    def test_strips_every_claude_session_marker_even_when_present(self):
+        fake = {name: "1" for name in _CLAUDE_SESSION_MARKERS}
+        with mock.patch.dict(os.environ, fake):
+            with AgentSandbox() as sb:
+                child = sb.child_env("claude")
+        for name in _CLAUDE_SESSION_MARKERS:
+            self.assertNotIn(name, child, name)
+
+    def test_still_carries_the_sandboxed_config_dir(self):
+        with AgentSandbox() as sb:
+            child = sb.child_env("claude")
+        self.assertEqual(child["CLAUDE_CONFIG_DIR"], sb.claude_home)
+
+    def test_forces_session_persistence_for_claude_only(self):
+        with AgentSandbox() as sb:
+            self.assertEqual(
+                sb.child_env("claude")["CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"], "1")
+            self.assertNotIn(
+                "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", sb.child_env("codex"))
+
+    def test_codex_still_gets_its_own_home_var(self):
+        with AgentSandbox() as sb:
+            self.assertEqual(sb.child_env("codex")["CODEX_HOME"], sb.codex_home)
+
+    def test_the_markers_are_actually_gone_from_this_process_afterwards(self):
+        # The real fix has to reach `os.environ` itself — a `PtyScreen` forks *this*
+        # process, so a marker merely absent from the returned dict is not enough.
+        fake = {name: "1" for name in _CLAUDE_SESSION_MARKERS}
+        with mock.patch.dict(os.environ, fake):
+            with AgentSandbox() as sb:
+                sb.child_env("claude")
+            for name in _CLAUDE_SESSION_MARKERS:
+                self.assertNotIn(name, os.environ, name)
 
 
 if __name__ == "__main__":

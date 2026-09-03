@@ -16,6 +16,18 @@ CREDENTIALS = {
 }
 
 
+# Names Claude Code sets on any process it spawns as its own child. A `claude` that inherits
+# `CLAUDE_CODE_CHILD_SESSION` runs with transcript saving silently disabled -- no error, no
+# JSONL, just a status-line banner easy to miss -- which would misreport every claude row that
+# reads a transcript back as `broken` against a claude that actually works fine. This harness
+# commonly runs *inside* a Claude Code session itself, so this is not hypothetical.
+_CLAUDE_SESSION_MARKERS = (
+    "CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_EFFORT",
+)
+
+
 class UnsafeHome(Exception):
     pass
 
@@ -72,6 +84,27 @@ class AgentSandbox:
         if agent == "codex":
             return {"CODEX_HOME": self.codex_home}
         raise ValueError(f"unknown agent {agent!r}")
+
+    def child_env(self, agent):
+        """A COMPLETE environment for spawning `agent` as a live process -- not just the one
+        variable `env()` names.
+
+        `env()` alone is enough for `subprocess.run(..., env=...)`, which replaces the child's
+        environment outright. It is not enough for a `PtyScreen`, which forks *this* process
+        and then only `update()`s on top of whatever it already inherited at fork time -- it
+        never deletes a key. So the markers below have to be gone from this process's real
+        `os.environ` before any fork happens, not merely absent from the dict handed back
+        here. `scripts/livefuzz/fuzz.py` hits the identical trap driving a live `claude` pty
+        and works around it the same way: popping the markers from its own environment before
+        spawning.
+        """
+        for name in _CLAUDE_SESSION_MARKERS:
+            os.environ.pop(name, None)
+        e = dict(os.environ)
+        e.update(self.env(agent))
+        if agent == "claude":
+            e["CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"] = "1"
+        return e
 
     def __exit__(self, *exc):
         if self.root and not self.keep:
