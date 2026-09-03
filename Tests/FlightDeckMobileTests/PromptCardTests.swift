@@ -216,17 +216,64 @@ final class PromptCardTests: XCTestCase {
 
     // MARK: - Blocked: the dialog nothing on this build can read
 
-    /// **All three inputs are required — see `showsBlocked`'s own comment for why no pair of
-    /// them is enough on its own.** `exhausted` alone would draw Blocked over a card that is
+    /// **Every input is required — see `showsBlocked`'s own comment for why no subset of them
+    /// is enough.** `exhausted` alone would draw Blocked over a card that is
     /// simply present (row 2). `allowsAbort` alone would draw it before the chase has even
     /// finished (implied by row 1, where nothing has exhausted yet). And dropping `hasCard`
     /// would draw it whether or not a Mac too old to honour the abort ever gets asked (row 3).
-    /// Only row 4 — all three true — is Blocked.
+    /// Only the last row — everything lined up — is Blocked.
     func testBlockedAppearsOnlyAfterTheChaseGivesUpAndOnlyWhenAllowed() {
-        XCTAssertFalse(PromptCard.showsBlocked(exhausted: false, allowsAbort: true, hasCard: false))
-        XCTAssertFalse(PromptCard.showsBlocked(exhausted: true, allowsAbort: true, hasCard: true))
-        XCTAssertFalse(PromptCard.showsBlocked(exhausted: true, allowsAbort: false, hasCard: false))
-        XCTAssertTrue(PromptCard.showsBlocked(exhausted: true, allowsAbort: true, hasCard: false))
+        XCTAssertFalse(PromptCard.showsBlocked(
+            exhausted: false, allowsAbort: true, hasCard: false,
+            activity: "waiting", call: .noPrompt))
+        XCTAssertFalse(PromptCard.showsBlocked(
+            exhausted: true, allowsAbort: true, hasCard: true,
+            activity: "waiting", call: .noPrompt))
+        XCTAssertFalse(PromptCard.showsBlocked(
+            exhausted: true, allowsAbort: false, hasCard: false,
+            activity: "waiting", call: .noPrompt))
+        XCTAssertTrue(PromptCard.showsBlocked(
+            exhausted: true, allowsAbort: true, hasCard: false,
+            activity: "waiting", call: .noPrompt))
+    }
+
+    /// **The latch outlives the episode, and this is what stops it drawing a card.**
+    /// `blockedChaseExhausted` is cleared only from inside `chaseBlockedPrompt`, and the
+    /// screen's chase task returns *before* entering it once the session stops being
+    /// `waiting` — so a stuck episode that resolves at the keyboard leaves the flag `true`,
+    /// `blocked(...)` returning nil (`OpenPrompt.find` gates on `waiting`), and every
+    /// phone-side input to this predicate pointing at Blocked. Without the activity test the
+    /// card would sit on a busy or idle session forever, offering a destructive Abort the Mac
+    /// refuses `not_waiting` — silently, because `abortBlockedPrompt` discards its completion.
+    func testBlockedIsWithdrawnOnceTheSessionIsNoLongerWaiting() {
+        for activity in ["busy", "idle", nil] {
+            XCTAssertFalse(
+                PromptCard.showsBlocked(
+                    exhausted: true, allowsAbort: true, hasCard: false,
+                    activity: activity, call: .noPrompt),
+                "a latched exhaustion must not outlive the episode it was latched during " +
+                "(activity=\(activity ?? "nil"))")
+        }
+    }
+
+    /// **The Mac naming the dialog is the phone's problem, not the Mac's.** A body this build
+    /// cannot parse or a page that never landed exhausts the chase while the Mac's
+    /// `openPromptCall` names the call fine. Drawing Blocked there tells the reader *"This Mac
+    /// can't read the dialog on screen"* — false — and puts a blind Escape under it aimed at a
+    /// real tool call they were never shown. Only `.noPrompt`, the Mac agreeing it can name
+    /// nothing, earns the card.
+    func testBlockedIsNotDrawnOverADialogTheMacCanName() {
+        XCTAssertFalse(
+            PromptCard.showsBlocked(
+                exhausted: true, allowsAbort: true, hasCard: false,
+                activity: "waiting", call: .call("toolu_REAL")),
+            "a call the Mac names is a card this phone failed to build, not an unreadable " +
+            "dialog — Abort here would deny a tool call nobody was shown")
+        XCTAssertFalse(
+            PromptCard.showsBlocked(
+                exhausted: true, allowsAbort: true, hasCard: false,
+                activity: "waiting", call: .unreported),
+            "a Mac too old to report the field has said nothing about this dialog either way")
     }
 }
 

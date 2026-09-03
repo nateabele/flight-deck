@@ -98,9 +98,11 @@ struct DevicesSettingsTab: View {
             }
 
             Section("Blocked Prompts") {
-                // Off by default — see `PreferencesStore.allowsBlockedPromptAbort`. This is
-                // the only place the switch is surfaced; nothing reads it yet, so turning it
-                // on today changes nothing until a later build ships the command it gates.
+                // Off by default — see `PreferencesStore.allowsBlockedPromptAbort`. This is the
+                // only place the switch is surfaced. It gates `FleetCommand.abortPrompt` at
+                // `FleetService`'s own handler, before the store is touched at all, and it is
+                // also carried to phones as `WireSession.allowsBlockedAbort` so the Blocked
+                // card's button is not drawn on a Mac that would only refuse it.
                 Toggle(
                     "Allow phones to dismiss unreadable dialogs",
                     isOn: Binding(

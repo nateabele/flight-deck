@@ -116,6 +116,62 @@ final class SessionStoreAbortTests: XCTestCase {
         XCTAssertEqual(spy.events, [.escape], "abort sends one key and reads no viewport")
     }
 
+    // MARK: The Mac's own verdict on the dialog
+    //
+    // `makeStore` leaves `openPromptProbe` nil — a bare store has no dialog derivation at all —
+    // which reads as `.unavailable` and refuses nothing, so every test above exercises the same
+    // guards it always did. These three install one.
+
+    /// **A dialog this Mac can name is not this command's business.** Everything the phone
+    /// weighs before offering Abort is phone-side; an unparseable body or a page that never
+    /// landed leaves it looking identical over a call `PromptService` resolves perfectly well,
+    /// and Escape there blind-denies a real tool call the reader was never shown. A distinct
+    /// code, because none of the other refusals is true of this tab.
+    func testAbortIsRefusedWhenThisMacCanNameTheDialog() {
+        let (store, spy, id) = makeStore(activity: .waiting)
+        store.openPromptProbe = { _ in nil }
+
+        XCTAssertEqual(store.abortPrompt(in: id, token: UUID()), .promptNameable)
+        XCTAssertTrue(spy.events.isEmpty, "no key may be typed at a dialog that has an answer")
+    }
+
+    /// The refusal must not burn the token: a phone whose first tap was refused because the Mac
+    /// could momentarily name the dialog has to be able to tap again once it cannot.
+    func testARefusedNameableAbortLeavesTheTokenUnspent() {
+        let (store, spy, id) = makeStore(activity: .waiting)
+        let token = UUID()
+        store.openPromptProbe = { _ in nil }
+        XCTAssertEqual(store.abortPrompt(in: id, token: token), .promptNameable)
+
+        store.openPromptProbe = { _ in "prompt_changed" }
+        XCTAssertEqual(
+            store.abortPrompt(in: id, token: token), .dispatched,
+            "the token was never remembered, so the retry is a first attempt, not a replay"
+        )
+        XCTAssertEqual(spy.events, [.escape])
+    }
+
+    /// **The order, pinned.** The status gate outranks this one, so a session that has left
+    /// `waiting` is told `not_waiting` — the truer sentence, and the one the phone already
+    /// renders — rather than being told something about a dialog that is no longer up.
+    func testNotWaitingOutranksPromptNameable() {
+        let (store, spy, id) = makeStore(activity: .idle)
+        store.openPromptProbe = { _ in nil }
+
+        XCTAssertEqual(store.abortPrompt(in: id, token: UUID()), .notWaiting)
+        XCTAssertTrue(spy.events.isEmpty)
+    }
+
+    /// The guard's own premise: a probe that cannot name the dialog is the state this whole
+    /// feature exists for, and it must still dispatch.
+    func testAnUnnameableDialogStillDispatches() {
+        let (store, spy, id) = makeStore(activity: .waiting)
+        store.openPromptProbe = { _ in "prompt_changed" }
+
+        XCTAssertEqual(store.abortPrompt(in: id, token: UUID()), .dispatched)
+        XCTAssertEqual(spy.events, [.escape])
+    }
+
     // MARK: Token idempotency
 
     func testTheSameTokenTwiceAbortsOnce() {

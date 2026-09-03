@@ -2,17 +2,25 @@ import FleetKit
 import XCTest
 @testable import FlightDeck
 
-/// Whether a blocked tab's transcript is still being read from the right file, and the repair
-/// when a registry tick says otherwise.
+/// Whether a blocked tab's transcript is still being read from the right file, when this Mac
+/// says so out loud, and the repair when a registry tick says otherwise.
 ///
-/// **Isolated from `PromptLifecycleTests`, which owns what gets logged.** These tests drive
-/// `checkStuckPrompts` directly through `stuckCheckForTesting`, never through `applyRegistry`
-/// itself — `applyRegistry`'s own resolution loop (`ConversationPin.resolve`) would happily
-/// repoint an unanchored tab's `transcriptDirectory` to a fresh row's `cwd` on the very first
-/// tick it sees one, which would make "one silent tick, then a repair on the second" impossible
-/// to observe: the loop would have already done the repair before `checkStuckPrompts` got a
-/// turn. Calling the seam directly keeps that loop out of the picture, exactly as production
-/// keeps this check running *after* it (see the call site in `applyRegistry`).
+/// **Isolated from `PromptLifecycleTests`, which owns what a live transcript derives.** These
+/// tests drive `checkStuckPrompts` directly through `stuckCheckForTesting`, never through
+/// `applyRegistry` itself — `applyRegistry`'s own resolution loop would happily repoint an
+/// unanchored tab's `transcriptDirectory` to a fresh row's `cwd` on the very first tick it sees
+/// one, which would make "silence early, a record later" impossible to observe: the loop would
+/// have already done the repair before `checkStuckPrompts` got a turn. Calling the seam directly
+/// keeps that loop out of the picture, exactly as production keeps this check running *after* it
+/// (see the call site in `applyRegistry`). The seam still builds its `ConversationPin`
+/// resolutions through the same `pinResolutions` production uses, so the row-selection rule
+/// under test below is the real one.
+///
+/// **This file also owns whether the record is emitted at all.** It captures
+/// `promptLifecycleSink` rather than leaving `FleetTestHarness`'s silencing in force — which it
+/// did for a whole branch, with the consequence that deleting the `promptLifecycleSink(...)`
+/// call inside `checkStuckPrompts` left the entire suite green, on a branch whose headline
+/// deliverable is that one line.
 @MainActor
 final class SessionStoreStuckPromptTests: XCTestCase {
     /// The transcript `openPromptProbe` reads through the harness's real `PromptService`.
@@ -26,6 +34,11 @@ final class SessionStoreStuckPromptTests: XCTestCase {
     private var harness: FleetTestHarness?
     private var projectsRoot: URL!
     private var transcript: Transcript!
+    /// Everything the store filed while a test ran. See the class comment.
+    private var records: [PromptLifecycleRecord] = []
+    /// The store's `now()`, under the test's control: the report schedule is wall-clock, so a
+    /// test that could not move time could only ever observe its first rung.
+    private var clock = Date(timeIntervalSince1970: 1_000_000)
     private var tmp: URL { URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true) }
 
     override func setUpWithError() throws {
@@ -36,14 +49,18 @@ final class SessionStoreStuckPromptTests: XCTestCase {
     override func tearDown() async throws {
         harness?.service.stop()
         harness = nil
+        records = []
         try? FileManager.default.removeItem(at: projectsRoot)
     }
 
     // MARK: - Fixtures
 
-    private func entry(_ sessionID: UUID, cwd: String) -> ClaudeStatusFile.Entry {
-        .init(pid: 4242, sessionID: sessionID, activity: .waiting, waitingFor: nil,
-              startedAt: 1, cwd: cwd, procStart: "start-a")
+    private func entry(
+        _ sessionID: UUID, cwd: String, pid: pid_t = 4242, startedAt: Double = 1,
+        procStart: String = "start-a"
+    ) -> ClaudeStatusFile.Entry {
+        .init(pid: pid, sessionID: sessionID, activity: .waiting, waitingFor: nil,
+              startedAt: startedAt, cwd: cwd, procStart: procStart)
     }
 
     private func bashLine(_ id: String) -> String {
@@ -63,6 +80,9 @@ final class SessionStoreStuckPromptTests: XCTestCase {
         self.harness = harness
         harness.store.transcriptsRootOverride = projectsRoot
         harness.service.promptLifecycleForTesting = { _ in }
+        // The whole point of this fixture, and what `FleetTestHarness` silences by default.
+        harness.store.promptLifecycleSink = { [weak self] in self?.records.append($0) }
+        harness.store.now = { [weak self] in self?.clock ?? Date() }
         let transcript = Transcript()
         self.transcript = transcript
         harness.service.promptTailForTesting = { _, _ in transcript.lines }
@@ -72,37 +92,188 @@ final class SessionStoreStuckPromptTests: XCTestCase {
         return (harness.store, session.id)
     }
 
-    /// Makes the tab's dialog nameable, so a following tick resets the counter instead of
-    /// firing.
+    /// Makes the tab's dialog nameable, so a following tick ends the episode instead of
+    /// carrying it forward.
     private func makeFixtureCallNameable() {
         transcript.lines = [SourceLine(offset: 0, text: bashLine("toolu_FIX"))]
     }
 
-    // MARK: - Tests
-
-    func testSecondConsecutiveUnnameableTickRetargetsAMismatchedPath() throws {
-        let (store, tab) = openFixtureSession()
-        let original = store.transcriptDirectory(of: tab)
-        let worktree = tmp.appendingPathComponent(".claude/worktrees/w", isDirectory: true).path
-        let rows = [pid_t(4242): entry(store.pinnedConversationID(of: tab)!, cwd: worktree)]
-
-        store.stuckCheckForTesting(rows: rows)          // tick 1: ordinary race, silent
-        XCTAssertEqual(store.transcriptDirectory(of: tab), original)
-
-        store.stuckCheckForTesting(rows: rows)          // tick 2: stuck, and mismatched
-        XCTAssertEqual(store.transcriptDirectory(of: tab), worktree,
-                       "a mismatched path must be repaired on the spot, not left for a later tick")
+    private func advance(_ seconds: TimeInterval) {
+        clock = clock.addingTimeInterval(seconds)
     }
 
-    func testOneTickOfUnnameableEmitsNothingAndChangesNothing() throws {
+    /// Every `.stuck` this test has seen, unpacked into the fields worth asserting on.
+    private var stuckRecords: [(code: String, watched: String?, cwd: String?, matches: Bool)] {
+        records.compactMap { record in
+            guard case .stuck(let code, let watched, let cwd, let matches, _, _, _) = record.event
+            else { return nil }
+            return (code, watched, cwd, matches)
+        }
+    }
+
+    // MARK: - When the record is written
+
+    /// **The ordinary race must stay unremarkable.** claude writes its status file and its
+    /// transcript by independent paths, so `waiting` routinely lands a beat before the record
+    /// naming the call — 16:37:57 `unnamed` → 16:37:58 `opened`, from the incident this feature
+    /// was built for. A second of unnameability is that, and it must produce nothing at all.
+    func testASecondOfUnnameabilityIsAnOrdinaryRaceAndSaysNothing() throws {
         let (store, tab) = openFixtureSession()
         let original = store.transcriptDirectory(of: tab)!
         let rows = [pid_t(4242): entry(store.pinnedConversationID(of: tab)!, cwd: original)]
 
         store.stuckCheckForTesting(rows: rows)
+        advance(1)
+        store.stuckCheckForTesting(rows: rows)
 
+        XCTAssertTrue(records.isEmpty, "one beat of unnamed is the race, not a diagnosis")
+        XCTAssertEqual(store.stuckEpisodeForTesting(tab)?.reported, 0)
+    }
+
+    /// **The record exists, and this is the test that says so.** Deleting the
+    /// `promptLifecycleSink(...)` call in `checkStuckPrompts` has to fail here — for a whole
+    /// branch nothing did, because this file left the harness's silencing in force and
+    /// `PromptLifecycleLogTests` only ever constructed records by hand.
+    func testAStuckEpisodeEmitsExactlyOneRecordPerRung() throws {
+        let (store, tab) = openFixtureSession()
+        let original = store.transcriptDirectory(of: tab)!
+        let rows = [pid_t(4242): entry(store.pinnedConversationID(of: tab)!, cwd: original)]
+
+        store.stuckCheckForTesting(rows: rows)
+        advance(5)
+        store.stuckCheckForTesting(rows: rows)
+        XCTAssertEqual(stuckRecords.count, 1, "the first rung fires once the race is ruled out")
+
+        // Production ticks at ~2 Hz. Every one of these is a tick with nothing new to say.
+        for _ in 0..<10 {
+            advance(0.5)
+            store.stuckCheckForTesting(rows: rows)
+        }
+        XCTAssertEqual(
+            stuckRecords.count, 1,
+            "a rung fires once — this must never become a log line every 500ms"
+        )
+    }
+
+    /// **The whole reason the schedule repeats.** The first record of an episode is written
+    /// seconds in, when `fileAgeMs` and `lastRecordAgeMs` are young by construction and cannot
+    /// tell a 24-minute stall from a race about to resolve. Only a later line, taken when those
+    /// ages have grown with the wall clock, carries the spec's stated discriminator — and the
+    /// previous rule (two ticks, ~1s, once per episode) could never produce one.
+    func testALongStallKeepsReportingSoTheAgesEventuallyMeanSomething() throws {
+        let (store, tab) = openFixtureSession()
+        let original = store.transcriptDirectory(of: tab)!
+        let rows = [pid_t(4242): entry(store.pinnedConversationID(of: tab)!, cwd: original)]
+
+        store.stuckCheckForTesting(rows: rows)
+        var seen: [Int] = []
+        // Roughly the shape of the observed failures: 24 minutes to 3 hours.
+        for elapsed in [5.0, 30.0, 120.0, 600.0, 1_800.0, 7_200.0] {
+            clock = Date(timeIntervalSince1970: 1_000_000).addingTimeInterval(elapsed)
+            store.stuckCheckForTesting(rows: rows)
+            seen.append(stuckRecords.count)
+        }
+
+        XCTAssertEqual(seen, [1, 2, 3, 4, 5, 6], "each rung reports once, in order")
+        XCTAssertEqual(
+            store.stuckEpisodeForTesting(tab)?.reported, 6,
+            "and the ladder is spent — a stall longer than its last rung stays quiet"
+        )
+    }
+
+    /// A tick that crosses several rungs at once — the app spent the interval in the background
+    /// at `WatchClock.backgroundInterval`, or the Mac slept — files the one record it is due,
+    /// not a backlog of everything it missed.
+    func testATickThatSkipsSeveralRungsFilesOneRecord() throws {
+        let (store, tab) = openFixtureSession()
+        let original = store.transcriptDirectory(of: tab)!
+        let rows = [pid_t(4242): entry(store.pinnedConversationID(of: tab)!, cwd: original)]
+
+        store.stuckCheckForTesting(rows: rows)
+        advance(700)
+        store.stuckCheckForTesting(rows: rows)
+
+        XCTAssertEqual(stuckRecords.count, 1)
+        XCTAssertEqual(store.stuckEpisodeForTesting(tab)?.reported, 4,
+                       "the skipped rungs are spent, not queued")
+    }
+
+    /// The episode ends the moment the dialog can be named, and the next one starts from the
+    /// bottom of the ladder — otherwise a tab that blocked once would report instantly forever.
+    func testNamingTheDialogEndsTheEpisodeAndTheNextOneStartsOver() throws {
+        let (store, tab) = openFixtureSession()
+        let original = store.transcriptDirectory(of: tab)!
+        let rows = [pid_t(4242): entry(store.pinnedConversationID(of: tab)!, cwd: original)]
+
+        store.stuckCheckForTesting(rows: rows)
+        advance(5)
+        store.stuckCheckForTesting(rows: rows)
+        XCTAssertEqual(stuckRecords.count, 1)
+
+        makeFixtureCallNameable()
+        store.stuckCheckForTesting(rows: rows)
+        XCTAssertNil(store.stuckEpisodeForTesting(tab), "a named dialog closes the episode")
+
+        transcript.lines = []
+        store.stuckCheckForTesting(rows: rows)
+        advance(1)
+        store.stuckCheckForTesting(rows: rows)
+        XCTAssertEqual(stuckRecords.count, 1, "the new episode starts at the bottom of the ladder")
+    }
+
+    /// A tab that stops waiting closes its episode too — the same reset, for the other reason a
+    /// dialog goes away.
+    func testLeavingWaitingEndsTheEpisode() throws {
+        let (store, tab) = openFixtureSession()
+        let original = store.transcriptDirectory(of: tab)!
+        let rows = [pid_t(4242): entry(store.pinnedConversationID(of: tab)!, cwd: original)]
+
+        store.stuckCheckForTesting(rows: rows)
+        store.applyRegistryForTesting([tab: SessionStatus(activity: .busy)])
+        store.stuckCheckForTesting(rows: rows)
+
+        XCTAssertNil(store.stuckEpisodeForTesting(tab))
+        XCTAssertTrue(records.isEmpty)
+    }
+
+    // MARK: - What the record says
+
+    func testTheRecordCarriesTheVerdictAndBothPaths() throws {
+        let (store, tab) = openFixtureSession()
+        let original = store.transcriptDirectory(of: tab)!
+        let rows = [pid_t(4242): entry(store.pinnedConversationID(of: tab)!, cwd: original)]
+
+        store.stuckCheckForTesting(rows: rows)
+        advance(5)
+        store.stuckCheckForTesting(rows: rows)
+
+        let record = try XCTUnwrap(stuckRecords.first)
+        XCTAssertEqual(record.code, "prompt_changed", "the probe's own refusal, verbatim")
+        XCTAssertEqual(record.cwd, original, "the registry's cwd, as the pin resolved it")
+        XCTAssertEqual(
+            record.watched, store.watchedTranscriptURL(of: tab)?.path,
+            "the file this Mac is actually reading, not one recomputed for the log"
+        )
+        // The verdict itself is `SessionStore.pathMatches`, pinned on its own below — what
+        // matters here is that the record carries the two paths the verdict was taken over,
+        // and not two recomputed for the log.
+    }
+
+    // MARK: - The repair
+
+    func testAMismatchedPathIsRetargetedOnceTheEpisodeIsWorthReporting() throws {
+        let (store, tab) = openFixtureSession()
+        let original = store.transcriptDirectory(of: tab)
+        let worktree = tmp.appendingPathComponent(".claude/worktrees/w", isDirectory: true).path
+        let rows = [pid_t(4242): entry(store.pinnedConversationID(of: tab)!, cwd: worktree)]
+
+        store.stuckCheckForTesting(rows: rows)          // the ordinary race: silent, no repair
         XCTAssertEqual(store.transcriptDirectory(of: tab), original)
-        XCTAssertEqual(store.stuckTicksForTesting(tab), 1)
+
+        advance(5)
+        store.stuckCheckForTesting(rows: rows)
+        XCTAssertEqual(store.transcriptDirectory(of: tab), worktree,
+                       "a mismatched path must be repaired on the spot, not left for a later tick")
     }
 
     func testAMatchingPathIsNeverRetargeted() throws {
@@ -111,22 +282,52 @@ final class SessionStoreStuckPromptTests: XCTestCase {
         let rows = [pid_t(4242): entry(store.pinnedConversationID(of: tab)!, cwd: original)]
 
         store.stuckCheckForTesting(rows: rows)
+        advance(5)
         store.stuckCheckForTesting(rows: rows)
 
         XCTAssertEqual(store.transcriptDirectory(of: tab), original,
                        "a path that already agrees must not be churned")
     }
 
-    func testTheCounterResetsOnceTheDialogIsNameable() throws {
+    /// **Which registry row this reads, when more than one names the conversation.**
+    ///
+    /// This selection used to be `rows.values.first { $0.sessionID == pinnedConversationID }`,
+    /// which `ConversationPin.resolve`'s own comment rules out in as many words: `rows.values`
+    /// has no defined order, and two processes really can hold one conversation once resumes
+    /// are in play. The row it happened to return then decided both the recorded `registryCwd`
+    /// *and* the `retarget` below it — the same mutation the hardened path drives — so a tab
+    /// anchored to one process could be moved onto a second process's transcript on a coin
+    /// flip, manufacturing the exact "wrong file" cause the record beside it had just reported.
+    ///
+    /// Here the second row is strictly newer, so the unanchored tiebreak would prefer it and
+    /// `first` might return either; the tab is anchored to the first, and the anchor must win.
+    func testTheAnchoredRowIsChosenWhenTwoProcessesShareOneConversation() throws {
         let (store, tab) = openFixtureSession()
-        let original = store.transcriptDirectory(of: tab)!
-        let rows = [pid_t(4242): entry(store.pinnedConversationID(of: tab)!, cwd: original)]
+        let conversation = store.pinnedConversationID(of: tab)!
+        let mine = store.transcriptDirectory(of: tab)!
+        let theirs = tmp.appendingPathComponent("someone-elses-resume", isDirectory: true).path
 
-        store.stuckCheckForTesting(rows: rows)
-        makeFixtureCallNameable()
+        // The real path, so an anchor exists: `stuckCheckForTesting` resolves but applies
+        // nothing, and an unanchored tab would fall through to the newest-wins tiebreak.
+        store.applyRegistry([4242: entry(conversation, cwd: mine)])
+
+        let rows = [
+            pid_t(4242): entry(conversation, cwd: mine, pid: 4242, startedAt: 1),
+            pid_t(5555): entry(conversation, cwd: theirs, pid: 5555, startedAt: 99,
+                               procStart: "start-b"),
+        ]
+        advance(5)
         store.stuckCheckForTesting(rows: rows)
 
-        XCTAssertEqual(store.stuckTicksForTesting(tab), 0)
+        XCTAssertEqual(
+            stuckRecords.last?.cwd, mine,
+            "the record must name the row this tab is anchored to, not whichever the dictionary " +
+            "yielded first"
+        )
+        XCTAssertEqual(
+            store.transcriptDirectory(of: tab), mine,
+            "and the repair must not follow a second process onto its transcript"
+        )
     }
 
     /// Pins the exact string `openPromptProbe` hands `checkStuckPrompts` for its `.stuck`

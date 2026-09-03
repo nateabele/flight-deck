@@ -55,8 +55,16 @@ final class AbortPromptLoopbackTests: XCTestCase {
     /// A blocked claude tab behind a real socket, client attached, transcript tail substituted
     /// — the same fixture `AnswerLoopbackTests` stands up, so a wrongly wired arm would be
     /// caught the same way.
+    ///
+    /// **The tail is empty by default, and that is the fixture, not a shortcut.** An abort is
+    /// only ever offered for a dialog this Mac cannot name, and `dispatchAbort` now refuses one
+    /// it can (`prompt_nameable`) — so a fixture whose transcript names a call would be testing
+    /// the refusal on every test in this file rather than the path. An empty tail trips
+    /// `PromptService.openPrompt`'s `prompt_changed` guard the same way a record claude deferred
+    /// for two hours does, which is the state this whole feature exists for. Pass `nameable` to
+    /// stand up the opposite case.
     private func standUp(
-        allowsAbort: Bool
+        allowsAbort: Bool, nameable: Bool = false
     ) async throws -> (SpyInjector, FleetClient, FrameLog, LifecycleRecorder, UUID) {
         let harness = FleetTestHarness()
         self.harness = harness
@@ -67,7 +75,7 @@ final class AbortPromptLoopbackTests: XCTestCase {
         let spy = SpyInjector()
         harness.store.injectorOverride = spy
         harness.store.injectionSettle = { $0() }
-        let lines = [SourceLine(offset: 0, text: bashLine("toolu_BASH"))]
+        let lines = nameable ? [SourceLine(offset: 0, text: bashLine("toolu_BASH"))] : []
         harness.service.promptTailForTesting = { _, _ in lines }
         // Two routes write a `.aborted` record — `FleetService`'s own early gate, through
         // `prompts.lifecycleSink`, and `SessionStore.abortPrompt`, through `promptLifecycleSink`
@@ -142,8 +150,13 @@ final class AbortPromptLoopbackTests: XCTestCase {
         XCTAssertEqual(code, "abort_disabled")
         XCTAssertTrue(spy.events.isEmpty, "the store must never be reached")
         XCTAssertEqual(
-            recorder.records, [PromptLifecycleRecord(session: id, event: .aborted(code: "abort_disabled"))],
-            "the refusal is recorded even though the store never saw the attempt"
+            recorder.records,
+            [PromptLifecycleRecord(
+                session: id,
+                event: .aborted(code: "abort_disabled", sent: false, probe: .unavailable)
+            )],
+            "the refusal is recorded even though the store never saw the attempt, and with " +
+            "no probe verdict because this gate consults none"
         )
         XCTAssertEqual(emittedEvents(log), [])
     }
@@ -163,8 +176,13 @@ final class AbortPromptLoopbackTests: XCTestCase {
         }
         XCTAssertEqual(spy.events, [.escape], "abort is one key event and no screen read")
         XCTAssertEqual(
-            recorder.records, [PromptLifecycleRecord(session: id, event: .aborted(code: nil))],
-            "a dispatched abort is recorded with no error code"
+            recorder.records,
+            [PromptLifecycleRecord(
+                session: id,
+                event: .aborted(code: nil, sent: true, probe: .unnameable(code: "prompt_changed"))
+            )],
+            "a dispatched abort is recorded with no error code, as a key actually typed, and " +
+            "with what this Mac believed about the dialog when it typed it"
         )
         XCTAssertEqual(emittedEvents(log), [], "aborting must emit no fleet event")
     }
@@ -195,8 +213,13 @@ final class AbortPromptLoopbackTests: XCTestCase {
         }
         XCTAssertEqual(spy.events, [.escape], "the replay must not type a second Escape")
         XCTAssertEqual(
-            recorder.records, [PromptLifecycleRecord(session: id, event: .aborted(code: nil))],
-            "a duplicate still logs an attempt, with no error code"
+            recorder.records,
+            [PromptLifecycleRecord(
+                session: id,
+                event: .aborted(code: nil, sent: false, probe: .unnameable(code: "prompt_changed"))
+            )],
+            "a duplicate still logs an attempt and still reports no error code — `sent` is " +
+            "the only thing that tells it from the Escape above, which is why it exists"
         )
     }
 
@@ -220,8 +243,52 @@ final class AbortPromptLoopbackTests: XCTestCase {
         XCTAssertTrue(spy.events.isEmpty)
         XCTAssertEqual(
             recorder.records,
-            [PromptLifecycleRecord(session: unknown, event: .aborted(code: "unknown_session"))],
+            [PromptLifecycleRecord(
+                session: unknown,
+                event: .aborted(
+                    code: "unknown_session", sent: false,
+                    // The probe's own code, not the store's: `pushedOpenPrompt` puts its agent
+                    // test ahead of everything (see its doc), and an id naming no tab names no
+                    // agent either. Which refusal the probe gives here does not matter — any
+                    // refusal is `.unnameable`, and the store's own `unknown_session` is what
+                    // reaches the phone.
+                    probe: .unnameable(code: "unsupported_agent")
+                )
+            )],
             "recorded, even though the id names no session"
+        )
+    }
+
+    /// **The Mac refusing to take the phone's word about its own screen.** Everything the phone
+    /// weighs before drawing Blocked is phone-side — its chase exhausted, its feed holds no card
+    /// — and none of it is evidence that *this* Mac cannot name the dialog. A body this build
+    /// cannot parse, or a page that never landed, produces exactly that phone state over a call
+    /// `PromptService` resolves fine; an Escape there blind-denies a real tool call nobody was
+    /// ever shown. So the store asks its own derivation and refuses with a code of its own.
+    ///
+    /// Driven over the socket rather than against a stubbed probe because the wiring is half the
+    /// claim: `FleetService` installs `openPromptProbe` against the same real `PromptService`
+    /// that names the dialog, and the tail here holds a genuine `tool_use`, so this fails if the
+    /// probe is ever pointed at something that cannot see it.
+    func testAnAbortAtADialogThisMacCanNameIsRefused() async throws {
+        let (spy, client, log, recorder, id) = try await standUp(allowsAbort: true, nameable: true)
+        spy.showOptions(["Yes", "No"], selected: 0)
+
+        let cid = client.send(.abortPrompt(id: id, token: UUID()))
+        let (landed, frame) = reply(on: cid, in: log)
+        await fulfillment(of: [landed], timeout: 10)
+
+        guard case .err(cid, let code) = try XCTUnwrap(frame()) else {
+            return XCTFail("a nameable dialog must be answered, never Escaped blind")
+        }
+        XCTAssertEqual(code, "prompt_nameable")
+        XCTAssertTrue(spy.events.isEmpty, "no key may be typed at a call the Mac can name")
+        XCTAssertEqual(
+            recorder.records,
+            [PromptLifecycleRecord(
+                session: id, event: .aborted(code: "prompt_nameable", sent: false, probe: .nameable)
+            )],
+            "the record must say the Mac could name it — that is the whole audit of this hatch"
         )
     }
 }

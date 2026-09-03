@@ -301,6 +301,12 @@ struct SessionTimelineScreen: View {
                     model: model,
                     blockedChaseExhausted: model.blockedChaseExhausted,
                     allowsBlockedAbort: session?.allowsBlockedAbort ?? false,
+                    // The two liveness inputs `showsBlocked` needs, read from the same
+                    // `session` as the `blocked(...)` call above so the card's "is this
+                    // session still blocked, and does the Mac still agree it cannot name the
+                    // dialog" is asked of one snapshot rather than two.
+                    activity: session?.activity,
+                    openPromptCall: session?.openPromptCall ?? .unreported,
                     onAbortBlocked: { await onAbortBlocked(model.sessionID) }
                 )
                 PromptComposer(session: session, model: model)
