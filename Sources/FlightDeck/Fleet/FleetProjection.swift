@@ -37,7 +37,7 @@ enum FleetProjection {
     static func project(
         _ repo: Repo, statuses: [UUID: SessionStatus], unread: Set<UUID>,
         backgroundWork: Set<UUID>, openPromptCalls: [UUID: String],
-        apiErrors: [UUID: SessionAPIError] = [:],
+        apiErrors: [UUID: SessionAPIError],
         planGates: PlanGateService? = nil
     ) -> WireProject {
         WireProject(
