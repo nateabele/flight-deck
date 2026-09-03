@@ -194,4 +194,26 @@ final class FleetReplayFoldTests: XCTestCase {
     func testAnEmptyGapFoldsToNothing() {
         XCTAssertTrue(FleetReplay.fold([FleetEvent]()).isEmpty)
     }
+
+    /// Coalesced like `.activity`. A session that errors, is nudged, and errors again inside one
+    /// resume gap only needs its final state delivered — without a `FoldKey` the flap ships in
+    /// full, which is exactly the volume the fold exists to absorb.
+    func testRepeatedAPIErrorsForOneSessionCoalesce() {
+        let id = UUID()
+        let folded = FleetReplay.fold([
+            .apiErrorChanged(id: id, error: SessionAPIError(status: 529)),
+            .apiErrorChanged(id: id, error: nil),
+            .apiErrorChanged(id: id, error: SessionAPIError(status: 500, kind: "server_error")),
+        ])
+        XCTAssertEqual(folded.count, 1)
+        XCTAssertEqual(folded, [.apiErrorChanged(
+            id: id, error: SessionAPIError(status: 500, kind: "server_error"))])
+    }
+
+    /// Two sessions are two keys, so neither swallows the other.
+    func testAPIErrorsForDifferentSessionsDoNotCoalesce() {
+        let a = UUID(), b = UUID()
+        XCTAssertEqual(FleetReplay.fold([.apiErrorChanged(id: a, error: SessionAPIError(status: 529)),
+                             .apiErrorChanged(id: b, error: SessionAPIError(status: 529))]).count, 2)
+    }
 }
