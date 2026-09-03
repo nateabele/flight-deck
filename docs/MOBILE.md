@@ -149,6 +149,10 @@ none of them should ever grow an assertion here that merely re-reads the source:
 Each item is stated as an observable outcome, not "check it looks right". None of these are
 run by anything on this machine.
 
+### Session row status indicators
+
+The session list's rightmost status column shows one indicator per row. A red `exclamationmark.triangle.fill` appears for `WireSession.apiError` when a session's last turn died on an API error (e.g., a 529 overload). The badge displays the error code and reason from `SessionAPIError.label` in FleetKit (e.g., "Stopped — API error 529 (overloaded)") as its VoiceOver string rather than a re-pinned literal. **Deliberately takes precedence over every activity branch, including `nil`** — a session that died and whose process then exited has `activity == nil`, and that is the case the badge matters most for.
+
 1. Pair by scanning; the Mac's Devices tab shows the phone as Connected.
 2. Pair by typing the twelve-character code instead of scanning; same outcome. This is not a
    lesser path — it is what a user falls back to when they decline the camera, and it is the
