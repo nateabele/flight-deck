@@ -64,24 +64,13 @@
 
 #define countof(arr) (sizeof(arr) / sizeof((arr)[0]))
 
-enum PacketType {
-	MSG_CONTENT = 0,
-	MSG_ATTACH  = 1,
-	MSG_DETACH  = 2,
-	MSG_RESIZE  = 3,
-	MSG_REDRAW  = 4,
-	MSG_EXIT    = 5,
-};
-
-typedef struct {
-	unsigned int type;
-	size_t len;
-	union {
-		char msg[BUFSIZ];
-		struct winsize ws;
-		int i;
-	} u;
-} Packet;
+/* Flight Deck fork (Task 3): enum PacketType / Packet used to be declared inline
+ * here; factored into protocol.h, unchanged, so Tests/fd-abduco/test_replay.c can
+ * share the exact wire declarations with the daemon. See protocol.h. */
+#include "protocol.h"
+/* Flight Deck fork (Task 3): bounded output log, appended to on every PTY read
+ * and replayed to a client when it attaches. See fd_outlog.h. */
+#include "fd_outlog.h"
 
 typedef struct Client Client;
 struct Client {
@@ -114,6 +103,7 @@ typedef struct {
 	const char *session_name;
 	char host[255];
 	bool read_pty;
+	FdOutlog outlog; /* Flight Deck fork (Task 3): captured PTY output, replayed on attach */
 } Server;
 
 static Server server = { .running = true, .exit_status = -1, .host = "@localhost" };
@@ -391,6 +381,11 @@ static bool create_session(const char *name, char * const argv[]) {
 		errno = EADDRINUSE;
 		return false;
 	}
+
+	/* Flight Deck fork (Task 3): captured-output budget, in bytes; overridable via
+	 * FD_OUTLOG_BUDGET for testing, defaults to 4 MiB inside fd_outlog_init(). */
+	const char *outlog_budget = getenv("FD_OUTLOG_BUDGET");
+	fd_outlog_init(&server.outlog, outlog_budget ? (size_t)strtoull(outlog_budget, NULL, 10) : 0);
 
 	if (pipe(client_pipe) == -1)
 		return false;
