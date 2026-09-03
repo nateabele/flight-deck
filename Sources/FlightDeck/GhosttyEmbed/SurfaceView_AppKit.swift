@@ -1645,6 +1645,12 @@ extension Ghostty {
             return ok
         }
 
+        // Flight Deck: font-size menu items reuse `performBindingAction` above rather than
+        // open-coding the four-line dance the older handlers use.
+        @IBAction func increaseFontSize(_ sender: Any?) { performBindingAction("increase_font_size:1") }
+        @IBAction func decreaseFontSize(_ sender: Any?) { performBindingAction("decrease_font_size:1") }
+        @IBAction func resetFontSize(_ sender: Any?)    { performBindingAction("reset_font_size") }
+
         @IBAction override func selectAll(_ sender: Any?) {
             guard let surface = self.surface else { return }
             let action = "select_all"
