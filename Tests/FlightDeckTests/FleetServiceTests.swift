@@ -581,6 +581,45 @@ final class FleetServiceTests: XCTestCase {
                        "a client's search.open must not move the desk's selection off elsewhere")
     }
 
+    /// **The common case, and the one round 1 missed.** Most phone searches land on a
+    /// conversation that already has an open tab — the already-live recheck below the resume
+    /// branch — not a fresh resume. Asserting the reply still carries the live tab's id is what
+    /// keeps this from passing on a request the Mac quietly refused: the phone still needs that
+    /// id to navigate its own side even though the Mac's selection does not move.
+    func testASearchOpenForAnAlreadyOpenTabLeavesTheDesksSelectionAlone() async throws {
+        let (store, key, port) = try await standUp()
+        // A session's `pinnedConversationID` defaults to its own id (see `Session.init`),
+        // which is exactly "this tab, already open" — no separate pinning call needed.
+        let alreadyOpen = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+        let elsewhere = store.newSession(in: URL(fileURLWithPath: "/w/elsewhere"))
+        store.selectSession(elsewhere.id)
+
+        var repliedID: UUID?
+        let opened = expectation(description: "session")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.openConversation(
+                    conversationID: alreadyOpen.pinnedConversationID.uuidString,
+                    projectPath: "/w/alpha"
+                ))
+            }
+            if case .err = frame { XCTFail("this launch must succeed") }
+            if case .session(_, let id) = frame {
+                repliedID = id
+                opened.fulfill()
+            }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [opened], timeout: 10)
+
+        XCTAssertEqual(repliedID, alreadyOpen.id,
+                       "the phone still needs the live tab's id to navigate its own side")
+        XCTAssertEqual(store.selectedSessionID, elsewhere.id,
+                       "a client's search.open must not move the desk's selection off elsewhere, even onto a tab already open")
+    }
+
     /// **The judgement call, pinned so it cannot be simplified away.** With nothing selected on
     /// the Mac, there is no focus for a client action to steal, and the alternative is a sidebar
     /// showing tabs over an empty pane — so a client action selects anyway, exactly as a desk

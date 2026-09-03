@@ -74,6 +74,68 @@ final class OpenConversationTests: XCTestCase {
         XCTAssertEqual(store.selectedSessionID, session.id)
     }
 
+    // MARK: - The client-selection rule: the two paths round 1's brief missed
+
+    /// Round 1's brief said `openConversation` had two selection writes; it has four — this
+    /// is the already-live recheck above, the same guard `testOpeningAnAlreadyOpenConversationSelectsItsTabRatherThanResuming`
+    /// exercises at the default. That test alone is what confirms ⌘K still selects here: it
+    /// takes no `selecting:` argument, gets the default `true`, and still passes.
+    ///
+    /// This test is the client half: `selecting: false` must leave the desk's selection alone,
+    /// while still returning the live tab's id — the phone needs that id to navigate its own
+    /// side, even though the Mac does not move.
+    func testAClientResumeRequestForAnAlreadyOpenConversationLeavesTheDesksSelectionAlone() {
+        let store = makeStore()
+        let session = store.newSession(in: projectA)
+        let elsewhere = store.newSession(in: projectA)
+        store.selectSession(elsewhere.id)
+
+        let opened = store.openConversation(.resume(
+            conversationID: session.pinnedConversationID.uuidString, projectPath: projectA.path,
+            title: "ignored", transcriptDirectory: projectA.path
+        ), directoryExists: { _ in true }, selecting: false)
+
+        XCTAssertEqual(opened, session.id, "the caller still needs the live tab's id")
+        XCTAssertEqual(store.repos.flatMap(\.sessions).map(\.id).sorted(), [session.id, elsewhere.id].sorted(),
+                       "no second tab may be filed for a conversation already open")
+        XCTAssertEqual(store.selectedSessionID, elsewhere.id,
+                       "a client request must not move the desk's selection off elsewhere")
+    }
+
+    /// The other missed path: `.select(id)`, reached when a search result already names an
+    /// open tab directly (`SearchActivation.plan`'s own `.session` case, or a conversation id
+    /// match) rather than resolving through the resume machinery above. Default `selecting:
+    /// true` is what ⌘K's Return relies on — pinned here so it cannot regress alongside the
+    /// client-selection rule.
+    func testSelectingAnAlreadyOpenTabByIDSelectsAtTheDeskDefault() {
+        let store = makeStore()
+        let session = store.newSession(in: projectA)
+        let elsewhere = store.newSession(in: projectA)
+        store.selectSession(elsewhere.id)
+
+        let opened = store.openConversation(.select(session.id))
+
+        XCTAssertEqual(opened, session.id)
+        XCTAssertEqual(store.selectedSessionID, session.id,
+                       "⌘K's Return must still land on the tab it selected")
+    }
+
+    /// The client half of `.select`: a phone action naming an already-open tab must not move
+    /// the desk's selection off whatever is on screen, even though it still reports the tab's
+    /// id back to the caller.
+    func testSelectingAnAlreadyOpenTabByIDFromAClientLeavesTheDesksSelectionAlone() {
+        let store = makeStore()
+        let session = store.newSession(in: projectA)
+        let elsewhere = store.newSession(in: projectA)
+        store.selectSession(elsewhere.id)
+
+        let opened = store.openConversation(.select(session.id), selecting: false)
+
+        XCTAssertEqual(opened, session.id, "the caller still needs the tab's id")
+        XCTAssertEqual(store.selectedSessionID, elsewhere.id,
+                       "a client's .select must not move the desk's selection off elsewhere")
+    }
+
     // MARK: - Un-collapsing the target project
 
     func testResumingIntoACollapsedProjectUncollapsesIt() {

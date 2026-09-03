@@ -2979,12 +2979,14 @@ final class SessionStore: ObservableObject {
     /// naming the wrong conversation. Returning the id directly makes that failure mode
     /// unrepresentable rather than relying on every caller to remember the gap.
     ///
-    /// - Parameter selecting: whether a filed or resumed tab may become the Mac's selection.
-    ///   Defaults to true — ⌘K and the search panel's `onSelect` already expect Return to land
-    ///   on what it opened. `FleetService` passes `false` for the phone's `search.open`: a
-    ///   command arriving from a client must never move the desk's selection off whatever is on
-    ///   screen. Threaded through the two places this method itself assigns
-    ///   `selectedSessionID` — the project-row branch and the resume branch below — via
+    /// - Parameter selecting: whether a filed, resumed, or already-open tab may become the
+    ///   Mac's selection. Defaults to true — ⌘K and the search panel's `onSelect` already
+    ///   expect Return to land on what it opened. `FleetService` passes `false` for the phone's
+    ///   `search.open`: a command arriving from a client must never move the desk's selection
+    ///   off whatever is on screen. The return value is unaffected either way — the phone still
+    ///   needs the id it asked about to navigate its own side. Threaded through all four places
+    ///   this method resolves a tab to hand back — the `.select` branch, the project-row
+    ///   branch, the already-live recheck, and the resume branch below — via
     ///   `select(_:selecting:)`.
     @discardableResult
     func openConversation(
@@ -3001,11 +3003,12 @@ final class SessionStore: ObservableObject {
 
         switch activation {
         case .select(let id):
-            // `selectSession` is itself a no-op when `id` names no live tab — checked again
-            // here rather than trusted, so a stale id (a tab closed between `plan` and this
-            // call) reports `nil` instead of an id that does not resolve to anything.
+            // `selectSession` would itself be a no-op when `id` names no live tab — checked
+            // here directly (rather than via that method) so this can honour `selecting` too:
+            // a stale id (a tab closed between `plan` and this call) still reports `nil`
+            // instead of an id that does not resolve to anything.
             guard locate(id) != nil else { return nil }
-            selectSession(id)
+            select(id, selecting: selecting)
             return id
         case .resume(let conversation, let project, let resultTitle, _):
             projectPath = project; conversationID = conversation; title = resultTitle
@@ -3044,7 +3047,7 @@ final class SessionStore: ObservableObject {
         // second `claude --resume` starts on a conversation that already has a tab, two
         // processes appending one transcript and colliding in claude's pid-keyed registry.
         if let live = repos.flatMap(\.sessions).first(where: { $0.pinnedConversationID == pinned }) {
-            selectSession(live.id)
+            select(live.id, selecting: selecting)
             return live.id
         }
 
