@@ -1,4 +1,5 @@
 import AppKit
+import FleetKit
 import SwiftUI
 
 /// A phone is on this conversation right now.
@@ -119,7 +120,8 @@ private struct SessionRow: View {
                 SessionStatusIcon(
                     status: store.status(for: session.id),
                     unread: store.unreadIdle.contains(session.id),
-                    hasBackgroundWork: store.backgroundWorkSessions.contains(session.id)
+                    hasBackgroundWork: store.backgroundWorkSessions.contains(session.id),
+                    apiError: store.apiErrors[session.id]
                 )
             }
 
