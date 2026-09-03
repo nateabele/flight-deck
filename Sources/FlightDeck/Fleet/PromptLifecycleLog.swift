@@ -82,6 +82,25 @@ struct PromptLifecycleRecord: Equatable {
         /// now, or `nil` when it believes none is. Side by side they say which machine was
         /// wrong. `code` is `nil` for an answer that was accepted.
         case answer(sent: String, open: String?, code: String?)
+        /// A dialog this Mac still cannot name a second tick after it first could not.
+        ///
+        /// **One tick of `unnamed` is ordinary** — claude writes its status file and its
+        /// transcript by independent paths, so `waiting` routinely arrives first and the very
+        /// next poll names the call (16:37:57 `unnamed` → 16:37:58 `opened`). This case is the
+        /// state that is NOT that: still blocked, still unnameable, and now worth a person's
+        /// attention. It carries the two paths side by side because which of them is wrong is
+        /// the whole question — `pathMatches == false` is this Mac reading a file `claude`
+        /// left, and `pathMatches == true` with a stale `lastRecordAgeMs` is a record that was
+        /// never written, which is upstream and not ours.
+        case stuck(
+            code: String, watched: String?, registryCWD: String?, pathMatches: Bool,
+            fileAgeMS: Int?, lastRecordAgeMS: Int?, tailRecords: Int
+        )
+        /// An Escape sent at a dialog nothing could name. A sibling of `answer`, not a reuse of
+        /// it: `answer` carries `sent` and `open` so a reader can see which machine was wrong
+        /// about *which call*, and an abort names no call on either side. Forcing a sentinel
+        /// through those fields would make "no call id by construction" read as a truncated line.
+        case aborted(code: String?)
     }
 
     /// `nil` only for `resumed`, which is about a connection rather than a session.
@@ -128,6 +147,15 @@ struct PromptLifecycleRecord: Equatable {
             // of them being omitted when it is absent would make "the Mac had nothing open"
             // look like a truncated line.
             return "answer sent=\(sent) open=\(open ?? "none") code=\(code ?? "ok")"
+        case .stuck(let code, let watched, let registryCWD, let matches,
+                    let fileAge, let recordAge, let tail):
+            return "stuck code=\(code) pathMatches=\(matches)"
+                + " watched=\(watched ?? "-") registryCwd=\(registryCWD ?? "-")"
+                + " fileAgeMs=\(fileAge.map(String.init) ?? "-")"
+                + " lastRecordAgeMs=\(recordAge.map(String.init) ?? "-")"
+                + " tailRecords=\(tail)"
+        case .aborted(let code):
+            return "abort code=\(code ?? "ok")"
         }
     }
 
