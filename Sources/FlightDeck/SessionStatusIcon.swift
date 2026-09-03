@@ -1,3 +1,4 @@
+import FleetKit
 import SwiftUI
 
 /// The status glyph at the trailing edge of a sidebar row.
@@ -24,9 +25,28 @@ struct SessionStatusIcon: View {
     let status: SessionStatus?
     var unread: Bool = false
     var hasBackgroundWork: Bool = false
+    var apiError: SessionAPIError?
 
     var body: some View {
-        if let status {
+        if let apiError {
+            // Wins outright — over the idle dot, over unread, and over the activity glyph.
+            //
+            // The justification is the clearing rule: this flag only survives while no newer
+            // transcript record has arrived, so if it is set, the last thing that actually happened
+            // in this conversation WAS an error, whatever the status file currently claims. A status
+            // file reading `busy` against a transcript whose last record is a failure is precisely
+            // the stale-status case this badge exists to expose, so deferring to it would defeat the
+            // feature. The window is small: the first record of a genuine new turn clears the flag.
+            //
+            // Red and a triangle: distinct in BOTH channels, per the HIG rule this file already
+            // enforces. Orange is spoken for by `waiting` and must not be reused.
+            symbol("exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+                .help(apiError.label)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(apiError.label)
+                .accessibilityIdentifier("session-status")
+        } else if let status {
             HStack(spacing: 2) {
                 glyph(for: status.activity)
                 if status.activity == .busy, status.subagentCount > 0 {
