@@ -160,6 +160,12 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     ///
     /// `.unreported` by default, because a value nobody set is nobody's assertion.
     public var openPromptCall: OpenPromptIdentity
+    /// Whether this Mac will honour `prompt.abort` for this tab.
+    ///
+    /// Carried rather than derived because it is a fact about the *Mac's* preferences, which
+    /// the phone has no other way to see. Defaulted so a snapshot written by an older Mac
+    /// decodes as off — the safe direction for a control that drives a terminal.
+    public var allowsBlockedAbort: Bool = false
 
     public init(
         id: UUID, title: String, agent: String,
@@ -167,7 +173,8 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         subagentCount: Int = 0, isUnread: Bool = false,
         hasBackgroundWork: Bool = false,
         planGate: WirePlanGate? = nil,
-        openPromptCall: OpenPromptIdentity = .unreported
+        openPromptCall: OpenPromptIdentity = .unreported,
+        allowsBlockedAbort: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -179,6 +186,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         self.hasBackgroundWork = hasBackgroundWork
         self.planGate = planGate
         self.openPromptCall = openPromptCall
+        self.allowsBlockedAbort = allowsBlockedAbort
     }
 
     /// Spelled out rather than synthesized, because `openPromptCall` is not `Codable` — its
@@ -195,7 +203,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
     /// `testSessionWithAGateRoundTrips` is what keeps it that way.
     enum CodingKeys: String, CodingKey {
         case id, title, agent, activity, waitingFor, subagentCount, isUnread
-        case hasBackgroundWork, planGate, openPromptCall
+        case hasBackgroundWork, planGate, openPromptCall, allowsBlockedAbort
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -212,6 +220,7 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         // that predates the gate must see the same bytes for a tab with none.
         try c.encodeIfPresent(planGate, forKey: .planGate)
         try c.encode(openPromptCall, forKey: .openPromptCall)
+        try c.encode(allowsBlockedAbort, forKey: .allowsBlockedAbort)
     }
 
     public init(from decoder: any Decoder) throws {
@@ -247,5 +256,9 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         // both decode as no gate, not as an error. See `WirePlanGate` for why the fact is
         // carried at all rather than derived like everything else here.
         planGate = try c.decodeIfPresent(WirePlanGate.self, forKey: .planGate)
+        // Absent from a Mac built before this preference existed, and from a Mac where the
+        // user never turned it on — both decode as off, the safe direction for a control
+        // that drives a terminal blind.
+        allowsBlockedAbort = try c.decodeIfPresent(Bool.self, forKey: .allowsBlockedAbort) ?? false
     }
 }
