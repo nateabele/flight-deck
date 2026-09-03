@@ -26,4 +26,16 @@ final class GhosttyDefaultsTests: XCTestCase {
     func testCommandShiftTRemainsUnbound() throws {
         XCTAssertTrue(try defaultsConfig().contains("keybind = super+shift+t=unbind"))
     }
+
+    /// libghostty's font-size chords unbound, so a live surface cannot resize itself out of
+    /// sync with `Preferences.terminalFontSize` — see `FontSizeCommands` and this file's
+    /// entry in `GhosttyDefaults.conf`. Missing any of the four fails exactly as silently as
+    /// the performable unbinds above: no error, just desync the next time that chord fires.
+    func testFontSizeChordsAreUnbound() throws {
+        let config = try defaultsConfig()
+        XCTAssertTrue(config.contains("keybind = super+equal=unbind"))
+        XCTAssertTrue(config.contains("keybind = super+plus=unbind"))
+        XCTAssertTrue(config.contains("keybind = super+minus=unbind"))
+        XCTAssertTrue(config.contains("keybind = super+zero=unbind"))
+    }
 }

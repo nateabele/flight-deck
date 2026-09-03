@@ -17,6 +17,7 @@ final class OpenConversationTests: XCTestCase {
             return nil
         }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     private final class SpyReporter: AgentLaunchFailureReporting {

@@ -280,6 +280,7 @@ final class CodexResumeTests: XCTestCase {
             return nil
         }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     /// Records what would have been typed at the restored tab's shell.

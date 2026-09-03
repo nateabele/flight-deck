@@ -19,6 +19,7 @@ final class PromptIdentityWireTests: XCTestCase {
     private final class StubProvider: SurfaceProvider {
         func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? { nil }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     /// The transcript the tail seam serves, rewritten between phases of one test.

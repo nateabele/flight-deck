@@ -571,6 +571,7 @@ final class AccountLaunchTests: XCTestCase {
             return nil
         }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     /// Restores a posed snapshot and discards every write, so nothing here reaches the

@@ -16,6 +16,7 @@ final class ReopenClosedSessionTests: XCTestCase {
             return nil
         }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     private struct SilentReporter: AgentLaunchFailureReporting {

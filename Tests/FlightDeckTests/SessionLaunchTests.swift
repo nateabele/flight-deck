@@ -11,6 +11,7 @@ final class SessionLaunchTests: XCTestCase {
             return nil
         }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     func testLaunchesClaudeBoundToSessionUUID() {
