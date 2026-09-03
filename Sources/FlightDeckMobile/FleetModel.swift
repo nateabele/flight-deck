@@ -42,15 +42,17 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// update — and an observed mutation there would invalidate the very view that is being
     /// built. Nothing renders this dictionary; the screens observe the models in it.
     @ObservationIgnored private var timelineModels: [UUID: SessionTimelineModel] = [:]
-    /// One token per session that has asked to abort a blocked dialog, minted on first use and
-    /// reused after — see `abortBlockedPrompt(session:)`'s own comment for why this is scoped
-    /// to the pairing rather than to the blocked episode.
+    /// One token per session with a *currently open* blocked dialog, minted on first abort tap
+    /// and reused for a second tap on that same dialog — see `abortBlockedPrompt(session:)`'s
+    /// own comment for why this must not outlive the episode it was minted for, and
+    /// `noteSessionActivity(_:waiting:)` for how it is dropped once that episode resolves.
     @ObservationIgnored private var blockedAbortTokens: [UUID: UUID] = [:]
     /// Every `FleetCommand` handed to `sendPrompt`, in order. Exists for tests only:
     /// `FleetModel.fixture()` leaves `connector` nil, so `sendPrompt` completes synchronously
     /// with `.disconnected` and there would otherwise be nothing to assert `abortBlockedPrompt`
     /// against — no protocol stub sits between it and `sendPrompt`, both being methods on this
-    /// same type.
+    /// same type. Cleared in `unpair()`, alongside `blockedAbortTokens`, so a long-lived pairing
+    /// does not accumulate every prompt a person ever typed for the life of the process.
     @ObservationIgnored private(set) var sentCommands: [FleetCommand] = []
 
     init(store: any PairedMacStoring = KeychainPairedMacStore()) {
@@ -230,11 +232,14 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // content, not fleet-independent fact, and the next Mac's project paths coinciding
         // with this one's would otherwise render titles that Mac never closed.
         recentlyClosed = []
-        // The dedup this guards is scoped to a pairing, not to a device: a token minted for
-        // this Mac's session id would collapse a genuinely new abort on a *different* Mac that
-        // later reuses the same id, which is exactly the reuse `unpair()` already guards against
-        // above for `timelineModels`.
+        // A token is scoped to one blocked episode (see `noteSessionActivity(_:waiting:)`), but
+        // that alone would not save a token minted for this Mac's session id from colliding
+        // with a genuinely new abort on a *different* Mac that later reuses the same id — the
+        // same reuse `unpair()` already guards against above for `timelineModels`.
         blockedAbortTokens.removeAll()
+        // Same privacy reasoning as `timelineModels` above: this is prompt content from the
+        // pairing being revoked, not fleet-independent fact, and must not survive it.
+        sentCommands.removeAll()
         state = .idle
         lastLive = nil
         pairingProgress = nil
@@ -461,24 +466,46 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// comment for why it names a session rather than a call, and `PromptCard.showsBlocked` for
     /// when this is ever offered at all.
     ///
-    /// **One token per session, minted once and reused on every later call.** The button gives
-    /// no feedback of its own — nothing tears the Blocked card down until the Mac's status
-    /// actually moves on — so a second tap is the ordinary response to the first appearing to
-    /// do nothing. Sent with the same token, it reaches `SessionStore.answeredPromptTokens` as
-    /// a replay and collapses to `.duplicate` there rather than pressing Escape twice.
+    /// **One token per blocked episode, minted on the first tap and reused by any later tap on
+    /// that same dialog.** The button gives no feedback of its own — nothing tears the Blocked
+    /// card down until the Mac's status actually moves on — so a second tap is the ordinary
+    /// response to the first appearing to do nothing. Sent with the same token, it reaches
+    /// `SessionStore.answeredPromptTokens` as a replay and collapses to `.duplicate` there
+    /// rather than pressing Escape twice.
     ///
-    /// **Scoped to the session for the pairing's lifetime, not to the blocked episode.**
-    /// Nothing held here distinguishes "the same dialog, tapped again" from "a new dialog on a
-    /// session that was blocked before" — both are just this session's id — and the Mac's own
-    /// table draws no finer a line either: it clears `id`'s tokens only when that tab closes
-    /// (`SessionStore`), not per dialog. A phone-side cache keyed any narrower would claim a
-    /// precision neither end of the wire actually has. `unpair()` clears this, alongside
-    /// `timelineModels`, for the same reason: a token minted for one Mac's session id must not
-    /// dedup an abort meant for a different Mac that later reuses it.
+    /// **Scoped to the episode, not to the session for the pairing's lifetime.** A session id
+    /// alone cannot tell "the same dialog, tapped again" from "a new dialog on a session that
+    /// was blocked before" — but this phone draws a finer line than that: `activity` leaving
+    /// `"waiting"` is the dialog resolving, and `noteSessionActivity(_:waiting:)` drops the
+    /// cached token right there, so the next blocked episode on the same session starts with
+    /// nothing cached and mints its own token instead of replaying one the Mac already marked
+    /// `.duplicate`-worthy. Without this, a session that blocks a second time would find its
+    /// abort silently doing nothing forever — the Mac no-ops the replay *before* typing Escape,
+    /// this method's own completion handler is ignored, and the Mac's instrumentation logs the
+    /// no-op as a successful abort — reintroducing, one layer up, the exact silent failure this
+    /// feature exists to fix. `unpair()` also clears this table, for a different reason: a
+    /// token minted for one Mac's session id must not dedup an abort meant for a different Mac
+    /// that later reuses that id.
     func abortBlockedPrompt(session id: UUID) async {
         let token = blockedAbortTokens[id] ?? UUID()
         blockedAbortTokens[id] = token
         sendPrompt(.abortPrompt(id: id, token: token)) { _ in }
+    }
+
+    /// Drops `id`'s cached abort token once its session is no longer `waiting` — the signal
+    /// that whatever blocked episode the token was minted for has resolved, so the next one
+    /// starts clean and mints its own token rather than replaying a settled one (see
+    /// `abortBlockedPrompt(session:)`'s own comment for the failure that silently reintroduces).
+    ///
+    /// Called for every session in a fleet snapshot from `connector.onFleet`, which fires on
+    /// the initial dial, every reconnect, and every folded event alike — comprehensive coverage
+    /// of activity transitions without a dedicated per-session subscription. Kept as its own
+    /// method, rather than folded inline into that closure, so it can be driven directly in
+    /// tests without a live `FleetConnector` to push a fleet snapshot through — the same
+    /// "nothing injectable below `sendPrompt`" gap `sentCommands` exists to work around.
+    func noteSessionActivity(_ id: UUID, waiting: Bool) {
+        guard !waiting else { return }
+        blockedAbortTokens.removeValue(forKey: id)
     }
 
     /// Answer a blocked dialog. Forwarded rather than absorbed, exactly as `sendPrompt` is:
@@ -550,6 +577,13 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         connector.onFleet = { [weak self] fleet in
             MainActor.assumeIsolated {
                 self?.fleet = fleet
+                // Every session's current `activity`, on every snapshot and every folded event
+                // alike, is exactly the input `noteSessionActivity` needs to tell a resolved
+                // blocked episode from one still open — see its own comment for why this is
+                // the hook rather than a dedicated per-session subscription.
+                for session in fleet.projects.flatMap(\.sessions) {
+                    self?.noteSessionActivity(session.id, waiting: session.activity == "waiting")
+                }
                 // **Every snapshot, which is every connect** — first dial, reconnect, and the
                 // redial on return from the background. That covers all three moments the
                 // menu can have gone stale without a single one of them needing its own hook,

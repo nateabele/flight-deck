@@ -287,4 +287,36 @@ final class FleetModelBlockedAbortTests: XCTestCase {
         }
         XCTAssertNotEqual(tokens[first], tokens[second])
     }
+
+    /// **A genuinely new episode mints a genuinely new token.** Without `noteSessionActivity`
+    /// clearing the cache when a session leaves `waiting`, this session's second blocked dialog
+    /// would replay the first episode's token — which the Mac's `answeredPromptTokens` already
+    /// marked spent, so it would collapse to `.duplicate` *before* typing Escape, and Abort
+    /// would silently do nothing for the rest of the pairing. That is the failure this test
+    /// exists to catch; see `FleetModel.abortBlockedPrompt(session:)`'s own comment for the full
+    /// chain. This is deliberately a different assertion from
+    /// `testAbortSendsOneTokenReusedOnASecondTap` above, not its opposite: that test's two taps
+    /// both land on one still-open dialog, while these two calls are separated by the session
+    /// resolving and blocking again — the episode boundary is the whole point.
+    func testAGenuineSecondBlockedEpisodeMintsAFreshToken() async {
+        let model = FleetModel.fixture()
+        let id = UUID()
+
+        model.noteSessionActivity(id, waiting: true)
+        await model.abortBlockedPrompt(session: id)
+
+        model.noteSessionActivity(id, waiting: false)
+        model.noteSessionActivity(id, waiting: true)
+        await model.abortBlockedPrompt(session: id)
+
+        let tokens: [UUID] = model.sentCommands.compactMap {
+            if case .abortPrompt(let sentID, let token) = $0, sentID == id { return token }
+            return nil
+        }
+        XCTAssertEqual(tokens.count, 2, "both episodes must still reach sendPrompt")
+        XCTAssertNotEqual(
+            tokens.first, tokens.last,
+            "a resolved episode's token must not be replayed into a later one"
+        )
+    }
 }
