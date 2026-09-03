@@ -1,4 +1,5 @@
 import XCTest
+import FleetKit
 @testable import FlightDeck
 
 @MainActor
@@ -163,5 +164,69 @@ final class TranscriptWatcherTests: XCTestCase {
         try (line("stale", sid) + line("fresh", sid)).data(using: .utf8)!.write(to: url)
         watcher.drain()
         XCTAssertEqual(seen, ["fresh"], "content appended after the seed must still be tailed")
+    }
+
+    private func apiErrorRecord(_ status: Int, _ kind: String) -> String {
+        #"{"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":\#(status),"error":"\#(kind)","message":{"content":[]}}"# + "\n"
+    }
+    private let plainAssistant =
+        #"{"type":"assistant","message":{"content":[{"type":"text","text":"back"}]}}"# + "\n"
+
+    /// The fold end to end: an error raises, and the next real record clears it.
+    func testAPIErrorRaisesThenClears() throws {
+        let sid = UUID()
+        let url = dir.appendingPathComponent("e.jsonl")
+        FileManager.default.createFile(atPath: url.path, contents: Data())
+        var seen: [SessionAPIError?] = []
+        let w = TranscriptWatcher(sessionID: sid, url: url, onTitle: { _ in },
+                                  onSubagentCount: { _ in }, onAPIError: { seen.append($0) })
+        w.drain()
+
+        let first = apiErrorRecord(529, "overloaded")
+        try first.write(to: url, atomically: true, encoding: .utf8)
+        w.drain()
+        XCTAssertEqual(seen, [SessionAPIError(status: 529, kind: "overloaded", isTransient: true)])
+
+        try (first + plainAssistant).write(to: url, atomically: true, encoding: .utf8)
+        w.drain()
+        XCTAssertEqual(seen.count, 2)
+        XCTAssertNil(seen[1])
+    }
+
+    /// A session dead for an hour must not re-emit on every poll — the discipline `setUnread`'s
+    /// early return exists to enforce, for the same reason.
+    func testUnchangedAPIErrorDoesNotReEmit() throws {
+        let sid = UUID()
+        let url = dir.appendingPathComponent("r.jsonl")
+        FileManager.default.createFile(atPath: url.path, contents: Data())
+        var seen: [SessionAPIError?] = []
+        let w = TranscriptWatcher(sessionID: sid, url: url, onTitle: { _ in },
+                                  onSubagentCount: { _ in }, onAPIError: { seen.append($0) })
+        w.drain()
+
+        let one = apiErrorRecord(529, "overloaded")
+        try one.write(to: url, atomically: true, encoding: .utf8)
+        w.drain()
+        try (one + one).write(to: url, atomically: true, encoding: .utf8)
+        w.drain()
+
+        XCTAssertEqual(seen.count, 1, "identical error reported once, not once per poll")
+    }
+
+    /// Last event in one scan wins, matching how `.title` already resolves.
+    func testLastEventInAScanWins() throws {
+        let sid = UUID()
+        let url = dir.appendingPathComponent("l.jsonl")
+        FileManager.default.createFile(atPath: url.path, contents: Data())
+        var seen: [SessionAPIError?] = []
+        let w = TranscriptWatcher(sessionID: sid, url: url, onTitle: { _ in },
+                                  onSubagentCount: { _ in }, onAPIError: { seen.append($0) })
+        w.drain()
+
+        try (apiErrorRecord(529, "overloaded") + plainAssistant)
+            .write(to: url, atomically: true, encoding: .utf8)
+        w.drain()
+
+        XCTAssertEqual(seen, [nil], "one net change per scan, and it is the last one")
     }
 }
