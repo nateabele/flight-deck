@@ -41,6 +41,16 @@ public enum FleetEvent: Equatable, Sendable {
                          openPromptCall: OpenPromptIdentity = .unreported)
     case unreadChanged(id: UUID, isUnread: Bool)
 
+    /// This session's last turn died on an API error, or a newer record cleared it.
+    ///
+    /// Its own case rather than a seventh parameter on `activityChanged`, and for
+    /// `unreadChanged`'s reasons: it arrives on the transcript watcher's cadence rather than
+    /// `commitStatuses`', and it clears on an entirely different trigger. Folding it into the
+    /// status triple would tie two things that move independently.
+    ///
+    /// `nil` clears. There is no separate "cleared" case, so a client cannot forget to handle it.
+    case apiErrorChanged(id: UUID, error: SessionAPIError?)
+
     /// A plan gate opened, changed subject, or closed on this session.
     ///
     /// Without this case, `planGate` was a field the projection oracle could see
@@ -75,7 +85,7 @@ extension FleetEvent {
         case .sessionRemoved(let id), .sessionMoved(let id, _, _),
              .renamed(let id, _, _), .activityChanged(let id, _, _, _, _, _),
              .unreadChanged(let id, _), .planGateChanged(let id, _),
-             .promptExpired(let id, _):
+             .promptExpired(let id, _), .apiErrorChanged(let id, _):
             return id
         case .projectAdded, .projectRemoved, .projectCollapsed,
              .projectsReordered, .sessionsReordered:
@@ -91,7 +101,8 @@ extension FleetEvent {
              .sessionsReordered(let id, _):
             return id
         case .sessionAdded, .sessionRemoved, .sessionMoved, .projectsReordered,
-             .renamed, .activityChanged, .unreadChanged, .planGateChanged, .promptExpired:
+             .renamed, .activityChanged, .unreadChanged, .planGateChanged, .promptExpired,
+             .apiErrorChanged:
             return nil
         }
     }

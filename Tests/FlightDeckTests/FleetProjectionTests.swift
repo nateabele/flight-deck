@@ -62,4 +62,18 @@ final class FleetProjectionTests: XCTestCase {
     func testProjectingAnEmptyStoreIsAnEmptySnapshotNotACrash() {
         XCTAssertEqual(FleetProjection.snapshot(of: store()), .empty)
     }
+
+    /// A field the projection oracle can see that no event can produce is a disagreement by
+    /// construction — the trap `planGateChanged` was added to close. This is that check here.
+    func testOracleMatchesTheReplayedMirrorWithAnErrorRaised() {
+        let store = store()
+        let id = store.newSession(in: URL(fileURLWithPath: "/w/alpha")).id
+        let mirror = FleetProjection.snapshot(of: store)
+        let error = SessionAPIError(status: 529, kind: "overloaded")
+
+        store.apply(.apiError(error), to: id)
+
+        XCTAssertEqual(FleetProjection.snapshot(of: store),
+                       mirror.applying([.apiErrorChanged(id: id, error: error)]))
+    }
 }

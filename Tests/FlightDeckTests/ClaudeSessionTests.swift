@@ -1,5 +1,6 @@
 import XCTest
 @testable import FlightDeck
+import FleetKit
 
 final class ClaudeSessionTests: XCTestCase {
     let sid = UUID(uuidString: "38f62687-0abb-4b2b-9cc7-35276b243bb2")!
@@ -239,5 +240,83 @@ final class ClaudeSessionTests: XCTestCase {
         }
 
         XCTAssertEqual(try flagNames(real), try flagNames(placeholder))
+    }
+
+    func testAssistantAPIErrorRecordRaisesTheError() {
+        let line = #"{"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":529,"error":"overloaded","apiErrorIsTransient":true,"message":{"content":[{"type":"text","text":"API Error: 529"}]}}"#
+        XCTAssertEqual(ClaudeSession.events(inLine: line, sessionID: UUID()),
+                       [.apiError(SessionAPIError(status: 529, kind: "overloaded",
+                                                  isTransient: true))])
+    }
+
+    /// The kind is read verbatim, never matched against a known set: the CLI's vocabulary is its
+    /// own and will grow, and a badge that renders an unrecognised kind beats one that drops it.
+    func testUnrecognisedKindIsCarriedThrough() {
+        let line = #"{"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":418,"error":"teapot_error","message":{"content":[]}}"#
+        XCTAssertEqual(ClaudeSession.events(inLine: line, sessionID: UUID()),
+                       [.apiError(SessionAPIError(status: 418, kind: "teapot_error"))])
+    }
+
+    /// A client-side failure raises the flag with neither status nor kind. It still has to badge.
+    func testErrorWithNoStatusOrKindStillRaises() {
+        let line = #"{"type":"assistant","isApiErrorMessage":true,"message":{"content":[]}}"#
+        XCTAssertEqual(ClaudeSession.events(inLine: line, sessionID: UUID()),
+                       [.apiError(SessionAPIError())])
+    }
+
+    /// The CLI's own predicate: these two kinds are transient even without the explicit flag.
+    func testOverloadedAndServerErrorAreTransientWithoutTheFlag() {
+        for kind in ["overloaded", "server_error"] {
+            let line = #"{"type":"assistant","isApiErrorMessage":true,"error":"\#(kind)","message":{"content":[]}}"#
+            guard case .apiError(let e)? = ClaudeSession.events(inLine: line,
+                                                                sessionID: UUID()).first else {
+                return XCTFail("expected an apiError event for \(kind)")
+            }
+            XCTAssertTrue(e.isTransient, "\(kind) is transient per the CLI's own predicate")
+        }
+    }
+
+    func testOrdinaryAssistantRecordProgresses() {
+        let line = #"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#
+        XCTAssertEqual(ClaudeSession.events(inLine: line, sessionID: UUID()), [.progressed])
+    }
+
+    /// The tool_use scan is unchanged and still runs — `.progressed` is appended to it, not
+    /// substituted for it.
+    func testAgentToolUseStillReportsAlongsideProgress() {
+        let line = #"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Agent","id":"a1"}]}}"#
+        XCTAssertEqual(ClaudeSession.events(inLine: line, sessionID: UUID()),
+                       [.agentStarted("a1"), .progressed])
+    }
+
+    /// The tool_use scan's own comment names the exact cost of depending on error records
+    /// never carrying a `tool_use` block: "a silently dropped `agentStarted` the day it stops
+    /// being true." Nothing enforces that promise today, so this pins the record shape it
+    /// warns about — an `Agent` tool_use block riding an `isApiErrorMessage` record — and
+    /// asserts both events survive, in the tool_use scan's own order ahead of the error.
+    func testAgentToolUseAndApiErrorOnTheSameRecordBothReport() {
+        let line = #"""
+        {"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":529,"error":"overloaded",
+        "message":{"content":[{"type":"tool_use","name":"Agent","id":"a1"}]}}
+        """#
+        XCTAssertEqual(ClaudeSession.events(inLine: line, sessionID: UUID()),
+                       [.agentStarted("a1"), .apiError(SessionAPIError(
+                           status: 529, kind: "overloaded", isTransient: true
+                       ))])
+    }
+
+    /// A tool result means the turn is alive and producing, which is exactly what makes an
+    /// earlier error stale.
+    func testToolResultProgresses() {
+        let line = #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a1"}]}}"#
+        XCTAssertEqual(ClaudeSession.events(inLine: line, sessionID: UUID()),
+                       [.agentFinished("a1"), .progressed])
+    }
+
+    /// System records are bookkeeping, not conversational progress. If `turn_duration` cleared
+    /// the badge, a turn that died would clear its own error a moment later.
+    func testTurnDurationDoesNotProgress() {
+        let line = #"{"type":"system","subtype":"turn_duration"}"#
+        XCTAssertEqual(ClaudeSession.events(inLine: line, sessionID: UUID()), [.turnEnded])
     }
 }

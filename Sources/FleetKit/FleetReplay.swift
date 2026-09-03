@@ -101,6 +101,7 @@ public enum FleetReplay {
     /// exists to absorb is machine-generated status flaps.
     private enum FoldKey: Hashable {
         case activity(UUID), rename(UUID), unread(UUID), collapsed(UUID), planGate(UUID)
+        case apiError(UUID)
     }
 
     private static func key(_ event: FleetEvent) -> FoldKey? {
@@ -114,6 +115,10 @@ public enum FleetReplay {
         // reconnecting phone would see it — the intermediate frames are indistinguishable
         // from a status flap to a fold that only sees events, never a screen.
         case .planGateChanged(let id, _): return .planGate(id)
+        // Same rationale as `.activity`: a session can error, be nudged, and error again inside
+        // one resume gap, and only the final value is real by the time a reconnecting phone
+        // sees it.
+        case .apiErrorChanged(let id, _): return .apiError(id)
         default: return nil
         }
     }
