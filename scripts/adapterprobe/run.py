@@ -71,14 +71,39 @@ def agent_versions():
     return {"codex": v(["codex", "--version"]), "claude": v(["claude", "--version"])}
 
 
-def diff_baseline(baseline, matrix):
+def diff_baseline(baseline, matrix, tiers=None):
+    """`tiers` is the set of tiers *this run* exercised. A baseline cell missing from the
+    matrix is only real drift (`removed`) if this run actually attempted its tier -- otherwise
+    it is merely `skipped`: not attempted, which is a different fact than gone. A `--tier cheap`
+    run against a baseline recorded with `--tier full` must not report every full-tier-only cell
+    as removed just because this run never went looking for it.
+
+    `tiers=None` (the default) disables this distinction entirely and treats every baseline key
+    missing from the matrix as `removed`, matching this function's original, tier-blind
+    behavior -- used by callers (and most of this module's own tests) that pass a matrix already
+    scoped to exactly what they want compared.
+
+    A baseline cell with no recorded tier (an older `baseline.json`, or a synthetic one in a
+    test) is always compared: with no tier of its own to check against `tiers`, there is no
+    basis for saying it wasn't attempted, so it is never exempted from `removed`.
+    """
     b, m = baseline.get("cells", {}), matrix.get("cells", {})
+    b_tiers = baseline.get("tiers", {})
+
+    def exercised(k):
+        if tiers is None:
+            return True
+        t = b_tiers.get(k)
+        return t is None or t in tiers
+
+    missing = b.keys() - m.keys()
     changed = {k: (b[k], m[k]) for k in b.keys() & m.keys() if b[k] != m[k]}
     bv, mv = baseline.get("versions", {}), matrix.get("versions", {})
     return {
         "changed": changed,
         "added": {k: m[k] for k in m.keys() - b.keys()},
-        "removed": {k: b[k] for k in b.keys() - m.keys()},
+        "removed": {k: b[k] for k in missing if exercised(k)},
+        "skipped": {k: b[k] for k in missing if not exercised(k)},
         "versions_changed": {k: (bv[k], mv[k]) for k in bv.keys() & mv.keys() if bv[k] != mv[k]},
     }
 
@@ -270,8 +295,10 @@ def _run_matrix(ctx, tiers):
     """Crash-isolated: one bad row records an `error` cell and never costs the others. Each row
     also gets its own hard wall-clock cap (see `_run_one`) and one progress line as it starts and
     one as it finishes, flushed immediately -- with no output at all, "still working" and
-    "silently wedged" look identical from outside."""
-    cells, details = {}, {}
+    "silently wedged" look identical from outside. Records each cell's tier alongside its
+    verdict -- `diff_baseline` needs it to tell a cell this run genuinely never attempted from
+    one that used to exist and no longer does."""
+    cells, details, cell_tiers = {}, {}, {}
     for row in ROWS:
         if row.tier not in tiers:
             continue
@@ -280,10 +307,11 @@ def _run_matrix(ctx, tiers):
             print(f"... {key}", flush=True)
             v, detail, elapsed = _run_one(ctx, row, agent)
             cells[key] = v
+            cell_tiers[key] = row.tier
             if detail:
                 details[key] = detail
             print(f"{GLYPH.get(v, '?')} {v:<11} {key}  ({elapsed:.1f}s)", flush=True)
-    return {"versions": ctx.versions, "cells": cells, "details": details}
+    return {"versions": ctx.versions, "cells": cells, "details": details, "tiers": cell_tiers}
 
 
 def _capture(ctx):
@@ -374,6 +402,23 @@ def main(argv=None):
     if stale:
         print(f"corpus stale: {stale}")
 
+    found_baseline = os.path.exists(BASELINE)
+    if found_baseline:
+        with open(BASELINE) as f:
+            baseline = json.load(f)
+    else:
+        baseline = {"versions": {}, "cells": {}, "tiers": {}}
+
+    # Computed even in `--update-baseline` mode -- cheap, and the skip line below is worth
+    # seeing on any run, not just a diffing one. Not used to decide anything in that mode: the
+    # write below always replaces the whole file with exactly this run's matrix.
+    diff = diff_baseline(baseline, matrix, tiers=tiers)
+    if diff["skipped"]:
+        skipped_tiers = sorted({baseline.get("tiers", {}).get(k) for k in diff["skipped"]} - {None})
+        label = skipped_tiers[0] if len(skipped_tiers) == 1 else "other-tier"
+        print(f"{len(diff['skipped'])} {label}-tier cells not exercised "
+              f"(run --tier {label} to check them)")
+
     print(render(matrix))
 
     if args.json:
@@ -385,14 +430,9 @@ def main(argv=None):
             json.dump(matrix, f, indent=2, sort_keys=True)
         return 0
 
-    if os.path.exists(BASELINE):
-        with open(BASELINE) as f:
-            baseline = json.load(f)
-    else:
+    if not found_baseline:
         print("no baseline.json yet; every cell is reported as new", file=sys.stderr)
-        baseline = {"versions": {}, "cells": {}}
 
-    diff = diff_baseline(baseline, matrix)
     if diff["added"] or diff["removed"] or diff["changed"] or diff["versions_changed"]:
         print()
         print("diff against baseline:")
