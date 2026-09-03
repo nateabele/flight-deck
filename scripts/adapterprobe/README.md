@@ -127,7 +127,35 @@ cell.
 
 ## First capture — 2026-09-02
 
-Taken against `claude-cli 2.1.259 (Claude Code)` and `codex-cli 0.152.1`, `--tier full`,
+**Two different `codex` binaries answer, depending on how a row launches it — `baseline.json`
+records both.** `codex`/`claude` in `versions` name whatever this runner's own `PATH` resolves
+(`agent_versions()`); `codex_pty`/`claude_pty` name whatever a live pty row's *login shell*
+resolves (`pty_agent_version()`), because `ctx.pty` launches every live row as `/bin/sh -lc
+<command>` — a login shell, which re-derives `PATH` via macOS's `path_helper` regardless of what
+this process inherited. On this machine that split is real, not theoretical: `codex` resolves
+`/Users/nate/.local/bin/codex` (`codex-cli 0.152.1`), the version the app-server/declaration
+rows exercised, while `codex_pty` resolves `/opt/homebrew/bin/codex` (`codex-cli 0.142.4`), the
+version every pty-driven row (`launchCommand`, `location`, `dialogDriver`, `resumeCommand`,
+`openPromptReader`, claude's `rename`) actually exercised. `claude` has only one binary on this
+machine, so `claude`/`claude_pty` agree.
+
+**Checked directly, and it is NOT the binary Flight Deck itself launches.**
+`Sources/FlightDeck/Agents/LoginShellPath.swift` exists because Flight Deck deliberately spawns
+`codex` through a login shell's `PATH` (`ShellResolver.resolve()`, this account's registered
+`$SHELL` — `fish` on this machine) rather than `/bin/sh`. Run directly: `fish -lc 'codex
+--version'` and `zsh -lc 'codex --version'` both land on `~/.local/bin/codex` (`0.152.1`) — the
+SAME binary `codex`/`codex_path` above already name — while `/bin/sh -lc`, what `ctx.pty`
+actually hardcodes for every live row in this harness, lands on `/opt/homebrew/bin/codex`
+(`0.142.4`) instead. So `codex_pty` is a fact about THIS HARNESS's own pty plumbing, not a
+second confirmation of what production runs: **`codex.resumeCommand: broken` was observed
+against `codex-cli 0.142.4`, a binary Flight Deck's own login-shell resolution does not
+currently select on this machine.** Worth a follow-up to either make `ctx.pty` resolve through
+the same `$SHELL`-based mechanism `LoginShellPath` uses (which would very likely change this
+row's verdict and needs its own dedicated `--tier full` run to find out) or to re-run this
+specific finding against `0.152.1` by hand before treating it as urgent.
+
+Taken against `claude-cli 2.1.259 (Claude Code)` and `codex-cli 0.152.1` for every
+declaration/app-server row and `codex-cli 0.142.4` for every pty-driven row, `--tier full`,
 committed as `baseline.json`. 6 rows were red or admittedly inconclusive out of 42 cells:
 
 - **`codex.sanitizedTitle` — broken.** Codex's declared contract is "no sanitizing; the RPC
