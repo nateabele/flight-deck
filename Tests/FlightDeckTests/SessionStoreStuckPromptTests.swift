@@ -128,4 +128,16 @@ final class SessionStoreStuckPromptTests: XCTestCase {
 
         XCTAssertEqual(store.stuckTicksForTesting(tab), 0)
     }
+
+    /// Pins the exact string `openPromptProbe` hands `checkStuckPrompts` for its `.stuck`
+    /// record's `code` field. `TimelineErrorCode` has no `CustomStringConvertible`, so a
+    /// `String(describing:)` regression here would silently swap this test's expected
+    /// `"prompt_changed"` for the struct dump `"TimelineErrorCode(code: \"prompt_changed\")"` —
+    /// exactly the bug this test exists to catch before it reaches the log a person actually
+    /// reads.
+    func testTheProbeReturnsTheRawWireCodeNotAStructDump() throws {
+        let (store, tab) = openFixtureSession()
+
+        XCTAssertEqual(store.openPromptProbe?(tab), "prompt_changed")
+    }
 }
