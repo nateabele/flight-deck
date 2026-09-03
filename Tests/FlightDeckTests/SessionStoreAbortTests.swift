@@ -5,9 +5,11 @@ import XCTest
 /// `SessionStore.abortPrompt` — Escape sent at a dialog nothing on this build can name.
 ///
 /// **The guards are `answerPrompt`'s own, in the same order, minus the call comparison it has
-/// nothing to compare.** This file exists to prove the order rather than assume it: each test
-/// below reaches exactly one guard by construction, and `testDuplicateOutranksNotWaiting` pins
-/// the one place the order is not obvious from reading top to bottom.
+/// nothing to compare.** This file exists to prove the order rather than assume it: every
+/// fixturable guard below is reached by exactly one test, and `testDuplicateOutranksNotWaiting`
+/// pins the one place the order is not obvious from reading top to bottom. The one guard this
+/// file cannot fixture — `.unsupportedAgent` — is recorded, not silently skipped: see the note
+/// above `testAnUnknownSessionIsRefused`.
 @MainActor
 final class SessionStoreAbortTests: XCTestCase {
     private final class StubProvider: SurfaceProvider {
@@ -44,6 +46,7 @@ final class SessionStoreAbortTests: XCTestCase {
         store.injectorOverride = spy
         store.injectionSettle = { $0() }
         store.answerAbortSink = { _ in }
+        store.promptLifecycleSink = { _ in }
         let session = store.newSession(in: tmp)
         store.applyRegistry([1: entry(session.pinnedConversationID, activity, cwd: tmp.path)])
         spy.events.removeAll()
@@ -51,6 +54,13 @@ final class SessionStoreAbortTests: XCTestCase {
     }
 
     // MARK: The gates, one per test
+    //
+    // No test here reaches `.unsupportedAgent`, the second gate in `dispatchAbort`, and none
+    // can: `AgentID` has exactly two cases and both now carry a real `dialogDriver`, the same
+    // gap `AnswerPromptTests.testAnIdleCodexTabIsRefusedByTheStatusGateLikeAnyOther`'s comment
+    // already records for `answerPrompt`'s identical guard. The order — agent capability before
+    // activity — is pinned in `dispatchAbort`'s own comment instead, until a third agent exists
+    // to fixture it.
 
     func testAnUnknownSessionIsRefused() {
         let (store, spy, _) = makeStore(activity: .waiting)
@@ -78,6 +88,7 @@ final class SessionStoreAbortTests: XCTestCase {
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.injectionSettle = { $0() }
+        store.promptLifecycleSink = { _ in }
         let session = store.newSession(in: tmp)
         store.applyRegistry([1: entry(session.pinnedConversationID, .waiting, cwd: tmp.path)])
         XCTAssertNil(store.viewport(of: session.id), "no surface, nothing to read")
