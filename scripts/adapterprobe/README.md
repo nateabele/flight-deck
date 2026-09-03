@@ -77,11 +77,12 @@ the checked-in `Fixtures/{Claude,Codex}/*.captured.*` corpus was actually captur
 `run.py` compares that against `agent_versions()`'s live read on every run and prints `corpus
 stale: {...}` the moment either agent has moved on. It has to be committed to do anything — an
 absent file makes every comparison vacuously pass, which is exactly the state this repo shipped
-in until this file existed. `--capture` updates its recorded version to whatever it just staged
-under `scripts/adapterprobe/corpus/`, whether or not that capture is ever promoted into
-`Fixtures/` — so the warning tracks "have I looked at this agent's output recently", not "is the
-promoted corpus current"; treat a `corpus stale` print as a prompt to go capture and review, not
-as something to silence by editing this file directly.
+in until this file existed. `--capture` never touches `corpus.json` — it only stages a raw
+transcript under `scripts/adapterprobe/corpus/` and prints which version it came from; updating
+`corpus.json` is part of the same manual promotion step as copying that capture over the pinned
+`Fixtures/{Claude,Codex}/*.captured.jsonl` file, both done by hand after a human has reviewed it.
+So a `corpus stale` print is a prompt to go capture and review, not something `--capture` alone
+resolves, and not something to silence by editing this file directly.
 
 Exit code: `0` clean (matches `baseline.json`), `1` capability drift (a cell changed or is new),
 `3` a harness failure (a cell that used to read something else now reads `error`, or a brand-new
@@ -148,8 +149,9 @@ prints on any future divergence between the two is kept: a machine where they st
 real hazard, not a bug in this harness.
 
 Taken against `claude-cli 2.1.259 (Claude Code)` and `codex-cli 0.152.1` for every row, pty-driven
-or not, `--tier full`, committed as `baseline.json`. 6 rows were red or admittedly inconclusive
-out of 42 cells:
+or not, `--tier full`, committed as `baseline.json`. 7 rows were red or admittedly inconclusive
+out of 42 cells — three independent codex findings, one derivative of them, and three
+harness/timing questions still open:
 
 - **`codex.sanitizedTitle` — broken.** Codex's declared contract is "no sanitizing; the RPC
   channel needs none" — but the real CLI strips `\n` and `\t` from a hostile title anyway. The
@@ -161,8 +163,12 @@ out of 42 cells:
   the seeded marker from an earlier turn never reappears on screen. Confirmed against the
   binary Flight Deck actually launches (`0.152.1`, not the `0.142.4` an earlier revision of this
   harness accidentally measured) — the finding holds, now correctly attributed.
-- **`codex.runtimeObservation` — broken.** A pre/post-turn delta that should show a live turn
-  actually ran does not appear — also confirmed against `0.152.1`.
+- **`codex.runtimeObservation` — broken, but NOT a fourth independent finding.**
+  `CodexAdapter.launchCommand` (`Sources/FlightDeck/Agents/Codex/CodexAdapter.swift:286`) is
+  `codex resume <id>` — byte-identical to `resumeCommand`'s own launch command — and this row
+  drives its turn through exactly that command via `seed_one_turn`. The rollout it measures can
+  only grow if the resume attached, so this failing alongside `codex.resumeCommand` is the same
+  failure counted twice, not a second, corroborating one.
 - **`claude.rename` — error** (`transcript '<sandbox path>.jsonl' never appeared within 30s,
   before /rename was even typed`). The session transcript file itself never showed up in time,
   so the row cannot say whether a rename would have taken — a harness/timing question, not yet a
@@ -172,10 +178,14 @@ out of 42 cells:
   *prepare* need a runtime" without the probe itself starting one just to ask. Admitted rather
   than guessed — see the row's own comment in `capabilities.py`.
 - **`codex.openPromptReader` — error** (`approval list never appeared; screen was still stuck at
-  'Booting MCP server: codex_apps'`). A `codex_apps` MCP-boot stall in `codex-cli 0.152.1`, not a
-  trust-override artifact of this harness — `approval_policy "on-request"` was set specifically
-  to rule that out and made no observable difference. A finding about this environment's codex
-  install, not about this harness or (so far) about the adapter.
+  'Booting MCP server: codex_apps'`). A `codex_apps` MCP-boot stall in `codex-cli 0.152.1` blocks
+  the screen before any approval prompt could show, regardless of trust settings. This row also
+  writes `approval_policy = "on-request"` (at top level, so it is genuinely in effect) to rule
+  out the sandbox's own trust override as the cause, but the boot stall is upstream of that
+  screen too, so whether the override would have mattered is NOT established — not concluded
+  either way, since a full-tier run would be needed to tell and none was spent on it here. A
+  finding about this environment's codex install, not about this harness or (so far) about the
+  adapter.
 
 Every other cell — including both `loginInvocation` rows (`needs-auth`, by design: the sandbox
 is authenticated on purpose, so an honest login probe is impossible without destroying that) —

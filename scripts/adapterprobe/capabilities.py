@@ -234,16 +234,25 @@ def _open_prompt_reader(ctx, agent):
     # sandbox's root so every OTHER row in the run skips the one-time "do you trust this
     # directory" prompt. That same trust plausibly removes the approval friction this row
     # exists to raise, which would make a 45s wait for it a coin flip against the wrong
-    # thing. So this row appends `approval_policy = "on-request"` to the same
-    # `[projects."<root>"]` table (TOML lets a bare `key = value` land in the table most
-    # recently opened, so this shares the trust entry's table rather than opening a second
-    # one) — the config knob that keeps prompting for approval even in a trusted directory,
-    # confirmed against this machine's installed `codex --help` output. That makes the row
-    # actually measure something instead of measuring its own trust override.
+    # thing. So this row also writes `approval_policy = "on-request"` — the config knob that
+    # keeps prompting for approval even in a trusted directory, confirmed against this
+    # machine's installed `codex --help` output — PREPENDED, not appended: appending would
+    # land it inside the `[projects."<root>"]` table the trust entry already opened (TOML
+    # puts a bare `key = value` in the table most recently opened), and live-confirmed
+    # against `codex-cli 0.152.1`, a bogus value at top level errors with `unknown variant`
+    # while the identical key inside a projects table is accepted silently and never
+    # validated — i.e. appending would make this setting inert while looking like it took
+    # effect. Prepending keeps it at top level, before any `[table]` header, so it is
+    # actually in effect. This mutates the shared sandbox config for every later row in this
+    # run; harmless today since no other row reads this key, but a future codex that starts
+    # validating unknown keys inside a projects table would need this reverted before it
+    # broke config load for the rest of the run.
     declared = ctx.probe(["declare", "codex"])["openPromptReader"]
     config_path = os.path.join(ctx.sandbox.codex_home, "config.toml")
-    with open(config_path, "a") as f:
-        f.write('approval_policy = "on-request"\n')
+    with open(config_path) as f:
+        existing_config = f.read()
+    with open(config_path, "w") as f:
+        f.write('approval_policy = "on-request"\n' + existing_config)
     prep = ctx.probe(["prepare", "codex", "--cwd", ctx.sandbox.root])
     cid = prep["conversationID"]
     text = ctx.probe(["launch-command", "codex", "--id", cid, "--cwd", ctx.sandbox.root])["text"]
@@ -264,10 +273,13 @@ def _open_prompt_reader(ctx, agent):
                 detail="approval list never appeared; screen was still stuck at "
                        "'Booting MCP server: codex_apps' after the wait, which reaching an "
                        "approval prompt would require passing first -- trust_level "
-                       "\"trusted\" is written for this sandbox root, but "
-                       "approval_policy \"on-request\" was also set above and made no "
-                       "observable difference, so the boot stall is the blocker here, not "
-                       "the trust override",
+                       "\"trusted\" is written for this sandbox root, and approval_policy "
+                       "\"on-request\" is written at top level so it is genuinely in effect "
+                       "this run, but whether it would have changed anything is NOT "
+                       "established: the boot stall blocks this screen before any approval "
+                       "prompt could appear either way, so this run cannot distinguish "
+                       "'the override does nothing' from 'the override would work if the "
+                       "boot stall were fixed'",
             )
         before = _bytes_under(home)
         term.pump(3)
@@ -624,6 +636,19 @@ def _runtime_observation(ctx, agent):
         ctx.seed_one_turn(agent, cid)
         after = os.path.getsize(rollout) if rollout and os.path.exists(rollout) else 0
         observed = after > before
+        if not observed:
+            # NOT an independent finding when this fails: `CodexAdapter.launchCommand`
+            # (`Sources/FlightDeck/Agents/Codex/CodexAdapter.swift:286`) is `codex resume
+            # <id>` -- byte-identical to `resumeCommand`'s own launch command -- and
+            # `seed_one_turn` drives this row's turn through exactly that command. The
+            # rollout this row measures can only grow if the resume attached, so this cell
+            # and `codex.resumeCommand` failing together is one failure counted twice, not
+            # two corroborating ones.
+            return Observation(
+                declared=True, observed=observed,
+                detail="derivative: the turn is driven through `codex resume <id>`, the "
+                       "same command resumeCommand launches, so this cannot pass while "
+                       "resumeCommand fails")
     return Observation(declared=True, observed=observed)
 
 
