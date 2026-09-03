@@ -274,7 +274,12 @@ final class FleetService: ObservableObject {
         let plan = SearchActivation.plan(
             for: result, openSessions: open, projects: openProjectPaths()
         )
-        guard let id = store.openConversation(plan) else { return .failure(.launchFailed) }
+        // `selecting: false`: this is a client request, and under the client-selection rule
+        // (see `SessionStore.select(_:selecting:)`) a phone's `search.open` must not move the
+        // desk's selection off whatever is on screen.
+        guard let id = store.openConversation(plan, selecting: false) else {
+            return .failure(.launchFailed)
+        }
         return .success(id)
     }
 
@@ -1001,8 +1006,10 @@ final class FleetService: ObservableObject {
             // running in this tab right now") and which is indistinguishable from a bug in the
             // composer. That is the report this comment exists for.
             Task { @MainActor in
+                // `selecting: false`: a client's `+` must not move the desk's selection off
+                // whatever is on screen — see `SessionStore.select(_:selecting:)`.
                 let created = await self.store.createSession(
-                    agent: picked, in: path, account: account
+                    agent: picked, in: path, account: account, selecting: false
                 )
                 if case .failure(let error) = created {
                     // The `ack` for this command has already gone — a create is dispatched,

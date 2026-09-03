@@ -1359,10 +1359,15 @@ final class SessionStore: ObservableObject {
     /// account (Task 14) rather than whatever `launchAccount` would otherwise resolve from
     /// project settings. Every other caller leaves it nil and gets the resolved default,
     /// unchanged.
+    ///
+    /// - Parameter selecting: whether this creation may move the Mac's selected tab. Defaults
+    ///   to true, preserving every existing desk caller's behaviour; `createSession` threads a
+    ///   client's `false` through this same parameter for its claude branch. See
+    ///   `select(_:selecting:)`.
     @discardableResult
     func newSession(
         in url: URL, at index: Int? = nil, account explicit: UUID? = nil,
-        waking: DisplayWakePolicy = .wakeIfNeeded
+        waking: DisplayWakePolicy = .wakeIfNeeded, selecting: Bool = true
     ) -> Session {
         guard ensureTerminalCreatable(waking) else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
@@ -1392,7 +1397,8 @@ final class SessionStore: ObservableObject {
             session,
             in: url,
             initialInput: adapter.launchCommand(adapter.binding(for: session), session, options),
-            at: index
+            at: index,
+            selecting: selecting
         )
     }
 
@@ -1411,9 +1417,16 @@ final class SessionStore: ObservableObject {
     ///
     /// `account`, when given, bypasses `launchAccount`'s project-settings resolution the same
     /// way `newSession`'s does — the New Session dropdown's chosen account, not the default.
+    ///
+    /// - Parameter selecting: whether this creation may move the Mac's selected tab. Defaults
+    ///   to true, matching every menu/dropdown caller. `FleetService` passes `false` for a
+    ///   phone `+` tap on an agent/account row — a client's creation must not move the desk's
+    ///   selection off whatever is on screen. Threaded to both the claude branch (which
+    ///   delegates to `newSession(in:)`) and the codex branch's own `addSession` call below.
     @discardableResult
     func createSession(
-        agent: AgentID, in directory: String, at index: Int? = nil, account explicit: UUID? = nil
+        agent: AgentID, in directory: String, at index: Int? = nil, account explicit: UUID? = nil,
+        selecting: Bool = true
     ) async -> Result<UUID, AgentLaunchError> {
         // Before anything else, covering both branches below: the codex branch calls
         // `addSession` directly rather than routing through `newSession(in:)`, so it does not
@@ -1443,7 +1456,9 @@ final class SessionStore: ObservableObject {
         // An agent that mints its own conversation id has nothing to negotiate, so it takes
         // the synchronous path and never touches anything this method builds below.
         guard agent.negotiatesIdentity else {
-            return .success(newSession(in: url, at: index, account: explicit).id)
+            return .success(
+                newSession(in: url, at: index, account: explicit, selecting: selecting).id
+            )
         }
 
         // Named before `prepare`, not after: `thread/name/set` is what commits the thread,
@@ -1509,7 +1524,8 @@ final class SessionStore: ObservableObject {
             session,
             in: url,
             initialInput: adapter.launchCommand(binding, session, options),
-            at: index
+            at: index,
+            selecting: selecting
         )
         return .success(session.id)
     }
@@ -1577,13 +1593,38 @@ final class SessionStore: ObservableObject {
         command.hasSuffix("\n") ? command : command + "\n"
     }
 
+    /// Applies a selection write under the client-selection rule, and the one chokepoint every
+    /// `selecting:` parameter in this file funnels through.
+    ///
+    /// **A command or request arriving from a client must never move the Mac's selected tab.**
+    /// Reopening, resuming or creating a tab from the phone is right for ⌘⇧T, ⌘K and ⌘N — the
+    /// user is sitting at the desk and asked for exactly that — but a client acting on its own
+    /// initiative has no business yanking the desk's focus off whatever is on screen. The
+    /// phone's presence badge (`FleetCommand.viewing`) already exists to say "I'm looking at
+    /// this one"; that is the channel for a client's own attention, not the desk's selection.
+    ///
+    /// The one exception: `selectedSessionID == nil`. With nothing selected there is no focus
+    /// to steal, and the alternative is a sidebar showing tabs over an empty pane — so a client
+    /// action resolves that exactly as a desk action would.
+    private func select(_ id: UUID, selecting: Bool) {
+        guard selecting || selectedSessionID == nil else { return }
+        selectedSessionID = id
+    }
+
     /// The tail every creation shares: file the tab, reveal it, select it, save.
     ///
     /// Split from `insertSession` rather than folded into it because `restore` calls that one
     /// directly — for the reason the un-collapse below spells out.
+    ///
+    /// - Parameter selecting: whether this creation may move the Mac's selected tab. Defaults
+    ///   to today's behaviour — every creation path selects what it just made — because a
+    ///   caller at the desk (⌘N, ⌘⇧A, a folder drop) explicitly asked for a new tab and expects
+    ///   to land on it. `false` is for a creation a client asked for (the phone's `+`): the
+    ///   desk's selection is not this caller's to move. See `select(_:selecting:)`.
     @discardableResult
     private func addSession(
-        _ session: Session, in url: URL, initialInput: String, at index: Int? = nil
+        _ session: Session, in url: URL, initialInput: String, at index: Int? = nil,
+        selecting: Bool = true
     ) -> Session {
         insertSession(session, in: url, initialInput: initialInput, at: index)
         // A session landing in a collapsed project is otherwise invisible: `SidebarRow.rows`
@@ -1597,7 +1638,7 @@ final class SessionStore: ObservableObject {
             repos[target].isCollapsed = false
             emit(.projectCollapsed(id: repos[target].id, isCollapsed: false))
         }
-        selectedSessionID = session.id
+        select(session.id, selecting: selecting)
         persist()
         return session
     }
@@ -2743,16 +2784,24 @@ final class SessionStore: ObservableObject {
         settleReopen(deferredCodexResumes)
     }
 
-    /// Rebuilds one recorded tab, un-collapses its project and selects it. The body ⌘⇧T's
-    /// `.session` case and the phone's `reopenClosedSession` both run, so the two surfaces
-    /// cannot disagree about what a reopen does.
+    /// Rebuilds one recorded tab and un-collapses its project. The body ⌘⇧T's `.session` case
+    /// and the phone's `reopenClosedSession` both run, so the two surfaces cannot disagree
+    /// about what a reopen resurrects — only about whether it may also move the desk's
+    /// selection, which `selecting:` below is for.
     ///
     /// Appends to `deferredCodexResumes` rather than settling anything itself: a caller
     /// reopening a whole project has several of these to collect before it starts one task.
+    ///
+    /// - Parameter selecting: whether this reopen may move the Mac's selected tab. Defaults to
+    ///   true — ⌘⇧T is pressed at the desk and expects to land on what it just brought back.
+    ///   `reopenClosedSession` passes `false`: the phone's reopen is a client request, and
+    ///   under the client-selection rule it must not yank the desk's focus off whatever is on
+    ///   screen. See `select(_:selecting:)`.
     private func reopenSession(
         _ closed: ClosedSessionHistory.ClosedSession,
         directoryExists: (String) -> Bool,
-        deferredCodexResumes: inout [UUID]
+        deferredCodexResumes: inout [UUID],
+        selecting: Bool = true
     ) {
         if reinsertClosed(closed, directoryExists: directoryExists) {
             deferredCodexResumes.append(closed.session.id)
@@ -2767,7 +2816,7 @@ final class SessionStore: ObservableObject {
             repos[target].isCollapsed = false
             emit(.projectCollapsed(id: repos[target].id, isCollapsed: false))
         }
-        selectedSessionID = closed.session.id
+        select(closed.session.id, selecting: selecting)
     }
 
     /// Persist, then start any codex tab whose resume text still has to be settled.
@@ -2795,6 +2844,12 @@ final class SessionStore: ObservableObject {
     /// The phone's counterpart to ⌘⇧T. A no-op when the id is not in the history — ⌘⇧T got
     /// there first, or it aged past `depth`. Deliberately silent: the tab is in the fleet list
     /// either way, so there is nothing to tell the phone that it cannot already see.
+    ///
+    /// Hardcodes `selecting: false` rather than taking a parameter of its own: this is a
+    /// phone-only entry point — only `FleetService` calls it, ⌘⇧T goes through
+    /// `reopenLastClosed` instead — so there is no caller that would ever want `true` here. A
+    /// client's reopen must not move the desk's selection off whatever is on screen; see
+    /// `select(_:selecting:)`.
     func reopenClosedSession(
         id: UUID,
         directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
@@ -2802,7 +2857,7 @@ final class SessionStore: ObservableObject {
         guard let closed = closedSessions.takeSession(id: id) else { return }
         var deferredCodexResumes: [UUID] = []
         reopenSession(closed, directoryExists: directoryExists,
-                      deferredCodexResumes: &deferredCodexResumes)
+                      deferredCodexResumes: &deferredCodexResumes, selecting: false)
         settleReopen(deferredCodexResumes)
     }
 
@@ -2923,13 +2978,22 @@ final class SessionStore: ObservableObject {
     /// would hand back whatever tab happened to be selected beforehand — a confident answer
     /// naming the wrong conversation. Returning the id directly makes that failure mode
     /// unrepresentable rather than relying on every caller to remember the gap.
+    ///
+    /// - Parameter selecting: whether a filed or resumed tab may become the Mac's selection.
+    ///   Defaults to true — ⌘K and the search panel's `onSelect` already expect Return to land
+    ///   on what it opened. `FleetService` passes `false` for the phone's `search.open`: a
+    ///   command arriving from a client must never move the desk's selection off whatever is on
+    ///   screen. Threaded through the two places this method itself assigns
+    ///   `selectedSessionID` — the project-row branch and the resume branch below — via
+    ///   `select(_:selecting:)`.
     @discardableResult
     func openConversation(
         _ activation: SearchActivation.Activation,
         directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
         resolveTranscriptDirectory: (String, UUID) -> String = {
             SessionStore.resolvedTranscriptDirectory(projectPath: $0, conversationID: $1)
-        }
+        },
+        selecting: Bool = true
     ) -> UUID? {
         let projectPath: String
         let conversationID: String
@@ -2960,7 +3024,7 @@ final class SessionStore: ObservableObject {
                     emit(.projectCollapsed(id: repos[existing].id, isCollapsed: false))
                 }
                 opened = repos[existing].sessions.first?.id
-                if let opened { selectedSessionID = opened }
+                if let opened { select(opened, selecting: selecting) }
             } else {
                 let created = addProject(at: url)
                 // `addProject` delegates to `newSession(in:)`, whose own `launchAccount`
@@ -3015,7 +3079,7 @@ final class SessionStore: ObservableObject {
             repos[target].isCollapsed = false
             emit(.projectCollapsed(id: repos[target].id, isCollapsed: false))
         }
-        selectedSessionID = session.id
+        select(session.id, selecting: selecting)
         persist()
 
         if deferred {
@@ -3070,10 +3134,16 @@ final class SessionStore: ObservableObject {
     /// method that already knows them.
     ///
     /// `nil` when the project is gone, which a phone holding a stale snapshot can ask about.
+    ///
+    /// Hardcodes `selecting: false` rather than taking a parameter of its own: this is a
+    /// phone-only entry point — only `FleetService` calls it, the sidebar's ⌘N and its `+`
+    /// button go through `newSessionBelowActive`/`addProject` instead — so there is no caller
+    /// that would ever want `true` here. A client's `+` must not move the desk's selection off
+    /// whatever is on screen. See `select(_:selecting:)`.
     @discardableResult
     func newSession(inProject id: Repo.ID) -> Session? {
         guard let index = repos.firstIndex(where: { $0.id == id }) else { return nil }
-        return newSession(in: repos[index].url)
+        return newSession(in: repos[index].url, selecting: false)
     }
 
     func setCollapsed(_ isCollapsed: Bool, forProjectAt id: Repo.ID) {

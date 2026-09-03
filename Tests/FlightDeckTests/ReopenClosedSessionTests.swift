@@ -239,11 +239,17 @@ final class ReopenClosedSessionTests: XCTestCase {
         XCTAssertEqual(store.repos.first?.sessions[1].id, target.id, "fixture assumption")
 
         store.closeSession(target.id)
+        let selectedBeforeReopen = store.selectedSessionID
         store.reopenClosedSession(id: target.id, directoryExists: { _ in true })
 
         XCTAssertEqual(store.repos.first?.sessions.count, 3)
         XCTAssertEqual(store.repos.first?.sessions[1].id, target.id, "not appended")
-        XCTAssertEqual(store.selectedSessionID, target.id)
+        // `reopenClosedSession` is the phone's own entry point (see its doc comment), so under
+        // the client-selection rule it must not move the desk off whatever `closeSession` left
+        // selected — that is the behaviour change this method exists to pin at the store level;
+        // `FleetServiceTests` pins the same rule over the real socket.
+        XCTAssertEqual(store.selectedSessionID, selectedBeforeReopen,
+                       "a phone reopen must not move the desk's selection")
     }
 
     /// The consumed entry must leave the stack, or ⌘⇧T would insert a second tab carrying an
