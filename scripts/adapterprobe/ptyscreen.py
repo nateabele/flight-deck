@@ -56,9 +56,25 @@ class PtyScreen:
     def close(self):
         try:
             os.kill(self.pid, signal.SIGKILL)
-            os.waitpid(self.pid, 0)
-        except (ProcessLookupError, ChildProcessError):
+        except ProcessLookupError:
             pass
+        else:
+            # A bounded, non-blocking reap -- not the unconditional `os.waitpid(self.pid, 0)`
+            # this used to be. SIGKILL is not always instantaneous: observed live against a
+            # real codex child, a process can sit in the kernel's "trying to exit" state for
+            # minutes, immune to a second SIGKILL, while anything blocked in `waitpid` on it
+            # waits right along. That single call defeated every wall-clock cap the runner
+            # otherwise guarantees. A lingering zombie past this deadline is init's problem to
+            # clean up eventually, not this run's to hang on.
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    reaped, _ = os.waitpid(self.pid, os.WNOHANG)
+                except ChildProcessError:
+                    break
+                if reaped == self.pid:
+                    break
+                time.sleep(0.1)
         try:
             os.close(self.fd)
         except OSError:

@@ -20,6 +20,7 @@ own public surface (Task 2), not a fourth thing bolted on. Rows also read a hand
 checked-in fixtures directly (plain `open()`), the same corpus `test_grammars.py` already reads
 from — that keeps "cheap" rows free of any live agent, per the design's §3.5 corpus rule.
 """
+import json
 import os
 import uuid
 from collections import namedtuple
@@ -99,8 +100,25 @@ def _needs_runtime_start(ctx, agent):
     """Does bringing an identity into being also require standing up a persistent stack?
     Measured by whether `prepare` writes anything into the agent's own home at all — codex's
     RPC process negotiates and persists a thread as a side effect, claude's does not. Also a
-    symmetric fact (`kind="fact"`), not a capability with a reason to probe."""
+    symmetric fact (`kind="fact"`), not a capability with a reason to probe.
+
+    codex is the one case this harness cannot honestly measure at all: every codex probe
+    subcommand -- `prepare` included -- routes through `probe.swift`'s `withCodex`, which
+    unconditionally bootstraps a live app-server connection into `codex_home` before doing
+    anything else. Any before/after diff this row could see on the codex side is that
+    bootstrap, not a property of `prepare` itself -- there is no cheap way to ask "does *your*
+    prepare need a runtime?" without the probe first starting one just to ask. Reporting a
+    verdict here would misrepresent a harness artifact as a finding about codex, so this row
+    records the gap honestly (`observed="error"`) instead of guessing.
+    """
     declared = ctx.probe(["declare", agent])["needsRuntimeStart"]
+    if agent == "codex":
+        return Observation(
+            declared=declared, observed="error",
+            detail="every codex probe subcommand bootstraps a runtime via withCodex, so this "
+                   "harness cannot separate 'prepare needs one' from 'the probe always starts "
+                   "one'",
+        )
     home = _agent_home(ctx, agent)
     before = set(os.listdir(home))
     out = ctx.probe(["prepare", agent, "--cwd", ctx.sandbox.root])
@@ -111,21 +129,39 @@ def _needs_runtime_start(ctx, agent):
 
 
 def _has_status_registry(ctx, agent):
-    """Claude writes one status file per *live* session into `<home>/sessions` — no full model
-    turn is needed to see it appear, just a process that is actually running. Codex's declared
-    `False` is the same kind of symmetric fact ("codex has no status registry"), not a
-    capability that is absent for a reason, hence `kind="fact"` below rather than
-    `absent_reason_holds`."""
+    """Claude writes one status file per *live* session into `<home>/sessions`, named by pid
+    but keyed inside by `sessionId` (see `ClaudeStatusFile.decode`) — so this row checks for an
+    entry naming *this conversation's* id, not merely that the directory holds something. A
+    bare directory-existence check is contaminated the moment any earlier row in this run's
+    shared sandbox (the documented, intended design: one `AgentSandbox` for the whole run) has
+    already launched this agent once — the directory, or codex's unrelated same-named one, is
+    already populated by the time this row runs regardless of what this row's own launch does.
+    Codex's declared `False` is the same kind of symmetric fact ("codex has no status
+    registry"), not a capability that is absent for a reason, hence `kind="fact"` below rather
+    than `absent_reason_holds` — codex's `<home>/sessions` holds its own rollout transcripts,
+    never a per-conversation status entry, so no file there ever matches this check regardless
+    of what earlier rows left behind.
+    """
     declared = ctx.probe(["declare", agent])["hasStatusRegistry"]
     prep = ctx.probe(["prepare", agent, "--cwd", ctx.sandbox.root])
     cid = prep["conversationID"]
     text = ctx.probe(["launch-command", agent, "--id", cid, "--cwd", ctx.sandbox.root])["text"]
     home = _agent_home(ctx, agent)
+    sessions_dir = os.path.join(home, "sessions")
     with ctx.pty(agent, ["/bin/sh", "-lc", text]) as term:
         term.pump(5)
-        sessions_dir = os.path.join(home, "sessions")
-        wrote = os.path.isdir(sessions_dir) and bool(os.listdir(sessions_dir))
-    return Observation(declared=declared, observed=wrote)
+        wrote_for_this_id = False
+        if os.path.isdir(sessions_dir):
+            for name in os.listdir(sessions_dir):
+                try:
+                    with open(os.path.join(sessions_dir, name)) as f:
+                        entry = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                if isinstance(entry, dict) and entry.get("sessionId", "").lower() == cid.lower():
+                    wrote_for_this_id = True
+                    break
+    return Observation(declared=declared, observed=wrote_for_this_id)
 
 
 def _text_channel(ctx, agent):
