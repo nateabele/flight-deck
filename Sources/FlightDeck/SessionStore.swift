@@ -1603,9 +1603,16 @@ final class SessionStore: ObservableObject {
     /// phone's presence badge (`FleetCommand.viewing`) already exists to say "I'm looking at
     /// this one"; that is the channel for a client's own attention, not the desk's selection.
     ///
-    /// The one exception: `selectedSessionID == nil`. With nothing selected there is no focus
-    /// to steal, and the alternative is a sidebar showing tabs over an empty pane — so a client
-    /// action resolves that exactly as a desk action would.
+    /// The one exception this method makes: `selectedSessionID == nil`. With nothing selected
+    /// there is no focus to steal, and the alternative is a sidebar showing tabs over an empty
+    /// pane — so a client action resolves that exactly as a desk action would.
+    ///
+    /// One more exception exists outside this method's control: `closeSession` relocates the
+    /// selection to `repos.flatMap(\.sessions).first` when a client closes the tab that was
+    /// selected — something must be selected once the selected tab is gone, and there is no
+    /// meaningful "whatever was on screen" left to preserve. Pre-existing, unavoidable, and out
+    /// of scope here; named so the rule above is read against what actually holds rather than
+    /// only what this one chokepoint enforces.
     private func select(_ id: UUID, selecting: Bool) {
         guard selecting || selectedSessionID == nil else { return }
         selectedSessionID = id
@@ -1752,9 +1759,17 @@ final class SessionStore: ObservableObject {
 
     /// ⌘⇧A and folder drops. A new folder becomes a project; a known one gains another
     /// session. Either way the new session is appended to its project and activated.
+    ///
+    /// - Parameter selecting: whether the new session may become the Mac's selection.
+    ///   Defaults to true, unaffected for every desk caller here (⌘⇧A, a folder drop,
+    ///   `createFromMenu`'s fallbacks). `openConversation`'s project-row branch passes its own
+    ///   `selecting` through when it lands here for a project new to the sidebar — without
+    ///   this, that branch would only be half-gated: the existing-repo side already honours
+    ///   `selecting`, but this side would still select unconditionally through `newSession`'s
+    ///   own default. See `select(_:selecting:)`.
     @discardableResult
-    func addProject(at url: URL) -> Session {
-        newSession(in: url)
+    func addProject(at url: URL, selecting: Bool = true) -> Session {
+        newSession(in: url, selecting: selecting)
     }
 
     /// The ⌘N / sidebar-button action. Routes to Add Project when nothing is open, which is
@@ -2984,10 +2999,14 @@ final class SessionStore: ObservableObject {
     ///   expect Return to land on what it opened. `FleetService` passes `false` for the phone's
     ///   `search.open`: a command arriving from a client must never move the desk's selection
     ///   off whatever is on screen. The return value is unaffected either way — the phone still
-    ///   needs the id it asked about to navigate its own side. Threaded through all four places
-    ///   this method resolves a tab to hand back — the `.select` branch, the project-row
-    ///   branch, the already-live recheck, and the resume branch below — via
-    ///   `select(_:selecting:)`.
+    ///   needs the id it asked about to navigate its own side. Threaded through every place
+    ///   this method can resolve a tab to hand back: the `.select` branch and the already-live
+    ///   recheck call `select(_:selecting:)` directly; the resume branch below does too; the
+    ///   project-row branch has two sides, and both honour it — the existing-repo side calls
+    ///   `select(_:selecting:)` directly, and the new-project side passes `selecting` on to
+    ///   `addProject(at:selecting:)` rather than taking `addProject`'s own default, so a
+    ///   client's search landing on a project new to the sidebar cannot select unconditionally
+    ///   through a path this parameter forgot to reach.
     @discardableResult
     func openConversation(
         _ activation: SearchActivation.Activation,
@@ -3029,7 +3048,7 @@ final class SessionStore: ObservableObject {
                 opened = repos[existing].sessions.first?.id
                 if let opened { select(opened, selecting: selecting) }
             } else {
-                let created = addProject(at: url)
+                let created = addProject(at: url, selecting: selecting)
                 // `addProject` delegates to `newSession(in:)`, whose own `launchAccount`
                 // failure branch returns a `Session` that was never filed — see that
                 // method's doc comment. Checked here rather than trusted, for the same
