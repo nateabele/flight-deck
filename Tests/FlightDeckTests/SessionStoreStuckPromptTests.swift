@@ -140,4 +140,75 @@ final class SessionStoreStuckPromptTests: XCTestCase {
 
         XCTAssertEqual(store.openPromptProbe?(tab), "prompt_changed")
     }
+
+    // MARK: - pathMatches
+    //
+    // `checkStuckPrompts` gates every retarget in the tests above on `!matches`, but every one
+    // of them also flips `cwd != session.transcriptDirectory` at the same time, so `matches`
+    // itself is never the deciding factor there. These tests call `SessionStore.pathMatches`
+    // directly so the raw-equality rule, and the `projectsRoot` it is fed, are pinned on their
+    // own — and so a future edit that "tidies" the comparison to `comparablePath`, or drops the
+    // `projectsRoot:` argument at the call site, fails a test instead of silently changing what
+    // a person reading the log believes about a wrong-file failure.
+
+    func testPathMatchesTrueForIdenticalTranscriptURLs() {
+        let url = ClaudeSession.transcriptURL(
+            sessionID: UUID(), workingDirectory: "/tmp/project", projectsRoot: projectsRoot)
+
+        XCTAssertTrue(SessionStore.pathMatches(watched: url, expected: url))
+    }
+
+    func testPathMatchesFalseWhenEitherSideIsNil() {
+        let url = ClaudeSession.transcriptURL(
+            sessionID: UUID(), workingDirectory: "/tmp/project", projectsRoot: projectsRoot)
+
+        XCTAssertFalse(SessionStore.pathMatches(watched: nil, expected: url))
+        XCTAssertFalse(SessionStore.pathMatches(watched: url, expected: nil))
+        XCTAssertFalse(SessionStore.pathMatches(watched: nil, expected: nil))
+    }
+
+    /// The case the doc comment on `pathMatches` names: a symlink and the real directory it
+    /// points at. `encodedProjectDirName` encodes the *string* claude was given, so these are
+    /// two different, unrelated project directories on disk — raw equality must call them a
+    /// mismatch. `comparablePath`'s `resolvingSymlinksInPath()` would instead collapse the
+    /// symlink component down to its target and call them the same file, which is exactly the
+    /// silent inversion a "tidying" edit here would produce.
+    func testPathMatchesDoesNotResolveSymlinksTheWayComparablePathWould() throws {
+        let sessionID = UUID()
+        let realDir = projectsRoot.appendingPathComponent(
+            ClaudeSession.encodedProjectDirName(for: "/tmp/real-project"), isDirectory: true)
+        let linkDir = projectsRoot.appendingPathComponent(
+            ClaudeSession.encodedProjectDirName(for: "/tmp/real-project-symlink"), isDirectory: true)
+        try FileManager.default.createDirectory(at: realDir, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: linkDir, withDestinationURL: realDir)
+
+        let watched = realDir.appendingPathComponent("\(sessionID.uuidString.lowercased()).jsonl")
+        let expected = linkDir.appendingPathComponent("\(sessionID.uuidString.lowercased()).jsonl")
+
+        XCTAssertFalse(
+            SessionStore.pathMatches(watched: watched, expected: expected),
+            "a symlink alias of the watched directory must read as a mismatch, not get " +
+            "normalized away")
+    }
+
+    /// The other case the review named: `expected` computed with `projectsRoot` left at its
+    /// default instead of threaded through `transcriptsRoot(forAccount:)`. A call site that
+    /// dropped that argument would make every fixture-rooted account read as a permanent
+    /// mismatch even when the two paths genuinely agree — this pins that dropping it changes
+    /// the verdict.
+    func testPathMatchesFailsWhenExpectedUsesADefaultedProjectsRoot() {
+        let sessionID = UUID()
+        let cwd = "/tmp/some-project"
+        let watched = ClaudeSession.transcriptURL(
+            sessionID: sessionID, workingDirectory: cwd, projectsRoot: projectsRoot)
+        let expectedWithFixtureRoot = ClaudeSession.transcriptURL(
+            sessionID: sessionID, workingDirectory: cwd, projectsRoot: projectsRoot)
+        let expectedWithDefaultedRoot = ClaudeSession.transcriptURL(
+            sessionID: sessionID, workingDirectory: cwd)
+
+        XCTAssertTrue(SessionStore.pathMatches(watched: watched, expected: expectedWithFixtureRoot))
+        XCTAssertFalse(
+            SessionStore.pathMatches(watched: watched, expected: expectedWithDefaultedRoot),
+            "a defaulted projectsRoot must not accidentally agree with the fixture-rooted watch")
+    }
 }
