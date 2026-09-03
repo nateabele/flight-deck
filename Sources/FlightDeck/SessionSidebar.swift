@@ -1,5 +1,4 @@
 import AppKit
-import FleetKit
 import SwiftUI
 
 /// A phone is on this conversation right now.

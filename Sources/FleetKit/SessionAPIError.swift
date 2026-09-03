@@ -41,4 +41,24 @@ public struct SessionAPIError: Equatable, Sendable, Codable {
         if let kind, !kind.isEmpty { out += " (\(kind))" }
         return out
     }
+
+    enum CodingKeys: String, CodingKey {
+        case status, kind, isTransient
+    }
+
+    /// Hand-written rather than synthesized, because `isTransient` is the field written by the
+    /// parser, carried on the wire, persisted, and read by nothing today — the one a future
+    /// encoder is most likely to stop writing without anyone noticing, since nothing downstream
+    /// would catch the omission. The synthesized decoder does `try decode(Bool.self, …)`, which
+    /// throws on an absent key rather than defaulting it; for `apiError` that throw propagates
+    /// out of `WireSession.init(from:)` and tears down the socket, exactly the failure
+    /// `Wire.swift`'s `decodeIfPresent(Bool.self, …) ?? false` comment for `hasBackgroundWork`
+    /// already guards against one file over. `status` and `kind` are `decodeIfPresent` too,
+    /// matching the synthesized behavior for `Int?`/`String?`, so this changes nothing for them.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = try c.decodeIfPresent(Int.self, forKey: .status)
+        kind = try c.decodeIfPresent(String.self, forKey: .kind)
+        isTransient = try c.decodeIfPresent(Bool.self, forKey: .isTransient) ?? false
+    }
 }

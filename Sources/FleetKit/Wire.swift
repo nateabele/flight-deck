@@ -259,6 +259,13 @@ public struct WireSession: Codable, Equatable, Sendable, Identifiable {
         // Absent from an older Mac, and from every healthy session — both decode as "no error",
         // not as a failure. Same contract as `hasBackgroundWork` above, and the reason
         // `FleetKitVersion.wire` is deliberately not bumped for this field either.
+        //
+        // This degrades cleanly only for the FIELD, on a `WireSession` decode — a full
+        // snapshot or a resync. It says nothing about `FleetEventTag.apiErrorChanged` in
+        // `WireCoding.swift`: an older phone's `FleetEventTag` decoder throws on a raw value
+        // it does not recognise, and that throw propagates out of `FleetEvent.init(from:)`
+        // rather than landing here. See `docs/FOLLOWUPS.md`'s API-error-badge section for
+        // what that costs.
         apiError = try c.decodeIfPresent(SessionAPIError.self, forKey: .apiError)
     }
 }

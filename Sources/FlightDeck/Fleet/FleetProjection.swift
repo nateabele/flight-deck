@@ -61,7 +61,7 @@ enum FleetProjection {
     static func project(
         _ session: Session, status: SessionStatus?, unread: Set<UUID>,
         hasBackgroundWork: Bool, openPromptCall: String?,
-        apiError: SessionAPIError? = nil,
+        apiError: SessionAPIError?,
         planGates: PlanGateService? = nil
     ) -> WireSession {
         WireSession(

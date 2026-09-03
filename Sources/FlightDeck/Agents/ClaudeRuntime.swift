@@ -1,4 +1,3 @@
-import FleetKit
 import Foundation
 
 /// Claude's runtime: one `TranscriptWatcher` per attached tab (the transcript is per

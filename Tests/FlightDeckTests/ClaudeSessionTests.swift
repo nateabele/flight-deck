@@ -289,6 +289,22 @@ final class ClaudeSessionTests: XCTestCase {
                        [.agentStarted("a1"), .progressed])
     }
 
+    /// The tool_use scan's own comment names the exact cost of depending on error records
+    /// never carrying a `tool_use` block: "a silently dropped `agentStarted` the day it stops
+    /// being true." Nothing enforces that promise today, so this pins the record shape it
+    /// warns about — an `Agent` tool_use block riding an `isApiErrorMessage` record — and
+    /// asserts both events survive, in the tool_use scan's own order ahead of the error.
+    func testAgentToolUseAndApiErrorOnTheSameRecordBothReport() {
+        let line = #"""
+        {"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":529,"error":"overloaded",
+        "message":{"content":[{"type":"tool_use","name":"Agent","id":"a1"}]}}
+        """#
+        XCTAssertEqual(ClaudeSession.events(inLine: line, sessionID: UUID()),
+                       [.agentStarted("a1"), .apiError(SessionAPIError(
+                           status: 529, kind: "overloaded", isTransient: true
+                       ))])
+    }
+
     /// A tool result means the turn is alive and producing, which is exactly what makes an
     /// earlier error stale.
     func testToolResultProgresses() {
