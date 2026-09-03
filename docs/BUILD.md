@@ -22,9 +22,10 @@ Exact recorded versions: [TOOLING.md](TOOLING.md).
 
 ```bash
 git clone <flight-deck remote or path> flight-deck && cd flight-deck
-git submodule update --init            # checks out vendor/ghostty and vendor/boringssl
+git submodule update --init            # checks out vendor/ghostty, vendor/boringssl, vendor/fd-abduco
 ./scripts/build-libghostty.sh          # ~10 min first run (builds libghostty from source)
 ./scripts/build-boringssl.sh           # builds BoringSSL (SPAKE2, for pairing) from source
+./scripts/build-fd-abduco.sh           # builds the fd-abduco daemon binary (seconds)
 ./scripts/build.sh                     # xcodegen generate + xcodebuild → "Flight Deck.app"
 open "DerivedData/Build/Products/Debug/Flight Deck.app"
 ```
@@ -37,7 +38,8 @@ You should see a "Flight Deck" window with a live shell prompt.
 |---|---|---|
 | `scripts/build-libghostty.sh` | Builds `libghostty` from the pinned submodule → stages `vendor/ghostty-artifacts/GhosttyKit.xcframework` | Downloads Zig 0.15.2 if missing; creates the `xcrun` SDK shim in `vendor/.build-shim/`; builds via the 15.4 SDK; `git clean`s the submodule after staging. Idempotent. Re-run only if the xcframework is missing or you re-pin Ghostty. |
 | `scripts/build-boringssl.sh` | Builds BoringSSL's `libcrypto` (for SPAKE2, the pairing PAKE) from the pinned submodule → stages `vendor/boringssl-artifacts/BoringSSL.xcframework` | Needs `cmake`, `ninja` and `go` on `PATH`. Refuses to build if `vendor/boringssl` has drifted off its pinned tag, rather than silently building whatever is checked out. Re-run only if the xcframework is missing or you re-pin BoringSSL. |
-| `scripts/build.sh` | `export DEVELOPER_DIR` → `xcodegen generate` → `xcodebuild ... build` | Builds the app. Assumes both xcframeworks already exist (run `build-libghostty.sh` and `build-boringssl.sh` once first). |
+| `scripts/build-fd-abduco.sh` | Builds the `fd-abduco` fork (a plain C daemon binary, no Xcode involved) → stages `vendor/fd-abduco-artifacts/fd-abduco` | Universal (`arm64`+`x86_64`) Mach-O, built in seconds with the system `cc`. `project.yml`'s `FlightDeck` target copies this into the app bundle at **`Contents/Resources/fd-abduco`** (a Copy Files build phase, executable bit preserved) — that is the exact bundle-relative path a later phase resolves via `Bundle.main.url(forResource: "fd-abduco", withExtension: nil)` and execs. Must run before `scripts/build.sh` (or the app builds with no `fd-abduco` to copy — the Copy Files phase input simply won't exist yet). Re-run only if the binary is missing or `vendor/fd-abduco` changes. |
+| `scripts/build.sh` | `export DEVELOPER_DIR` → `xcodegen generate` → `xcodebuild ... build` | Builds the app. Assumes both xcframeworks already exist (run `build-libghostty.sh` and `build-boringssl.sh` once first) and, since this fork, that `vendor/fd-abduco-artifacts/fd-abduco` exists too (run `build-fd-abduco.sh` once first). |
 | `scripts/test-unit.sh` | Runs the headless unit test suite (`FlightDeckTests`) | The actually-working path for unit tests — see below. Needs both xcframeworks staged first, same as `build.sh`. |
 | `scripts/smoke.sh` | Clears saved window *geometry* → `build.sh` → `xcodegen generate` → runs the UI smoke test → prints `SMOKE PASS` | See "One-time UI-automation grant" below. It deliberately does **not** clear sessions or preferences — the app isolates those itself via `-FlightDeckResetState`. |
 
@@ -54,6 +56,14 @@ You should see a "Flight Deck" window with a live shell prompt.
 
 ```bash
 ./scripts/smoke.sh          # → ends with: SMOKE PASS
+```
+
+**`fd-abduco` tests** (build + unit trim + live create/attach/replay/budget-trim of the
+detached-session daemon; no app build needed):
+
+```bash
+bash Tests/fd-abduco/run_all.sh
+# → ALL fd-abduco tests OK
 ```
 
 ### One-time UI-automation grant
@@ -99,6 +109,11 @@ pattern and shows up as untracked. When the framework is a cross-checkout symlin
 worktree has no `BoringSSL.xcframework` either, and needs its own `scripts/build-boringssl.sh`
 run (or the same real-directory-plus-symlink treatment) before `FleetKit`, `FleetKitiOS` or
 `FlightDeckTests` will link.
+
+`vendor/fd-abduco-artifacts/` is git-ignored too, but unlike the two xcframeworks above it costs
+nothing to just build directly in the worktree — `scripts/build-fd-abduco.sh` is a few seconds
+of plain `cc`, no SDK pin or Zig toolchain involved — so there is no need for the
+real-directory-plus-symlink workaround here.
 
 ## Limitations (build reproducibility)
 
