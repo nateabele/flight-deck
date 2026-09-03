@@ -496,16 +496,25 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// that whatever blocked episode the token was minted for has resolved, so the next one
     /// starts clean and mints its own token rather than replaying a settled one (see
     /// `abortBlockedPrompt(session:)`'s own comment for the failure that silently reintroduces).
-    ///
-    /// Called for every session in a fleet snapshot from `connector.onFleet`, which fires on
-    /// the initial dial, every reconnect, and every folded event alike — comprehensive coverage
-    /// of activity transitions without a dedicated per-session subscription. Kept as its own
-    /// method, rather than folded inline into that closure, so it can be driven directly in
-    /// tests without a live `FleetConnector` to push a fleet snapshot through — the same
-    /// "nothing injectable below `sendPrompt`" gap `sentCommands` exists to work around.
     func noteSessionActivity(_ id: UUID, waiting: Bool) {
         guard !waiting else { return }
         blockedAbortTokens.removeValue(forKey: id)
+    }
+
+    /// The `activity == "waiting"` → `noteSessionActivity` mapping, over every session in a
+    /// fleet snapshot. Called from `connector.onFleet`, which fires on the initial dial, every
+    /// reconnect, and every folded event alike — comprehensive coverage of activity transitions
+    /// without a dedicated per-session subscription.
+    ///
+    /// Pulled out of that closure into its own method, rather than left as a loop inline there,
+    /// so both the loop and the `"waiting"` string it tests against are exercised directly by a
+    /// test that hands this a constructed `FleetSnapshot` — no live `FleetConnector` needed to
+    /// push one through. A test that only calls `noteSessionActivity` pins that method alone;
+    /// it would keep passing whether or not this loop still ran at all, or against any string.
+    func noteFleet(_ fleet: FleetSnapshot) {
+        for session in fleet.projects.flatMap(\.sessions) {
+            noteSessionActivity(session.id, waiting: session.activity == "waiting")
+        }
     }
 
     /// Answer a blocked dialog. Forwarded rather than absorbed, exactly as `sendPrompt` is:
@@ -578,12 +587,10 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
             MainActor.assumeIsolated {
                 self?.fleet = fleet
                 // Every session's current `activity`, on every snapshot and every folded event
-                // alike, is exactly the input `noteSessionActivity` needs to tell a resolved
-                // blocked episode from one still open — see its own comment for why this is
-                // the hook rather than a dedicated per-session subscription.
-                for session in fleet.projects.flatMap(\.sessions) {
-                    self?.noteSessionActivity(session.id, waiting: session.activity == "waiting")
-                }
+                // alike, is exactly the input `noteFleet` needs to tell a resolved blocked
+                // episode from one still open — see its own comment for why this is the hook
+                // rather than a dedicated per-session subscription.
+                self?.noteFleet(fleet)
                 // **Every snapshot, which is every connect** — first dial, reconnect, and the
                 // redial on return from the background. That covers all three moments the
                 // menu can have gone stale without a single one of them needing its own hook,

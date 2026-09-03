@@ -319,4 +319,56 @@ final class FleetModelBlockedAbortTests: XCTestCase {
             "a resolved episode's token must not be replayed into a later one"
         )
     }
+
+    /// `testAGenuineSecondBlockedEpisodeMintsAFreshToken` above pins `noteSessionActivity`
+    /// directly, which leaves two things it cannot catch: the `for session in
+    /// fleet.projects.flatMap(\.sessions)` loop inside `connector.onFleet` that calls it, and
+    /// the `session.activity == "waiting"` string this maps from. Delete the loop, or change
+    /// the string, and that test still passes. This one drives `noteFleet(_:)` — the method the
+    /// loop was extracted into — with constructed `FleetSnapshot` values instead, so both are
+    /// exercised: a snapshot naming the session `"waiting"` twice must still share one token
+    /// (the loop runs and the string matches, so nothing is cleared in between), and a snapshot
+    /// naming it anything else must drop the token before the next `"waiting"` one mints a new
+    /// one. No `FleetConnector` needed — `noteFleet` takes the same `FleetSnapshot` its closure
+    /// would have handed it.
+    func testNoteFleetTracksWaitingAcrossSnapshotsForBothTheLoopAndTheString() async {
+        let model = FleetModel.fixture()
+        let id = UUID()
+        let projectID = UUID()
+
+        func snapshot(activity: String?) -> FleetSnapshot {
+            FleetSnapshot(projects: [
+                WireProject(
+                    id: projectID, name: "P", path: "/p",
+                    sessions: [WireSession(id: id, title: "T", agent: "claude", activity: activity)]
+                )
+            ])
+        }
+
+        // Still waiting across two snapshots — same episode, must keep one token.
+        model.noteFleet(snapshot(activity: "waiting"))
+        await model.abortBlockedPrompt(session: id)
+        model.noteFleet(snapshot(activity: "waiting"))
+        await model.abortBlockedPrompt(session: id)
+
+        // The episode resolves...
+        model.noteFleet(snapshot(activity: "busy"))
+        // ...and a second, genuine episode begins.
+        model.noteFleet(snapshot(activity: "waiting"))
+        await model.abortBlockedPrompt(session: id)
+
+        let tokens: [UUID] = model.sentCommands.compactMap {
+            if case .abortPrompt(let sentID, let token) = $0, sentID == id { return token }
+            return nil
+        }
+        XCTAssertEqual(tokens.count, 3, "all three taps must still reach sendPrompt")
+        XCTAssertEqual(
+            tokens[0], tokens[1],
+            "still \"waiting\" across snapshots must not clear the token mid-episode"
+        )
+        XCTAssertNotEqual(
+            tokens[1], tokens[2],
+            "a resolved episode (activity left \"waiting\") must not carry its token into the next"
+        )
+    }
 }
