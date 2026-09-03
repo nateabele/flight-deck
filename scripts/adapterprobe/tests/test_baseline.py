@@ -119,5 +119,55 @@ class ExitCodeTests(unittest.TestCase):
         self.assertEqual(failures, {})
 
 
+MIXED_TIER_BASE = {
+    "versions": {"codex": "0.152.1", "claude": "2.1.258"},
+    "cells": {"codex.rename": "ok", "codex.resumeCommand": "broken", "codex.rebind": "ok"},
+    "tiers": {"codex.rename": "full", "codex.resumeCommand": "full", "codex.rebind": "cheap"},
+}
+
+
+class TierAwareDiffTests(unittest.TestCase):
+    """A `--tier cheap` run must not report every full-tier-only baseline cell as `removed`
+    just because it never went looking for it -- that is this repo's exact default-invocation
+    defect: a bare `./scripts/test-adapters.sh` always failed against a `--tier full` baseline,
+    for cells it structurally cannot have run."""
+
+    def test_a_cheap_run_against_a_full_tier_baseline_exits_0_when_cheap_cells_match(self):
+        m = {"versions": MIXED_TIER_BASE["versions"], "cells": {"codex.rebind": "ok"}}
+        diff = diff_baseline(MIXED_TIER_BASE, m, tiers={"cheap"})
+        self.assertEqual(diff["removed"], {})
+        self.assertEqual(diff["changed"], {})
+        code, failures = _exit_code(diff)
+        self.assertEqual(code, 0)
+        self.assertEqual(failures, {})
+
+    def test_the_two_full_tier_only_cells_are_skipped_not_removed(self):
+        m = {"versions": MIXED_TIER_BASE["versions"], "cells": {"codex.rebind": "ok"}}
+        diff = diff_baseline(MIXED_TIER_BASE, m, tiers={"cheap"})
+        self.assertEqual(diff["skipped"],
+                          {"codex.rename": "ok", "codex.resumeCommand": "broken"})
+        self.assertEqual(diff["removed"], {})
+
+    def test_a_cheap_cell_that_genuinely_disappeared_still_reports_removed(self):
+        # Its own tier (cheap) WAS exercised by this run -- being absent from the matrix is
+        # real drift, not "not attempted".
+        m = {"versions": MIXED_TIER_BASE["versions"], "cells": {}}
+        diff = diff_baseline(MIXED_TIER_BASE, m, tiers={"cheap"})
+        self.assertEqual(diff["removed"], {"codex.rebind": "ok"})
+
+    def test_a_full_tier_run_against_the_same_baseline_sees_every_cell(self):
+        m = {"versions": MIXED_TIER_BASE["versions"],
+             "cells": dict(MIXED_TIER_BASE["cells"])}
+        diff = diff_baseline(MIXED_TIER_BASE, m, tiers={"cheap", "full"})
+        self.assertEqual(diff["skipped"], {})
+        self.assertEqual(diff["removed"], {})
+
+    def test_a_baseline_entry_with_no_recorded_tier_is_still_compared(self):
+        base = {"versions": {}, "cells": {"codex.mystery": "ok"}, "tiers": {}}
+        diff = diff_baseline(base, {"versions": {}, "cells": {}}, tiers={"cheap"})
+        self.assertEqual(diff["removed"], {"codex.mystery": "ok"})
+        self.assertEqual(diff["skipped"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

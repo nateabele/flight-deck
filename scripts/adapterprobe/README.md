@@ -66,11 +66,13 @@ Exit code: `0` clean (matches `baseline.json`), `1` capability drift (a cell cha
 cell reads `error` outright — always outranks plain drift), `4` the sandbox guard refused to run
 at all (see below).
 
-**`baseline.json` was captured at `--tier full`, so a bare `./scripts/test-adapters.sh` (cheap
-only) will always exit non-zero against it** — `diff_baseline` does not filter by tier, so every
-full-tier-only cell the cheap run never produces shows up as "removed". That is not a failure to
-chase; it means exactly what it says. Compare a cheap run's own output by eye, or use `--tier
-full` for an apples-to-apples gate check.
+**`baseline.json` was captured at `--tier full`, and records each cell's own tier alongside its
+verdict.** A bare `./scripts/test-adapters.sh` (cheap only) diffs cleanly against it: a
+full-tier-only cell this run never attempted is reported as "not exercised", not "removed", and
+does not affect the exit code. Only a cell whose own tier this run *did* run, and that vanished
+from the matrix anyway, is real drift. The full-tier-only count is printed above the matrix
+(e.g. `8 full-tier cells not exercised (run --tier full to check them)`) so the gap stays
+visible rather than silent.
 
 **`--tier full` spends real API tokens and creates real threads** (inside the sandbox, which is
 deleted afterwards) — four rows per agent need a live model turn, and `ROW_TIMEOUT["full"]` is
