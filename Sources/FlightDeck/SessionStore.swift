@@ -3838,10 +3838,25 @@ final class SessionStore: ObservableObject {
     /// identical in both configurations and it is only the destination a test replaces.
     var answerAbortSink: (AnswerAbort) -> Void = AnswerAbortLog.record
 
-    /// Where `abortPrompt` files its own `.aborted` record. Same shape as `answerAbortSink`
-    /// above and for the same reason: `PromptLifecycleLog.record` writes to a real file and
-    /// os_log unconditionally, so a test that wants to see what this store decided — dispatch
-    /// or which guard refused — replaces the destination rather than the call site.
+    /// Where `abortPrompt` and `checkStuckPrompts` file their own `PromptLifecycleRecord`s.
+    /// Same shape as `answerAbortSink` above and for the same reason: `PromptLifecycleLog.record`
+    /// writes to a real file and os_log unconditionally, so a test that wants to see what this
+    /// store decided — dispatch, which guard refused, or a stuck-tick's diagnosis — replaces the
+    /// destination rather than the call site.
+    ///
+    /// **A second seam, not a reuse of `PromptService.lifecycleSink`, and that is a deliberate
+    /// departure from the convention that property's own doc states** — "files through this
+    /// property too rather than owning a second one, so a dialog's whole life … reads as one
+    /// stream." Both of this task's callers run on the store itself: `abortPrompt` can be
+    /// dispatched, and `checkStuckPrompts` runs on every registry tick, whether or not any
+    /// `PromptService` has ever been attached to this store (see `openPromptProbe`'s doc for why
+    /// a bare `SessionStore` in a test has none). Routing either through `PromptService` would
+    /// make the store depend on a service that exists only to serve the phone, for a write the
+    /// store can and must make on its own. Production behavior is identical either way — both
+    /// default to `PromptLifecycleLog.record` — so the "one stream" a person reading the log
+    /// sees is unaffected; only a test that wants every record now has two closures to redirect
+    /// instead of one, which `FleetTestHarness.init` and `AbortPromptLoopbackTests.standUp` both
+    /// do together for exactly this reason.
     var promptLifecycleSink: (PromptLifecycleRecord) -> Void = PromptLifecycleLog.record
 
     /// A client answered the dialog tab `id` is blocked on.
@@ -4033,6 +4048,13 @@ final class SessionStore: ObservableObject {
     /// hard here as it would be for a normal answer.
     private func dispatchAbort(in id: UUID, token: UUID) -> AnswerDispatch {
         guard let at = locate(id) else { return .unknownSession }
+        // Ahead of the activity check below, on purpose — see `answerPrompt`'s own comment on
+        // this same ordering, which this guard mirrors exactly. **Untestable by fixture today,
+        // for the reason `AnswerPromptTests.testAnIdleCodexTabIsRefusedByTheStatusGateLikeAnyOther`
+        // records rather than hides**: `AgentID` has exactly two cases and both now carry a real
+        // `dialogDriver` (`ClaudeAdapter`'s and `CodexAdapter`'s), so nothing reachable through
+        // `newSession` can make this `nil` — it would take a third agent. The order is pinned in
+        // prose here and in `answerPrompt`'s doc, not by a passing assertion, until one exists.
         guard let driver = repos[at.repo].sessions[at.session].agent.dialogDriver else {
             return .unsupportedAgent
         }
@@ -4758,7 +4780,7 @@ final class SessionStore: ObservableObject {
             let expected = registryCWD.map { expectedTranscriptURL(for: session, cwd: $0) }
             let matches = Self.pathMatches(watched: watched, expected: expected)
 
-            PromptLifecycleLog.record(PromptLifecycleRecord(
+            promptLifecycleSink(PromptLifecycleRecord(
                 session: id,
                 event: .stuck(
                     code: code,
