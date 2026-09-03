@@ -23,6 +23,7 @@ final class SessionStorePlanGateIntegrationTests: XCTestCase {
     private final class StubProvider: SurfaceProvider {
         func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? { nil }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     /// Same shape as `SessionStatusStoreTests.SpyNotifier` — copied rather than shared, since

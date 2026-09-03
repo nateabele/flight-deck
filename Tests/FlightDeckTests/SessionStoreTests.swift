@@ -13,6 +13,7 @@ final class SessionStoreTests: XCTestCase {
             return nil
         }
         func tick() { tickCount += 1 }
+        var defaultFontSize: Float { 12 }
     }
 
     /// In-memory stand-in for the snapshot store.

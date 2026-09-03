@@ -68,6 +68,7 @@ final class CodexLaunchFailureTests: XCTestCase {
             return nil
         }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     /// Blocks in `prepare` until it is released, so a test can act while a codex creation is
