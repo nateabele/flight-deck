@@ -223,7 +223,7 @@ struct FlightDeckApp: App {
             .commands {
                 SessionCommands(store: store, preferences: preferences)
                 EditCommands()
-                FontSizeCommands()
+                FontSizeCommands(store: store, preferences: preferences)
                 TabNavigationCommands(store: store)
                 SearchCommands()
             }

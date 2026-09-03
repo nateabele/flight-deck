@@ -6,6 +6,7 @@ final class SessionCreationTests: XCTestCase {
     final class StubProvider: SurfaceProvider {
         func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? { nil }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     // `SessionStore.provider` is `weak`; a `StubProvider` that isn't held anywhere else

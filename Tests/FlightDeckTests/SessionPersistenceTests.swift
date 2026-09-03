@@ -10,6 +10,7 @@ final class SessionPersistenceTests: XCTestCase {
             return nil
         }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     /// In-memory stand-in for UserDefaults.

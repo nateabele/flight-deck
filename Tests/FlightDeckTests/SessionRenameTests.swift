@@ -6,6 +6,7 @@ final class SessionRenameTests: XCTestCase {
     final class StubProvider: SurfaceProvider {
         func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? { nil }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     private func entry(_ sid: UUID, _ activity: SessionActivity, cwd: String)

@@ -34,6 +34,11 @@ final class GhosttyApp {
     /// surface-lifetime regression test to prove the app outlives surface frees.
     var hasValidApp: Bool { app != nil }
 
+    /// libghostty's configured `font-size`, read once during `init`. This is what
+    /// `TerminalFontSize.resolved` falls back to when `Preferences.terminalFontSize` is `nil`,
+    /// i.e. before the user has ever changed the size.
+    private(set) var defaultFontSize: Float = 12
+
     /// The finalized libghostty configuration backing `app`.
     private var config: ghostty_config_t!
 
@@ -64,6 +69,7 @@ final class GhosttyApp {
         ghostty_config_finalize(cfg)
         GhosttyApp.logConfigDiagnostics(cfg)
         self.config = cfg
+        self.defaultFontSize = GhosttyApp.readDefaultFontSize(from: cfg)
 
         // The "runtime" config is how libghostty calls back into the host app.
         //
@@ -161,6 +167,22 @@ final class GhosttyApp {
             Ghostty.logger.warning("ghostty config: \(String(cString: message))")
         }
     }
+
+    /// Reads libghostty's configured `font-size` (an `f32` in `Config.zig`) out of the
+    /// finalized config, so a surface created with no explicit `fontSize` and a freshly
+    /// bumped `set_font_size` binding action agree on what "default" means. A failed read is
+    /// logged and falls back to the property's initializer default rather than crashing —
+    /// this is a nicety, not something worth refusing to launch over.
+    private static func readDefaultFontSize(from config: ghostty_config_t) -> Float {
+        var value: Float = 12
+        let key = "font-size"
+        guard ghostty_config_get(config, &value, key, UInt(key.lengthOfBytes(using: .utf8))) else {
+            Ghostty.logger.warning("ghostty_config_get failed for font-size; using fallback")
+            return 12
+        }
+        return value
+    }
+
     /// Dispatches an app-level action from libghostty to its host equivalent.
     ///
     /// Most actions are still unhandled — see `docs/FOLLOWUPS.md`. This wires only the ones

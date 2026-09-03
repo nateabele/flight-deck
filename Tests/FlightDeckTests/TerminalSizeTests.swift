@@ -6,6 +6,7 @@ final class TerminalSizeTests: XCTestCase {
     final class StubProvider: SurfaceProvider {
         func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? { nil }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     final class FakePersistence: SessionPersisting {

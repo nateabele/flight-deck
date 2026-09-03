@@ -11,37 +11,51 @@ import SwiftUI
 /// ⌘⇧T, which libghostty registers `performable` and which therefore do need an unbind to
 /// keep the terminal from claiming them first.
 ///
-/// **Why `nil` targets.** Each button forwards to the first responder via `NSApp.sendAction`,
-/// so the item acts on whichever surface is focused without this file knowing about the
-/// session store. That mirrors `EditCommands` and `TabNavigationCommands`.
-///
 /// **Why no `.disabled(...)`.** A disabled `NSMenuItem` does not fire its key equivalent, so
 /// validating here would silently kill the shortcut too — the same rule `EditCommands` and
 /// `TabNavigationCommands` document.
+///
+/// **Why the size is set absolutely, not by increment.** libghostty has no font-size getter
+/// and no `increase_font_size`/`decrease_font_size` *action* wired here — only
+/// `set_font_size:<points>`, an absolute set. So this file owns the current number
+/// (`Preferences.terminalFontSize`), steps it with `TerminalFontSize`, and pushes the result
+/// to every surface via `SessionStore.applyTerminalFontSize`. Counting increments instead
+/// would let a surface's on-screen size and the stored preference drift apart the moment one
+/// changed without the other — an absolute set makes that desync impossible.
 struct FontSizeCommands: Commands {
+    let store: SessionStore
+    @ObservedObject var preferences: PreferencesStore
+
     var body: some Commands {
         // `.toolbar` is the group SwiftUI places in the View menu.
         CommandGroup(after: .toolbar) {
             Button("Bigger") {
-                send(#selector(Ghostty.SurfaceView.increaseFontSize(_:)))
+                let current = TerminalFontSize.resolved(
+                    preferences.preferences.terminalFontSize, default: store.defaultFontSize
+                )
+                let bigger = TerminalFontSize.bigger(current)
+                preferences.preferences.terminalFontSize = bigger
+                store.applyTerminalFontSize(bigger)
             }
             .keyboardShortcut("=", modifiers: [.command, .shift])
 
             Button("Smaller") {
-                send(#selector(Ghostty.SurfaceView.decreaseFontSize(_:)))
+                let current = TerminalFontSize.resolved(
+                    preferences.preferences.terminalFontSize, default: store.defaultFontSize
+                )
+                let smaller = TerminalFontSize.smaller(current)
+                preferences.preferences.terminalFontSize = smaller
+                store.applyTerminalFontSize(smaller)
             }
             .keyboardShortcut("-", modifiers: [.command, .shift])
 
             Button("Actual Size") {
-                send(#selector(Ghostty.SurfaceView.resetFontSize(_:)))
+                preferences.preferences.terminalFontSize = nil
+                store.applyTerminalFontSize(store.defaultFontSize)
             }
             .keyboardShortcut("0", modifiers: .command)
 
             Divider()
         }
-    }
-
-    private func send(_ selector: Selector) {
-        NSApp.sendAction(selector, to: nil, from: nil)
     }
 }

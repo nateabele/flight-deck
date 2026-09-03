@@ -458,5 +458,6 @@ final class AgentRoutingTests: XCTestCase {
             return nil
         }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 }

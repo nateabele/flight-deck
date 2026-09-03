@@ -113,6 +113,9 @@ struct Preferences: Codable, Equatable {
     /// reserves this port while Flight Deck is not running, so `FleetService.start` treats a
     /// port it cannot rebind as a preference to abandon, not a reason to have no listener.
     var fleetPort: UInt16?
+    /// Points. Optional for exactly the reason `confirmations` is — see that property's comment.
+    /// `nil` means "never changed", which resolves to libghostty's configured `font-size`.
+    var terminalFontSize: Float?
 
     init(
         globalFlags: FlagSet = FlagSet(),
@@ -126,7 +129,8 @@ struct Preferences: Codable, Equatable {
         storedProjectSettings: [String: ProjectSettings]? = nil,
         pairedDevices: [PairedDevice]? = nil,
         installID: UUID? = nil,
-        fleetPort: UInt16? = nil
+        fleetPort: UInt16? = nil,
+        terminalFontSize: Float? = nil
     ) {
         self.globalFlags = globalFlags
         self.projectFlags = projectFlags
@@ -140,6 +144,7 @@ struct Preferences: Codable, Equatable {
         self.pairedDevices = pairedDevices
         self.installID = installID
         self.fleetPort = fleetPort
+        self.terminalFontSize = terminalFontSize
     }
 
     /// Falls back to claude-then-codex so a `Preferences` that has never been migrated

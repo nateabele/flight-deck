@@ -243,4 +243,26 @@ final class PreferencesStoreTests: XCTestCase {
         XCTAssertEqual(decoded.globalFlags.values["--model"], .value("opus"))
         XCTAssertTrue(decoded.shell.clearChildSessionMarker)
     }
+
+    /// Same trap, for `terminalFontSize`: a `preferences.v1` blob written before this task
+    /// must still decode, with every other field intact.
+    func testPreferencesWithoutTheTerminalFontSizeKeyStillDecode() throws {
+        let original = Preferences(
+            globalFlags: FlagSet(values: ["--model": .value("opus")]),
+            claude: ClaudePreferences(autoResumeRunningSessions: true)
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try JSONEncoder().encode(original))
+                as? [String: Any]
+        )
+        object.removeValue(forKey: "terminalFontSize")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(Preferences.self, from: legacy)
+
+        XCTAssertNil(decoded.terminalFontSize)
+        XCTAssertEqual(decoded.globalFlags.values["--model"], .value("opus"))
+        XCTAssertEqual(decoded.claude?.autoResumeRunningSessions, true)
+        XCTAssertTrue(decoded.shell.clearChildSessionMarker)
+    }
 }

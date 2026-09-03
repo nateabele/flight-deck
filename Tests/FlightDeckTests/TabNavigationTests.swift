@@ -8,6 +8,7 @@ final class TabNavigationTests: XCTestCase {
     private final class StubProvider: SurfaceProvider {
         func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? { nil }
         func tick() {}
+        var defaultFontSize: Float { 12 }
     }
 
     private let foo = URL(fileURLWithPath: "/work/foo", isDirectory: true)

@@ -6,6 +6,9 @@ import Foundation
 protocol SurfaceProvider: AnyObject {
     func makeSurface(_ config: Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView?
     func tick()
+    /// libghostty's configured `font-size`, in points — what an unset `Preferences
+    /// .terminalFontSize` resolves to. See `GhosttyApp.defaultFontSize`.
+    var defaultFontSize: Float { get }
 }
 
 extension GhosttyApp: SurfaceProvider {
