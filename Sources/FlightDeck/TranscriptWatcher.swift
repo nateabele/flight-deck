@@ -145,6 +145,10 @@ final class TranscriptWatcher {
                     outstandingAgents.removeAll()
                     countChanged = true
                 }
+            case .apiError:
+                break
+            case .progressed:
+                break
             }
         }
 
