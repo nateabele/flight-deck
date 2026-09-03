@@ -140,7 +140,8 @@ struct FleetListScreen: View {
                     session: model.fleet.projects
                         .flatMap(\.sessions)
                         .first { $0.id == id },
-                    model: model.timelineModel(for: id)
+                    model: model.timelineModel(for: id),
+                    onAbortBlocked: { await model.abortBlockedPrompt(session: $0) }
                 )
             }
             // Inline, not the default large title. A large title costs roughly 52pt of height

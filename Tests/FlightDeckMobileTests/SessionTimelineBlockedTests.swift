@@ -434,6 +434,58 @@ final class SessionTimelineBlockedTests: XCTestCase {
         XCTAssertFalse(model.blockedChaseExhausted)
     }
 
+    // MARK: - Task 6: the Blocked card's own live-input requirement
+
+    /// **The regression `PromptCard.showsBlocked`'s `hasCard` contract exists to prevent.** A
+    /// `hasCard` snapshot taken *before* the late record lands — exactly what latched
+    /// `blockedChaseExhausted` alone would tempt a caller into reusing, since the flag itself
+    /// does not change when the card finally arrives — says Blocked should stay up even after
+    /// the card exists. Only a `hasCard` re-evaluated from `blocked(...)` at the same moment as
+    /// `exhausted` is read gets this right; this test fails if `showsBlocked` were fed the stale
+    /// reading instead.
+    func testALateCardStandsBlockedDownOnlyWhenHasCardIsReEvaluatedLive() async {
+        let (model, stub) = makeModel()
+        model.promptRetries = Array(repeating: .milliseconds(30), count: 3)
+        model.loadLatest()
+        stub.answer(.success(page([], session: model.sessionID)))
+
+        async let chase: Void = model.chaseBlockedPrompt(
+            agent: "claude", activity: "waiting", call: .unreported
+        )
+        for _ in 0..<3 { await stub.answerWhenAsked(.success(page([], session: model.sessionID))) }
+        await chase
+        XCTAssertTrue(model.blockedChaseExhausted, "the premise: the chase gave up")
+
+        // The reading a caller must not reuse: captured once, before the late record arrives.
+        let staleHasCard =
+            model.blocked(agent: "claude", activity: "waiting", call: .unreported) != nil
+        XCTAssertFalse(staleHasCard, "the premise: nothing was on screen when this was taken")
+
+        // The record lands late, on the SAME still-open call — the case `blockedChaseExhausted`
+        // does NOT clear for, per its own comment.
+        model.loadNewer()
+        stub.answer(.success(page([askItem(callID: "toolu_late")], session: model.sessionID)))
+        XCTAssertTrue(model.blockedChaseExhausted, "still latched: this was not a new dialog")
+
+        let liveHasCard =
+            model.blocked(agent: "claude", activity: "waiting", call: .unreported) != nil
+        XCTAssertTrue(liveHasCard, "the card is there once the record is")
+
+        XCTAssertFalse(
+            PromptCard.showsBlocked(
+                exhausted: model.blockedChaseExhausted, allowsAbort: true, hasCard: liveHasCard
+            ),
+            "fed the live reading, Blocked must stand down now that the card exists"
+        )
+        XCTAssertTrue(
+            PromptCard.showsBlocked(
+                exhausted: model.blockedChaseExhausted, allowsAbort: true, hasCard: staleHasCard
+            ),
+            "the stale reading is what would leave Blocked on screen wrongly — a cached " +
+            "hasCard reproduces exactly this"
+        )
+    }
+
     // MARK: - What the Mac says is open
 
     /// **The stale card, from this end.** The feed still holds `toolu_A` unanswered — the
