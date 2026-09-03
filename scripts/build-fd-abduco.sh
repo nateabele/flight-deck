@@ -3,7 +3,9 @@
 #
 # `abduco.c` #includes `debug.c`, `client.c`, `server.c` inline (confirmed by
 # reading vendor/fd-abduco/abduco.c), so it is a single translation unit and
-# only abduco.c is compiled here.
+# only abduco.c is compiled from that group. `fd_outlog.c` (Task 2) is NOT
+# `#include`d anywhere -- it is a separate translation unit and must be
+# compiled and linked alongside abduco.c explicitly.
 #
 # Flags beyond a bare `cc abduco.c` (see vendor/fd-abduco/PROVENANCE.md for
 # why each is needed):
@@ -23,6 +25,6 @@ CC=${CC:-cc}
 # Universal binary to match the app's architectures.
 "$CC" -arch arm64 -arch x86_64 -Os -Wall -o "$OUT/fd-abduco" \
   -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE -DNDEBUG \
-  -I"$SRC" "$SRC/abduco.c" -lutil
+  -I"$SRC" "$SRC/abduco.c" "$SRC/fd_outlog.c" -lutil
 echo "built $OUT/fd-abduco"
 "$OUT/fd-abduco" -v || true

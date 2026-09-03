@@ -223,8 +223,13 @@ static void server_mainloop(void) {
 		if (FD_ISSET(server.socket, &readfds))
 			server_accept_client();
 
-		if (FD_ISSET(server.pty, &readfds))
+		if (FD_ISSET(server.pty, &readfds)) {
 			pty_data = server_read_pty(&server_packet);
+			/* Flight Deck fork (Task 3): capture what was just read, before it is
+			 * forwarded to clients below, so replay can hand it to late attachers. */
+			if (pty_data)
+				fd_outlog_append(&server.outlog, server_packet.u.msg, server_packet.len);
+		}
 
 		for (Client **prev_next = &server.clients, *c = server.clients; c;) {
 			if (FD_ISSET(c->socket, &readfds) && server_recv_packet(c, &client_packet)) {
@@ -238,7 +243,33 @@ static void server_mainloop(void) {
 						server_sink_client();
 					break;
 				case MSG_RESIZE:
-					c->state = STATE_ATTACHED;
+					/* Flight Deck fork (Task 3): this is the point a client actually
+					 * becomes attached -- MSG_ATTACH above only records flags; the
+					 * client always follows it with MSG_RESIZE (client.c:
+					 * client.need_resize starts true). Replay history to this client
+					 * only, once, on the CONNECTED/DETACHED -> ATTACHED transition,
+					 * and do it before falling through to the live-forwarding code
+					 * below so history always precedes any live/resize repaint. A
+					 * later client-initiated resize also sends MSG_RESIZE while
+					 * already ATTACHED; that must not replay again. */
+					if (c->state != STATE_ATTACHED) {
+						c->state = STATE_ATTACHED;
+						fd_outlog_trim(&server.outlog);
+						for (size_t off = 0; off < server.outlog.len; ) {
+							Packet rp;
+							memset(&rp, 0, sizeof rp);
+							size_t chunk = server.outlog.len - off;
+							if (chunk > sizeof(rp.u.msg))
+								chunk = sizeof(rp.u.msg);
+							rp.type = MSG_CONTENT;
+							rp.len = chunk;
+							memcpy(rp.u.msg, server.outlog.data + off, chunk);
+							server_send_packet(c, &rp);
+							off += chunk;
+						}
+					} else {
+						c->state = STATE_ATTACHED;
+					}
 				case MSG_REDRAW:
 					if (!(c->flags & CLIENT_READONLY) && (client_packet.type == MSG_REDRAW || c == server.clients)) {
 						debug("server-ioct: TIOCSWINSZ\n");
