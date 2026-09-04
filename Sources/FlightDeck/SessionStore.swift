@@ -3915,6 +3915,22 @@ final class SessionStore: ObservableObject {
     /// and arrows. Collapsing the two back into one capability would make an agent's dialogs
     /// undrivable for a reason that is about its composer.
     ///
+    /// Files an `AnswerAbort` for a guard in `answerPrompt`/`dispatchAbort` that fails before any
+    /// plan step exists — `drive()`'s own aborts always have a step; these never do. `from: 0,
+    /// to: 0` is intentional: from/to are meaningless for a pre-move guard, so the `check` name
+    /// alone carries the meaning.
+    private func recordEarlyAbort(
+        _ check: AnswerAbort.Check,
+        expected: String? = nil,
+        focused: Int? = nil,
+        injector: (any TextInjecting)? = nil
+    ) {
+        answerAbortSink(AnswerAbort(
+            check: check, step: nil, purpose: nil, from: 0, to: 0,
+            expected: expected, focused: focused, viewport: injector?.readViewport()
+        ))
+    }
+
     /// Changes no fleet state and emits no `FleetEvent`: what the phone answered becomes
     /// visible through the status the agent writes and the transcript it appends.
     @discardableResult
@@ -3931,10 +3947,16 @@ final class SessionStore: ObservableObject {
         // comment describes from the other side. Escape is gated too: a stray Escape into a
         // live TUI is not free either.
         guard statuses[id]?.activity == .waiting else { return .notWaiting }
-        guard let injector = injector(for: id) else { return .unreadableScreen }
+        guard let injector = injector(for: id) else {
+            recordEarlyAbort(.noInjector)
+            return .unreadableScreen
+        }
         // The same set the other two users of this terminal hold, so a rename or a queued
         // phone prompt mid-settle cannot interleave with a dialog being driven.
-        guard !injecting.contains(id) else { return .unreadableScreen }
+        guard !injecting.contains(id) else {
+            recordEarlyAbort(.tabBusy, injector: injector)
+            return .unreadableScreen
+        }
 
         switch answer {
         case .deny:
@@ -3974,10 +3996,18 @@ final class SessionStore: ObservableObject {
             // to confirm the row against. All that can be required after the move is that the
             // marker is ON that row. A screen that renumbered its rows would satisfy that.
             // The two paths are not equally verified and must not be read as if they were.
-            guard case .permission = open else { return .unreadableScreen }
-            guard let viewport = injector.readViewport(),
-                  let current = driver.focusedRow(inViewport: viewport)
-            else { return .unreadableScreen }
+            guard case .permission = open else {
+                recordEarlyAbort(.allowNotPermission, injector: injector)
+                return .unreadableScreen
+            }
+            guard let viewport = injector.readViewport() else {
+                recordEarlyAbort(.unreadableBeforePress)
+                return .unreadableScreen
+            }
+            guard let current = driver.focusedRow(inViewport: viewport) else {
+                recordEarlyAbort(.noFocusedRow, injector: injector)
+                return .unreadableScreen
+            }
             return drive(
                 from: current, to: driver.allowRow,
                 confirm: { driver.focusedRow(inViewport: $0) == driver.allowRow },
@@ -3988,13 +4018,24 @@ final class SessionStore: ObservableObject {
             // The set path. Everything it needs is checked before a key moves: the answers fit
             // the questions the TRANSCRIPT holds, each label matches this Mac's own copy, and
             // the plan exists at all.
-            guard case .question(_, let questions) = open else { return .unreadableScreen }
-            guard selections.count == questions.count else { return .unreadableScreen }
+            guard case .question(_, let questions) = open else {
+                recordEarlyAbort(.setNotQuestion, injector: injector)
+                return .unreadableScreen
+            }
+            guard selections.count == questions.count else {
+                recordEarlyAbort(.setCountMismatch, injector: injector)
+                return .unreadableScreen
+            }
             for (question, chosen) in zip(questions, selections) {
                 for selection in chosen {
                     guard question.options.indices.contains(selection.index),
                           question.options[selection.index].label == selection.label
-                    else { return .unreadableScreen }
+                    else {
+                        let expected = question.options.indices.contains(selection.index)
+                            ? question.options[selection.index].label : nil
+                        recordEarlyAbort(.setLabelMismatch, expected: expected, injector: injector)
+                        return .unreadableScreen
+                    }
                 }
             }
             guard let plan = AnswerPlan.plan(
@@ -4007,7 +4048,10 @@ final class SessionStore: ObservableObject {
             // `option` indexes an `AskUserQuestion`'s own options, so a permission dialog —
             // which has no options this build can enumerate — has no list for the index to
             // mean anything in.
-            guard case .question(_, let questions) = open else { return .unreadableScreen }
+            guard case .question(_, let questions) = open else {
+                recordEarlyAbort(.optionNotQuestion, injector: injector)
+                return .unreadableScreen
+            }
             // **One question, and this refusal is the guard rail.** `.option` names an index
             // into ONE question's options; a set has several lists and a screen showing
             // whichever of them claude has advanced to, so the index would be counted against
@@ -4028,22 +4072,40 @@ final class SessionStore: ObservableObject {
             // something else, and its index is not to be trusted either.
             guard question.options.indices.contains(index),
                   question.options[index].label == label
-            else { return .unreadableScreen }
-            guard let viewport = injector.readViewport(),
-                  let current = driver.focusedRow(inViewport: viewport),
-                  // The pre-flight half of the interlock: before counting arrows across a
-                  // list, confirm the row the cursor is already on says what this question
-                  // says it should. Without it a dialog that has been answered and replaced
-                  // would be moved through — two keystrokes into someone else's cursor —
-                  // and only the re-read would catch it, too late to have sent nothing.
-                  //
-                  // A cursor outside the transcript's options is refused rather than counted
-                  // from: claude appends rows at display time (`Type something.`, `Chat about
-                  // this`) that appear in no transcript, so there is no label to confirm.
-                  question.options.indices.contains(current),
-                  driver.row(current, reads: question.options[current].label,
-                             inViewport: viewport)
-            else { return .unreadableScreen }
+            else {
+                let expected = question.options.indices.contains(index)
+                    ? question.options[index].label : nil
+                recordEarlyAbort(.optionLabelMismatch, expected: expected, injector: injector)
+                return .unreadableScreen
+            }
+            guard let viewport = injector.readViewport() else {
+                recordEarlyAbort(.unreadableBeforePress)
+                return .unreadableScreen
+            }
+            guard let current = driver.focusedRow(inViewport: viewport) else {
+                recordEarlyAbort(.noFocusedRow, injector: injector)
+                return .unreadableScreen
+            }
+            // The pre-flight half of the interlock: before counting arrows across a
+            // list, confirm the row the cursor is already on says what this question
+            // says it should. Without it a dialog that has been answered and replaced
+            // would be moved through — two keystrokes into someone else's cursor —
+            // and only the re-read would catch it, too late to have sent nothing.
+            //
+            // A cursor outside the transcript's options is refused rather than counted
+            // from: claude appends rows at display time (`Type something.`, `Chat about
+            // this`) that appear in no transcript, so there is no label to confirm.
+            guard question.options.indices.contains(current) else {
+                recordEarlyAbort(.optionCursorOutside, focused: current, injector: injector)
+                return .unreadableScreen
+            }
+            guard driver.row(current, reads: question.options[current].label,
+                              inViewport: viewport)
+            else {
+                recordEarlyAbort(.optionRowMismatch, expected: question.options[current].label,
+                                  focused: current, injector: injector)
+                return .unreadableScreen
+            }
             return drive(
                 from: current, to: index,
                 confirm: {
@@ -4139,10 +4201,16 @@ final class SessionStore: ObservableObject {
         // `not_waiting` is the truer sentence; before the screen, because this is a question
         // about the transcript and reaching a terminal to answer it would be backwards.
         if probe == .nameable { return .promptNameable }
-        guard let injector = injector(for: id) else { return .unreadableScreen }
+        guard let injector = injector(for: id) else {
+            recordEarlyAbort(.noInjector)
+            return .unreadableScreen
+        }
         // The same set the other two users of this terminal hold, so a rename or a queued
         // phone prompt mid-settle cannot interleave with a dialog being driven.
-        guard !injecting.contains(id) else { return .unreadableScreen }
+        guard !injecting.contains(id) else {
+            recordEarlyAbort(.tabBusy, injector: injector)
+            return .unreadableScreen
+        }
         remember(answered: token, for: id)
         driver.deny(injector)
         return .dispatched
@@ -5792,6 +5860,17 @@ struct AnswerAbort: Equatable {
         case labelBeforePress = "pre-press-label"
         case unreadableAfterMove = "unreadable-viewport-after-move"
         case landingAfterMove = "post-move-landing"
+        case noInjector          = "no-injector"
+        case tabBusy             = "tab-busy"
+        case allowNotPermission  = "allow-not-permission"
+        case noFocusedRow        = "no-focused-row"
+        case setNotQuestion      = "set-not-question"
+        case setCountMismatch    = "set-count-mismatch"
+        case setLabelMismatch    = "set-label-mismatch"
+        case optionNotQuestion   = "option-not-question"
+        case optionLabelMismatch = "option-label-mismatch"
+        case optionCursorOutside = "option-cursor-outside"
+        case optionRowMismatch   = "option-row-mismatch"
     }
 
     let check: Check
