@@ -134,6 +134,10 @@ struct PromptLifecycleRecord: Equatable {
         /// not count the Escapes this Mac really sent. `probe` is what this Mac believed about
         /// the dialog at that instant — see `AbortProbe`, which is where the reason lives.
         case aborted(code: String?, sent: Bool, probe: AbortProbe)
+        /// Observability for the phone-prompt *typing* path (the submitPrompt→inject funnel),
+        /// which previously logged nothing. `composer` classifies what `readViewport()` returned:
+        /// `noInjector` / `viewportNil` / `viewportEmpty` / `boxEmpty(vp=N)` / `boxNonEmpty(vp=N)`.
+        case typing(stage: String, activity: String?, selected: Bool, injector: Bool, composer: String)
     }
 
     /// `nil` only for `resumed`, which is about a connection rather than a session.
@@ -189,6 +193,9 @@ struct PromptLifecycleRecord: Equatable {
                 + " tailRecords=\(tail)"
         case .aborted(let code, let sent, let probe):
             return "abort code=\(code ?? "ok") sent=\(sent) probe=\(Self.describe(probe))"
+        case .typing(let stage, let activity, let selected, let injector, let composer):
+            return "typing stage=\(stage) activity=\(activity ?? "-") selected=\(selected)"
+                + " injector=\(injector) composer=\(composer)"
         }
     }
 
