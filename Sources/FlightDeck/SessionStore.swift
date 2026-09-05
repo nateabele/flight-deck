@@ -1362,6 +1362,9 @@ final class SessionStore: ObservableObject {
         let previousRun = persistence?.load()
         if resetState || !restore() { seedInitialSession() }
         startStatusWatching()
+        #if DEBUG
+        startViewportDiagnosticsIfRequested()
+        #endif
         if let previousRun {
             Task { [weak self] in await self?.sweepOrphans(from: previousRun) }
         }
@@ -3743,6 +3746,51 @@ final class SessionStore: ObservableObject {
         return promptQueue[id]?.contains { $0.token == token } == true ? .queued : .sent
     }
 
+    /// Classifies what the tab's live surface reads as, for the typing-path instrumentation.
+    /// A pure read (no fleet-state mutation), same contract as `viewport(of:)`.
+    func promptTypingComposerState(for id: UUID) -> String {
+        guard let inj = injector(for: id) else { return "noInjector" }
+        guard let vp = inj.readViewport() else { return "viewportNil" }
+        if vp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "viewportEmpty" }
+        let empty = session(for: id)?.agent.textChannel?.isComposerEmpty(inj) ?? false
+        return "\(empty ? "boxEmpty" : "boxNonEmpty")(vp=\(vp.count))"
+    }
+
+    /// Emits one `.typing` record through the same sink dialog records use.
+    private func logPromptTyping(_ stage: String, for id: UUID) {
+        promptLifecycleSink(PromptLifecycleRecord(
+            session: id,
+            event: .typing(
+                stage: stage,
+                activity: statuses[id].map { String(describing: $0.activity) },
+                selected: selectedSessionID == id,
+                injector: injector(for: id) != nil,
+                composer: promptTypingComposerState(for: id)
+            )
+        ))
+    }
+
+    #if DEBUG
+    /// One-shot diagnostic for the mid-turn-queuing investigation: when
+    /// `FD_DIAGNOSE_VIEWPORT=1`, log every tab's composer state a few times after launch, so a
+    /// background (non-selected) tab's `readViewport()` can be compared against the selected
+    /// tab's without a phone. Removed once the investigation concludes.
+    func startViewportDiagnosticsIfRequested() {
+        guard ProcessInfo.processInfo.environment["FD_DIAGNOSE_VIEWPORT"] == "1" else { return }
+        var fires = 0
+        Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] timer in
+            Task { @MainActor in
+                guard let self else { timer.invalidate(); return }
+                for session in self.repos.flatMap(\.sessions) {
+                    self.logPromptTyping("diagnostic", for: session.id)
+                }
+                fires += 1
+                if fires >= 4 { timer.invalidate() }
+            }
+        }
+    }
+    #endif
+
     /// Files a token against a tab, oldest evicted first. See `acceptedPromptTokens`.
     private func remember(_ token: UUID, for id: UUID) {
         var tokens = acceptedPromptTokens[id, default: []]
@@ -3791,7 +3839,8 @@ final class SessionStore: ObservableObject {
         // resume queue holds text that stops making sense in two minutes. This queue has
         // fifteen.
         guard pendingRenames[id] == nil, pendingPrompts[id] == nil else { return }
-        inject(
+        logPromptTyping("attempt", for: id)
+        let started = inject(
             head.text,
             into: id,
             allowMidTurn: true,
@@ -3807,6 +3856,7 @@ final class SessionStore: ObservableObject {
                 }
             }
         )
+        logPromptTyping("inject=\(started)", for: id)
     }
 
     // MARK: - Answering a dialog from a paired phone
