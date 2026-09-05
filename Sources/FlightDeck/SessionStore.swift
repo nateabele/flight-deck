@@ -3792,56 +3792,44 @@ final class SessionStore: ObservableObject {
     }
 
     /// Temporary reproduction for the mid-turn-queuing investigation. When
-    /// `FD_SIMULATE_PHONE_PROMPT=1`: find a ready claude tab, type a long prompt to make it
-    /// BUSY, sample its composer state (as the app's readViewport sees it) throughout the busy
-    /// window, and fire a simulated phone prompt (`submitPrompt`) at it mid-turn — so the log
-    /// shows what `isComposerEmpty` returns during real streaming and whether `inject` refuses.
+    /// `FD_SIMULATE_PHONE_PROMPT=1`: create a real claude tab in the TRUSTED repo dir (so it
+    /// boots straight to a ready empty box with no trust dialog, unlike the nondeterministic
+    /// shell-profile seeding), type a long prompt to make it BUSY, sample its composer state
+    /// (as the app's readViewport sees it) through the busy window, and fire a simulated phone
+    /// prompt (`submitPrompt`) at it mid-turn — so the log shows what `isComposerEmpty` returns
+    /// during real streaming and whether `inject` refuses.
     func startPhonePromptSimulationIfRequested() {
         guard ProcessInfo.processInfo.environment["FD_SIMULATE_PHONE_PROMPT"] == "1" else { return }
-        // Give tabs time to boot to a ready prompt.
-        Timer.scheduledTimer(withTimeInterval: 9, repeats: false) { [weak self] _ in
+        let repoDir = URL(
+            fileURLWithPath: "/Users/nate/Projects/Protos-n-Tools/flight-deck", isDirectory: true)
+        let id = newSession(in: repoDir).id
+        logPromptTyping("sim:createdClaudeTab", for: id)
+        // t≈12s: claude should be at a ready empty box; type a long prompt to make it BUSY.
+        Timer.scheduledTimer(withTimeInterval: 12, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                // A ready claude tab: has a text channel, a reported status, and an empty box.
-                let target = self.repos.flatMap(\.sessions).first { s in
-                    s.agent.textChannel != nil
-                        && self.status(for: s.id)?.activity != nil
-                        && self.promptTypingComposerState(for: s.id).hasPrefix("boxEmpty")
-                }
-                guard let target else {
-                    // Log every tab so we can see why none qualified.
-                    for s in self.repos.flatMap(\.sessions) { self.logPromptTyping("sim:candidate", for: s.id) }
-                    self.logPromptTyping("sim:noReadyClaudeTarget", for: UUID())
-                    return
-                }
-                let id = target.id
-                self.logPromptTyping("sim:targetChosen", for: id)
-                // Make it busy by typing a long-running prompt straight at the pty.
-                if let inj = self.injector(for: id) {
-                    inj.sendText("Print every integer from 1 to 300, one per line, each followed by a short word. Take your time.")
-                    inj.sendReturn()
-                }
+                self.logPromptTyping("sim:preBusy", for: id)
+                self.injector(for: id)?.sendText(
+                    "Print every integer from 1 to 400, one per line, each followed by a short word. Take your time.")
+                self.injector(for: id)?.sendReturn()
                 self.logPromptTyping("sim:typedLongPrompt", for: id)
-                // Sample the target's composer state every 2s for ~34s, so the busy window is
-                // captured as the app's readViewport sees it.
-                var samples = 0
-                Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
-                    Task { @MainActor in
-                        guard let self else { timer.invalidate(); return }
-                        self.logPromptTyping("sim:sample", for: id)
-                        samples += 1
-                        if samples >= 17 { timer.invalidate() }
-                    }
+            }
+        }
+        // Sample composer state every 2s; start after the busy prompt is typed, fire the
+        // simulated phone prompt well into the busy turn, then stop.
+        var n = 0
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
+            Task { @MainActor in
+                guard let self else { timer.invalidate(); return }
+                n += 1
+                if n >= 7 { self.logPromptTyping("sim:sample", for: id) }   // ~t=14s onward
+                if n == 11 {                                               // ~t=22s, mid-busy
+                    self.logPromptTyping("sim:beforeSubmit", for: id)
+                    let result = self.submitPrompt(
+                        "SIMULATED PHONE PROMPT (mid-turn)", token: UUID(), to: id)
+                    self.logPromptTyping("sim:submitResult=\(result)", for: id)
                 }
-                // Fire the simulated phone prompt ~7s in (well into the busy turn).
-                Timer.scheduledTimer(withTimeInterval: 7, repeats: false) { [weak self] _ in
-                    Task { @MainActor in
-                        guard let self else { return }
-                        self.logPromptTyping("sim:beforeSubmit", for: id)
-                        let result = self.submitPrompt("SIMULATED PHONE PROMPT (mid-turn)", token: UUID(), to: id)
-                        self.logPromptTyping("sim:submitResult=\(result)", for: id)
-                    }
-                }
+                if n >= 24 { timer.invalidate() }                          // ~t=48s
             }
         }
     }
