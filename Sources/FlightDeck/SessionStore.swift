@@ -1365,6 +1365,7 @@ final class SessionStore: ObservableObject {
         #if DEBUG
         startViewportDiagnosticsIfRequested()
         startPhonePromptSimulationIfRequested()
+        startLoopbackPromptTestIfRequested()
         #endif
         if let previousRun {
             Task { [weak self] in await self?.sweepOrphans(from: previousRun) }
@@ -3830,6 +3831,75 @@ final class SessionStore: ObservableObject {
                     self.logPromptTyping("sim:submitResult=\(result)", for: id)
                 }
                 if n >= 24 { timer.invalidate() }                          // ~t=48s
+            }
+        }
+    }
+
+    private var loopbackTestService: FleetService?
+    private var loopbackTestClient: FleetClient?
+
+    /// Temporary reproduction: drive a REAL `session.prompt` frame over the wire
+    /// (FleetClient → TLS → FleetService.apply → submitPrompt → inject) at a BUSY claude tab, to
+    /// see whether the network path refuses where an in-process submitPrompt did not. Gated on
+    /// `FD_LOOPBACK_PROMPT_TEST=1`. Stands up a second FleetService bound to THIS store (real
+    /// surfaces), authed by an in-memory paired device — the FleetTestHarness pattern.
+    func startLoopbackPromptTestIfRequested() {
+        guard ProcessInfo.processInfo.environment["FD_LOOPBACK_PROMPT_TEST"] == "1" else { return }
+        let repoDir = URL(
+            fileURLWithPath: "/Users/nate/Projects/Protos-n-Tools/flight-deck", isDirectory: true)
+        let id = newSession(in: repoDir).id
+        logPromptTyping("loop:createdClaudeTab", for: id)
+
+        let key = FleetDeviceKey.mint()
+        let prefs = PreferencesStore(persistence: nil)   // in-memory; never touches real prefs
+        prefs.upsert(PairedDevice(slot: key.slot, name: "loopback-test", secret: key.secret,
+                                  pairedAt: Date(), lastSeenAt: nil, armedUntil: nil))
+        let testService = FleetService(store: self, preferences: prefs, armer: PairingArmer())
+        testService.promptLifecycleForTesting = { _ in }  // the store's own sink still logs inject
+        loopbackTestService = testService
+        let client = FleetClient(key: key)
+        loopbackTestClient = client
+
+        // t≈12s: tab ready -> make busy, start the service, connect the client mid-turn.
+        Timer.scheduledTimer(withTimeInterval: 12, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.logPromptTyping("loop:preBusy", for: id)
+                self.injector(for: id)?.sendText(
+                    "Print every integer from 1 to 400, one per line, each with a short word. Take your time.")
+                self.injector(for: id)?.sendReturn()
+                self.logPromptTyping("loop:typedLongPrompt", for: id)
+                do {
+                    _ = try await testService.start(port: nil)
+                    let endpoint = try testService.loopbackEndpoint()
+                    client.onReady = { [weak self] in
+                        let cid = client.send(FleetCommand.prompt(
+                            id: id, token: UUID(), text: "LOOPBACK WIRE PROMPT (mid-turn)"))
+                        self?.logPromptTyping("loop:sentFrame cid=\(cid)", for: id)
+                    }
+                    client.onFrame = { [weak self] frame in
+                        self?.logPromptTyping("loop:reply=\(frame)", for: id)
+                    }
+                    // Connect ~6s into the busy turn.
+                    Timer.scheduledTimer(withTimeInterval: 6, repeats: false) { _ in
+                        Task { @MainActor in
+                            self.logPromptTyping("loop:connecting", for: id)
+                            client.connect(to: endpoint, lastSeq: 0)
+                        }
+                    }
+                } catch {
+                    self.logPromptTyping("loop:serviceStartFailed", for: id)
+                }
+            }
+        }
+        // Sample the box state through the busy window.
+        var n = 0
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
+            Task { @MainActor in
+                guard let self else { timer.invalidate(); return }
+                n += 1
+                if n >= 7 { self.logPromptTyping("loop:sample", for: id) }
+                if n >= 28 { timer.invalidate() }
             }
         }
     }
