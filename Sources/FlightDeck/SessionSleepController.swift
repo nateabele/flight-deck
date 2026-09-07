@@ -16,6 +16,7 @@ final class SessionSleepController {
     private let resolver: AgentGroupResolving
     private let inputs: SleepInputs
     private let tearDownSurface: (UUID) -> Void
+    private let rebuildSurface: (UUID) -> Void
     private let now: () -> Date
 
     private(set) var asleep: Set<UUID> = []
@@ -23,10 +24,11 @@ final class SessionSleepController {
 
     init(policy: SleepPolicy, daemonControl: DaemonControlling, inspector: ProcessInspecting,
          resolver: AgentGroupResolving, inputs: SleepInputs,
-         tearDownSurface: @escaping (UUID) -> Void, now: @escaping () -> Date) {
+         tearDownSurface: @escaping (UUID) -> Void,
+         rebuildSurface: @escaping (UUID) -> Void = { _ in }, now: @escaping () -> Date) {
         self.policy = policy; self.daemonControl = daemonControl; self.inspector = inspector
         self.resolver = resolver; self.inputs = inputs
-        self.tearDownSurface = tearDownSurface; self.now = now
+        self.tearDownSurface = tearDownSurface; self.rebuildSurface = rebuildSurface; self.now = now
     }
 
     func tick() {
@@ -70,10 +72,12 @@ final class SessionSleepController {
         idleSince[id] = nil
     }
 
-    /// Wake. Task 5 adds the surface rebuild after SIGCONT. Idempotent.
+    /// Wake: CONT the agent first so it's running, then rebuild the surface so the
+    /// daemon's ring replay restores the screen. Idempotent.
     func wake(_ id: UUID) {
         guard asleep.contains(id) else { return }
-        daemonControl.cont(id)
+        daemonControl.cont(id)     // ensure the agent is running FIRST
         asleep.remove(id)
+        rebuildSurface(id)         // then re-attach; the daemon's ring replay restores the screen
     }
 }

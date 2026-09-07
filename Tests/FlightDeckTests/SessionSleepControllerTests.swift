@@ -5,11 +5,12 @@ import XCTest
 final class SessionSleepControllerTests: XCTestCase {
     final class DaemonSpy: DaemonControlling {
         var stopped: [UUID] = []; var conted: [UUID] = []
+        var onCont: (() -> Void)?
         func isLive(_ id: UUID) -> Bool { true }
         func daemonPID(_ id: UUID) -> pid_t? { 111 }
         func terminate(_ id: UUID) {}
         func stop(_ id: UUID) { stopped.append(id) }
-        func cont(_ id: UUID) { conted.append(id) }
+        func cont(_ id: UUID) { conted.append(id); onCont?() }
     }
     struct FixedInspector: ProcessInspecting {
         var result: [ProcessIdentity] = []
@@ -95,5 +96,20 @@ final class SessionSleepControllerTests: XCTestCase {
         ctrl.tick(); ctrl.tick()          // sleeps
         ctrl.wake(id)
         XCTAssertEqual(daemon.conted, [id]); XCTAssertFalse(ctrl.asleep.contains(id))
+    }
+
+    func testWakeContsThenRebuilds() {
+        let id = UUID(); let daemon = DaemonSpy(); var order: [String] = []
+        daemon.onCont = { order.append("cont") }
+        let ctrl = SessionSleepController(
+            policy: SleepPolicy(idleThreshold: 0), daemonControl: daemon,
+            inspector: FixedInspector(result: []), resolver: FixedResolver(pgid: 222),
+            inputs: SleepInputs(candidates: { [id] }, activity: { _ in .idle }, selectedID: { nil },
+                                reportsBackgroundWork: { _ in false }, daemonPID: { _ in 111 }),
+            tearDownSurface: { _ in }, rebuildSurface: { _ in order.append("rebuild") }, now: { Date() })
+        ctrl.tick(); ctrl.tick()          // sleeps
+        ctrl.wake(id)
+        XCTAssertEqual(order, ["cont", "rebuild"])
+        XCTAssertFalse(ctrl.asleep.contains(id))
     }
 }
