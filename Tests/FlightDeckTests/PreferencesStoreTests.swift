@@ -219,6 +219,50 @@ final class PreferencesStoreTests: XCTestCase {
         XCTAssertFalse(store.autoResumesRunningSessions)
     }
 
+    // MARK: Idle sleep
+
+    func testIdleSleepDefaultsOnAtTenMinutes() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        XCTAssertTrue(store.idleSleepEnabled)
+        XCTAssertEqual(store.sleepIdleThresholdSeconds, 600)
+        XCTAssertNil(store.preferences.claude)
+    }
+
+    func testIdleSleepPreferencesRoundTrip() {
+        let persistence = MemoryPersistence()
+        let store = PreferencesStore(persistence: persistence)
+        store.idleSleepEnabled = false
+        store.sleepIdleThresholdSeconds = 120
+        XCTAssertEqual(persistence.stored?.claude?.idleSleepEnabled, false)
+        XCTAssertEqual(persistence.stored?.claude?.sleepIdleThresholdSeconds, 120)
+
+        let relaunched = PreferencesStore(persistence: persistence)
+        XCTAssertFalse(relaunched.idleSleepEnabled)
+        XCTAssertEqual(relaunched.sleepIdleThresholdSeconds, 120)
+    }
+
+    /// Same trap `testPreferencesWithoutTheClaudeKeyStillDecode` guards, one level deeper: a
+    /// `"claude": {...}` blob written before these two fields existed must still decode a
+    /// `ClaudePreferences`, with `autoResumeRunningSessions` intact and the new fields nil.
+    func testClaudePreferencesWithoutTheIdleSleepKeysStillDecode() throws {
+        let original = ClaudePreferences(
+            autoResumeRunningSessions: true, idleSleepEnabled: false, sleepIdleThresholdSeconds: 120
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try JSONEncoder().encode(original))
+                as? [String: Any]
+        )
+        object.removeValue(forKey: "idleSleepEnabled")
+        object.removeValue(forKey: "sleepIdleThresholdSeconds")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(ClaudePreferences.self, from: legacy)
+
+        XCTAssertTrue(decoded.autoResumeRunningSessions)
+        XCTAssertNil(decoded.idleSleepEnabled)
+        XCTAssertNil(decoded.sleepIdleThresholdSeconds)
+    }
+
     /// The load-bearing one. A `preferences.v1` blob written before this field existed must
     /// still decode — `load()` uses `try?`, so a throw here resets every flag, project
     /// override and shell setting the user has. Same trap as `Preferences.confirmations`.
