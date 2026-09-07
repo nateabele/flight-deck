@@ -105,4 +105,23 @@ struct SessionDaemon {
     func coldCreateCommand(for id: UUID, shell: String) throws -> String {
         "\(try resolvedBinaryPath()) -c \(socketPath(for: id)) \(shell)"
     }
+
+    /// Every session id `directory` currently has a `.sock` file for — a directory listing,
+    /// not a liveness probe (see `DaemonControlling.isLive` for that). This is what a launch
+    /// reconcile walks to find daemons whose session no longer appears in a restored snapshot:
+    /// `sessions.json` only names what the *last run* thought was open, but the directory
+    /// names what is actually still on disk right now.
+    ///
+    /// A filename that does not parse as `<uuid>.sock` is silently skipped rather than
+    /// treated as an error: the `fd-abduco` symlink and each socket's `.pid` sidecar both live
+    /// alongside the sockets in the same directory, and neither ends in `.sock`, so the
+    /// suffix check alone already excludes them — this only guards against anything else that
+    /// might land here.
+    func liveSessionIDs() -> [UUID] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        return names.compactMap { name in
+            guard name.hasSuffix(".sock") else { return nil }
+            return UUID(uuidString: String(name.dropLast(".sock".count)))
+        }
+    }
 }
