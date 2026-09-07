@@ -22,6 +22,8 @@ final class ResumeGatingTests: XCTestCase {
         }
         func daemonPID(_ id: UUID) -> pid_t? { nil }
         func terminate(_ id: UUID) {}
+        func stop(_ id: UUID) {}
+        func cont(_ id: UUID) {}
     }
 
     // MARK: - Claude

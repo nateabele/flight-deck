@@ -23,6 +23,16 @@ protocol DaemonControlling {
     /// socket and pidfile regardless of how far that got. No-throw — this runs from teardown
     /// paths that cannot fail the operation they are cleaning up after; problems are logged.
     func terminate(_ id: UUID)
+
+    /// Freezes the idle agent's process group (`kill(-agentPGID, SIGSTOP)`) — the agent, not the
+    /// daemon: the daemon must keep running its `select()` loop so a later re-attach still has
+    /// something to connect to. Silent no-op if the daemon pid is missing/dead or no agent group
+    /// resolves — signaling nothing is always the safe failure mode here.
+    func stop(_ id: UUID)
+
+    /// Resumes the process group a prior `stop` froze (`kill(-agentPGID, SIGCONT)`). Same no-op
+    /// rules as `stop`.
+    func cont(_ id: UUID)
 }
 
 /// The real `DaemonControlling`, talking to `fd-abduco` over its `AF_UNIX` control socket and
@@ -48,8 +58,22 @@ struct PosixDaemonControl: DaemonControlling {
 
     let daemon: SessionDaemon
 
-    init(daemon: SessionDaemon = SessionDaemon()) {
+    /// How `stop`/`cont` find the agent's pgid to signal — injected so tests can substitute a
+    /// fixed pgid instead of walking real `proc_listchildpids` state.
+    private let agentGroupResolver: AgentGroupResolving
+
+    /// The actual signal delivery `stop`/`cont` use — injected so tests can spy on calls instead
+    /// of sending real `SIGSTOP`/`SIGCONT`. Defaults to the real `Darwin.kill`.
+    private let signal: (pid_t, Int32) -> Int32
+
+    init(
+        daemon: SessionDaemon = SessionDaemon(),
+        agentGroupResolver: AgentGroupResolving = PosixAgentGroupResolver(),
+        signal: @escaping (pid_t, Int32) -> Int32 = { Darwin.kill($0, $1) }
+    ) {
         self.daemon = daemon
+        self.agentGroupResolver = agentGroupResolver
+        self.signal = signal
     }
 
     func isLive(_ id: UUID) -> Bool {
@@ -142,7 +166,25 @@ struct PosixDaemonControl: DaemonControlling {
         }
     }
 
+    func stop(_ id: UUID) { signalAgentGroup(id, SIGSTOP) }
+
+    func cont(_ id: UUID) { signalAgentGroup(id, SIGCONT) }
+
     // MARK: - Helpers
+
+    /// Resolves the agent pgid from the (validated, live) daemon pid and signals the NEGATIVE
+    /// pgid, so the whole agent tree (claude + any node/MCP children) is hit — but never the
+    /// daemon itself. `daemon > 0` mirrors `readPID`'s own guard as belt-and-suspenders, and
+    /// `pgid > 0` is the same non-negotiable rail: `kill(-0, …)` broadcasts to this app's own
+    /// process group and would freeze/resume Flight Deck itself, and `kill(-1, …)` broadcasts
+    /// system-wide. Neither target is ever signaled.
+    private func signalAgentGroup(_ id: UUID, _ sig: Int32) {
+        guard let daemon = daemonPID(id), daemon > 0 else { return }
+        guard let pgid = agentGroupResolver.agentProcessGroup(daemonPID: daemon), pgid > 0 else {
+            return
+        }
+        _ = signal(-pgid, sig)
+    }
 
     private func waitUntilWritable(_ fd: Int32) -> Bool {
         var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
