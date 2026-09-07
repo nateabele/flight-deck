@@ -860,12 +860,12 @@ final class SessionStore: ObservableObject {
     /// fake executable, matching `daemonControl` below.
     private let daemon: SessionDaemon
 
-    /// Whether each session's daemon is already live, and how to tear it down. Injected
-    /// (default `PosixDaemonControl()`) separately from `daemon` rather than derived from it —
-    /// deriving one default from another parameter's value is not expressible in Swift default
-    /// arguments — so a caller that overrides one without the other still gets a `daemon` and
-    /// `daemonControl` that agree, since both defaults resolve `SessionDaemon()`'s own default
-    /// `directory`/`bundledBinary` identically.
+    /// Whether each session's daemon is already live, and how to tear it down. `nil` by default
+    /// and resolved in `init` to `PosixDaemonControl(daemon: daemon)` — derived from the actual
+    /// `daemon` this store was given, not from a second independent default, so a caller that
+    /// overrides `daemon` alone still gets a control that probes the same socket paths. A
+    /// caller that passes its own `daemonControl` (every fake-daemon test) still gets exactly
+    /// that instance.
     private let daemonControl: DaemonControlling
 
     /// Test seam. Production sets this from the convenience init.
@@ -1248,14 +1248,14 @@ final class SessionStore: ObservableObject {
             inspector: ProcessTree(), signals: PosixSignals(), sleeper: RealSleeper()
         ),
         daemon: SessionDaemon = SessionDaemon(),
-        daemonControl: DaemonControlling = PosixDaemonControl()
+        daemonControl: DaemonControlling? = nil
     ) {
         self.provider = provider
         self.persistence = persistence
         self.preferences = preferences
         self.reaper = reaper
         self.daemon = daemon
-        self.daemonControl = daemonControl
+        self.daemonControl = daemonControl ?? PosixDaemonControl(daemon: daemon)
         // Shell records land asynchronously, up to half a second after the tab they belong to
         // (see `SurfaceProcessRegistry`), so the `persist()` that `newSession`/`restore` already
         // ran is too early to contain them. Without this the snapshot names no shell for any
