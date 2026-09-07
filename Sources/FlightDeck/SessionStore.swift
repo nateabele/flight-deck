@@ -2216,6 +2216,10 @@ final class SessionStore: ObservableObject {
         }
 
         let restoredIDs = repos.flatMap(\.sessions).map(\.id)
+        // Every session this run actually rebuilt is now known, so any daemon whose socket
+        // outlived that set belongs to a tab this run has no other way of finding — see
+        // `reconcileDaemons`.
+        reconcileDaemons(restored: Set(restoredIDs))
         selectedSessionID = snapshot.selectedSessionID.flatMap {
             restoredIDs.contains($0) ? $0 : nil
         } ?? restoredIDs.first
@@ -2238,6 +2242,20 @@ final class SessionStore: ObservableObject {
         // the replicator re-reads and anyone behind is sent back for a snapshot.
         replicator?.reset()
         return !restoredIDs.isEmpty || !repos.isEmpty
+    }
+
+    /// Kills every daemon whose socket is still on disk but whose session did not come back in
+    /// this restore — a tab closed by a crash, a hand-edited `sessions.json`, or a snapshot
+    /// from a run that predates this feature. `restore()` is the only caller: this is what
+    /// keeps a daemon's lifetime from silently outliving the very last thing that could ever
+    /// reattach to it.
+    ///
+    /// Never called from `reapAllForQuit` or `sweepOrphans` — see their own doc comments for
+    /// why persisting daemons across quit is the point, not a gap.
+    private func reconcileDaemons(restored: Set<UUID>) {
+        for id in daemon.liveSessionIDs() where !restored.contains(id) {
+            daemonControl.terminate(id)
+        }
     }
 
     /// Settles every restored codex tab against the app-server, then types its resume
@@ -2588,6 +2606,12 @@ final class SessionStore: ObservableObject {
 
         Task { [weak self] in
             await self?.reapSession(id, process: doomed, context: "tab close")
+            // After the client reap above, not folded into `reapSession` itself: that method
+            // is shared with `reapAllForQuit`, which must leave every daemon running — see its
+            // doc comment. Closing a tab is the one path that actually means "end this agent",
+            // and only the client's own tree needs to detach first; the daemon (and the agent
+            // still attached to it) is torn down second.
+            self?.daemonControl.terminate(id)
         }
     }
 
@@ -2652,6 +2676,12 @@ final class SessionStore: ObservableObject {
     /// else's live children, and killing them would be a second Flight Deck instance
     /// sabotaging the first), and each identity's start time must still match (otherwise the
     /// pid has been recycled and now belongs to an unrelated process).
+    ///
+    /// Never reaches a daemon, and must not: every `SessionProcess` here is a *client* shell,
+    /// `setsid`'d into its own session by `fd-abduco` on attach — outside the process group
+    /// this sweep signals — so a daemon was never reachable through this path even
+    /// accidentally. Reconciling daemons against a dead run's leftovers is `reconcileDaemons`'s
+    /// job, run once from `restore()`, not this method's.
     ///
     /// The pgid used to signal is re-derived from the live process table. A number carried on
     /// the record would be evidence about some previous boot's process table, not this one —
@@ -2762,6 +2792,14 @@ final class SessionStore: ObservableObject {
     /// session to finish would win the outer `group.next()`, and the `cancelAll()` that
     /// followed cancelled every reap still in flight, so quitting with several tabs open
     /// reaped only one of them.
+    ///
+    /// Deliberately never reaches `daemonControl.terminate` — the whole feature this daemon
+    /// exists for is surviving an app quit so the next launch can reattach to it. `reapSession`
+    /// (called below, same as `closeSession` calls it) only tears down the *client* shell,
+    /// `setsid`'d outside this store's own process group; the daemon and the agent still
+    /// attached to it are untouched, on purpose, until either a real tab close
+    /// (`closeSession`'s own `Task` tail) or a future launch's `reconcileDaemons` decides its
+    /// session is really gone.
     func reapAllForQuit(budget: Double = SessionStore.quitBudget) async {
         // Before any `await` — see `isTerminating`'s doc comment for the race this closes.
         isTerminating = true
