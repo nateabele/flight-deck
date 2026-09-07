@@ -51,6 +51,8 @@ private final class RecordingDaemonControl: DaemonControlling, @unchecked Sendab
         terminatedIDs.append(id)
         onTerminate?(id)
     }
+    func stop(_ id: UUID) {}
+    func cont(_ id: UUID) {}
 }
 
 private final class FakePersistence: SessionPersisting {

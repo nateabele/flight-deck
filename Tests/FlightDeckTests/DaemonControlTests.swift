@@ -160,6 +160,74 @@ final class DaemonControlTests: XCTestCase {
         }
     }
 
+    // MARK: - stop/cont, agent group signaling
+
+    func testStopSignalsNegativeAgentGroupWithSIGSTOP() throws {
+        try writePidfile(getpid(), for: sessionID)
+        let sig = SignalSpy()
+        let control = PosixDaemonControl(
+            daemon: daemon, agentGroupResolver: FixedResolver(pgid: 4242), signal: sig.record
+        )
+
+        control.stop(sessionID)
+
+        XCTAssertEqual(sig.calls, [.init(pid: -4242, signal: SIGSTOP)])
+    }
+
+    func testContSignalsNegativeAgentGroupWithSIGCONT() throws {
+        try writePidfile(getpid(), for: sessionID)
+        let sig = SignalSpy()
+        let control = PosixDaemonControl(
+            daemon: daemon, agentGroupResolver: FixedResolver(pgid: 4242), signal: sig.record
+        )
+
+        control.cont(sessionID)
+
+        XCTAssertEqual(sig.calls, [.init(pid: -4242, signal: SIGCONT)])
+    }
+
+    func testStopRefusesWhenPgidResolvesNonPositive() throws {
+        try writePidfile(getpid(), for: sessionID)
+        let sig = SignalSpy()
+        let control = PosixDaemonControl(
+            daemon: daemon, agentGroupResolver: FixedResolver(pgid: 0), signal: sig.record
+        )
+
+        control.stop(sessionID)
+
+        XCTAssertTrue(sig.calls.isEmpty, "must never kill(-0, …) — that hits our own group")
+    }
+
+    func testStopNoOpWhenDaemonDead() {
+        // No pidfile written, so `daemonPID` is nil before the resolver is even consulted.
+        let sig = SignalSpy()
+        let control = PosixDaemonControl(
+            daemon: daemon, agentGroupResolver: FixedResolver(pgid: 4242), signal: sig.record
+        )
+
+        control.stop(sessionID)
+
+        XCTAssertTrue(sig.calls.isEmpty)
+    }
+
+    /// Against a real forked child rather than a spy: proves `stop`/`cont` actually reach the
+    /// kernel's `SIGSTOP`/`SIGCONT` semantics, not just that `signal` was called with the right
+    /// arguments.
+    func testStopThenContAgainstLiveChild() throws {
+        let child = try ForkedChild.spawnOwnGroup(command: "/bin/sleep", args: ["30"])
+        defer { child.terminate() }
+        try writePidfile(getpid(), for: sessionID)
+        let control = PosixDaemonControl(
+            daemon: daemon, agentGroupResolver: FixedResolver(pgid: child.expectedPGID)
+        )
+
+        control.stop(sessionID)
+        XCTAssertEqual(processState(child.pid), "T", "child should be stopped")
+
+        control.cont(sessionID)
+        XCTAssertNotEqual(processState(child.pid), "T", "child should have resumed")
+    }
+
     // MARK: - Helpers
 
     /// A real `AF_UNIX`/`SOCK_STREAM` listener at `path`, mirroring the connect-side idiom in
@@ -236,6 +304,29 @@ final class DaemonControlTests: XCTestCase {
         throw PosixError.timedOut("pidfile never appeared at \(path)")
     }
 
+    /// Writes a pidfile `daemonPID`/`readPID` accepts, naming `pid` — this process's own pid by
+    /// convention in the `stop`/`cont` tests above, since `kill(pid, 0)` needs a genuinely live
+    /// process and this one always is for the duration of the test.
+    private func writePidfile(_ pid: pid_t, for id: UUID) throws {
+        try Data("\(pid)\n".utf8).write(to: URL(fileURLWithPath: daemon.pidfilePath(for: id)))
+    }
+
+    /// The one-letter `ps` state code (`T` == stopped) for `pid`, so the live-child test can
+    /// observe the kernel's actual `SIGSTOP`/`SIGCONT` effect rather than trust a spy.
+    private func processState(_ pid: pid_t) -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-o", "state=", "-p", "\(pid)"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        try? process.run()
+        process.waitUntilExit()
+        let output = String(
+            data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8
+        ) ?? ""
+        return String(output.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1))
+    }
+
     private enum PosixError: Error, CustomStringConvertible {
         case errno(String, Int32)
         case timedOut(String)
@@ -248,5 +339,28 @@ final class DaemonControlTests: XCTestCase {
                 return message
             }
         }
+    }
+}
+
+/// A fixed `AgentGroupResolving` stub for `stop`/`cont` tests: real resolution (walking
+/// `proc_listchildpids`) is `AgentGroupResolverTests`'s job, not this file's.
+private struct FixedResolver: AgentGroupResolving {
+    let pgid: pid_t
+    func agentProcessGroup(daemonPID: pid_t) -> pid_t? { pgid }
+}
+
+/// Captures every `signal` call `PosixDaemonControl` makes instead of actually calling
+/// `Darwin.kill`, so `stop`/`cont` tests can assert on exactly what would have been signaled.
+private final class SignalSpy {
+    struct Call: Equatable {
+        let pid: pid_t
+        let signal: Int32
+    }
+
+    var calls: [Call] = []
+
+    func record(_ pid: pid_t, _ signal: Int32) -> Int32 {
+        calls.append(.init(pid: pid, signal: signal))
+        return 0
     }
 }
