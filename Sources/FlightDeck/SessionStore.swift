@@ -855,6 +855,19 @@ final class SessionStore: ObservableObject {
     /// Not `private`: `AppDelegate` reads this to wire the Tools menu to the same store.
     let preferences: PreferencesStore?
 
+    /// The path calculator for `fd-abduco` sockets/pidfiles/binary — see its doc comment.
+    /// Injected (default `SessionDaemon()`) so tests can point it at a temp directory with a
+    /// fake executable, matching `daemonControl` below.
+    private let daemon: SessionDaemon
+
+    /// Whether each session's daemon is already live, and how to tear it down. Injected
+    /// (default `PosixDaemonControl()`) separately from `daemon` rather than derived from it —
+    /// deriving one default from another parameter's value is not expressible in Swift default
+    /// arguments — so a caller that overrides one without the other still gets a `daemon` and
+    /// `daemonControl` that agree, since both defaults resolve `SessionDaemon()`'s own default
+    /// `directory`/`bundledBinary` identically.
+    private let daemonControl: DaemonControlling
+
     /// Test seam. Production sets this from the convenience init.
     var notifier: Notifying?
 
@@ -1021,7 +1034,6 @@ final class SessionStore: ObservableObject {
         _ = processRegistry.forget(id)
 
         var config = Ghostty.SurfaceConfiguration()
-        config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
         config.workingDirectory = session.transcriptDirectory
         // `nil` when unset: `withCValue` already maps that to `0`, meaning "inherit
         // libghostty's configured default" — the same thing a never-touched size means.
@@ -1031,7 +1043,22 @@ final class SessionStore: ObservableObject {
         // from `AgentID`.
         let adapter = adapter(for: instance(for: session))
         let options = options(for: session.agent, project: session.workingDirectory)
-        config.initialInput = adapter.launchCommand(adapter.binding(for: session), session, options)
+        let shell = preferences?.resolvedShell() ?? ShellResolver.resolve()
+        let typedText = adapter.launchCommand(adapter.binding(for: session), session, options)
+        do {
+            try daemon.ensureDirectory()
+            let plan = try LaunchPlan.decide(
+                sessionID: session.id, isLive: daemonControl.isLive(session.id), shell: shell,
+                resumeOrLaunch: typedText, daemon: daemon
+            )
+            config.command = plan.command
+            config.initialInput = plan.typed
+        } catch {
+            // Graceful degradation: fd-abduco not resolvable (e.g. no app bundle in the
+            // unit-test host). Fall back to today's non-detached behavior so nothing breaks.
+            config.command = shell
+            config.initialInput = typedText
+        }
         let orphaned = accountIsMissing(for: session)
         config.environmentVariables =
             preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
@@ -1219,12 +1246,16 @@ final class SessionStore: ObservableObject {
         preferences: PreferencesStore? = nil,
         reaper: SessionReaper = SessionReaper(
             inspector: ProcessTree(), signals: PosixSignals(), sleeper: RealSleeper()
-        )
+        ),
+        daemon: SessionDaemon = SessionDaemon(),
+        daemonControl: DaemonControlling = PosixDaemonControl()
     ) {
         self.provider = provider
         self.persistence = persistence
         self.preferences = preferences
         self.reaper = reaper
+        self.daemon = daemon
+        self.daemonControl = daemonControl
         // Shell records land asynchronously, up to half a second after the tab they belong to
         // (see `SurfaceProcessRegistry`), so the `persist()` that `newSession`/`restore` already
         // ran is too early to contain them. Without this the snapshot names no shell for any
@@ -1920,12 +1951,25 @@ final class SessionStore: ObservableObject {
         emit(.sessionAdded(wire(session), project: repos[repoIndex].id, at: insertedAt))
 
         var config = Ghostty.SurfaceConfiguration()
-        config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
         config.workingDirectory = session.transcriptDirectory
         // `nil` when unset: `withCValue` already maps that to `0`, meaning "inherit
         // libghostty's configured default" — the same thing a never-touched size means.
         config.fontSize = preferences?.preferences.terminalFontSize
-        config.initialInput = initialInput
+        let shell = preferences?.resolvedShell() ?? ShellResolver.resolve()
+        do {
+            try daemon.ensureDirectory()
+            let plan = try LaunchPlan.decide(
+                sessionID: session.id, isLive: daemonControl.isLive(session.id), shell: shell,
+                resumeOrLaunch: initialInput, daemon: daemon
+            )
+            config.command = plan.command
+            config.initialInput = plan.typed
+        } catch {
+            // Graceful degradation: fd-abduco not resolvable (e.g. no app bundle in the
+            // unit-test host). Fall back to today's non-detached behavior so nothing breaks.
+            config.command = shell
+            config.initialInput = initialInput
+        }
         // The account is what actually makes this tab run as its login: the shell libghostty
         // forks below inherits these, and the agent reads its home out of one of them. Every
         // creation path and `restore` funnel through here, so a restored tab is relaunched as
