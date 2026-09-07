@@ -69,6 +69,21 @@ final class DaemonLifecycleTests: XCTestCase {
         wait(for: [exp], timeout: 1.0)
     }
 
+    /// A non-nil, actually-executable `bundledBinary` — same fixture shape
+    /// `SessionDaemonWiringTests` uses. `reconcileDaemons`'s guard only checks that this is
+    /// non-nil, but every test that means to exercise the guard's *open* path builds one of
+    /// these rather than passing `nil`, so those tests stay meaningful proof of the reconcile
+    /// logic instead of accidentally passing "for free" through the guard's closed path.
+    private func makeFakeBinary(in directory: URL) throws -> URL {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let binary = directory.appendingPathComponent("fake-fd-abduco")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: binary)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: binary.path
+        )
+        return binary
+    }
+
     // MARK: - closeSession terminates the daemon, after the client reap
 
     /// The behavior Task 7 exists to add: closing a tab must end its daemon, and only after
@@ -128,6 +143,11 @@ final class DaemonLifecycleTests: XCTestCase {
     /// A directory with sockets for three sessions, a snapshot that only restores two of them:
     /// the third's daemon has no session left that could ever reattach to it, and `restore()`
     /// must terminate it — while leaving the two that came back alone.
+    ///
+    /// Uses a real, non-nil `bundledBinary` deliberately: `reconcileDaemons`'s guard treats a
+    /// nil `bundledBinary` as "this process owns no daemons, reap nothing" (see
+    /// `testReconcileDaemonsIsInertWhenNoBundledBinaryExists` below), and this test means to
+    /// exercise the reconcile logic itself, not the guard's closed path.
     func testRestoreTerminatesOnlyTheDaemonsWhoseSessionDidNotComeBack() throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("DaemonLifecycleTests-\(UUID().uuidString)")
@@ -136,7 +156,8 @@ final class DaemonLifecycleTests: XCTestCase {
 
         let runDir = tempDir.appendingPathComponent("run")
         try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
-        let daemon = SessionDaemon(directory: runDir, bundledBinary: nil)
+        let fakeBinary = try makeFakeBinary(in: tempDir.appendingPathComponent("bin"))
+        let daemon = SessionDaemon(directory: runDir, bundledBinary: fakeBinary)
 
         let a = UUID()
         let b = UUID()
@@ -171,6 +192,9 @@ final class DaemonLifecycleTests: XCTestCase {
     /// The other half: a session that *did* come back must not have its daemon terminated,
     /// even though `restore()`'s own `insertSession` probes `isLive` (which this file's
     /// `RecordingDaemonControl` always answers `false`) on the very same id.
+    ///
+    /// Real `bundledBinary`, same reason as the test above: this means to prove the reconcile
+    /// logic finds nothing to terminate, not merely that the guard made it a no-op.
     func testRestoreDoesNotTerminateDaemonsForSessionsThatCameBack() throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("DaemonLifecycleTests-\(UUID().uuidString)")
@@ -179,7 +203,8 @@ final class DaemonLifecycleTests: XCTestCase {
 
         let runDir = tempDir.appendingPathComponent("run")
         try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
-        let daemon = SessionDaemon(directory: runDir, bundledBinary: nil)
+        let fakeBinary = try makeFakeBinary(in: tempDir.appendingPathComponent("bin"))
+        let daemon = SessionDaemon(directory: runDir, bundledBinary: fakeBinary)
 
         let a = UUID()
         FileManager.default.createFile(atPath: daemon.socketPath(for: a), contents: nil)
@@ -200,6 +225,54 @@ final class DaemonLifecycleTests: XCTestCase {
         XCTAssertTrue(store.restore())
 
         XCTAssertTrue(control.terminatedIDs.isEmpty)
+    }
+
+    /// The regression this fix-up exists to prevent: a process with no app bundle — the
+    /// unit-test host, chiefly — never created any daemon, but `SessionDaemon`'s *default*
+    /// directory (`/tmp/flight-deck-<uid>`) is real and shared with whatever a genuinely
+    /// bundled Flight Deck has left running there. Without the `bundledBinary != nil` guard,
+    /// `restore()` would list that real directory, find sockets for none of its fixture ids,
+    /// and terminate every one of them — destroying live production daemons from a routine
+    /// `test-unit.sh` run. Here `bundledBinary` is `nil` and the directory holds sockets for
+    /// two sessions that are deliberately *not* in the restored snapshot; the guard must make
+    /// `reconcileDaemons` inert regardless, so neither is terminated.
+    func testReconcileDaemonsIsInertWhenNoBundledBinaryExists() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DaemonLifecycleTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: tempDir) }
+
+        let runDir = tempDir.appendingPathComponent("run")
+        try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+        let daemon = SessionDaemon(directory: runDir, bundledBinary: nil)
+
+        // Neither of these ids appears in the restored snapshot below — exactly the shape
+        // that, absent the guard, would get both terminated.
+        let orphanA = UUID()
+        let orphanB = UUID()
+        FileManager.default.createFile(atPath: daemon.socketPath(for: orphanA), contents: nil)
+        FileManager.default.createFile(atPath: daemon.socketPath(for: orphanB), contents: nil)
+
+        let restoredID = UUID()
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(id: restoredID, title: "restored", workingDirectory: tempDir.path)],
+            selectedSessionID: nil,
+            sessionCounter: 1
+        )
+
+        let control = RecordingDaemonControl()
+        let store = SessionStore(
+            provider: StubProvider(), persistence: persistence, preferences: nil,
+            daemon: daemon, daemonControl: control
+        )
+
+        XCTAssertTrue(store.restore())
+
+        XCTAssertTrue(
+            control.terminatedIDs.isEmpty,
+            "a process with no bundled binary owns no daemons and must reap none"
+        )
     }
 
     // MARK: - quit never terminates a daemon
