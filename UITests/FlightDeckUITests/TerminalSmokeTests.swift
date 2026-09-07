@@ -366,6 +366,56 @@ final class TerminalSmokeTests: XCTestCase {
         return app
     }
 
+    /// Resolves `testSessionReattachesWithScrollbackAfterRelaunch`'s OWN session id by reading
+    /// its isolated state directory's `sessions.json` directly, rather than assuming there is
+    /// exactly one session anywhere — `/tmp/flight-deck-<uid>` (where the daemon actually lives)
+    /// is shared with every other live Flight Deck session on this machine, so teardown needs
+    /// the precise id to target rather than a directory-wide guess.
+    private func sessionUUIDFromIsolatedState() -> UUID? {
+        struct Entry: Decodable { let id: UUID }
+        struct Snapshot: Decodable { let sessions: [Entry] }
+        let url = URL(fileURLWithPath: Self.isolatedStateDir).appendingPathComponent("sessions.json")
+        guard
+            let data = try? Data(contentsOf: url),
+            let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data)
+        else { return nil }
+        return snapshot.sessions.first?.id
+    }
+
+    /// Kills exactly one session's `fd-abduco` daemon, by id, and removes its socket and
+    /// pidfile — SIGTERM, a short poll, then SIGKILL if it is still alive, mirroring
+    /// `DaemonControl.terminate(_:)`'s own mechanics without depending on it: this test bundle
+    /// is a separate process with no access to the app's internals, only to the same
+    /// well-known `/tmp/flight-deck-<uid>/<id>.sock(.pid)` layout (`SessionDaemon.swift`) the
+    /// app itself writes to.
+    ///
+    /// Deliberately takes a single `id` rather than a directory to sweep: that directory holds
+    /// every OTHER live session's daemon too (the developer's own, or a teammate's), and this
+    /// must never touch them.
+    private func terminateOwnDaemon(_ id: UUID) {
+        let socketPath = "/tmp/flight-deck-\(getuid())/\(id.uuidString.lowercased()).sock"
+        let pidPath = socketPath + ".pid"
+        defer {
+            unlink(socketPath)
+            unlink(pidPath)
+        }
+        guard
+            let contents = try? String(contentsOfFile: pidPath, encoding: .utf8),
+            let pid = Int32(contents.trimmingCharacters(in: .whitespacesAndNewlines)),
+            pid > 0
+        else { return }
+        guard kill(pid, 0) == 0 else { return }
+
+        kill(pid, SIGTERM)
+        for _ in 0..<20 {
+            if kill(pid, 0) != 0 { return }
+            usleep(50_000)
+        }
+        if kill(pid, 0) == 0 {
+            kill(pid, SIGKILL)
+        }
+    }
+
     /// ⌘K opens the search overlay while a terminal has focus.
     ///
     /// The one regression no unit test can catch. Ghostty binds `super+k` to `clear_screen` as a
@@ -438,8 +488,8 @@ final class TerminalSmokeTests: XCTestCase {
     /// to its parent never reaches it, and the second launch's `SessionStore.restore()` finds
     /// the session recorded in `sessions.json` and attaches (`fd-abduco -a`) to whatever is
     /// still running for it — `LaunchPlan.decide` only types a fresh resume command when
-    /// `daemonControl.isLive` says otherwise. A cold-started shell would show neither the marker
-    /// nor a doubled one, which is exactly the pair of failure modes this guards against.
+    /// `daemonControl.isLive` says otherwise. A cold-started shell would never have seen this
+    /// test's marker at all, which is exactly the failure mode this guards against.
     ///
     /// Its own launch, like the other standalone behaviours in this file: nothing here depends
     /// on the shared sequence, and the sequence's ⌘Q at the very end would leave no app alive
@@ -467,10 +517,19 @@ final class TerminalSmokeTests: XCTestCase {
 
         var app = launchIsolated()
         // Unconditional teardown so a failure partway through this test cannot leak the
-        // daemon and its socket/pidfile under `/tmp/flight-deck-<uid>` past the run. Closing
-        // the session in-app drives `SessionStore.closeSession` -> `DaemonControl.terminate`,
-        // the same path a user quitting a tab takes; `app.state` is checked first because an
-        // earlier failure can leave `app` already terminated, with nothing left to click.
+        // daemon and its socket/pidfile under `/tmp/flight-deck-<uid>` past the run.
+        //
+        // Two layers, not one. The graceful in-app close (`SessionStore.closeSession` ->
+        // `DaemonControl.terminate`, the same path a user quitting a tab takes) is tried first,
+        // but is NOT trusted alone: the `close-session` button is hover-gated, and if it simply
+        // does not appear within the timeout the daemon would otherwise leak silently. So this
+        // also resolves this test's OWN session id from its own isolated state directory and
+        // signals exactly that daemon directly — belt-and-suspenders, and safe to run even
+        // after a successful in-app close, since terminating an already-gone daemon is a no-op.
+        //
+        // Never a directory-wide sweep: `/tmp/flight-deck-<uid>` is shared with every other
+        // live Flight Deck session on this machine (the developer's own, or a teammate's), so
+        // only the id this test itself created is ever targeted.
         defer {
             if app.state != .notRunning {
                 let rows = app.staticTexts.matching(identifier: "session-row-title")
@@ -478,8 +537,19 @@ final class TerminalSmokeTests: XCTestCase {
                 let close = app.buttons["close-session"].firstMatch
                 if close.waitForExistence(timeout: 5) {
                     close.click()
+                    settle()
                 }
                 app.terminate()
+            }
+
+            if let id = sessionUUIDFromIsolatedState() {
+                terminateOwnDaemon(id)
+            } else {
+                XCTFail(
+                    "teardown could not resolve this test's own session id from "
+                    + "\(Self.isolatedStateDir)/sessions.json — its fd-abduco daemon may have "
+                    + "leaked and needs manual cleanup"
+                )
             }
         }
 
@@ -527,21 +597,22 @@ final class TerminalSmokeTests: XCTestCase {
         )
         func reattachedText() -> String { (reattached.value as? String) ?? "" }
 
+        // Presence is the whole proof, and count is deliberately not asserted. A correct
+        // reattach shows the marker TWICE, not once: an interactive shell echoes typed input,
+        // so both the input-echo line (`echo FD-REATTACH-<nonce>`) and the command's own output
+        // line (`FD-REATTACH-<nonce>`) land in scrollback pre-terminate, and both replay on
+        // reattach — the same echoed-prompt trap `CodexDialogDriver.swift:13-17` documents for
+        // codex's own approval screens ("a live session carries the marker twice"). A cold
+        // shell, by contrast, shows the marker ZERO times: `LaunchPlan.decide` only retypes the
+        // resume command when `daemonControl.isLive` is false, and it retypes the ORIGINAL
+        // `claude` command, not this test's `echo` — there is no path that retypes `echo` a
+        // second time, so there is no over-count case to guard against either. Visible after
+        // relaunch therefore means reattached-and-replayed; absent means cold-started; a count
+        // would only be measuring the tty's own echo behavior, not the feature under test.
         XCTAssertTrue(
             waitFor(timeout: 10) { reattachedText().contains(marker) },
             "marker did not survive relaunch — the reattach replayed no scrollback (or the "
             + "session cold-started instead of reattaching)"
-        )
-
-        // A cold-started shell would show the marker zero times; a reattach that also somehow
-        // retyped the resume command over a live replay would show it twice (this test's own
-        // `echo` colliding with a second, unwanted round of typed input). Exactly one is the
-        // only outcome consistent with "reattached and replayed, nothing retyped".
-        let occurrences = reattachedText().components(separatedBy: marker).count - 1
-        XCTAssertEqual(
-            occurrences, 1,
-            "expected the marker exactly once (replayed scrollback, nothing retyped), got "
-            + "\(occurrences) — 0 means a cold shell, 2+ means something retyped input"
         )
     }
 
