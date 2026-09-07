@@ -323,6 +323,29 @@ final class PreferencesStore: ObservableObject {
         }
     }
 
+    /// Whether idle sessions are put to sleep automatically. Reads through the optional so an
+    /// unconfigured `Preferences` (or one predating this field) keeps today's behaviour — see
+    /// `ShellPreferences.idleSleepEnabled`.
+    var idleSleepEnabled: Bool {
+        get { preferences.shell.idleSleepEnabled ?? true }
+        set {
+            var shell = preferences.shell
+            shell.idleSleepEnabled = newValue
+            preferences.shell = shell
+        }
+    }
+
+    /// Seconds an idle session waits before it is put to sleep. Reads through the optional the
+    /// same way `idleSleepEnabled` does — see `ShellPreferences.sleepIdleThresholdSeconds`.
+    var sleepIdleThresholdSeconds: Int {
+        get { preferences.shell.sleepIdleThresholdSeconds ?? 600 }
+        set {
+            var shell = preferences.shell
+            shell.sleepIdleThresholdSeconds = newValue
+            preferences.shell = shell
+        }
+    }
+
     // MARK: Confirmations
 
     /// Whether closing a project with several sessions asks first. Phrased positively — the
@@ -346,31 +369,6 @@ final class PreferencesStore: ObservableObject {
         set {
             var claude = preferences.claude ?? ClaudePreferences()
             claude.autoResumeRunningSessions = newValue
-            preferences.claude = claude
-        }
-    }
-
-    // MARK: Sleep
-
-    /// Whether idle sessions are put to sleep automatically. Reads through the optional so an
-    /// unconfigured `Preferences` (or one predating this field) keeps today's behaviour — see
-    /// `ClaudePreferences.idleSleepEnabled`.
-    var idleSleepEnabled: Bool {
-        get { preferences.claude?.idleSleepEnabled ?? true }
-        set {
-            var claude = preferences.claude ?? ClaudePreferences()
-            claude.idleSleepEnabled = newValue
-            preferences.claude = claude
-        }
-    }
-
-    /// Seconds an idle session waits before it is put to sleep. Reads through the optional the
-    /// same way `idleSleepEnabled` does — see `ClaudePreferences.sleepIdleThresholdSeconds`.
-    var sleepIdleThresholdSeconds: Int {
-        get { preferences.claude?.sleepIdleThresholdSeconds ?? 600 }
-        set {
-            var claude = preferences.claude ?? ClaudePreferences()
-            claude.sleepIdleThresholdSeconds = newValue
             preferences.claude = claude
         }
     }
