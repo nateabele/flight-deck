@@ -145,6 +145,12 @@ struct PosixDaemonControl: DaemonControlling {
 
         guard let pid = readPID(id), kill(pid, 0) == 0 else { return }
 
+        // A SIGSTOP'd agent can't act on the daemon's SIGTERM below — it can't process signals
+        // or exit while stopped — so wake it first. Unconditional and safe: SIGCONT to an
+        // already-running agent group is a harmless no-op, and `cont` is itself a no-op if no
+        // agent group resolves.
+        cont(id)
+
         if kill(pid, SIGTERM) != 0 {
             let reason = String(cString: strerror(errno))
             Self.logger.error(
