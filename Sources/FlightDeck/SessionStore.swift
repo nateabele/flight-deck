@@ -95,6 +95,13 @@ final class SessionStore: ObservableObject {
     /// `checkStuckPrompts` must treat that as "nothing to check" rather than as "always stuck".
     var openPromptProbe: ((UUID) -> String?)?
 
+    /// Session ids in most-recently-active order (index 0 == current selection).
+    /// Consulted by `closeSession` so closing the active tab returns to the tab you
+    /// were on before it rather than the top of the sidebar. Not persisted: after a
+    /// relaunch there is no meaningful "before", and the adjacent fallback covers the
+    /// first close.
+    private var activationOrder: [UUID] = []
+
     /// `didSet` persists every change, including one made through `SessionSidebar`'s
     /// `List(selection:)` binding — the only way selection actually changes in
     /// production, since that binding writes here directly rather than through
@@ -102,6 +109,10 @@ final class SessionStore: ObservableObject {
     /// cannot recurse.
     @Published var selectedSessionID: UUID? {
         didSet {
+            if let id = selectedSessionID {
+                activationOrder.removeAll { $0 == id }
+                activationOrder.insert(id, at: 0)
+            }
             if let id = selectedSessionID, let at = locate(id) {
                 lastActiveProjectURL = URL(
                     fileURLWithPath: repos[at.repo].sessions[at.session].workingDirectory,
@@ -2559,13 +2570,12 @@ final class SessionStore: ObservableObject {
         // long-standing disagreement with `moveSession`, which has always left an emptied
         // source project standing.
         if selectedSessionID == id {
-            // The first *session*, not the first repo's first session: this method just above
-            // may have emptied `repos[repoIndex]` without removing it, and `moveSession` leaves
-            // an emptied source project standing the same way — so `repos.first` can be empty
-            // while live tabs sit in a later section. Reading through it would clear the
-            // selection and drop the whole app to the "No Session" empty state.
-            selectedSessionID = repos.flatMap(\.sessions).first?.id
+            selectedSessionID = selectionAfterClosing(id, formerLocation: (repoIndex, sessionIndex))
         }
+        // Prune regardless of whether the closed tab was active, so opening and closing
+        // many tabs cannot grow activationOrder without bound. selectionAfterClosing
+        // already skips dead entries, so this is tidiness, not correctness.
+        activationOrder.removeAll { $0 == id }
         persist()
 
         Task { [weak self] in
@@ -5833,6 +5843,27 @@ final class SessionStore: ObservableObject {
             }
         }
         return nil
+    }
+
+    /// The session to select once `closed` (at `at` before its removal) is gone: the
+    /// most recently active still-live session other than `closed`, or — when history
+    /// has nothing to offer — the closed tab's sidebar neighbor. Never the top of the list.
+    private func selectionAfterClosing(
+        _ closed: UUID, formerLocation at: (repo: Int, session: Int)
+    ) -> UUID? {
+        // MRU first. The liveness check skips ids for tabs closed earlier, so a stale
+        // history entry is invisible rather than wrong.
+        if let predecessor = activationOrder.first(where: { $0 != closed && locate($0) != nil }) {
+            return predecessor
+        }
+        // No history: the sidebar neighbor. `closed` is already removed from `repos`,
+        // so the survivor now at the closed tab's old flattened position is the
+        // "next one down"; clamping to the last index lands on the "previous" when the
+        // closed tab was last.
+        let ordered = repos.flatMap(\.sessions)
+        guard !ordered.isEmpty else { return nil }
+        let flattened = repos[..<at.repo].reduce(0) { $0 + $1.sessions.count } + at.session
+        return ordered[min(flattened, ordered.count - 1)].id
     }
 }
 
