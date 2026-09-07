@@ -196,6 +196,54 @@ final class PreferencesStoreTests: XCTestCase {
         XCTAssertNil(store.sessionEnvironment(inherited: [:])["CLAUDE_CODE_CHILD_SESSION"])
     }
 
+    // MARK: Scrollback budget
+
+    func testScrollbackBudgetDefaultsToFourMiB() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        XCTAssertEqual(store.scrollbackBudgetBytes, 4 * 1024 * 1024)
+        XCTAssertNil(store.preferences.shell.scrollbackBudgetBytes)
+    }
+
+    func testScrollbackBudgetRoundTripsAndClamps() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        store.scrollbackBudgetBytes = 8 * 1024 * 1024
+        XCTAssertEqual(store.scrollbackBudgetBytes, 8 * 1024 * 1024)
+        store.scrollbackBudgetBytes = 999 * 1024 * 1024 // over max
+        XCTAssertEqual(store.scrollbackBudgetBytes, 16 * 1024 * 1024)
+        store.scrollbackBudgetBytes = 1 // under min
+        XCTAssertEqual(store.scrollbackBudgetBytes, 262_144)
+    }
+
+    func testSessionEnvironmentCarriesScrollbackBudget() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        store.scrollbackBudgetBytes = 2 * 1024 * 1024
+        XCTAssertEqual(store.sessionEnvironment(inherited: [:])["FD_OUTLOG_BUDGET"], String(2 * 1024 * 1024))
+    }
+
+    /// Same trap `testClaudePreferencesWithoutTheIdleSleepKeysStillDecode` guards, for the
+    /// neutral `ShellPreferences` struct this field actually lives on: a `"shell": {...}`
+    /// blob written before this field existed must still decode, with the other shell
+    /// fields intact and the new one nil (which the store's getter reads as 4 MiB).
+    func testShellPreferencesWithoutTheScrollbackBudgetKeyStillDecode() throws {
+        let original = ShellPreferences(
+            shellOverride: "/bin/fish", environment: ["FOO": "bar"], clearChildSessionMarker: false,
+            scrollbackBudgetBytes: 8 * 1024 * 1024
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try JSONEncoder().encode(original))
+                as? [String: Any]
+        )
+        object.removeValue(forKey: "scrollbackBudgetBytes")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(ShellPreferences.self, from: legacy)
+
+        XCTAssertEqual(decoded.shellOverride, "/bin/fish")
+        XCTAssertEqual(decoded.environment, ["FOO": "bar"])
+        XCTAssertFalse(decoded.clearChildSessionMarker)
+        XCTAssertNil(decoded.scrollbackBudgetBytes)
+    }
+
     // MARK: Auto-resume
 
     func testAutoResumeDefaultsOff() {
