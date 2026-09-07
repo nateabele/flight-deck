@@ -1081,3 +1081,54 @@ the feature, and both written up where someone will hit them rather than here:
   The entry above this one records the rule; the working route (a window on the app's own
   `UIWindowScene` held across an `xcrun simctl io … screenshot`, with the two-file handshake
   that makes it possible) is in [docs/MOBILE.md](MOBILE.md) beside the technique.
+
+## Detached session persistence (2026-09-07), carried forward from Phase 1
+
+`fd-abduco` (`vendor/fd-abduco/`) is a vendored fork; all four items below were flagged in
+Phase 1's own review and are unreachable from Phase 2's paths, which is why they were deferred
+rather than fixed alongside the daemon wiring.
+
+- **Replay backpressure: `write_all` busy-spins on `EAGAIN`.** `server.c`'s attach-time replay
+  (the loop that hands a newly-attached client the captured `FdOutlog` history, one packet at a
+  time via `server_send_packet`) goes through `abduco.c`'s `write_all`, whose retry loop treats
+  `EAGAIN`/`EWOULDBLOCK` exactly like `EINTR` — `continue` with no wait. For a slow or
+  non-draining client with a large backlog to replay, that spins the daemon's CPU instead of
+  blocking. The server already runs a `select()` loop with a `writefds` set sitting unused for
+  this purpose; the fix is to drive replay through it (queue the remaining chunks, mark the
+  client's fd in `writefds`, resume the write when `select` reports it writable) rather than
+  through a tight retry. Unreachable today because replay payloads in practice fit well within
+  socket buffer sizes before a client can be slow enough to matter — worth fixing before Phase
+  3's user-facing scrollback-budget preference lets that payload grow large enough to matter.
+- **Nested-binary code-signing is unvalidated.** `SessionDaemon.resolvedBinaryPath()` symlinks
+  to the bundled `fd-abduco` and Flight Deck `exec`s it directly; nothing here checks that the
+  binary's signature matches expectations before that first `exec` under the app's hardened
+  runtime. A binary that failed to sign (or was tampered with post-build) would only surface as
+  a launch failure at exec time, not as a clear signing error. Worth a `SecStaticCodeCheckValidity`
+  probe (or equivalent) the first time a launch resolves the symlink, logged clearly rather than
+  left to whatever `posix_spawn`/exec reports.
+- **Opportunistic `FdOutlog` hardening**, all in `vendor/fd-abduco/fd_outlog.c` /
+  `server.c`, none exercised by any budget-trim or replay test because none of them are reachable
+  short of an actual allocation failure or code that never runs on the path taken:
+  - `fd_outlog.c`'s `ensure()` does not NULL-check `realloc`'s return before assigning it to
+    `o->data` — an allocation failure on a very long-lived session (budget growth, not the
+    normal trim-at-`2×budget` path) would silently corrupt `o->data` and drop the old pointer,
+    leaking it. Belongs beside the existing bounded-budget design, not as a behavior change to it.
+  - `server.c` never calls `fd_outlog_free(&server.outlog)`, so the log's buffer is never
+    reclaimed. Harmless as written — the server only ever exits via `_exit`/signal, which the OS
+    reclaims for free — but worth adding for symmetry with `fd_outlog_init`, and in case a future
+    change adds a graceful-shutdown path that returns from `main`.
+  - `server.c`'s `MSG_RESIZE` handler has a redundant self-assign: the `else` branch of
+    `if (c->state != STATE_ATTACHED) { c->state = STATE_ATTACHED; ... } else { c->state = STATE_ATTACHED; }`
+    reassigns a value the `else` condition already guarantees. Cosmetic; safe to delete the
+    `else` body's assignment when next touching that function.
+- **Debug and release builds share `/tmp/flight-deck-<uid>`, and therefore each other's
+  daemons.** `SessionDaemon`'s `directory` default is not affected by `-FlightDeckStateDir` the
+  way `sessions.json`'s path and `AnswerTriggerSocket`'s socket already are — a debug build
+  already reads and writes the same `sessions.json` as the real installed app for the identical
+  reason (no salting), and now its daemon sockets are shared the same way. A debug build attaches
+  to, and can `terminate()`, a session belonging to the real installed app's fleet, because both
+  resolve the identical `<uuid>.sock`. If isolating a debug run from the real fleet's daemons is
+  ever wanted, `SessionDaemon.init(directory:)` already takes the
+  override it needs; the missing piece is threading `-FlightDeckStateDir` (or a dedicated flag)
+  into `FlightDeckApp`'s construction of the `SessionDaemon` it hands to `SessionStore`, the
+  same way that launch argument already salts the persistence path.
