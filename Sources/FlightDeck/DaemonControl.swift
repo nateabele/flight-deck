@@ -163,7 +163,15 @@ struct PosixDaemonControl: DaemonControlling {
             )
         else { return nil }
         let trimmed = contents.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let value = Int32(trimmed) else { return nil }
+        // `> 0`, not just "parses as an Int32": `kill(pid, 0)` treats 0 and negative pids as
+        // group/broadcast targets, not per-process liveness checks, and "succeeds" for them
+        // regardless of what is actually running. A pidfile of "0" would otherwise make
+        // `terminate` deliver `SIGTERM`/`SIGKILL` to pid 0 — Flight Deck's own process group,
+        // taking down every ghostty surface and sibling daemon with it — and "-1" would
+        // broadcast to every process this user can signal. fd-abduco only ever writes its own
+        // positive `getpid()`, but a corrupted, truncated, or tampered pidfile must not be
+        // catastrophic.
+        guard let value = Int32(trimmed), value > 0 else { return nil }
         return pid_t(value)
     }
 
