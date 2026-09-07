@@ -228,6 +228,29 @@ final class DaemonControlTests: XCTestCase {
         XCTAssertNotEqual(processState(child.pid), "T", "child should have resumed")
     }
 
+    // MARK: - terminate SIGCONT ordering
+
+    /// A `SIGSTOP`'d agent can't act on the daemon's `SIGTERM` — it can't process signals or
+    /// exit while stopped — so `terminate` must `SIGCONT` the agent group first, unconditionally,
+    /// before reaching for the ladder. The pidfile pid is a real (disposable) forked child, not
+    /// `getpid()`, because unlike `stop`/`cont` — which only ever signal the agent group through
+    /// the injected `signal` seam — `terminate`'s SIGTERM/SIGKILL ladder calls `Darwin.kill`
+    /// directly against the pidfile pid: this process's own pid there would mean a real SIGTERM
+    /// hitting the test runner itself.
+    func testTerminateContsAgentGroupBeforeTermLadder() throws {
+        let child = try ForkedChild.spawnOwnGroup(command: "/bin/sleep", args: ["30"])
+        defer { child.terminate() }
+        try writePidfile(child.pid, for: sessionID)
+        let sig = SignalSpy()
+        let control = PosixDaemonControl(
+            daemon: daemon, agentGroupResolver: FixedResolver(pgid: 4242), signal: sig.record
+        )
+
+        control.terminate(sessionID)
+
+        XCTAssertEqual(sig.calls.first, .init(pid: -4242, signal: SIGCONT))
+    }
+
     // MARK: - Helpers
 
     /// A real `AF_UNIX`/`SOCK_STREAM` listener at `path`, mirroring the connect-side idiom in
