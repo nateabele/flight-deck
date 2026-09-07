@@ -2252,7 +2252,21 @@ final class SessionStore: ObservableObject {
     ///
     /// Never called from `reapAllForQuit` or `sweepOrphans` — see their own doc comments for
     /// why persisting daemons across quit is the point, not a gap.
+    ///
+    /// Guarded on `bundledBinary` for a reason neither surface-creation site needs to be: this
+    /// runs unconditionally from `restore()`, with no `try/catch` and no dependence on the
+    /// binary actually resolving — it only lists a directory and signals pids. A process with
+    /// no app bundle (the unit-test host, chiefly) never created a daemon in the first place,
+    /// but `daemon`'s *default* directory (`/tmp/flight-deck-<uid>`) is real and shared with
+    /// whatever a genuinely bundled Flight Deck has left running there. Without this guard, a
+    /// default-wired `SessionStore` built by a bundle-less process would list that real
+    /// directory, find sockets for none of its own fixture ids, and `SIGTERM`/`SIGKILL` every
+    /// live daemon it finds — destroying exactly the persisted agent state this feature exists
+    /// to protect, from something as routine as running the unit tests. A process that cannot
+    /// bundle the binary cannot have created any of the daemons in that directory, so it must
+    /// never be the one deciding which of them are orphans.
     private func reconcileDaemons(restored: Set<UUID>) {
+        guard daemon.bundledBinary != nil else { return }
         for id in daemon.liveSessionIDs() where !restored.contains(id) {
             daemonControl.terminate(id)
         }
