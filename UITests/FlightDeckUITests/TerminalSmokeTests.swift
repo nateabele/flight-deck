@@ -516,20 +516,42 @@ final class TerminalSmokeTests: XCTestCase {
         let marker = "FD-REATTACH-\(nonce)"
 
         var app = launchIsolated()
+
+        // Captured HERE, right after the seeded session is confirmed running, and BEFORE
+        // anything below that could tear it down — deliberately NOT resolved from inside
+        // teardown. A successful in-app close (below) runs `SessionStore.closeSession` ->
+        // `persist()`, which writes an EMPTY `sessions` array back to this same
+        // `sessions.json`; resolving the id after that point would read `nil` on every
+        // SUCCESSFUL run and only ever "find" one on a run that already failed to clean up —
+        // exactly backwards. Polled rather than read once: `persist()` runs synchronously, but
+        // nothing guarantees it has already landed on disk in the instant the window appears.
+        var sessionID: UUID?
+        _ = waitFor(timeout: 5) {
+            sessionID = sessionUUIDFromIsolatedState()
+            return sessionID != nil
+        }
+        guard let sessionID else {
+            XCTFail(
+                "could not resolve the seeded session's id from "
+                + "\(Self.isolatedStateDir)/sessions.json"
+            )
+            return
+        }
+
         // Unconditional teardown so a failure partway through this test cannot leak the
-        // daemon and its socket/pidfile under `/tmp/flight-deck-<uid>` past the run.
-        //
-        // Two layers, not one. The graceful in-app close (`SessionStore.closeSession` ->
-        // `DaemonControl.terminate`, the same path a user quitting a tab takes) is tried first,
-        // but is NOT trusted alone: the `close-session` button is hover-gated, and if it simply
-        // does not appear within the timeout the daemon would otherwise leak silently. So this
-        // also resolves this test's OWN session id from its own isolated state directory and
-        // signals exactly that daemon directly — belt-and-suspenders, and safe to run even
-        // after a successful in-app close, since terminating an already-gone daemon is a no-op.
+        // daemon and its socket/pidfile under `/tmp/flight-deck-<uid>` past the run. The
+        // in-app graceful close (`SessionStore.closeSession` -> `DaemonControl.terminate`, the
+        // same path a user quitting a tab takes) is attempted first as a nicety, but does not
+        // gate cleanup and must not fail the test if its hover-gated button never appears —
+        // `terminateOwnDaemon` below covers cleanup unconditionally either way. Targeting the
+        // `sessionID` captured above (not re-resolved here) is what makes this idempotent and
+        // correct on the success path: whether or not the close above already tore the daemon
+        // down, `terminateOwnDaemon` finds no live pid in that case and just unlinks whatever
+        // socket/pidfile remain — a no-op, not a failure.
         //
         // Never a directory-wide sweep: `/tmp/flight-deck-<uid>` is shared with every other
         // live Flight Deck session on this machine (the developer's own, or a teammate's), so
-        // only the id this test itself created is ever targeted.
+        // only `sessionID` is ever targeted.
         defer {
             if app.state != .notRunning {
                 let rows = app.staticTexts.matching(identifier: "session-row-title")
@@ -541,16 +563,7 @@ final class TerminalSmokeTests: XCTestCase {
                 }
                 app.terminate()
             }
-
-            if let id = sessionUUIDFromIsolatedState() {
-                terminateOwnDaemon(id)
-            } else {
-                XCTFail(
-                    "teardown could not resolve this test's own session id from "
-                    + "\(Self.isolatedStateDir)/sessions.json — its fd-abduco daemon may have "
-                    + "leaked and needs manual cleanup"
-                )
-            }
+            terminateOwnDaemon(sessionID)
         }
 
         // Give the terminal keyboard focus — the same click this file already uses elsewhere
