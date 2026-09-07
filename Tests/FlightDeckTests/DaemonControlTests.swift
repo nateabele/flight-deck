@@ -15,10 +15,16 @@ final class DaemonControlTests: XCTestCase {
     private var daemon: SessionDaemon!
     private var control: PosixDaemonControl!
 
-    /// Any real `fd-abduco` this test spawned, so `tearDown` can make sure it is dead even if
-    /// an assertion fails partway through — this worktree's process table is shared with other
-    /// sessions and a leaked `sleep 30` (or the daemon holding it) is exactly the kind of orphan
-    /// `SessionReaper` exists to prevent elsewhere in this app.
+    /// The real daemon pids this test learned of via a pidfile, so `tearDown` can make sure
+    /// they are dead even if an assertion fails partway through — this worktree's process
+    /// table is shared with other sessions and a leaked `sleep 30` (or the daemon holding it)
+    /// is exactly the kind of orphan `SessionReaper` exists to prevent elsewhere in this app.
+    ///
+    /// **Deliberately not the `Process.processIdentifier` `spawnDaemon` gets back.** Under
+    /// `-n`, that pid is the launcher, which daemonizes and exits almost immediately — by the
+    /// time a test could kill it, it is already gone, and the actual long-lived daemon (a
+    /// double-forked grandchild `fd-abduco` re-parented to launchd) has a pid that only ever
+    /// appears in the pidfile. Killing the launcher pid here would silently kill nothing.
     private var spawnedPIDs: [pid_t] = []
 
     override func setUpWithError() throws {
@@ -91,6 +97,10 @@ final class DaemonControlTests: XCTestCase {
         try spawnDaemon(binary: binary, socketPath: socketPath)
 
         let pidFromFile = try waitForPidfile(daemon.pidfilePath(for: sessionID))
+        // The real daemon, not the launcher `spawnDaemon` forked — see `spawnedPIDs`'s doc
+        // comment. This test never calls `terminate`, so without this the daemon (and the
+        // `sleep 30` under it) would otherwise outlive the test by design.
+        spawnedPIDs.append(pidFromFile)
         XCTAssertEqual(control.daemonPID(sessionID), pidFromFile)
         XCTAssertTrue(control.isLive(sessionID))
     }
@@ -101,7 +111,10 @@ final class DaemonControlTests: XCTestCase {
         try spawnDaemon(binary: binary, socketPath: socketPath)
 
         let pidfilePath = daemon.pidfilePath(for: sessionID)
-        _ = try waitForPidfile(pidfilePath)
+        let pidFromFile = try waitForPidfile(pidfilePath)
+        // Belt-and-suspenders alongside the `terminate` call below: if an assertion between
+        // here and there fails, `tearDown` still reaps the real daemon rather than leaking it.
+        spawnedPIDs.append(pidFromFile)
         XCTAssertTrue(control.isLive(sessionID))
 
         control.terminate(sessionID)
@@ -110,6 +123,41 @@ final class DaemonControlTests: XCTestCase {
         XCTAssertNil(control.daemonPID(sessionID))
         XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath))
         XCTAssertFalse(FileManager.default.fileExists(atPath: pidfilePath))
+    }
+
+    // MARK: - readPID guard against non-positive / garbage pidfiles
+
+    /// Regression coverage for the pidfile-parsing guard in `readPID`: `kill(pid, 0)` treats
+    /// pid `0` as "my own process group" and pid `-1` as "every process I can signal", and
+    /// both "succeed" for that signal-0 existence check regardless of what is actually
+    /// running — so `Int32(trimmed)` alone is not enough to trust a pidfile's contents. This
+    /// only exercises `daemonPID` and `terminate`'s harmless probing (`kill(pid, 0)`), never
+    /// the real `SIGTERM`/`SIGKILL` delivery `terminate` would reach for pid `0`/`-1` if the
+    /// guard were missing: proving that branch red the honest way — by actually removing the
+    /// guard and letting `terminate` deliver a real `SIGTERM`/`SIGKILL` to pid `0` (this
+    /// process's own group, sharing this worktree's other sessions) or pid `-1` (every process
+    /// this user can signal, system-wide) — is not a safe thing to do even transiently on a
+    /// shared machine. `readPID` is the single choke point both `daemonPID` and `terminate`
+    /// read a pid through, so proving the guard holds there is proving it for both callers.
+    func testDaemonPIDAndTerminateRefuseNonPositiveOrGarbagePidfiles() throws {
+        let pidfilePath = daemon.pidfilePath(for: sessionID)
+        let socketPath = daemon.socketPath(for: sessionID)
+
+        for content in ["0", "-1", "abc"] {
+            try Data("\(content)\n".utf8).write(to: URL(fileURLWithPath: pidfilePath))
+            // A bystander socket file, so `terminate`'s unconditional cleanup has something to
+            // unlink — proving it still runs its cleanup even when the pid itself is refused.
+            XCTAssertTrue(FileManager.default.createFile(atPath: socketPath, contents: nil))
+
+            XCTAssertNil(
+                control.daemonPID(sessionID), "daemonPID should refuse pidfile \"\(content)\""
+            )
+
+            control.terminate(sessionID)
+
+            XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: pidfilePath))
+        }
     }
 
     // MARK: - Helpers
