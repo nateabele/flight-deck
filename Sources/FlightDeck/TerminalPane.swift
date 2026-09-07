@@ -59,6 +59,10 @@ struct TerminalPane: NSViewRepresentable {
     }
 
     func updateNSView(_ container: TerminalHostView, context: Context) {
+        // Wake the selected session before fetching its surface, so a session the sleep
+        // controller froze comes back the instant it's brought on-screen rather than showing
+        // an empty pane until the next agent-triggered wake.
+        if let selected = store.selectedSessionID { store.wakeIfAsleep(selected) }
         let current = store.selectedSessionID.flatMap { store.surface(for: $0) }
 
         // Refreshed on every update, not just on attach: `updateNSView` is the only place

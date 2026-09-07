@@ -872,9 +872,10 @@ final class SessionStore: ObservableObject {
     /// capture `self` after `init` has finished assigning every property they read
     /// (`daemonControl`, `processInspector`, `statuses`, …).
     ///
-    /// **Not yet registered on `clock`.** That happens in a later task, together with the UI
-    /// wake hooks, so a session can never be put to sleep by a build that has no way to wake it
-    /// back up.
+    /// Registered on `clock` from the production convenience init, alongside `wakeIfAsleep(_:)`
+    /// — the seam `injector(for:)` and `TerminalPane.updateNSView` both call before touching a
+    /// session's surface — so a build that can put a session to sleep always has a way to wake
+    /// it back up.
     private(set) lazy var sleepController = SessionSleepController(
         policy: SleepPolicy(idleThreshold: 600),   // 10 min; a later task replaces this with a preference
         daemonControl: daemonControl,
@@ -1128,6 +1129,21 @@ final class SessionStore: ObservableObject {
     func tearDownSurface(for id: UUID) {
         surfaces[id] = nil            // release the SurfaceView → client disconnects from daemon
         _ = processRegistry.forget(id)
+    }
+
+    /// Wake a session if the sleep controller has it frozen — the one seam both the
+    /// selection path (`TerminalPane`) and the injection path (`injector(for:)`) call before
+    /// touching a session's surface. Idempotent and safe on any id, including one the sleep
+    /// controller never heard of: `SessionSleepController.wake` itself no-ops unless `id` is
+    /// in `asleep`.
+    ///
+    /// A session deleted while asleep can still reach here — nothing removes an id from
+    /// `asleep` on close — and `wake(_:)`'s `rebuildSurface` closure calls `makeAttachSurface`,
+    /// which returns nil for a session `locate` can no longer find. That is an acceptable
+    /// no-op: a gone session has no surface to rebuild, and nothing here crashes on it.
+    @MainActor
+    func wakeIfAsleep(_ id: UUID) {
+        if sleepController.asleep.contains(id) { sleepController.wake(id) }
     }
 
     /// Test seam for frontmost-ness; production reads `NSApplication`.
@@ -1413,6 +1429,12 @@ final class SessionStore: ObservableObject {
         let previousRun = persistence?.load()
         if resetState || !restore() { seedInitialSession() }
         startStatusWatching()
+        // Same idiom `SessionStatusWatcher`/`TranscriptWatcher` use to register themselves,
+        // and the same lifecycle point as `startStatusWatching()` above: only the production
+        // convenience init reaches here, so a store built by a test never arms sleep. `add`
+        // replaces rather than duplicates a registration for the same owner, and `sleepController`
+        // itself is the weak owner — held alive by this store's `lazy var` for the run.
+        clock.add(sleepController) { [weak self] in self?.sleepController.tick() }
         if let previousRun {
             Task { [weak self] in await self?.sweepOrphans(from: previousRun) }
         }
@@ -5147,7 +5169,8 @@ final class SessionStore: ObservableObject {
     }
 
     private func injector(for id: UUID) -> TextInjecting? {
-        injectorOverride ?? surfaces[id]
+        wakeIfAsleep(id)   // rebuilds the surface (+ SIGCONT) if this session was asleep
+        return injectorOverride ?? surfaces[id]
     }
 
     func surface(for id: UUID) -> Ghostty.SurfaceView? { surfaces[id] }
