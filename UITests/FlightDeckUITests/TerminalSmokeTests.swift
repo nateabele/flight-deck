@@ -324,13 +324,39 @@ final class TerminalSmokeTests: XCTestCase {
     ///   the search index, whose path is derived independently in `AppDelegate`. Without it a run
     ///   opens the developer's real `search-index.sqlite` and starts a backfill over their whole
     ///   transcript corpus mid-test.
+    /// Shared by `launchIsolated(_:)` and `launchPreservingState(_:)` so the two can name the
+    /// same directory without repeating the literal — the whole point of the pair is that a
+    /// relaunch land on the state the first launch wrote.
+    private static let isolatedStateDir = NSTemporaryDirectory() + "fd-smoke-state"
+
     @discardableResult
     private func launchIsolated(_ extraArguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments += [
             "-ApplePersistenceIgnoreState", "YES",
             "-FlightDeckResetState", "YES",
-            "-FlightDeckStateDir", NSTemporaryDirectory() + "fd-smoke-state",
+            "-FlightDeckStateDir", Self.isolatedStateDir,
+        ] + extraArguments
+        app.launch()
+        app.activate()
+        XCTAssertTrue(
+            app.windows.firstMatch.waitForExistence(timeout: 15), "no window appeared"
+        )
+        return app
+    }
+
+    /// The counterpart to `launchIsolated(_:)`: relaunches against the SAME state directory but
+    /// WITHOUT `-FlightDeckResetState`, so `SessionStore.restore()` runs against whatever the
+    /// previous launch left in `sessions.json` instead of a freshly seeded slate. This is what
+    /// `testSessionReattachesWithScrollbackAfterRelaunch` uses to prove a session survives a
+    /// kill-and-relaunch: reusing `isolatedStateDir` rather than taking a path parameter is what
+    /// guarantees the second launch actually sees the first one's session.
+    @discardableResult
+    private func launchPreservingState(_ extraArguments: [String] = []) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "-ApplePersistenceIgnoreState", "YES",
+            "-FlightDeckStateDir", Self.isolatedStateDir,
         ] + extraArguments
         app.launch()
         app.activate()
@@ -402,6 +428,120 @@ final class TerminalSmokeTests: XCTestCase {
         XCTAssertEqual(
             app.windows.firstMatch.title, "Flight Deck - \(project)",
             "the window title does not name the active project"
+        )
+    }
+
+    /// The spec's end-to-end payoff: a live session's scrollback survives Flight Deck being
+    /// killed and relaunched, because the pty lives inside a detached `fd-abduco` daemon rather
+    /// than inside Flight Deck's own process. `app.terminate()` kills the ghostty/Flight Deck
+    /// client, but Phase 1 starts each session's daemon `setsid`'d specifically so that SIGTERM
+    /// to its parent never reaches it, and the second launch's `SessionStore.restore()` finds
+    /// the session recorded in `sessions.json` and attaches (`fd-abduco -a`) to whatever is
+    /// still running for it — `LaunchPlan.decide` only types a fresh resume command when
+    /// `daemonControl.isLive` says otherwise. A cold-started shell would show neither the marker
+    /// nor a doubled one, which is exactly the pair of failure modes this guards against.
+    ///
+    /// Its own launch, like the other standalone behaviours in this file: nothing here depends
+    /// on the shared sequence, and the sequence's ⌘Q at the very end would leave no app alive
+    /// for this test to kill and relaunch anyway.
+    ///
+    /// **Reading terminal output.** `SurfaceView.accessibilityRole` reports `.textArea`, which
+    /// XCUITest surfaces as a `textView` — the same element kind this file already reads with
+    /// `.value as? String` for the Preferences command field. Its value is
+    /// `cachedScreenContents`, a 500ms-cached live snapshot of the terminal's screen, so polling
+    /// it is how this test observes output without a dedicated on-screen text query.
+    ///
+    /// **The marker.** A UUID-suffixed string never seen on screen before this test types it, so
+    /// neither assertion can pass vacuously — a stale sighting from an earlier run or a
+    /// similar-looking prompt cannot satisfy it.
+    ///
+    /// **Why there is a wait before the first `echo`.** A freshly seeded session already has a
+    /// resume/launch command (`claude ...`) queued into its shell the moment the surface is
+    /// created (`LaunchPlan.decide`'s cold path) — and no `claude` binary exists under test, so
+    /// it fails immediately with "command not found" and the shell falls back to its own prompt.
+    /// Typing this test's `echo` before that settles risks interleaving the two into one
+    /// corrupted line, so this waits for the shell to finish that round trip first.
+    func testSessionReattachesWithScrollbackAfterRelaunch() {
+        let nonce = UUID().uuidString.prefix(8)
+        let marker = "FD-REATTACH-\(nonce)"
+
+        var app = launchIsolated()
+        // Unconditional teardown so a failure partway through this test cannot leak the
+        // daemon and its socket/pidfile under `/tmp/flight-deck-<uid>` past the run. Closing
+        // the session in-app drives `SessionStore.closeSession` -> `DaemonControl.terminate`,
+        // the same path a user quitting a tab takes; `app.state` is checked first because an
+        // earlier failure can leave `app` already terminated, with nothing left to click.
+        defer {
+            if app.state != .notRunning {
+                let rows = app.staticTexts.matching(identifier: "session-row-title")
+                rows.firstMatch.hover()
+                let close = app.buttons["close-session"].firstMatch
+                if close.waitForExistence(timeout: 5) {
+                    close.click()
+                }
+                app.terminate()
+            }
+        }
+
+        // Give the terminal keyboard focus — the same click this file already uses elsewhere
+        // to hand focus from the sidebar back to the detail pane.
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let terminal = app.textViews.firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface found")
+        func terminalText() -> String { (terminal.value as? String) ?? "" }
+
+        // See the doc comment above: let the doomed `claude` resume attempt finish and the
+        // shell return to its own prompt before typing anything of this test's own.
+        settle()
+        settle()
+        settle()
+
+        app.typeText("echo \(marker)\n")
+        XCTAssertTrue(
+            waitFor(timeout: 10) { terminalText().contains(marker) },
+            "marker never appeared in the terminal before the app was killed"
+        )
+
+        // Kills the Flight Deck process outright. The session's `fd-abduco` daemon was started
+        // `setsid`'d in Phase 1 specifically so it outlives its parent's death — this line is
+        // the whole feature under test.
+        app.terminate()
+
+        // Same state directory, no `-FlightDeckResetState`: `SessionStore.restore()` reads the
+        // session `sessions.json` recorded and, finding its daemon still live, attaches rather
+        // than starting a fresh shell.
+        app = launchPreservingState()
+
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let reattached = app.textViews.firstMatch
+        XCTAssertTrue(
+            reattached.waitForExistence(timeout: 10), "no terminal surface found after relaunch"
+        )
+        func reattachedText() -> String { (reattached.value as? String) ?? "" }
+
+        XCTAssertTrue(
+            waitFor(timeout: 10) { reattachedText().contains(marker) },
+            "marker did not survive relaunch — the reattach replayed no scrollback (or the "
+            + "session cold-started instead of reattaching)"
+        )
+
+        // A cold-started shell would show the marker zero times; a reattach that also somehow
+        // retyped the resume command over a live replay would show it twice (this test's own
+        // `echo` colliding with a second, unwanted round of typed input). Exactly one is the
+        // only outcome consistent with "reattached and replayed, nothing retyped".
+        let occurrences = reattachedText().components(separatedBy: marker).count - 1
+        XCTAssertEqual(
+            occurrences, 1,
+            "expected the marker exactly once (replayed scrollback, nothing retyped), got "
+            + "\(occurrences) — 0 means a cold shell, 2+ means something retyped input"
         )
     }
 
