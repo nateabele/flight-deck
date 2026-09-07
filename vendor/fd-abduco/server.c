@@ -184,8 +184,42 @@ static void server_sigusr1_handler(int sig) {
 	}
 }
 
+/* Flight Deck fork (Task 1): "<socket>.pid" sidecar holding the server
+ * process's own decimal pid, so Flight Deck can SIGTERM the daemon that
+ * owns the PTY without first attaching to it. Reuses the already-resolved
+ * `sockaddr.sun_path` (set once, before forking, by server_create_socket())
+ * rather than tracking a second static -- both the write here and the
+ * unlink in server_atexit_handler() derive the same path from it. A write
+ * failure is non-fatal: the daemon still runs, it just can't be signalled
+ * by pidfile. */
+static bool server_pidfile_path(char *path, size_t size) {
+	int n = snprintf(path, size, "%s.pid", sockaddr.sun_path);
+	return n >= 0 && (size_t)n < size;
+}
+
+static bool server_write_pidfile(void) {
+	char path[sizeof(sockaddr.sun_path) + 4];
+	if (!server_pidfile_path(path, sizeof(path)))
+		return false;
+	int fd = open(path, O_WRONLY|O_CREAT|O_TRUNC, S_IRUSR|S_IWUSR);
+	if (fd == -1)
+		return false;
+	char buf[32];
+	int len = snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
+	bool ok = len > 0 && (size_t)len < sizeof(buf) && write_all(fd, buf, len) == len;
+	close(fd);
+	return ok;
+}
+
+static void server_remove_pidfile(void) {
+	char path[sizeof(sockaddr.sun_path) + 4];
+	if (server_pidfile_path(path, sizeof(path)))
+		unlink(path);
+}
+
 static void server_atexit_handler(void) {
 	unlink(sockaddr.sun_path);
+	server_remove_pidfile();
 }
 
 static void server_mainloop(void) {
