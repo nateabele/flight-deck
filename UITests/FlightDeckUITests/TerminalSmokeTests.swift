@@ -351,6 +351,9 @@ final class TerminalSmokeTests: XCTestCase {
     /// `testSessionReattachesWithScrollbackAfterRelaunch` uses to prove a session survives a
     /// kill-and-relaunch: reusing `isolatedStateDir` rather than taking a path parameter is what
     /// guarantees the second launch actually sees the first one's session.
+    ///
+    /// Also used for that same test's FIRST launch, paired with `clearIsolatedStateDir()` —
+    /// see that method's doc comment for why `launchIsolated(_:)` cannot be used there.
     @discardableResult
     private func launchPreservingState(_ extraArguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
@@ -364,6 +367,27 @@ final class TerminalSmokeTests: XCTestCase {
             app.windows.firstMatch.waitForExistence(timeout: 15), "no window appeared"
         )
         return app
+    }
+
+    /// Deletes `isolatedStateDir` outright, so a launch against it starts from a genuinely
+    /// empty slate WITHOUT going through `-FlightDeckResetState`.
+    ///
+    /// That flag cannot be used for `testSessionReattachesWithScrollbackAfterRelaunch`'s FIRST
+    /// launch: `FlightDeckApp.makeStore` wires `SessionStore`'s persistence to `nil` under
+    /// reset (`persistence: resetState ? nil : Self.fileSessionPersistence()`), so the seeded
+    /// session is never written to `sessions.json` at all, and `sessionUUIDFromIsolatedState()`
+    /// would find nothing to capture before the app is even killed. Clearing the directory by
+    /// hand and launching with `launchPreservingState(_:)` (live persistence) instead reaches
+    /// the same clean slate a different way: `SessionStore.init`'s
+    /// `if resetState || !restore() { seedInitialSession() }` still seeds a fresh session on an
+    /// empty directory — `restore()` returns false, same as under reset — but this time
+    /// `seedInitialSession()` also PERSISTS it, which is what makes the capture below possible.
+    ///
+    /// `try?` swallows "doesn't exist" along with everything else: a launch against a directory
+    /// this failed to clear for some other reason would surface as that launch's own
+    /// window-existence assertion failing, which names the real problem better than this would.
+    private func clearIsolatedStateDir() {
+        try? FileManager.default.removeItem(atPath: Self.isolatedStateDir)
     }
 
     /// Resolves `testSessionReattachesWithScrollbackAfterRelaunch`'s OWN session id by reading
@@ -495,6 +519,12 @@ final class TerminalSmokeTests: XCTestCase {
     /// on the shared sequence, and the sequence's ⌘Q at the very end would leave no app alive
     /// for this test to kill and relaunch anyway.
     ///
+    /// **Deliberately does not use `launchIsolated(_:)` for its first launch either** — see
+    /// `clearIsolatedStateDir()`'s doc comment for why `-FlightDeckResetState` is unusable here:
+    /// it wires `SessionStore`'s persistence to `nil`, so nothing would ever be written to
+    /// `sessions.json` for this test to capture. `clearIsolatedStateDir()` +
+    /// `launchPreservingState(_:)` reaches the same clean slate with persistence left live.
+    ///
     /// **Reading terminal output.** `SurfaceView.accessibilityRole` reports `.textArea`, which
     /// XCUITest surfaces as a `textView` — the same element kind this file already reads with
     /// `.value as? String` for the Preferences command field. Its value is
@@ -515,7 +545,12 @@ final class TerminalSmokeTests: XCTestCase {
         let nonce = UUID().uuidString.prefix(8)
         let marker = "FD-REATTACH-\(nonce)"
 
-        var app = launchIsolated()
+        // Clear-then-launch-without-reset, not `launchIsolated()` — see this test's own doc
+        // comment and `clearIsolatedStateDir()`'s for why: `-FlightDeckResetState` disables
+        // `SessionStore` persistence outright, which would leave `sessions.json` unwritten for
+        // the capture just below to ever find.
+        clearIsolatedStateDir()
+        var app = launchPreservingState()
 
         // Captured HERE, right after the seeded session is confirmed running, and BEFORE
         // anything below that could tear it down — deliberately NOT resolved from inside
