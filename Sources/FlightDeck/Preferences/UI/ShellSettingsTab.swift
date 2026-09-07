@@ -117,6 +117,35 @@ struct ShellSettingsTab: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Sleep") {
+                Toggle(
+                    "Sleep idle sessions",
+                    isOn: Binding(
+                        get: { preferences.idleSleepEnabled },
+                        set: { preferences.idleSleepEnabled = $0 }
+                    )
+                )
+                .accessibilityIdentifier("prefs-idle-sleep-enabled")
+
+                if preferences.idleSleepEnabled {
+                    Stepper(
+                        "After \(preferences.sleepIdleThresholdSeconds / 60) min",
+                        value: Binding(
+                            get: { preferences.sleepIdleThresholdSeconds / 60 },
+                            set: { preferences.sleepIdleThresholdSeconds = $0 * 60 }
+                        ),
+                        in: 1...120
+                    )
+                    .accessibilityIdentifier("prefs-idle-sleep-threshold")
+                }
+                // A threshold changed here applies on the next launch — see the comment on
+                // `SessionStore.sleepController`'s `policy:` argument. The Off switch above
+                // is live.
+                Text("An idle session's agent is paused and its terminal detached, freezing the tab until you select it again — regardless of which agent it's running. A threshold change takes effect the next time Flight Deck launches.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 Text("Applies to new sessions. Running sessions keep the environment they started with.")
                     .font(.caption)

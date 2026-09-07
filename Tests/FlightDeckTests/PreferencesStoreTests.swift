@@ -220,10 +220,10 @@ final class PreferencesStoreTests: XCTestCase {
         XCTAssertEqual(store.sessionEnvironment(inherited: [:])["FD_OUTLOG_BUDGET"], String(2 * 1024 * 1024))
     }
 
-    /// Same trap `testClaudePreferencesWithoutTheIdleSleepKeysStillDecode` guards, for the
-    /// neutral `ShellPreferences` struct this field actually lives on: a `"shell": {...}`
-    /// blob written before this field existed must still decode, with the other shell
-    /// fields intact and the new one nil (which the store's getter reads as 4 MiB).
+    /// Same trap `testShellPreferencesWithoutTheIdleSleepKeysStillDecode` guards, for
+    /// `scrollbackBudgetBytes`: a `"shell": {...}` blob written before this field existed
+    /// must still decode, with the other shell fields intact and the new one nil (which the
+    /// store's getter reads as 4 MiB).
     func testShellPreferencesWithoutTheScrollbackBudgetKeyStillDecode() throws {
         let original = ShellPreferences(
             shellOverride: "/bin/fish", environment: ["FOO": "bar"], clearChildSessionMarker: false,
@@ -242,6 +242,54 @@ final class PreferencesStoreTests: XCTestCase {
         XCTAssertEqual(decoded.environment, ["FOO": "bar"])
         XCTAssertFalse(decoded.clearChildSessionMarker)
         XCTAssertNil(decoded.scrollbackBudgetBytes)
+    }
+
+    // MARK: Idle sleep
+
+    func testIdleSleepDefaultsOnAtTenMinutes() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        XCTAssertTrue(store.idleSleepEnabled)
+        XCTAssertEqual(store.sleepIdleThresholdSeconds, 600)
+        XCTAssertNil(store.preferences.shell.idleSleepEnabled)
+        XCTAssertNil(store.preferences.shell.sleepIdleThresholdSeconds)
+    }
+
+    func testIdleSleepPreferencesRoundTrip() {
+        let persistence = MemoryPersistence()
+        let store = PreferencesStore(persistence: persistence)
+        store.idleSleepEnabled = false
+        store.sleepIdleThresholdSeconds = 120
+        XCTAssertEqual(persistence.stored?.shell.idleSleepEnabled, false)
+        XCTAssertEqual(persistence.stored?.shell.sleepIdleThresholdSeconds, 120)
+
+        let relaunched = PreferencesStore(persistence: persistence)
+        XCTAssertFalse(relaunched.idleSleepEnabled)
+        XCTAssertEqual(relaunched.sleepIdleThresholdSeconds, 120)
+    }
+
+    /// Same trap `testShellPreferencesWithoutTheScrollbackBudgetKeyStillDecode` guards, for
+    /// these two fields: a `"shell": {...}` blob written before they existed must still
+    /// decode a `ShellPreferences`, with the other shell fields intact and the new ones nil.
+    func testShellPreferencesWithoutTheIdleSleepKeysStillDecode() throws {
+        let original = ShellPreferences(
+            shellOverride: "/bin/fish", environment: ["FOO": "bar"], clearChildSessionMarker: false,
+            idleSleepEnabled: false, sleepIdleThresholdSeconds: 120
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try JSONEncoder().encode(original))
+                as? [String: Any]
+        )
+        object.removeValue(forKey: "idleSleepEnabled")
+        object.removeValue(forKey: "sleepIdleThresholdSeconds")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(ShellPreferences.self, from: legacy)
+
+        XCTAssertEqual(decoded.shellOverride, "/bin/fish")
+        XCTAssertEqual(decoded.environment, ["FOO": "bar"])
+        XCTAssertFalse(decoded.clearChildSessionMarker)
+        XCTAssertNil(decoded.idleSleepEnabled)
+        XCTAssertNil(decoded.sleepIdleThresholdSeconds)
     }
 
     // MARK: Auto-resume
@@ -265,50 +313,6 @@ final class PreferencesStoreTests: XCTestCase {
         store.autoResumesRunningSessions = true
         store.autoResumesRunningSessions = false
         XCTAssertFalse(store.autoResumesRunningSessions)
-    }
-
-    // MARK: Idle sleep
-
-    func testIdleSleepDefaultsOnAtTenMinutes() {
-        let store = PreferencesStore(persistence: MemoryPersistence())
-        XCTAssertTrue(store.idleSleepEnabled)
-        XCTAssertEqual(store.sleepIdleThresholdSeconds, 600)
-        XCTAssertNil(store.preferences.claude)
-    }
-
-    func testIdleSleepPreferencesRoundTrip() {
-        let persistence = MemoryPersistence()
-        let store = PreferencesStore(persistence: persistence)
-        store.idleSleepEnabled = false
-        store.sleepIdleThresholdSeconds = 120
-        XCTAssertEqual(persistence.stored?.claude?.idleSleepEnabled, false)
-        XCTAssertEqual(persistence.stored?.claude?.sleepIdleThresholdSeconds, 120)
-
-        let relaunched = PreferencesStore(persistence: persistence)
-        XCTAssertFalse(relaunched.idleSleepEnabled)
-        XCTAssertEqual(relaunched.sleepIdleThresholdSeconds, 120)
-    }
-
-    /// Same trap `testPreferencesWithoutTheClaudeKeyStillDecode` guards, one level deeper: a
-    /// `"claude": {...}` blob written before these two fields existed must still decode a
-    /// `ClaudePreferences`, with `autoResumeRunningSessions` intact and the new fields nil.
-    func testClaudePreferencesWithoutTheIdleSleepKeysStillDecode() throws {
-        let original = ClaudePreferences(
-            autoResumeRunningSessions: true, idleSleepEnabled: false, sleepIdleThresholdSeconds: 120
-        )
-        var object = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: try JSONEncoder().encode(original))
-                as? [String: Any]
-        )
-        object.removeValue(forKey: "idleSleepEnabled")
-        object.removeValue(forKey: "sleepIdleThresholdSeconds")
-        let legacy = try JSONSerialization.data(withJSONObject: object)
-
-        let decoded = try JSONDecoder().decode(ClaudePreferences.self, from: legacy)
-
-        XCTAssertTrue(decoded.autoResumeRunningSessions)
-        XCTAssertNil(decoded.idleSleepEnabled)
-        XCTAssertNil(decoded.sleepIdleThresholdSeconds)
     }
 
     /// The load-bearing one. A `preferences.v1` blob written before this field existed must

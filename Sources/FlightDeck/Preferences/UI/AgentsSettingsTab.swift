@@ -107,37 +107,10 @@ struct ClaudeOptionsPane: View {
                                 )
                             )
                             .accessibilityIdentifier("prefs-auto-resume")
-                        // States the busy/shell rule in the user's terms: "running" is not
-                        // self-evident from the label, and the exclusions are the surprising
-                        // half.
-                        Text("Sessions that were working when Flight Deck last quit are asked to continue once they have resumed. Sessions that were idle, or waiting on you, are left alone.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-
-                            Toggle(
-                                "Sleep idle sessions",
-                                isOn: Binding(
-                                    get: { preferences.idleSleepEnabled },
-                                    set: { preferences.idleSleepEnabled = $0 }
-                                )
-                            )
-                            .accessibilityIdentifier("prefs-idle-sleep-enabled")
-
-                            if preferences.idleSleepEnabled {
-                                Stepper(
-                                    "After \(preferences.sleepIdleThresholdSeconds / 60) min",
-                                    value: Binding(
-                                        get: { preferences.sleepIdleThresholdSeconds / 60 },
-                                        set: { preferences.sleepIdleThresholdSeconds = $0 * 60 }
-                                    ),
-                                    in: 1...120
-                                )
-                                .accessibilityIdentifier("prefs-idle-sleep-threshold")
-                            }
-                        // A threshold changed here applies on the next launch — see the
-                        // comment on `SessionStore.sleepController`'s `policy:` argument. The
-                        // Off switch above is live.
-                        Text("An idle session's agent is paused and its terminal detached, freezing the tab until you select it again. A threshold change takes effect the next time Flight Deck launches.")
+                            // States the busy/shell rule in the user's terms: "running" is not
+                            // self-evident from the label, and the exclusions are the surprising
+                            // half.
+                            Text("Sessions that were working when Flight Deck last quit are asked to continue once they have resumed. Sessions that were idle, or waiting on you, are left alone.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

@@ -19,17 +19,32 @@ struct ShellPreferences: Codable, Equatable {
     /// this field, and a non-optional property with no default would fail to decode every
     /// one of them. `nil` means "never configured", which reads as 4 MiB.
     var scrollbackBudgetBytes: Int?
+    /// Whether an idle session's agent is put to sleep (SIGSTOP'd, its terminal detached)
+    /// after `sleepIdleThresholdSeconds` of inactivity. Applies to every session's shell,
+    /// regardless of agent — sleep freezes a process group and tears down a terminal surface,
+    /// neither of which is Claude-specific. Optional for the same reason `scrollbackBudgetBytes`
+    /// is: a `"shell": {...}` blob already on disk predates this field, and a non-optional
+    /// property with no default would fail to decode every one of them. `nil` means "never
+    /// configured", which reads as on — idle sleep is on by default.
+    var idleSleepEnabled: Bool?
+    /// How long a session must sit idle before it is put to sleep. Optional for the same
+    /// reason as `idleSleepEnabled`. `nil` reads as 600 (10 minutes).
+    var sleepIdleThresholdSeconds: Int?
 
     init(
         shellOverride: String? = nil,
         environment: [String: String] = [:],
         clearChildSessionMarker: Bool = true,
-        scrollbackBudgetBytes: Int? = nil
+        scrollbackBudgetBytes: Int? = nil,
+        idleSleepEnabled: Bool? = nil,
+        sleepIdleThresholdSeconds: Int? = nil
     ) {
         self.shellOverride = shellOverride
         self.environment = environment
         self.clearChildSessionMarker = clearChildSessionMarker
         self.scrollbackBudgetBytes = scrollbackBudgetBytes
+        self.idleSleepEnabled = idleSleepEnabled
+        self.sleepIdleThresholdSeconds = sleepIdleThresholdSeconds
     }
 }
 
@@ -53,25 +68,9 @@ struct ClaudePreferences: Codable, Equatable {
     /// once they have resumed and settled. Off by default: picking work back up unattended
     /// is a decision the user has to make deliberately, not one to inherit from an upgrade.
     var autoResumeRunningSessions: Bool
-    /// Whether an idle session's agent is put to sleep (SIGSTOP'd, its terminal detached)
-    /// after `sleepIdleThresholdSeconds` of inactivity. Optional for the reason every field
-    /// added to this struct after `autoResumeRunningSessions` must be — see the struct's doc
-    /// comment: a `"claude": {...}` blob already on disk predates this field, and a
-    /// non-optional property with no default would fail to decode every one of them. `nil`
-    /// means "never configured", which reads as on — idle sleep is on by default.
-    var idleSleepEnabled: Bool?
-    /// How long a session must sit idle before it is put to sleep. Optional for the same
-    /// reason as `idleSleepEnabled`. `nil` reads as 600 (10 minutes).
-    var sleepIdleThresholdSeconds: Int?
 
-    init(
-        autoResumeRunningSessions: Bool = false,
-        idleSleepEnabled: Bool? = nil,
-        sleepIdleThresholdSeconds: Int? = nil
-    ) {
+    init(autoResumeRunningSessions: Bool = false) {
         self.autoResumeRunningSessions = autoResumeRunningSessions
-        self.idleSleepEnabled = idleSleepEnabled
-        self.sleepIdleThresholdSeconds = sleepIdleThresholdSeconds
     }
 }
 
