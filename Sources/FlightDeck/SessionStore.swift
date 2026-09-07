@@ -2130,8 +2130,16 @@ final class SessionStore: ObservableObject {
             // settling it would spawn an app-server for a login that no longer exists.
             let deferred = session.agent.negotiatesIdentity
             if deferred, !orphaned { deferredCodexResumes.append(session.id) }
+            // The agent never stopped: `fd-abduco` still has its shell attached and running,
+            // so there is nothing to resume and nothing to nudge. Same probe `insertSession`
+            // makes below (through `LaunchPlan.decide`) — this is the one that decides whether
+            // a resume string is worth building at all, keyed on the tab's own id exactly as
+            // the daemon is. Agent-agnostic on purpose: a live Codex shell is exactly as
+            // "already running" as a live Claude one, and neither reads the daemon's answer
+            // differently.
+            let isLive = daemonControl.isLive(entry.id)
             let initialInput: String
-            if orphaned || deferred {
+            if orphaned || deferred || isLive {
                 initialInput = ""
             } else {
                 // Built here rather than above the branch so an orphaned tab does not
@@ -2186,7 +2194,12 @@ final class SessionStore: ObservableObject {
             //
             // After `!orphaned` on purpose: the ordering costs an orphaned codex tab nothing,
             // and it keeps this gate from being the thing that first asks about an agent.
-            if autoResume, !orphaned, session.agent.textChannel != nil,
+            //
+            // `!isLive`: "Keep going" exists to nudge an agent the restart actually stopped.
+            // One still attached inside `fd-abduco` never stopped — it has been sitting there,
+            // possibly finishing the very work `activity` describes, since before this launch
+            // began — and pasting a nudge at it answers a question nobody asked.
+            if autoResume, !orphaned, !isLive, session.agent.textChannel != nil,
                let activity = restored.activity,
                Self.isResumable(activity: activity, hasBackgroundWork: hasBackgroundWork) {
                 pendingPrompts[entry.id] = DeferredPrompt(
@@ -2303,7 +2316,14 @@ final class SessionStore: ObservableObject {
                 apply(.title(title), to: tabID)
             }
 
-            sendToShell(adapter.resumeCommand(binding, repinned, options), into: tabID)
+            // A live daemon means `restore`'s `insertSession` already attached this tab to a
+            // shell where `codex resume` (or the thread it opened) is still running — the
+            // title refresh above is still worth doing, since that answers whether the
+            // *thread* changed while Flight Deck was closed, not whether the *shell* did, but
+            // typing the resume command again here would paste it into a live TUI.
+            if !daemonControl.isLive(tabID) {
+                sendToShell(adapter.resumeCommand(binding, repinned, options), into: tabID)
+            }
         }
     }
 
