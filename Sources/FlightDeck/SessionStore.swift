@@ -868,6 +868,30 @@ final class SessionStore: ObservableObject {
     /// that instance.
     private let daemonControl: DaemonControlling
 
+    /// Owns the idle-session sleep/wake bookkeeping. Constructed lazily so its closures can
+    /// capture `self` after `init` has finished assigning every property they read
+    /// (`daemonControl`, `processInspector`, `statuses`, …).
+    ///
+    /// **Not yet registered on `clock`.** That happens in a later task, together with the UI
+    /// wake hooks, so a session can never be put to sleep by a build that has no way to wake it
+    /// back up.
+    private(set) lazy var sleepController = SessionSleepController(
+        policy: SleepPolicy(idleThreshold: 600),   // 10 min; a later task replaces this with a preference
+        daemonControl: daemonControl,
+        inspector: processInspector,
+        resolver: PosixAgentGroupResolver(),
+        inputs: SleepInputs(
+            candidates: { [weak self] in self?.repos.flatMap(\.sessions).map(\.id) ?? [] },
+            activity: { [weak self] in self?.statuses[$0]?.activity },
+            selectedID: { [weak self] in self?.selectedSessionID },
+            reportsBackgroundWork: { [weak self] in self?.backgroundWorkSessions.contains($0) ?? false },
+            daemonPID: { [weak self] in self?.daemonControl.daemonPID($0) }
+        ),
+        tearDownSurface: { [weak self] in self?.tearDownSurface(for: $0) },
+        rebuildSurface: { [weak self] in _ = self?.makeAttachSurface(id: $0) },
+        now: { Date() }
+    )
+
     /// Test seam. Production sets this from the convenience init.
     var notifier: Notifying?
 
@@ -1011,27 +1035,16 @@ final class SessionStore: ObservableObject {
         case respawned, alreadyRunning, displayAsleep, unknownSession, failed
     }
 
-    /// Replaces an inert terminal with a working one.
-    ///
-    /// *Replaces*, not fills: the broken tab already holds a `SurfaceView`: it just has no
-    /// drawable behind it and never forked a child. Discarding it is safe precisely because
-    /// there is no child process to orphan.
+    /// Builds (or rebuilds) an attached `SurfaceView` for an existing session: resolves the
+    /// adapter/shell, asks `LaunchPlan` whether to attach the live daemon or cold-create, and
+    /// records the result. Used both by `respawnSurface` (an inert tab getting its first real
+    /// terminal) and by the sleep controller's wake path — a SIGSTOP'd agent's daemon is still
+    /// `daemonControl.isLive`, so `LaunchPlan.decide` returns `.attach` and the daemon's ring
+    /// replay restores the screen. On success this also sets `surfaces[id]`.
     @discardableResult
-    func respawnSurface(for id: UUID) -> RespawnOutcome {
-        guard let at = locate(id) else { return .unknownSession }
+    func makeAttachSurface(id: UUID) -> Ghostty.SurfaceView? {
+        guard let at = locate(id) else { return nil }
         let session = repos[at.repo].sessions[at.session]
-        // Ordered before the display check deliberately: "it is already working" is true and
-        // more useful regardless of what the display is doing.
-        guard !hasShellProcess(for: id) else { return .alreadyRunning }
-        guard ensureTerminalCreatable() else {
-            launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
-            return .displayAsleep
-        }
-
-        // Drop the inert view and its (absent) registry record before rebuilding, so the new
-        // fork is contested by exactly one claimant.
-        surfaces[id] = nil
-        _ = processRegistry.forget(id)
 
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = session.transcriptDirectory
@@ -1064,17 +1077,57 @@ final class SessionStore: ObservableObject {
             preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
 
         guard let surface = processRegistry.record(for: id, around: { provider?.makeSurface(config) })
-        else {
+        else { return nil }
+        surfaces[id] = surface
+        return surface
+    }
+
+    /// Replaces an inert terminal with a working one.
+    ///
+    /// *Replaces*, not fills: the broken tab already holds a `SurfaceView`: it just has no
+    /// drawable behind it and never forked a child. Discarding it is safe precisely because
+    /// there is no child process to orphan.
+    @discardableResult
+    func respawnSurface(for id: UUID) -> RespawnOutcome {
+        guard let at = locate(id) else { return .unknownSession }
+        let session = repos[at.repo].sessions[at.session]
+        // Ordered before the display check deliberately: "it is already working" is true and
+        // more useful regardless of what the display is doing.
+        guard !hasShellProcess(for: id) else { return .alreadyRunning }
+        guard ensureTerminalCreatable() else {
+            launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
+            return .displayAsleep
+        }
+
+        // Drop the inert view and its (absent) registry record before rebuilding, so the new
+        // fork is contested by exactly one claimant.
+        surfaces[id] = nil
+        _ = processRegistry.forget(id)
+
+        guard makeAttachSurface(id: id) != nil else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: false))
             return .failed
         }
-        surfaces[id] = surface
         // Same ordering and reason as `insertSession`: before anything is typed, so the child
         // is not left talking to libghostty's placeholder 800x600 grid.
         report(terminalSize, to: id)
         provider?.tick()
-        if !orphaned { startWatching(tabID: id) }
+        if !accountIsMissing(for: session) { startWatching(tabID: id) }
         return .respawned
+    }
+
+    /// Drops the attach-client surface for a session without touching its daemon — the sleep
+    /// controller's teardown side. The daemon keeps the (frozen) agent alive; this only frees
+    /// the ghostty renderer/buffers on Flight Deck's side, so the SIGSTOP'd agent can be
+    /// re-attached later by `makeAttachSurface`.
+    ///
+    /// MUST NOT call `daemonControl.terminate` and MUST NOT go anywhere near quit, reap, or
+    /// `sweepOrphans` — a stopped agent's daemon has to survive this, that is the entire point
+    /// of detach persistence.
+    @MainActor
+    func tearDownSurface(for id: UUID) {
+        surfaces[id] = nil            // release the SurfaceView → client disconnects from daemon
+        _ = processRegistry.forget(id)
     }
 
     /// Test seam for frontmost-ness; production reads `NSApplication`.
