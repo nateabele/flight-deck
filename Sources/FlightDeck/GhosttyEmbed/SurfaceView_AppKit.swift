@@ -363,6 +363,11 @@ extension Ghostty {
                 selector: #selector(windowDidChangeScreen),
                 name: NSWindow.didChangeScreenNotification,
                 object: nil)
+            center.addObserver(
+                self,
+                selector: #selector(windowDidChangeOcclusionState),
+                name: NSWindow.didChangeOcclusionStateNotification,
+                object: nil)
 
             // Listen for local events that we need to know of outside of
             // single surface handlers.
@@ -841,7 +846,30 @@ extension Ghostty {
             }
         }
 
+        @objc private func windowDidChangeOcclusionState(notification: SwiftUI.Notification) {
+            guard let window = self.window else { return }
+            guard let object = notification.object as? NSWindow, window == object else { return }
+            guard let surface = self.surface else { return }
+
+            // Pause libghostty's rendering while the window is fully hidden behind other
+            // apps or minimized, and resume it once visible again. Mirrors upstream
+            // ghostty's AppKit app (BaseTerminalController.windowDidChangeOcclusionState).
+            ghostty_surface_set_occlusion(surface, occlusionVisible(window.occlusionState))
+        }
+
         // MARK: - NSView
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+
+            // Apply the window's current occlusion state as soon as we have one, rather
+            // than waiting for the first `didChangeOcclusionStateNotification`. Without
+            // this, a surface re-parented (see `TerminalPane`) into a window that's
+            // already occluded would keep rendering until the window's occlusion state
+            // next changes.
+            guard let window = self.window, let surface = self.surface else { return }
+            ghostty_surface_set_occlusion(surface, occlusionVisible(window.occlusionState))
+        }
 
         override func becomeFirstResponder() -> Bool {
             let result = super.becomeFirstResponder()
@@ -2329,6 +2357,13 @@ extension Ghostty.SurfaceView {
         return NSAttributedString(string: plainString, attributes: attributes)
     }
 
+}
+
+/// libghostty's `ghostty_surface_set_occlusion` takes VISIBLE (true = render, false =
+/// paused), not occluded. See `vendor/ghostty/src/apprt/embedded.zig:1736`. Pulled out
+/// as a pure function so the polarity is locked by a unit test.
+func occlusionVisible(_ state: NSWindow.OcclusionState) -> Bool {
+    state.contains(.visible)
 }
 
 /// Caches a value for some period of time, evicting it automatically when that time expires.
