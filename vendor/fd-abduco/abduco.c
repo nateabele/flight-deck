@@ -455,6 +455,12 @@ static bool create_session(const char *name, char * const argv[]) {
 				if (read_all(server_pipe[0], errormsg, sizeof(errormsg)) > 0)
 					_exit(EXIT_FAILURE);
 				close(server_pipe[0]);
+				/* Flight Deck fork (Task 1): drop a "<socket>.pid" sidecar
+				 * containing this process's own pid -- it is the one that
+				 * owns the PTY and handles SIGTERM -- so Flight Deck can
+				 * signal the daemon for teardown. Best-effort: see
+				 * server_write_pidfile() in server.c. */
+				server_write_pidfile();
 				server_mainloop();
 				break;
 			}
