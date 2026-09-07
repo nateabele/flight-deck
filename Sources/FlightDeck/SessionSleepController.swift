@@ -17,6 +17,12 @@ final class SessionSleepController {
     private let inputs: SleepInputs
     private let tearDownSurface: (UUID) -> Void
     private let rebuildSurface: (UUID) -> Void
+    /// Live Off switch: consulted on every `tick()`, not read once at construction — unlike
+    /// `policy`'s threshold, flipping this in Preferences must take effect immediately rather
+    /// than waiting for the next launch. Defaults to `{ true }` so every existing
+    /// `SessionSleepController(...)` construction (this file's own tests included) keeps
+    /// compiling unchanged.
+    private let sleepEnabled: () -> Bool
     private let now: () -> Date
 
     private(set) var asleep: Set<UUID> = []
@@ -25,13 +31,16 @@ final class SessionSleepController {
     init(policy: SleepPolicy, daemonControl: DaemonControlling, inspector: ProcessInspecting,
          resolver: AgentGroupResolving, inputs: SleepInputs,
          tearDownSurface: @escaping (UUID) -> Void,
-         rebuildSurface: @escaping (UUID) -> Void = { _ in }, now: @escaping () -> Date) {
+         rebuildSurface: @escaping (UUID) -> Void = { _ in },
+         sleepEnabled: @escaping () -> Bool = { true }, now: @escaping () -> Date) {
         self.policy = policy; self.daemonControl = daemonControl; self.inspector = inspector
         self.resolver = resolver; self.inputs = inputs
-        self.tearDownSurface = tearDownSurface; self.rebuildSurface = rebuildSurface; self.now = now
+        self.tearDownSurface = tearDownSurface; self.rebuildSurface = rebuildSurface
+        self.sleepEnabled = sleepEnabled; self.now = now
     }
 
     func tick() {
+        guard sleepEnabled() else { return }   // live Off gate
         let t = now()
         for id in inputs.candidates() where !asleep.contains(id) {
             let activity = inputs.activity(id)

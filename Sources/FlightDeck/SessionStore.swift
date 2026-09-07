@@ -877,7 +877,9 @@ final class SessionStore: ObservableObject {
     /// session's surface — so a build that can put a session to sleep always has a way to wake
     /// it back up.
     private(set) lazy var sleepController = SessionSleepController(
-        policy: SleepPolicy(idleThreshold: 600),   // 10 min; a later task replaces this with a preference
+        // Read once, here at construction — a threshold changed in Preferences applies on the
+        // next launch, not live. `sleepEnabled` below is the live half of this preference.
+        policy: SleepPolicy(idleThreshold: TimeInterval(preferences?.sleepIdleThresholdSeconds ?? 600)),
         daemonControl: daemonControl,
         inspector: processInspector,
         resolver: PosixAgentGroupResolver(),
@@ -890,6 +892,9 @@ final class SessionStore: ObservableObject {
         ),
         tearDownSurface: { [weak self] in self?.tearDownSurface(for: $0) },
         rebuildSurface: { [weak self] in _ = self?.makeAttachSurface(id: $0) },
+        // Read every tick, unlike the threshold above: flipping the Off switch in Preferences
+        // must take effect immediately, not on the next launch.
+        sleepEnabled: { [weak self] in self?.preferences?.idleSleepEnabled ?? true },
         now: { Date() }
     )
 

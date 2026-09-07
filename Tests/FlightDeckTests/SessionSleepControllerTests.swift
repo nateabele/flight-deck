@@ -98,6 +98,20 @@ final class SessionSleepControllerTests: XCTestCase {
         XCTAssertEqual(daemon.conted, [id]); XCTAssertFalse(ctrl.asleep.contains(id))
     }
 
+    func testDisabledSuppressesSleep() {
+        let id = UUID(); let daemon = DaemonSpy()
+        let ctrl = SessionSleepController(
+            policy: SleepPolicy(idleThreshold: 0), daemonControl: daemon,
+            inspector: FixedInspector(result: []), resolver: FixedResolver(pgid: 222),
+            inputs: SleepInputs(candidates: { [id] }, activity: { _ in .idle }, selectedID: { nil },
+                                reportsBackgroundWork: { _ in false }, daemonPID: { _ in 111 }),
+            tearDownSurface: { _ in }, rebuildSurface: { _ in },
+            sleepEnabled: { false },       // Off
+            now: { Date() })
+        ctrl.tick(); ctrl.tick()
+        XCTAssertFalse(ctrl.asleep.contains(id)); XCTAssertTrue(daemon.stopped.isEmpty)
+    }
+
     func testWakeContsThenRebuilds() {
         let id = UUID(); let daemon = DaemonSpy(); var order: [String] = []
         daemon.onCont = { order.append("cont") }

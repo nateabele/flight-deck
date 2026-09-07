@@ -334,6 +334,31 @@ final class PreferencesStore: ObservableObject {
         }
     }
 
+    // MARK: Sleep
+
+    /// Whether idle sessions are put to sleep automatically. Reads through the optional so an
+    /// unconfigured `Preferences` (or one predating this field) keeps today's behaviour — see
+    /// `ClaudePreferences.idleSleepEnabled`.
+    var idleSleepEnabled: Bool {
+        get { preferences.claude?.idleSleepEnabled ?? true }
+        set {
+            var claude = preferences.claude ?? ClaudePreferences()
+            claude.idleSleepEnabled = newValue
+            preferences.claude = claude
+        }
+    }
+
+    /// Seconds an idle session waits before it is put to sleep. Reads through the optional the
+    /// same way `idleSleepEnabled` does — see `ClaudePreferences.sleepIdleThresholdSeconds`.
+    var sleepIdleThresholdSeconds: Int {
+        get { preferences.claude?.sleepIdleThresholdSeconds ?? 600 }
+        set {
+            var claude = preferences.claude ?? ClaudePreferences()
+            claude.sleepIdleThresholdSeconds = newValue
+            preferences.claude = claude
+        }
+    }
+
     // MARK: Tools
 
     /// The configured tools, in overlay order. The single accessor the menu, the overlay and
