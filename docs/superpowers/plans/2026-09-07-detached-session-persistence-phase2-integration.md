@@ -22,6 +22,7 @@
 - **"Keep going" / resume gating:** the `DeferredPrompt`/`pendingPrompts` queueing and the typed `resumeCommand` fire **only on the cold-create path**, never on attach.
 - **Seams for tests:** daemon probing/control and process signalling go behind protocols injected into `SessionStore`, so `FlightDeckTests` can drive attach-vs-cold and teardown without real daemons where possible; the `SessionDaemon` socket/probe unit may use real temp sockets.
 - **No new entitlements.** Touching `Sources/FlightDeckMobile`/`FleetKit` is out of scope (macOS-only). `./scripts/test-unit.sh` runs the whole macOS suite (~8 min) and ignores `-only-testing:` — budget for that.
+- **Adapter-agnostic (load-bearing — detach must NOT become a Claude-only feature).** The daemon, socket/pidfile layout, liveness probe, `LaunchPlan`, wiring, teardown and reconcile all key on `session.id` + daemon liveness, never on agent type. Cold-create types each adapter's own text via the existing seam (Claude `resumeCommand`/`launchCommand`; Codex `codex resume` via `resumeRestoredCodex`'s `sendToShell`); attach types nothing for either. Status is unchanged for both adapters because each derives it from state the agent keeps producing regardless of process tree (Claude's pid-file registry; Codex's JSON-RPC + `CodexRolloutWatcher`). Tests and the manual payoff cover BOTH a Claude-shaped and a Codex-shaped session.
 
 ---
 
@@ -152,7 +153,7 @@ echo "pidfile OK"
 - Consumes: `DaemonControlling` (Task 3), the Task-5 wiring.
 - Produces: when a session's daemon is live at restore, no `resumeCommand` is typed and no `DeferredPrompt`/"Keep going" is queued; when dead, behavior is exactly as today.
 
-- [ ] **Step 1: Write failing tests.** With a fake `DaemonControlling`: (a) live daemon at restore → the restored tab gets `initialInput == ""` (attach, via Task 5) AND `pendingPrompts[id]` is NOT set even when `activity == .busy` and `autoResume == true`; (b) dead daemon → `initialInput == resumeCommand` and the "Keep going" `DeferredPrompt` IS queued under the same `isResumable` gate as today. Drive `restore()` through the existing persistence/test seams (see `SessionAutoResumeTests` for the established harness).
+- [ ] **Step 1: Write failing tests, covering BOTH adapters.** With a fake `DaemonControlling`: (a) live daemon at restore → the restored tab gets `initialInput == ""` (attach, via Task 5) AND `pendingPrompts[id]` is NOT set even when `activity == .busy` and `autoResume == true`; (b) dead daemon → `initialInput == resumeCommand` and the "Keep going" `DeferredPrompt` IS queued under the same `isResumable` gate as today. Add a **Codex-shaped** case: a live daemon at restore must cause `resumeRestoredCodex` to skip its `sendToShell(resumeCommand)` (record calls via the injector seam), while a dead daemon runs the existing Codex resume flow. Drive `restore()`/`resumeRestoredCodex` through the existing persistence/test seams (see `SessionAutoResumeTests` for the Claude harness and the Codex restore tests for the app-server fakes).
 - [ ] **Step 2: Run, verify fail.**
 - [ ] **Step 3: Implement.** In `restore()`: compute `isLive` once per entry; when live, set the entry's `initialInput` to `""` (the Task-5 wiring already turns a live probe into an attach command, but the resume-string construction at ~2096 must be skipped so nothing is typed) and skip the `pendingPrompts[entry.id] = DeferredPrompt(...)` block. When dead, keep both. For Codex in `resumeRestoredCodex`: if `daemonControl.isLive(tabID)`, skip the `sendToShell(adapter.resumeCommand(...))` (the thread is already live in the daemon) — still refresh the title if cheap; when dead, run the existing flow. Keep the orphaned/deferred handling intact.
 - [ ] **Step 4: Run, verify pass** (full suite).
@@ -198,7 +199,7 @@ echo "pidfile OK"
 - `bash Tests/fd-abduco/run_all.sh` (incl. new `run_pidfile_test.sh`) green.
 - `./scripts/test-unit.sh` green (SessionDaemon paths, DaemonControl probe/teardown, LaunchPlan, wiring, resume-gating, lifecycle).
 - App builds; `fd-abduco` bundled.
-- **Manual end-to-end (the payoff, not automated here — Phase 3 automates it):** launch the app with a running claude session; `kill -9` the app (simulating swap-release); relaunch → the tab reattaches, the terminal shows the prior scrollback, claude is the SAME process (same pid, mid-work), and **no "Keep going" is typed**. Then close the tab → the daemon (and claude) exit; the socket/pidfile are gone.
+- **Manual end-to-end (the payoff, not automated here — Phase 3 automates it), run for BOTH a Claude and a Codex session:** launch the app with a running agent; `kill -9` the app (simulating swap-release); relaunch → the tab reattaches, the terminal shows the prior scrollback, the agent is the SAME process (same pid, mid-work), and **nothing is re-typed** (no "Keep going" for Claude; no `codex resume` for Codex). Then close the tab → the daemon (and agent) exit; the socket/pidfile are gone.
 
 ## Non-goals (Phase 3 / later)
 
