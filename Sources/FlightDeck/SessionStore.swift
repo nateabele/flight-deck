@@ -3701,9 +3701,12 @@ final class SessionStore: ObservableObject {
     /// is minted per composed message, and if they ever did the first send is the one the
     /// user watched land.
     ///
-    /// Changes no fleet state and emits no `FleetEvent`, deliberately: what a phone typed
-    /// becomes visible through the transcript the agent writes, not through a mirrored field,
-    /// so this feature adds no mutation site for `FleetReplicator`'s drift check to police.
+    /// Changes no fleet state and this call itself emits no `FleetEvent`, deliberately: what
+    /// a phone typed becomes visible through the transcript the agent writes, not through a
+    /// mirrored field, so this feature adds no mutation site for `FleetReplicator`'s drift
+    /// check to police. The moment of typing IS signalled, but from `flushPromptQueue`'s
+    /// `onSent` — the point where the text actually lands in the pty, which for a queued
+    /// prompt can be well after this call returns.
     @discardableResult
     func submitPrompt(_ raw: String, token: UUID, to id: UUID) -> PromptDispatch {
         guard let at = locate(id) else { return .unknownSession }
@@ -3976,6 +3979,7 @@ final class SessionStore: ObservableObject {
                 if self.promptQueue[id]?.isEmpty == true {
                     self.promptQueue.removeValue(forKey: id)
                 }
+                self.emit([.promptTyped(id: id, token: head.token)])
             }
         )
         logPromptTyping("inject=\(started)", for: id)
