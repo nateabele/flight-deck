@@ -272,6 +272,10 @@ struct PromptComposer: View {
             Label("Waiting for your Mac to type this", systemImage: "clock")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        case .delivered:
+            // Delivered shows as the inline transcript ghost (see SessionTimelineScreen); no
+            // below-composer row.
+            EmptyView()
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
