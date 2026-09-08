@@ -3892,14 +3892,22 @@ final class SessionStore: ObservableObject {
                 }
             }
         }
-        // Sample the box state through the busy window.
+        // Sample the box state through the busy window; dump the ACTUAL viewport text at a few
+        // points (mid-busy-after-submit, and late/idle) so we can tell an unsent draft in the
+        // box from claude's queued-message display — boxEmpty/boxNonEmpty can't.
         var n = 0
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
             Task { @MainActor in
                 guard let self else { timer.invalidate(); return }
                 n += 1
                 if n >= 7 { self.logPromptTyping("loop:sample", for: id) }
-                if n >= 28 { timer.invalidate() }
+                if n == 12 || n == 30 || n == 38 || n == 44 {
+                    let vp = self.injector(for: id)?.readViewport() ?? "(nil)"
+                    let url = URL(fileURLWithPath: "/tmp/fd-loop-vp-\(n).txt")
+                    try? Data(vp.utf8).write(to: url)
+                    self.logPromptTyping("loop:dumpedViewport n=\(n)", for: id)
+                }
+                if n >= 46 { timer.invalidate() }
             }
         }
     }
