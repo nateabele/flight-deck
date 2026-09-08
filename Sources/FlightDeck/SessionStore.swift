@@ -891,7 +891,18 @@ final class SessionStore: ObservableObject {
             daemonPID: { [weak self] in self?.daemonControl.daemonPID($0) }
         ),
         tearDownSurface: { [weak self] in self?.tearDownSurface(for: $0) },
-        rebuildSurface: { [weak self] in _ = self?.makeAttachSurface(id: $0) },
+        // Mirrors `respawnSurface`'s post-attach size report: `makeAttachSurface` forks a
+        // fresh attach-client surface here too, so without this it would start on libghostty's
+        // 800x600 placeholder just like an unreported respawn would. This matters most for a
+        // session woken while NOT the selected tab (e.g. a background/programmatic injection);
+        // the selected-tab wake path (`TerminalPane.updateNSView`) also reports its own size via
+        // `activateTerminalSize` right after `wakeIfAsleep`, but `report(_:to:)` dedupes a
+        // repeat of an unchanged size for free, so the two routes never fight.
+        rebuildSurface: { [weak self] id in
+            guard let self, self.makeAttachSurface(id: id) != nil else { return }
+            self.report(self.terminalSize, to: id)
+            self.provider?.tick()
+        },
         // Read every tick, unlike the threshold above: flipping the Off switch in Preferences
         // must take effect immediately, not on the next launch.
         sleepEnabled: { [weak self] in self?.preferences?.idleSleepEnabled ?? true },
@@ -1118,6 +1129,8 @@ final class SessionStore: ObservableObject {
         // is not left talking to libghostty's placeholder 800x600 grid.
         report(terminalSize, to: id)
         provider?.tick()
+        // Recomputed rather than threaded back from `makeAttachSurface` above: cheap, and
+        // `makeAttachSurface(id:) -> SurfaceView?` has no room to also return it.
         if !accountIsMissing(for: session) { startWatching(tabID: id) }
         return .respawned
     }

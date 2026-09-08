@@ -198,6 +198,32 @@ final class DaemonControlTests: XCTestCase {
         XCTAssertTrue(sig.calls.isEmpty, "must never kill(-0, …) — that hits our own group")
     }
 
+    func testStopAndContRefuseWhenPgidResolvesNegative() throws {
+        try writePidfile(getpid(), for: sessionID)
+        let sig = SignalSpy()
+        let control = PosixDaemonControl(
+            daemon: daemon, agentGroupResolver: FixedResolver(pgid: -5), signal: sig.record
+        )
+
+        control.stop(sessionID)
+        control.cont(sessionID)
+
+        XCTAssertTrue(sig.calls.isEmpty, "must never kill(-(-5), …) — the guard is `> 0`, not `!= 0`")
+    }
+
+    func testStopResolvesAgainstTheCorrectDaemonPID() throws {
+        try writePidfile(getpid(), for: sessionID)
+        let sig = SignalSpy()
+        let resolver = RecordingResolver(pgid: 4242)
+        let control = PosixDaemonControl(
+            daemon: daemon, agentGroupResolver: resolver, signal: sig.record
+        )
+
+        control.stop(sessionID)
+
+        XCTAssertEqual(resolver.daemonPIDsSeen, [getpid()])
+    }
+
     func testStopNoOpWhenDaemonDead() {
         // No pidfile written, so `daemonPID` is nil before the resolver is even consulted.
         let sig = SignalSpy()
@@ -249,6 +275,9 @@ final class DaemonControlTests: XCTestCase {
         control.terminate(sessionID)
 
         XCTAssertEqual(sig.calls.first, .init(pid: -4242, signal: SIGCONT))
+        // Only the agent-group SIGCONT goes through the injected seam; SIGTERM/SIGKILL use
+        // direct `Darwin.kill` against the pidfile pid, so the spy sees exactly one call.
+        XCTAssertEqual(sig.calls.count, 1)
     }
 
     // MARK: - Helpers
@@ -370,6 +399,21 @@ final class DaemonControlTests: XCTestCase {
 private struct FixedResolver: AgentGroupResolving {
     let pgid: pid_t
     func agentProcessGroup(daemonPID: pid_t) -> pid_t? { pgid }
+}
+
+/// Like `FixedResolver`, but records every `daemonPID:` it was asked to resolve — so a test can
+/// assert `stop`/`cont` hand it the pid `daemonPID(_:)` actually resolved, not just that some
+/// signal eventually landed.
+private final class RecordingResolver: AgentGroupResolving {
+    let pgid: pid_t
+    private(set) var daemonPIDsSeen: [pid_t] = []
+
+    init(pgid: pid_t) { self.pgid = pgid }
+
+    func agentProcessGroup(daemonPID: pid_t) -> pid_t? {
+        daemonPIDsSeen.append(daemonPID)
+        return pgid
+    }
 }
 
 /// Captures every `signal` call `PosixDaemonControl` makes instead of actually calling
