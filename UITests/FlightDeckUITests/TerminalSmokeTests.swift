@@ -820,6 +820,233 @@ final class TerminalSmokeTests: XCTestCase {
         )
     }
 
+    /// The same investigation as `testClaudeSessionReattachDisplayAndCommandFlush` above, for a
+    /// **codex** session instead: does codex's on-screen TUI come back after Flight Deck is
+    /// killed and relaunched, and does the reattached box still accept a freshly typed command?
+    /// Answered the same way — DUMPING the terminal surface at three points (pre-detach,
+    /// post-reattach, post-command) to stdout and as `XCTAttachment`s — because what shape a
+    /// correct codex reattach takes is exactly as open a question as it was for claude.
+    ///
+    /// **Makes one real `codex` API call** (a one-word prompt, near the end below) against
+    /// whatever account `Preferences.migrateAccountsIfNeeded` resolves as codex's default —
+    /// this is not a fixture run. If no codex account is actually logged in, codex itself is
+    /// expected to show that (a login prompt, a trust dialog, an error) rather than this test
+    /// crashing; the dumps are what let a human tell the two apart.
+    ///
+    /// **Unlike the claude investigation, this needs the New Session UI**, because the seeded
+    /// initial session already IS claude (`SessionStore.seedInitialSession` defaults
+    /// `Session.agent` to `.claude`), so a second, codex, session has to be created on top of
+    /// it. That makes this run with TWO live daemons under `Self.isolatedStateDir` — the seeded
+    /// claude tab and the new codex tab — so teardown below reaps both by id, never a
+    /// directory-wide sweep, exactly like every other test in this file that touches
+    /// `terminateOwnDaemon`.
+    ///
+    /// **Creating the codex session.** Clicking File -> "New Codex Session"
+    /// (`SessionCommands`'s per-agent menu item, built from `NewSessionAffordance.menu`) rather
+    /// than the sidebar's New Session button/dropdown: `Preferences.migrateAccountsIfNeeded`
+    /// seeds a built-in "Default" account for every `AgentID` — codex included — the first time
+    /// preferences are read, regardless of whether a real codex login exists, so the File-menu
+    /// item is present on any machine this suite runs on (`testTheWholeShellInOneSession`
+    /// already asserts its existence, unconditionally, above). `NewSessionAffordance.menu`
+    /// renders it as a single flat item, "New Codex Session", whenever codex has exactly one
+    /// live account — the common case this targets — and only nests it under a submenu of
+    /// account names when there are several; this does not attempt to drive that nested case.
+    /// `SessionStore.createFromMenu(agent:)` behind the click both creates AND selects the new
+    /// session (`createSession(..., selecting: true)`), so no extra click is needed to make it
+    /// active.
+    ///
+    /// **Detecting "codex painted".** `›` (U+203A) is `InputBar.codexMarker` — codex's own
+    /// analogue of claude's `❯`, documented in `CodexAdapter.swift` and `CodexDialogDriver.swift`
+    /// ("codex draws `›` (U+203A)") and shown landing at the idle composer's left edge in
+    /// `Fixtures/Codex/tui-idle.captured.txt` (`› Ask Codex to do anything`). A bare shell
+    /// prompt never draws it, so polling the surface for that glyph is the codex-specific
+    /// version of the same signal the claude investigation uses. Restated as a local literal
+    /// rather than imported, for the same reason as the claude test: this bundle runs as a
+    /// separate process from the app and cannot `import FlightDeck`.
+    func testCodexSessionReattachDisplayAndCommandFlush() {
+        let codexMarker: Character = "\u{203A}" // › — see InputBar.codexMarker
+
+        // Clear-then-launch-without-reset, exactly like the claude investigation above — see
+        // that test's doc comment and `clearIsolatedStateDir()`'s for why
+        // `-FlightDeckResetState` is unusable here: it disables `SessionStore` persistence
+        // outright, and this test needs BOTH sessions it touches to land in `sessions.json`.
+        clearIsolatedStateDir()
+        var app = launchPreservingState()
+
+        // The seeded session's id, captured the same way and for the same reason the claude
+        // test captures its one session's id: before anything below could tear it down. This
+        // test creates a SECOND session on top of it, so both ids are needed for teardown.
+        var seededSessionID: UUID?
+        _ = waitFor(timeout: 5) {
+            seededSessionID = sessionUUIDFromIsolatedState()
+            return seededSessionID != nil
+        }
+        guard let seededSessionID else {
+            XCTFail(
+                "could not resolve the seeded session's id from "
+                + "\(Self.isolatedStateDir)/sessions.json"
+            )
+            return
+        }
+
+        // Resolves the id of whichever session in `sessions.json` is NOT the seeded one —
+        // i.e. the codex tab this test is about to create. `sessionUUIDFromIsolatedState()`
+        // itself always answers the FIRST entry, which is the seeded claude session both
+        // before and after the codex tab is appended, so it cannot be reused here; this reads
+        // the same file with the same shape (see `SessionSnapshot.Entry` for the schema) but
+        // filters on it instead.
+        func codexSessionID() -> UUID? {
+            struct Entry: Decodable { let id: UUID; let agent: String? }
+            struct Snapshot: Decodable { let sessions: [Entry] }
+            let url = URL(fileURLWithPath: Self.isolatedStateDir).appendingPathComponent("sessions.json")
+            guard
+                let data = try? Data(contentsOf: url),
+                let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data)
+            else { return nil }
+            return snapshot.sessions.first { $0.id != seededSessionID }?.id
+        }
+
+        // Unconditional teardown, exactly like the claude investigation, but for TWO daemons:
+        // the seeded claude session's and the codex session's, each targeted by id — never a
+        // directory-wide sweep of `/tmp/flight-deck-<uid>`, which is shared with every other
+        // live Flight Deck session on this machine. `codexSessionID` may still be nil here if
+        // creation itself failed partway through; guarded so a failed creation cannot leak a
+        // half-started daemon either.
+        var codexID: UUID?
+        defer {
+            if app.state != .notRunning {
+                app.terminate()
+            }
+            terminateOwnDaemon(seededSessionID)
+            if let codexID {
+                terminateOwnDaemon(codexID)
+            }
+        }
+
+        let rows = app.staticTexts.matching(identifier: "session-row-title")
+        XCTAssertTrue(
+            waitFor(timeout: 10) { rows.count == 1 }, "expected exactly one seeded session"
+        )
+
+        // See this test's doc comment for why the File menu, not the sidebar control.
+        let file = app.menuBarItems["File"]
+        XCTAssertTrue(file.waitForExistence(timeout: 5), "File menu missing")
+        file.click()
+        let newCodexItem = app.menuItems["New Codex Session"]
+        XCTAssertTrue(
+            newCodexItem.waitForExistence(timeout: 5),
+            "no \"New Codex Session\" menu item — expected one even with no real codex login, "
+            + "since Preferences.migrateAccountsIfNeeded seeds a built-in account for every "
+            + "agent"
+        )
+        newCodexItem.click()
+
+        XCTAssertTrue(
+            waitFor(timeout: 10) { rows.count == 2 }, "creating a codex session added no row"
+        )
+        _ = waitFor(timeout: 5) {
+            codexID = codexSessionID()
+            return codexID != nil
+        }
+        XCTAssertNotNil(codexID, "could not resolve the new codex session's own id")
+
+        // Give the terminal keyboard focus, the same click this file already uses elsewhere.
+        // `createFromMenu` both creates and selects the new session, so the detail pane is
+        // already showing the codex tab's surface by the time this lands.
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let terminal = app.textViews.firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface found")
+        func terminalText() -> String { (terminal.value as? String) ?? "" }
+
+        // Codex is slower to reach its own prompt than claude: `CodexAdapter.needsRuntimeStart`
+        // means a `codex app-server` process has to spawn and negotiate a thread id BEFORE the
+        // pty even types `codex resume <id>`, and only then does codex itself paint. Generous
+        // on purpose, this is the first thing under investigation.
+        let painted = waitFor(timeout: 45) { terminalText().contains(codexMarker) }
+        XCTAssertTrue(
+            painted,
+            "codex never painted its composer before detach — is it installed and logged in? "
+            + "got:\n\(terminalText())"
+        )
+
+        let preDetach = terminalText()
+        print("PRE-DETACH SURFACE:\n\(preDetach)")
+        let preDetachAttachment = XCTAttachment(string: preDetach)
+        preDetachAttachment.name = "pre-detach"
+        preDetachAttachment.lifetime = .keepAlways
+        add(preDetachAttachment)
+
+        // Kill Flight Deck outright. Phase 1 starts each session's `fd-abduco` daemon
+        // `setsid`'d specifically so SIGTERM to its parent never reaches it — this line is
+        // the detach half of the feature under investigation, exactly as in the claude test.
+        app.terminate()
+
+        // Same state directory, no `-FlightDeckResetState`: `SessionStore.restore()` finds
+        // both sessions' daemons still live and attaches (`fd-abduco -a`) to each rather than
+        // starting a fresh shell — and, for the codex tab specifically, restarts its
+        // `codex app-server` and rebinds it to the still-live thread (`CodexAdapter.rebind`).
+        app = launchPreservingState()
+
+        // The codex row is not necessarily selected again after relaunch, so it is picked by
+        // position rather than assumed to already be showing: `SessionStore.restore()`
+        // preserves each project's session order, and `newSession`/`createSession` append —
+        // never insert above an existing row — whenever nothing is selected the way it was
+        // right after the seeded slate's first launch, so the codex tab created second is
+        // still row 1 (row 0 is the seeded claude session).
+        XCTAssertTrue(waitFor(timeout: 10) { rows.count == 2 }, "expected both sessions after relaunch")
+        rows.element(boundBy: 1).click()
+        settle()
+
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let reattached = app.textViews.firstMatch
+        XCTAssertTrue(
+            reattached.waitForExistence(timeout: 10), "no terminal surface found after relaunch"
+        )
+        func reattachedText() -> String { (reattached.value as? String) ?? "" }
+
+        // THE CRUX: does codex's TUI come back on reattach? Waited on generously — codex's
+        // slower boot applies again here, on top of Flight Deck's own relaunch — and then
+        // dumped, asserted only as non-empty (soft — the point is to SEE it, not to pin a
+        // specific shape this investigation does not yet know to expect).
+        _ = waitFor(timeout: 20) { !reattachedText().isEmpty }
+        let postReattach = reattachedText()
+        print("POST-REATTACH SURFACE:\n\(postReattach)")
+        let postReattachAttachment = XCTAttachment(string: postReattach)
+        postReattachAttachment.name = "post-reattach"
+        postReattachAttachment.lifetime = .keepAlways
+        add(postReattachAttachment)
+        XCTAssertFalse(postReattach.isEmpty, "surface was completely empty after reattach")
+
+        // Flush a fresh command at the reattached prompt — a real turn, kept to one cheap
+        // word. Clicking first is what hands the reattached surface keyboard focus; the
+        // surface changing at all after typing is this test's evidence that the box actually
+        // accepted the keystrokes rather than swallowing them into a dead pty.
+        reattached.click()
+        settle()
+        app.typeText("hi\n")
+        _ = waitFor(timeout: 25) { reattachedText() != postReattach }
+
+        let postCommand = reattachedText()
+        print("POST-COMMAND SURFACE:\n\(postCommand)")
+        let postCommandAttachment = XCTAttachment(string: postCommand)
+        postCommandAttachment.name = "post-command"
+        postCommandAttachment.lifetime = .keepAlways
+        add(postCommandAttachment)
+        XCTAssertNotEqual(
+            postCommand, postReattach,
+            "the surface did not change at all after typing and submitting — the reattached "
+            + "input box may not be accepting keystrokes"
+        )
+    }
+
     func testTheWholeShellInOneSession() {
         let app = launchIsolated()
         let window = app.windows.firstMatch
