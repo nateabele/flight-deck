@@ -42,16 +42,19 @@ final class SessionSleepController {
     func tick() {
         guard sleepEnabled() else { return }   // live Off gate
         let t = now()
-        for id in inputs.candidates() where !asleep.contains(id) {
-            let activity = inputs.activity(id)
-            if activity == .idle || activity == .waiting {
+        let candidates = inputs.candidates()
+        for id in candidates where !asleep.contains(id) {
+            let activity: SessionActivity
+            switch inputs.activity(id) {
+            case let live? where live == .idle || live == .waiting:
+                activity = live
                 if idleSince[id] == nil { idleSince[id] = t }
-            } else {
+            default:
                 idleSince[id] = nil   // busy / no-agent clears the clock
                 continue
             }
             let candidate = SleepCandidate(
-                id: id, activity: activity!,
+                id: id, activity: activity,
                 isSelected: inputs.selectedID() == id,
                 reportsBackgroundWork: inputs.reportsBackgroundWork(id),
                 hasLiveDescendants: hasLiveDescendants(id),
@@ -61,8 +64,9 @@ final class SessionSleepController {
             )
             if policy.evaluate(candidate, now: t) == .sleep { sleep(id) }
         }
-        let known = Set(inputs.candidates())
+        let known = Set(candidates)
         idleSince = idleSince.filter { known.contains($0.key) }   // forget vanished sessions
+        asleep.formIntersection(known)   // forget sessions closed while asleep
     }
 
     /// Walk the AGENT tree (daemon's child), NOT the attach-client surface shell:

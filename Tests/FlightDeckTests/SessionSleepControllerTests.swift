@@ -28,15 +28,18 @@ final class SessionSleepControllerTests: XCTestCase {
     func testSleepsIdleUnfocusedSession() {
         let id = UUID(); let daemon = DaemonSpy(); var torn: [UUID] = []
         let ctrl = SessionSleepController(
-            policy: SleepPolicy(idleThreshold: 0),      // threshold 0 => eligible on 2nd tick
+            policy: SleepPolicy(idleThreshold: 0),      // eligible on the FIRST tick — see below
             daemonControl: daemon, inspector: FixedInspector(result: []),
             resolver: FixedResolver(pgid: 222),
             inputs: SleepInputs(candidates: { [id] }, activity: { _ in .idle },
                                 selectedID: { nil }, reportsBackgroundWork: { _ in false },
                                 daemonPID: { _ in 111 }),
             tearDownSurface: { torn.append($0) }, now: { Date() })
-        ctrl.tick()   // sets idleSince
-        ctrl.tick()   // threshold 0 satisfied → sleeps
+        // idleThreshold 0: idleSince is set to the same `now` this tick evaluates against, so
+        // 0 >= 0 is already satisfied and this FIRST tick sleeps. The second is a no-op — `id`
+        // is already in `asleep`, so the loop skips it.
+        ctrl.tick()
+        ctrl.tick()
         XCTAssertTrue(ctrl.asleep.contains(id))
         XCTAssertEqual(daemon.stopped, [id])
         XCTAssertEqual(torn, [id])
@@ -93,7 +96,7 @@ final class SessionSleepControllerTests: XCTestCase {
                                 selectedID: { nil }, reportsBackgroundWork: { _ in false },
                                 daemonPID: { _ in 111 }),
             tearDownSurface: { _ in }, now: { Date() })
-        ctrl.tick(); ctrl.tick()          // sleeps
+        ctrl.tick(); ctrl.tick()          // threshold 0: the first tick already sleeps; the second is a no-op
         ctrl.wake(id)
         XCTAssertEqual(daemon.conted, [id]); XCTAssertFalse(ctrl.asleep.contains(id))
     }
@@ -121,9 +124,37 @@ final class SessionSleepControllerTests: XCTestCase {
             inputs: SleepInputs(candidates: { [id] }, activity: { _ in .idle }, selectedID: { nil },
                                 reportsBackgroundWork: { _ in false }, daemonPID: { _ in 111 }),
             tearDownSurface: { _ in }, rebuildSurface: { _ in order.append("rebuild") }, now: { Date() })
-        ctrl.tick(); ctrl.tick()          // sleeps
+        ctrl.tick(); ctrl.tick()          // threshold 0: the first tick already sleeps; the second is a no-op
         ctrl.wake(id)
         XCTAssertEqual(order, ["cont", "rebuild"])
         XCTAssertFalse(ctrl.asleep.contains(id))
+    }
+
+    func testWakeWhenNotAsleepIsANoOp() {
+        let id = UUID(); let daemon = DaemonSpy(); var rebuilt: [UUID] = []
+        let ctrl = SessionSleepController(
+            policy: SleepPolicy(idleThreshold: 0), daemonControl: daemon,
+            inspector: FixedInspector(result: []), resolver: FixedResolver(pgid: 222),
+            inputs: SleepInputs(candidates: { [id] }, activity: { _ in .idle }, selectedID: { nil },
+                                reportsBackgroundWork: { _ in false }, daemonPID: { _ in 111 }),
+            tearDownSurface: { _ in }, rebuildSurface: { rebuilt.append($0) }, now: { Date() })
+        ctrl.wake(id)   // never ticked, never slept
+        XCTAssertTrue(daemon.conted.isEmpty)
+        XCTAssertTrue(rebuilt.isEmpty)
+        XCTAssertTrue(ctrl.asleep.isEmpty)
+    }
+
+    func testNilActivityClearsIdleClockAndNeverSleeps() {
+        let id = UUID(); let daemon = DaemonSpy()
+        let ctrl = SessionSleepController(
+            policy: SleepPolicy(idleThreshold: 0), daemonControl: daemon,
+            inspector: FixedInspector(result: []), resolver: FixedResolver(pgid: 222),
+            inputs: SleepInputs(candidates: { [id] }, activity: { _ in nil },   // no live agent
+                                selectedID: { nil }, reportsBackgroundWork: { _ in false },
+                                daemonPID: { _ in 111 }),
+            tearDownSurface: { _ in }, now: { Date() })
+        ctrl.tick(); ctrl.tick(); ctrl.tick()
+        XCTAssertFalse(ctrl.asleep.contains(id))
+        XCTAssertTrue(daemon.stopped.isEmpty)
     }
 }

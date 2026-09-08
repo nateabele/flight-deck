@@ -78,18 +78,25 @@ final class SessionSleepSmokeTests: XCTestCase {
             sleepEnabled: { true },
             now: { Date() })
 
-        controller.tick()   // idle: records idleSince
-        controller.tick()   // idleThreshold 0 already satisfied → sleeps
+        // idleThreshold 0: idleSince is set to the same `now` this tick evaluates against, so
+        // 0 >= 0 is already satisfied and this FIRST tick sleeps. The second is a no-op — `id`
+        // is already in `asleep`, so the loop skips it.
+        controller.tick()
+        controller.tick()
 
         XCTAssertTrue(controller.asleep.contains(id))
         XCTAssertEqual(torn, [id])
-        XCTAssertEqual(processState(agentPGID), "T", "the agent should be really SIGSTOP'd")
+        XCTAssertTrue(
+            waitForProcessState(agentPGID, toBe: "T"), "the agent should be really SIGSTOP'd"
+        )
 
         controller.wake(id)
 
         XCTAssertFalse(controller.asleep.contains(id))
         XCTAssertEqual(rebuilt, [id])
-        XCTAssertNotEqual(processState(agentPGID), "T", "the agent should have really resumed")
+        XCTAssertTrue(
+            waitForProcessState(agentPGID, leaving: "T"), "the agent should have really resumed"
+        )
     }
 
     // MARK: - Helpers
@@ -122,6 +129,29 @@ final class SessionSleepSmokeTests: XCTestCase {
             data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8
         ) ?? ""
         return String(output.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1))
+    }
+
+    /// Polls `processState(_:)` up to ~1s (same budget as `waitForAgentGroup`) for `pid` to
+    /// reach `state`, so this can't race the kernel's actual delivery of the SIGSTOP/SIGCONT
+    /// `stop`/`cont` just sent — a single snapshot right after `tick()`/`wake()` returns is not
+    /// guaranteed to already reflect it.
+    private func waitForProcessState(_ pid: pid_t, toBe state: String) -> Bool {
+        for _ in 0..<20 {
+            if processState(pid) == state { return true }
+            usleep(50_000)
+        }
+        return false
+    }
+
+    /// Same poll, inverted: waits for `pid` to leave `state` rather than reach it — used for the
+    /// post-wake assertion, where "no longer stopped" is what SIGCONT actually promises (it
+    /// could resume through several other states, not just one target).
+    private func waitForProcessState(_ pid: pid_t, leaving state: String) -> Bool {
+        for _ in 0..<20 {
+            if processState(pid) != state { return true }
+            usleep(50_000)
+        }
+        return false
     }
 
     private struct TimedOut: Error, CustomStringConvertible {
