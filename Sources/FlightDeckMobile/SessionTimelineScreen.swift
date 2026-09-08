@@ -418,7 +418,12 @@ struct SessionTimelineScreen: View {
             }
     }
 
-    private var entries: [Entry] { Self.entries(from: model.feed.items) }
+    private var entries: [Entry] {
+        Self.entries(
+            from: model.feed.items,
+            delivered: model.outbox.entries.filter { $0.state == .delivered }
+        )
+    }
 
     /// One entry, as a link into the detail screen or as a row that is simply itself.
     ///
@@ -438,23 +443,62 @@ struct SessionTimelineScreen: View {
     /// inside it, so a row cannot be a link and carry a button at once.
     @ViewBuilder
     private func entryRow(_ entry: Entry) -> some View {
-        let row = TimelineRow(
-            item: entry.item, result: entry.result, agent: session?.agent,
-            isExpanded: expansion.isExpanded(entry.id),
-            // Not animated, and that is the same judgement the opening jump above is made on:
-            // a row growing by two thousand points is not a transition anything can follow,
-            // and `List` animating a height change that large under the finger reads as the
-            // screen having lost its place. The rest of the message is simply there.
-            toggleExpanded: { expansion.toggle(entry.id) },
-            // Straight onto the model, which is where the draft lives — the row never learns
-            // that a composer exists.
-            onReply: { model.quote($0) }
-        )
-        if TimelineStyle.opensDetail(entry.item) {
-            NavigationLink(value: entry.item) { row }
+        if entry.isGhost {
+            ghostRow(entry)
         } else {
-            row
+            let row = TimelineRow(
+                item: entry.item, result: entry.result, agent: session?.agent,
+                isExpanded: expansion.isExpanded(entry.id),
+                // Not animated, and that is the same judgement the opening jump above is made
+                // on: a row growing by two thousand points is not a transition anything can
+                // follow, and `List` animating a height change that large under the finger
+                // reads as the screen having lost its place. The rest of the message is simply
+                // there.
+                toggleExpanded: { expansion.toggle(entry.id) },
+                // Straight onto the model, which is where the draft lives — the row never
+                // learns that a composer exists.
+                onReply: { model.quote($0) }
+            )
+            if TimelineStyle.opensDetail(entry.item) {
+                NavigationLink(value: entry.item) { row }
+            } else {
+                row
+            }
         }
+    }
+
+    /// A `.delivered` outbox message, inline where it will land as a real `.userTurn` once the
+    /// agent's own transcript catches up — and visibly not one yet.
+    ///
+    /// **Dimmed and captioned rather than the accent-tinted panel `TimelineRow` gives a real
+    /// user turn**, which is the whole point: a reader scanning the transcript for the
+    /// landmarks they wrote must not mistake something still in flight for something that
+    /// happened. Italic body text and a small "Queued to your agent" caption, with a clock
+    /// glyph — the same pending vocabulary a `.sending`/`.accepted` outbox row used to carry
+    /// below the composer, before delivery moved the cue in here.
+    ///
+    /// **No `NavigationLink`, no expansion, no callID folding.** A ghost has none of the state
+    /// those need — it is not in `TimelineFeed`, has no id `TimelineStyle` or `Expansion`
+    /// recognise, and answers no tool call — so it is drawn straight rather than routed through
+    /// `TimelineRow`, which would have nothing to do with most of what it offers.
+    private func ghostRow(_ entry: Entry) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(entry.item.body.text)
+                .font(.body)
+                .italic()
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Label("Queued to your agent", systemImage: "clock")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(.secondarySystemBackground))
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Queued: \(entry.item.body.text)")
     }
 
     /// What sits above the oldest row the phone holds: a spinner while history is on its way,
@@ -538,6 +582,12 @@ struct SessionTimelineScreen: View {
         let item: TimelineItem
         let result: TimelineItem?
         var id: String { item.id }
+
+        /// A synthetic entry for a `.delivered` outbox message, never a record the agent
+        /// wrote. Detected by id prefix rather than a stored field, because the id is already
+        /// the one thing `entries(from:delivered:)` controls and a second flag would be a
+        /// second place the two could disagree.
+        var isGhost: Bool { item.id.hasPrefix("ghost:") }
     }
 
     // MARK: Which long answers are open
@@ -592,7 +642,13 @@ struct SessionTimelineScreen: View {
     /// land between the two, and dropping a result whose call is on the previous page would
     /// delete content from the screen — the one thing worse than showing it twice. So the set
     /// of calls present is what decides, not merely the result having an id.
-    static func entries(from items: [TimelineItem]) -> [Entry] {
+    ///
+    /// `delivered` is appended AFTER the folded feed, one ghost per entry, in send order —
+    /// `entries` is oldest-first, so the ghosts land at the bottom whatever page the feed is
+    /// showing. Each carries a `"ghost:<token>"` id, which is `Entry.isGhost`'s whole test, and
+    /// exists only in this array: it is never written into `TimelineFeed`, so a page reset or a
+    /// `reconcile` cannot find it and cannot mistake it for a record the agent wrote.
+    static func entries(from items: [TimelineItem], delivered: [PromptOutboxEntry] = []) -> [Entry] {
         var resultsByCall: [String: TimelineItem] = [:]
         var callsPresent: Set<String> = []
         for item in items {
@@ -603,7 +659,7 @@ struct SessionTimelineScreen: View {
             default: break
             }
         }
-        return items.compactMap { item in
+        let mapped = items.compactMap { item -> Entry? in
             guard let callID = item.body.callID else { return Entry(item: item, result: nil) }
             switch item.kind {
             case .toolCall:
@@ -614,6 +670,16 @@ struct SessionTimelineScreen: View {
                 return Entry(item: item, result: nil)
             }
         }
+        let ghosts = delivered.map { entry in
+            Entry(
+                item: TimelineItem(
+                    id: "ghost:\(entry.id.uuidString)", kind: .userTurn, status: .complete,
+                    body: .init(text: entry.text)
+                ),
+                result: nil
+            )
+        }
+        return mapped + ghosts
     }
 
     // MARK: Following the live edge
