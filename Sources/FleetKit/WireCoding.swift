@@ -17,6 +17,7 @@ enum FleetEventTag: String, Codable {
     case unreadChanged = "session.unread"
     case planGateChanged = "session.planGate"
     case promptExpired = "prompt.expired"
+    case promptTyped = "prompt.typed"
     case apiErrorChanged = "session.apiError"
 }
 
@@ -100,6 +101,10 @@ extension FleetEvent: Codable {
             try c.encode(FleetEventTag.promptExpired, forKey: .t)
             try c.encode(id, forKey: .id)
             try c.encode(token, forKey: .token)
+        case .promptTyped(let id, let token):
+            try c.encode(FleetEventTag.promptTyped, forKey: .t)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
         case .apiErrorChanged(let id, let error):
             try c.encode(FleetEventTag.apiErrorChanged, forKey: .t)
             try c.encode(id, forKey: .id)
@@ -160,6 +165,9 @@ extension FleetEvent: Codable {
         case .promptExpired:
             self = .promptExpired(id: try c.decode(UUID.self, forKey: .id),
                                   token: try c.decode(UUID.self, forKey: .token))
+        case .promptTyped:
+            self = .promptTyped(id: try c.decode(UUID.self, forKey: .id),
+                                token: try c.decode(UUID.self, forKey: .token))
         case .apiErrorChanged:
             self = .apiErrorChanged(
                 id: try c.decode(UUID.self, forKey: .id),

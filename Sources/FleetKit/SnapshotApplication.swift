@@ -41,12 +41,12 @@ extension FleetSnapshot {
             let clamped = min(max(at, 0), projects[destination].sessions.count)
             projects[destination].sessions.insert(session, at: clamped)
 
-        case .promptExpired:
+        case .promptExpired, .promptTyped:
             // Nothing. The snapshot describes the fleet — projects, sessions, their status —
-            // and a prompt that timed out changes none of that. It is addressed to one
-            // screen's outbox, which is not snapshot state and is deliberately not replayed:
-            // a reconnect that re-folded this would re-fail a row the reader had already
-            // dismissed, or one whose message they had since re-sent successfully.
+            // and a prompt that timed out, or one that was typed, changes none of that. It is
+            // addressed to one screen's outbox, which is not snapshot state and is deliberately
+            // not replayed: a reconnect that re-folded this would re-fail a row the reader had
+            // already dismissed, or one whose message they had since re-sent successfully.
             return
 
         case .sessionsReordered(let project, let order):
