@@ -664,6 +664,162 @@ final class TerminalSmokeTests: XCTestCase {
         )
     }
 
+    /// Investigative, not a strict behaviour gate: does a LIVE `claude` session's on-screen
+    /// TUI actually come back after Flight Deck is killed and relaunched, and does the
+    /// reattached prompt still accept a freshly typed command? The scrollback test above
+    /// proves the *text* the pty already emitted survives a relaunch; this asks the harder
+    /// question the marker trick cannot answer — whether claude's alt-screen redraw and its
+    /// live input box come back too, and whether the box is still wired up to receive input.
+    /// Answered by DUMPING the terminal surface at three points (pre-detach, post-reattach,
+    /// post-command) to stdout and as `XCTAttachment`s, so a human can read exactly what
+    /// painted — the asserts here are deliberately light, because what shape a correct
+    /// reattach takes is itself the open question.
+    ///
+    /// **Makes one real `claude` API call** (a one-word prompt, step 8 below) against the
+    /// default, already-logged-in `~/.claude` account — this is not a fixture run.
+    ///
+    /// Shares its isolation machinery with `testSessionReattachesWithScrollbackAfterRelaunch`
+    /// above: `clearIsolatedStateDir()` + `launchPreservingState()` for a clean slate with
+    /// live persistence, `sessionUUIDFromIsolatedState()` to capture the daemon's id before
+    /// anything could tear it down, and `terminateOwnDaemon(_:)` to reap only that daemon
+    /// (never a directory-wide sweep) in teardown. See that test's doc comments for why each
+    /// piece is shaped the way it is; this reuses them rather than re-deriving them.
+    ///
+    /// **No New Session UI needed.** The seeded initial session already IS a claude session:
+    /// `SessionStore.seedInitialSession` calls `newSession(in:waking:)` with no `agent:`
+    /// argument, and `Session.agent` defaults to `.claude` (`SessionModel.swift`). Confirmed
+    /// below with a light assertion rather than assumed silently, so a change to that default
+    /// would fail loudly here instead of this test silently investigating a codex session.
+    ///
+    /// **Detecting "claude painted".** `❯` (U+276F) is `InputBar.claudeMarker` —
+    /// `InputBar.swift` documents it as the character Claude Code's own input box begins every
+    /// row with, and `Fixtures/Claude/idle-empty-box.captured.txt` shows it landing at rest. A
+    /// bare shell prompt never draws it, so polling the surface for that glyph is a reasonably
+    /// specific signal that the TUI — not a `command not found` fallback shell — is on screen.
+    /// Restated as a local literal rather than imported: this test bundle runs as a separate
+    /// process from the app and cannot `import FlightDeck`.
+    func testClaudeSessionReattachDisplayAndCommandFlush() {
+        let claudeMarker: Character = "\u{276F}" // ❯ — see InputBar.claudeMarker
+
+        // Clear-then-launch-without-reset, exactly like the scrollback test above — see that
+        // test's doc comment and `clearIsolatedStateDir()`'s for why `-FlightDeckResetState`
+        // is unusable here: it disables `SessionStore` persistence outright.
+        clearIsolatedStateDir()
+        var app = launchPreservingState()
+
+        // Captured HERE, before anything below could tear the session down — see the
+        // scrollback test's note on why this is polled rather than read once and resolved
+        // before, not after, any close.
+        var sessionID: UUID?
+        _ = waitFor(timeout: 5) {
+            sessionID = sessionUUIDFromIsolatedState()
+            return sessionID != nil
+        }
+        guard let sessionID else {
+            XCTFail(
+                "could not resolve the seeded session's id from "
+                + "\(Self.isolatedStateDir)/sessions.json"
+            )
+            return
+        }
+
+        // Unconditional teardown, exactly like the scrollback test: a failure partway through
+        // must not leak the daemon and its socket/pidfile past this run. Targets only
+        // `sessionID`, never a directory-wide sweep — `/tmp/flight-deck-<uid>` is shared with
+        // every other live Flight Deck session on this machine.
+        defer {
+            if app.state != .notRunning {
+                app.terminate()
+            }
+            terminateOwnDaemon(sessionID)
+        }
+
+        let rows = app.staticTexts.matching(identifier: "session-row-title")
+        XCTAssertTrue(
+            waitFor(timeout: 10) { rows.count == 1 }, "expected exactly one seeded session"
+        )
+
+        // Give the terminal keyboard focus, the same click this file already uses elsewhere.
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let terminal = app.textViews.firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface found")
+        func terminalText() -> String { (terminal.value as? String) ?? "" }
+
+        // claude can take several seconds to boot before it paints its input box — generous
+        // on purpose, this is the first thing under investigation.
+        let painted = waitFor(timeout: 45) { terminalText().contains(claudeMarker) }
+        XCTAssertTrue(
+            painted,
+            "claude never painted its input box before detach — is it installed and logged "
+            + "in for the default ~/.claude account? got:\n\(terminalText())"
+        )
+
+        let preDetach = terminalText()
+        print("PRE-DETACH SURFACE:\n\(preDetach)")
+        let preDetachAttachment = XCTAttachment(string: preDetach)
+        preDetachAttachment.name = "pre-detach"
+        preDetachAttachment.lifetime = .keepAlways
+        add(preDetachAttachment)
+
+        // Kill Flight Deck outright. Phase 1 starts each session's `fd-abduco` daemon
+        // `setsid`'d specifically so SIGTERM to its parent never reaches it — this line is
+        // the detach half of the feature under investigation.
+        app.terminate()
+
+        // Same state directory, no `-FlightDeckResetState`: `SessionStore.restore()` finds
+        // the session's daemon still live and attaches (`fd-abduco -a`) rather than starting
+        // a fresh shell.
+        app = launchPreservingState()
+
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let reattached = app.textViews.firstMatch
+        XCTAssertTrue(
+            reattached.waitForExistence(timeout: 10), "no terminal surface found after relaunch"
+        )
+        func reattachedText() -> String { (reattached.value as? String) ?? "" }
+
+        // THE CRUX: does claude's alt-screen UI come back on reattach? Waited on generously
+        // and then dumped — asserted only as non-empty (soft — the point is to SEE it, not to
+        // pin a specific shape this investigation does not yet know to expect).
+        _ = waitFor(timeout: 15) { !reattachedText().isEmpty }
+        let postReattach = reattachedText()
+        print("POST-REATTACH SURFACE:\n\(postReattach)")
+        let postReattachAttachment = XCTAttachment(string: postReattach)
+        postReattachAttachment.name = "post-reattach"
+        postReattachAttachment.lifetime = .keepAlways
+        add(postReattachAttachment)
+        XCTAssertFalse(postReattach.isEmpty, "surface was completely empty after reattach")
+
+        // Flush a fresh command at the reattached prompt — a real turn, kept to one cheap
+        // word. Clicking first is what hands the reattached surface keyboard focus; the
+        // surface changing at all after typing is this test's evidence that the box actually
+        // accepted the keystrokes rather than swallowing them into a dead pty.
+        reattached.click()
+        settle()
+        app.typeText("hi\n")
+        _ = waitFor(timeout: 20) { reattachedText() != postReattach }
+
+        let postCommand = reattachedText()
+        print("POST-COMMAND SURFACE:\n\(postCommand)")
+        let postCommandAttachment = XCTAttachment(string: postCommand)
+        postCommandAttachment.name = "post-command"
+        postCommandAttachment.lifetime = .keepAlways
+        add(postCommandAttachment)
+        XCTAssertNotEqual(
+            postCommand, postReattach,
+            "the surface did not change at all after typing and submitting — the reattached "
+            + "input box may not be accepting keystrokes"
+        )
+    }
+
     func testTheWholeShellInOneSession() {
         let app = launchIsolated()
         let window = app.windows.firstMatch
