@@ -139,8 +139,11 @@ final class AgentTextChannelTests: XCTestCase {
         // Keyed to the account the tab actually resolves to. A `PreferencesStore` seeds the
         // built-in accounts, so this is NOT nil here — an override filed under the wrong key
         // is silently not found, and for codex "not found" means spawning a real app-server.
+        // `/r/x.jsonl` above does not exist on disk, and this test is about routing (shell vs.
+        // composer), not the cold-create rollout fallback — so `rolloutExists` is stubbed true
+        // rather than left at the production default, same as `liveTab` below.
         store.overrideAdapter(
-            CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport())),
+            CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport()), rolloutExists: { _ in true }),
             for: .codex, account: preferences.resolvedAccountID(for: .codex, in: nil)
         )
         XCTAssertTrue(store.restore(directoryExists: { _ in true }))

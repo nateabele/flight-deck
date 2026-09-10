@@ -2468,7 +2468,17 @@ final class SessionStore: ObservableObject {
             // *thread* changed while Flight Deck was closed, not whether the *shell* did, but
             // typing the resume command again here would paste it into a live TUI.
             if !daemonControl.isLive(tabID) {
-                sendToShell(adapter.resumeCommand(binding, repinned, options), into: tabID)
+                // Codex only: if the pinned thread never wrote a rollout (it never got past
+                // the trust prompt), `codex resume <id>` would error out to a bare shell — see
+                // `CodexAdapter.coldCreateCommand`. Claude and any other adapter keep typing
+                // `resumeCommand` exactly as before.
+                let command: String
+                if let codexAdapter = adapter as? CodexAdapter {
+                    command = codexAdapter.coldCreateCommand(binding, repinned, options)
+                } else {
+                    command = adapter.resumeCommand(binding, repinned, options)
+                }
+                sendToShell(command, into: tabID)
             }
         }
     }

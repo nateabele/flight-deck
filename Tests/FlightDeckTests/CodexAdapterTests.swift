@@ -222,6 +222,55 @@ final class CodexAdapterTests: XCTestCase {
         )
     }
 
+    /// `resumeRestoredCodex`'s cold-create fallback (Task 2): a thread whose rollout never
+    /// appeared — the trust prompt was never cleared — must not be handed `codex resume`, since
+    /// codex answers that with "No saved session found" and exits to a bare shell.
+    func testColdCreateCommandLaunchesFreshWhenTheRolloutIsMissing() async throws {
+        let t = ScriptedTransport()
+        var adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+        adapter.rolloutExists = { _ in true }
+        let session = Session(title: "my tab", workingDirectory: "/w/a")
+        let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+        adapter.rolloutExists = { _ in false }
+
+        XCTAssertEqual(
+            adapter.coldCreateCommand(binding, session, .codex(CodexThreadOptions())),
+            "codex\n",
+            "a thread with no rollout on disk must fall back to a fresh session, not resume"
+        )
+    }
+
+    /// The has-rollout branch must be unchanged: exactly the same string `resumeCommand`
+    /// (and therefore the pre-fix call site) would have typed.
+    func testColdCreateCommandResumesTheBoundThreadWhenTheRolloutExists() async throws {
+        let (adapter, t) = makeAdapter()
+        let session = Session(title: "my tab", workingDirectory: "/w/a")
+        let binding = try await adapter.prepare(for: session, options: .codex(CodexThreadOptions()))
+
+        XCTAssertEqual(
+            adapter.coldCreateCommand(binding, session, .codex(CodexThreadOptions())),
+            "codex resume \(t.threadID)\n"
+        )
+    }
+
+    /// A restored tab whose binding carries no transcript path at all (never pinned) must
+    /// count as "no rollout" — there is no path to check, so there is nothing to resume.
+    func testColdCreateCommandLaunchesFreshWhenTheTranscriptURLIsNil() {
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport()), rolloutExists: { _ in true })
+        let session = Session(
+            id: UUID(), title: "t", workingDirectory: "/w/a",
+            pinnedConversationID: UUID(), agent: .codex, transcriptPath: nil
+        )
+        let binding = adapter.binding(for: session)
+        XCTAssertNil(binding.transcriptURL)
+
+        XCTAssertEqual(
+            adapter.coldCreateCommand(binding, session, .codex(CodexThreadOptions())),
+            "codex\n",
+            "a nil transcriptURL means no rollout to check — fall back to a fresh session"
+        )
+    }
+
     func testRenameSendsThreadNameSet() async throws {
         let (adapter, t) = makeAdapter()
         let session = Session(title: "t", workingDirectory: "/w/a")

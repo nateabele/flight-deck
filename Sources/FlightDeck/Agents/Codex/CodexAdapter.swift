@@ -291,6 +291,23 @@ struct CodexAdapter: AgentAdapter {
         launchCommand(binding, session, options)
     }
 
+    /// The command to type into a freshly cold-created shell for a restored codex tab. If the
+    /// pinned thread has a rollout on disk, resume it; if not, the thread never got past the
+    /// directory-trust prompt (codex writes no rollout until trust is granted), so `codex
+    /// resume` would answer "No saved session found with ID <id>" and exit to a bare shell —
+    /// launch a fresh session instead so the user reaches a usable codex.
+    ///
+    /// KNOWN LIMITATION: the fresh `codex` this falls back to mints a thread the app-server
+    /// never started, so the tab's pin stays stale until a later re-pin path picks it up.
+    /// Accepted here because this path is non-fatal and rare, and the alternative — a bare
+    /// shell — is worse.
+    func coldCreateCommand(_ binding: AgentBinding, _ session: Session, _ options: AgentOptions) -> String {
+        if let url = binding.transcriptURL, rolloutExists(url) {
+            return resumeCommand(binding, session, options)
+        }
+        return "codex\n"
+    }
+
     /// Authoritative title and status for an already-bound thread.
     ///
     /// Used by `rebind` on every restore, and directly by `resumeRestoredCodex`'s follow-up
