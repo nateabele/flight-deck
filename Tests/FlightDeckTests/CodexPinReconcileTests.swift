@@ -34,6 +34,23 @@ final class CodexPinReconcileTests: XCTestCase {
         /// not collapse a remote error to `[]`, which is what makes "asked, and there are
         /// none" different from "could not ask".
         var failing: Set<String> = []
+        /// Methods whose reply is held back until `release()`. What lets a test park a REAL
+        /// `createSession` inside the window a reconcile pass must refuse — suspended at the
+        /// app-server, with `codexCreationsInFlight` raised and no tab in `repos` yet — with
+        /// no sleep and no reach into store internals.
+        var withholding: Set<String> = []
+        /// Fired the moment a withheld request arrives, so the test can wait for the
+        /// suspension it needs rather than guessing at it.
+        var onWithheld: (() -> Void)?
+        private var held: [Int] = []
+
+        /// Answers everything `withholding` parked, in arrival order, so the suspended caller
+        /// can finish and the test does not leak a task.
+        func release() {
+            let pending = held
+            held.removeAll()
+            for id in pending { onLine?(#"{"id":\#(id),"result":{}}"#) }
+        }
 
         func forgetRecording() {
             methods.removeAll()
@@ -44,6 +61,11 @@ final class CodexPinReconcileTests: XCTestCase {
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
                   let method = obj["method"] as? String, let id = obj["id"] as? Int else { return }
             methods.append(method)
+            guard !withholding.contains(method) else {
+                held.append(id)
+                onWithheld?()
+                return
+            }
             guard method == "thread/list" else {
                 // Enough for `rebind` and the restore path's follow-up read: an empty `thread`
                 // object is a thread that exists and has no name, so nothing here re-pins or
@@ -147,6 +169,22 @@ final class CodexPinReconcileTests: XCTestCase {
         await store.codexRestoreTask?.value
         transport.forgetRecording()
         return store
+    }
+
+    /// A real rollout file with a real mtime, and its path.
+    ///
+    /// Real files rather than a stubbed `FileManager`: what is under test is the fallback
+    /// `reconcileCodexPins` uses when codex's own `thread/list` window does not carry the
+    /// pinned thread, and the whole point of that fallback is that it reads the file system
+    /// the app actually runs against. Written under its own subdirectory so it cannot be
+    /// mistaken for anything `transcriptsRootOverride` scans.
+    private func rollout(_ name: String, modified: Date) throws -> String {
+        let directory = projectsRoot.appendingPathComponent("rollouts", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(name)
+        try Data("{}\n".utf8).write(to: url)
+        try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
+        return url.path
     }
 
     private func codexEntry(
@@ -287,6 +325,54 @@ final class CodexPinReconcileTests: XCTestCase {
                       + "could be acted on, so asking is pure cost")
     }
 
+    // MARK: - 4b. Closing one of the two tabs must not hand its thread to the other
+
+    /// The regression test for the way the two-tab guard above was walked around.
+    ///
+    /// `taken` only ever knew the threads *currently* pinned by a live tab, so the guard held
+    /// only for as long as both tabs did. Close one and its thread became takeable: the very
+    /// next pass re-pinned the survivor onto a conversation its terminal was not having, moved
+    /// the rollout watcher to that thread's file and renamed the tab. The state was stable —
+    /// the adopted thread is then both the pin and the newest entry — and became unrecoverable
+    /// at the next launch, where `resumeRestoredCodex` types `codex resume <it>` into the tab
+    /// and orphans the real conversation with nothing left referencing it.
+    ///
+    /// `codexThreadsEverPinned` is what closes it: the closed tab's thread is remembered for
+    /// the life of the process and stays untakeable.
+    func testAClosedTabsThreadIsNeverHandedToTheTabThatOutlivedIt() async {
+        let survivor = UUID()
+        let closed = UUID()
+        let t = ThreadListTransport()
+        t.threads["/w/a"] = [
+            // The closed tab's thread, and the newest in the directory by a wide margin —
+            // which is exactly the shape a user who has been working in the tab they just
+            // closed leaves behind.
+            entry(other, updatedAt: 9_000, path: "/r/other.jsonl", name: "the closed tab's"),
+            entry(stale, updatedAt: 1_000, path: "/r/stale.jsonl"),
+        ]
+        let store = await makeStore(
+            [
+                codexEntry(survivor, pinned: stale, directory: "/w/a"),
+                codexEntry(closed, pinned: other, directory: "/w/a", title: "b"),
+            ],
+            transport: t
+        )
+
+        // While both are live the group is skipped, as test 4 asserts directly.
+        await store.reconcileCodexPins()
+        store.closeSession(closed)
+        await store.reconcileCodexPins()
+
+        XCTAssertEqual(store.pinnedConversationID(of: survivor), stale,
+                       "the survivor is still driving its own conversation; nothing about "
+                       + "closing the other tab is evidence that it moved")
+        let session = store.repos.flatMap(\.sessions).first { $0.id == survivor }
+        XCTAssertEqual(session?.transcriptPath, "/r/stale.jsonl",
+                       "the watcher and the phone must not be moved onto the closed tab's rollout")
+        XCTAssertEqual(store.title(of: survivor), "a",
+                       "and the tab must not be renamed to the closed tab's conversation")
+    }
+
     // MARK: - 5. A failing RPC is per group
 
     /// `try?` per group, not per pass. A login whose app-server has crashed says nothing about
@@ -360,6 +446,135 @@ final class CodexPinReconcileTests: XCTestCase {
 
         XCTAssertEqual(t.listed, [awkward],
                        "no standardizing, no symlink resolution, no trailing-slash tidying")
+    }
+
+    // MARK: - 8. A pinned thread that fell out of the window
+
+    /// `thread/list` is capped at ten entries, so a long-lived project directory eventually
+    /// pushes an idle tab's own thread off the end of it. Scoring an absent pinned thread as 0
+    /// made the strictly-greater guard inert there — every candidate beats 0 — and quietly
+    /// degraded the whole feature to "adopt the newest unclaimed thread". The local answer is
+    /// always available instead: when its rollout was last written.
+    func testAPinnedThreadOutsideTheWindowIsScoredFromItsRolloutsMtime() async throws {
+        let path = try rollout("recent.jsonl", modified: Date().addingTimeInterval(-60))
+        let tabID = UUID()
+        let t = ThreadListTransport()
+        let store = await makeStore(
+            [codexEntry(tabID, pinned: stale, directory: "/w/a", path: path)], transport: t
+        )
+        // Installed AFTER the restore, which runs a pass of its own: the pass under test has
+        // to be the one this test drives, not one that already happened.
+        //
+        // The pinned thread is NOT in the answer, exactly as codex reports a directory whose
+        // ten newest threads are all somebody else's. The candidate's stamp is a real unix
+        // second from 2023, so it is genuinely older than the rollout above.
+        t.threads["/w/a"] = [entry(live, updatedAt: 1_700_000_000, path: "/r/live.jsonl", name: "older")]
+
+        await store.reconcileCodexPins()
+
+        XCTAssertEqual(store.pinnedConversationID(of: tabID), stale,
+                       "the pinned thread's own rollout was written a minute ago; a candidate "
+                       + "from 2023 is not evidence the tab moved")
+        let session = store.repos.flatMap(\.sessions).first { $0.id == tabID }
+        XCTAssertEqual(session?.transcriptPath, path)
+    }
+
+    /// The other half: the fallback is a real comparison, not a way of always refusing. A
+    /// pinned thread whose rollout has not been written since 2001 loses to a candidate from
+    /// 2023 — which is the reported bug's own shape, a stub rollout three days stale against
+    /// the thread the user is actually typing into.
+    func testAPinnedThreadOutsideTheWindowWithAStaleRolloutIsOvertaken() async throws {
+        let path = try rollout("stale.jsonl", modified: Date(timeIntervalSince1970: 1_000_000_000))
+        let tabID = UUID()
+        let t = ThreadListTransport()
+        let store = await makeStore(
+            [codexEntry(tabID, pinned: stale, directory: "/w/a", path: path)], transport: t
+        )
+        // After the restore, for the same reason as the test above.
+        t.threads["/w/a"] = [
+            entry(live, updatedAt: 1_700_000_000, path: "/r/live.jsonl", name: "the real conversation")
+        ]
+
+        await store.reconcileCodexPins()
+
+        XCTAssertEqual(store.pinnedConversationID(of: tabID), live,
+                       "failing closed on an absent pinned thread would un-fix the bug this "
+                       + "whole branch exists for")
+    }
+
+    // MARK: - 9. A creation in flight
+
+    /// The pass reads `repos` before its round trip, and `createSession` does not put its tab
+    /// in `repos` until long after `thread/name/set` has committed — and named — the thread it
+    /// is claiming. A tick landing in that window sees a one-tab directory, cannot see the new
+    /// thread in the rebuilt `taken`, and re-pins the existing tab onto the thread the new tab
+    /// is about to be born on: two tabs, one thread, produced by the guard whose whole job is
+    /// to refuse that.
+    ///
+    /// Driven through a real suspended `createSession` rather than by reaching into
+    /// `codexCreationsInFlight`, so what is asserted is the window as it actually occurs.
+    func testAPassRefusesADirectoryWhileACodexCreationIsInFlight() async {
+        let tabID = UUID()
+        let t = ThreadListTransport()
+        let store = await makeStore(
+            [codexEntry(tabID, pinned: stale, directory: "/w/a")], transport: t
+        )
+        // After the restore, which runs a pass of its own: with this list in place beforehand
+        // the tab would already have been re-pinned before the creation even started, and the
+        // assertion below would hold for a reason that has nothing to do with the guard.
+        t.threads["/w/a"] = [
+            entry(live, updatedAt: 9_000, path: "/r/live.jsonl", name: "the new tab's"),
+            entry(stale, updatedAt: 1_000, path: "/r/stale.jsonl"),
+        ]
+
+        let suspended = expectation(description: "the creation reached the app-server")
+        t.onWithheld = { suspended.fulfill() }
+        t.withholding = ["thread/start"]
+        let creating = Task { await store.createSession(agent: .codex, in: "/w/a") }
+        await fulfillment(of: [suspended], timeout: 5)
+        // Only the pass driven below may be read: the creation itself is a legitimate caller.
+        t.forgetRecording()
+
+        await store.reconcileCodexPins()
+
+        XCTAssertTrue(t.listed.isEmpty,
+                      "the group is dropped before the round trip: no answer taken while a "
+                      + "creation is uncommitted can be acted on")
+        XCTAssertEqual(store.pinnedConversationID(of: tabID), stale,
+                       "the existing tab must not be moved onto a thread the tab being "
+                       + "created is about to claim")
+
+        // Let the creation fail out on its own terms (an empty `thread/start` result), so
+        // nothing is left suspended past the end of the test.
+        t.release()
+        _ = await creating.value
+    }
+
+    // MARK: - 10. An empty candidate name
+
+    /// A thread codex reports with `"name": ""` must not become the tab's name.
+    ///
+    /// Two independent guards hold this — `!name.isEmpty` at the call site, and
+    /// `AgentTitle.sanitized`'s empty-after-trimming rule inside `applyExternalTitle` — so
+    /// this pins the behaviour rather than any one of them. The re-pin itself still has to
+    /// happen: an unnamed thread is still the conversation the tab is driving.
+    func testACandidateWithAnEmptyNameLeavesTheTabsTitleAlone() async {
+        let tabID = UUID()
+        let t = ThreadListTransport()
+        t.threads["/w/a"] = [
+            entry(live, updatedAt: 2_000, path: "/r/live.jsonl", name: ""),
+            entry(stale, updatedAt: 1_000, path: "/r/stale.jsonl"),
+        ]
+        let store = await makeStore(
+            [codexEntry(tabID, pinned: stale, directory: "/w/a")], transport: t
+        )
+
+        await store.reconcileCodexPins()
+
+        XCTAssertEqual(store.pinnedConversationID(of: tabID), live,
+                       "a thread with no name is still the thread the tab is driving")
+        XCTAssertEqual(store.title(of: tabID), "a",
+                       "and the tab keeps the name it had rather than being renamed to nothing")
     }
 
     // MARK: - Lifecycle
@@ -457,7 +672,10 @@ final class CodexPinReconcileTests: XCTestCase {
         await Task.yield()
         XCTAssertEqual(count, 0, "every tick inside the window is refused, however many arrive")
 
-        now = now.advanced(by: CodexPinReconciler.throttle)
+        // Lands on exactly one window from `lastPass` (0.5 s + 4 s + 0.5 s), not past it. The
+        // boundary is the only advance that tells `>= throttle` from `> throttle`, and an
+        // overshoot — this used to clear the window by 4.5 s — lets that mutation live.
+        now = now.advanced(by: .milliseconds(500))
         reconciler.tick()
         await fulfillment(of: [passes], timeout: 2)
         XCTAssertEqual(count, 1)

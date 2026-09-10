@@ -362,6 +362,12 @@ final class CodexAdapterTests: XCTestCase {
         XCTAssertEqual(params["sortKey"] as? String, "updated_at")
         XCTAssertEqual(params["sortDirection"] as? String, "desc")
         XCTAssertEqual(Set(params["sourceKinds"] as? [String] ?? []), ["cli", "vscode"])
+        // The literal 10, not a reference to `codexThreadListLimit`, which is fileprivate to
+        // `CodexAdapter.swift` — and a test that read the constant it is meant to pin would
+        // agree with any value it was changed to. This one is load-bearing off-wire as well:
+        // every thread the window drops falls to `reconcileCodexPins`' mtime fallback, so
+        // shrinking it silently moves that decision off the timestamps codex reports.
+        XCTAssertEqual(params["limit"] as? Int, 10)
     }
 
     func testThreadsInDirectoryReturnsEmptyArrayForEmptyData() async throws {

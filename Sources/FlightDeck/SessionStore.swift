@@ -538,6 +538,31 @@ final class SessionStore: ObservableObject {
     /// must not clear a guard the first still needs.
     private var codexCreationsInFlight: [UUID?: Int] = [:]
 
+    /// Every codex thread this run has seen a tab pinned to, whether or not a tab still holds
+    /// it. `reconcileCodexPins` treats all of them as untakeable.
+    ///
+    /// **Why it is not enough to exclude the threads live tabs pin right now.** That set —
+    /// `taken` — loses a thread the moment its tab closes. Two codex tabs in one directory,
+    /// T1 on thread A and T2 on the newer B: while both are live the two-tab guard skips the
+    /// group, but closing T2 drops B out of `taken`, and the next pass re-pins T1 to B while
+    /// T1's terminal is still driving A. That state is stable (B is now both the pin and the
+    /// newest entry) and survives a relaunch, where `resumeRestoredCodex` types
+    /// `codex resume B` into T1 and orphans A outright. Remembering B closes it.
+    ///
+    /// **What it costs, deliberately.** A hand-typed
+    /// `codex resume <a thread some Flight Deck tab once held>` is now refused rather than
+    /// followed — a case `vscode` in `CodexAdapter.threads`' `sourceKinds` was kept for. Taken
+    /// knowingly, because the two failure directions are not symmetric: a false refusal leaves
+    /// a stale timeline, which is recoverable and no worse than the behaviour before any of
+    /// this existed, while a false follow orphans a live conversation and mis-resumes the tab
+    /// on the next launch.
+    ///
+    /// **Process-lifetime, not persisted.** A relaunch starts it empty (seeded only from the
+    /// restored sessions' own pins), so the scenario above can recur exactly once after a
+    /// restart. Making it durable needs a new persisted field and is deliberately out of this
+    /// plan's scope.
+    private var codexThreadsEverPinned: Set<UUID> = []
+
     /// Tears down the stack the caller meant, whatever the reason. `stop()` funnels into the
     /// transport's termination hook, so every request still in flight fails rather than
     /// hanging its caller — the same guarantee a crash gets, and by the same route: that hook
@@ -1619,6 +1644,11 @@ final class SessionStore: ObservableObject {
             accountID: draft.accountID,
             transcriptPath: binding.transcriptURL?.path
         )
+        // One of the three places a codex pin is first established — see
+        // `codexThreadsEverPinned`. Recorded here rather than left to `repinCodex`, which this
+        // path never calls: a thread this tab was born on must stay untakeable by its
+        // neighbours even after the tab is closed.
+        codexThreadsEverPinned.insert(binding.conversationID)
         let adapter = adapter(for: instance)
         addSession(
             session,
@@ -2161,6 +2191,11 @@ final class SessionStore: ObservableObject {
                 accountID: entry.accountID,
                 transcriptPath: entry.transcriptPath
             )
+            // Seeded from every restored codex pin, orphaned tabs included — see
+            // `codexThreadsEverPinned`. An orphan is exactly the case that matters: it never
+            // resumes and never re-pins, so this is the only chance to record the thread it
+            // is holding, and a neighbour in the same directory must not be handed it.
+            if session.agent == .codex { codexThreadsEverPinned.insert(conversationID) }
             // A tab whose login has been deleted since the last run. Rebuilt, but never
             // resumed — see `accountIsMissing`. The tab still appears, because a tab that
             // vanishes at relaunch is its own bug: the user has to be able to see which tabs
@@ -2413,6 +2448,18 @@ final class SessionStore: ObservableObject {
             // record of where that conversation was. Skipping costs the feature in a rare
             // layout; guessing costs a conversation.
             guard tabs.count == 1, let tabID = tabs.first else { continue }
+            // **A creation in flight makes every other guard here stale.** `members`, `order`
+            // and the two-tab count above are all read from `repos` before the round trip
+            // below, and `createSession` does not insert its tab until long after
+            // `thread/name/set` has committed — and named — the thread it is claiming. A tick
+            // landing in that window sees a one-tab directory, cannot see the new thread in
+            // the rebuilt `taken`, and re-pins the existing tab onto the thread the new tab is
+            // about to be born on: two tabs, one thread, created by the guard that exists to
+            // refuse exactly that. The same predicate `stopCodexIfUnused` uses at :484, for
+            // the same reason — a creation between "asked for an app-server" and "tab
+            // inserted" is invisible to anything that reads `repos`. Before the `await`, so a
+            // pass that cannot act on the answer does not pay for one either.
+            guard codexCreationsInFlight[group.instance.account, default: 0] == 0 else { continue }
             // `adapter(for:)`, never a fresh `CodexAdapter`: that is what lets an override
             // installed through `overrideAdapter` win, which is the only reason any of this is
             // testable without spawning `codex`.
@@ -2447,21 +2494,42 @@ final class SessionStore: ObservableObject {
             )
 
             // Newest-first as the server sorted it (`sortKey: updated_at`, `desc`), so the
-            // first survivor of the two filters is the newest survivor.
+            // first survivor of the filters is the newest survivor.
             let candidate = threads.first { thread in
                 // No rollout path means nothing for the watcher or the phone to read, so
                 // re-pinning to it would trade one dead file for no file at all.
                 thread.path != nil && !taken.contains(thread.id)
+                    // The tab's own pin is deliberately exempt from the ever-pinned memory
+                    // and left in the pool: it is `codexThreadsEverPinned`'s first entry, and
+                    // the strictly-greater comparison below — not this filter — is what
+                    // rejects it. Excluding it here would make a tie select some *other*
+                    // thread and turn `>` into a rule nothing tests.
+                    && (thread.id == pinned || !codexThreadsEverPinned.contains(thread.id))
             }
             guard let candidate, let path = candidate.path else { continue }
 
-            // A pinned thread that is absent from the list counts as 0 — which is the live
-            // case, since a thread nobody has touched for three days sorts off the end of a
-            // 10-entry window. Strictly greater, never `>=`: an equal timestamp is not
-            // evidence that anything moved, and re-pinning on one would flap between two
-            // threads written in the same second. A `updatedAt` that failed to decode is also
-            // 0 (see `CodexAdapter.threads`), so it can never win either.
-            let pinnedUpdatedAt = threads.first { $0.id == pinned }?.updatedAt ?? 0
+            // Strictly greater, never `>=`: an equal timestamp is not evidence that anything
+            // moved, and re-pinning on one would flap between two threads written in the same
+            // second. A `updatedAt` that failed to decode is 0 (see `CodexAdapter.threads`),
+            // so it can never win either.
+            //
+            // **A pinned thread absent from the window is scored from its own rollout, not
+            // from 0.** `thread/list` is capped at `codexThreadListLimit` (10), so any
+            // long-lived project directory eventually pushes an idle tab's thread out of the
+            // window — and scoring that 0 makes the comparison inert, because every candidate
+            // beats 0. Raising the cap only moves the cliff. Failing closed on absence is
+            // worse still: the reported bug's own stub rollout may not be listed at all (codex
+            // need not list a thread that has taken no turn), so refusing the group would
+            // un-fix it. The local answer is always available instead — when was this thread's
+            // rollout last written.
+            //
+            // Mixing a wire `updatedAt` with a filesystem mtime is sound because they measure
+            // the same thing in the same unit: wall-clock seconds since the epoch at which
+            // this thread was last written. The only sensitivity is a sub-second tie, which
+            // the strictly-greater rule resolves in the pin's favour and the next pass
+            // restabilises.
+            let pinnedUpdatedAt = threads.first { $0.id == pinned }?.updatedAt
+                ?? Self.rolloutModifiedAt(session.transcriptPath)
             guard candidate.updatedAt > pinnedUpdatedAt else { continue }
 
             repinCodex(tabID, to: AgentBinding(
@@ -2475,6 +2543,25 @@ final class SessionStore: ObservableObject {
                 apply(.title(name), to: tabID)
             }
         }
+    }
+
+    /// When a rollout file was last written, in unix seconds — 0 when there is no path, or
+    /// nothing readable at it.
+    ///
+    /// The fallback `reconcileCodexPins` scores a pinned thread with when codex's own
+    /// `thread/list` window does not carry it. 0 for a missing file is the right answer rather
+    /// than a defeat: a pin whose rollout is gone names a thread that cannot be read, and a
+    /// live candidate should win against it.
+    ///
+    /// `resourceValues` rather than `attributesOfItem`, as `SessionStatusWatcher` and
+    /// `FleetService` both do: the latter builds a dictionary of every attribute the file
+    /// system can report in order to read one date.
+    private static func rolloutModifiedAt(_ path: String?) -> Int {
+        guard let path,
+              let mtime = (try? URL(fileURLWithPath: path)
+                  .resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        else { return 0 }
+        return Int(mtime.timeIntervalSince1970)
     }
 
     /// Points a codex tab at a different thread than the one its record names.
@@ -2493,6 +2580,10 @@ final class SessionStore: ObservableObject {
     /// notification will ever arrive on it.
     private func repinCodex(_ tabID: UUID, to binding: AgentBinding) {
         guard let at = locate(tabID) else { return }
+        // The chokepoint for both re-pinning callers — see `codexThreadsEverPinned`. Includes
+        // the candidate `reconcileCodexPins` has just adopted, so a thread stays this tab's
+        // even after it closes.
+        codexThreadsEverPinned.insert(binding.conversationID)
         repos[at.repo].sessions[at.session].pinnedConversationID = binding.conversationID
         repos[at.repo].sessions[at.session].transcriptPath = binding.transcriptURL?.path
         stopWatching(tabID)
