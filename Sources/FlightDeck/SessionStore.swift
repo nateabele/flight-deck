@@ -1445,7 +1445,13 @@ final class SessionStore: ObservableObject {
         // the previous run's records with this one's. The sweep itself is async and may land
         // well after that write; it works from this snapshot, not from disk.
         let previousRun = persistence?.load()
-        if resetState || !restore() { seedInitialSession() }
+        if resetState || !restore() {
+            if let override = SessionStore.seedDirectoryOverride {
+                seedInitialSession(homeURL: override)
+            } else {
+                seedInitialSession()
+            }
+        }
         startStatusWatching()
         // Same idiom `SessionStatusWatcher`/`TranscriptWatcher` use to register themselves,
         // and the same lifecycle point as `startStatusWatching()` above: only the production
@@ -1456,6 +1462,21 @@ final class SessionStore: ObservableObject {
         if let previousRun {
             Task { [weak self] in await self?.sweepOrphans(from: previousRun) }
         }
+    }
+
+    /// Test-only: `-FlightDeckSeedProjectDir <path>` makes the initial seeded session open in
+    /// `<path>` instead of `$HOME`, so a UI test can place a session in a directory codex has
+    /// not trusted — its directory-trust prompt only appears for an untrusted dir, and `$HOME`
+    /// is trusted on the developer's machine. Honoured ONLY when `-FlightDeckStateDir` is also
+    /// isolating persistence, so it can never seed the developer's real `sessions.json`. Read at
+    /// seed time (first launch against an empty state dir); a relaunch restores instead of
+    /// re-seeding, so passing the flag only on the first launch is what a reattach test wants.
+    static var seedDirectoryOverride: URL? {
+        let defaults = UserDefaults.standard
+        guard defaults.string(forKey: "FlightDeckStateDir")?.isEmpty == false,
+              let path = defaults.string(forKey: "FlightDeckSeedProjectDir"), !path.isEmpty
+        else { return nil }
+        return URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
     }
 
     func seedInitialSession(
