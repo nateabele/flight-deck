@@ -74,6 +74,13 @@ public enum FleetEvent: Equatable, Sendable {
     /// Carries the token rather than the text, because the token is what the outbox is keyed
     /// on and the text is already on the phone.
     case promptExpired(id: UUID, token: UUID)
+
+    /// A prompt this Mac accepted from a phone has been typed into the agent.
+    ///
+    /// Carries the token rather than the text, for the same reason `promptExpired` does: it
+    /// is a per-screen outbox notification, not fleet state. Emitted from
+    /// `SessionStore.flushPromptQueue`'s `onSent`.
+    case promptTyped(id: UUID, token: UUID)
 }
 
 extension FleetEvent {
@@ -85,7 +92,7 @@ extension FleetEvent {
         case .sessionRemoved(let id), .sessionMoved(let id, _, _),
              .renamed(let id, _, _), .activityChanged(let id, _, _, _, _, _),
              .unreadChanged(let id, _), .planGateChanged(let id, _),
-             .promptExpired(let id, _), .apiErrorChanged(let id, _):
+             .promptExpired(let id, _), .promptTyped(let id, _), .apiErrorChanged(let id, _):
             return id
         case .projectAdded, .projectRemoved, .projectCollapsed,
              .projectsReordered, .sessionsReordered:
@@ -102,7 +109,7 @@ extension FleetEvent {
             return id
         case .sessionAdded, .sessionRemoved, .sessionMoved, .projectsReordered,
              .renamed, .activityChanged, .unreadChanged, .planGateChanged, .promptExpired,
-             .apiErrorChanged:
+             .promptTyped, .apiErrorChanged:
             return nil
         }
     }

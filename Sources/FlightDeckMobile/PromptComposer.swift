@@ -110,7 +110,12 @@ struct PromptComposer: View {
         VStack(spacing: 0) {
             Divider()
             VStack(alignment: .leading, spacing: 8) {
-                ForEach(model.outbox.entries) { entry in
+                // Only a failure gets a row here. `.sending`/`.accepted` show no cue but the
+                // disabled Send button, and `.delivered` is the inline transcript ghost (see
+                // `SessionTimelineScreen.ghostRow`) — a row in both places would be the same
+                // fact said twice, once above the field and once in the conversation it is
+                // about to join.
+                ForEach(model.outbox.entries.filter { if case .failed = $0.state { true } else { false } }) { entry in
                     outboxRow(entry)
                 }
                 if let reason = unavailableReason {
@@ -241,7 +246,12 @@ struct PromptComposer: View {
 
     // MARK: The outbox
 
-    /// One message on its way, with what is known about it and nothing more.
+    /// A message the Mac refused, with the reason it gave.
+    ///
+    /// **The only state that reaches here now.** `.sending`/`.accepted` show no row — the
+    /// disabled Send button is the only pre-delivery cue — and `.delivered` is the inline
+    /// transcript ghost (see `SessionTimelineScreen.ghostRow`), so this draws a failure
+    /// outright rather than switching on a state most of which can no longer arrive.
     private func outboxRow(_ entry: PromptOutboxEntry) -> some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
@@ -250,34 +260,16 @@ struct PromptComposer: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                status(of: entry.state)
+                if case .failed(let message) = entry.state {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .accessibilityElement(children: .combine)
-            if case .failed = entry.state { dismissButton(entry.id) }
-        }
-    }
-
-    @ViewBuilder
-    private func status(of state: PromptOutboxEntry.State) -> some View {
-        switch state {
-        case .sending:
-            Label("Sending…", systemImage: "arrow.up.circle")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .accepted:
-            // NOT "Sent to Claude". The Mac acked, which means dispatched and not done —
-            // it may be queued behind a turn that is still running. This row disappears
-            // when the agent's own transcript comes back holding the message, and that is
-            // the only moment anything here can honestly claim it arrived.
-            Label("Waiting for your Mac to type this", systemImage: "clock")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .failed(let message):
-            Label(message, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
+            dismissButton(entry.id)
         }
     }
 

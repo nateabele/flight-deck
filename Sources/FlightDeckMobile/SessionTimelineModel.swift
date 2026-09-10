@@ -1078,6 +1078,9 @@ final class SessionTimelineModel {
     /// A queued prompt the Mac dropped when its window closed. See `FleetEvent.promptExpired`.
     func promptExpired(_ token: UUID) { outbox.fail(token, Self.expired) }
 
+    /// The Mac typed this prompt into the agent. See `FleetEvent.promptTyped`.
+    func promptTyped(_ token: UUID) { outbox.deliver(token) }
+
     /// Copy for a prompt that did not land.
     ///
     /// **Deliberately NOT `message(for:)`.** The same wire code means a different thing on

@@ -2,15 +2,20 @@ import Foundation
 
 /// One message a client handed to the Mac, and how far it has got.
 public struct PromptOutboxEntry: Identifiable, Equatable, Sendable {
-    /// **Three states and no fourth.** "The Mac has it" is not distinguished from "the agent
-    /// has it", because the Mac cannot tell you the difference — `ack` means dispatched, not
-    /// done — and the transcript settles it either way within a turn.
+    /// **There is now a fourth state.** "The Mac has it" used to be indistinguishable from
+    /// "the agent has it", because the Mac could not report the moment it typed the prompt in
+    /// — `ack` meant dispatched, not done. `FleetEvent.promptTyped` now reports exactly that
+    /// moment, which is the distinction this comment used to say was impossible. Machine:
+    /// `.sending → .accepted` (ack) `→ .delivered` (`promptTyped`) `→` removed (`reconcile`);
+    /// `.failed` from `err`/`promptExpired`.
     public enum State: Equatable, Sendable {
         /// Handed to the socket; no answer yet.
         case sending
         /// The Mac acked. It will be typed when the agent's input box is free, which may be
         /// a turn boundary away.
         case accepted
+        /// The Mac reported it typed the prompt into the agent.
+        case delivered
         /// It will not be typed, and this is why. Copy, not a code.
         case failed(String)
     }
@@ -72,6 +77,14 @@ public struct PromptOutbox: Equatable, Sendable {
     public mutating func accept(_ id: UUID) {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
         entries[index].state = .accepted
+    }
+
+    /// The Mac reported (via `FleetEvent.promptTyped`) that it typed this prompt into the
+    /// agent. Idempotent: a missing or already-removed entry is a no-op — covers replay and
+    /// duplicate signals. `reconcile` still retires it once the transcript catches up.
+    public mutating func deliver(_ id: UUID) {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+        entries[index].state = .delivered
     }
 
     /// It will not be typed. The entry STAYS, carrying the reason: an outbox that cleared

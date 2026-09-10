@@ -630,6 +630,10 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // row to fail, because the row only exists while that screen's model does.
         connector.onEvent = { [weak self] event in
             MainActor.assumeIsolated {
+                if case .promptTyped(let id, let token) = event {
+                    self?.timelineModels[id]?.promptTyped(token)
+                    return
+                }
                 guard case .promptExpired(let id, let token) = event else { return }
                 self?.timelineModels[id]?.promptExpired(token)
             }
