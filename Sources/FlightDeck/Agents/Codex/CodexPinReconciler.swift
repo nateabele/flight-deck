@@ -47,6 +47,11 @@ final class CodexPinReconciler {
     /// the next one would ask.
     private var isPolling = false
 
+    /// The ticker's own in-flight pass, if any — so `passNow()` can wait it out rather than
+    /// race it. Only `tick()` creates one; `passNow()` never assigns here, since it is not a
+    /// ticker pass itself.
+    private var inFlight: Task<Void, Never>?
+
     /// Seeded at construction rather than left nil, so the *first* pass waits a window too.
     ///
     /// Deliberate: the reconciler is created the moment a codex tab appears, and a tab that
@@ -90,14 +95,17 @@ final class CodexPinReconciler {
     /// them. It used to call `SessionStore.reconcileCodexPins()` straight, which reconciled
     /// exactly the same — the stamp is the whole reason this exists.
     ///
-    /// **Why the stamp is load-bearing.** The reconciler is constructed inside that method's
-    /// stage 1 (`preparedAdapter`), so `lastPass` is seeded there and the first tick falls due
-    /// a window later — which an unstarted or wedged app-server can easily outlast, since the
-    /// pass below spends a whole `readTimeout` on each group it cannot reach. A tick landing
-    /// after that is a *second* re-pin arriving while stage 3 is mid-restore: it reads a tab's
-    /// binding before awaiting `rebind` and types what it read, so a pass that moves the record
-    /// across that suspension leaves the terminal on the pre-tick thread — the record-versus-
-    /// terminal split the reorder exists to remove, re-entered from the other side.
+    /// **Why the stamp still matters, now that `inFlight` and `isPolling` handle the passes
+    /// this one could overlap.** The reconciler is constructed inside that method's stage 1
+    /// (`preparedAdapter`), so `lastPass` is seeded there and, without this stamp, the first
+    /// tick would fall due a window after *that* instant — which an unstarted or wedged
+    /// app-server can easily outlast, since the pass below spends a whole `readTimeout` on each
+    /// group it cannot reach. A tick landing that soon after `passNow()` returns is a *later*
+    /// re-pin arriving while stage 3 is mid-restore: it reads a tab's binding before awaiting
+    /// `rebind` and types what it read, so a pass that moves the record across that suspension
+    /// leaves the terminal on the pre-tick thread — the record-versus-terminal split the
+    /// reorder exists to remove, re-entered from the other side. The stamp is what pushes that
+    /// later tick a full window past this pass instead.
     ///
     /// **Stamped at the end, unlike `tick()`.** There the window means "how often we ask" and
     /// stamping late would let a slow app-server stretch the cadence without bound. Here there
@@ -105,11 +113,21 @@ final class CodexPinReconciler {
     /// be clear is the one *after* it, the stretch of stage 3 where the sends happen. Stamping
     /// at the start would leave that stretch a window shorter, by however long this pass took.
     ///
-    /// `isPolling` is deliberately not set: a ticker pass may already be in flight, and
-    /// clearing that flag on this pass's way out would drop the guard from under it. Two
-    /// concurrent passes are harmless anyway — `reconcileCodexPins` re-reads the session after
-    /// its own await and only ever re-pins onto a strictly newer thread.
+    /// **When this returns, no reconcile pass is in flight and none starts for a window.**
+    /// Three pieces make that true, one per way a pass could otherwise overlap stage 3:
+    /// `await inFlight?.value` first, so a ticker pass already running when this is called is
+    /// waited out rather than raced — it cannot still be running once this returns. `isPolling`
+    /// is then set for the duration of this pass (restored on the way out only if this call is
+    /// the one that set it, via `wasPolling`), so a tick that lands *during* this pass sees the
+    /// guard held and does not start a second, concurrent one. And the stamp below, as always,
+    /// pushes the *next* tick a full window past this pass. Together they close the pass this
+    /// method could still be racing with, the pass a tick could start underneath it, and the
+    /// pass the very next tick could start after it.
     func passNow() async {
+        await inFlight?.value
+        let wasPolling = isPolling
+        isPolling = true
+        defer { if !wasPolling { isPolling = false } }
         await reconcile()
         lastPass = now()
     }
@@ -133,10 +151,11 @@ final class CodexPinReconciler {
         // and stamping at the end would let a slow app-server stretch it without bound.
         lastPass = now
         isPolling = true
-        Task { [weak self] in
+        inFlight = Task { [weak self] in
             guard let self else { return }
             await self.reconcile()
             self.isPolling = false
+            self.inFlight = nil
         }
     }
 }
