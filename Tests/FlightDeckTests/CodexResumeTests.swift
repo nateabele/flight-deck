@@ -374,7 +374,10 @@ final class CodexResumeTests: XCTestCase {
         // Two reads, not one: `rebind` settles identity, and `resumeRestoredCodex`'s own
         // follow-up read recovers a title changed while Flight Deck was closed — see
         // `testARestoredCodexTabRecoversATitleChangedWhileItWasClosed` below.
-        XCTAssertEqual(t.methods, ["thread/read", "thread/read"])
+        // Two reads and then a `thread/list`: the restore path asks for one reconcile pass on
+        // its way out, so a relaunch lands on the thread the tab is really driving without
+        // waiting a throttle window. See `SessionStore.reconcileCodexPins`.
+        XCTAssertEqual(t.methods, ["thread/read", "thread/read", "thread/list"])
         XCTAssertEqual(injector.sent, ["codex resume \(existing.uuidString.lowercased())"])
         XCTAssertEqual(injector.returns, 1, "a paste alone submits nothing")
         XCTAssertEqual(store.pinnedConversationID(of: tabID), existing)

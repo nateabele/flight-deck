@@ -487,6 +487,50 @@ final class SessionStore: ObservableObject {
         stopCodex(account: account, expected: stack)
     }
 
+    /// The one thing that notices a codex tab has wandered onto another thread.
+    ///
+    /// **One, not one per account.** A pass groups by directory and resolves its adapter per
+    /// group, so a single subscriber already covers every login. It is also not on
+    /// `CodexStack`: `adapter(for:)` answers codex from `adapters[instance]` first and only
+    /// builds a stack on a miss — deliberately, so `overrideAdapter` keeps winning — which
+    /// means no store-level codex test in this repo ever builds a `CodexStack`, and a
+    /// stack-owned reconciler would never exist to be tested.
+    private var codexPinReconciler: CodexPinReconciler?
+
+    /// Starts the reconciler the first time a codex tab needs one.
+    ///
+    /// Hung off `preparedAdapter` rather than `makeCodexStackIfNeeded` for two reasons.
+    /// `preparedAdapter` is on both codex paths — `createSession` and `resumeRestoredCodex`
+    /// take it and nothing else does — and, unlike the stack builder, it is still reached when
+    /// a caller has installed its own adapter, which is every store-level codex test and the
+    /// only way this is observable without spawning `codex`.
+    private func startCodexPinReconcilerIfNeeded() {
+        guard codexPinReconciler == nil else { return }
+        let reconciler = CodexPinReconciler(clock: clock) { [weak self] in
+            await self?.reconcileCodexPins()
+        }
+        codexPinReconciler = reconciler
+        reconciler.start()
+    }
+
+    /// Drops it once no codex tab anywhere justifies it.
+    ///
+    /// `stopCodexIfUnused`'s predicate, widened from one account to all of them: the app-server
+    /// it tears down is per-login, this subscriber is not, so narrowing it the same way would
+    /// leave the clock ticking a reconciler for a login whose last tab closed. Called from the
+    /// same two sites, including `createSession`'s `defer`, so a creation that failed before
+    /// inserting its tab does not leave a subscriber behind for the rest of the run.
+    private func stopCodexPinReconcilerIfUnused() {
+        guard let reconciler = codexPinReconciler else { return }
+        guard !repos.flatMap(\.sessions).contains(where: { $0.agent == .codex }) else { return }
+        reconciler.stop()
+        codexPinReconciler = nil
+    }
+
+    /// Test seam. Whether a reconciler is currently subscribed — the lifecycle's only
+    /// observable fact, since the object itself stays private.
+    var hasCodexPinReconcilerForTesting: Bool { codexPinReconciler != nil }
+
     /// How many codex creations are between "asked for an app-server" and "tab inserted",
     /// per account.
     ///
@@ -1547,6 +1591,9 @@ final class SessionStore: ObservableObject {
             // app-server would outlive every codex tab. A creation that SUCCEEDED inserted
             // its tab already, so the tab count below refuses the teardown by itself.
             stopCodexIfUnused(account: instance.account)
+            // Same reasoning, one scope wider: a creation that never inserted its tab must not
+            // leave a reconciler subscribed to the clock for the rest of the run.
+            stopCodexPinReconcilerIfUnused()
         }
 
         let binding: AgentBinding
@@ -1721,6 +1768,11 @@ final class SessionStore: ObservableObject {
         // that a path *asked* for a running app-server, and a test that let it actually start
         // one would spawn `codex`. One ask is one account's — two logins asking is two.
         if instance.agent.needsRuntimeStart { codexServerRequestsForTesting += 1 }
+        // Both codex paths pass through here — creation and restore — and this one still runs
+        // when an override adapter short-circuits the lines below. See
+        // `startCodexPinReconcilerIfNeeded` for why that matters and why the stack builder is
+        // the wrong hook.
+        if instance.agent == .codex { startCodexPinReconcilerIfNeeded() }
         if let registered = adapters[instance] { return registered }
         guard instance.agent.needsRuntimeStart else { return adapter(for: instance) }
         try await startCodex(account: instance.account)
@@ -2292,7 +2344,7 @@ final class SessionStore: ObservableObject {
                 binding = settled
             }
             if binding.conversationID != session.pinnedConversationID {
-                repinRestoredCodex(tabID, to: binding)
+                repinCodex(tabID, to: binding)
             }
             // Re-read: the re-pin above rewrote the row, and the command names the session.
             guard let repinned = self.session(for: tabID) else { continue }
@@ -2311,18 +2363,135 @@ final class SessionStore: ObservableObject {
 
             sendToShell(adapter.resumeCommand(binding, repinned, options), into: tabID)
         }
+
+        // One pass right now, rather than waiting up to a throttle window for the reconciler's
+        // first tick. A relaunch is precisely when a tab is most likely to be pinned to the
+        // wrong thread: `rebind` only asks whether the *pinned* thread still exists, and a
+        // thread the user started by hand in a previous run leaves that one alive and stale.
+        await reconcileCodexPins()
     }
 
-    /// The restored tab's thread was gone and codex started it a new one.
+    /// Follows a codex tab to the thread it is actually driving.
+    ///
+    /// **The bug this closes.** A user who types `codex` at a Flight Deck tab's shell gets a
+    /// brand-new thread and nothing tells the store. Claude's counterpart — `pinResolutions`
+    /// → `repin` — is driven by claude's status registry; codex has no registry, so without
+    /// this nothing follows it. Measured on the live machine: a tab driving a 676-line thread
+    /// while its record pinned a different one whose rollout was one line long and three days
+    /// stale. The rollout watcher, the phone, and the tab title were all reading the dead file.
+    ///
+    /// Called from `CodexPinReconciler` on a throttled tick, and once directly at the end of
+    /// `resumeRestoredCodex`. Directly callable, and taking nothing, so every rule below is
+    /// assertable with no clock and no expectations.
+    func reconcileCodexPins() async {
+        // Grouped by the pair that decides which app-server to ask and what to ask it about.
+        // `instance(for:)` is the store's one normalisation for the account key — a second one
+        // invented here is how a group ends up asking the wrong login's server.
+        struct Group: Hashable {
+            let instance: AgentInstance
+            let directory: String
+        }
+        var members: [Group: [UUID]] = [:]
+        // Insertion-ordered alongside the dictionary so a pass visits groups in a stable order.
+        // Dictionary iteration order is not, and a test that proves one group's RPC failure
+        // does not abort another needs the two to be visited in a knowable sequence.
+        var order: [Group] = []
+        for session in repos.flatMap(\.sessions) where session.agent == .codex {
+            let group = Group(instance: instance(for: session), directory: session.transcriptDirectory)
+            if members[group] == nil { order.append(group) }
+            members[group, default: []].append(session.id)
+        }
+        guard !order.isEmpty else { return }
+
+        for group in order {
+            guard let tabs = members[group] else { continue }
+            // **Load-bearing guard.** Two live codex tabs in one directory: `thread/list`
+            // reports the directory's threads, not which tab is driving which, so a newly
+            // appeared thread cannot be attributed to either of them. Guessing wrong re-pins a
+            // tab away from the user's real conversation — the unrecoverable loss
+            // `CodexAdapter.rebind`'s doc comment exists to prevent — and the pin is the only
+            // record of where that conversation was. Skipping costs the feature in a rare
+            // layout; guessing costs a conversation.
+            guard tabs.count == 1, let tabID = tabs.first else { continue }
+            // `adapter(for:)`, never a fresh `CodexAdapter`: that is what lets an override
+            // installed through `overrideAdapter` win, which is the only reason any of this is
+            // testable without spawning `codex`.
+            guard let codex = adapter(for: group.instance) as? CodexAdapter else { continue }
+
+            // `try?` per group, not per pass. An app-server that is missing, crashed, or too
+            // slow says nothing about this directory's threads — every pin in the group stays
+            // exactly where it is — but it says nothing about the *other* directories either,
+            // and aborting the pass on it would let one broken login silence every other one.
+            // Task 3 deliberately does not collapse a remote error to `[]`, so "asked, and
+            // there are none" and "could not ask" arrive here as genuinely different values.
+            //
+            // The directory is passed VERBATIM. `thread/list` matches `cwd` as an exact
+            // string and answers a non-matching one with an empty array and no error, so any
+            // normalisation — `standardizedFileURL`, resolving a symlink, a `/private` prefix,
+            // adding or stripping a trailing slash — turns this into a silent no-op that looks
+            // exactly like "no threads here". Probed live: an abbreviated form of a real cwd
+            // came back `data: []`.
+            guard let threads = try? await codex.threads(inDirectory: group.directory) else { continue }
+
+            // Re-read after the await: the tab may have been closed, moved, or re-pinned by
+            // the restore path while this round trip was in flight.
+            guard let session = self.session(for: tabID) else { continue }
+            let pinned = session.pinnedConversationID
+
+            // Every pin held by a *different* live tab, whatever agent it runs. Built here
+            // rather than from `ConversationPin.conflicted(_:)`: that one is claude-registry
+            // code and a post-hoc detector of tabs that already collide, where what is needed
+            // here is the opposite — refusing to create a collision in the first place.
+            let taken = Set(
+                repos.flatMap(\.sessions).filter { $0.id != tabID }.map(\.pinnedConversationID)
+            )
+
+            // Newest-first as the server sorted it (`sortKey: updated_at`, `desc`), so the
+            // first survivor of the two filters is the newest survivor.
+            let candidate = threads.first { thread in
+                // No rollout path means nothing for the watcher or the phone to read, so
+                // re-pinning to it would trade one dead file for no file at all.
+                thread.path != nil && !taken.contains(thread.id)
+            }
+            guard let candidate, let path = candidate.path else { continue }
+
+            // A pinned thread that is absent from the list counts as 0 — which is the live
+            // case, since a thread nobody has touched for three days sorts off the end of a
+            // 10-entry window. Strictly greater, never `>=`: an equal timestamp is not
+            // evidence that anything moved, and re-pinning on one would flap between two
+            // threads written in the same second. A `updatedAt` that failed to decode is also
+            // 0 (see `CodexAdapter.threads`), so it can never win either.
+            let pinnedUpdatedAt = threads.first { $0.id == pinned }?.updatedAt ?? 0
+            guard candidate.updatedAt > pinnedUpdatedAt else { continue }
+
+            repinCodex(tabID, to: AgentBinding(
+                conversationID: candidate.id,
+                transcriptURL: URL(fileURLWithPath: path)
+            ))
+            // The same route `resumeRestoredCodex` takes for a title, and what makes the fix
+            // visible on the Mac within one tick rather than only on the phone: without it the
+            // tab keeps the name of a conversation it is no longer having.
+            if let name = candidate.name, !name.isEmpty {
+                apply(.title(name), to: tabID)
+            }
+        }
+    }
+
+    /// Points a codex tab at a different thread than the one its record names.
+    ///
+    /// Two callers, and the name says what it does rather than when it runs because they are
+    /// nothing alike: `resumeRestoredCodex` uses it when the restored tab's thread was *gone*
+    /// and codex started a fresh one, and `reconcileCodexPins` uses it when the thread is
+    /// perfectly alive but the tab has been observed driving a different, newer one.
     ///
     /// Deliberately not `repin`: that one is claude's in-session `/resume`, and every step it
     /// takes past the pin describes an agent this is not — a transcript *directory* codex
     /// does not derive paths from, a sub-agent count no registry feeds, a title read out of a
     /// transcript file that has just been created empty. What has to happen here is narrower:
     /// follow the new thread, keep the rollout path codex reported for it, and repoint the
-    /// runtime, because the attachment `insertSession` made names the dead thread and no
+    /// runtime, because the attachment `insertSession` made names the old thread and no
     /// notification will ever arrive on it.
-    private func repinRestoredCodex(_ tabID: UUID, to binding: AgentBinding) {
+    private func repinCodex(_ tabID: UUID, to binding: AgentBinding) {
         guard let at = locate(tabID) else { return }
         repos[at.repo].sessions[at.session].pinnedConversationID = binding.conversationID
         repos[at.repo].sessions[at.session].transcriptPath = binding.transcriptURL?.path
@@ -2532,6 +2701,9 @@ final class SessionStore: ObservableObject {
         // store with no accounts configured at all, where the one nil key serves everything
         // and closing any tab runs exactly the check it always did.
         stopCodexIfUnused(account: closed.account)
+        // Not per account, unlike the line above: the reconciler is one object covering every
+        // login, so it goes only when the last codex tab anywhere has gone.
+        stopCodexPinReconcilerIfUnused()
         // The claude half of the same rule: an account whose last claude tab just closed has
         // no reason to keep scanning its registry, and a watcher left registered on the
         // `WatchClock` outlives every tab that justified it.
