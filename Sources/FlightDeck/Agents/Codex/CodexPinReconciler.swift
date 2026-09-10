@@ -55,10 +55,16 @@ final class CodexPinReconciler {
     /// caller asks for one outright (`resumeRestoredCodex` does, so a relaunch lands on the
     /// right thread without waiting a tick).
     ///
-    /// A *restored* tab is the exception to "nothing for a pass to find", which is why that
-    /// caller's pass runs before it types `codex resume <id>` rather than after: its pin was
-    /// negotiated in some previous run, and the user may have abandoned that thread for
+    /// A tab restored *at relaunch* is the exception to "nothing for a pass to find", which is
+    /// why that caller's pass runs before it types `codex resume <id>` rather than after: its
+    /// pin was negotiated in some previous run, and the user may have abandoned that thread for
     /// another one at any point since.
+    ///
+    /// Relaunch and no other path: `resumeRestoredCodex` takes the pass only under
+    /// `pinsPredateThisRun`, and its reopen callers — ⌘⇧T, the phone's `reopenClosedSession`,
+    /// ⌘K's `openConversation` — pass false. Their pin is a thread the user chose seconds ago,
+    /// so it is current by construction; moving it to the directory's newest thread would
+    /// override the choice instead of repairing a stale one.
     private var lastPass: ContinuousClock.Instant
 
     init(
