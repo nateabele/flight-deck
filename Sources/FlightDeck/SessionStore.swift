@@ -3706,9 +3706,12 @@ final class SessionStore: ObservableObject {
     /// is minted per composed message, and if they ever did the first send is the one the
     /// user watched land.
     ///
-    /// Changes no fleet state and emits no `FleetEvent`, deliberately: what a phone typed
-    /// becomes visible through the transcript the agent writes, not through a mirrored field,
-    /// so this feature adds no mutation site for `FleetReplicator`'s drift check to police.
+    /// Changes no fleet state and this call itself emits no `FleetEvent`, deliberately: what
+    /// a phone typed becomes visible through the transcript the agent writes, not through a
+    /// mirrored field, so this feature adds no mutation site for `FleetReplicator`'s drift
+    /// check to police. The moment of typing IS signalled, but from `flushPromptQueue`'s
+    /// `onSent` — the point where the text actually lands in the pty, which for a queued
+    /// prompt can be well after this call returns.
     @discardableResult
     func submitPrompt(_ raw: String, token: UUID, to id: UUID) -> PromptDispatch {
         guard let at = locate(id) else { return .unknownSession }
@@ -3751,6 +3754,30 @@ final class SessionStore: ObservableObject {
         // substituted `injectionSettle`, one turn later in production — so by the time this
         // line runs the entry is either gone or genuinely waiting.
         return promptQueue[id]?.contains { $0.token == token } == true ? .queued : .sent
+    }
+
+    /// Classifies what the tab's live surface reads as, for the typing-path instrumentation.
+    /// A pure read (no fleet-state mutation), same contract as `viewport(of:)`.
+    func promptTypingComposerState(for id: UUID) -> String {
+        guard let inj = injector(for: id) else { return "noInjector" }
+        guard let vp = inj.readViewport() else { return "viewportNil" }
+        if vp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "viewportEmpty" }
+        let empty = session(for: id)?.agent.textChannel?.isComposerEmpty(inj) ?? false
+        return "\(empty ? "boxEmpty" : "boxNonEmpty")(vp=\(vp.count))"
+    }
+
+    /// Emits one `.typing` record through the same sink dialog records use.
+    private func logPromptTyping(_ stage: String, for id: UUID) {
+        promptLifecycleSink(PromptLifecycleRecord(
+            session: id,
+            event: .typing(
+                stage: stage,
+                activity: statuses[id].map { String(describing: $0.activity) },
+                selected: selectedSessionID == id,
+                injector: injector(for: id) != nil,
+                composer: promptTypingComposerState(for: id)
+            )
+        ))
     }
 
     /// Files a token against a tab, oldest evicted first. See `acceptedPromptTokens`.
@@ -3801,7 +3828,8 @@ final class SessionStore: ObservableObject {
         // resume queue holds text that stops making sense in two minutes. This queue has
         // fifteen.
         guard pendingRenames[id] == nil, pendingPrompts[id] == nil else { return }
-        inject(
+        logPromptTyping("attempt", for: id)
+        let started = inject(
             head.text,
             into: id,
             allowMidTurn: true,
@@ -3815,8 +3843,10 @@ final class SessionStore: ObservableObject {
                 if self.promptQueue[id]?.isEmpty == true {
                     self.promptQueue.removeValue(forKey: id)
                 }
+                self.emit([.promptTyped(id: id, token: head.token)])
             }
         )
+        logPromptTyping("inject=\(started)", for: id)
     }
 
     // MARK: - Answering a dialog from a paired phone
