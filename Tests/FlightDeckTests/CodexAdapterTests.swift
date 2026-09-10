@@ -50,6 +50,32 @@ final class CodexAdapterTests: XCTestCase {
         }
     }
 
+    /// Answers `thread/list` with a scripted `data` array (or a scripted error), and records
+    /// the params it was sent so the request-shape test can assert on them directly. Kept
+    /// separate from `ScriptedTransport`, which has no `thread/list` case of its own and
+    /// whose existing scripts are about `thread/start`'s sequence, not this one's.
+    private final class ThreadListTransport: CodexTransport {
+        var onLine: ((String) -> Void)?
+        private(set) var methods: [String] = []
+        private(set) var lastParams: [String: Any]?
+        /// Raw JSON for the `data` array codex would answer with — set per test.
+        var data = "[]"
+        /// When set, `thread/list` answers with this error instead of a result.
+        var error: (code: Int, message: String)?
+
+        func send(_ line: String) {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let method = obj["method"] as? String, let id = obj["id"] as? Int else { return }
+            methods.append(method)
+            lastParams = obj["params"] as? [String: Any]
+            if let error {
+                onLine?(#"{"id":\#(id),"error":{"code":\#(error.code),"message":"\#(error.message)"}}"#)
+            } else {
+                onLine?(#"{"id":\#(id),"result":{"data":\#(data),"nextCursor":null,"backwardsCursor":null}}"#)
+            }
+        }
+    }
+
     private func makeAdapter() -> (CodexAdapter, ScriptedTransport) {
         let t = ScriptedTransport()
         // Every fixture's `thread["path"]` is a fake, non-existent path (`/r/<id>.jsonl`), so
@@ -296,4 +322,129 @@ final class CodexAdapterTests: XCTestCase {
         XCTAssertNotNil(params["config"], "addDirs still routes through the config override")
         XCTAssertEqual(params.count, 7)
     }
+
+    func testThreadsInDirectoryMapsEntriesInServerOrder() async throws {
+        let t = ThreadListTransport()
+        t.data = """
+        [
+          {"id":"01a0878d-3172-7c60-ac84-2a9805894a60","name":"Flesh out authoring UI plan",
+           "path":"/Users/nate/.codex/sessions/2026/09/09/a.jsonl","updatedAt":1788993339},
+          {"id":"01a01269-baa6-7493-8d15-8fa21bcb602b","name":"Fix the phone empty bug",
+           "path":"/Users/nate/.codex/sessions/2026/09/09/b.jsonl","updatedAt":1788980001}
+        ]
+        """
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+
+        let threads = try await adapter.threads(inDirectory: "/w/a")
+
+        XCTAssertEqual(threads.count, 2)
+        XCTAssertEqual(threads[0].id, UUID(uuidString: "01a0878d-3172-7c60-ac84-2a9805894a60"))
+        XCTAssertEqual(threads[0].name, "Flesh out authoring UI plan")
+        XCTAssertEqual(threads[0].path, "/Users/nate/.codex/sessions/2026/09/09/a.jsonl")
+        XCTAssertEqual(threads[0].updatedAt, 1_788_993_339, "updatedAt is the seconds integer, verbatim")
+        XCTAssertEqual(threads[1].id, UUID(uuidString: "01a01269-baa6-7493-8d15-8fa21bcb602b"))
+        XCTAssertEqual(threads[1].name, "Fix the phone empty bug")
+        XCTAssertEqual(threads[1].path, "/Users/nate/.codex/sessions/2026/09/09/b.jsonl")
+        XCTAssertEqual(threads[1].updatedAt, 1_788_980_001)
+    }
+
+    func testThreadsInDirectorySendsTheExactRequestShape() async throws {
+        // This is the assertion that catches a silently-wrong query: `cwd` is matched as an
+        // exact string, and a mismatch comes back `[]` with no error, forever.
+        let t = ThreadListTransport()
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+
+        _ = try await adapter.threads(inDirectory: "/w/some/dir")
+
+        XCTAssertEqual(t.methods, ["thread/list"])
+        let params = try XCTUnwrap(t.lastParams)
+        XCTAssertEqual(params["cwd"] as? String, "/w/some/dir")
+        XCTAssertEqual(params["sortKey"] as? String, "updated_at")
+        XCTAssertEqual(params["sortDirection"] as? String, "desc")
+        XCTAssertEqual(Set(params["sourceKinds"] as? [String] ?? []), ["cli", "vscode"])
+    }
+
+    func testThreadsInDirectoryReturnsEmptyArrayForEmptyData() async throws {
+        let t = ThreadListTransport()
+        t.data = "[]"
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+
+        let threads = try await adapter.threads(inDirectory: "/w/a")
+
+        XCTAssertTrue(threads.isEmpty, "empty data must map to [], not throw")
+    }
+
+    func testThreadsInDirectorySkipsAnEntryWithAnUnparseableID() async throws {
+        let t = ThreadListTransport()
+        t.data = """
+        [
+          {"id":"not-a-uuid","name":"broken","path":"/x.jsonl","updatedAt":1},
+          {"id":"01a01269-baa6-7493-8d15-8fa21bcb602b","name":"fine","path":"/y.jsonl","updatedAt":2}
+        ]
+        """
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+
+        let threads = try await adapter.threads(inDirectory: "/w/a")
+
+        XCTAssertEqual(threads.count, 1, "the one malformed entry must not lose the rest")
+        XCTAssertEqual(threads[0].id, UUID(uuidString: "01a01269-baa6-7493-8d15-8fa21bcb602b"))
+    }
+
+    func testThreadsInDirectoryKeepsAnEntryWithNoPathAndNoName() async throws {
+        let t = ThreadListTransport()
+        t.data = """
+        [{"id":"01a01269-baa6-7493-8d15-8fa21bcb602b","updatedAt":42}]
+        """
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+
+        let threads = try await adapter.threads(inDirectory: "/w/a")
+
+        XCTAssertEqual(threads.count, 1, "a genuinely-nil path/name must not be dropped")
+        XCTAssertNil(threads[0].path)
+        XCTAssertNil(threads[0].name)
+        XCTAssertEqual(threads[0].updatedAt, 42)
+    }
+
+    func testThreadsInDirectoryPropagatesARemoteErrorRatherThanReturningEmpty() async throws {
+        // Task 4 must be able to tell "asked and there are none" apart from "could not ask" —
+        // collapsing a broken app-server to [] would make the reconciler read it as "no
+        // threads here" and silently do nothing.
+        let t = ThreadListTransport()
+        t.error = (code: -32000, message: "boom")
+        let adapter = CodexAdapter(rpc: CodexRPC(transport: t))
+
+        do {
+            _ = try await adapter.threads(inDirectory: "/w/a")
+            XCTFail("a remote error must propagate, not collapse to []")
+        } catch CodexRPCError.remote(let code, let message) {
+            XCTAssertEqual(code, -32000)
+            XCTAssertEqual(message, "boom")
+        } catch {
+            XCTFail("expected CodexRPCError.remote, got \(error)")
+        }
+    }
+
+    func testThreadsInDirectoryTimesOutRatherThanHangingOnASilentAppServer() async throws {
+        // `readTimeout` is a `var` precisely so this can be driven low rather than waiting
+        // out a real multi-second hang.
+        var adapter = CodexAdapter(rpc: CodexRPC(transport: SilentTransport()))
+        adapter.readTimeout = 0.05
+
+        do {
+            _ = try await adapter.threads(inDirectory: "/w/a")
+            XCTFail("expected a timeout")
+        } catch CodexRPCError.timeout {
+            // expected
+        } catch {
+            XCTFail("expected CodexRPCError.timeout, got \(error)")
+        }
+    }
+}
+
+/// A transport that records nothing and answers nothing — every request it is sent hangs
+/// forever, so the only way a caller unblocks is `readTimeout`'s own race. Used to prove
+/// `threads(inDirectory:)` is genuinely bounded, the same way `read(_:)` already is.
+private final class SilentTransport: CodexTransport {
+    var onLine: ((String) -> Void)?
+    func send(_ line: String) {}
 }

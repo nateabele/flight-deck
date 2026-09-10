@@ -1,6 +1,21 @@
 import FleetKit
 import Foundation
 
+/// One entry from codex's `thread/list` — trimmed to exactly what `threads(inDirectory:)`'s
+/// caller (Task 4's reconciler) needs to tell whether a tab is still driving the thread its
+/// session record is pinned to. Do not widen this "while you're here"; everything else in a
+/// `thread/list` entry (status, preview, gitInfo, turns, …) is deliberately left unmapped.
+struct CodexThreadSummary {
+    let id: UUID
+    let path: String?
+    let name: String?
+    let updatedAt: Int
+}
+
+/// The cap `threads(inDirectory:)` passes as `thread/list`'s `limit`. Task 4's reconciler
+/// only ever looks at the newest few threads, so there is no reason to ask codex for more.
+private let codexThreadListLimit = 10
+
 /// Codex conformance, driven over `codex app-server` JSON-RPC rather than by typing at a pty.
 ///
 /// The inversion versus claude is deliberate and forced by the tool: codex assigns thread
@@ -326,6 +341,66 @@ struct CodexAdapter: AgentAdapter {
             defer { group.cancelAll() }
             guard let first = try await group.next() else { throw CodexRPCError.timeout }
             return (title: first.0, activity: first.1)
+        }
+    }
+
+    /// Asks codex which threads have recently been active in `directory` — the producer half
+    /// of Task 4's reconciler, which re-pins a tab whose session record points at a thread
+    /// the user has since abandoned (typed `codex` fresh at the tab's prompt rather than
+    /// letting Flight Deck resume the one it had pinned).
+    ///
+    /// **`cwd` is matched as an exact string, and a non-matching one is a silent no-op, not a
+    /// failure.** Probed live against codex-cli 0.153.4: passing an abbreviated form of a
+    /// real cwd came back `data: []` with no error at all. A `/private` prefix, a resolved
+    /// symlink, a trailing slash — any normalisation difference between what is passed here
+    /// and what codex recorded as the thread's own cwd — is indistinguishable from "no
+    /// threads here". This is the failure mode most likely to make Task 4's reconciler look
+    /// like it simply does not work.
+    ///
+    /// `sourceKinds` deliberately excludes `exec`: the large majority of rollouts on a typical
+    /// machine are `codex exec` runs, and any of them would otherwise be eligible to steal a
+    /// binding. `vscode` is kept so a hand-typed `codex resume <another flight-deck thread>`
+    /// is still followed. The server does the sorting (newest first); entries come back in
+    /// the order it gives them.
+    ///
+    /// Bounded by `readTimeout`, same shape and same reason as `read(_:)` above: `CodexRPC`
+    /// has no deadline of its own, and an app-server that answers `initialize` and then goes
+    /// quiet would otherwise wedge whatever calls this — in Task 4, a clock tick on the main
+    /// actor.
+    func threads(inDirectory directory: String) async throws -> [CodexThreadSummary] {
+        let rpc = self.rpc
+        let seconds = readTimeout
+        let params: [String: Any] = [
+            "cwd": directory,
+            "limit": codexThreadListLimit,
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "sourceKinds": ["cli", "vscode"],
+        ]
+        return try await withThrowingTaskGroup(of: [CodexThreadSummary].self) { group in
+            group.addTask { @MainActor in
+                let result = try await rpc.request("thread/list", params)
+                let entries = result["data"] as? [[String: Any]] ?? []
+                // A malformed id must drop only its own entry, not the whole response — one
+                // bad row must not lose every other thread it was found alongside.
+                return entries.compactMap { entry in
+                    guard let raw = entry["id"] as? String, let id = UUID(uuidString: raw)
+                    else { return nil }
+                    return CodexThreadSummary(
+                        id: id,
+                        path: entry["path"] as? String,
+                        name: entry["name"] as? String,
+                        updatedAt: entry["updatedAt"] as? Int ?? 0
+                    )
+                }
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw CodexRPCError.timeout
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw CodexRPCError.timeout }
+            return first
         }
     }
 
