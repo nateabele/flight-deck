@@ -127,18 +127,39 @@ static void process_byte(FdOutlog *o, unsigned char b) {
         return;
     }
 
-    /* DCS: o->pend[1] == 'P' -- buffer until the two-byte ST (ESC \) */
+    /* DCS: o->pend[1] == 'P' -- buffer until the string terminator, which
+     * is either the two-byte ST (ESC \) or a lone BEL (0x07); real
+     * terminals accept both as ST for DCS/OSC-style strings. */
     o->pend[o->pend_len++] = (char)b;
-    if (o->pend_len >= 2 &&
-        (unsigned char)o->pend[o->pend_len - 2] == 0x1b &&
-        (unsigned char)o->pend[o->pend_len - 1] == '\\') {
-        if (dcs_is_query(o->pend, o->pend_len)) o->pend_len = 0; /* drop */
-        else flush_pending(o);
+    {
+        int st_two_byte = o->pend_len >= 2 &&
+            (unsigned char)o->pend[o->pend_len - 2] == 0x1b &&
+            (unsigned char)o->pend[o->pend_len - 1] == '\\';
+        int st_bel = b == 0x07;
+        if (st_two_byte || st_bel) {
+            if (dcs_is_query(o->pend, o->pend_len)) o->pend_len = 0; /* drop */
+            else flush_pending(o);
+        }
     }
 }
 
 void fd_outlog_append(FdOutlog *o, const char *buf, size_t len) {
-    for (size_t i = 0; i < len; i++) process_byte(o, (unsigned char)buf[i]);
+    size_t i = 0;
+    while (i < len) {
+        if (o->pend_len == 0) {
+            /* common case: bulk-emit the run of normal bytes up to the
+             * next ESC in one ensure+memcpy, instead of the state machine's
+             * one-byte-at-a-time raw_emit -- keeps the hot path cheap for
+             * bursty/large pty output. */
+            size_t start = i;
+            while (i < len && (unsigned char)buf[i] != 0x1b) i++;
+            if (i > start) raw_emit(o, buf + start, i - start);
+            if (i == len) break;
+            /* buf[i] is ESC: fall through to the candidate state machine */
+        }
+        process_byte(o, (unsigned char)buf[i]);
+        i++;
+    }
     if (o->len > 2 * o->budget) fd_outlog_trim(o); /* amortized: keep the hot path cheap */
 }
 

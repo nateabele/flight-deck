@@ -26,6 +26,15 @@ int main(void) {
     assert(o.len == 2 && memcmp(o.data, "xy", 2) == 0);
     fd_outlog_free(&o);
 
+    /* 2b. XTGETTCAP DCS terminated by BEL (0x07) is also stripped --
+     * ST is ESC \ OR BEL; a BEL-terminated query must not be flushed
+     * verbatim into the ring. */
+    fd_outlog_init(&o, 1024);
+    fd_outlog_append(&o, "x\x1bP+q544e\x07y", 11);
+    fd_outlog_trim(&o);
+    assert(o.len == 2 && memcmp(o.data, "xy", 2) == 0);
+    fd_outlog_free(&o);
+
     /* 3a. DA1 stripped */
     fd_outlog_init(&o, 1024);
     fd_outlog_append(&o, "\x1b[c", 3);
