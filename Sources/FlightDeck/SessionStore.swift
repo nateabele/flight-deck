@@ -2330,7 +2330,8 @@ final class SessionStore: ObservableObject {
     ///   marked unread until the user happened to create a *new* codex tab, which started the
     ///   memoized stack and incidentally revived it. `preparedAdapter` is what starts it, and
     ///   this method only runs when a codex tab came back, so the laziness holds.
-    /// - **Identity is settled** with `rebind` rather than read off the pin, and the tab is
+    /// - **Identity is settled** — first by one `reconcileCodexPins` pass over every codex
+    ///   tab, then per tab with `rebind` rather than read off the pin — and the tab is
     ///   re-pinned when codex answers with a different thread. See `CodexAdapter.rebind`.
     /// - **The resume command is typed afterwards**, which is why `restore` left
     ///   `initialInput` empty for these tabs.
@@ -2338,6 +2339,10 @@ final class SessionStore: ObservableObject {
     /// Degrades to the pinned thread whenever it cannot ask — no app-server, or one that will
     /// not answer. Not knowing whether a thread is gone is not the same as knowing it is, and
     /// the command this types then is exactly the one restore used to type unconditionally.
+    ///
+    /// **Three stages, and the order between them is the whole point.** Prepare every account,
+    /// then reconcile once, then bind and send. See the comment on stage 2 for what typing
+    /// first cost.
     private func resumeRestoredCodex(_ tabIDs: [UUID]) async {
         // One prepare per account, not per tab. `startCodex` already memoizes the handshake,
         // so a second ask would not spawn a second app-server — but it would count as a
@@ -2346,6 +2351,9 @@ final class SessionStore: ObservableObject {
         // waiting on the other's `initialize`.
         var preparedPerAccount: [AgentInstance: (any AgentAdapter)?] = [:]
 
+        // **Stage 1 — every account's app-server up.** Nothing here reads or writes a pin, so
+        // it can precede the reconcile pass, which is the point: that pass needs a started
+        // app-server and nothing else this method produces.
         for tabID in tabIDs {
             // A tab the user closed while the app-server was starting has nothing to resume,
             // and re-pinning it would file state against a row that no longer exists.
@@ -2358,8 +2366,6 @@ final class SessionStore: ObservableObject {
                 prepared = try? await preparedAdapter(for: instance)
                 preparedPerAccount[instance] = prepared
             }
-            let adapter = prepared ?? self.adapter(for: instance)
-            let options = options(for: .codex, project: session.workingDirectory)
 
             // A failed probe or handshake tore the stack down — `startCodex` calls
             // `stopCodex` so the next attempt re-probes rather than replaying the failure —
@@ -2372,6 +2378,45 @@ final class SessionStore: ObservableObject {
                 stopWatching(tabID)
                 startWatching(tabID: tabID)
             }
+        }
+
+        // **Stage 2 — one pass, BEFORE anything is typed.** `rebind` below asks only whether
+        // the *pinned* thread still exists, never whether it is still the thread the user
+        // works in, so a pin left behind by a previous run survives it untouched. This pass is
+        // the only thing that answers the second question, and it used to run after the loop —
+        // which meant a relaunch typed `codex resume <abandoned-thread>` and only then learned
+        // better, leaving the store, the watcher, the title and the phone on the right thread
+        // while the terminal sat on an empty TUI. Flight Deck creates its pinned thread itself
+        // in `prepare`, so "wrong thread" reads as "blank conversation": that is the whole of
+        // the "codex resume is broken" symptom. Measured live across 26 Flight-Deck-created
+        // threads, only 2 ever carried a turn.
+        //
+        // Immediate rather than waiting up to a throttle window for the reconciler's first
+        // tick, for the same reason: a relaunch is precisely when a tab is most likely to be
+        // pinned to a thread the user abandoned in the previous run.
+        //
+        // It needs no state stage 1 produced beyond a started app-server: it reads `repos` and
+        // resolves its own adapters through `adapter(for:)`. A group whose server never came up
+        // is skipped by its own per-group `try?`, so the degraded path is exactly as it was.
+        //
+        // **Known limitation, deliberately not fixed.** Its `taken` set excludes threads pinned
+        // by other Flight Deck tabs, not one held by a TUI started by hand outside Flight Deck.
+        // Selecting such a thread while its writer lock is still held makes `codex resume` fail
+        // visibly in the tab (`already has an active writer (code -32600)`) — a loud,
+        // correctable failure, where the behaviour it replaces is a silent wrong thread. Lock
+        // probing before selection is not worth the round trip for that trade.
+        await reconcileCodexPins()
+
+        // **Stage 3 — bind and send, on a pin stage 2 has just made current.**
+        for tabID in tabIDs {
+            guard let session = session(for: tabID) else { continue }
+            let instance = instance(for: session)
+            // Flattened: a miss and a stored nil both mean "no app-server for this account",
+            // and stage 1 visited exactly these tabs, so a miss here is a tab that has since
+            // been closed — which the guard above has already dropped.
+            let prepared = preparedPerAccount[instance] ?? nil
+            let adapter = prepared ?? self.adapter(for: instance)
+            let options = options(for: .codex, project: session.workingDirectory)
 
             var binding = adapter.binding(for: session)
             if prepared != nil,
@@ -2399,11 +2444,12 @@ final class SessionStore: ObservableObject {
             sendToShell(adapter.resumeCommand(binding, repinned, options), into: tabID)
         }
 
-        // One pass right now, rather than waiting up to a throttle window for the reconciler's
-        // first tick. A relaunch is precisely when a tab is most likely to be pinned to the
-        // wrong thread: `rebind` only asks whether the *pinned* thread still exists, and a
-        // thread the user started by hand in a previous run leaves that one alive and stale.
-        await reconcileCodexPins()
+        // No second pass behind the loop. The only pin stage 3 can change is one `rebind`
+        // re-pointed because its thread was *gone*, and the replacement `prepare` creates is by
+        // definition the newest thread in that directory — and already in
+        // `codexThreadsEverPinned` — so a fresh pass would re-select it and stop at the
+        // strictly-greater test, having paid one `thread/list` round trip per directory to
+        // learn nothing. The 5 s ticker covers everything after restore.
     }
 
     /// Follows a codex tab to the thread it is actually driving.
@@ -2415,9 +2461,11 @@ final class SessionStore: ObservableObject {
     /// while its record pinned a different one whose rollout was one line long and three days
     /// stale. The rollout watcher, the phone, and the tab title were all reading the dead file.
     ///
-    /// Called from `CodexPinReconciler` on a throttled tick, and once directly at the end of
-    /// `resumeRestoredCodex`. Directly callable, and taking nothing, so every rule below is
-    /// assertable with no clock and no expectations.
+    /// Called from `CodexPinReconciler` on a throttled tick, and once directly by
+    /// `resumeRestoredCodex` — between starting the app-servers and typing anything, never
+    /// after, or a relaunch types a command naming the thread this pass is about to move off.
+    /// Directly callable, and taking nothing, so every rule below is assertable with no clock
+    /// and no expectations.
     func reconcileCodexPins() async {
         // Grouped by the pair that decides which app-server to ask and what to ask it about.
         // `instance(for:)` is the store's one normalisation for the account key — a second one

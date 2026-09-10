@@ -196,6 +196,10 @@ final class CodexIntegrationTests: XCTestCase {
     /// `resumeRestoredCodex`'s re-attach heal (`stopWatching`/`startWatching`, taken exactly
     /// when `preparedAdapter` throws).
     ///
+    /// It is also the only test of the fully degraded restore: the heal is stage 1 of
+    /// `resumeRestoredCodex`, and the `reconcileCodexPins` pass in stage 2 is stopped by the
+    /// same dead app-server — so the pin below survives untouched and is what stage 3 types.
+    ///
     /// This used to force that failure for free: `CodexProcessTransport.verifyHandshake` sent
     /// `initialize` with `rpc.request("initialize", [:])`, which real codex rejected outright
     /// (`-32600 missing field 'params'`), so `startCodex()` failed every time against a real

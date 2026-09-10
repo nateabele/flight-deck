@@ -19,11 +19,25 @@ final class CodexResumeTests: XCTestCase {
         /// because `read` maps the whole union through `CodexThreadStatus`, and `idle` — the
         /// default the rest of this file relies on — is only one of its four cases.
         var readStatus = #"{"type":"idle"}"#
+        /// `thread/list` results, as raw entries, keyed by the `cwd` asked about — the shape
+        /// `CodexAdapter.threads` decodes. Empty by default, which is what every test written
+        /// before the reconcile pass moved in front of the sends assumes: a directory codex
+        /// reports no threads for leaves every pin exactly where it is.
+        var threads: [String: [[String: Any]]] = [:]
+        /// Every `cwd` a `thread/list` carried, in order and unmodified. `thread/list` matches
+        /// `cwd` as an exact string, so a normalised path is a silent no-op that looks just
+        /// like "no threads here".
+        private(set) var listed: [String] = []
+        /// Answers `thread/list` with codex's own error shape instead of a result. "Could not
+        /// ask" is not "asked, and there are none": a reconcile pass that cannot reach the
+        /// app-server must leave every pin in the group exactly where it is.
+        var listFails = false
 
         func send(_ line: String) {
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
                   let method = obj["method"] as? String, let id = obj["id"] as? Int else { return }
             methods.append(method)
+            let params = obj["params"] as? [String: Any]
             switch method {
             case "thread/read" where threadMissing:
                 // codex's ACTUAL answer for a thread with no rollout, probed against
@@ -31,7 +45,24 @@ final class CodexResumeTests: XCTestCase {
                 // codex has never sent: every app-server error is `-32600`, and the message
                 // names the thread. `CodexAdapter.isThreadGone` keys on the message for
                 // exactly that reason, so a stub that invented one proved nothing.
-                onLine?(#"{"id":\#(id),"error":{"code":-32600,"message":"thread not loaded: 01a01269-baa6-7493-8d15-8fa21bcb602b"}}"#)
+                //
+                // The id is echoed from the request rather than hard-coded, because that is
+                // the half of the signal `isThreadGone` actually keys on: it requires the
+                // message to name the thread *it asked about*. A canned id answers "gone" for
+                // one fixture thread and "some unrelated remote error" for every other one,
+                // which silently disables the gone-path for any test that re-pins first.
+                let asked = params?["threadId"] as? String ?? ""
+                onLine?(#"{"id":\#(id),"error":{"code":-32600,"message":"thread not loaded: \#(asked)"}}"#)
+            case "thread/list":
+                let cwd = params?["cwd"] as? String ?? ""
+                listed.append(cwd)
+                guard !listFails else {
+                    onLine?(#"{"id":\#(id),"error":{"code":-32600,"message":"app-server is gone"}}"#)
+                    return
+                }
+                let body: [String: Any] = ["id": id, "result": ["data": threads[cwd] ?? []]]
+                guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+                onLine?(String(decoding: data, as: UTF8.self))
             case "thread/read":
                 onLine?(#"{"id":\#(id),"result":{"thread":{"id":"01a01269-baa6-7493-8d15-8fa21bcb602b","name":"restored","status":\#(readStatus),"path":"/r/x.jsonl","cwd":"/w/a"}}}"#)
             case "thread/start":
@@ -52,6 +83,16 @@ final class CodexResumeTests: XCTestCase {
 
     private let existing = UUID(uuidString: "01a01269-baa6-7493-8d15-8fa21bcb602b")!
     private let fresh = UUID(uuidString: "01a01705-bd49-7b70-a0a1-4514d4bda5dd")!
+
+    /// The live case the reconcile-before-send restructure was diagnosed from, replayed as a
+    /// fixture: a tab pinned to a thread Flight Deck created and nobody ever took a turn in,
+    /// in a directory whose newest thread is the conversation the user is really having. The
+    /// id prefixes and the directory are the real ones from `~/.codex/state_5.sqlite`; the
+    /// uuid tails are synthetic, because only the `updatedAt` ordering decides anything.
+    private let stalePin = UUID(uuidString: "01a07927-0000-7000-8000-000000000001")!
+    private let liveThread = UUID(uuidString: "01a0878d-0000-7000-8000-000000000002")!
+    private let otherPin = UUID(uuidString: "01a0878d-0000-7000-8000-000000000003")!
+    private let liveDirectory = "/Users/nate/Projects/Startups/Field/ogolvy-app"
 
     // MARK: - The adapter
 
@@ -320,9 +361,8 @@ final class CodexResumeTests: XCTestCase {
         agent: AgentID, transport: CodexTransport?, readTimeout: Double = 5
     ) -> (SessionStore, RecordingProvider, SpyInjector, UUID) {
         let tabID = UUID()
-        let persistence = FakePersistence()
-        persistence.stored = SessionSnapshot(
-            sessions: [.init(
+        let (store, provider, injector) = makeStore(
+            entries: [.init(
                 id: tabID,
                 title: "a",
                 workingDirectory: "/w/a",
@@ -330,8 +370,25 @@ final class CodexResumeTests: XCTestCase {
                 agent: agent,
                 transcriptPath: agent == .codex ? "/r/x.jsonl" : nil
             )],
-            selectedSessionID: tabID,
-            sessionCounter: 1
+            transport: transport,
+            readTimeout: readTimeout
+        )
+        return (store, provider, injector, tabID)
+    }
+
+    /// The same store, over an arbitrary set of restored tabs.
+    ///
+    /// Split out of `makeRestoredStore` for the reconcile-before-send cases below, whose
+    /// fixtures need a pin, a directory or a second tab of their own — the one canned session
+    /// that helper builds cannot express any of them.
+    private func makeStore(
+        entries: [SessionSnapshot.Entry], transport: CodexTransport?, readTimeout: Double = 5
+    ) -> (SessionStore, RecordingProvider, SpyInjector) {
+        let persistence = FakePersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: entries,
+            selectedSessionID: entries.first?.id,
+            sessionCounter: entries.count
         )
         let provider = RecordingProvider()
         retained.append(provider)
@@ -356,7 +413,24 @@ final class CodexResumeTests: XCTestCase {
                 for: .codex, account: nil
             )
         }
-        return (store, provider, injector, tabID)
+        return (store, provider, injector)
+    }
+
+    /// One restored codex tab, in the shape the snapshot stores it.
+    private func codexEntry(
+        _ id: UUID, pinned: UUID, directory: String = "/w/a", path: String = "/r/x.jsonl"
+    ) -> SessionSnapshot.Entry {
+        .init(
+            id: id, title: "a", workingDirectory: directory, pinnedConversationID: pinned,
+            agent: .codex, transcriptPath: path
+        )
+    }
+
+    /// One `thread/list` entry, in the shape `CodexAdapter.threads` decodes.
+    private func entry(_ id: UUID, updatedAt: Int, path: String? = "/r/live.jsonl") -> [String: Any] {
+        var raw: [String: Any] = ["id": id.uuidString.lowercased(), "updatedAt": updatedAt]
+        if let path { raw["path"] = path }
+        return raw
     }
 
     /// Requirement: the restore path settles identity with `thread/read`, never straight off
@@ -371,13 +445,13 @@ final class CodexResumeTests: XCTestCase {
                        "nothing may be typed at a codex tab before its thread is known to exist")
         await store.codexRestoreTask?.value
 
-        // Two reads, not one: `rebind` settles identity, and `resumeRestoredCodex`'s own
-        // follow-up read recovers a title changed while Flight Deck was closed — see
-        // `testARestoredCodexTabRecoversATitleChangedWhileItWasClosed` below.
-        // Two reads and then a `thread/list`: the restore path asks for one reconcile pass on
-        // its way out, so a relaunch lands on the thread the tab is really driving without
-        // waiting a throttle window. See `SessionStore.reconcileCodexPins`.
-        XCTAssertEqual(t.methods, ["thread/read", "thread/read", "thread/list"])
+        // A `thread/list` and then two reads, in that order. The reconcile pass runs *before*
+        // anything is bound or typed, so the two reads that follow it — `rebind` settling
+        // identity, then the follow-up read that recovers a title changed while Flight Deck
+        // was closed — see a pin that is already current. Typing first and reconciling
+        // afterwards is the defect this ordering exists to close: it left the terminal on a
+        // thread the store had already moved off. See `SessionStore.reconcileCodexPins`.
+        XCTAssertEqual(t.methods, ["thread/list", "thread/read", "thread/read"])
         XCTAssertEqual(injector.sent, ["codex resume \(existing.uuidString.lowercased())"])
         XCTAssertEqual(injector.returns, 1, "a paste alone submits nothing")
         XCTAssertEqual(store.pinnedConversationID(of: tabID), existing)
@@ -454,5 +528,146 @@ final class CodexResumeTests: XCTestCase {
         XCTAssertTrue(injector.sent.isEmpty, "claude's resume text goes in at surface creation")
         XCTAssertNotEqual(provider.configs.last?.initialInput, "",
                           "claude's restore path must be untouched")
+    }
+
+    // MARK: - Reconcile before the command is typed
+
+    /// **The defect this ordering closes.** `codex resume <id>` is not broken — codex attaches
+    /// to exactly the thread it is given. What was broken is which id a relaunch handed it.
+    /// `rebind` only asks whether the *pinned* thread still exists, never whether it is still
+    /// the thread the user works in, so a pin left behind by a previous run survives it
+    /// untouched and gets typed at the shell. The pass that knows better used to run after the
+    /// loop, which left the store, the watcher, the title and the phone all on the right
+    /// thread while the terminal sat on the wrong one — an empty TUI, because Flight Deck
+    /// creates its pinned thread itself in `prepare` and it is empty by construction.
+    ///
+    /// Replays the live case: three separate TUI processes resumed `01a07927` (0 tokens since
+    /// creation) and were switched by hand to a real thread, the last of them 1 h 48 m later.
+    /// Against the pre-fix ordering this test names `01a07927` — that assertion is the bug.
+    func testARestoredCodexTabResumesTheThreadTheUserIsActuallyDriving() async {
+        let t = ScriptedTransport()
+        t.threads[liveDirectory] = [
+            entry(liveThread, updatedAt: 2_000, path: "/r/live.jsonl"),
+            entry(stalePin, updatedAt: 1_000, path: "/r/stale.jsonl"),
+        ]
+        let tabID = UUID()
+        let (store, _, injector) = makeStore(
+            entries: [codexEntry(
+                tabID, pinned: stalePin, directory: liveDirectory, path: "/r/stale.jsonl"
+            )],
+            transport: t
+        )
+
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        await store.codexRestoreTask?.value
+
+        XCTAssertEqual(injector.sent, ["codex resume \(liveThread.uuidString.lowercased())"],
+                       "the command must name the thread the reconcile pass settled on, not "
+                       + "the pin it was settled from")
+        XCTAssertEqual(store.pinnedConversationID(of: tabID), liveThread,
+                       "the terminal and the record must land on the same thread")
+        XCTAssertEqual(t.listed, [liveDirectory],
+                       "the directory goes on the wire verbatim: `thread/list` matches `cwd` "
+                       + "as an exact string and answers a normalised one with an empty array")
+    }
+
+    /// The other half of the rule: a pin that is already the newest thread in its directory is
+    /// left exactly where it is. The record's own rollout path differs from the one the
+    /// listing reports for the same thread, so a re-pin — which rewrites that path — is
+    /// distinguishable from having correctly done nothing.
+    func testARestoredCodexTabWhosePinIsAlreadyCurrentIsTypedThatPin() async {
+        let t = ScriptedTransport()
+        t.threads["/w/a"] = [entry(existing, updatedAt: 2_000, path: "/r/live.jsonl")]
+        let (store, _, injector, tabID) = makeRestoredStore(agent: .codex, transport: t)
+
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        await store.codexRestoreTask?.value
+
+        XCTAssertEqual(injector.sent, ["codex resume \(existing.uuidString.lowercased())"])
+        XCTAssertEqual(store.pinnedConversationID(of: tabID), existing)
+        let session = store.repos.flatMap(\.sessions).first { $0.id == tabID }
+        XCTAssertEqual(session?.transcriptPath, "/r/x.jsonl",
+                       "no re-pin happened: `repinCodex` would have rewritten this to the "
+                       + "path the listing reported")
+    }
+
+    /// The degraded path. An app-server that will not answer says nothing about this
+    /// directory's threads, so the pass leaves the pin alone and the tab is still typed at —
+    /// not knowing whether a thread has moved is not the same as knowing it has. The listing
+    /// is stocked with a newer thread that would win outright, so what refuses it is the
+    /// failure itself rather than an empty answer.
+    ///
+    /// The sibling case where `preparedAdapter` *throws* — a real `startCodex()` failure,
+    /// which no store here can produce because `overrideAdapter` answers first — is covered by
+    /// `CodexIntegrationTests.testARestoredCodexTabReattachesAfterAStartCodexFailure`,
+    /// including the `stopWatching`/`startWatching` re-attach that goes with it.
+    func testAReconcilePassThatCannotAskLeavesThePinAndStillTypesIt() async {
+        let t = ScriptedTransport()
+        t.listFails = true
+        t.threads["/w/a"] = [entry(liveThread, updatedAt: 2_000, path: "/r/live.jsonl")]
+        let (store, _, injector, tabID) = makeRestoredStore(agent: .codex, transport: t)
+
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        await store.codexRestoreTask?.value
+
+        XCTAssertEqual(injector.sent, ["codex resume \(existing.uuidString.lowercased())"],
+                       "a restore that cannot reach the app-server must still produce a "
+                       + "usable tab, on the thread it already had")
+        XCTAssertEqual(store.pinnedConversationID(of: tabID), existing)
+    }
+
+    /// A thread that was deleted between launches still ends on the replacement `prepare`
+    /// started, and nothing moves it afterwards.
+    ///
+    /// Exactly one `thread/list`: the pass that used to trail the loop is gone. Removing it is
+    /// safe precisely here, on the only path where stage 3 can still change a pin — a second
+    /// pass would find that replacement is the newest thread in the directory *and* already in
+    /// `codexThreadsEverPinned`, so it would re-select nothing and stop. The 5 s ticker covers
+    /// everything after restore.
+    func testAGoneThreadEndsOnItsReplacementWithNoSecondReconcilePass() async {
+        let t = ScriptedTransport()
+        t.threadMissing = true
+        t.threads["/w/a"] = [entry(liveThread, updatedAt: 2_000, path: "/r/live.jsonl")]
+        let (store, _, injector, tabID) = makeRestoredStore(agent: .codex, transport: t)
+
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        await store.codexRestoreTask?.value
+
+        XCTAssertEqual(store.pinnedConversationID(of: tabID), fresh,
+                       "the pass re-pins onto the directory's newest thread, `rebind` finds "
+                       + "that one gone too, and `prepare`'s replacement is what survives")
+        XCTAssertEqual(injector.sent, ["codex resume \(fresh.uuidString.lowercased())"])
+        XCTAssertEqual(t.methods.filter { $0 == "thread/list" }.count, 1,
+                       "one reconcile pass per restore, in front of the sends — never a "
+                       + "second one behind them")
+    }
+
+    /// Two live codex tabs in one directory: `thread/list` reports the directory's threads,
+    /// not which tab is driving which, so a newly appeared thread cannot be attributed to
+    /// either of them and the group is skipped whole. Both tabs are still typed at, each with
+    /// its own pin. Guessing wrong here would re-pin a tab away from the user's real
+    /// conversation, and the pin is the only record of where that conversation was.
+    func testTwoCodexTabsInOneDirectoryAreEachTypedTheirOwnPin() async {
+        let t = ScriptedTransport()
+        t.threads["/w/a"] = [entry(liveThread, updatedAt: 9_000, path: "/r/live.jsonl")]
+        let first = UUID()
+        let second = UUID()
+        let (store, _, injector) = makeStore(
+            entries: [
+                codexEntry(first, pinned: stalePin, path: "/r/one.jsonl"),
+                codexEntry(second, pinned: otherPin, path: "/r/two.jsonl"),
+            ],
+            transport: t
+        )
+
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        await store.codexRestoreTask?.value
+
+        XCTAssertEqual(injector.sent, [
+            "codex resume \(stalePin.uuidString.lowercased())",
+            "codex resume \(otherPin.uuidString.lowercased())",
+        ])
+        XCTAssertEqual(store.pinnedConversationID(of: first), stalePin)
+        XCTAssertEqual(store.pinnedConversationID(of: second), otherPin)
     }
 }

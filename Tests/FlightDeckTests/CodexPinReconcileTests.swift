@@ -647,8 +647,9 @@ final class CodexPinReconcileTests: XCTestCase {
     /// trip per directory, and a human typing `codex` at a shell does not need it every beat.
     ///
     /// The first tick is throttled too — `lastPass` is seeded at construction — because a tab
-    /// that has only just been created or restored is pinned to the thread it just negotiated.
-    /// Where an immediate pass is genuinely needed, `resumeRestoredCodex` asks for one outright.
+    /// that has only just been created is pinned to the thread it just negotiated. A *restored*
+    /// tab is not: its pin came from a previous run. So `resumeRestoredCodex` asks for a pass
+    /// outright, and takes it before it types `codex resume <id>` rather than after.
     func testTicksInsideTheThrottleWindowFireNoPass() async {
         let passes = expectation(description: "one pass, eventually")
         var count = 0

@@ -54,6 +54,11 @@ final class CodexPinReconciler {
     /// there is nothing for a pass to find. Where an immediate pass genuinely is needed, the
     /// caller asks for one outright (`resumeRestoredCodex` does, so a relaunch lands on the
     /// right thread without waiting a tick).
+    ///
+    /// A *restored* tab is the exception to "nothing for a pass to find", which is why that
+    /// caller's pass runs before it types `codex resume <id>` rather than after: its pin was
+    /// negotiated in some previous run, and the user may have abandoned that thread for
+    /// another one at any point since.
     private var lastPass: ContinuousClock.Instant
 
     init(
