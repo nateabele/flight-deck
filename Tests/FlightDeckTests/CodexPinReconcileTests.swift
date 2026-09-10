@@ -188,17 +188,30 @@ final class CodexPinReconcileTests: XCTestCase {
 
     // MARK: - 2. Older or equal is ignored
 
-    /// Strictly greater, never `>=`. The older case is obvious; the equal case is the one a
-    /// `>=` gets wrong, and it is not hypothetical — two threads written in the same second
-    /// would flap the tab between them on every tick, forever.
+    /// Strictly greater, never `>=`.
+    ///
+    /// **The equal case is the one doing the work here**, and it is not hypothetical — two
+    /// threads stamped in the same second would flap the tab between them on every tick,
+    /// forever. The older case is included because it is the obvious reading of the rule, but
+    /// it cannot on its own tell `>` from `>=`: the tab's own pin stays in the candidate pool
+    /// (`SessionStore.reconcileCodexPins` does not exclude it), and in a `sortDirection: desc`
+    /// list a strictly older entry is always behind it, so the candidate *is* the current pin
+    /// and either comparison re-pins the tab to exactly where it already is.
+    ///
+    /// The tie is what discriminates, and only if the equal-stamped *other* thread is the one
+    /// selected — hence the ordering below.
     func testAThreadThatIsNotStrictlyNewerIsIgnored() async {
         for (label, candidateUpdatedAt) in [("older", 500), ("exactly equal", 1_000)] {
             let tabID = UUID()
             let t = ThreadListTransport()
-            t.threads["/w/a"] = [
-                entry(stale, updatedAt: 1_000, path: "/r/stale.jsonl"),
-                entry(live, updatedAt: candidateUpdatedAt, path: "/r/live.jsonl", name: "not newer"),
-            ]
+            let mine = entry(stale, updatedAt: 1_000, path: "/r/stale.jsonl")
+            let theirs = entry(live, updatedAt: candidateUpdatedAt, path: "/r/live.jsonl",
+                               name: "not newer")
+            // Newest first, the way the server sorts. A tie may legitimately come back in
+            // either order, and this is the order that makes the assertion mean something: the
+            // selected candidate is `theirs`, so a `>=` regression moves the pin, the path and
+            // the title somewhere visibly different rather than back onto the current pin.
+            t.threads["/w/a"] = candidateUpdatedAt >= 1_000 ? [theirs, mine] : [mine, theirs]
             let store = await makeStore(
                 [codexEntry(tabID, pinned: stale, directory: "/w/a")], transport: t
             )
@@ -206,6 +219,9 @@ final class CodexPinReconcileTests: XCTestCase {
             await store.reconcileCodexPins()
 
             XCTAssertEqual(store.pinnedConversationID(of: tabID), stale, "\(label)")
+            let session = store.repos.flatMap(\.sessions).first { $0.id == tabID }
+            XCTAssertEqual(session?.transcriptPath, "/r/stale.jsonl",
+                           "\(label): the rollout the watcher and the phone read must not move")
             XCTAssertEqual(store.title(of: tabID), "a", "\(label): the title must not move either")
         }
     }
@@ -401,6 +417,11 @@ final class CodexPinReconcileTests: XCTestCase {
 
         now = now.advanced(by: CodexPinReconciler.throttle * 10)
         reconciler.tick()
+        // `tick()` enqueues its pass rather than running it inline, so without this the
+        // assertion would hold whether or not the guard exists — it would simply be reading
+        // the count before any second pass could have started. The yield gives an unguarded
+        // pass its chance to run, so the assertion itself is what catches a regression.
+        await Task.yield()
         XCTAssertEqual(passes, 1, "a tick landing inside an in-flight pass must run nothing")
 
         box.resume?.resume()
@@ -423,12 +444,17 @@ final class CodexPinReconcileTests: XCTestCase {
         }
 
         reconciler.tick()
+        // Yielded before each count is read, because `tick()` enqueues its pass rather than
+        // running it inline: without this the assertions would pass even with no throttle at
+        // all, merely by reading the count first.
+        await Task.yield()
         XCTAssertEqual(count, 0, "the reconciler was built this instant; the window has not opened")
 
         now = now.advanced(by: .milliseconds(500))
         reconciler.tick()
         now = now.advanced(by: .seconds(4))
         reconciler.tick()
+        await Task.yield()
         XCTAssertEqual(count, 0, "every tick inside the window is refused, however many arrive")
 
         now = now.advanced(by: CodexPinReconciler.throttle)
