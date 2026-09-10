@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import XCTest
 
 /// The whole UI gate, in **one** app launch.
@@ -438,6 +439,142 @@ final class TerminalSmokeTests: XCTestCase {
         if kill(pid, 0) == 0 {
             kill(pid, SIGKILL)
         }
+    }
+
+    /// A single point-in-time reading of whether a session's `fd-abduco` daemon is actually
+    /// alive after Flight Deck has been killed, gathered by `captureDaemonLiveness(sessionID:
+    /// socketPath:pidPath:)` for `testCodexReattachDaemonLivenessProbe`'s decisive capture. Kept
+    /// as a `CustomStringConvertible` value rather than logged piecemeal so `print` and the
+    /// `XCTAttachment` dump below say exactly the same thing.
+    private struct DaemonLivenessSnapshot: CustomStringConvertible {
+        let socketExists: Bool
+        let pidfileExists: Bool
+        let pid: Int32?
+        let pidAlive: Bool
+        let connectSucceeded: Bool
+        let connectDetail: String
+        let matchingProcessLines: [String]
+
+        var description: String {
+            """
+            socket file exists: \(socketExists)
+            pidfile exists: \(pidfileExists)
+            pidfile pid: \(pid.map(String.init) ?? "none")
+            pid alive (kill(pid, 0) == 0): \(pidAlive)
+            raw AF_UNIX connect() to the socket: \(connectSucceeded ? "SUCCEEDED" : "FAILED") (\(connectDetail))
+            matching `ps` lines (by session id or socket path), \(matchingProcessLines.count) found:
+            \(matchingProcessLines.isEmpty ? "  (none)" : matchingProcessLines.map { "  " + $0 }.joined(separator: "\n"))
+            """
+        }
+    }
+
+    /// Replicates `PosixDaemonControl.isLive(_:)` (`Sources/FlightDeck/DaemonControl.swift`)
+    /// inline, from the test process, rather than calling it: this bundle cannot `import
+    /// FlightDeck` (separate process, same reason every marker/glyph in this file is restated as
+    /// a local literal), and the whole point of this probe is to observe exactly what `isLive`
+    /// would have seen — a nonblocking `AF_UNIX` `connect()` to the session's socket — with the
+    /// specific errno attached, not just a bool.
+    private func probeUnixSocketConnect(_ path: String) -> (succeeded: Bool, detail: String) {
+        guard path.utf8.count <= 103 else { return (false, "path too long for sun_path") }
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            return (false, "socket() failed: \(String(cString: strerror(errno)))")
+        }
+        defer { close(fd) }
+
+        let flags = fcntl(fd, F_GETFL, 0)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        withUnsafeMutablePointer(to: &address.sun_path) { field in
+            field.withMemoryRebound(to: CChar.self, capacity: 104) {
+                _ = strlcpy($0, path, 104)
+            }
+        }
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        if result == 0 { return (true, "connect() succeeded immediately") }
+
+        let code = errno
+        switch code {
+        case EISCONN:
+            return (true, "EISCONN")
+        case ENOENT:
+            return (false, "ENOENT — no socket file (nothing ever listened, or it was cleaned up)")
+        case ECONNREFUSED:
+            return (false, "ECONNREFUSED — socket file exists but nothing is listening behind it")
+        case EINPROGRESS:
+            return (false, "EINPROGRESS — connect did not resolve synchronously (unusual for local AF_UNIX)")
+        default:
+            return (false, "errno \(code) (\(String(cString: strerror(code))))")
+        }
+    }
+
+    /// The full process table, one `ps` line per process, for `captureDaemonLiveness` to search
+    /// for anything referencing the daemon's session id or socket path — the "is something
+    /// actually running that thinks it owns this session" half of the probe, independent of
+    /// whatever the socket/pidfile *files* claim. Column order matches the pidfile parsing
+    /// elsewhere in this file (`pid=,ppid=,command=`) purely for a human skimming the dump.
+    private func psProcessTableLines() -> [String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-Ao", "pid=,ppid=,command="]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = Pipe()
+        guard (try? process.run()) != nil else { return ["ps failed to launch"] }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (String(data: data, encoding: .utf8) ?? "").split(separator: "\n").map(String.init)
+    }
+
+    /// The decisive capture `testCodexReattachDaemonLivenessProbe` exists to make: after Flight
+    /// Deck is killed, is the codex session's `fd-abduco` daemon actually DEAD (socket/pidfile
+    /// gone, pid dead, connect refused), or ALIVE-but-unreachable-by-`isLive` (pid alive and/or
+    /// `ps` still shows it, yet the raw connect this method replicates fails)? Bundled as one
+    /// snapshot — rather than four separate assertions — because the whole point is to read all
+    /// four facts together and see which combination actually occurred; a partial read (e.g. the
+    /// pidfile alone) is exactly the kind of guess this investigation is trying to replace with
+    /// ground truth.
+    private func captureDaemonLiveness(
+        sessionID: UUID, socketPath: String, pidPath: String
+    ) -> DaemonLivenessSnapshot {
+        let socketExists = FileManager.default.fileExists(atPath: socketPath)
+        let pidfileExists = FileManager.default.fileExists(atPath: pidPath)
+
+        var pid: Int32?
+        var pidAlive = false
+        if
+            let contents = try? String(contentsOfFile: pidPath, encoding: .utf8),
+            let parsed = Int32(contents.trimmingCharacters(in: .whitespacesAndNewlines)),
+            parsed > 0
+        {
+            pid = parsed
+            pidAlive = kill(parsed, 0) == 0
+        }
+
+        let (connectSucceeded, connectDetail) = probeUnixSocketConnect(socketPath)
+
+        let idNeedle = sessionID.uuidString.lowercased()
+        let matching = psProcessTableLines().filter {
+            $0.lowercased().contains(idNeedle) || $0.contains(socketPath)
+        }
+
+        return DaemonLivenessSnapshot(
+            socketExists: socketExists,
+            pidfileExists: pidfileExists,
+            pid: pid,
+            pidAlive: pidAlive,
+            connectSucceeded: connectSucceeded,
+            connectDetail: connectDetail,
+            matchingProcessLines: matching
+        )
     }
 
     /// ⌘K opens the search overlay while a terminal has focus.
@@ -1029,6 +1166,286 @@ final class TerminalSmokeTests: XCTestCase {
         // word. Clicking first is what hands the reattached surface keyboard focus; the
         // surface changing at all after typing is this test's evidence that the box actually
         // accepted the keystrokes rather than swallowing them into a dead pty.
+        reattached.click()
+        settle()
+        app.typeText("hi\n")
+        _ = waitFor(timeout: 25) { reattachedText() != postReattach }
+
+        let postCommand = reattachedText()
+        print("POST-COMMAND SURFACE:\n\(postCommand)")
+        let postCommandAttachment = XCTAttachment(string: postCommand)
+        postCommandAttachment.name = "post-command"
+        postCommandAttachment.lifetime = .keepAlways
+        add(postCommandAttachment)
+        XCTAssertNotEqual(
+            postCommand, postReattach,
+            "the surface did not change at all after typing and submitting — the reattached "
+            + "input box may not be accepting keystrokes"
+        )
+    }
+
+    /// The decisive follow-up to `testCodexSessionReattachDisplayAndCommandFlush` above: that
+    /// test only ever reaches codex's TRUST PROMPT before detaching (`›` is drawn by both the
+    /// prompt's "1. Yes, continue" row and the composer's own idle state, so waiting on the
+    /// glyph alone stops at whichever one paints first) — never codex's actual running composer
+    /// — and never asks the one question that would explain a cold-started reattach: after
+    /// Flight Deck is killed, is the codex session's `fd-abduco` daemon actually DEAD, or
+    /// ALIVE-but-unreachable by whatever `isLive(_:)` sees? id-mismatch and "something kills the
+    /// daemon on quit" have both been ruled out already; this exists to capture the one fact that
+    /// would settle which of those two remains.
+    ///
+    /// **Makes one real `codex` API call**, exactly like the display/flush investigation above —
+    /// this is not a fixture run.
+    ///
+    /// Reuses that test's machinery wholesale (`clearIsolatedStateDir()` +
+    /// `launchPreservingState()`, `sessionUUIDFromIsolatedState()` for the seeded claude
+    /// session's id, the same `codexSessionID()` filter-by-exclusion pattern for the new codex
+    /// tab, `terminateOwnDaemon(_:)` for both in teardown, the New-Codex-Session File-menu route,
+    /// and the `›` `codexMarker` literal) — see that test's doc comment for why each piece is
+    /// shaped the way it is. What is new here is entirely between detach and relaunch.
+    ///
+    /// **Getting past the trust prompt.** The prompt only appears the first time codex sees a
+    /// given working directory — `Fixtures/Codex/workspace-trust.captured.txt` shows its shape,
+    /// ending in "Press enter to continue" with "1. Yes, continue" already focused — so a machine
+    /// where this directory was already trusted from an earlier run goes straight to the
+    /// composer instead. Handled by waiting for EITHER state first (the marker, or trust-prompt
+    /// text), then conditionally clicking the terminal and pressing Return only if the trust
+    /// text is actually present. Return is enough on its own — "Press enter to continue" — and
+    /// "1. Yes, continue" is the row already focused (`›`), so no arrow key is needed first.
+    ///
+    /// **Detecting the composer, not just the marker.** Both screens draw `›`, so the marker
+    /// alone cannot distinguish them (that ambiguity is this test's whole reason to exist).
+    /// `Fixtures/Codex/tui-idle.captured.txt` shows the composer's idle placeholder, "Ask Codex
+    /// to do anything" — checked and logged as a bonus signal — but the actual gate is the
+    /// simpler, version-independent one the task calls out as the fallback: the marker present
+    /// AND the trust-prompt text gone. That holds whether or not a trust decision was needed at
+    /// all (a pre-trusted directory never shows the trust text in the first place, so the "gone"
+    /// half is vacuously true and only the marker matters).
+    ///
+    /// **The decisive capture itself.** `captureDaemonLiveness(sessionID:socketPath:pidPath:)`
+    /// (see its doc comment) is run from THIS test process — not the app under test — against
+    /// the well-known `/tmp/flight-deck-<uid>/<id>.sock(.pid)` layout, polled 5×200ms after
+    /// `app.terminate()` in case teardown itself is racy, with only the final reading dumped.
+    /// Socket/pidfile path are computed BEFORE `app.terminate()`, from the codex session id
+    /// captured before that — mirroring why `sessionID` itself is captured early throughout this
+    /// file: nothing below this point may still be able to answer "which session was this" once
+    /// the app is gone.
+    ///
+    /// **Reading the dump.** DEAD looks like: no socket file, connect ENOENT, pid dead, no
+    /// matching `ps` line. ALIVE-BUT-UNREACHABLE looks like: pid alive and/or a matching `ps`
+    /// line, but connect fails (most tellingly ECONNREFUSED — a socket file with nothing
+    /// listening — or some other errno). ALIVE-AND-REACHABLE looks like: connect succeeds outright
+    /// — meaning `isLive` should itself have returned true, and the bug is elsewhere entirely.
+    ///
+    /// Asserts here are deliberately soft, per the task's own framing: the DUMPS are the
+    /// deliverable, not a pass/fail verdict this investigation does not yet know how to state.
+    func testCodexReattachDaemonLivenessProbe() {
+        let codexMarker: Character = "\u{203A}" // › — see InputBar.codexMarker
+
+        // Clear-then-launch-without-reset, exactly like the display/flush investigation above —
+        // see that test's doc comment for why `-FlightDeckResetState` is unusable here.
+        clearIsolatedStateDir()
+        var app = launchPreservingState()
+
+        // The seeded claude session's id, captured before anything below could tear it down —
+        // needed only for teardown, since this probe's subject is the codex session created
+        // next.
+        var seededSessionID: UUID?
+        _ = waitFor(timeout: 5) {
+            seededSessionID = sessionUUIDFromIsolatedState()
+            return seededSessionID != nil
+        }
+        guard let seededSessionID else {
+            XCTFail(
+                "could not resolve the seeded session's id from "
+                + "\(Self.isolatedStateDir)/sessions.json"
+            )
+            return
+        }
+
+        // Same filter-by-exclusion pattern as `testCodexSessionReattachDisplayAndCommandFlush`:
+        // `sessionUUIDFromIsolatedState()` always answers the FIRST entry (the seeded claude
+        // session), so the codex tab this test creates has to be found by excluding that id
+        // instead. Restated locally rather than shared — this file already duplicates this
+        // exact closure per test that needs it.
+        func codexSessionID() -> UUID? {
+            struct Entry: Decodable { let id: UUID; let agent: String? }
+            struct Snapshot: Decodable { let sessions: [Entry] }
+            let url = URL(fileURLWithPath: Self.isolatedStateDir).appendingPathComponent("sessions.json")
+            guard
+                let data = try? Data(contentsOf: url),
+                let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data)
+            else { return nil }
+            return snapshot.sessions.first { $0.id != seededSessionID }?.id
+        }
+
+        // Unconditional teardown for both daemons, targeted by id — never a directory-wide
+        // sweep of `/tmp/flight-deck-<uid>`, which is shared with every other live Flight Deck
+        // session on this machine. `capturedDaemonPID` is filled in by the liveness probe below
+        // and killed here too, belt-and-suspenders: `terminateOwnDaemon` already re-reads and
+        // kills whatever pid the pidfile names at teardown time, so this only matters if the
+        // pidfile itself is gone by then but the pid the probe saw is somehow still alive.
+        var codexID: UUID?
+        var capturedDaemonPID: Int32?
+        defer {
+            if app.state != .notRunning {
+                app.terminate()
+            }
+            terminateOwnDaemon(seededSessionID)
+            if let codexID {
+                terminateOwnDaemon(codexID)
+            }
+            if let capturedDaemonPID, kill(capturedDaemonPID, 0) == 0 {
+                kill(capturedDaemonPID, SIGKILL)
+            }
+        }
+
+        let rows = app.staticTexts.matching(identifier: "session-row-title")
+        XCTAssertTrue(
+            waitFor(timeout: 10) { rows.count == 1 }, "expected exactly one seeded session"
+        )
+
+        // See `testCodexSessionReattachDisplayAndCommandFlush`'s doc comment for why the File
+        // menu, not the sidebar control.
+        let file = app.menuBarItems["File"]
+        XCTAssertTrue(file.waitForExistence(timeout: 5), "File menu missing")
+        file.click()
+        let newCodexItem = app.menuItems["New Codex Session"]
+        XCTAssertTrue(
+            newCodexItem.waitForExistence(timeout: 5),
+            "no \"New Codex Session\" menu item — expected one even with no real codex login, "
+            + "since Preferences.migrateAccountsIfNeeded seeds a built-in account for every "
+            + "agent"
+        )
+        newCodexItem.click()
+
+        XCTAssertTrue(
+            waitFor(timeout: 10) { rows.count == 2 }, "creating a codex session added no row"
+        )
+        _ = waitFor(timeout: 5) {
+            codexID = codexSessionID()
+            return codexID != nil
+        }
+        guard let sessionID = codexID else {
+            XCTFail("could not resolve the new codex session's own id")
+            return
+        }
+
+        // Computed BEFORE `app.terminate()`, from the id captured above — nothing after that
+        // point can still ask the app which session this was.
+        let socketPath = "/tmp/flight-deck-\(getuid())/\(sessionID.uuidString.lowercased()).sock"
+        let pidPath = socketPath + ".pid"
+
+        // Give the terminal keyboard focus, the same click this file already uses elsewhere.
+        // `createFromMenu` both creates and selects the new session, so the detail pane is
+        // already showing the codex tab's surface by the time this lands.
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let terminal = app.textViews.firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface found")
+        func terminalText() -> String { (terminal.value as? String) ?? "" }
+
+        // First checkpoint: EITHER the trust prompt or the composer — whichever codex draws
+        // first depends on whether this directory was already trusted on this machine. Codex is
+        // slow to boot (see the display/flush test's note on `needsRuntimeStart`), so this is
+        // generous on purpose.
+        let sawSomething = waitFor(timeout: 45) {
+            let text = terminalText()
+            return text.contains(codexMarker) || text.contains("Do you trust")
+        }
+        XCTAssertTrue(
+            sawSomething,
+            "codex drew neither its trust prompt nor its composer before detach — is it "
+            + "installed and logged in? got:\n\(terminalText())"
+        )
+
+        // Only accept the trust prompt if it is actually on screen — a pre-trusted directory
+        // must not have a spurious Return sent into what would already be the composer.
+        if terminalText().contains("Do you trust") || terminalText().contains("Press enter to continue") {
+            print("TRUST PROMPT DETECTED — accepting with Return (default-focused \"1. Yes, continue\")")
+            terminal.click()
+            settle()
+            app.typeKey(.return, modifierFlags: [])
+        }
+
+        // Second checkpoint: the composer specifically, distinguished from the trust prompt by
+        // the trust text having gone away — see this test's doc comment for why that is the
+        // reliable half of the check and the placeholder-text match is only a bonus signal.
+        let composerReached = waitFor(timeout: 30) {
+            let text = terminalText()
+            return text.contains(codexMarker)
+                && !text.contains("Do you trust")
+                && !text.contains("Press enter to continue")
+        }
+        let sawComposerHint = terminalText().contains("Ask Codex to do anything")
+        XCTAssertTrue(
+            composerReached,
+            "codex never reached its composer after accepting the trust prompt — got:\n"
+            + "\(terminalText())"
+        )
+        print("composer placeholder (\"Ask Codex to do anything\") seen: \(sawComposerHint)")
+
+        let preDetach = terminalText()
+        print("PRE-DETACH SURFACE:\n\(preDetach)")
+        let preDetachAttachment = XCTAttachment(string: preDetach)
+        preDetachAttachment.name = "pre-detach"
+        preDetachAttachment.lifetime = .keepAlways
+        add(preDetachAttachment)
+
+        // Kill Flight Deck outright — same mechanics as every other detach in this file.
+        app.terminate()
+
+        // THE DECISIVE CAPTURE. Polled 5×200ms in case teardown itself is racy (the daemon
+        // exiting a beat after its parent, or the socket/pidfile being unlinked a beat late);
+        // only the final reading is dumped. See `captureDaemonLiveness`'s doc comment for what
+        // each field means and how DEAD / ALIVE-BUT-UNREACHABLE / ALIVE-AND-REACHABLE read.
+        var liveness = captureDaemonLiveness(sessionID: sessionID, socketPath: socketPath, pidPath: pidPath)
+        for _ in 0..<4 {
+            usleep(200_000)
+            liveness = captureDaemonLiveness(sessionID: sessionID, socketPath: socketPath, pidPath: pidPath)
+        }
+        capturedDaemonPID = liveness.pid
+        print("DAEMON-LIVENESS-AFTER-QUIT:\n\(liveness)")
+        let livenessAttachment = XCTAttachment(string: "\(liveness)")
+        livenessAttachment.name = "daemon-liveness-after-quit"
+        livenessAttachment.lifetime = .keepAlways
+        add(livenessAttachment)
+
+        // Same state directory, no `-FlightDeckResetState`: `SessionStore.restore()` should find
+        // the codex daemon still live (per the capture above) and attach rather than starting a
+        // fresh shell.
+        app = launchPreservingState()
+
+        // See `testCodexSessionReattachDisplayAndCommandFlush`'s doc comment for why the codex
+        // row is picked by position (row 1) rather than assumed selected.
+        XCTAssertTrue(waitFor(timeout: 10) { rows.count == 2 }, "expected both sessions after relaunch")
+        rows.element(boundBy: 1).click()
+        settle()
+
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let reattached = app.textViews.firstMatch
+        XCTAssertTrue(
+            reattached.waitForExistence(timeout: 10), "no terminal surface found after relaunch"
+        )
+        func reattachedText() -> String { (reattached.value as? String) ?? "" }
+
+        _ = waitFor(timeout: 20) { !reattachedText().isEmpty }
+        let postReattach = reattachedText()
+        print("POST-REATTACH SURFACE:\n\(postReattach)")
+        let postReattachAttachment = XCTAttachment(string: postReattach)
+        postReattachAttachment.name = "post-reattach"
+        postReattachAttachment.lifetime = .keepAlways
+        add(postReattachAttachment)
+        XCTAssertFalse(postReattach.isEmpty, "surface was completely empty after reattach")
+
+        // Flush a fresh command, exactly like the display/flush investigation.
         reattached.click()
         settle()
         app.typeText("hi\n")
