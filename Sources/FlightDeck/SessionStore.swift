@@ -2405,15 +2405,21 @@ final class SessionStore: ObservableObject {
         // tick, for the same reason: a relaunch is precisely when a tab is most likely to be
         // pinned to a thread the user abandoned in the previous run.
         //
-        // **Gated, because all of that is true only of a relaunch.** The other callers —
-        // ⌘⇧T and the phone's `reopenClosedSession` through `settleReopen`, ⌘K through
-        // `openConversation` — hand this a pin the user chose seconds ago; at ⌘K it is
-        // literally the conversation they searched for by name. Following the directory's
-        // newest thread there overrides that choice instead of repairing a stale pin, and it
-        // usually collides while doing it: the hand-started TUI that made the rival thread
-        // newest is typically still alive, so the limitation below stops being a rare risk and
-        // becomes the common case. Reopens therefore skip this stage and behave exactly as they
-        // did before it existed; stages 1 and 3 run for every caller.
+        // **Gated, because all of that is true only of a relaunch.** The live other callers
+        // are the reopens — ⌘⇧T and the phone's `reopenClosedSession`, both through
+        // `settleReopen` — and they hand this a pin the user chose seconds ago. Following the
+        // directory's newest thread there overrides that choice instead of repairing a stale
+        // pin, and it usually collides while doing it: the hand-started TUI that made the rival
+        // thread newest is typically still alive, so the limitation below stops being a rare
+        // risk and becomes the common case. Reopens therefore skip this stage and behave
+        // exactly as they did before it existed; stages 1 and 3 run for every caller.
+        //
+        // ⌘K's `openConversation` passes `false` too, but that call site is claude-only in
+        // practice: it resolves its login with `launchAccount(for: .claude, …)` and builds its
+        // `Session` with no `agent:` argument, and `resumeExisting` defers only for an agent
+        // that `negotiatesIdentity` — which claude does not. So no codex tab reaches this
+        // method from search today; the argument is written out so the answer is already right
+        // the day one can, rather than defaulted into being wrong.
         //
         // It needs no state stage 1 produced beyond a started app-server: it reads `repos` and
         // resolves its own adapters through `adapter(for:)`. A group whose server never came up
@@ -2425,6 +2431,14 @@ final class SessionStore: ObservableObject {
         // used to be populated at once. Total settle time is the same either way; only the
         // order of the wait moved, and on a relaunch that wait is what the pass costs.
         //
+        // A perfectly healthy codex pays it too, once, for any **orphaned** tab in the fleet.
+        // The pass visits every codex session in `repos`, and a tab whose login was deleted is
+        // restored but deliberately never added to `deferredCodexResumes` — so stage 1 never
+        // prepares it. Its `instance(for:)` collapses to the nil account, `adapter(for:)`
+        // answers from `makeCodexStackIfNeeded`, and that builds a stack while spawning
+        // nothing: an unstarted transport, one full `readTimeout` for that group, ahead of
+        // every other tab's first keystroke.
+        //
         // **Known limitation, deliberately not fixed.** Its `taken` set excludes threads pinned
         // by other Flight Deck tabs, not one held by a TUI started by hand outside Flight Deck.
         // Selecting such a thread while its writer lock is still held makes `codex resume` fail
@@ -2434,7 +2448,25 @@ final class SessionStore: ObservableObject {
         // above confines the trade to relaunch, where the thread being left behind is one
         // nobody has taken a turn in.
         if pinsPredateThisRun {
-            await reconcileCodexPins()
+            // Through the reconciler rather than straight into `reconcileCodexPins()`, for the
+            // stamp and nothing else — the pass itself is identical. `lastPass` was seeded when
+            // stage 1 constructed the reconciler, so a direct call leaves the first tick due a
+            // window from *that* instant, which this stage can outlast on its own (a
+            // `readTimeout` per unreachable group, sequentially). That tick would then land
+            // inside stage 3, which reads a tab's binding before awaiting `rebind` and types
+            // what it read — so a pass moving the record across that suspension puts the
+            // terminal and the record back on different threads. `passNow()` stamps, and the
+            // next tick falls a full window after this pass instead. See its doc comment.
+            //
+            // nil only when stage 1 reached `preparedAdapter` for no tab at all — every
+            // restored tab closed between the two stages — because that method starts the
+            // reconciler before anything in it can throw. `repos` can still hold an orphaned
+            // codex tab for a pass to visit, so the fallback reconciles rather than skipping.
+            if let reconciler = codexPinReconciler {
+                await reconciler.passNow()
+            } else {
+                await reconcileCodexPins()
+            }
         }
 
         // **Stage 3 — bind and send, on a pin stage 2 has just made current — or, on a reopen,
@@ -2444,7 +2476,12 @@ final class SessionStore: ObservableObject {
             let instance = instance(for: session)
             // Flattened: a miss and a stored nil both mean "no app-server for this account",
             // and stage 1 visited exactly these tabs, so a miss here is a tab that has since
-            // been closed — which the guard above has already dropped.
+            // been closed — which the guard above has already dropped — or one whose account
+            // was deleted between the stages: `instance(for:)` resolves through
+            // `resolvedAccountID`, which collapses a tombstoned account to nil, so the key
+            // stage 1 filed this tab's adapter under is no longer the key it is looked up by.
+            // Benign, and the same answer either way: no `rebind`, no title read, the pin it
+            // already had is typed — the degraded path's own contract.
             let prepared = preparedPerAccount[instance] ?? nil
             let adapter = prepared ?? self.adapter(for: instance)
             let options = options(for: .codex, project: session.workingDirectory)
@@ -3316,6 +3353,12 @@ final class SessionStore: ObservableObject {
     /// the choice rather than repair anything — and would usually run into the writer lock of
     /// the TUI that made that thread newest.
     ///
+    /// Two of those callers actually arrive with a codex tab: ⌘⇧T and the phone's reopen. The
+    /// third, ⌘K's `openConversation`, is claude-only as things stand — it resolves a claude
+    /// login and builds a `Session` that defaults to `.claude`, and `deferred` below is
+    /// `negotiatesIdentity`, which claude answers false — so it has never once settled a codex
+    /// tab. Its `false` is a right answer held ready, not one being exercised.
+    ///
     /// Returns true when it is a codex tab whose resume text still has to be settled.
     @discardableResult
     private func resumeExisting(
@@ -3538,10 +3581,13 @@ final class SessionStore: ObservableObject {
 
         if deferred {
             codexRestoreTask = Task { [weak self] in
-                // No reconcile pass, for `settleReopen`'s reason at its sharpest: this pin is
-                // the conversation the user searched for by name and selected, so a pass that
-                // followed the directory's newest thread would answer a different question
-                // than the one they asked.
+                // No reconcile pass, for `settleReopen`'s reason at its sharpest: this pin
+                // would be the conversation the user searched for by name and selected, so a
+                // pass that followed the directory's newest thread would answer a different
+                // question than the one they asked. Conditional rather than live: search
+                // builds claude sessions only, so `deferred` is never true here today — the
+                // argument is spelled out anyway, because a default would decide this the
+                // wrong way round on the first day search learns about codex.
                 await self?.resumeRestoredCodex([session.id], pinsPredateThisRun: false)
             }
         }

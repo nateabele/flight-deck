@@ -52,8 +52,8 @@ final class CodexPinReconciler {
     /// Deliberate: the reconciler is created the moment a codex tab appears, and a tab that
     /// was just created or just restored is pinned to the thread it has only now negotiated —
     /// there is nothing for a pass to find. Where an immediate pass genuinely is needed, the
-    /// caller asks for one outright (`resumeRestoredCodex` does, so a relaunch lands on the
-    /// right thread without waiting a tick).
+    /// caller asks for one outright through `passNow()` (`resumeRestoredCodex` does, so a
+    /// relaunch lands on the right thread without waiting a tick).
     ///
     /// A tab restored *at relaunch* is the exception to "nothing for a pass to find", which is
     /// why that caller's pass runs before it types `codex resume <id>` rather than after: its
@@ -61,10 +61,15 @@ final class CodexPinReconciler {
     /// another one at any point since.
     ///
     /// Relaunch and no other path: `resumeRestoredCodex` takes the pass only under
-    /// `pinsPredateThisRun`, and its reopen callers — ⌘⇧T, the phone's `reopenClosedSession`,
-    /// ⌘K's `openConversation` — pass false. Their pin is a thread the user chose seconds ago,
-    /// so it is current by construction; moving it to the directory's newest thread would
-    /// override the choice instead of repairing a stale one.
+    /// `pinsPredateThisRun`, and its reopen callers — ⌘⇧T and the phone's
+    /// `reopenClosedSession`, both through `settleReopen` — pass false. Their pin is a thread
+    /// the user chose seconds ago, so it is current by construction; moving it to the
+    /// directory's newest thread would override the choice instead of repairing a stale one.
+    ///
+    /// ⌘K's `openConversation` passes false as well, but it is not a case that happens: it
+    /// resolves its login with `launchAccount(for: .claude, …)` and builds its `Session` with
+    /// no `agent:` argument, so nothing it makes ever defers into `resumeRestoredCodex`. That
+    /// argument is an answer held ready, not one in use.
     private var lastPass: ContinuousClock.Instant
 
     init(
@@ -76,6 +81,37 @@ final class CodexPinReconciler {
         self.now = now
         self.reconcile = reconcile
         self.lastPass = now()
+    }
+
+    /// One pass now, off the schedule, stamping the window as a tick would.
+    ///
+    /// `resumeRestoredCodex`'s stage 2 is the only caller, and it cannot wait for a tick: its
+    /// tabs' pins came off disk, and it is about to type `codex resume <id>` at every one of
+    /// them. It used to call `SessionStore.reconcileCodexPins()` straight, which reconciled
+    /// exactly the same — the stamp is the whole reason this exists.
+    ///
+    /// **Why the stamp is load-bearing.** The reconciler is constructed inside that method's
+    /// stage 1 (`preparedAdapter`), so `lastPass` is seeded there and the first tick falls due
+    /// a window later — which an unstarted or wedged app-server can easily outlast, since the
+    /// pass below spends a whole `readTimeout` on each group it cannot reach. A tick landing
+    /// after that is a *second* re-pin arriving while stage 3 is mid-restore: it reads a tab's
+    /// binding before awaiting `rebind` and types what it read, so a pass that moves the record
+    /// across that suspension leaves the terminal on the pre-tick thread — the record-versus-
+    /// terminal split the reorder exists to remove, re-entered from the other side.
+    ///
+    /// **Stamped at the end, unlike `tick()`.** There the window means "how often we ask" and
+    /// stamping late would let a slow app-server stretch the cadence without bound. Here there
+    /// is no cadence to stretch — one pass, at a caller's request — and the window that has to
+    /// be clear is the one *after* it, the stretch of stage 3 where the sends happen. Stamping
+    /// at the start would leave that stretch a window shorter, by however long this pass took.
+    ///
+    /// `isPolling` is deliberately not set: a ticker pass may already be in flight, and
+    /// clearing that flag on this pass's way out would drop the guard from under it. Two
+    /// concurrent passes are harmless anyway — `reconcileCodexPins` re-reads the session after
+    /// its own await and only ever re-pins onto a strictly newer thread.
+    func passNow() async {
+        await reconcile()
+        lastPass = now()
     }
 
     func start() {
