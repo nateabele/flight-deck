@@ -133,8 +133,9 @@ final class CodexPinReconciler {
     /// `inFlight` and only *then* enqueues this method's continuation, so a timer block can
     /// land in that gap, find both guards clear and `lastPass` older than the throttle, and
     /// start a pass a single await would never look for. The loop's final condition check and
-    /// the `isPolling = true` below it run in one uninterrupted job — nothing can be enqueued
-    /// between them — so what the loop saw on that check is still true when the guard goes up.
+    /// the `isPolling = true` below it run in one uninterrupted job — a queue block can be
+    /// *enqueued* between them, but none can *run* — so what the loop saw on that check is
+    /// still true when the guard goes up.
     /// That one-job property, not the number of awaits, is what makes the invariant hold.
     ///
     /// *The guard* — `isPolling`, held for the duration of this pass and restored on the way
@@ -155,10 +156,12 @@ final class CodexPinReconciler {
     /// **The invariant is about ticker passes.** This method never *gates* on `isPolling` or
     /// `passNowPending` — stage 2 must reconcile before stage 3 types anything, so it always
     /// takes its own pass — which means two `passNow()` calls overlapping in time would overlap
-    /// each other, and nothing here would stop them. Nothing creates a second one: the only
-    /// call is stage 2, reached only under `pinsPredateThisRun`, which only the relaunch
-    /// restore (`SessionStore.swift:2310`) passes true — once per launch. Every other caller of
-    /// `resumeRestoredCodex` passes false and takes no pass at all.
+    /// each other, and nothing here would stop them. Worse than the overlap itself: whichever
+    /// call found the flags clear restores *both* on its way out, so the other call would run
+    /// on with no guard up, and a ticker pass could start underneath it. Nothing creates a
+    /// second one: the only call is stage 2, reached only under `pinsPredateThisRun`, which
+    /// only the relaunch restore (`SessionStore.swift:2310`) passes true — once per launch.
+    /// Every other caller of `resumeRestoredCodex` passes false and takes no pass at all.
     ///
     /// **Two costs, both accepted.** This can wait out an in-flight pass *and then* run its
     /// own, so a wedged app-server — a whole `readTimeout` per group it cannot reach — is paid
