@@ -41,6 +41,11 @@ final class FleetTestHarness {
         // would land in it. A test that wants the records replaces this closure — see
         // `PromptLifecycleTests`.
         service.promptLifecycleForTesting = { _ in }
+        // The store's own half of the same problem: `abortPrompt` and `checkStuckPrompts` file
+        // through `store.promptLifecycleSink` directly, never through the service, so silencing
+        // only the line above leaves that second stream writing to the same real file. A test
+        // that wants those records replaces this closure too — see `AbortPromptLoopbackTests`.
+        self.store.promptLifecycleSink = { _ in }
     }
 
     @discardableResult

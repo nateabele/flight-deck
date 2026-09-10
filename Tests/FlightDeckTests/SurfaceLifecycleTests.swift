@@ -32,4 +32,13 @@ final class SurfaceLifecycleTests: XCTestCase {
         }
         XCTAssertTrue(ghostty.hasValidApp)
     }
+
+    /// `ghostty_surface_set_occlusion` takes VISIBLE (true = render), not occluded — the
+    /// inverse of what `NSWindow.occlusionState` itself reports. Locks the polarity so a
+    /// future edit that inverts it fails here rather than silently freezing the terminal
+    /// whenever the window is on screen.
+    func testOcclusionVisibleReflectsWindowVisibility() {
+        XCTAssertTrue(occlusionVisible([.visible]))
+        XCTAssertFalse(occlusionVisible([]))
+    }
 }

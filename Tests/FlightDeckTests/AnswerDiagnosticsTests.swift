@@ -80,6 +80,95 @@ final class AnswerDiagnosticsTests: XCTestCase {
                            with: answer(questions, chosen), in: id, token: UUID())
     }
 
+    private var permission: OpenPrompt {
+        .permission(callID: "toolu_B", tool: "Bash", summary: "rm -rf build")
+    }
+
+    // MARK: The early guards — before any plan step exists
+
+    /// The set path's label cross-check, isolated from the drive it would otherwise have to
+    /// pass through first. The mismatch is what refuses, so the record has to name it as such
+    /// rather than folding it into one of `perform`'s own checks.
+    func testASetAnswerWhoseLabelDisagreesWithTheMacsCopyNamesItself() throws {
+        let (store, spy, id, log) = makeStore()
+        spy.showOptions(["Yes", "No"], selected: 0)
+        store.answerPrompt(
+            .question(callID: "toolu_A", single(["Yes", "No"])),
+            with: .answers([[AnswerSelection(index: 0, label: "Wrong")]]), in: id, token: UUID()
+        )
+
+        let abort = try XCTUnwrap(log.aborts.first)
+        XCTAssertEqual(abort.check, .setLabelMismatch)
+        XCTAssertEqual(abort.expected, "Yes")
+        XCTAssertNil(abort.step)
+        XCTAssertEqual(abort.from, 0)
+        XCTAssertEqual(abort.to, 0)
+        XCTAssertNotNil(abort.viewport)
+        XCTAssertTrue(spy.events.isEmpty)
+    }
+
+    /// The one-question path's own label cross-check, the same mismatch through `.option`
+    /// instead of `.answers`.
+    func testAnOptionAnswerWhoseLabelDisagreesWithTheMacsCopyNamesItself() throws {
+        let (store, spy, id, log) = makeStore()
+        spy.showOptions(["Yes", "No"], selected: 0)
+        store.answerPrompt(
+            .question(callID: "toolu_A", single(["Yes", "No"])),
+            with: .option(index: 1, label: "Wrong"), in: id, token: UUID()
+        )
+
+        let abort = try XCTUnwrap(log.aborts.first)
+        XCTAssertEqual(abort.check, .optionLabelMismatch)
+        XCTAssertEqual(abort.expected, "No")
+        XCTAssertNotNil(abort.viewport)
+        XCTAssertTrue(spy.events.isEmpty)
+    }
+
+    /// A set answer against a permission dialog — there is no question for it to fit.
+    func testASetAnswerAgainstAPermissionDialogNamesItself() throws {
+        let (store, spy, id, log) = makeStore()
+        store.answerPrompt(
+            permission, with: .answers([[AnswerSelection(index: 0, label: "Yes")]]),
+            in: id, token: UUID()
+        )
+
+        let abort = try XCTUnwrap(log.aborts.first)
+        XCTAssertEqual(abort.check, .setNotQuestion)
+        XCTAssertNil(abort.expected)
+        XCTAssertTrue(spy.events.isEmpty)
+    }
+
+    /// `.option` against a permission dialog, the same refusal on the other answer shape.
+    func testAnOptionAnswerAgainstAPermissionDialogNamesItself() throws {
+        let (store, spy, id, log) = makeStore()
+        store.answerPrompt(permission, with: .option(index: 0, label: "Yes"), in: id, token: UUID())
+
+        let abort = try XCTUnwrap(log.aborts.first)
+        XCTAssertEqual(abort.check, .optionNotQuestion)
+        XCTAssertTrue(spy.events.isEmpty)
+    }
+
+    /// A tab with no surface at all — `injector(for:)` itself returns nil, before any screen
+    /// could be read. No viewport is possible, so the record carries none.
+    func testATabWithNoSurfaceNamesTheMissingInjector() throws {
+        let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.transcriptsRootOverride = projectsRoot
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
+        store.injectionSettle = { $0() }
+        let recorder = Recorder()
+        store.answerAbortSink = { recorder.aborts.append($0) }
+        let session = store.newSession(in: tmp)
+        store.applyRegistry([1: entry(session.pinnedConversationID, .waiting, cwd: tmp.path)])
+        XCTAssertNil(store.viewport(of: session.id), "no surface, nothing to read")
+
+        store.answerPrompt(permission, with: .deny, in: session.id, token: UUID())
+
+        let abort = try XCTUnwrap(recorder.aborts.first)
+        XCTAssertEqual(abort.check, .noInjector)
+        XCTAssertNil(abort.viewport)
+        XCTAssertNil(abort.focused)
+    }
+
     // MARK: The four checks in `perform`
 
     /// A terminal that cannot be read at all, before a key moves. Nothing to quote, so the

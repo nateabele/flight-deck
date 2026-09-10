@@ -216,4 +216,18 @@ final class FleetEventApplicationTests: XCTestCase {
             XCTAssertEqual(snapshot.applying([event]), snapshot, "\(event) was not inert")
         }
     }
+
+    func testApplyingAnAPIErrorChangedSetsAndClearsIt() {
+        let id = UUID()
+        let snapshot = FleetSnapshot(projects: [
+            WireProject(id: UUID(), name: "p", path: "/p", isCollapsed: false,
+                        sessions: [WireSession(id: id, title: "t", agent: "claude")])
+        ])
+        let raised = snapshot.applying([
+            .apiErrorChanged(id: id, error: SessionAPIError(status: 529, kind: "overloaded"))])
+        XCTAssertEqual(raised.projects[0].sessions[0].apiError?.status, 529)
+
+        let cleared = raised.applying([.apiErrorChanged(id: id, error: nil)])
+        XCTAssertNil(cleared.projects[0].sessions[0].apiError)
+    }
 }

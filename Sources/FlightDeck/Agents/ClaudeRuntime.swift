@@ -66,6 +66,7 @@ final class ClaudeRuntime: AgentRuntime {
                 clock: clock,
                 onTitle: { subscribers.emit(.title($0)) },
                 onSubagentCount: { subscribers.emit(.subagentCount($0)) },
+                onAPIError: { subscribers.emit(.apiError($0)) },
                 // `onMessages` is passed unconditionally, never `nil` — so `wantsMessages` (see
                 // `Scan.read`'s doc comment, which the gate was written to serve) is
                 // permanently true for every Claude session, including in tests and for a

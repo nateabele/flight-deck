@@ -70,6 +70,19 @@ final class FleetWireTests: XCTestCase {
         XCTAssertTrue(session.hasBackgroundWork)
     }
 
+    /// An older Mac's snapshot has no such key, because the preference it names did not
+    /// exist yet. The field is additive; its absence must mean off, never a decode failure —
+    /// off is the safe direction for a control that drives a terminal blind.
+    func testWireSessionDecodesWithoutTheAllowsBlockedAbortKeyAsOff() throws {
+        let json = #"""
+        {"id":"00000000-0000-0000-0000-0000000000AA","title":"t","agent":"claude",
+         "subagentCount":0,"isUnread":false,"hasBackgroundWork":false}
+        """#
+        let session = try JSONDecoder().decode(WireSession.self, from: Data(json.utf8))
+        XCTAssertFalse(session.allowsBlockedAbort,
+                       "the field is additive; its absence must mean off, never a decode failure")
+    }
+
     func testActivityChangedRoundTripsBackgroundWork() throws {
         let event = FleetEvent.activityChanged(
             id: UUID(), activity: "idle", waitingFor: nil,

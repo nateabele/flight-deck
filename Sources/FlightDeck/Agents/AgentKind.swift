@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// Which coding agent a tab runs. The raw value is a storage format — it is written into
@@ -49,6 +50,12 @@ enum AgentEvent: Equatable, Sendable {
     case activity(SessionActivity)
     case subagentCount(Int)
     case turnEnded
+    /// This tab's last turn died on an API error, or `nil` because a newer record cleared it.
+    ///
+    /// Like `.subagentCount` and unlike `.activity`, this is folded from transcript records
+    /// before it reaches here — the store never learns which channel carried it. Only the claude
+    /// runtime raises it today; codex's failure shape is a separate probe.
+    case apiError(SessionAPIError?)
 }
 
 /// Per-agent settings payload.

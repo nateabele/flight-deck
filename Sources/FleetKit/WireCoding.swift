@@ -17,6 +17,8 @@ enum FleetEventTag: String, Codable {
     case unreadChanged = "session.unread"
     case planGateChanged = "session.planGate"
     case promptExpired = "prompt.expired"
+    case promptTyped = "prompt.typed"
+    case apiErrorChanged = "session.apiError"
 }
 
 extension FleetEvent: Codable {
@@ -26,6 +28,7 @@ extension FleetEvent: Codable {
         case activity, waitingFor, subagentCount, isUnread, isCollapsed, hasBackgroundWork
         case gate
         case openPromptCall
+        case apiError
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -98,6 +101,16 @@ extension FleetEvent: Codable {
             try c.encode(FleetEventTag.promptExpired, forKey: .t)
             try c.encode(id, forKey: .id)
             try c.encode(token, forKey: .token)
+        case .promptTyped(let id, let token):
+            try c.encode(FleetEventTag.promptTyped, forKey: .t)
+            try c.encode(id, forKey: .id)
+            try c.encode(token, forKey: .token)
+        case .apiErrorChanged(let id, let error):
+            try c.encode(FleetEventTag.apiErrorChanged, forKey: .t)
+            try c.encode(id, forKey: .id)
+            // Absent, not `null`, matching `planGateChanged` directly above: a decoder that has
+            // never heard of this key must see what a Mac predating the case entirely would send.
+            try c.encodeIfPresent(error, forKey: .apiError)
         }
     }
 
@@ -152,6 +165,13 @@ extension FleetEvent: Codable {
         case .promptExpired:
             self = .promptExpired(id: try c.decode(UUID.self, forKey: .id),
                                   token: try c.decode(UUID.self, forKey: .token))
+        case .promptTyped:
+            self = .promptTyped(id: try c.decode(UUID.self, forKey: .id),
+                                token: try c.decode(UUID.self, forKey: .token))
+        case .apiErrorChanged:
+            self = .apiErrorChanged(
+                id: try c.decode(UUID.self, forKey: .id),
+                error: try c.decodeIfPresent(SessionAPIError.self, forKey: .apiError))
         }
     }
 }

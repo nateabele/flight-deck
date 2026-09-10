@@ -29,6 +29,11 @@ struct SessionTimelineScreen: View {
     /// is not merely a re-download, it is a screen that empties itself under the reader.
     /// `FleetModel.timelineModel(for:)` caches one per tab id for exactly that reason.
     let model: SessionTimelineModel
+    /// Forwarded straight to `FleetModel.abortBlockedPrompt(session:)` by `FleetListScreen`,
+    /// which is the only place in this screen's chain that holds a `FleetModel` at all —
+    /// `model` above is deliberately narrowed to the paging/answering protocols, and this one
+    /// button's action does not belong on that seam; see `PromptCard.onAbortBlocked`.
+    let onAbortBlocked: (UUID) async -> Void
 
     /// The newest item the screen has already scrolled to, so arriving pages move it once each
     /// rather than on every re-evaluation of the body.
@@ -293,7 +298,16 @@ struct SessionTimelineScreen: View {
                     ),
                     agent: session?.agent,
                     state: model.answerState,
-                    model: model
+                    model: model,
+                    blockedChaseExhausted: model.blockedChaseExhausted,
+                    allowsBlockedAbort: session?.allowsBlockedAbort ?? false,
+                    // The two liveness inputs `showsBlocked` needs, read from the same
+                    // `session` as the `blocked(...)` call above so the card's "is this
+                    // session still blocked, and does the Mac still agree it cannot name the
+                    // dialog" is asked of one snapshot rather than two.
+                    activity: session?.activity,
+                    openPromptCall: session?.openPromptCall ?? .unreported,
+                    onAbortBlocked: { await onAbortBlocked(model.sessionID) }
                 )
                 PromptComposer(session: session, model: model)
             }
@@ -404,7 +418,12 @@ struct SessionTimelineScreen: View {
             }
     }
 
-    private var entries: [Entry] { Self.entries(from: model.feed.items) }
+    private var entries: [Entry] {
+        Self.entries(
+            from: model.feed.items,
+            delivered: model.outbox.entries.filter { $0.state == .delivered }
+        )
+    }
 
     /// One entry, as a link into the detail screen or as a row that is simply itself.
     ///
@@ -424,23 +443,62 @@ struct SessionTimelineScreen: View {
     /// inside it, so a row cannot be a link and carry a button at once.
     @ViewBuilder
     private func entryRow(_ entry: Entry) -> some View {
-        let row = TimelineRow(
-            item: entry.item, result: entry.result, agent: session?.agent,
-            isExpanded: expansion.isExpanded(entry.id),
-            // Not animated, and that is the same judgement the opening jump above is made on:
-            // a row growing by two thousand points is not a transition anything can follow,
-            // and `List` animating a height change that large under the finger reads as the
-            // screen having lost its place. The rest of the message is simply there.
-            toggleExpanded: { expansion.toggle(entry.id) },
-            // Straight onto the model, which is where the draft lives — the row never learns
-            // that a composer exists.
-            onReply: { model.quote($0) }
-        )
-        if TimelineStyle.opensDetail(entry.item) {
-            NavigationLink(value: entry.item) { row }
+        if entry.isGhost {
+            ghostRow(entry)
         } else {
-            row
+            let row = TimelineRow(
+                item: entry.item, result: entry.result, agent: session?.agent,
+                isExpanded: expansion.isExpanded(entry.id),
+                // Not animated, and that is the same judgement the opening jump above is made
+                // on: a row growing by two thousand points is not a transition anything can
+                // follow, and `List` animating a height change that large under the finger
+                // reads as the screen having lost its place. The rest of the message is simply
+                // there.
+                toggleExpanded: { expansion.toggle(entry.id) },
+                // Straight onto the model, which is where the draft lives — the row never
+                // learns that a composer exists.
+                onReply: { model.quote($0) }
+            )
+            if TimelineStyle.opensDetail(entry.item) {
+                NavigationLink(value: entry.item) { row }
+            } else {
+                row
+            }
         }
+    }
+
+    /// A `.delivered` outbox message, inline where it will land as a real `.userTurn` once the
+    /// agent's own transcript catches up — and visibly not one yet.
+    ///
+    /// **Dimmed and captioned rather than the accent-tinted panel `TimelineRow` gives a real
+    /// user turn**, which is the whole point: a reader scanning the transcript for the
+    /// landmarks they wrote must not mistake something still in flight for something that
+    /// happened. Italic body text and a small "Queued to your agent" caption, with a clock
+    /// glyph — the same pending vocabulary a `.sending`/`.accepted` outbox row used to carry
+    /// below the composer, before delivery moved the cue in here.
+    ///
+    /// **No `NavigationLink`, no expansion, no callID folding.** A ghost has none of the state
+    /// those need — it is not in `TimelineFeed`, has no id `TimelineStyle` or `Expansion`
+    /// recognise, and answers no tool call — so it is drawn straight rather than routed through
+    /// `TimelineRow`, which would have nothing to do with most of what it offers.
+    private func ghostRow(_ entry: Entry) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(entry.item.body.text)
+                .font(.body)
+                .italic()
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Label("Queued to your agent", systemImage: "clock")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(.secondarySystemBackground))
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Queued: \(entry.item.body.text)")
     }
 
     /// What sits above the oldest row the phone holds: a spinner while history is on its way,
@@ -524,6 +582,12 @@ struct SessionTimelineScreen: View {
         let item: TimelineItem
         let result: TimelineItem?
         var id: String { item.id }
+
+        /// A synthetic entry for a `.delivered` outbox message, never a record the agent
+        /// wrote. Detected by id prefix rather than a stored field, because the id is already
+        /// the one thing `entries(from:delivered:)` controls and a second flag would be a
+        /// second place the two could disagree.
+        var isGhost: Bool { item.id.hasPrefix("ghost:") }
     }
 
     // MARK: Which long answers are open
@@ -578,7 +642,13 @@ struct SessionTimelineScreen: View {
     /// land between the two, and dropping a result whose call is on the previous page would
     /// delete content from the screen — the one thing worse than showing it twice. So the set
     /// of calls present is what decides, not merely the result having an id.
-    static func entries(from items: [TimelineItem]) -> [Entry] {
+    ///
+    /// `delivered` is appended AFTER the folded feed, one ghost per entry, in send order —
+    /// `entries` is oldest-first, so the ghosts land at the bottom whatever page the feed is
+    /// showing. Each carries a `"ghost:<token>"` id, which is `Entry.isGhost`'s whole test, and
+    /// exists only in this array: it is never written into `TimelineFeed`, so a page reset or a
+    /// `reconcile` cannot find it and cannot mistake it for a record the agent wrote.
+    static func entries(from items: [TimelineItem], delivered: [PromptOutboxEntry] = []) -> [Entry] {
         var resultsByCall: [String: TimelineItem] = [:]
         var callsPresent: Set<String> = []
         for item in items {
@@ -589,7 +659,7 @@ struct SessionTimelineScreen: View {
             default: break
             }
         }
-        return items.compactMap { item in
+        let mapped = items.compactMap { item -> Entry? in
             guard let callID = item.body.callID else { return Entry(item: item, result: nil) }
             switch item.kind {
             case .toolCall:
@@ -600,6 +670,16 @@ struct SessionTimelineScreen: View {
                 return Entry(item: item, result: nil)
             }
         }
+        let ghosts = delivered.map { entry in
+            Entry(
+                item: TimelineItem(
+                    id: "ghost:\(entry.id.uuidString)", kind: .userTurn, status: .complete,
+                    body: .init(text: entry.text)
+                ),
+                result: nil
+            )
+        }
+        return mapped + ghosts
     }
 
     // MARK: Following the live edge
@@ -793,6 +873,10 @@ struct SessionTimelineScreen: View {
         /// underneath it. Its symbol and tint match the fleet list's badge, not `working`'s
         /// spinner: nothing is running the model turn, only the background task is.
         case background(String)
+        /// The session's last turn died on an API error. Wins over every other case above —
+        /// see `activityFooter`'s own comment for why `activity` cannot be trusted to route
+        /// this once the error has landed.
+        case error(String)
     }
 
     /// What the session itself is doing, said the way the Mac says it.
@@ -810,8 +894,20 @@ struct SessionTimelineScreen: View {
     /// still running" is the one state this whole feature exists to surface, and staying
     /// silent about it here after showing a badge in the fleet list would tell a reader two
     /// different stories about the same session two taps apart.
+    ///
+    /// **`apiError` is checked before `activity`, not folded into one of its branches.**
+    /// `SessionStatusGlyph.label(for:)` already replaces the base label with the error's own
+    /// once a session has one, but `activity` itself is not updated by the same event — the
+    /// process that would flip it to `"idle"` is the one that just died on the API. Routing
+    /// on `activity` after that label swap produced exactly the two-different-stories bug this
+    /// comment warns about above: a spinner captioned "Stopped", an orange `waiting` glyph
+    /// captioned "Stopped", a green background badge captioned "Stopped", and — worst of the
+    /// four — `idle` with no background work returning `nil` outright, silent here while the
+    /// fleet list two taps back still shows a red triangle. The error is a fact about the
+    /// session, not about `activity`, so it is checked first and wins outright.
     static func activityFooter(for session: WireSession?) -> Activity? {
         guard let session, let label = SessionStatusGlyph.label(for: session) else { return nil }
+        if session.apiError != nil { return .error(label) }
         switch session.activity {
         case "busy":
             return .working(label)
@@ -855,6 +951,17 @@ struct SessionTimelineScreen: View {
             Label(text, systemImage: "terminal.fill")
                 .font(.footnote)
                 .foregroundStyle(.green)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .listRowInsets(Self.rowInsets)
+                .listRowSeparator(.hidden)
+        case .error(let text):
+            // Same symbol and tint as `SessionStatusGlyph`'s error branch and the fleet list's
+            // badge — `exclamationmark.triangle.fill` in `.red` — so a reader who tapped a red
+            // triangle to get here sees the same claim restated, not a different one.
+            Label(text, systemImage: "exclamationmark.triangle.fill")
+                .font(.footnote)
+                .foregroundStyle(.red)
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .listRowInsets(Self.rowInsets)

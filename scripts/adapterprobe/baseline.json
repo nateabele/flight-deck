@@ -107,9 +107,9 @@
     "claude_path": "/Users/nate/.local/bin/claude",
     "claude_pty": "2.1.259 (Claude Code)",
     "claude_pty_path": "/Users/nate/.local/bin/claude",
-    "codex": "codex-cli 0.152.1",
+    "codex": "codex-cli 0.153.0",
     "codex_path": "/Users/nate/.local/bin/codex",
-    "codex_pty": "codex-cli 0.152.1",
+    "codex_pty": "codex-cli 0.153.0",
     "codex_pty_path": "/Users/nate/.local/bin/codex"
   }
 }

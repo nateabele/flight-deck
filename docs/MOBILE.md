@@ -497,6 +497,10 @@ page.
     the cursor in the terminal yourself. The drive must STOP — no further keys — rather than
     counting arrows from where you left it. Nothing is committed until the review is submitted,
     so the dialog should be left answerable by hand.
+71. **Kill a session mid-turn with an API failure (or seed `apiError` in `sessions.json` and
+    relaunch)** — a red `exclamationmark.triangle.fill` appears at the LEADING edge of that row
+    on both devices, VoiceOver reads "Stopped — API error 529 (overloaded)" identically on
+    both, and it survives with `activity == nil`.
 
 ## A second checklist: the iOS plumbing
 

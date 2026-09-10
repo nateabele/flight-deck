@@ -69,9 +69,11 @@ diagnosable and survivable.
 
 ### Part A — Desktop: assert the path, and self-heal
 
-`PromptLifecycleRecord.Event` gains one case, emitted when `unnamed` persists
-past a second consecutive poll (one poll of `unnamed` is the ordinary race —
-16:37:57 `unnamed` → 16:37:58 `opened` — and must stay unremarkable):
+`PromptLifecycleRecord.Event` gains one case, emitted when `unnamed` persists for
+**five seconds of continuous unnameability**, and again on a decaying ladder —
+30 s, 2 min, 10 min, 30 min, 2 h — while it still does. A brief `unnamed` is the
+ordinary race (16:37:57 `unnamed` → 16:37:58 `opened`) and must stay
+unremarkable:
 
 ```swift
 case stuck(
@@ -93,6 +95,20 @@ case stuck(
 `pathMatches == true` with a stale `lastRecordAgeMS` means the record was never
 written — upstream. The distinction that cost a day of archaeology becomes one
 line in `~/Library/Logs/flight-deck-prompt.log`.
+
+**Why a wall clock and a ladder, not "a second consecutive poll."** This section
+originally said two polls, and that was written believing a poll was a *change*.
+It is not: `WatchClock.foregroundInterval` is 500 ms and `SessionStatusWatcher.drain`
+calls back on every tick, so two polls is 0.5–1 s — the same order as the ordinary
+race the threshold exists to exclude, and at that instant the two ages read
+identically for a 24-minute stall and for a race that resolves at 1.2 s. The
+discriminator quoted above would therefore never have fired at a moment when it
+carried information; the absent-record cause would have stayed identifiable only
+by the negative (a `stuck` with no `opened` after it). Five seconds rules the race
+out, and the later rungs are where a `lastRecordAgeMS` growing in step with the
+wall clock states the upstream cause positively. Bounded by construction: six
+rungs, each once per episode, and an episode ends the moment the dialog is named
+or the tab stops waiting.
 
 **Self-heal.** On `pathMatches == false`, call the existing `retarget(tab, to:)`
 immediately rather than waiting for the next registry tick. This is the fix for
@@ -120,9 +136,17 @@ answer, now covering this case too.
 
 ### Part C — The Blocked state and its escape hatch
 
-When the chase exhausts with no card, the phone renders a **Blocked** state in
+When the chase exhausts with no card, **and the Mac still reports the session
+`waiting` with no prompt it can name**, the phone renders a **Blocked** state in
 place of the bare "Waiting for you": a short line saying the Mac cannot read this
 dialog, and one button.
+
+Those two liveness conditions were missing from the first implementation and were
+added in review. Without the first, the exhaustion latch — which only
+`chaseBlockedPrompt` clears, and which that method never reaches once the session
+stops being `waiting` — leaves Blocked and its destructive Abort drawn on a busy
+or idle session indefinitely. Without the second, a phone that merely failed to
+build a card draws "This Mac can't read the dialog on screen" over one it can.
 
 **Abort** sends Escape to the terminal. This is not a new capability class — it is
 the existing `PromptAnswer.deny` path, which the phone already offers on
@@ -151,19 +175,35 @@ order and returning the same codes:
 - `unsupported_agent` — no `dialogDriver`
 - `not_waiting` — **kept, and load-bearing.** A stray Escape into a live TUI is
   not free; `answerPrompt` gates on this for the same reason.
+- `prompt_nameable` — **added in review, and load-bearing for the same reason
+  `not_waiting` is.** Every input the phone weighs before drawing Blocked is
+  phone-side; a body it cannot parse, or a page that never landed, leaves it
+  looking identical over a call this Mac names perfectly well, and a blind Escape
+  there denies a real tool call the reader was never shown. So the store asks its
+  own `openPromptProbe` and refuses when the answer is a call id. Costs codex
+  nothing: the probe refuses a codex tab `unsupported_agent`, so those stay
+  abortable.
 - `unreadable_screen` — no injector, or `injecting` already holds this tab
 - duplicate `token` — idempotent, via the existing `answeredPromptTokens`
 
 Then `driver.deny(injector)` and nothing else. No viewport read, so it works on
 exactly the screens this feature exists for.
 
-`PromptLifecycleRecord.Event` gains `aborted(code: String?)` — a sibling of
+`PromptLifecycleRecord.Event` gains `aborted(code:sent:probe:)` — a sibling of
 `answer`, not a reuse of it. `answer` carries `sent` and `open` so a reader can
 see which machine was wrong about *which call*; an abort names no call on either
 side, and forcing a sentinel through those fields would make "no call id by
 construction" indistinguishable from a truncated line. `code` is nil for an
 abort that was dispatched, and the refusal code otherwise — so a blind Escape is
 as accounted for as a targeted answer.
+
+Two fields beside it, both added in review. `sent` is whether a key was actually
+typed: `.duplicate` and `.dispatched` both report no error, so a `code`-only
+record cannot say how many Escapes this Mac really sent. `probe` is what this
+Mac's own derivation said about the dialog at that instant — `nameable`,
+`unnameable-<code>`, or absent — which is the only way the log can answer the
+question the escape hatch's safety story rests on: *was this blind Escape aimed
+at a genuinely unnameable dialog?*
 
 **Gating.** The Blocked banner and its button sit behind a new Mac preference,
 default off, carried as one additive Bool on the fleet snapshot. The Mac refuses

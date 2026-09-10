@@ -62,4 +62,40 @@ final class FleetProjectionTests: XCTestCase {
     func testProjectingAnEmptyStoreIsAnEmptySnapshotNotACrash() {
         XCTAssertEqual(FleetProjection.snapshot(of: store()), .empty)
     }
+
+    /// A field the projection oracle can see that no event can produce is a disagreement by
+    /// construction — the trap `planGateChanged` was added to close. This is that check here.
+    func testOracleMatchesTheReplayedMirrorWithAnErrorRaised() {
+        let store = store()
+        let id = store.newSession(in: URL(fileURLWithPath: "/w/alpha")).id
+        let mirror = FleetProjection.snapshot(of: store)
+        let error = SessionAPIError(status: 529, kind: "overloaded")
+
+        store.apply(.apiError(error), to: id)
+
+        XCTAssertEqual(FleetProjection.snapshot(of: store),
+                       mirror.applying([.apiErrorChanged(id: id, error: error)]))
+    }
+
+    /// `allowsBlockedAbort` is a fact about the Mac, not any one session, but it rides on
+    /// every `WireSession` because that is the only shape a client reads. Read off the
+    /// store's own `preferences`, the same way `planGates` is — see the doc comment on
+    /// `FleetProjection.snapshot(of:planGates:)`.
+    func testTheProjectionCarriesThePreference() {
+        let preferences = PreferencesStore(persistence: nil)
+        preferences.allowsBlockedPromptAbort = true
+        let store = SessionStore(provider: nil, persistence: nil, preferences: preferences)
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+        let snapshot = FleetProjection.snapshot(of: store)
+        XCTAssertTrue(snapshot.projects.flatMap(\.sessions).allSatisfy(\.allowsBlockedAbort))
+    }
+
+    /// The default: a store built with no preferences configured must not turn the switch on
+    /// by accident — off is the safe direction for a control that drives a terminal.
+    func testTheProjectionDefaultsThePreferenceToOff() {
+        let store = store()
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+        let snapshot = FleetProjection.snapshot(of: store)
+        XCTAssertFalse(snapshot.projects.flatMap(\.sessions).contains { $0.allowsBlockedAbort })
+    }
 }
