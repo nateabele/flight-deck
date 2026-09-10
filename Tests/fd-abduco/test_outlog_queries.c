@@ -76,5 +76,41 @@ int main(void) {
     assert(o.len == 5 && memcmp(o.data, "hi\x1b[>", 5) == 0);
     fd_outlog_free(&o);
 
+    /* 7. long, batched XTGETTCAP (payload exceeds FD_OUTLOG_PEND_CAP) is
+     * still fully stripped -- codex often batches several capabilities in
+     * one DCS ("+q 524742;544e;4b53;..."), and once the pending-candidate
+     * cap fires the old behavior flushed the whole thing VERBATIM into the
+     * ring, reproducing the reattach-corruption bug for the long-query
+     * case. Fed across several fd_outlog_append() calls, so this also
+     * covers a +q DCS payload split across appends. */
+    fd_outlog_init(&o, 1024);
+    fd_outlog_append(&o, "x\x1bP+q", 5);
+    for (int i = 0; i < 12; i++) fd_outlog_append(&o, "544e;", 5); /* 60 bytes, > cap */
+    fd_outlog_append(&o, "\x1b\\y", 3);
+    fd_outlog_trim(&o);
+    assert(o.len == 2 && memcmp(o.data, "xy", 2) == 0);
+    fd_outlog_free(&o);
+
+    /* 8. remaining entries in the CSI query table are also stripped: DA2,
+     * DA3, kitty keyboard-protocol, and the 0-param DA1/XTVERSION variants
+     * (only DA1 "c", DSR "6n", and XTVERSION ">q" were exercised above). */
+    {
+        static const struct { const char *seq; size_t len; } more[] = {
+            { "\x1b[>c",  4 }, /* DA2 */
+            { "\x1b[>0c", 5 }, /* DA2 */
+            { "\x1b[=c",  4 }, /* DA3 */
+            { "\x1b[?u",  4 }, /* kitty keyboard-protocol query */
+            { "\x1b[0c",  4 }, /* DA1, 0-param */
+            { "\x1b[>0q", 5 }, /* XTVERSION, 0-param */
+        };
+        for (size_t i = 0; i < sizeof(more) / sizeof(more[0]); i++) {
+            fd_outlog_init(&o, 1024);
+            fd_outlog_append(&o, more[i].seq, more[i].len);
+            fd_outlog_trim(&o);
+            assert(o.len == 0);
+            fd_outlog_free(&o);
+        }
+    }
+
     return 0;
 }

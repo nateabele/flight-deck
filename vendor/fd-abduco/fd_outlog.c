@@ -11,6 +11,7 @@ void fd_outlog_init(FdOutlog *o, size_t budget) {
     o->data = NULL; o->len = 0; o->cap = 0;
     o->budget = budget ? budget : (4u * 1024 * 1024);
     o->pend_len = 0;
+    o->dropping_dcs = 0; o->dropping_dcs_esc = 0;
 }
 void fd_outlog_free(FdOutlog *o) {
     flush_pending(o);
@@ -81,6 +82,19 @@ static int dcs_is_query(const char *s, size_t n) {
  * (or a candidate that turns out not to be a listed query) are emitted via
  * raw_emit(); bytes matching a listed query are dropped silently. */
 static void process_byte(FdOutlog *o, unsigned char b) {
+    if (o->dropping_dcs) {
+        /* committed-to-drop XTGETTCAP payload: consume bytes straight to
+         * the ST terminator (ESC \ or BEL) without buffering into `pend`,
+         * so an arbitrarily long, multi-capability batched query can never
+         * hit FD_OUTLOG_PEND_CAP and fall back to a verbatim flush. */
+        if (b == 0x07 || (o->dropping_dcs_esc && b == '\\')) {
+            o->dropping_dcs = 0; o->dropping_dcs_esc = 0;
+        } else {
+            o->dropping_dcs_esc = (b == 0x1b);
+        }
+        return;
+    }
+
     if (o->pend_len == 0) {
         if (b == 0x1b) { o->pend[0] = (char)b; o->pend_len = 1; return; }
         char c = (char)b;
@@ -131,26 +145,36 @@ static void process_byte(FdOutlog *o, unsigned char b) {
      * is either the two-byte ST (ESC \) or a lone BEL (0x07); real
      * terminals accept both as ST for DCS/OSC-style strings. */
     o->pend[o->pend_len++] = (char)b;
+    if (o->pend_len == 4 && dcs_is_query(o->pend, o->pend_len)) {
+        /* the "+q" prefix alone identifies an XTGETTCAP request -- commit
+         * to dropping right now, before the payload that follows (which
+         * can batch many capabilities and run well past
+         * FD_OUTLOG_PEND_CAP) is ever buffered into `pend`. */
+        o->pend_len = 0;
+        o->dropping_dcs = 1; o->dropping_dcs_esc = 0;
+        return;
+    }
     {
         int st_two_byte = o->pend_len >= 2 &&
             (unsigned char)o->pend[o->pend_len - 2] == 0x1b &&
             (unsigned char)o->pend[o->pend_len - 1] == '\\';
         int st_bel = b == 0x07;
-        if (st_two_byte || st_bel) {
-            if (dcs_is_query(o->pend, o->pend_len)) o->pend_len = 0; /* drop */
-            else flush_pending(o);
-        }
+        /* reaching a terminator here means the "+q" check above never
+         * fired, so this DCS is not a listed query -- always flush. */
+        if (st_two_byte || st_bel) flush_pending(o);
     }
 }
 
 void fd_outlog_append(FdOutlog *o, const char *buf, size_t len) {
     size_t i = 0;
     while (i < len) {
-        if (o->pend_len == 0) {
+        if (o->pend_len == 0 && !o->dropping_dcs) {
             /* common case: bulk-emit the run of normal bytes up to the
              * next ESC in one ensure+memcpy, instead of the state machine's
              * one-byte-at-a-time raw_emit -- keeps the hot path cheap for
-             * bursty/large pty output. */
+             * bursty/large pty output. (Skipped while dropping_dcs is set:
+             * those bytes must go through process_byte() one at a time so
+             * they are consumed, not bulk-emitted.) */
             size_t start = i;
             while (i < len && (unsigned char)buf[i] != 0x1b) i++;
             if (i > start) raw_emit(o, buf + start, i - start);
@@ -167,7 +191,12 @@ void fd_outlog_trim(FdOutlog *o) {
     /* an in-progress candidate must not be silently dropped when a
      * reattaching client is about to read `data` -- flush it verbatim
      * before either the budget check below or the replay loop that calls
-     * us right before reading (server.c). */
+     * us right before reading (server.c: fd_outlog_trim is called
+     * immediately before that loop reads o->data). When this function is
+     * instead reached via the amortized len > 2*budget path inside
+     * fd_outlog_append, the same flush can fire mid-candidate; that is a
+     * rare, tolerated under-strip (a not-yet-classified escape lands in
+     * the ring verbatim), never an over-strip. */
     flush_pending(o);
     if (o->len <= o->budget) return;
     size_t window = o->len - o->budget;               /* earliest index we may keep from */
