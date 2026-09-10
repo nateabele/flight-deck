@@ -11,6 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 bash run_outlog_test.sh
+bash run_outlog_queries_test.sh
 bash baseline_smoke.sh
 bash run_replay_test.sh
 bash run_replay_busy_test.sh
