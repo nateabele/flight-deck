@@ -2305,7 +2305,9 @@ final class SessionStore: ObservableObject {
         // behind their back at launch. See `resumeRestoredCodex`.
         if !deferredCodexResumes.isEmpty {
             codexRestoreTask = Task { [weak self] in
-                await self?.resumeRestoredCodex(deferredCodexResumes)
+                // The one caller whose pins came off disk rather than out of this run, so the
+                // only one that reconciles before typing. See `resumeRestoredCodex`'s stage 2.
+                await self?.resumeRestoredCodex(deferredCodexResumes, pinsPredateThisRun: true)
             }
         }
         // Projects count as "restored something": `SessionStore.init` reads this as
@@ -2330,9 +2332,9 @@ final class SessionStore: ObservableObject {
     ///   marked unread until the user happened to create a *new* codex tab, which started the
     ///   memoized stack and incidentally revived it. `preparedAdapter` is what starts it, and
     ///   this method only runs when a codex tab came back, so the laziness holds.
-    /// - **Identity is settled** — first by one `reconcileCodexPins` pass over every codex
-    ///   tab, then per tab with `rebind` rather than read off the pin — and the tab is
-    ///   re-pinned when codex answers with a different thread. See `CodexAdapter.rebind`.
+    /// - **Identity is settled** — on a relaunch first by one `reconcileCodexPins` pass over
+    ///   every codex tab, then per tab with `rebind` rather than read off the pin — and the tab
+    ///   is re-pinned when codex answers with a different thread. See `CodexAdapter.rebind`.
     /// - **The resume command is typed afterwards**, which is why `restore` left
     ///   `initialInput` empty for these tabs.
     ///
@@ -2342,8 +2344,15 @@ final class SessionStore: ObservableObject {
     ///
     /// **Three stages, and the order between them is the whole point.** Prepare every account,
     /// then reconcile once, then bind and send. See the comment on stage 2 for what typing
-    /// first cost.
-    private func resumeRestoredCodex(_ tabIDs: [UUID]) async {
+    /// first cost, and for why only a relaunch takes that middle stage.
+    ///
+    /// - Parameter pinsPredateThisRun: whether these tabs' pins were negotiated before this
+    ///   process existed — true from `restore`, which reads them back off disk. Only then is
+    ///   stage 2 a repair: a reopen (⌘⇧T, the phone's reopen, ⌘K) resurrects a pin the user
+    ///   chose seconds ago, and reconciling it would override that choice rather than correct
+    ///   a stale one. Passed explicitly at all three call sites rather than defaulted, so a
+    ///   fourth caller has to answer the question instead of inheriting an answer.
+    private func resumeRestoredCodex(_ tabIDs: [UUID], pinsPredateThisRun: Bool) async {
         // One prepare per account, not per tab. `startCodex` already memoizes the handshake,
         // so a second ask would not spawn a second app-server — but it would count as a
         // second ask (see `codexServerRequestsForTesting`) and re-await a settled task for
@@ -2380,34 +2389,56 @@ final class SessionStore: ObservableObject {
             }
         }
 
-        // **Stage 2 — one pass, BEFORE anything is typed.** `rebind` below asks only whether
-        // the *pinned* thread still exists, never whether it is still the thread the user
-        // works in, so a pin left behind by a previous run survives it untouched. This pass is
-        // the only thing that answers the second question, and it used to run after the loop —
-        // which meant a relaunch typed `codex resume <abandoned-thread>` and only then learned
-        // better, leaving the store, the watcher, the title and the phone on the right thread
-        // while the terminal sat on an empty TUI. Flight Deck creates its pinned thread itself
-        // in `prepare`, so "wrong thread" reads as "blank conversation": that is the whole of
-        // the "codex resume is broken" symptom. Measured live across 26 Flight-Deck-created
-        // threads, only 2 ever carried a turn.
+        // **Stage 2 — one pass, BEFORE anything is typed, and only for pins that predate this
+        // run.** `rebind` below asks only whether the *pinned* thread still exists, never
+        // whether it is still the thread the user works in, so a pin left behind by a previous
+        // run survives it untouched. This pass is the only thing that answers the second
+        // question, and it used to run after the loop — which meant a relaunch typed
+        // `codex resume <abandoned-thread>` and only then learned better, leaving the store,
+        // the watcher, the title and the phone on the right thread while the terminal sat on an
+        // empty TUI. Flight Deck creates its pinned thread itself in `prepare`, so "wrong
+        // thread" reads as "blank conversation": that is the whole of the "codex resume is
+        // broken" symptom. Measured live across 26 Flight-Deck-created threads, only 2 ever
+        // carried a turn.
         //
         // Immediate rather than waiting up to a throttle window for the reconciler's first
         // tick, for the same reason: a relaunch is precisely when a tab is most likely to be
         // pinned to a thread the user abandoned in the previous run.
         //
+        // **Gated, because all of that is true only of a relaunch.** The other callers —
+        // ⌘⇧T and the phone's `reopenClosedSession` through `settleReopen`, ⌘K through
+        // `openConversation` — hand this a pin the user chose seconds ago; at ⌘K it is
+        // literally the conversation they searched for by name. Following the directory's
+        // newest thread there overrides that choice instead of repairing a stale pin, and it
+        // usually collides while doing it: the hand-started TUI that made the rival thread
+        // newest is typically still alive, so the limitation below stops being a rare risk and
+        // becomes the common case. Reopens therefore skip this stage and behave exactly as they
+        // did before it existed; stages 1 and 3 run for every caller.
+        //
         // It needs no state stage 1 produced beyond a started app-server: it reads `repos` and
         // resolves its own adapters through `adapter(for:)`. A group whose server never came up
-        // is skipped by its own per-group `try?`, so the degraded path is exactly as it was.
+        // is skipped by its own per-group `try?`, so the degraded path is unchanged in what it
+        // does — but not in when it waits. `threads(inDirectory:)` over the unstarted transport
+        // a missing or wedged codex leaves behind burns the full `readTimeout` (5 s), per
+        // directory, sequentially, and now it burns it *before* the first keystroke: four
+        // broken-codex tabs across four directories sit at empty prompts for ~20 s where they
+        // used to be populated at once. Total settle time is the same either way; only the
+        // order of the wait moved, and on a relaunch that wait is what the pass costs.
         //
         // **Known limitation, deliberately not fixed.** Its `taken` set excludes threads pinned
         // by other Flight Deck tabs, not one held by a TUI started by hand outside Flight Deck.
         // Selecting such a thread while its writer lock is still held makes `codex resume` fail
         // visibly in the tab (`already has an active writer (code -32600)`) — a loud,
         // correctable failure, where the behaviour it replaces is a silent wrong thread. Lock
-        // probing before selection is not worth the round trip for that trade.
-        await reconcileCodexPins()
+        // probing before selection is not worth the round trip for that trade — and the gate
+        // above confines the trade to relaunch, where the thread being left behind is one
+        // nobody has taken a turn in.
+        if pinsPredateThisRun {
+            await reconcileCodexPins()
+        }
 
-        // **Stage 3 — bind and send, on a pin stage 2 has just made current.**
+        // **Stage 3 — bind and send, on a pin stage 2 has just made current — or, on a reopen,
+        // on the one the user picked, which is already current by construction.**
         for tabID in tabIDs {
             guard let session = session(for: tabID) else { continue }
             let instance = instance(for: session)
@@ -2449,7 +2480,16 @@ final class SessionStore: ObservableObject {
         // definition the newest thread in that directory — and already in
         // `codexThreadsEverPinned` — so a fresh pass would re-select it and stop at the
         // strictly-greater test, having paid one `thread/list` round trip per directory to
-        // learn nothing. The 5 s ticker covers everything after restore.
+        // learn nothing.
+        //
+        // That is the benign half, and it holds only while the replacement's rollout is
+        // already on disk. When it is not, `pinnedUpdatedAt` falls through to
+        // `rolloutModifiedAt(session.transcriptPath)`, which answers 0 for a file codex has yet
+        // to write — and against 0 *any* never-pinned candidate in the directory wins. A
+        // retained second pass would then re-pin the record off the thread stage 3 has just
+        // typed, recreating the exact terminal-versus-record split this ordering exists to
+        // remove. Deleting it is the stronger call, not the cheaper one. The 5 s ticker covers
+        // everything after restore.
     }
 
     /// Follows a codex tab to the thread it is actually driving.
@@ -2462,8 +2502,10 @@ final class SessionStore: ObservableObject {
     /// stale. The rollout watcher, the phone, and the tab title were all reading the dead file.
     ///
     /// Called from `CodexPinReconciler` on a throttled tick, and once directly by
-    /// `resumeRestoredCodex` — between starting the app-servers and typing anything, never
-    /// after, or a relaunch types a command naming the thread this pass is about to move off.
+    /// `resumeRestoredCodex` on the relaunch path — between starting the app-servers and typing
+    /// anything, never after, or a relaunch types a command naming the thread this pass is
+    /// about to move off. Relaunch only: its reopen callers pass `pinsPredateThisRun: false`,
+    /// because a pin the user picked out of history seconds ago is not one to second-guess.
     /// Directly callable, and taking nothing, so every rule below is assertable with no clock
     /// and no expectations.
     func reconcileCodexPins() async {
@@ -3223,7 +3265,10 @@ final class SessionStore: ObservableObject {
         persist()
         if !deferredCodexResumes.isEmpty {
             codexRestoreTask = Task { [weak self] in
-                await self?.resumeRestoredCodex(deferredCodexResumes)
+                // No reconcile pass: a reopen names the thread the user picked out of the
+                // closed-tab history seconds ago, so there is no stale pin to repair — only a
+                // choice to obey. See `resumeRestoredCodex`'s stage 2 for the rest.
+                await self?.resumeRestoredCodex(deferredCodexResumes, pinsPredateThisRun: false)
             }
         }
     }
@@ -3263,6 +3308,13 @@ final class SessionStore: ObservableObject {
     /// gone (a deleted worktree, usually) falls back to the project so `--resume` runs where
     /// claude actually wrote; a tab whose login was deleted is rebuilt but never launched;
     /// codex is typed at only after `resumeRestoredCodex` confirms its thread still exists.
+    ///
+    /// Confirms it, and nothing more. Every caller of this one is a reopen, so all of them pass
+    /// `pinsPredateThisRun: false` and the settling skips the reconcile pass `restore` takes:
+    /// the thread being resurrected here is one the user named seconds ago, not a pin left over
+    /// from a previous run, so following the directory's newest thread instead would override
+    /// the choice rather than repair anything — and would usually run into the writer lock of
+    /// the TUI that made that thread newest.
     ///
     /// Returns true when it is a codex tab whose resume text still has to be settled.
     @discardableResult
@@ -3486,7 +3538,11 @@ final class SessionStore: ObservableObject {
 
         if deferred {
             codexRestoreTask = Task { [weak self] in
-                await self?.resumeRestoredCodex([session.id])
+                // No reconcile pass, for `settleReopen`'s reason at its sharpest: this pin is
+                // the conversation the user searched for by name and selected, so a pass that
+                // followed the directory's newest thread would answer a different question
+                // than the one they asked.
+                await self?.resumeRestoredCodex([session.id], pinsPredateThisRun: false)
             }
         }
         return session.id
