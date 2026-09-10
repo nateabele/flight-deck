@@ -52,6 +52,16 @@ final class CodexPinReconciler {
     /// ticker pass itself.
     private var inFlight: Task<Void, Never>?
 
+    /// Set synchronously at the top of `passNow()`, before its first `await`, and held for the
+    /// whole call — so `tick()` starts nothing from the instant stage 2 begins.
+    ///
+    /// Its job is bounding, not correctness: without it, every timer block that won the gap
+    /// described in `passNow()` would start a pass the loop then had to wait out, so the loop
+    /// would terminate only probabilistically — and stage 2 sits on the restore's critical
+    /// path. (Being set before that method's first `await` does make it sufficient on its own
+    /// against today's `tick()`; the loop is what does not depend on that. See `passNow()`.)
+    private var passNowPending = false
+
     /// Seeded at construction rather than left nil, so the *first* pass waits a window too.
     ///
     /// Deliberate: the reconciler is created the moment a codex tab appears, and a tab that
@@ -113,18 +123,52 @@ final class CodexPinReconciler {
     /// be clear is the one *after* it, the stretch of stage 3 where the sends happen. Stamping
     /// at the start would leave that stretch a window shorter, by however long this pass took.
     ///
-    /// **When this returns, no reconcile pass is in flight and none starts for a window.**
-    /// Three pieces make that true, one per way a pass could otherwise overlap stage 3:
-    /// `await inFlight?.value` first, so a ticker pass already running when this is called is
-    /// waited out rather than raced — it cannot still be running once this returns. `isPolling`
-    /// is then set for the duration of this pass (restored on the way out only if this call is
-    /// the one that set it, via `wasPolling`), so a tick that lands *during* this pass sees the
-    /// guard held and does not start a second, concurrent one. And the stamp below, as always,
-    /// pushes the *next* tick a full window past this pass. Together they close the pass this
-    /// method could still be racing with, the pass a tick could start underneath it, and the
-    /// pass the very next tick could start after it.
+    /// **When this returns, no ticker pass is in flight, and no tick starts one for a window.**
+    /// Three pieces, one per way a pass could otherwise overlap stage 3.
+    ///
+    /// *The drain* — a `while let` loop, not a single `await inFlight?.value`. `WatchClock`
+    /// drives `tick()` from a `DispatchSource` timer on `.main` (`WatchClock.swift:128-134`),
+    /// a plain queue block rather than a main-actor `Task`, so timer blocks interleave FIFO
+    /// with this actor's continuations. The pass being waited on clears `isPolling` and
+    /// `inFlight` and only *then* enqueues this method's continuation, so a timer block can
+    /// land in that gap, find both guards clear and `lastPass` older than the throttle, and
+    /// start a pass a single await would never look for. The loop's final condition check and
+    /// the `isPolling = true` below it run in one uninterrupted job — nothing can be enqueued
+    /// between them — so what the loop saw on that check is still true when the guard goes up.
+    /// That one-job property, not the number of awaits, is what makes the invariant hold.
+    ///
+    /// *The guard* — `isPolling`, held for the duration of this pass and restored on the way
+    /// out only if this call is the one that set it (via `wasPolling`), so a tick landing
+    /// *during* this pass sees it held and starts nothing.
+    ///
+    /// *The stamp* — below, at the end, pushing the next tick a full window past this pass.
+    ///
+    /// `passNowPending` bounds the loop rather than making it correct, but be exact about the
+    /// overlap between the two: because it is set before the first `await`, it *also* keeps the
+    /// gap above empty on today's code, where `tick()` is the only thing that starts a pass and
+    /// runs synchronously. So each piece alone would close this hazard, and the test that pins
+    /// the loop only fails with the flag's clause taken out of `tick()` as well — measured, not
+    /// assumed. Both are kept because they hold it in different ways: the flag is an argument
+    /// about who calls `tick()` and when, the loop is a property of these four lines that
+    /// survives that argument going stale.
+    ///
+    /// **The invariant is about ticker passes.** This method never *gates* on `isPolling` or
+    /// `passNowPending` — stage 2 must reconcile before stage 3 types anything, so it always
+    /// takes its own pass — which means two `passNow()` calls overlapping in time would overlap
+    /// each other, and nothing here would stop them. Nothing creates a second one: the only
+    /// call is stage 2, reached only under `pinsPredateThisRun`, which only the relaunch
+    /// restore (`SessionStore.swift:2310`) passes true — once per launch. Every other caller of
+    /// `resumeRestoredCodex` passes false and takes no pass at all.
+    ///
+    /// **Two costs, both accepted.** This can wait out an in-flight pass *and then* run its
+    /// own, so a wedged app-server — a whole `readTimeout` per group it cannot reach — is paid
+    /// for about twice on this path. And `.value` on a non-throwing `Task` ignores
+    /// cancellation, so a restore cancelled during stage 2 still waits the in-flight pass out.
     func passNow() async {
-        await inFlight?.value
+        let wasPending = passNowPending
+        passNowPending = true
+        defer { if !wasPending { passNowPending = false } }
+        while let task = inFlight { await task.value }
         let wasPolling = isPolling
         isPolling = true
         defer { if !wasPolling { isPolling = false } }
@@ -144,7 +188,7 @@ final class CodexPinReconciler {
     /// against a fake now-provider, the way `WatchClock.fire()` and `TranscriptWatcher.drain()`
     /// are internal for the same reason.
     func tick() {
-        guard !isPolling else { return }
+        guard !isPolling, !passNowPending else { return }
         let now = self.now()
         guard now - lastPass >= Self.throttle else { return }
         // Stamped at the *start* of the pass, not its end: the window is "how often we ask",

@@ -821,4 +821,147 @@ final class CodexPinReconcileTests: XCTestCase {
         await passNowTask.value
         XCTAssertEqual(events, ["ticker enter", "ticker exit", "passNow enter", "passNow exit"])
     }
+
+    /// The gap that a single `await inFlight?.value` leaves open, and why the drain is a loop.
+    ///
+    /// `WatchClock` drives `tick()` from a `DispatchSource` timer on `.main`, so a tick is a
+    /// plain queue block interleaving FIFO with this actor's continuations — not something the
+    /// actor can be holding out. The pass `passNow()` is waiting on clears `isPolling` and
+    /// `inFlight` and only *then* enqueues `passNow()`'s continuation, so a tick can land in
+    /// between: both guards clear, the throttle long expired, and a second pass starts. A
+    /// single await never looks again and would run its own pass on top of that one, straight
+    /// into stage 3 — the record-versus-terminal split this whole branch removes.
+    ///
+    /// The interleaving is driven exactly rather than by timing. Resuming the ticker's pass and
+    /// then yielding puts this test's continuation ahead of `passNow()`'s on the main actor's
+    /// queue, so the `tick()` below runs in the gap itself — and the assertion before it is
+    /// what proves the gap was reached, rather than the test passing for the wrong reason.
+    func testATickInTheGapBeforePassNowResumesCannotOverlapItsOwnPass() async {
+        final class Box { var resumes: [CheckedContinuation<Void, Never>] = [] }
+        final class Flag { var value = false }
+        let box = Box()
+        var events: [String] = []
+        var live = 0
+        var mostLiveAtOnce = 0
+        var passCount = 0
+        var now = ContinuousClock.now
+        let tickerEntered = expectation(description: "the ticker's pass entered reconcile")
+
+        let reconciler = CodexPinReconciler(clock: nil, now: { now }) {
+            passCount += 1
+            let label = "pass\(passCount)"
+            live += 1
+            mostLiveAtOnce = max(mostLiveAtOnce, live)
+            events.append("\(label) enter")
+            if passCount == 1 { tickerEntered.fulfill() }
+            await withCheckedContinuation { box.resumes.append($0) }
+            live -= 1
+            events.append("\(label) exit")
+        }
+
+        // Past the seeded window, so the tick starts a pass and parks it in `reconcile`.
+        now = now.advanced(by: CodexPinReconciler.throttle)
+        reconciler.tick()
+        await fulfillment(of: [tickerEntered], timeout: 2)
+
+        // Boxed, and read instead of `await passNowTask.value`, so the drain below can stop on
+        // it without the test being able to suspend on a pass it did not expect.
+        let returned = Flag()
+        Task { await reconciler.passNow(); returned.value = true }
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(events, ["pass1 enter"], "passNow() must wait the ticker's pass out")
+
+        // Into the gap. The resume lets the ticker's task finish — clearing both guards and
+        // enqueueing `passNow()`'s continuation *behind* the one this yield enqueued.
+        now = now.advanced(by: CodexPinReconciler.throttle * 10)
+        // Removed as it is resumed: the drain below resumes everything still parked, and a
+        // continuation resumed twice traps rather than failing.
+        box.resumes.removeFirst().resume()
+        await Task.yield()
+        XCTAssertEqual(events, ["pass1 enter", "pass1 exit"],
+                       "the gap: the awaited pass has finished and passNow() has not resumed")
+
+        // The tick review found — the one a single await cannot see.
+        reconciler.tick()
+
+        // Drain whatever did start, however many passes that turns out to be, so that a
+        // regression fails on the assertions below. Bounded and driven off `returned` rather
+        // than off `box.resumes` being empty or an `await passNowTask.value`: a shape that
+        // starts more passes than expected must not be able to park this test forever — a
+        // hung test wedges the whole suite, where a failing one names the defect.
+        var spins = 0
+        while !returned.value, spins < 50 {
+            spins += 1
+            let parked = box.resumes
+            box.resumes.removeAll()
+            for continuation in parked { continuation.resume() }
+            await Task.yield()
+            await Task.yield()
+        }
+
+        XCTAssertTrue(returned.value, "passNow() never returned: \(events)")
+        XCTAssertEqual(mostLiveAtOnce, 1,
+                       "no two reconcile passes may be inside `reconcile` at once: \(events)")
+        XCTAssertEqual(live, 0, "passNow() returned with a pass still running: \(events)")
+        XCTAssertGreaterThanOrEqual(passCount, 2, "passNow() must always take its own pass")
+    }
+
+    /// `passNowPending`'s job — bounding the drain, not making it correct.
+    ///
+    /// The same interleaving as above, counted rather than overlapped. The flag is set before
+    /// `passNow()`'s first await, so the tick in the gap is refused by `tick()`'s first guard
+    /// and starts nothing: the loop drains the one pass that was already in flight, runs
+    /// `passNow()`'s own, and stops — two passes, not three. Without the flag the loop would
+    /// still refuse to overlap, but it would have another pass to wait out first, and stage 2
+    /// is on the restore's critical path.
+    func testATickInTheGapWhilePassNowIsPendingStartsNothing() async {
+        final class Box { var resumes: [CheckedContinuation<Void, Never>] = [] }
+        final class Flag { var value = false }
+        let box = Box()
+        var passCount = 0
+        var now = ContinuousClock.now
+        let tickerEntered = expectation(description: "the ticker's pass entered reconcile")
+
+        let reconciler = CodexPinReconciler(clock: nil, now: { now }) {
+            passCount += 1
+            if passCount == 1 { tickerEntered.fulfill() }
+            await withCheckedContinuation { box.resumes.append($0) }
+        }
+
+        now = now.advanced(by: CodexPinReconciler.throttle)
+        reconciler.tick()
+        await fulfillment(of: [tickerEntered], timeout: 2)
+
+        // Boxed, and read instead of `await passNowTask.value`, so the drain below can stop on
+        // it without the test being able to suspend on a pass it did not expect.
+        let returned = Flag()
+        Task { await reconciler.passNow(); returned.value = true }
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(passCount, 1)
+
+        now = now.advanced(by: CodexPinReconciler.throttle * 10)
+        // Removed as it is resumed: the drain below resumes everything still parked, and a
+        // continuation resumed twice traps rather than failing.
+        box.resumes.removeFirst().resume()
+        await Task.yield()
+        XCTAssertEqual(passCount, 1, "the gap: the awaited pass has finished, passNow() has not resumed")
+
+        reconciler.tick()
+        var spins = 0
+        while !returned.value, spins < 50 {
+            spins += 1
+            let parked = box.resumes
+            box.resumes.removeAll()
+            for continuation in parked { continuation.resume() }
+            await Task.yield()
+            await Task.yield()
+        }
+
+        XCTAssertTrue(returned.value, "passNow() never returned")
+        XCTAssertEqual(passCount, 2,
+                       "a tick while passNow() is pending must start nothing, so the drain "
+                       + "waits out one pass and not a second one it caused")
+    }
 }
