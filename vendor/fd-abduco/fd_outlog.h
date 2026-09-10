@@ -15,6 +15,12 @@
 typedef struct {
     char *data; size_t len, cap, budget;
     char pend[FD_OUTLOG_PEND_CAP]; size_t pend_len;
+    /* set once a DCS candidate's "+q" prefix commits it to an XTGETTCAP
+     * drop, so the (possibly long, multi-capability) payload is consumed
+     * straight to its terminator without ever touching `pend` -- see
+     * fd_outlog.c. dropping_dcs_esc is a 1-byte lookback used to notice
+     * the two-byte ST (ESC \) while dropping. */
+    int dropping_dcs, dropping_dcs_esc;
 } FdOutlog;
 void fd_outlog_init(FdOutlog *o, size_t budget);
 void fd_outlog_free(FdOutlog *o);
