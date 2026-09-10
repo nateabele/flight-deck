@@ -761,4 +761,64 @@ final class CodexPinReconcileTests: XCTestCase {
         await fulfillment(of: [passes], timeout: 2)
         XCTAssertEqual(count, 1)
     }
+
+    // MARK: - 9. `passNow()` against the ticker
+
+    /// `passNow()` is `resumeRestoredCodex`'s stage 2, and stage 3 reads a tab's binding before
+    /// awaiting `rebind` and types what it read — so any reconcile pass that moves the record
+    /// across that suspension leaves the terminal and the record on different threads. This
+    /// asserts the invariant stage 3 needs, not the mechanism: a ticker pass already running
+    /// when `passNow()` is called cannot outlive it, and a tick landing while `passNow()`'s own
+    /// pass is running starts nothing.
+    func testPassNowWaitsOutAnInFlightTickAndBlocksATickDuringItsOwnPass() async {
+        final class Box { var resumes: [CheckedContinuation<Void, Never>] = [] }
+        let box = Box()
+        var events: [String] = []
+        var passCount = 0
+        var now = ContinuousClock.now
+        let tickerEntered = expectation(description: "the ticker's pass entered reconcile")
+        let passNowEntered = expectation(description: "passNow's own pass entered reconcile")
+
+        let reconciler = CodexPinReconciler(clock: nil, now: { now }) {
+            passCount += 1
+            let label = passCount == 1 ? "ticker" : "passNow"
+            events.append("\(label) enter")
+            if label == "ticker" { tickerEntered.fulfill() } else { passNowEntered.fulfill() }
+            await withCheckedContinuation { box.resumes.append($0) }
+            events.append("\(label) exit")
+        }
+
+        // Past the seeded window, so the tick actually starts a pass and parks it in `reconcile`.
+        now = now.advanced(by: CodexPinReconciler.throttle)
+        reconciler.tick()
+        await fulfillment(of: [tickerEntered], timeout: 2)
+
+        // `passNow()` must wait this pass out rather than race it — it should not have reached
+        // `reconcile` yet, however long we give it, because it is still awaiting `inFlight`.
+        let passNowTask = Task { await reconciler.passNow() }
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(events, ["ticker enter"],
+                        "passNow() must not start its own pass while the ticker's is in flight")
+        XCTAssertEqual(passCount, 1)
+
+        // Releasing the ticker's pass lets `passNow()` proceed — and only then.
+        box.resumes[0].resume()
+        await fulfillment(of: [passNowEntered], timeout: 2)
+        XCTAssertEqual(events, ["ticker enter", "ticker exit", "passNow enter"],
+                        "the two passes must not overlap")
+
+        // A tick landing while `passNow()`'s own pass is running — far past the throttle, so
+        // only the re-entrancy guard could refuse it — must start no pass.
+        now = now.advanced(by: CodexPinReconciler.throttle * 10)
+        reconciler.tick()
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(passCount, 2, "a tick during passNow()'s own pass must run nothing")
+
+        // `passNow()` must not return until its own pass has finished too.
+        box.resumes[1].resume()
+        await passNowTask.value
+        XCTAssertEqual(events, ["ticker enter", "ticker exit", "passNow enter", "passNow exit"])
+    }
 }

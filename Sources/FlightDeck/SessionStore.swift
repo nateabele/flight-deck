@@ -2348,10 +2348,13 @@ final class SessionStore: ObservableObject {
     ///
     /// - Parameter pinsPredateThisRun: whether these tabs' pins were negotiated before this
     ///   process existed — true from `restore`, which reads them back off disk. Only then is
-    ///   stage 2 a repair: a reopen (⌘⇧T, the phone's reopen, ⌘K) resurrects a pin the user
-    ///   chose seconds ago, and reconciling it would override that choice rather than correct
-    ///   a stale one. Passed explicitly at all three call sites rather than defaulted, so a
-    ///   fourth caller has to answer the question instead of inheriting an answer.
+    ///   stage 2 a repair: a reopen (⌘⇧T, the phone's `reopenClosedSession`) resurrects a pin
+    ///   the user chose seconds ago, and reconciling it would override that choice rather than
+    ///   correct a stale one. ⌘K's `openConversation` also passes false, but as an answer held
+    ///   ready rather than one in use: it is claude-only in practice and never defers into this
+    ///   method (see `CodexPinReconciler.lastPass`'s doc comment). Passed explicitly at all
+    ///   three call sites rather than defaulted, so a fourth caller has to answer the question
+    ///   instead of inheriting an answer.
     private func resumeRestoredCodex(_ tabIDs: [UUID], pinsPredateThisRun: Bool) async {
         // One prepare per account, not per tab. `startCodex` already memoizes the handshake,
         // so a second ask would not spawn a second app-server — but it would count as a
@@ -2449,19 +2452,25 @@ final class SessionStore: ObservableObject {
         // nobody has taken a turn in.
         if pinsPredateThisRun {
             // Through the reconciler rather than straight into `reconcileCodexPins()`, for the
-            // stamp and nothing else — the pass itself is identical. `lastPass` was seeded when
-            // stage 1 constructed the reconciler, so a direct call leaves the first tick due a
-            // window from *that* instant, which this stage can outlast on its own (a
+            // stamp and nothing else — the pass itself is identical. `passNow()` also closes
+            // this pass against any ticker pass already in flight or starting underneath it;
+            // the stamp handles what those two do not, a *later* tick. `lastPass` was seeded
+            // when stage 1 constructed the reconciler, so without it the first tick would fall
+            // due a window from *that* instant, which this stage can outlast on its own (a
             // `readTimeout` per unreachable group, sequentially). That tick would then land
             // inside stage 3, which reads a tab's binding before awaiting `rebind` and types
             // what it read — so a pass moving the record across that suspension puts the
             // terminal and the record back on different threads. `passNow()` stamps, and the
             // next tick falls a full window after this pass instead. See its doc comment.
             //
-            // nil only when stage 1 reached `preparedAdapter` for no tab at all — every
-            // restored tab closed between the two stages — because that method starts the
-            // reconciler before anything in it can throw. `repos` can still hold an orphaned
-            // codex tab for a pass to visit, so the fallback reconciles rather than skipping.
+            // nil by two routes, both benign. Either stage 1 reached `preparedAdapter` for no
+            // tab at all — every restored tab closed between the two stages — because that
+            // method starts the reconciler before anything in it can throw; `repos` can still
+            // hold an orphaned codex tab for a pass to visit, so the fallback reconciles rather
+            // than skipping. Or `stopCodexPinReconcilerIfUnused` tore it down mid-stage-1, from
+            // a `closeSession` interleaved with this method's awaits — and on that route
+            // `repos` holds no codex tab at all, by the very check that nilled it, so the
+            // fallback pass below simply finds nothing to reconcile.
             if let reconciler = codexPinReconciler {
                 await reconciler.passNow()
             } else {
