@@ -96,6 +96,27 @@ struct DevicesSettingsTab: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+
+            Section("Blocked Prompts") {
+                // Off by default — see `PreferencesStore.allowsBlockedPromptAbort`. This is the
+                // only place the switch is surfaced. It gates `FleetCommand.abortPrompt` at
+                // `FleetService`'s own handler, before the store is touched at all, and it is
+                // also carried to phones as `WireSession.allowsBlockedAbort` so the Blocked
+                // card's button is not drawn on a Mac that would only refuse it.
+                Toggle(
+                    "Allow phones to dismiss unreadable dialogs",
+                    isOn: Binding(
+                        get: { preferences.allowsBlockedPromptAbort },
+                        set: { preferences.allowsBlockedPromptAbort = $0 }
+                    )
+                )
+                .accessibilityIdentifier("prefs-allows-blocked-prompt-abort")
+
+                Text("When Flight Deck cannot tell what a session is waiting on, a paired phone may send Escape without knowing which prompt it is answering.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .formStyle(.grouped)
         // `.sheet(item:)`, not `.sheet(isPresented:)` with a companion optional. The latter

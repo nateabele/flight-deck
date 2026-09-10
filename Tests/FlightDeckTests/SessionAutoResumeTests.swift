@@ -1,4 +1,5 @@
 import XCTest
+import FleetKit
 @testable import FlightDeck
 
 @MainActor
@@ -410,5 +411,23 @@ final class SessionAutoResumeTests: XCTestCase {
             store.backgroundWorkSessions.contains(id),
             "an explicit hasBackgroundWork: true must not be overridden by \"idle\" implying false"
         )
+    }
+
+    /// The clearing trigger is a NEW transcript record, and `TailReader` starts a first look at
+    /// an existing file at its end. Without persistence, every relaunch would silently forget
+    /// every dead session — which matters more here than it does for the unread mark.
+    func testRestoreSeedsTheAPIError() {
+        let id = UUID()
+        let record = SessionSnapshot.Entry(
+            id: id, title: "s", workingDirectory: "/w",
+            apiError: SessionAPIError(status: 529, kind: "overloaded")
+        )
+        let snap = SessionSnapshot(sessions: [record], selectedSessionID: nil, sessionCounter: 1)
+        let store = makeStore(snap, autoResume: true)
+
+        store.restore(directoryExists: allDirsExist)
+
+        XCTAssertEqual(store.apiErrors[id]?.status, 529)
+        XCTAssertEqual(store.apiErrors[id]?.kind, "overloaded")
     }
 }

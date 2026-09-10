@@ -1,3 +1,4 @@
+import FleetKit
 import Foundation
 
 /// Tails one session's Claude transcript and reports the newest `customTitle`.
@@ -28,6 +29,7 @@ final class TranscriptWatcher {
     let url: URL
     private let onTitle: (String) -> Void
     private let onSubagentCount: (Int) -> Void
+    private let onAPIError: (SessionAPIError?) -> Void
     /// Reports conversation text to the search index. A genuine optional, not a defaulted
     /// no-op: `Scan.read` checks `onMessages != nil` and skips
     /// `TranscriptExtractor.messages(inObject:)` entirely when nothing is subscribed, so a
@@ -39,6 +41,16 @@ final class TranscriptWatcher {
     /// is what makes a miscount from attaching mid-turn self-correcting rather than
     /// permanent.
     private var outstandingAgents: Set<String> = []
+
+    /// The error currently reported to the store, so an unchanged value re-emits nothing.
+    /// Without this the store would receive an event per poll for a session that has been dead
+    /// for an hour — the volume `setUnread`'s early return exists to prevent.
+    ///
+    /// Double-optional for the same reason `apiErrorOutcome` below is: the outer `nil` means
+    /// "nothing has been reported yet", distinct from `.some(nil)` meaning "cleared was
+    /// reported". Collapsing those two would make the very first cleared outcome of a
+    /// session's life indistinguishable from the untouched start and silently swallow it.
+    private var lastAPIError: SessionAPIError??
 
     private var offset: UInt64 = 0
     /// Whether the position to start reading from has been decided yet. See `Scan.read`.
@@ -58,6 +70,7 @@ final class TranscriptWatcher {
         clock: WatchClock? = nil,
         onTitle: @escaping (String) -> Void,
         onSubagentCount: @escaping (Int) -> Void = { _ in },
+        onAPIError: @escaping (SessionAPIError?) -> Void = { _ in },
         onMessages: (([IndexedMessage]) -> Void)? = nil
     ) {
         self.sessionID = sessionID
@@ -65,6 +78,7 @@ final class TranscriptWatcher {
         self.clock = clock
         self.onTitle = onTitle
         self.onSubagentCount = onSubagentCount
+        self.onAPIError = onAPIError
         self.onMessages = onMessages
     }
 
@@ -131,6 +145,10 @@ final class TranscriptWatcher {
 
         var lastTitle: String?
         var countChanged = false
+        // Three-valued on purpose: `nil` means no event in this scan touched it, `.some(nil)`
+        // means cleared, `.some(error)` means raised. A plain optional cannot tell the first
+        // two apart.
+        var apiErrorOutcome: SessionAPIError??
 
         for event in scan.events {
             switch event {
@@ -145,11 +163,19 @@ final class TranscriptWatcher {
                     outstandingAgents.removeAll()
                     countChanged = true
                 }
+            case .apiError(let error):
+                apiErrorOutcome = .some(error)
+            case .progressed:
+                apiErrorOutcome = .some(nil)
             }
         }
 
         if let lastTitle { onTitle(lastTitle) }
         if countChanged { onSubagentCount(outstandingAgents.count) }
+        if let outcome = apiErrorOutcome, apiErrorOutcome != lastAPIError {
+            lastAPIError = apiErrorOutcome
+            onAPIError(outcome)
+        }
         if !scan.messages.isEmpty { onMessages?(scan.messages) }
     }
 }

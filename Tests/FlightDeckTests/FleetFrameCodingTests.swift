@@ -361,4 +361,37 @@ final class FleetFrameCodingTests: XCTestCase {
         let encoded = try fields(of: ClientFrame.hello(lastSeq: 0, device: nil, caps: []))
         XCTAssertEqual(Set(encoded.keys), ["t", "lastSeq"])
     }
+
+    // MARK: API errors
+
+    /// `WireSession`'s encoder is hand-written, and `planGate`'s comment records the trap: a
+    /// member omitted from `CodingKeys` is not a compile error, it is a field that silently
+    /// never reaches the wire. Only a round-trip catches it.
+    func testSessionWithAnAPIErrorRoundTrips() throws {
+        let s = WireSession(
+            id: UUID(), title: "t", agent: "claude", activity: "idle",
+            apiError: SessionAPIError(status: 529, kind: "overloaded", isTransient: true))
+        let data = try JSONEncoder().encode(s)
+        XCTAssertEqual(try JSONDecoder().decode(WireSession.self, from: data).apiError, s.apiError)
+    }
+
+    /// An older Mac sends no key at all. That is "no error", not a decode failure — the same
+    /// contract `hasBackgroundWork` established, and the reason the wire version stays at 1.
+    func testSessionWithNoAPIErrorKeyDecodesToNil() throws {
+        let s = WireSession(id: UUID(), title: "t", agent: "claude")
+        let data = try JSONEncoder().encode(s)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertNil(object["apiError"],
+                     "absent, not null — an older phone must see the bytes it always saw")
+        XCTAssertNil(try JSONDecoder().decode(WireSession.self, from: data).apiError)
+    }
+
+    func testAPIErrorChangedEventRoundTrips() throws {
+        let id = UUID()
+        for event in [FleetEvent.apiErrorChanged(id: id, error: SessionAPIError(status: 529)),
+                      FleetEvent.apiErrorChanged(id: id, error: nil)] {
+            let data = try JSONEncoder().encode(event)
+            XCTAssertEqual(try JSONDecoder().decode(FleetEvent.self, from: data), event)
+        }
+    }
 }
