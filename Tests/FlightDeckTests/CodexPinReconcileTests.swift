@@ -150,6 +150,28 @@ final class CodexPinReconcileTests: XCTestCase {
     private func makeStore(
         _ sessions: [SessionSnapshot.Entry], transport: ThreadListTransport
     ) async -> SessionStore {
+        let store = makeUnrestoredStore(sessions, transport: transport, injector: NullInjector())
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        await store.codexRestoreTask?.value
+        transport.forgetRecording()
+        return store
+    }
+
+    /// The same store one step earlier: wired, holding `sessions` in its snapshot, and not yet
+    /// restored.
+    ///
+    /// Split out for the creation-racing-restore case, which has to raise
+    /// `codexCreationsInFlight` *before* `restore()` runs and then assert against restore's own
+    /// pass — the one `makeStore` has both spent and wiped from the recording by the time it
+    /// hands a store back.
+    ///
+    /// `injector` is not defaulted: a `NullInjector()` in a default argument is evaluated
+    /// outside the actor, and `TextInjecting` is main-actor isolated.
+    private func makeUnrestoredStore(
+        _ sessions: [SessionSnapshot.Entry],
+        transport: ThreadListTransport,
+        injector: TextInjecting
+    ) -> SessionStore {
         let persistence = FakePersistence()
         persistence.stored = SessionSnapshot(
             sessions: sessions, selectedSessionID: sessions.first?.id, sessionCounter: sessions.count
@@ -159,15 +181,12 @@ final class CodexPinReconcileTests: XCTestCase {
         // Never the user's real `~/.codex/session_index.jsonl`.
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.launchFailureReporter = SilentReporter()
-        store.injectorOverride = NullInjector()
+        store.injectorOverride = injector
         store.overrideAdapter(
             CodexAdapter(rpc: CodexRPC(transport: transport), rolloutExists: { _ in true }),
             // No `PreferencesStore` on this store, so every tab resolves to the nil account.
             for: .codex, account: nil
         )
-        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
-        await store.codexRestoreTask?.value
-        transport.forgetRecording()
         return store
     }
 
@@ -546,6 +565,64 @@ final class CodexPinReconcileTests: XCTestCase {
 
         // Let the creation fail out on its own terms (an empty `thread/start` result), so
         // nothing is left suspended past the end of the test.
+        t.release()
+        _ = await creating.value
+    }
+
+    // MARK: - 9b. That refusal, when the pass being refused is the restore's own
+
+    /// The same guard seen from the restore side, where refusing a group switches the whole of
+    /// `resumeRestoredCodex`'s stage 2 off for that relaunch.
+    ///
+    /// A ⌘N codex creation started while stage 1 is awaiting `startCodex` is still uncommitted
+    /// when stage 2 runs, so every group on that account is refused, nothing is reconciled, and
+    /// stage 3 types the pins exactly as they came off disk — the
+    /// `codex resume <abandoned thread>` the reconcile-before-send ordering exists to prevent,
+    /// reinstated for one restore by a race.
+    ///
+    /// **Correct as designed, which is why it is pinned here.** A pass that ran anyway could
+    /// not see the thread the creating tab is about to be born on — it is committed at the
+    /// app-server and absent from `repos` — so it would hand that thread to the restored tab
+    /// and give two tabs one conversation. A stale pin is stale until the 5 s ticker moves it;
+    /// a stolen thread is a conversation lost. Nothing else records the trade: the window is
+    /// invisible from either call site alone, so without this a later reader meets only a
+    /// relaunch that silently failed to reconcile.
+    func testACreationInFlightWhenTheRestoreRunsLeavesItTypingItsStalePins() async {
+        let tabID = UUID()
+        let t = ThreadListTransport()
+        let injector = SpyInjector()
+        let store = makeUnrestoredStore(
+            [codexEntry(tabID, pinned: stale, directory: "/w/a")],
+            transport: t, injector: injector
+        )
+        // Newer than the pin, unnamed by any other tab: with no creation in the way this is
+        // the thread the restore settles on and types. Stocked so the assertions below are
+        // about the guard rather than about a listing with nothing in it.
+        t.threads["/w/a"] = [
+            entry(live, updatedAt: 9_000, path: "/r/live.jsonl"),
+            entry(stale, updatedAt: 1_000, path: "/r/stale.jsonl"),
+        ]
+
+        // A real creation, parked at the app-server where stage 1's own `startCodex` await
+        // would overlap it: `codexCreationsInFlight` raised, no tab in `repos` yet.
+        let suspended = expectation(description: "the creation reached the app-server")
+        t.onWithheld = { suspended.fulfill() }
+        t.withholding = ["thread/start"]
+        let creating = Task { await store.createSession(agent: .codex, in: "/w/a") }
+        await fulfillment(of: [suspended], timeout: 5)
+
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }))
+        await store.codexRestoreTask?.value
+
+        XCTAssertTrue(t.listed.isEmpty,
+                      "stage 2 asks nothing at all: the account's only group is dropped before "
+                      + "its round trip while a creation on it is uncommitted")
+        XCTAssertEqual(store.pinnedConversationID(of: tabID), stale,
+                       "so the record keeps the pin it was restored with")
+        XCTAssertEqual(injector.sent, ["codex resume \(stale.uuidString.lowercased())"],
+                       "and the terminal is typed that same pin, unreconciled — the price of "
+                       + "refusing to guess, paid until the ticker's next pass")
+
         t.release()
         _ = await creating.value
     }
