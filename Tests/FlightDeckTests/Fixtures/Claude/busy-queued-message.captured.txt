@@ -1,0 +1,16 @@
+u ▐▛███▛█  Claude Code v2.1.268
+▝▜██████▀  Opus 4.8 (1M context) · Claude Pro
+  ▝▝ ▝▝    ~/Projects/Protos-n-Tools/flight-deck
+
+
+⏺ 1. one
+  49. fern
+  50.
+
+
+  ❯ this is the second queued message
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.8 (1M context)  [░░░░░░░░░░] 7%
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents

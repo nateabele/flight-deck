@@ -24,12 +24,20 @@ import Foundation
 /// `sendText` and `sendReturn` are separate because a paste is not typing — see
 /// `TextInjecting.sendReturn()`.
 struct ClaudeTextChannel: AgentTextChannel {
+    /// Claude shows this in the input box when messages are queued behind a running turn — the
+    /// input itself is empty and typing appends another queued message, so it is a hint, not a
+    /// draft. Version-pinned to Claude Code's wording (verified 2.1.268). If the wording drifts,
+    /// this match simply fails and behaviour reverts to today's (refuse-until-idle) — never a
+    /// clobber, because `submit()` still kills-and-compares.
+    static let queuedMessagesHint = "Press up to edit queued messages"
+
     func isComposerEmpty(_ injector: TextInjecting) -> Bool {
         guard let viewport = injector.readViewport(),
               let bar = InputBar.read(fromViewport: viewport),
               bar.rows.count == 1
         else { return false }
-        return bar.content.trimmingCharacters(in: .whitespaces).isEmpty
+        let content = bar.content.trimmingCharacters(in: .whitespaces)
+        return content.isEmpty || content == Self.queuedMessagesHint
     }
 
     func submit(
