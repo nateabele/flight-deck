@@ -89,4 +89,25 @@ final class MidTurnDraftTests: XCTestCase {
         let streaming = try XCTUnwrap(InputBar.read(fromViewport: screen("busy-streaming-no-box")))
         XCTAssertTrue(streaming.content.isEmpty, "and free again once output starts")
     }
+
+    // MARK: - The queued-messages hint
+
+    /// **The refusal a phone actually hits.** A second prompt sent while a turn is running
+    /// queues behind the first, and the box then shows `Press up to edit queued messages` — the
+    /// input itself is empty, but the text on screen is not, so `isComposerEmpty` used to read
+    /// it as a draft and refuse every prompt after it until the turn ended. See
+    /// `ClaudeTextChannel.queuedMessagesHint`.
+    func testAQueuedMessagesBoxReadsAsEmptyComposer() throws {
+        let injector = SpyInjector()
+        injector.viewportOverride = try screen("busy-queued-message")
+        XCTAssertTrue(ClaudeTextChannel().isComposerEmpty(injector))
+    }
+
+    /// The hint match must not swallow a real draft — this is the box `ClaudeTextChannel` is
+    /// protecting when it kills-and-compares rather than trusting the screen outright.
+    func testARealDraftBoxIsNotEmpty() throws {
+        let injector = SpyInjector()
+        injector.viewportOverride = try screen("busy-draft-below-echo")
+        XCTAssertFalse(ClaudeTextChannel().isComposerEmpty(injector))
+    }
 }
