@@ -978,8 +978,16 @@ final class SessionTimelineModelTests: XCTestCase {
     /// The disk cache is a `Caches` file the OS is free to purge. When a rehydrate reads an id
     /// the store no longer holds, the model falls back to one quiet wire re-fetch of that id's
     /// offset rather than leaving the placeholder stuck forever.
+    ///
+    /// **Async, and that is why this waits for the spill before simulating the purge.**
+    /// `TimelineSpillStore.write` is dispatched off the main thread now (see its own doc
+    /// comment), so `reportVisibleWindow` returning is no longer proof the file is actually on
+    /// disk yet. Purging out from under a write that has not landed would not reproduce what
+    /// this test means to simulate — a file the OS dropped *after* it existed — it would just
+    /// race it, and either outcome of that race would be the wrong reason for this test to pass
+    /// or fail. `settle` waits for the real thing.
     @MainActor
-    func testApproachingASpilledRegionThatWasPurgedRefetchesFromTheWire() {
+    func testApproachingASpilledRegionThatWasPurgedRefetchesFromTheWire() async {
         let pager = StubPager()
         let spillDirectory = tempSpillDirectory()
         let model = model(pager, spillDirectory: spillDirectory)
@@ -992,9 +1000,13 @@ final class SessionTimelineModelTests: XCTestCase {
         model.reportVisibleWindow(firstID: "80#0", lastID: "90#0")   // spills the top
         XCTAssertTrue(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder)
 
-        // The cache the spill just wrote is gone, as if the OS purged it under pressure. A
-        // second store built on the same session and directory sees the same file.
-        TimelineSpillStore(session: session, directory: spillDirectory).purge()
+        // A second store built on the same session and directory sees the same file — once the
+        // async write behind the spill above has actually reached it.
+        let probe = TimelineSpillStore(session: session, directory: spillDirectory)
+        await settle(until: { !probe.read(["0#0"]).isEmpty }, "the spill's write to reach disk")
+
+        // The cache the spill just wrote is gone, as if the OS purged it under pressure.
+        probe.purge()
 
         model.reportVisibleWindow(firstID: "0#0", lastID: "10#0")    // scroll back to the top
         XCTAssertTrue(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
@@ -1004,5 +1016,59 @@ final class SessionTimelineModelTests: XCTestCase {
         pager.answer(page([item(0, String(repeating: "x", count: 50))], start: 0, end: 50, hasMore: false))
         XCTAssertFalse(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
                        "the wire re-fetch clears the placeholder")
+    }
+
+    /// The other half of the bound `reconcileSpill` puts on the file: a body back in memory does
+    /// not need to keep growing it, so a rehydrate prunes the id it just restored. See
+    /// `TimelineSpillStore.remove`.
+    @MainActor
+    func testRehydratingAnItemPrunesItFromTheSpillStore() {
+        let pager = StubPager()
+        let spillDirectory = tempSpillDirectory()
+        let model = model(pager, spillDirectory: spillDirectory)
+        model.spillBudgetBytesOverride = 100
+        model.spillMarginOverride = 1
+        model.open()
+        let big = (0..<10).map { item($0 * 10, String(repeating: "x", count: 50)) }
+        pager.answer(page(big, start: 0, end: 100, hasMore: false))
+
+        model.reportVisibleWindow(firstID: "80#0", lastID: "90#0")   // spills the top
+        model.reportVisibleWindow(firstID: "0#0", lastID: "10#0")    // and rehydrates it back
+
+        XCTAssertFalse(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
+                       "the premise: it rehydrated")
+        // `read` is `queue.sync` on the model's own store instance, the same one `remove` just
+        // ran on synchronously inside `reconcileSpill` — so this probe, built after
+        // `reportVisibleWindow` has already returned, is not racing anything.
+        let probe = TimelineSpillStore(session: session, directory: spillDirectory)
+        XCTAssertTrue(probe.read(["0#0"]).isEmpty,
+                      "a rehydrated body no longer needs a disk copy")
+    }
+
+    /// A reset means the transcript these ids came from is gone — item ids are byte offsets, so
+    /// a spilled body kept past a reset would misname a different record entirely. The session's
+    /// whole spill file goes with the feed rather than surviving it. See `TimelineSpillStore`'s
+    /// own doc comment and `SessionTimelineModel`'s success handler.
+    @MainActor
+    func testAResetPagePurgesTheSessionsSpillFile() {
+        let pager = StubPager()
+        let spillDirectory = tempSpillDirectory()
+        let model = model(pager, spillDirectory: spillDirectory)
+        model.spillBudgetBytesOverride = 100
+        model.spillMarginOverride = 1
+        model.open()
+        let big = (0..<10).map { item($0 * 10, String(repeating: "x", count: 50)) }
+        pager.answer(page(big, start: 0, end: 100, hasMore: false))
+
+        model.reportVisibleWindow(firstID: "80#0", lastID: "90#0")   // spills the top
+        XCTAssertTrue(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
+                      "the premise: something is actually spilled")
+
+        model.loadNewer()
+        pager.answer(page([], start: 60, end: 60, reset: true))
+
+        XCTAssertTrue(model.feed.items.isEmpty, "the reset itself — see the Reset section above")
+        let probe = TimelineSpillStore(session: session, directory: spillDirectory)
+        XCTAssertTrue(probe.read(["0#0"]).isEmpty, "a reset invalidates every spilled body too")
     }
 }

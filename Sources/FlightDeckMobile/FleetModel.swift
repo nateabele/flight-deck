@@ -263,6 +263,10 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         timelineModels.removeAll()
         timelineViewOrder.removeAll()
         evictedTimelineModelIDs.removeAll()
+        // Same privacy reasoning as the transcripts above: a spilled body is transcript text
+        // too, only parked on disk instead of in memory, and it must not survive a revoked
+        // pairing merely because it happened to be paged out at the moment of unpairing.
+        TimelineSpillStore.purgeAll()
         // Same reasoning as the transcripts above: a closed tab's title is this pairing's
         // content, not fleet-independent fact, and the next Mac's project paths coinciding
         // with this one's would otherwise render titles that Mac never closed.

@@ -171,6 +171,31 @@ final class FleetModelTests: XCTestCase {
         XCTAssertEqual(after.phase, .idle)
     }
 
+    /// **Privacy, not memory — the disk half of the test above.** A spilled body is transcript
+    /// text too, only parked under `Caches` instead of in memory, and `unpair()` must not leave
+    /// a plaintext copy of a revoked pairing's conversation sitting there merely because it
+    /// happened to be paged out at the moment of unpairing.
+    ///
+    /// `timelineModel(for:)` builds its `SessionTimelineModel` with no `spillDirectory`
+    /// override — the app never passes one, only tests do — so there is no seam here to point
+    /// at a temp directory instead. This exercises `TimelineSpillStore.purgeAll()`'s real
+    /// default location directly, the same one `unpair()` calls it against, rather than only
+    /// asserting the store's own `purgeAll(directory:)` behaves (see `TimelineSpillStoreTests`,
+    /// which covers that half in an isolated temp directory).
+    func testUnpairingRemovesAnySpilledTranscriptTextFromDisk() {
+        let model = FleetModel(store: RefusingPairedMacStore())
+        let session = UUID()
+        let store = TimelineSpillStore(session: session)
+        store.write(["0#0": TimelineItem.Body(text: "leftover transcript")])
+        defer { store.purge() }
+        XCTAssertFalse(store.read(["0#0"]).isEmpty, "the premise: something is actually on disk")
+
+        model.unpair()
+
+        XCTAssertTrue(TimelineSpillStore(session: session).read(["0#0"]).isEmpty,
+                      "unpairing must not leave a revoked pairing's transcript on disk")
+    }
+
     /// **Bounded, for the same reason `timelineModels` itself needs bounding.** A reader who
     /// opens more sessions than the cap must not keep every one of them resident — only the
     /// most-recently-viewed handful survive, and the rest are dropped for `timelineModel(for:)`
