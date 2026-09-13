@@ -306,4 +306,16 @@ final class TimelineFeedTests: XCTestCase {
         expect(feed, texts: ["a", "c", "z"], oldest: 10, newest: 40,
                hasOlder: false, hasLoadedAnything: true)
     }
+
+    /// `merge`'s return is what lets `SessionTimelineModel.rebuild()` skip recomputing its
+    /// fold on a quiet poll: only a page that actually changes `items` should ask for that.
+    func testMergeReportsWhetherItemsChanged() {
+        var feed = TimelineFeed()
+        XCTAssertTrue(feed.merge(page([item("10#0", "a")], start: 10, end: 20, hasMore: true)),
+                      "the first page adds an item")
+        XCTAssertFalse(feed.merge(page([], start: 20, end: 20)),
+                       "an empty newer poll page changes no items")
+        XCTAssertTrue(feed.merge(page([item("20#0", "b")], start: 20, end: 30)),
+                      "a page with a new item changes items")
+    }
 }

@@ -199,7 +199,7 @@ enum ClaudeTimelineMapper {
             // mappers.
             //
             // Everything else about the row stays a tool call's — same tool name, same
-            // `callID` so `SessionTimelineScreen.entries(from:)` still folds the answering
+            // `callID` so `TimelineRender.entries(from:)` still folds the answering
             // `tool_result` into it, same whole input in `text` so both ends can rebuild the
             // question from the row itself. Only the kind moves, and it does two jobs: it
             // stops a question a person answered from rendering as a JSON tree of

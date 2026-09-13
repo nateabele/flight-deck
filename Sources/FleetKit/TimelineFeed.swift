@@ -72,15 +72,20 @@ public struct TimelineFeed: Equatable, Sendable {
     public var newerAnchor: TimelineAnchor { newest.map { .after($0) } ?? .latest }
 
     /// Fold one page in. Idempotent: merging the same page twice leaves the feed identical.
-    public mutating func merge(_ page: TimelinePage) {
+    /// Returns whether `items` actually changed, so a caller maintaining a fold over `items`
+    /// (`SessionTimelineModel.rebuild()`) knows whether it has anything to recompute — an
+    /// ordinary quiet poll merges an empty or fully-redelivered page and changes nothing.
+    @discardableResult
+    public mutating func merge(_ page: TimelinePage) -> Bool {
         // The transcript this feed's cursors came from is gone — truncated, or replaced. Item
         // ids ARE byte offsets, so every id held now names a different record: merging would
         // interleave two conversations under matching ids, which reads as corruption rather
         // than staleness. Discard everything, and let the screen start again from `.latest`
         // — which `newerAnchor` answers by itself once `newest` is nil again.
         guard !page.reset else {
+            let hadItems = !items.isEmpty
             self = TimelineFeed()
-            return
+            return hadItems
         }
 
         // Both decided BEFORE the cursors widen, and decided from the CURSORS rather than
@@ -89,6 +94,7 @@ public struct TimelineFeed: Equatable, Sendable {
         let isFirstPage = !hasLoadedAnything
         let isOlder = oldest.map { page.start < $0 } ?? false
 
+        let before = items
         items = Self.merging(items, page.items)
 
         // Each cursor only ever widens. A page fetched above must not drag `newest` back, and
@@ -100,6 +106,8 @@ public struct TimelineFeed: Equatable, Sendable {
         // Believed only for a page fetched upwards, or for the very first page, which is also
         // the top of everything the feed knows. See `hasOlder`.
         if isOlder || isFirstPage { hasOlder = page.hasMore }
+
+        return items != before
     }
 
     /// Two lists of items in file order, folded into one, in file order, with an id held once.

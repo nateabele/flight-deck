@@ -203,7 +203,7 @@ public enum OpenPrompt: Equatable, Sendable {
     ///   whose result has not been read yet, which is the ordinary state of any feed a beat
     ///   behind the file.
     /// - **No `tool_result` carries this `callID`.** The same pairing
-    ///   `SessionTimelineScreen.entries(from:)` already does to fold output into a command.
+    ///   `TimelineRender.entries(from:)` already does to fold output into a command.
     ///
     /// For `AskUserQuestion` the pair is exact, because that tool's *execution is the human
     /// answering*. For every other tool it means "approving or running", and `waiting` is what
