@@ -418,7 +418,7 @@ struct SessionTimelineScreen: View {
             }
     }
 
-    private var entries: [Entry] {
+    private var entries: [TimelineEntry] {
         Self.entries(
             from: model.feed.items,
             delivered: model.outbox.entries.filter { $0.state == .delivered }
@@ -442,7 +442,7 @@ struct SessionTimelineScreen: View {
     /// what makes its More button tappable: a `NavigationLink` swallows the tap on any control
     /// inside it, so a row cannot be a link and carry a button at once.
     @ViewBuilder
-    private func entryRow(_ entry: Entry) -> some View {
+    private func entryRow(_ entry: TimelineEntry) -> some View {
         if entry.isGhost {
             ghostRow(entry)
         } else {
@@ -481,7 +481,7 @@ struct SessionTimelineScreen: View {
     /// those need — it is not in `TimelineFeed`, has no id `TimelineStyle` or `Expansion`
     /// recognise, and answers no tool call — so it is drawn straight rather than routed through
     /// `TimelineRow`, which would have nothing to do with most of what it offers.
-    private func ghostRow(_ entry: Entry) -> some View {
+    private func ghostRow(_ entry: TimelineEntry) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(entry.item.body.text)
                 .font(.body)
@@ -569,25 +569,9 @@ struct SessionTimelineScreen: View {
     /// Not `nil`, which is what an unclamped lookup answers: a screen that loaded one short
     /// page would then never ask for a second, and those are exactly the sessions where the
     /// reader reaches the top fastest.
-    static func prefetchTrigger(_ entries: [Entry]) -> String? {
+    static func prefetchTrigger(_ entries: [TimelineEntry]) -> String? {
         guard !entries.isEmpty else { return nil }
         return entries.count > prefetchDepth ? entries[prefetchDepth].id : entries[0].id
-    }
-
-    // MARK: One entry per thing that happened
-
-    /// A row's worth of conversation: an item, plus the result that answers it when the item
-    /// is a call and the feed holds one.
-    struct Entry: Identifiable, Hashable {
-        let item: TimelineItem
-        let result: TimelineItem?
-        var id: String { item.id }
-
-        /// A synthetic entry for a `.delivered` outbox message, never a record the agent
-        /// wrote. Detected by id prefix rather than a stored field, because the id is already
-        /// the one thing `entries(from:delivered:)` controls and a second flag would be a
-        /// second place the two could disagree.
-        var isGhost: Bool { item.id.hasPrefix("ghost:") }
     }
 
     // MARK: Which long answers are open
@@ -609,7 +593,7 @@ struct SessionTimelineScreen: View {
     /// SwiftUI is a decision a test can run, which is the same rule `TimelineStyle` is written
     /// under: `TimelineProseExpansionTests` drives every transition below with no window at all.
     ///
-    /// Keyed by `Entry.id`, which is `TimelineItem.id`: the record's byte offset in the file
+    /// Keyed by `TimelineEntry.id`, which is `TimelineItem.id`: the record's byte offset in the file
     /// the agent wrote, so it is stable across every refetch and re-page. An id that leaves the
     /// feed leaves a `String` in a set behind it, which costs nothing and is what makes paging
     /// away from an open row and back the same case as scrolling.
@@ -630,56 +614,25 @@ struct SessionTimelineScreen: View {
         }
     }
 
-    /// Folds every tool result into the call it answers, so a command and its output are one
-    /// card rather than two rows that read as two unrelated events.
-    ///
-    /// **Paired on `callID` — the agent's own id — and never on position.** A session running
-    /// two tools at once interleaves their records, so "the next result" is a different call's
-    /// output about half the time, and a command captioned with another command's output is
-    /// worse than a command with no output shown at all.
-    ///
-    /// **A result is only folded away when its call is actually here.** A page boundary can
-    /// land between the two, and dropping a result whose call is on the previous page would
-    /// delete content from the screen — the one thing worse than showing it twice. So the set
-    /// of calls present is what decides, not merely the result having an id.
-    ///
-    /// `delivered` is appended AFTER the folded feed, one ghost per entry, in send order —
-    /// `entries` is oldest-first, so the ghosts land at the bottom whatever page the feed is
-    /// showing. Each carries a `"ghost:<token>"` id, which is `Entry.isGhost`'s whole test, and
-    /// exists only in this array: it is never written into `TimelineFeed`, so a page reset or a
-    /// `reconcile` cannot find it and cannot mistake it for a record the agent wrote.
-    static func entries(from items: [TimelineItem], delivered: [PromptOutboxEntry] = []) -> [Entry] {
-        var resultsByCall: [String: TimelineItem] = [:]
-        var callsPresent: Set<String> = []
-        for item in items {
-            guard let callID = item.body.callID else { continue }
-            switch item.kind {
-            case .toolResult: if resultsByCall[callID] == nil { resultsByCall[callID] = item }
-            case .toolCall: callsPresent.insert(callID)
-            default: break
-            }
-        }
-        let mapped = items.compactMap { item -> Entry? in
-            guard let callID = item.body.callID else { return Entry(item: item, result: nil) }
-            switch item.kind {
-            case .toolCall:
-                return Entry(item: item, result: resultsByCall[callID])
-            case .toolResult:
-                return callsPresent.contains(callID) ? nil : Entry(item: item, result: nil)
-            default:
-                return Entry(item: item, result: nil)
-            }
-        }
-        let ghosts = delivered.map { entry in
-            Entry(
+    /// Temporary wrapper over `TimelineRender.entries(from:)`, removed in Task 1.2 once the
+    /// ghost-append moves to `SessionTimelineModel`. `delivered` is appended AFTER the folded
+    /// feed, one ghost per entry, in send order — `entries` is oldest-first, so the ghosts land
+    /// at the bottom whatever page the feed is showing. Each carries a `"ghost:<token>"` id,
+    /// which is `TimelineEntry.isGhost`'s whole test, and exists only in this array: it is never
+    /// written into `TimelineFeed`, so a page reset or a `reconcile` cannot find it and cannot
+    /// mistake it for a record the agent wrote.
+    static func entries(from items: [TimelineItem], delivered: [PromptOutboxEntry] = []) -> [TimelineEntry] {
+        var mapped = TimelineRender.entries(from: items)
+        mapped.append(contentsOf: delivered.map { entry in
+            TimelineEntry(
                 item: TimelineItem(
                     id: "ghost:\(entry.id.uuidString)", kind: .userTurn, status: .complete,
                     body: .init(text: entry.text)
                 ),
                 result: nil
             )
-        }
-        return mapped + ghosts
+        })
+        return mapped
     }
 
     // MARK: Following the live edge
