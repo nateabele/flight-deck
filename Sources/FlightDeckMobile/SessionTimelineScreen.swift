@@ -104,7 +104,7 @@ struct SessionTimelineScreen: View {
                 if model.feed.hasOlder || model.olderFailure != nil {
                     olderStatusRow
                 }
-                ForEach(entries) { entry in
+                ForEach(model.rendered) { entry in
                     entryRow(entry)
                         .listRowInsets(Self.rowInsets)
                         // The card and the tinted user turn are what separate one entry from
@@ -127,12 +127,12 @@ struct SessionTimelineScreen: View {
                         // button instead. A page down, the rubber-band never reaches it and
                         // the read finishes before the reader arrives.
                         .onAppear {
-                            guard entry.id == prefetchTriggerID else { return }
+                            guard entry.id == model.prefetchTriggerID else { return }
                             isNearOldest = true
                             model.prefetchOlder()
                         }
                         .onDisappear {
-                            if entry.id == prefetchTriggerID { isNearOldest = false }
+                            if entry.id == model.prefetchTriggerID { isNearOldest = false }
                         }
                 }
                 if let notice = Self.bottomNotice(
@@ -418,13 +418,6 @@ struct SessionTimelineScreen: View {
             }
     }
 
-    private var entries: [TimelineEntry] {
-        SessionTimelineModel.rendered(
-            from: model.feed.items,
-            delivered: model.outbox.entries.filter { $0.state == .delivered }
-        )
-    }
-
     /// One entry, as a link into the detail screen or as a row that is simply itself.
     ///
     /// **A `NavigationLink` only where there is something to navigate to**, which is
@@ -546,10 +539,6 @@ struct SessionTimelineScreen: View {
     /// The entry whose appearance starts the next read of history, or `nil` when there is no
     /// history left to read. `prefetchDepth` and the trigger computation itself moved to
     /// `SessionTimelineModel` — this just calls through.
-    private var prefetchTriggerID: String? {
-        model.feed.hasOlder ? SessionTimelineModel.prefetchTrigger(entries) : nil
-    }
-
     // MARK: Which long answers are open
 
     /// The set of rows the reader has opened past the ceiling, by entry id.

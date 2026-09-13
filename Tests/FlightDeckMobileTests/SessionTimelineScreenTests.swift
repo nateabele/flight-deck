@@ -357,6 +357,22 @@ final class SessionTimelineScreenTests: XCTestCase {
         )
     }
 
+    /// The screen's `ForEach` source is `model.rendered`, not a per-render fold — a test with no
+    /// window asserts the model maintains exactly the ids the list will draw, folding a tool
+    /// result into its call.
+    @MainActor
+    func testTheScreenDrawsTheModelsMaintainedRenderedList() {
+        let items = [
+            TimelineItem(id: "0#0", kind: .toolCall, status: .complete,
+                         body: .init(text: "call", callID: "tA")),
+            TimelineItem(id: "10#0", kind: .toolResult, status: .complete,
+                         body: .init(text: "out", callID: "tA")),
+        ]
+        let rendered = SessionTimelineModel.rendered(from: items, delivered: [])
+        XCTAssertEqual(rendered.map(\.id), ["0#0"])
+        XCTAssertEqual(rendered[0].result?.id, "10#0")
+    }
+
     // MARK: Following a live session
 
     /// **A `List` draws oldest-first**, so the `.latest` page's newest record is off the bottom
