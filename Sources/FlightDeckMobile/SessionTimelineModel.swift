@@ -1147,7 +1147,14 @@ final class SessionTimelineModel {
     func promptExpired(_ token: UUID) { outbox.fail(token, Self.expired) }
 
     /// The Mac typed this prompt into the agent. See `FleetEvent.promptTyped`.
-    func promptTyped(_ token: UUID) { outbox.deliver(token) }
+    func promptTyped(_ token: UUID) {
+        outbox.deliver(token)
+        // `deliver` adds to the `.delivered` set `rebuild()`'s ghost-append reads, and this
+        // arrives off the socket, entirely outside `fetch` — the only other place that set
+        // changes. Without this the new ghost would sit unseen in `outbox.entries` until the
+        // next successful fetch happened to land.
+        rebuild()
+    }
 
     /// Copy for a prompt that did not land.
     ///
