@@ -171,6 +171,52 @@ final class FleetModelTests: XCTestCase {
         XCTAssertEqual(after.phase, .idle)
     }
 
+    /// **Bounded, for the same reason `timelineModels` itself needs bounding.** A reader who
+    /// opens more sessions than the cap must not keep every one of them resident — only the
+    /// most-recently-viewed handful survive, and the rest are dropped for `timelineModel(for:)`
+    /// to rebuild on reopen.
+    func testOpeningManySessionsEvictsAllButTheMostRecentlyViewed() {
+        let model = FleetModel(store: RefusingPairedMacStore())
+        var ids: [UUID] = []
+        for _ in 0..<(FleetModel.maxKeptTimelineModels + 3) {
+            let id = UUID(); ids.append(id)
+            _ = model.timelineModel(for: id)
+        }
+        let kept = ids.suffix(FleetModel.maxKeptTimelineModels)
+        for id in kept { XCTAssertFalse(model.evictedTimelineModelIDs.contains(id)) }
+        for id in ids.prefix(3) { XCTAssertTrue(model.evictedTimelineModelIDs.contains(id)) }
+    }
+
+    /// A model is never dropped while it is holding something the reader was told is in
+    /// flight — here, an outbox row that never got to retire because there is no connector to
+    /// answer it. `fail` (not `dismiss`) is what a synchronous `.disconnected` produces, and it
+    /// leaves the row present rather than removing it, so the outbox stays non-empty.
+    func testAModelWithAnOutstandingOutboxEntryIsNotEvicted() {
+        let model = FleetModel(store: RefusingPairedMacStore())
+        let sticky = UUID()
+        let stickyModel = model.timelineModel(for: sticky)
+        stickyModel.send("a message that will sit unacked with no connector")
+        XCTAssertTrue(stickyModel.hasOutstandingWork, "the outbox holds an unretired entry")
+        for _ in 0..<(FleetModel.maxKeptTimelineModels + 3) { _ = model.timelineModel(for: UUID()) }
+        XCTAssertFalse(model.evictedTimelineModelIDs.contains(sticky),
+                       "a model with outstanding work is never evicted")
+    }
+
+    /// The other half of eviction: dropping a model must not be permanent. Reopening its id
+    /// finds nothing resident, builds a fresh model exactly as a first open would, and clears
+    /// the id from the evicted set — the same path `unpair()` leaves every id on before any of
+    /// them is ever opened again.
+    func testReopeningAnEvictedModelReturnsAFreshOne() {
+        let model = FleetModel(store: RefusingPairedMacStore())
+        let first = UUID()
+        let a = model.timelineModel(for: first)
+        for _ in 0..<(FleetModel.maxKeptTimelineModels + 3) { _ = model.timelineModel(for: UUID()) }
+        XCTAssertTrue(model.evictedTimelineModelIDs.contains(first))
+        let b = model.timelineModel(for: first)
+        XCTAssertFalse(a === b, "a reopened evicted session gets a fresh model that re-fetches")
+        XCTAssertFalse(model.evictedTimelineModelIDs.contains(first), "reopening un-evicts it")
+    }
+
     /// A real `FD2-` code, minted here rather than checked in: `PairingPayload.encoded()` is
     /// the Mac's own encoder, so this exercises the decode `adopt(code:)` actually performs.
     private static func scannableCode() -> String {
