@@ -84,6 +84,14 @@ struct SessionTimelineScreen: View {
     /// the row that answered their tap for exactly as long as the fade takes and not a frame
     /// longer.
     @State private var highlightedID: String?
+    /// The clamped-segments memo every row on this screen shares, so a row's three segmenter
+    /// passes collapse to one cached split that survives re-render and cell recycling. See
+    /// `TimelineSegmentCache`.
+    @State private var segmentCache = TimelineSegmentCache()
+    /// The list's own width, bucketed to 32pt so hairline jitter does not invalidate the memo
+    /// while portrait/landscape/split-view widths — which change where the clamp lands — do.
+    /// Fed to every `TimelineRow` alongside `segmentCache`; see the `GeometryReader` below.
+    @State private var widthBucket = 0
 
     var body: some View {
         ScrollViewReader { scroll in
@@ -145,6 +153,19 @@ struct SessionTimelineScreen: View {
                 }
                 bottomSentinel
             }
+            // The list's own width, bucketed for `segmentCache`. A background reader rather
+            // than a row: every row needs the same number before it can ask the cache for
+            // anything, and a `GeometryReader` inside one row would only ever see that row's
+            // own bounds.
+            .background(
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { widthBucket = Int((geo.size.width / 32).rounded()) }
+                        .onChange(of: geo.size.width) { _, width in
+                            widthBucket = Int((width / 32).rounded())
+                        }
+                }
+            )
             // `.plain` HERE, unlike the fleet list, and the reason is the content rather than
             // taste: this list holds full-width cards of command output, and inset-grouped's
             // own card edges cut every one of them short and put a second rounded corner
@@ -459,7 +480,9 @@ struct SessionTimelineScreen: View {
                 toggleExpanded: { expansion.toggle(entry.id) },
                 // Straight onto the model, which is where the draft lives — the row never
                 // learns that a composer exists.
-                onReply: { model.quote($0) }
+                onReply: { model.quote($0) },
+                segmentCache: segmentCache,
+                widthBucket: widthBucket
             )
             if TimelineStyle.opensDetail(entry.item) {
                 NavigationLink(value: entry.item) { row }
