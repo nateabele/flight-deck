@@ -275,7 +275,11 @@ struct SessionTimelineScreen: View {
         // looked at, and it is the ONLY place that says so — the fleet list's row used to
         // send the mark from a gesture racing its own link, which is what stopped rows
         // opening at all. See `TimelinePaging`.
-        .task(id: model.sessionID) { model.open() }
+        .task(id: model.sessionID) {
+            model.updateStatus(agent: session?.agent, activity: session?.activity,
+                               call: session?.openPromptCall ?? .unreported)
+            model.open()
+        }
         // Reported from the SCREEN rather than the model: the model is cached per tab and
         // outlives the screen (see `FleetModel.timelineModel(for:)`), so tying presence to its
         // lifetime would leave a badge glowing for a conversation nobody is looking at.
@@ -292,19 +296,16 @@ struct SessionTimelineScreen: View {
                 // is blocked on sits directly above the field, so a reader whose keyboard is up
                 // can still see what they are answering.
                 PromptCard(
-                    open: model.blocked(
-                        agent: session?.agent, activity: session?.activity,
-                        call: session?.openPromptCall ?? .unreported
-                    ),
+                    open: model.blockedPrompt,
                     agent: session?.agent,
                     state: model.answerState,
                     model: model,
                     blockedChaseExhausted: model.blockedChaseExhausted,
                     allowsBlockedAbort: session?.allowsBlockedAbort ?? false,
                     // The two liveness inputs `showsBlocked` needs, read from the same
-                    // `session` as the `blocked(...)` call above so the card's "is this
-                    // session still blocked, and does the Mac still agree it cannot name the
-                    // dialog" is asked of one snapshot rather than two.
+                    // `session` as the status pushed into `model.blockedPrompt` above so the
+                    // card's "is this session still blocked, and does the Mac still agree it
+                    // cannot name the dialog" is asked of one snapshot rather than two.
                     activity: session?.activity,
                     openPromptCall: session?.openPromptCall ?? .unreported,
                     onAbortBlocked: { await onAbortBlocked(model.sessionID) }
@@ -327,14 +328,22 @@ struct SessionTimelineScreen: View {
         // change to either is the cheapest possible signal that this session has moved — most
         // importantly the busy → idle transition, which is the moment the last records of a
         // turn have landed.
-        .onChange(of: session?.activity) { _, _ in model.loadNewer() }
+        .onChange(of: session?.activity) { _, _ in
+            model.loadNewer()
+            model.updateStatus(agent: session?.agent, activity: session?.activity,
+                               call: session?.openPromptCall ?? .unreported)
+        }
         // The second event trigger, and it fires where the first cannot. A dialog answered at
         // the keyboard with the next one raised immediately never leaves `waiting`, so
         // `activity` is identical either side of it and the modifier above sees nothing — the
         // stale-card report, exactly. Which call is open does move, so this is the fetch that
         // brings the records naming the new dialog. Until they land `blocked` draws nothing,
         // which is the honest state rather than the previous dialog's buttons.
-        .onChange(of: session?.openPromptCall) { _, _ in model.loadNewer() }
+        .onChange(of: session?.openPromptCall) { _, _ in
+            model.loadNewer()
+            model.updateStatus(agent: session?.agent, activity: session?.activity,
+                               call: session?.openPromptCall ?? .unreported)
+        }
         // The timer, and it is not redundant with the event above: `emitActivity` on the Mac
         // filters to genuine transitions, so a turn that runs busy for four minutes emits
         // NOTHING in the middle of it. Without this, an open screen would sit unchanged
