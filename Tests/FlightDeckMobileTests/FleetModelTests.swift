@@ -217,6 +217,22 @@ final class FleetModelTests: XCTestCase {
         XCTAssertFalse(model.evictedTimelineModelIDs.contains(first), "reopening un-evicts it")
     }
 
+    /// More aggressive than the LRU cap: under a real memory warning there is no recency
+    /// exemption at all, only on-screen and busy survive.
+    func testAMemoryWarningEvictsEverythingButTheOnScreenAndBusyModels() {
+        let model = FleetModel(store: RefusingPairedMacStore())
+        let onScreen = UUID(), idle = UUID(), busy = UUID()
+        model.timelineModel(for: onScreen).viewing(true)
+        _ = model.timelineModel(for: idle)
+        model.timelineModel(for: busy).send("stuck")   // outstanding work, no socket
+
+        model.handleMemoryWarning()
+
+        XCTAssertTrue(model.evictedTimelineModelIDs.contains(idle), "an idle off-screen model goes")
+        XCTAssertFalse(model.evictedTimelineModelIDs.contains(onScreen), "the on-screen model stays")
+        XCTAssertFalse(model.evictedTimelineModelIDs.contains(busy), "outstanding work stays")
+    }
+
     /// A real `FD2-` code, minted here rather than checked in: `PairingPayload.encoded()` is
     /// the Mac's own encoder, so this exercises the decode `adopt(code:)` actually performs.
     private static func scannableCode() -> String {

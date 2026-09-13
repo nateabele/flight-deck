@@ -107,6 +107,16 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // banner exists to prevent.
         mac?.lastSeq = 0
         if mac != nil { connect() }
+
+        // UIKit posts this on the main thread, so `assumeIsolated` is sound here even though
+        // the closure itself is not `@MainActor` — `self` is `@MainActor` and `[weak self]`
+        // keeps the observer from extending its lifetime.
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleMemoryWarning() }
+        }
     }
 
     /// Throws `PairingPayloadError` or `PairedMacStoreError`, both of which the pairing
@@ -466,10 +476,32 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         let keepRecent = Set(timelineViewOrder.suffix(Self.maxKeptTimelineModels))
         for (id, model) in timelineModels {
             guard !keepRecent.contains(id), !model.isOnScreen, !model.hasOutstandingWork else { continue }
-            timelineModels.removeValue(forKey: id)
-            timelineViewOrder.removeAll { $0 == id }
-            evictedTimelineModelIDs.insert(id)
+            evictTimelineModel(id)
         }
+    }
+
+    /// Under memory pressure, keep only what the reader is actually looking at (plus anything
+    /// mid-send or mid-answer) and drop every other session's feed. The OS is asking for memory
+    /// back and a held transcript is the largest thing here that is safe to rebuild on reopen.
+    ///
+    /// More aggressive than `evictIdleTimelineModels()`'s recency cap on purpose: there is no
+    /// "recent" exemption here, only on-screen and busy.
+    func handleMemoryWarning() {
+        for (id, model) in timelineModels {
+            guard !model.isOnScreen, !model.hasOutstandingWork else { continue }
+            evictTimelineModel(id)
+        }
+        PhoneLog.connection.notice(
+            "memory-warning evicted timeline models kept=\(self.timelineModels.count, privacy: .public)"
+        )
+    }
+
+    /// The per-model bookkeeping shared by both eviction paths: drop the model itself, its
+    /// place in view order, and record it as evicted so a reopen rebuilds rather than reuses it.
+    private func evictTimelineModel(_ id: UUID) {
+        timelineModels.removeValue(forKey: id)
+        timelineViewOrder.removeAll { $0 == id }
+        evictedTimelineModelIDs.insert(id)
     }
 
     /// Ask the Mac for a page of a session's conversation.
