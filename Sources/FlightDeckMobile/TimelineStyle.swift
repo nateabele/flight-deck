@@ -174,16 +174,28 @@ enum TimelineStyle {
         return date.formatted(date: .abbreviated, time: .standard)
     }
 
+    /// The two spellings ISO-8601 arrives in, allocated once. Claude writes fractional seconds
+    /// and codex does not, and `ISO8601DateFormatter` fails the spelling it was not configured
+    /// for, so both are kept. `date(_:)` used to allocate BOTH of these on every call — twice
+    /// per row per render on a list hundreds of rows long. `ISO8601DateFormatter` is
+    /// thread-safe for reading; `nonisolated(unsafe)` states that fact for Swift 6 rather than
+    /// hiding a hazard.
+    nonisolated(unsafe) private static let isoFractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    nonisolated(unsafe) private static let isoPlain: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
     /// Both spellings ISO-8601 arrives in. Claude writes fractional seconds and codex does
     /// not, and `ISO8601DateFormatter` fails the one it was not configured for rather than
     /// coping — so both are tried, and neither matching means `nil`.
     private static func date(_ raw: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: raw) { return date }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: raw)
+        isoFractional.date(from: raw) ?? isoPlain.date(from: raw)
     }
 
     static func bytes(_ count: Int) -> String {

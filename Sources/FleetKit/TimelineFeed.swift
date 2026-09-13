@@ -72,15 +72,20 @@ public struct TimelineFeed: Equatable, Sendable {
     public var newerAnchor: TimelineAnchor { newest.map { .after($0) } ?? .latest }
 
     /// Fold one page in. Idempotent: merging the same page twice leaves the feed identical.
-    public mutating func merge(_ page: TimelinePage) {
+    /// Returns whether `items` actually changed, so a caller maintaining a fold over `items`
+    /// (`SessionTimelineModel.rebuild()`) knows whether it has anything to recompute — an
+    /// ordinary quiet poll merges an empty or fully-redelivered page and changes nothing.
+    @discardableResult
+    public mutating func merge(_ page: TimelinePage) -> Bool {
         // The transcript this feed's cursors came from is gone — truncated, or replaced. Item
         // ids ARE byte offsets, so every id held now names a different record: merging would
         // interleave two conversations under matching ids, which reads as corruption rather
         // than staleness. Discard everything, and let the screen start again from `.latest`
         // — which `newerAnchor` answers by itself once `newest` is nil again.
         guard !page.reset else {
+            let hadItems = !items.isEmpty
             self = TimelineFeed()
-            return
+            return hadItems
         }
 
         // Both decided BEFORE the cursors widen, and decided from the CURSORS rather than
@@ -89,6 +94,7 @@ public struct TimelineFeed: Equatable, Sendable {
         let isFirstPage = !hasLoadedAnything
         let isOlder = oldest.map { page.start < $0 } ?? false
 
+        let before = items
         items = Self.merging(items, page.items)
 
         // Each cursor only ever widens. A page fetched above must not drag `newest` back, and
@@ -100,6 +106,35 @@ public struct TimelineFeed: Equatable, Sendable {
         // Believed only for a page fetched upwards, or for the very first page, which is also
         // the top of everything the feed knows. See `hasOlder`.
         if isOlder || isFirstPage { hasOlder = page.hasMore }
+
+        return items != before
+    }
+
+    /// Swap the full `body.text` of each item in `ids` for a placeholder preview, returning the
+    /// original bodies for the spill store. **Ordering and both cursors are untouched** — this
+    /// only mutates body text in place, which is the clean part this approach buys over
+    /// eviction: the paging cursors never learn a spill happened. An id not present, or already
+    /// a placeholder, is skipped.
+    @discardableResult
+    public mutating func spill(_ ids: Set<String>) -> [String: TimelineItem.Body] {
+        guard !ids.isEmpty else { return [:] }
+        var originals: [String: TimelineItem.Body] = [:]
+        for index in items.indices {
+            let item = items[index]
+            guard ids.contains(item.id), !item.body.isPlaceholder else { continue }
+            originals[item.id] = item.body
+            items[index].body = item.body.spilledPlaceholder()
+        }
+        return originals
+    }
+
+    /// Restore full bodies for the ids in `bodies`, clearing their placeholders. Ordering and
+    /// cursors are untouched, exactly as `spill`. An id not present is skipped.
+    public mutating func rehydrate(_ bodies: [String: TimelineItem.Body]) {
+        guard !bodies.isEmpty else { return }
+        for index in items.indices {
+            if let full = bodies[items[index].id] { items[index].body = full }
+        }
     }
 
     /// Two lists of items in file order, folded into one, in file order, with an id held once.
@@ -118,13 +153,24 @@ public struct TimelineFeed: Equatable, Sendable {
         _ held: [TimelineItem], _ page: [TimelineItem]
     ) -> [TimelineItem] {
         guard !page.isEmpty else { return held }
+        guard !held.isEmpty else {
+            return page.sorted { order(of: $0.id) < order(of: $1.id) }
+        }
+
+        // A quiet poll re-delivers a page already fully held. If every incoming id is present
+        // with an equal item, the merge is a copy that changes nothing — so return the held
+        // array unchanged and allocate nothing on the 1.5s tick. Cursor widening is decided by
+        // the caller from the page boundaries, not from here, so this only skips the rebuild.
+        var heldByID: [String: TimelineItem] = Dictionary(minimumCapacity: held.count)
+        for item in held { heldByID[item.id] = item }
+        if page.allSatisfy({ heldByID[$0.id] == $0 }) { return held }
+
         // `TimelinePage.items` is documented as file order for every anchor, so this sort is
         // ordinarily a no-op. It is here because the alternative to re-establishing the
         // precondition is assuming it: a page that ever arrived out of order would leave
         // `items` permanently unsorted, and every merge after it wrong. Bounded by
         // `TimelineLimits.maxLimit` records, so the cost is not on the poll's critical path.
         let incoming = page.sorted { order(of: $0.id) < order(of: $1.id) }
-        guard !held.isEmpty else { return incoming }
 
         var merged: [TimelineItem] = []
         merged.reserveCapacity(held.count + incoming.count)

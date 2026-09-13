@@ -25,14 +25,15 @@ final class SessionTimelineScreenTests: XCTestCase {
     /// the list is still settling, dragging the reader upward — which is why this screen used
     /// to make them tap a button instead. A page below the top, the rubber-band never reaches
     /// it, and the read finishes before the reader does.
+    @MainActor
     func testTheReadOfMoreHistoryStartsAPageBeforeTheReaderReachesTheTop() {
-        let entries = SessionTimelineScreen.entries(
+        let entries = TimelineRender.entries(
             from: (0..<200).map { prose(at: $0 * 10) }
         )
 
-        let trigger = SessionTimelineScreen.prefetchTrigger(entries)
+        let trigger = SessionTimelineModel.prefetchTrigger(entries)
 
-        XCTAssertEqual(trigger, entries[SessionTimelineScreen.prefetchDepth].id)
+        XCTAssertEqual(trigger, entries[SessionTimelineModel.prefetchDepth].id)
         XCTAssertNotEqual(trigger, entries.first?.id,
                           "the oldest row is exactly what must NOT be the trigger")
     }
@@ -41,18 +42,20 @@ final class SessionTimelineScreenTests: XCTestCase {
     /// holding less than a page has no entry at `prefetchDepth`, so an unclamped lookup
     /// answers `nil` — and a screen that loaded one short page would then never ask for a
     /// second, leaving the reader at the top of a conversation that has more behind it.
+    @MainActor
     func testAFeedShorterThanTheRunwayStillHasATriggerRatherThanNone() {
-        let entries = SessionTimelineScreen.entries(from: (0..<3).map { prose(at: $0 * 10) })
-        XCTAssertLessThan(entries.count, SessionTimelineScreen.prefetchDepth, "the premise")
+        let entries = TimelineRender.entries(from: (0..<3).map { prose(at: $0 * 10) })
+        XCTAssertLessThan(entries.count, SessionTimelineModel.prefetchDepth, "the premise")
 
-        XCTAssertEqual(SessionTimelineScreen.prefetchTrigger(entries), entries.first?.id,
+        XCTAssertEqual(SessionTimelineModel.prefetchTrigger(entries), entries.first?.id,
                        "the oldest row it has, because there is nothing deeper to use")
     }
 
     /// Nothing to trigger on, and nothing to crash on: an empty feed is the state every
     /// session is in for the first round trip of its life.
+    @MainActor
     func testAnEmptyConversationHasNothingToTriggerOn() {
-        XCTAssertNil(SessionTimelineScreen.prefetchTrigger([]))
+        XCTAssertNil(SessionTimelineModel.prefetchTrigger([]))
     }
 
     // MARK: Where a failure is said
@@ -283,7 +286,7 @@ final class SessionTimelineScreenTests: XCTestCase {
     /// two tools in flight answered in the opposite order to the calls, so an implementation
     /// that took the next result gets both of them wrong rather than one right by luck.
     func testAToolResultIsFoldedIntoItsOwnCallAndNotTheOneBeforeIt() {
-        let entries = SessionTimelineScreen.entries(from: interleavedCalls())
+        let entries = TimelineRender.entries(from: interleavedCalls())
 
         XCTAssertEqual(entries.map(\.id), ["1000#0", "1200#0"], "two calls, two rows")
         // Subscripting `entries` is subscripting the OUTPUT of the code under test, so a
@@ -303,7 +306,7 @@ final class SessionTimelineScreenTests: XCTestCase {
     func testAResultWhoseCallIsNotOnScreenKeepsARowOfItsOwn() {
         let orphan = toolResult(id: "1400#0", callID: "toolu_a1")
 
-        let entries = SessionTimelineScreen.entries(from: [orphan])
+        let entries = TimelineRender.entries(from: [orphan])
 
         XCTAssertEqual(entries.map(\.id), ["1400#0"], "nothing here answers a call nobody made")
         // Subscripting `entries` is subscripting the OUTPUT of the code under test, so a
@@ -319,7 +322,7 @@ final class SessionTimelineScreenTests: XCTestCase {
     /// are not two halves of one call, and folding on that basis would swallow every anonymous
     /// result into the first anonymous call in the conversation.
     func testTwoRecordsThatBothLackAnIDAreNotFoldedTogether() {
-        let entries = SessionTimelineScreen.entries(from: [
+        let entries = TimelineRender.entries(from: [
             toolCall(id: "1000#0", callID: nil),
             toolResult(id: "1400#0", callID: nil),
         ])
@@ -345,13 +348,29 @@ final class SessionTimelineScreenTests: XCTestCase {
         ]
 
         XCTAssertEqual(
-            SessionTimelineScreen.entries(from: items).map(\.id),
+            TimelineRender.entries(from: items).map(\.id),
             [
                 TimelineFixtures.userTurn.id, TimelineFixtures.bashCall.id,
                 TimelineFixtures.assistantAnswer.id, TimelineFixtures.thinking.id,
                 TimelineFixtures.unknown.id,
             ]
         )
+    }
+
+    /// The screen's `ForEach` source is `model.rendered`, not a per-render fold — a test with no
+    /// window asserts the model maintains exactly the ids the list will draw, folding a tool
+    /// result into its call.
+    @MainActor
+    func testTheScreenDrawsTheModelsMaintainedRenderedList() {
+        let items = [
+            TimelineItem(id: "0#0", kind: .toolCall, status: .complete,
+                         body: .init(text: "call", callID: "tA")),
+            TimelineItem(id: "10#0", kind: .toolResult, status: .complete,
+                         body: .init(text: "out", callID: "tA")),
+        ]
+        let rendered = SessionTimelineModel.rendered(from: items, delivered: [])
+        XCTAssertEqual(rendered.map(\.id), ["0#0"])
+        XCTAssertEqual(rendered[0].result?.id, "10#0")
     }
 
     // MARK: Following a live session

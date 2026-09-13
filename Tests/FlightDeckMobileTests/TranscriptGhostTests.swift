@@ -3,8 +3,10 @@ import XCTest
 @testable import FlightDeckMobile
 
 /// A `.delivered` outbox entry, shown inline in the transcript rather than in the outbox — and
-/// never anywhere else. `entries(from:delivered:)` is the pure boundary that decides this, so
-/// these tests never touch a view.
+/// never anywhere else. `SessionTimelineModel.rendered(from:delivered:)` is the pure boundary
+/// that decides this, so these tests never touch a view. `@MainActor` because `rendered` now
+/// lives on `SessionTimelineModel`, which is `@MainActor`-isolated.
+@MainActor
 final class TranscriptGhostTests: XCTestCase {
     func testADeliveredOutboxEntryBecomesATrailingGhost() {
         let t = UUID()
@@ -18,7 +20,7 @@ final class TranscriptGhostTests: XCTestCase {
         outbox.accept(t)
         outbox.deliver(t)
 
-        let entries = SessionTimelineScreen.entries(from: feed, delivered: outbox.entries)
+        let entries = SessionTimelineModel.rendered(from: feed, delivered: outbox.entries)
 
         XCTAssertEqual(entries.last?.id, "ghost:\(t.uuidString)")
         XCTAssertTrue(entries.last!.isGhost)
@@ -32,7 +34,7 @@ final class TranscriptGhostTests: XCTestCase {
             )
         ]
 
-        XCTAssertEqual(SessionTimelineScreen.entries(from: feed).map(\.id), ["0#0"])
+        XCTAssertEqual(SessionTimelineModel.rendered(from: feed, delivered: []).map(\.id), ["0#0"])
     }
 
     /// A `.sending` or `.accepted` entry is not delivered yet, so it must not become a ghost
@@ -43,7 +45,7 @@ final class TranscriptGhostTests: XCTestCase {
         let t = UUID()
         outbox.add(id: t, text: "hi", alreadyShowing: [])
 
-        let entries = SessionTimelineScreen.entries(
+        let entries = SessionTimelineModel.rendered(
             from: [], delivered: outbox.entries.filter { $0.state == .delivered }
         )
 
