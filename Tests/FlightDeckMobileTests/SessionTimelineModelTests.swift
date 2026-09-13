@@ -123,9 +123,22 @@ final class SessionTimelineModelTests: XCTestCase {
     }
 
     private func model(
-        _ pager: StubPager, timeout: Duration = .seconds(15)
+        _ pager: StubPager, timeout: Duration = .seconds(15), spillDirectory: URL? = nil
     ) -> SessionTimelineModel {
-        SessionTimelineModel(sessionID: session, fleet: pager, timeout: timeout)
+        SessionTimelineModel(
+            sessionID: session, fleet: pager, timeout: timeout,
+            spillDirectory: spillDirectory ?? tempSpillDirectory()
+        )
+    }
+
+    /// A fresh temp directory per call, so the spill tests below never touch the real `Caches`
+    /// and never collide with a spill store another test built. Mirrors
+    /// `TimelineSpillStoreTests.tempDir()`.
+    private func tempSpillDirectory() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("spill-test-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
     }
 
     /// Spins the main actor until `condition` holds. Only the deadline tests use it, and only
@@ -920,5 +933,76 @@ final class SessionTimelineModelTests: XCTestCase {
         let items = [item(1040, "first"), item(1090, "second")]
 
         XCTAssertNil(SessionTimelineModel.highlightTarget(offset: 240, in: items))
+    }
+
+    // MARK: - Spill / rehydrate
+
+    @MainActor
+    func testItemsFarFromTheWindowSpillWhenOverBudget() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.spillBudgetBytesOverride = 100     // tiny, so a few bodies exceed it
+        model.spillMarginOverride = 1
+        model.open()
+        let big = (0..<10).map { item($0 * 10, String(repeating: "x", count: 50)) }
+        pager.answer(page(big, start: 0, end: 100, hasMore: false))
+
+        model.reportVisibleWindow(firstID: "80#0", lastID: "90#0")  // window at the bottom
+        XCTAssertTrue(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
+                      "an item far from the window spilled")
+        XCTAssertFalse(model.feed.items.first(where: { $0.id == "90#0" })!.body.isPlaceholder,
+                       "the visible item stays resident")
+        XCTAssertFalse(model.feed.items.first(where: { $0.id == "80#0" })!.body.isPlaceholder)
+    }
+
+    @MainActor
+    func testApproachingASpilledRegionRehydratesFromDisk() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.spillBudgetBytesOverride = 100
+        model.spillMarginOverride = 1
+        model.open()
+        let big = (0..<10).map { item($0 * 10, String(repeating: "x", count: 50)) }
+        pager.answer(page(big, start: 0, end: 100, hasMore: false))
+
+        model.reportVisibleWindow(firstID: "80#0", lastID: "90#0")   // spills the top
+        XCTAssertTrue(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder)
+
+        model.reportVisibleWindow(firstID: "0#0", lastID: "10#0")    // scroll back to the top
+        XCTAssertFalse(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
+                       "an approached spilled item rehydrates synchronously from the store")
+        XCTAssertEqual(model.feed.items.first(where: { $0.id == "0#0" })!.body.text.count, 50,
+                       "the full body is back")
+    }
+
+    /// The disk cache is a `Caches` file the OS is free to purge. When a rehydrate reads an id
+    /// the store no longer holds, the model falls back to one quiet wire re-fetch of that id's
+    /// offset rather than leaving the placeholder stuck forever.
+    @MainActor
+    func testApproachingASpilledRegionThatWasPurgedRefetchesFromTheWire() {
+        let pager = StubPager()
+        let spillDirectory = tempSpillDirectory()
+        let model = model(pager, spillDirectory: spillDirectory)
+        model.spillBudgetBytesOverride = 100
+        model.spillMarginOverride = 1
+        model.open()
+        let big = (0..<10).map { item($0 * 10, String(repeating: "x", count: 50)) }
+        pager.answer(page(big, start: 0, end: 100, hasMore: false))
+
+        model.reportVisibleWindow(firstID: "80#0", lastID: "90#0")   // spills the top
+        XCTAssertTrue(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder)
+
+        // The cache the spill just wrote is gone, as if the OS purged it under pressure. A
+        // second store built on the same session and directory sees the same file.
+        TimelineSpillStore(session: session, directory: spillDirectory).purge()
+
+        model.reportVisibleWindow(firstID: "0#0", lastID: "10#0")    // scroll back to the top
+        XCTAssertTrue(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
+                      "still a placeholder until the re-fetch lands")
+        XCTAssertEqual(pager.anchors.last, .around(0), "a purged rehydrate falls back to the wire")
+
+        pager.answer(page([item(0, String(repeating: "x", count: 50))], start: 0, end: 50, hasMore: false))
+        XCTAssertFalse(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
+                       "the wire re-fetch clears the placeholder")
     }
 }
