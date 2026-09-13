@@ -484,6 +484,11 @@ final class SessionTimelineModel {
             let restored = spillStore.read(toRehydrate)
             if !restored.isEmpty {
                 feed.rehydrate(restored)
+                // A body back in memory does not need to keep growing the spill file — this is
+                // the other half of the bound `reconcileSpill` puts on disk. Only after the feed
+                // actually holds the bodies again, so a crash between the two leaves the file
+                // holding an extra, harmless copy rather than losing the only one.
+                spillStore.remove(Set(restored.keys))
                 rebuild()
             }
             // An id the store no longer holds — a purged Caches file — falls back to one wire
@@ -1115,6 +1120,17 @@ final class SessionTimelineModel {
             case .success(let page):
                 let hadOlder = self.feed.hasOlder
                 let outboxBefore = self.outbox
+                // Read before the merge, though nothing here actually depends on the order:
+                // `page.reset` is a fact about the page the Mac sent, not something merging it
+                // changes. Item ids are byte offsets, so once the transcript those cursors read
+                // from is gone, every body this store still holds for this session names a
+                // different record — spilled bookkeeping for a file that no longer exists is
+                // worse than none, so it goes with the feed rather than surviving it.
+                if page.reset {
+                    self.spillStore.purge()
+                    self.visibleFirstID = nil
+                    self.visibleLastID = nil
+                }
                 let itemsChanged = self.feed.merge(page)
                 // The transcript is the only thing that confirms a sent message reached the
                 // agent — see `PromptOutbox`. Done here rather than in `send` because the page
