@@ -253,6 +253,26 @@ final class SessionTimelineModel {
     @ObservationIgnored private let fleet:
         any TimelinePaging & PromptSending & PromptAnswering & PresenceReporting
     @ObservationIgnored private let timeout: Duration
+    /// The on-disk cache a spilled body's full text is written to and read back from. See
+    /// `reconcileSpill()`.
+    @ObservationIgnored private let spillStore: TimelineSpillStore
+    /// The visible window's first and last item ids, in feed order — reported by the screen
+    /// from the rows entering and leaving the viewport, and read only by `reconcileSpill()`.
+    /// `nil` until the screen's first report.
+    @ObservationIgnored private var visibleFirstID: String?
+    @ObservationIgnored private var visibleLastID: String?
+    /// The resident-text budget for one session, and the two hysteresis margins that stop a
+    /// window parked on a spill boundary from thrashing: `reconcileSpill()` spills only beyond
+    /// `spillMargin` items outside the window, and rehydrates anything within the tighter
+    /// `rehydrateMargin` of it. `rehydrateMargin < spillMargin` is what makes that work — a
+    /// window sitting still cannot both qualify to rehydrate an item and be far enough away to
+    /// spill it back. The `var` overrides below are test hooks only, the same device as
+    /// `promptRetries`.
+    static let spillBudgetBytes = 2_000_000
+    static let spillMargin = 200
+    static let rehydrateMargin = 60
+    @ObservationIgnored var spillBudgetBytesOverride: Int?
+    @ObservationIgnored var spillMarginOverride: Int?
     /// The fetch whose answer is still allowed to change anything, or `nil` when none is.
     ///
     /// A number rather than a `Bool`, and that is what makes the deadline below safe: an
@@ -300,14 +320,20 @@ final class SessionTimelineModel {
 
     /// `timeout` is injectable so `SessionTimelineModelTests` can watch a deadline expire in
     /// milliseconds rather than in fifteen seconds. Nothing in the app passes it.
+    ///
+    /// `spillDirectory` is injectable the same way, so those tests can point the spill store at
+    /// a temp directory rather than the real `Caches`. Nothing in the app passes it either —
+    /// `TimelineSpillStore`'s own `nil` default finds `Caches`.
     init(
         sessionID: UUID,
         fleet: any TimelinePaging & PromptSending & PromptAnswering & PresenceReporting,
-        timeout: Duration = .seconds(15)
+        timeout: Duration = .seconds(15),
+        spillDirectory: URL? = nil
     ) {
         self.sessionID = sessionID
         self.fleet = fleet
         self.timeout = timeout
+        self.spillStore = TimelineSpillStore(session: sessionID, directory: spillDirectory)
     }
 
     /// The screen came on: the reader is looking at this session, and the feed has to be
@@ -413,6 +439,96 @@ final class SessionTimelineModel {
         )
         prefetchTriggerID = feed.hasOlder ? Self.prefetchTrigger(rendered) : nil
         blockedPrompt = blocked(agent: statusAgent, activity: statusActivity, call: statusCall)
+    }
+
+    /// The visible window moved. Reported by the screen from the rows entering and leaving the
+    /// viewport; drives spill (far items go to disk) and rehydrate (approaching placeholders
+    /// come back). Guarded on the ids actually changing so a scroll tick that doesn't cross a
+    /// row boundary does no work.
+    func reportVisibleWindow(firstID: String?, lastID: String?) {
+        guard firstID != visibleFirstID || lastID != visibleLastID else { return }
+        visibleFirstID = firstID
+        visibleLastID = lastID
+        reconcileSpill()
+    }
+
+    /// Rehydrates placeholders the window is approaching, then — only if resident text is still
+    /// over budget — spills items far from the window to bring it back down.
+    ///
+    /// **Rehydrate before spill, and always in that order.** A window that has just moved onto a
+    /// spilled region needs those bodies back before anything else runs, and doing it first
+    /// means a body already restored this call is not immediately re-counted as a spill
+    /// candidate for a stale reason.
+    ///
+    /// **The two margins are what stop a window sitting on a boundary from thrashing.**
+    /// `rehydrateMargin` (tight) governs what comes back; `spillMargin` (wide) governs what goes
+    /// out, and `rehydrateMargin < spillMargin` is why a single scroll position cannot satisfy
+    /// both at once — anything close enough to rehydrate is, by construction, too close to the
+    /// window to also qualify as a spill candidate this same pass.
+    private func reconcileSpill() {
+        let items = feed.items
+        guard !items.isEmpty else { return }
+        let budget = spillBudgetBytesOverride ?? Self.spillBudgetBytes
+        let margin = spillMarginOverride ?? Self.spillMargin
+
+        let firstIndex = visibleFirstID.flatMap { id in items.firstIndex { $0.id == id } } ?? 0
+        let lastIndex = visibleLastID.flatMap { id in items.firstIndex { $0.id == id } } ?? (items.count - 1)
+
+        // Rehydrate: anything within the tight margin of the window that is still a placeholder.
+        let rehydrateLower = max(0, firstIndex - Self.rehydrateMargin)
+        let rehydrateUpper = min(items.count - 1, lastIndex + Self.rehydrateMargin)
+        let toRehydrate = Set(
+            items[rehydrateLower...rehydrateUpper].filter { $0.body.isPlaceholder }.map(\.id)
+        )
+        if !toRehydrate.isEmpty {
+            let restored = spillStore.read(toRehydrate)
+            if !restored.isEmpty {
+                feed.rehydrate(restored)
+                rebuild()
+            }
+            // An id the store no longer holds — a purged Caches file — falls back to one wire
+            // re-fetch of its offset range. The merge is idempotent and its full body clears the
+            // placeholder; no spinner, this only covers the disk-miss case.
+            let missing = toRehydrate.subtracting(restored.keys)
+            if let offset = missing.compactMap(Self.offset(of:)).min() {
+                fetch(anchor: .around(offset), older: false, quiet: true)
+            }
+        }
+
+        // Spill, only if resident text is over budget: items outside the window plus the wider
+        // margin, biggest bodies first, until back under budget or out of candidates. The
+        // exclusion zone is symmetric — both directions — so the live edge the reader is
+        // following near the bottom of the window is protected exactly like the top.
+        var residentBytes = feed.items.reduce(0) {
+            $0 + ($1.body.isPlaceholder ? 0 : $1.body.text.utf8.count)
+        }
+        guard residentBytes > budget else { return }
+        let spillLower = max(0, firstIndex - margin)
+        let spillUpper = min(feed.items.count - 1, lastIndex + margin)
+        let candidates = feed.items.indices
+            .filter { index in
+                (index < spillLower || index > spillUpper) && !feed.items[index].body.isPlaceholder
+            }
+            .sorted { feed.items[$0].body.text.utf8.count > feed.items[$1].body.text.utf8.count }
+
+        var toSpill: Set<String> = []
+        for index in candidates {
+            guard residentBytes > budget else { break }
+            toSpill.insert(feed.items[index].id)
+            residentBytes -= feed.items[index].body.text.utf8.count
+        }
+        if !toSpill.isEmpty {
+            let originals = feed.spill(toSpill)
+            spillStore.write(originals)
+            rebuild()
+        }
+    }
+
+    /// The byte offset half of an item id (`"<offset>#<index>"`), for the wire fallback's
+    /// `.around`. `nil` for a malformed id, which the caller simply drops.
+    private static func offset(of id: String) -> Int? {
+        guard let hash = id.firstIndex(of: "#") else { return nil }
+        return Int(id[id.startIndex..<hash])
     }
 
     /// The view's status inputs moved: fold them in and recompute, but only when one actually

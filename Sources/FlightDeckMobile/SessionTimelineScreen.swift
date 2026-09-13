@@ -92,6 +92,10 @@ struct SessionTimelineScreen: View {
     /// while portrait/landscape/split-view widths — which change where the clamp lands — do.
     /// Fed to every `TimelineRow` alongside `segmentCache`; see the `GeometryReader` below.
     @State private var widthBucket = 0
+    /// The rows currently on screen, kept up to date by the row `.onAppear`/`.onDisappear`
+    /// below. Only ever read through `reportWindow()`, which turns it into the first/last id in
+    /// feed order the model needs to schedule spill and rehydrate.
+    @State private var visibleIDs: Set<String> = []
 
     var body: some View {
         ScrollViewReader { scroll in
@@ -135,11 +139,15 @@ struct SessionTimelineScreen: View {
                         // button instead. A page down, the rubber-band never reaches it and
                         // the read finishes before the reader arrives.
                         .onAppear {
+                            visibleIDs.insert(entry.id)
+                            reportWindow()
                             guard entry.id == model.prefetchTriggerID else { return }
                             isNearOldest = true
                             model.prefetchOlder()
                         }
                         .onDisappear {
+                            visibleIDs.remove(entry.id)
+                            reportWindow()
                             if entry.id == model.prefetchTriggerID { isNearOldest = false }
                         }
                 }
@@ -424,6 +432,14 @@ struct SessionTimelineScreen: View {
     /// moving and a 1-point row clearing the viewport, short enough that a message arriving a
     /// moment after an unrelated tap-drag is still followed.
     private static let scrollGestureWindow: TimeInterval = 1
+
+    /// The first and last visible entry ids, in feed order, handed to the model so it can spill
+    /// far history to disk and rehydrate what the reader is approaching. Cheap: a set-membership
+    /// filter over `rendered`, which is already the on-screen-sized list every row draws from.
+    private func reportWindow() {
+        let visible = model.rendered.filter { visibleIDs.contains($0.id) }
+        model.reportVisibleWindow(firstID: visible.first?.id, lastID: visible.last?.id)
+    }
 
     /// A zero-height row at the very end, and it does two jobs that both need something to
     /// exist down there: it is what `scrollTo` aims at — the last *entry* is the wrong target,
