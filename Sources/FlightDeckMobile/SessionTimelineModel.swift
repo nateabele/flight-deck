@@ -138,6 +138,21 @@ final class SessionTimelineModel {
     /// `.onAppear`.
     private(set) var prefetchTriggerID: String?
 
+    /// What this session is blocked on, or nil — maintained state, folded by `rebuild()` from the
+    /// live status inputs and the feed, so the `OpenPrompt.find` scan runs once per change rather
+    /// than once per render. The scan still only does work while `waiting`.
+    ///
+    /// Named `blockedPrompt` rather than `blocked` to coexist with the method below: Swift
+    /// rejects a stored property and a method sharing one base name as an invalid redeclaration.
+    private(set) var blockedPrompt: OpenPrompt?
+
+    /// The live `WireSession` fields the blocked derivation reads, pushed by the view through
+    /// `updateStatus`. `@ObservationIgnored` because they are inputs to `rebuild()`, not display
+    /// state — the view draws `blockedPrompt`, never these.
+    @ObservationIgnored private var statusAgent: String?
+    @ObservationIgnored private var statusActivity: String?
+    @ObservationIgnored private var statusCall: OpenPromptIdentity = .unreported
+
     /// How many times `rebuild()` has run. `@ObservationIgnored` because a busy poll must not
     /// invalidate the view merely by counting, and because the recompute-count guard test asserts
     /// on it directly — a quiet poll must add zero, one new item exactly one.
@@ -390,6 +405,18 @@ final class SessionTimelineModel {
             delivered: outbox.entries.filter { $0.state == .delivered }
         )
         prefetchTriggerID = feed.hasOlder ? Self.prefetchTrigger(rendered) : nil
+        blockedPrompt = blocked(agent: statusAgent, activity: statusActivity, call: statusCall)
+    }
+
+    /// The view's status inputs moved: fold them in and recompute, but only when one actually
+    /// changed. A supersede — same activity, different open call — still lands here because
+    /// `call` is part of the comparison.
+    func updateStatus(agent: String?, activity: String?, call: OpenPromptIdentity) {
+        guard agent != statusAgent || activity != statusActivity || call != statusCall else { return }
+        statusAgent = agent
+        statusActivity = activity
+        statusCall = call
+        rebuild()
     }
 
     /// Make the screen current: the opening fetch, the fetch on coming back to a screen whose
@@ -740,11 +767,15 @@ final class SessionTimelineModel {
     /// answered on the Mac is a `tool_result` arriving on the next fetch. What the status
     /// gained is the call's *id* — `call` below — and never a word of the question.
     ///
-    /// A function of `agent`, `activity` and `call` rather than a stored property, so it
-    /// cannot go stale: the screen passes the live `WireSession` fields it is already reading.
-    /// The first two are `find`'s to judge — including whether this Mac can answer for that
-    /// agent at all, which is why a codex tab is blocked on nothing here however it is drawn
-    /// elsewhere.
+    /// A function of `agent`, `activity` and `call` rather than reading stored state itself, so
+    /// it cannot go stale on its own: the caller passes the live `WireSession` fields it is
+    /// already reading. `blockedPrompt` is the maintained mirror of this — folded into
+    /// `rebuild()` from the status inputs `updateStatus` remembers, so the view reads it without
+    /// re-running the scan on every render — but this method stays the one place the derivation
+    /// itself lives, and it is still called directly wherever a caller has its own live inputs
+    /// (`chaseBlockedPrompt`, the tests below). The first two are `find`'s to judge — including
+    /// whether this Mac can answer for that agent at all, which is why a codex tab is blocked on
+    /// nothing here however it is drawn elsewhere.
     ///
     /// **`call` is the Mac's veto, and it is the half `find` cannot supply.** The derivation
     /// runs over `feed.items`, so it is only ever as current as the last fetch — and the case

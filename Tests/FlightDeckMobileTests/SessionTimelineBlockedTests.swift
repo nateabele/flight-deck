@@ -199,6 +199,23 @@ final class SessionTimelineBlockedTests: XCTestCase {
         XCTAssertNil(model.blocked(agent: "claude", activity: "waiting", call: .unreported))
     }
 
+    /// **The stored mirror.** `blocked(agent:activity:call:)` above is the derivation; this is
+    /// the maintained state the view actually draws — folded by `rebuild()` from whatever
+    /// `updateStatus` last recorded, so a status push with no feed change still lands.
+    func testBlockedPromptIsStoredAndRecomputedOnStatusChange() {
+        let (model, stub) = makeModel()
+        model.loadLatest()
+        stub.answer(.success(page([askItem(callID: "toolu_A")], session: model.sessionID)))
+        XCTAssertNil(model.blockedPrompt, "no status pushed yet: nothing is claimed blocked")
+
+        model.updateStatus(agent: "claude", activity: "waiting", call: .unreported)
+        XCTAssertEqual(model.blockedPrompt?.callID, "toolu_A",
+                       "waiting + an unanswered prompt call derives a blocked prompt, stored")
+
+        model.updateStatus(agent: "claude", activity: "idle", call: .unreported)
+        XCTAssertNil(model.blockedPrompt, "leaving waiting clears the stored blocked value")
+    }
+
     func testTappingAnOptionSendsAnAnswerNamingTheCall() {
         let (model, stub) = makeModel()
         model.answer(.option(index: 1, label: "No"), to: "toolu_A")
