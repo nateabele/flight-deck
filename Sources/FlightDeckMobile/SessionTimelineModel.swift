@@ -128,6 +128,36 @@ final class SessionTimelineModel {
     /// row instead, where the history that is missing would have been.
     private(set) var olderFailure: String?
 
+    /// The folded, ghost-appended list the `ForEach` draws — maintained state, recomputed by
+    /// `rebuild()` exactly once per change to its inputs, never from the view. The lag this whole
+    /// change removes was this fold running O(N) on every render and every row lifecycle.
+    private(set) var rendered: [TimelineEntry] = []
+
+    /// The id of the row whose appearance triggers a backward prefetch, computed once alongside
+    /// `rendered`. The view compares an id here instead of re-folding the feed in every row's
+    /// `.onAppear`.
+    private(set) var prefetchTriggerID: String?
+
+    /// What this session is blocked on, or nil — maintained state, folded by `rebuild()` from the
+    /// live status inputs and the feed, so the `OpenPrompt.find` scan runs once per change rather
+    /// than once per render. The scan still only does work while `waiting`.
+    ///
+    /// Named `blockedPrompt` rather than `blocked` to coexist with the method below: Swift
+    /// rejects a stored property and a method sharing one base name as an invalid redeclaration.
+    private(set) var blockedPrompt: OpenPrompt?
+
+    /// The live `WireSession` fields the blocked derivation reads, pushed by the view through
+    /// `updateStatus`. `@ObservationIgnored` because they are inputs to `rebuild()`, not display
+    /// state — the view draws `blockedPrompt`, never these.
+    @ObservationIgnored private var statusAgent: String?
+    @ObservationIgnored private var statusActivity: String?
+    @ObservationIgnored private var statusCall: OpenPromptIdentity = .unreported
+
+    /// How many times `rebuild()` has run. `@ObservationIgnored` because a busy poll must not
+    /// invalidate the view merely by counting, and because the recompute-count guard test asserts
+    /// on it directly — a quiet poll must add zero, one new item exactly one.
+    @ObservationIgnored private(set) var rebuildCount = 0
+
     /// How many pages of history the phone keeps ahead of the reader.
     ///
     /// Three, because one is not a buffer. A page is `TimelineLimits.defaultLimit` records
@@ -213,9 +243,36 @@ final class SessionTimelineModel {
 
     private(set) var answerState = AnswerState.idle
 
+    /// Whether this model must not be evicted: it holds a message the reader was told is in
+    /// flight, or a dialog they may still answer. Only a truly idle model is eligible to be
+    /// dropped and rebuilt on reopen.
+    var hasOutstandingWork: Bool {
+        !outbox.entries.isEmpty || blockedPrompt != nil || answerState.call != nil
+    }
+
     @ObservationIgnored private let fleet:
         any TimelinePaging & PromptSending & PromptAnswering & PresenceReporting
     @ObservationIgnored private let timeout: Duration
+    /// The on-disk cache a spilled body's full text is written to and read back from. See
+    /// `reconcileSpill()`.
+    @ObservationIgnored private let spillStore: TimelineSpillStore
+    /// The visible window's first and last item ids, in feed order — reported by the screen
+    /// from the rows entering and leaving the viewport, and read only by `reconcileSpill()`.
+    /// `nil` until the screen's first report.
+    @ObservationIgnored private var visibleFirstID: String?
+    @ObservationIgnored private var visibleLastID: String?
+    /// The resident-text budget for one session, and the two hysteresis margins that stop a
+    /// window parked on a spill boundary from thrashing: `reconcileSpill()` spills only beyond
+    /// `spillMargin` items outside the window, and rehydrates anything within the tighter
+    /// `rehydrateMargin` of it. `rehydrateMargin < spillMargin` is what makes that work — a
+    /// window sitting still cannot both qualify to rehydrate an item and be far enough away to
+    /// spill it back. The `var` overrides below are test hooks only, the same device as
+    /// `promptRetries`.
+    static let spillBudgetBytes = 2_000_000
+    static let spillMargin = 200
+    static let rehydrateMargin = 60
+    @ObservationIgnored var spillBudgetBytesOverride: Int?
+    @ObservationIgnored var spillMarginOverride: Int?
     /// The fetch whose answer is still allowed to change anything, or `nil` when none is.
     ///
     /// A number rather than a `Bool`, and that is what makes the deadline below safe: an
@@ -263,14 +320,20 @@ final class SessionTimelineModel {
 
     /// `timeout` is injectable so `SessionTimelineModelTests` can watch a deadline expire in
     /// milliseconds rather than in fifteen seconds. Nothing in the app passes it.
+    ///
+    /// `spillDirectory` is injectable the same way, so those tests can point the spill store at
+    /// a temp directory rather than the real `Caches`. Nothing in the app passes it either —
+    /// `TimelineSpillStore`'s own `nil` default finds `Caches`.
     init(
         sessionID: UUID,
         fleet: any TimelinePaging & PromptSending & PromptAnswering & PresenceReporting,
-        timeout: Duration = .seconds(15)
+        timeout: Duration = .seconds(15),
+        spillDirectory: URL? = nil
     ) {
         self.sessionID = sessionID
         self.fleet = fleet
         self.timeout = timeout
+        self.spillStore = TimelineSpillStore(session: sessionID, directory: spillDirectory)
     }
 
     /// The screen came on: the reader is looking at this session, and the feed has to be
@@ -333,6 +396,157 @@ final class SessionTimelineModel {
             ?? candidates.first?.id
     }
 
+    /// The pure fold plus the ghost-append. The fold itself is `TimelineRender.entries(from:)` in
+    /// FleetKit; the ghosts need `PromptOutboxEntry` and so stay here, appended after the folded
+    /// feed, one per `.delivered` entry, in send order. Each carries a `"ghost:<token>"` id that
+    /// exists only in this array — never written into `TimelineFeed`, so a page reset or a
+    /// reconcile cannot find it.
+    static func rendered(from items: [TimelineItem], delivered: [PromptOutboxEntry]) -> [TimelineEntry] {
+        var entries = TimelineRender.entries(from: items)
+        entries.append(contentsOf: delivered.map { entry in
+            TimelineEntry(
+                item: TimelineItem(
+                    id: "ghost:\(entry.id.uuidString)", kind: .userTurn, status: .complete,
+                    body: .init(text: entry.text)
+                ),
+                result: nil
+            )
+        })
+        return entries
+    }
+
+    /// One page's worth of runway below the top of history — moved here from the view because the
+    /// trigger id is now maintained state. `defaultLimit` is in records and one record can carry
+    /// several entries, so this is a floor on the real distance.
+    static let prefetchDepth = TimelineLimits.defaultLimit
+
+    /// Falls back to the OLDEST entry (index 0), never the newest and never nil: a feed shorter
+    /// than the depth has no runway, so the earliest possible ask is the right one; clamping to
+    /// `count - 1` would fire the prefetch the instant the screen draws.
+    static func prefetchTrigger(_ entries: [TimelineEntry]) -> String? {
+        guard !entries.isEmpty else { return nil }
+        return entries.count > prefetchDepth ? entries[prefetchDepth].id : entries[0].id
+    }
+
+    /// The one place `rendered` and the derived prefetch id are recomputed. Called only when an
+    /// input actually changed — after a merge that moved items, after a reconcile that retired an
+    /// outbox entry — never from the view.
+    private func rebuild() {
+        rebuildCount += 1
+        rendered = Self.rendered(
+            from: feed.items,
+            delivered: outbox.entries.filter { $0.state == .delivered }
+        )
+        prefetchTriggerID = feed.hasOlder ? Self.prefetchTrigger(rendered) : nil
+        blockedPrompt = blocked(agent: statusAgent, activity: statusActivity, call: statusCall)
+    }
+
+    /// The visible window moved. Reported by the screen from the rows entering and leaving the
+    /// viewport; drives spill (far items go to disk) and rehydrate (approaching placeholders
+    /// come back). Guarded on the ids actually changing so a scroll tick that doesn't cross a
+    /// row boundary does no work.
+    func reportVisibleWindow(firstID: String?, lastID: String?) {
+        guard firstID != visibleFirstID || lastID != visibleLastID else { return }
+        visibleFirstID = firstID
+        visibleLastID = lastID
+        reconcileSpill()
+    }
+
+    /// Rehydrates placeholders the window is approaching, then — only if resident text is still
+    /// over budget — spills items far from the window to bring it back down.
+    ///
+    /// **Rehydrate before spill, and always in that order.** A window that has just moved onto a
+    /// spilled region needs those bodies back before anything else runs, and doing it first
+    /// means a body already restored this call is not immediately re-counted as a spill
+    /// candidate for a stale reason.
+    ///
+    /// **The two margins are what stop a window sitting on a boundary from thrashing.**
+    /// `rehydrateMargin` (tight) governs what comes back; `spillMargin` (wide) governs what goes
+    /// out, and `rehydrateMargin < spillMargin` is why a single scroll position cannot satisfy
+    /// both at once — anything close enough to rehydrate is, by construction, too close to the
+    /// window to also qualify as a spill candidate this same pass.
+    private func reconcileSpill() {
+        let items = feed.items
+        guard !items.isEmpty else { return }
+        let budget = spillBudgetBytesOverride ?? Self.spillBudgetBytes
+        let margin = spillMarginOverride ?? Self.spillMargin
+
+        let firstIndex = visibleFirstID.flatMap { id in items.firstIndex { $0.id == id } } ?? 0
+        let lastIndex = visibleLastID.flatMap { id in items.firstIndex { $0.id == id } } ?? (items.count - 1)
+
+        // Rehydrate: anything within the tight margin of the window that is still a placeholder.
+        let rehydrateLower = max(0, firstIndex - Self.rehydrateMargin)
+        let rehydrateUpper = min(items.count - 1, lastIndex + Self.rehydrateMargin)
+        let toRehydrate = Set(
+            items[rehydrateLower...rehydrateUpper].filter { $0.body.isPlaceholder }.map(\.id)
+        )
+        if !toRehydrate.isEmpty {
+            let restored = spillStore.read(toRehydrate)
+            if !restored.isEmpty {
+                feed.rehydrate(restored)
+                // A body back in memory does not need to keep growing the spill file — this is
+                // the other half of the bound `reconcileSpill` puts on disk. Only after the feed
+                // actually holds the bodies again, so a crash between the two leaves the file
+                // holding an extra, harmless copy rather than losing the only one.
+                spillStore.remove(Set(restored.keys))
+                rebuild()
+            }
+            // An id the store no longer holds — a purged Caches file — falls back to one wire
+            // re-fetch of its offset range. The merge is idempotent and its full body clears the
+            // placeholder; no spinner, this only covers the disk-miss case.
+            let missing = toRehydrate.subtracting(restored.keys)
+            if let offset = missing.compactMap(Self.offset(of:)).min() {
+                fetch(anchor: .around(offset), older: false, quiet: true)
+            }
+        }
+
+        // Spill, only if resident text is over budget: items outside the window plus the wider
+        // margin, biggest bodies first, until back under budget or out of candidates. The
+        // exclusion zone is symmetric — both directions — so the live edge the reader is
+        // following near the bottom of the window is protected exactly like the top.
+        var residentBytes = feed.items.reduce(0) {
+            $0 + ($1.body.isPlaceholder ? 0 : $1.body.text.utf8.count)
+        }
+        guard residentBytes > budget else { return }
+        let spillLower = max(0, firstIndex - margin)
+        let spillUpper = min(feed.items.count - 1, lastIndex + margin)
+        let candidates = feed.items.indices
+            .filter { index in
+                (index < spillLower || index > spillUpper) && !feed.items[index].body.isPlaceholder
+            }
+            .sorted { feed.items[$0].body.text.utf8.count > feed.items[$1].body.text.utf8.count }
+
+        var toSpill: Set<String> = []
+        for index in candidates {
+            guard residentBytes > budget else { break }
+            toSpill.insert(feed.items[index].id)
+            residentBytes -= feed.items[index].body.text.utf8.count
+        }
+        if !toSpill.isEmpty {
+            let originals = feed.spill(toSpill)
+            spillStore.write(originals)
+            rebuild()
+        }
+    }
+
+    /// The byte offset half of an item id (`"<offset>#<index>"`), for the wire fallback's
+    /// `.around`. `nil` for a malformed id, which the caller simply drops.
+    private static func offset(of id: String) -> Int? {
+        guard let hash = id.firstIndex(of: "#") else { return nil }
+        return Int(id[id.startIndex..<hash])
+    }
+
+    /// The view's status inputs moved: fold them in and recompute, but only when one actually
+    /// changed. A supersede — same activity, different open call — still lands here because
+    /// `call` is part of the comparison.
+    func updateStatus(agent: String?, activity: String?, call: OpenPromptIdentity) {
+        guard agent != statusAgent || activity != statusActivity || call != statusCall else { return }
+        statusAgent = agent
+        statusActivity = activity
+        statusCall = call
+        rebuild()
+    }
+
     /// Make the screen current: the opening fetch, the fetch on coming back to a screen whose
     /// model was kept, and the recovery after a `reset`.
     ///
@@ -357,7 +571,7 @@ final class SessionTimelineModel {
     /// reader upward. What made it tolerable was that the reader was never surprised by the
     /// wait — they had asked for it. That is the wrong trade: the wait is the defect, and the
     /// fix is to have already done the reading. The trigger now sits a page BELOW the top
-    /// (`SessionTimelineScreen.prefetchTrigger`), which is both far enough from the rubber-band
+    /// (`Self.prefetchTrigger`), which is both far enough from the rubber-band
     /// to be untouched by it and early enough that the page lands before the reader arrives.
     ///
     /// **Both conditions, and `hasOlder` is the one that stops the fetch.** `olderAnchor` is
@@ -681,11 +895,15 @@ final class SessionTimelineModel {
     /// answered on the Mac is a `tool_result` arriving on the next fetch. What the status
     /// gained is the call's *id* — `call` below — and never a word of the question.
     ///
-    /// A function of `agent`, `activity` and `call` rather than a stored property, so it
-    /// cannot go stale: the screen passes the live `WireSession` fields it is already reading.
-    /// The first two are `find`'s to judge — including whether this Mac can answer for that
-    /// agent at all, which is why a codex tab is blocked on nothing here however it is drawn
-    /// elsewhere.
+    /// A function of `agent`, `activity` and `call` rather than reading stored state itself, so
+    /// it cannot go stale on its own: the caller passes the live `WireSession` fields it is
+    /// already reading. `blockedPrompt` is the maintained mirror of this — folded into
+    /// `rebuild()` from the status inputs `updateStatus` remembers, so the view reads it without
+    /// re-running the scan on every render — but this method stays the one place the derivation
+    /// itself lives, and it is still called directly wherever a caller has its own live inputs
+    /// (`chaseBlockedPrompt`, the tests below). The first two are `find`'s to judge — including
+    /// whether this Mac can answer for that agent at all, which is why a codex tab is blocked on
+    /// nothing here however it is drawn elsewhere.
     ///
     /// **`call` is the Mac's veto, and it is the half `find` cannot supply.** The derivation
     /// runs over `feed.items`, so it is only ever as current as the last fetch — and the case
@@ -900,12 +1118,32 @@ final class SessionTimelineModel {
             guard let self, self.claim(fetch) else { return }
             switch result {
             case .success(let page):
-                self.feed.merge(page)
+                let hadOlder = self.feed.hasOlder
+                let outboxBefore = self.outbox
+                // Read before the merge, though nothing here actually depends on the order:
+                // `page.reset` is a fact about the page the Mac sent, not something merging it
+                // changes. Item ids are byte offsets, so once the transcript those cursors read
+                // from is gone, every body this store still holds for this session names a
+                // different record — spilled bookkeeping for a file that no longer exists is
+                // worse than none, so it goes with the feed rather than surviving it.
+                if page.reset {
+                    self.spillStore.purge()
+                    self.visibleFirstID = nil
+                    self.visibleLastID = nil
+                }
+                let itemsChanged = self.feed.merge(page)
                 // The transcript is the only thing that confirms a sent message reached the
                 // agent — see `PromptOutbox`. Done here rather than in `send` because the page
                 // that holds it can arrive from any fetch: the `loadNewer` an ack triggers,
                 // a reader scrolling, or a return to a screen kept in `FleetModel`.
                 self.outbox.reconcile(with: self.feed.items)
+                // Recompute maintained state only when an input to it actually moved: the folded
+                // items, whether there is more history (drives the prefetch id), or the set of
+                // delivered outbox ghosts. A quiet 1.5s poll changes none of these and rebuilds
+                // nothing.
+                if itemsChanged || self.feed.hasOlder != hadOlder || self.outbox != outboxBefore {
+                    self.rebuild()
+                }
                 self.phase = .idle
                 // A reset emptied the feed: the transcript these cursors came from is gone,
                 // so start again from the end rather than leaving a blank screen that will
@@ -1079,7 +1317,14 @@ final class SessionTimelineModel {
     func promptExpired(_ token: UUID) { outbox.fail(token, Self.expired) }
 
     /// The Mac typed this prompt into the agent. See `FleetEvent.promptTyped`.
-    func promptTyped(_ token: UUID) { outbox.deliver(token) }
+    func promptTyped(_ token: UUID) {
+        outbox.deliver(token)
+        // `deliver` adds to the `.delivered` set `rebuild()`'s ghost-append reads, and this
+        // arrives off the socket, entirely outside `fetch` — the only other place that set
+        // changes. Without this the new ghost would sit unseen in `outbox.entries` until the
+        // next successful fetch happened to land.
+        rebuild()
+    }
 
     /// Copy for a prompt that did not land.
     ///

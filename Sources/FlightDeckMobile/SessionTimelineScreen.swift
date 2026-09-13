@@ -84,6 +84,18 @@ struct SessionTimelineScreen: View {
     /// the row that answered their tap for exactly as long as the fade takes and not a frame
     /// longer.
     @State private var highlightedID: String?
+    /// The clamped-segments memo every row on this screen shares, so a row's three segmenter
+    /// passes collapse to one cached split that survives re-render and cell recycling. See
+    /// `TimelineSegmentCache`.
+    @State private var segmentCache = TimelineSegmentCache()
+    /// The list's own width, bucketed to 32pt so hairline jitter does not invalidate the memo
+    /// while portrait/landscape/split-view widths — which change where the clamp lands — do.
+    /// Fed to every `TimelineRow` alongside `segmentCache`; see the `GeometryReader` below.
+    @State private var widthBucket = 0
+    /// The rows currently on screen, kept up to date by the row `.onAppear`/`.onDisappear`
+    /// below. Only ever read through `reportWindow()`, which turns it into the first/last id in
+    /// feed order the model needs to schedule spill and rehydrate.
+    @State private var visibleIDs: Set<String> = []
 
     var body: some View {
         ScrollViewReader { scroll in
@@ -104,7 +116,7 @@ struct SessionTimelineScreen: View {
                 if model.feed.hasOlder || model.olderFailure != nil {
                     olderStatusRow
                 }
-                ForEach(entries) { entry in
+                ForEach(model.rendered) { entry in
                     entryRow(entry)
                         .listRowInsets(Self.rowInsets)
                         // The card and the tinted user turn are what separate one entry from
@@ -127,12 +139,16 @@ struct SessionTimelineScreen: View {
                         // button instead. A page down, the rubber-band never reaches it and
                         // the read finishes before the reader arrives.
                         .onAppear {
-                            guard entry.id == prefetchTriggerID else { return }
+                            visibleIDs.insert(entry.id)
+                            reportWindow()
+                            guard entry.id == model.prefetchTriggerID else { return }
                             isNearOldest = true
                             model.prefetchOlder()
                         }
                         .onDisappear {
-                            if entry.id == prefetchTriggerID { isNearOldest = false }
+                            visibleIDs.remove(entry.id)
+                            reportWindow()
+                            if entry.id == model.prefetchTriggerID { isNearOldest = false }
                         }
                 }
                 if let notice = Self.bottomNotice(
@@ -145,6 +161,19 @@ struct SessionTimelineScreen: View {
                 }
                 bottomSentinel
             }
+            // The list's own width, bucketed for `segmentCache`. A background reader rather
+            // than a row: every row needs the same number before it can ask the cache for
+            // anything, and a `GeometryReader` inside one row would only ever see that row's
+            // own bounds.
+            .background(
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { widthBucket = Int((geo.size.width / 32).rounded()) }
+                        .onChange(of: geo.size.width) { _, width in
+                            widthBucket = Int((width / 32).rounded())
+                        }
+                }
+            )
             // `.plain` HERE, unlike the fleet list, and the reason is the content rather than
             // taste: this list holds full-width cards of command output, and inset-grouped's
             // own card edges cut every one of them short and put a second rounded corner
@@ -275,7 +304,11 @@ struct SessionTimelineScreen: View {
         // looked at, and it is the ONLY place that says so — the fleet list's row used to
         // send the mark from a gesture racing its own link, which is what stopped rows
         // opening at all. See `TimelinePaging`.
-        .task(id: model.sessionID) { model.open() }
+        .task(id: model.sessionID) {
+            model.updateStatus(agent: session?.agent, activity: session?.activity,
+                               call: session?.openPromptCall ?? .unreported)
+            model.open()
+        }
         // Reported from the SCREEN rather than the model: the model is cached per tab and
         // outlives the screen (see `FleetModel.timelineModel(for:)`), so tying presence to its
         // lifetime would leave a badge glowing for a conversation nobody is looking at.
@@ -292,19 +325,16 @@ struct SessionTimelineScreen: View {
                 // is blocked on sits directly above the field, so a reader whose keyboard is up
                 // can still see what they are answering.
                 PromptCard(
-                    open: model.blocked(
-                        agent: session?.agent, activity: session?.activity,
-                        call: session?.openPromptCall ?? .unreported
-                    ),
+                    open: model.blockedPrompt,
                     agent: session?.agent,
                     state: model.answerState,
                     model: model,
                     blockedChaseExhausted: model.blockedChaseExhausted,
                     allowsBlockedAbort: session?.allowsBlockedAbort ?? false,
                     // The two liveness inputs `showsBlocked` needs, read from the same
-                    // `session` as the `blocked(...)` call above so the card's "is this
-                    // session still blocked, and does the Mac still agree it cannot name the
-                    // dialog" is asked of one snapshot rather than two.
+                    // `session` as the status pushed into `model.blockedPrompt` above so the
+                    // card's "is this session still blocked, and does the Mac still agree it
+                    // cannot name the dialog" is asked of one snapshot rather than two.
                     activity: session?.activity,
                     openPromptCall: session?.openPromptCall ?? .unreported,
                     onAbortBlocked: { await onAbortBlocked(model.sessionID) }
@@ -327,14 +357,22 @@ struct SessionTimelineScreen: View {
         // change to either is the cheapest possible signal that this session has moved — most
         // importantly the busy → idle transition, which is the moment the last records of a
         // turn have landed.
-        .onChange(of: session?.activity) { _, _ in model.loadNewer() }
+        .onChange(of: session?.activity) { _, _ in
+            model.loadNewer()
+            model.updateStatus(agent: session?.agent, activity: session?.activity,
+                               call: session?.openPromptCall ?? .unreported)
+        }
         // The second event trigger, and it fires where the first cannot. A dialog answered at
         // the keyboard with the next one raised immediately never leaves `waiting`, so
         // `activity` is identical either side of it and the modifier above sees nothing — the
         // stale-card report, exactly. Which call is open does move, so this is the fetch that
         // brings the records naming the new dialog. Until they land `blocked` draws nothing,
         // which is the honest state rather than the previous dialog's buttons.
-        .onChange(of: session?.openPromptCall) { _, _ in model.loadNewer() }
+        .onChange(of: session?.openPromptCall) { _, _ in
+            model.loadNewer()
+            model.updateStatus(agent: session?.agent, activity: session?.activity,
+                               call: session?.openPromptCall ?? .unreported)
+        }
         // The timer, and it is not redundant with the event above: `emitActivity` on the Mac
         // filters to genuine transitions, so a turn that runs busy for four minutes emits
         // NOTHING in the middle of it. Without this, an open screen would sit unchanged
@@ -395,6 +433,14 @@ struct SessionTimelineScreen: View {
     /// moment after an unrelated tap-drag is still followed.
     private static let scrollGestureWindow: TimeInterval = 1
 
+    /// The first and last visible entry ids, in feed order, handed to the model so it can spill
+    /// far history to disk and rehydrate what the reader is approaching. Cheap: a set-membership
+    /// filter over `rendered`, which is already the on-screen-sized list every row draws from.
+    private func reportWindow() {
+        let visible = model.rendered.filter { visibleIDs.contains($0.id) }
+        model.reportVisibleWindow(firstID: visible.first?.id, lastID: visible.last?.id)
+    }
+
     /// A zero-height row at the very end, and it does two jobs that both need something to
     /// exist down there: it is what `scrollTo` aims at — the last *entry* is the wrong target,
     /// since a tall card scrolled to its own bottom still leaves the footer off screen — and
@@ -418,13 +464,6 @@ struct SessionTimelineScreen: View {
             }
     }
 
-    private var entries: [Entry] {
-        Self.entries(
-            from: model.feed.items,
-            delivered: model.outbox.entries.filter { $0.state == .delivered }
-        )
-    }
-
     /// One entry, as a link into the detail screen or as a row that is simply itself.
     ///
     /// **A `NavigationLink` only where there is something to navigate to**, which is
@@ -442,8 +481,13 @@ struct SessionTimelineScreen: View {
     /// what makes its More button tappable: a `NavigationLink` swallows the tap on any control
     /// inside it, so a row cannot be a link and carry a button at once.
     @ViewBuilder
-    private func entryRow(_ entry: Entry) -> some View {
-        if entry.isGhost {
+    private func entryRow(_ entry: TimelineEntry) -> some View {
+        if entry.item.body.isPlaceholder {
+            // A spilled row never got as far as being a ghost — a ghost is an outbox entry,
+            // never spilled — but checking this first is correct regardless of what else the
+            // entry is: a skeleton is the one thing a spilled body can ever draw.
+            TimelineSkeletonRow(item: entry.item)
+        } else if entry.isGhost {
             ghostRow(entry)
         } else {
             let row = TimelineRow(
@@ -457,7 +501,9 @@ struct SessionTimelineScreen: View {
                 toggleExpanded: { expansion.toggle(entry.id) },
                 // Straight onto the model, which is where the draft lives — the row never
                 // learns that a composer exists.
-                onReply: { model.quote($0) }
+                onReply: { model.quote($0) },
+                segmentCache: segmentCache,
+                widthBucket: widthBucket
             )
             if TimelineStyle.opensDetail(entry.item) {
                 NavigationLink(value: entry.item) { row }
@@ -481,7 +527,7 @@ struct SessionTimelineScreen: View {
     /// those need — it is not in `TimelineFeed`, has no id `TimelineStyle` or `Expansion`
     /// recognise, and answers no tool call — so it is drawn straight rather than routed through
     /// `TimelineRow`, which would have nothing to do with most of what it offers.
-    private func ghostRow(_ entry: Entry) -> some View {
+    private func ghostRow(_ entry: TimelineEntry) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(entry.item.body.text)
                 .font(.body)
@@ -544,52 +590,8 @@ struct SessionTimelineScreen: View {
     }
 
     /// The entry whose appearance starts the next read of history, or `nil` when there is no
-    /// history left to read.
-    private var prefetchTriggerID: String? {
-        model.feed.hasOlder ? Self.prefetchTrigger(entries) : nil
-    }
-
-    /// How far below the oldest loaded row the trigger sits, in entries.
-    ///
-    /// One page's worth. Shallower and the rubber-band at the top of the list starts reaching
-    /// it — the defect that made this a button in the first place. Deeper and it fires while
-    /// the reader is still in the middle of what they have, which is a read they may never
-    /// need. `defaultLimit` is in *records* and one record can carry several entries, so this
-    /// is a floor on the real distance rather than an estimate of it.
-    static let prefetchDepth = TimelineLimits.defaultLimit
-
-    /// **Falls back to the OLDEST entry, and the direction is the trap.** `entries` is
-    /// oldest-first, so the trigger's index counts down from the top of history: index
-    /// `prefetchDepth` is the row with a page of history above it. A feed shorter than that
-    /// has no such row — and clamping the index to `count - 1` picks the *newest* row instead,
-    /// which fires the read the instant the screen draws and every time the reader returns to
-    /// the bottom. The fallback has to be index 0: on a feed this short there is no runway to
-    /// be had, so the earliest possible ask is the right one.
-    ///
-    /// Not `nil`, which is what an unclamped lookup answers: a screen that loaded one short
-    /// page would then never ask for a second, and those are exactly the sessions where the
-    /// reader reaches the top fastest.
-    static func prefetchTrigger(_ entries: [Entry]) -> String? {
-        guard !entries.isEmpty else { return nil }
-        return entries.count > prefetchDepth ? entries[prefetchDepth].id : entries[0].id
-    }
-
-    // MARK: One entry per thing that happened
-
-    /// A row's worth of conversation: an item, plus the result that answers it when the item
-    /// is a call and the feed holds one.
-    struct Entry: Identifiable, Hashable {
-        let item: TimelineItem
-        let result: TimelineItem?
-        var id: String { item.id }
-
-        /// A synthetic entry for a `.delivered` outbox message, never a record the agent
-        /// wrote. Detected by id prefix rather than a stored field, because the id is already
-        /// the one thing `entries(from:delivered:)` controls and a second flag would be a
-        /// second place the two could disagree.
-        var isGhost: Bool { item.id.hasPrefix("ghost:") }
-    }
-
+    /// history left to read. `prefetchDepth` and the trigger computation itself moved to
+    /// `SessionTimelineModel` — this just calls through.
     // MARK: Which long answers are open
 
     /// The set of rows the reader has opened past the ceiling, by entry id.
@@ -609,7 +611,7 @@ struct SessionTimelineScreen: View {
     /// SwiftUI is a decision a test can run, which is the same rule `TimelineStyle` is written
     /// under: `TimelineProseExpansionTests` drives every transition below with no window at all.
     ///
-    /// Keyed by `Entry.id`, which is `TimelineItem.id`: the record's byte offset in the file
+    /// Keyed by `TimelineEntry.id`, which is `TimelineItem.id`: the record's byte offset in the file
     /// the agent wrote, so it is stable across every refetch and re-page. An id that leaves the
     /// feed leaves a `String` in a set behind it, which costs nothing and is what makes paging
     /// away from an open row and back the same case as scrolling.
@@ -628,58 +630,6 @@ struct SessionTimelineScreen: View {
         mutating func toggle(_ id: String) {
             if open.contains(id) { open.remove(id) } else { open.insert(id) }
         }
-    }
-
-    /// Folds every tool result into the call it answers, so a command and its output are one
-    /// card rather than two rows that read as two unrelated events.
-    ///
-    /// **Paired on `callID` — the agent's own id — and never on position.** A session running
-    /// two tools at once interleaves their records, so "the next result" is a different call's
-    /// output about half the time, and a command captioned with another command's output is
-    /// worse than a command with no output shown at all.
-    ///
-    /// **A result is only folded away when its call is actually here.** A page boundary can
-    /// land between the two, and dropping a result whose call is on the previous page would
-    /// delete content from the screen — the one thing worse than showing it twice. So the set
-    /// of calls present is what decides, not merely the result having an id.
-    ///
-    /// `delivered` is appended AFTER the folded feed, one ghost per entry, in send order —
-    /// `entries` is oldest-first, so the ghosts land at the bottom whatever page the feed is
-    /// showing. Each carries a `"ghost:<token>"` id, which is `Entry.isGhost`'s whole test, and
-    /// exists only in this array: it is never written into `TimelineFeed`, so a page reset or a
-    /// `reconcile` cannot find it and cannot mistake it for a record the agent wrote.
-    static func entries(from items: [TimelineItem], delivered: [PromptOutboxEntry] = []) -> [Entry] {
-        var resultsByCall: [String: TimelineItem] = [:]
-        var callsPresent: Set<String> = []
-        for item in items {
-            guard let callID = item.body.callID else { continue }
-            switch item.kind {
-            case .toolResult: if resultsByCall[callID] == nil { resultsByCall[callID] = item }
-            case .toolCall: callsPresent.insert(callID)
-            default: break
-            }
-        }
-        let mapped = items.compactMap { item -> Entry? in
-            guard let callID = item.body.callID else { return Entry(item: item, result: nil) }
-            switch item.kind {
-            case .toolCall:
-                return Entry(item: item, result: resultsByCall[callID])
-            case .toolResult:
-                return callsPresent.contains(callID) ? nil : Entry(item: item, result: nil)
-            default:
-                return Entry(item: item, result: nil)
-            }
-        }
-        let ghosts = delivered.map { entry in
-            Entry(
-                item: TimelineItem(
-                    id: "ghost:\(entry.id.uuidString)", kind: .userTurn, status: .complete,
-                    body: .init(text: entry.text)
-                ),
-                result: nil
-            )
-        }
-        return mapped + ghosts
     }
 
     // MARK: Following the live edge

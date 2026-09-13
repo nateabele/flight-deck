@@ -21,7 +21,7 @@ import UIKit
 /// - **A call and its result belong in one card.** Rendered as two sibling rows they read as
 ///   two unrelated events, and a `⎿` marker did not join them across a row separator. Folded
 ///   into one card, a command and what it printed are one thing on screen, which is what they
-///   are. `SessionTimelineScreen.entries(from:)` does the folding, on `callID` and never on
+///   are. `TimelineRender.entries(from:)` does the folding, on `callID` and never on
 ///   position.
 ///
 /// **A MACHINE body is rendered, never parsed — in the ROW.** A body is cut at the per-item
@@ -70,6 +70,11 @@ struct TimelineRow: View {
     /// harnesses, the filler rows in the tests — has no composer to quote into, and prose that
     /// is selectable-but-unrepliable is the correct behaviour there rather than a crash.
     var onReply: ((String) -> Void)?
+    /// The screen's shared segment memo, and the width the row laid out at. Optional so a row
+    /// built with no screen behind it — the offscreen harnesses, the filler rows in tests —
+    /// segments directly through `TimelineStyle` as it always has.
+    var segmentCache: TimelineSegmentCache?
+    var widthBucket: Int = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -99,8 +104,33 @@ struct TimelineRow: View {
 
     /// `nil` on every row with nothing cut, which is the same question the link asks.
     private var expandActionName: String? {
-        guard TimelineStyle.expandsInPlace(item) else { return nil }
+        guard expandsInPlace else { return nil }
         return isExpanded ? "Show less" : "Show more"
+    }
+
+    /// The row's own read of `TimelineStyle.expandsInPlace(_:)` — same predicate, reusing the
+    /// cache instead of asking the segmenter again.
+    ///
+    /// **Deliberately asks for the collapsed clamp, not `clamped` (which tracks `isExpanded`).**
+    /// `TimelineStyle.expandsInPlace(_:)` calls `clampedProse(for: item)` with its default
+    /// `expanded: false` — always the collapsed form — which is what makes the link
+    /// "independent of the expansion state" (see that function's own doc comment): an expanded
+    /// row's `clampedProse(for: item, expanded: true)` always answers `hasMore: false` by
+    /// construction (`TimelineStyle.clampedProse`'s guard only reaches the clamp when
+    /// `!expanded`), so reusing `clamped` here would make the Less link vanish the moment a row
+    /// expands. Asking collapsed regardless of `isExpanded` is what keeps More, then Less, both
+    /// drawable at the same cut.
+    private var expandsInPlace: Bool {
+        TimelineStyle.rendersMarkdown(item) && collapsedClamped.hasMore
+    }
+
+    /// The clamp evaluated as collapsed, whatever `isExpanded` actually is — see
+    /// `expandsInPlace`, its only caller.
+    private var collapsedClamped: TimelineSegmenter.Clamped {
+        if let segmentCache {
+            return segmentCache.clamped(for: item, expanded: false, widthBucket: widthBucket)
+        }
+        return TimelineStyle.clampedProse(for: item, expanded: false)
     }
 
     // MARK: Header
@@ -250,12 +280,22 @@ struct TimelineRow: View {
     }
 
     /// The body this row draws, already cut to the ceiling if it needed cutting.
-    ///
-    /// Recomputed per evaluation rather than cached: the walk is bounded by the budget, so a
-    /// collapsed row pays for a hundred and twenty lines whatever the body's size, and an
-    /// expanded one is drawing all of it anyway.
     private var segments: [TimelineSegment] {
-        TimelineStyle.clampedProse(for: item, expanded: isExpanded).segments
+        clamped.segments
+    }
+
+    /// The split at the row's actual `isExpanded`, cached so a re-render costs a dictionary
+    /// lookup rather than another walk of the body. Routed through `segmentCache` when the
+    /// screen handed one in; a row built with no screen behind it — the offscreen harnesses,
+    /// the filler rows in tests — segments directly through `TimelineStyle`, exactly as it
+    /// always has. (`expandsInPlace` deliberately does NOT reuse this one — see its own
+    /// comment — so it has its own `collapsedClamped`, which is the same cache and often the
+    /// same key when the row is collapsed.)
+    private var clamped: TimelineSegmenter.Clamped {
+        if let segmentCache {
+            return segmentCache.clamped(for: item, expanded: isExpanded, widthBucket: widthBucket)
+        }
+        return TimelineStyle.clampedProse(for: item, expanded: isExpanded)
     }
 
     private var proseFont: Font {
@@ -349,7 +389,7 @@ struct TimelineRow: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
-        if TimelineStyle.expandsInPlace(item) {
+        if expandsInPlace {
             moreLink
         }
     }

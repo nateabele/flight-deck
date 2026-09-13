@@ -171,6 +171,93 @@ final class FleetModelTests: XCTestCase {
         XCTAssertEqual(after.phase, .idle)
     }
 
+    /// **Privacy, not memory — the disk half of the test above.** A spilled body is transcript
+    /// text too, only parked under `Caches` instead of in memory, and `unpair()` must not leave
+    /// a plaintext copy of a revoked pairing's conversation sitting there merely because it
+    /// happened to be paged out at the moment of unpairing.
+    ///
+    /// `timelineModel(for:)` builds its `SessionTimelineModel` with no `spillDirectory`
+    /// override — the app never passes one, only tests do — so there is no seam here to point
+    /// at a temp directory instead. This exercises `TimelineSpillStore.purgeAll()`'s real
+    /// default location directly, the same one `unpair()` calls it against, rather than only
+    /// asserting the store's own `purgeAll(directory:)` behaves (see `TimelineSpillStoreTests`,
+    /// which covers that half in an isolated temp directory).
+    func testUnpairingRemovesAnySpilledTranscriptTextFromDisk() {
+        let model = FleetModel(store: RefusingPairedMacStore())
+        let session = UUID()
+        let store = TimelineSpillStore(session: session)
+        store.write(["0#0": TimelineItem.Body(text: "leftover transcript")])
+        defer { store.purge() }
+        XCTAssertFalse(store.read(["0#0"]).isEmpty, "the premise: something is actually on disk")
+
+        model.unpair()
+
+        XCTAssertTrue(TimelineSpillStore(session: session).read(["0#0"]).isEmpty,
+                      "unpairing must not leave a revoked pairing's transcript on disk")
+    }
+
+    /// **Bounded, for the same reason `timelineModels` itself needs bounding.** A reader who
+    /// opens more sessions than the cap must not keep every one of them resident — only the
+    /// most-recently-viewed handful survive, and the rest are dropped for `timelineModel(for:)`
+    /// to rebuild on reopen.
+    func testOpeningManySessionsEvictsAllButTheMostRecentlyViewed() {
+        let model = FleetModel(store: RefusingPairedMacStore())
+        var ids: [UUID] = []
+        for _ in 0..<(FleetModel.maxKeptTimelineModels + 3) {
+            let id = UUID(); ids.append(id)
+            _ = model.timelineModel(for: id)
+        }
+        let kept = ids.suffix(FleetModel.maxKeptTimelineModels)
+        for id in kept { XCTAssertFalse(model.evictedTimelineModelIDs.contains(id)) }
+        for id in ids.prefix(3) { XCTAssertTrue(model.evictedTimelineModelIDs.contains(id)) }
+    }
+
+    /// A model is never dropped while it is holding something the reader was told is in
+    /// flight — here, an outbox row that never got to retire because there is no connector to
+    /// answer it. `fail` (not `dismiss`) is what a synchronous `.disconnected` produces, and it
+    /// leaves the row present rather than removing it, so the outbox stays non-empty.
+    func testAModelWithAnOutstandingOutboxEntryIsNotEvicted() {
+        let model = FleetModel(store: RefusingPairedMacStore())
+        let sticky = UUID()
+        let stickyModel = model.timelineModel(for: sticky)
+        stickyModel.send("a message that will sit unacked with no connector")
+        XCTAssertTrue(stickyModel.hasOutstandingWork, "the outbox holds an unretired entry")
+        for _ in 0..<(FleetModel.maxKeptTimelineModels + 3) { _ = model.timelineModel(for: UUID()) }
+        XCTAssertFalse(model.evictedTimelineModelIDs.contains(sticky),
+                       "a model with outstanding work is never evicted")
+    }
+
+    /// The other half of eviction: dropping a model must not be permanent. Reopening its id
+    /// finds nothing resident, builds a fresh model exactly as a first open would, and clears
+    /// the id from the evicted set — the same path `unpair()` leaves every id on before any of
+    /// them is ever opened again.
+    func testReopeningAnEvictedModelReturnsAFreshOne() {
+        let model = FleetModel(store: RefusingPairedMacStore())
+        let first = UUID()
+        let a = model.timelineModel(for: first)
+        for _ in 0..<(FleetModel.maxKeptTimelineModels + 3) { _ = model.timelineModel(for: UUID()) }
+        XCTAssertTrue(model.evictedTimelineModelIDs.contains(first))
+        let b = model.timelineModel(for: first)
+        XCTAssertFalse(a === b, "a reopened evicted session gets a fresh model that re-fetches")
+        XCTAssertFalse(model.evictedTimelineModelIDs.contains(first), "reopening un-evicts it")
+    }
+
+    /// More aggressive than the LRU cap: under a real memory warning there is no recency
+    /// exemption at all, only on-screen and busy survive.
+    func testAMemoryWarningEvictsEverythingButTheOnScreenAndBusyModels() {
+        let model = FleetModel(store: RefusingPairedMacStore())
+        let onScreen = UUID(), idle = UUID(), busy = UUID()
+        model.timelineModel(for: onScreen).viewing(true)
+        _ = model.timelineModel(for: idle)
+        model.timelineModel(for: busy).send("stuck")   // outstanding work, no socket
+
+        model.handleMemoryWarning()
+
+        XCTAssertTrue(model.evictedTimelineModelIDs.contains(idle), "an idle off-screen model goes")
+        XCTAssertFalse(model.evictedTimelineModelIDs.contains(onScreen), "the on-screen model stays")
+        XCTAssertFalse(model.evictedTimelineModelIDs.contains(busy), "outstanding work stays")
+    }
+
     /// A real `FD2-` code, minted here rather than checked in: `PairingPayload.encoded()` is
     /// the Mac's own encoder, so this exercises the decode `adopt(code:)` actually performs.
     private static func scannableCode() -> String {

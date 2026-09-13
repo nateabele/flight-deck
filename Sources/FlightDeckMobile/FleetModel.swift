@@ -42,6 +42,17 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// update — and an observed mutation there would invalidate the very view that is being
     /// built. Nothing renders this dictionary; the screens observe the models in it.
     @ObservationIgnored private var timelineModels: [UUID: SessionTimelineModel] = [:]
+    /// The tab ids of the open session models in view order, most-recently-viewed last. Bounds
+    /// `timelineModels`: everything past the cap that is neither on screen nor holding outstanding
+    /// work is dropped and rebuilt on reopen.
+    @ObservationIgnored private var timelineViewOrder: [UUID] = []
+    /// The most-recently-viewed models to keep resident, plus whatever is on screen. Small on
+    /// purpose: a `TimelineFeed` for a long session is the one thing here that grows, and a reader
+    /// who has opened ten sessions has no use for the feed of the eight-tabs-ago one.
+    static let maxKeptTimelineModels = 8
+    /// The tab ids evicted since launch, for the tests — reaching eviction through the real path
+    /// needs a Mac and a socket. Cleared for an id the moment it is reopened.
+    @ObservationIgnored private(set) var evictedTimelineModelIDs: Set<UUID> = []
     /// One token per session with a *currently open* blocked dialog, minted on first abort tap
     /// and reused for a second tap on that same dialog — see `abortBlockedPrompt(session:)`'s
     /// own comment for why this must not outlive the episode it was minted for, and
@@ -96,6 +107,16 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // banner exists to prevent.
         mac?.lastSeq = 0
         if mac != nil { connect() }
+
+        // UIKit posts this on the main thread, so `assumeIsolated` is sound here even though
+        // the closure itself is not `@MainActor` — `self` is `@MainActor` and `[weak self]`
+        // keeps the observer from extending its lifetime.
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleMemoryWarning() }
+        }
     }
 
     /// Throws `PairingPayloadError` or `PairedMacStoreError`, both of which the pairing
@@ -240,6 +261,12 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // something they believe they revoked — and it is what the next pairing, to a
         // different Mac, would open a session onto if a tab id ever collided.
         timelineModels.removeAll()
+        timelineViewOrder.removeAll()
+        evictedTimelineModelIDs.removeAll()
+        // Same privacy reasoning as the transcripts above: a spilled body is transcript text
+        // too, only parked on disk instead of in memory, and it must not survive a revoked
+        // pairing merely because it happened to be paged out at the moment of unpairing.
+        TimelineSpillStore.purgeAll()
         // Same reasoning as the transcripts above: a closed tab's title is this pairing's
         // content, not fleet-independent fact, and the next Mac's project paths coinciding
         // with this one's would otherwise render titles that Mac never closed.
@@ -427,10 +454,58 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
     /// which is a cycle broken in `unpair()` and bounded by the app's own lifetime otherwise:
     /// there is exactly one `FleetModel` and it outlives every screen.
     func timelineModel(for id: UUID) -> SessionTimelineModel {
-        if let existing = timelineModels[id] { return existing }
-        let model = SessionTimelineModel(sessionID: id, fleet: self)
-        timelineModels[id] = model
+        // Reopening an evicted (or never-seen) tab makes it the most recent again.
+        timelineViewOrder.removeAll { $0 == id }
+        timelineViewOrder.append(id)
+        evictedTimelineModelIDs.remove(id)
+
+        let model: SessionTimelineModel
+        if let existing = timelineModels[id] {
+            model = existing
+        } else {
+            model = SessionTimelineModel(sessionID: id, fleet: self)
+            timelineModels[id] = model
+        }
+        evictIdleTimelineModels()
         return model
+    }
+
+    /// Keep the most-recently-viewed cap plus the on-screen model plus any model holding
+    /// outstanding work; drop the rest. An evicted model's `TimelineFeed` goes with it, and
+    /// `timelineModel(for:)` recreates it on reopen — the same path a first open takes, re-fetching
+    /// from `.latest`. The reconnect fan-out (`onState`) naturally skips evicted models: nothing
+    /// observes a model that is not resident.
+    private func evictIdleTimelineModels() {
+        guard timelineModels.count > Self.maxKeptTimelineModels else { return }
+        let keepRecent = Set(timelineViewOrder.suffix(Self.maxKeptTimelineModels))
+        for (id, model) in timelineModels {
+            guard !keepRecent.contains(id), !model.isOnScreen, !model.hasOutstandingWork else { continue }
+            evictTimelineModel(id)
+        }
+    }
+
+    /// Under memory pressure, keep only what the reader is actually looking at (plus anything
+    /// mid-send or mid-answer) and drop every other session's feed. The OS is asking for memory
+    /// back and a held transcript is the largest thing here that is safe to rebuild on reopen.
+    ///
+    /// More aggressive than `evictIdleTimelineModels()`'s recency cap on purpose: there is no
+    /// "recent" exemption here, only on-screen and busy.
+    func handleMemoryWarning() {
+        for (id, model) in timelineModels {
+            guard !model.isOnScreen, !model.hasOutstandingWork else { continue }
+            evictTimelineModel(id)
+        }
+        PhoneLog.connection.notice(
+            "memory-warning evicted timeline models kept=\(self.timelineModels.count, privacy: .public)"
+        )
+    }
+
+    /// The per-model bookkeeping shared by both eviction paths: drop the model itself, its
+    /// place in view order, and record it as evicted so a reopen rebuilds rather than reuses it.
+    private func evictTimelineModel(_ id: UUID) {
+        timelineModels.removeValue(forKey: id)
+        timelineViewOrder.removeAll { $0 == id }
+        evictedTimelineModelIDs.insert(id)
     }
 
     /// Ask the Mac for a page of a session's conversation.

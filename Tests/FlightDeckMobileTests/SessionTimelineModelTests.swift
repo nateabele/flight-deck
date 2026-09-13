@@ -123,9 +123,22 @@ final class SessionTimelineModelTests: XCTestCase {
     }
 
     private func model(
-        _ pager: StubPager, timeout: Duration = .seconds(15)
+        _ pager: StubPager, timeout: Duration = .seconds(15), spillDirectory: URL? = nil
     ) -> SessionTimelineModel {
-        SessionTimelineModel(sessionID: session, fleet: pager, timeout: timeout)
+        SessionTimelineModel(
+            sessionID: session, fleet: pager, timeout: timeout,
+            spillDirectory: spillDirectory ?? tempSpillDirectory()
+        )
+    }
+
+    /// A fresh temp directory per call, so the spill tests below never touch the real `Caches`
+    /// and never collide with a spill store another test built. Mirrors
+    /// `TimelineSpillStoreTests.tempDir()`.
+    private func tempSpillDirectory() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("spill-test-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
     }
 
     /// Spins the main actor until `condition` holds. Only the deadline tests use it, and only
@@ -228,6 +241,45 @@ final class SessionTimelineModelTests: XCTestCase {
                        "a second .latest here is a silent gap in the middle of a conversation")
         XCTAssertNotEqual(pager.anchors.last, .after(1090),
                           "the page's own end, not the last item's offset")
+    }
+
+    // MARK: Rendered state
+
+    /// The fold that used to run in the view on every render now runs once here and is held.
+    func testRenderedIsMaintainedAfterAFetchLands() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.open()
+        pager.answer(tail())
+        XCTAssertEqual(model.rendered.map(\.id), ["1040#0", "1090#0"],
+                       "rendered is folded from the merged feed and held")
+    }
+
+    /// The recompute-count guard: a poll that merges nothing must cost nothing.
+    func testAQuietNoOpPollTriggersNoRebuild() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.open()
+        pager.answer(tail(hasMore: false))
+        let after = model.rebuildCount
+        model.loadNewer()
+        pager.answer(page([], start: 1200, end: 1200))  // nothing new
+        XCTAssertEqual(model.rebuildCount, after,
+                       "a poll that merges nothing must not recompute rendered")
+    }
+
+    /// The other half of the guard: a real change recomputes exactly once, not zero and not twice.
+    func testOneNewItemTriggersExactlyOneRebuild() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.open()
+        pager.answer(tail(hasMore: false))
+        let after = model.rebuildCount
+        model.loadNewer()
+        pager.answer(page([item(1200, "third")], start: 1200, end: 1260))
+        XCTAssertEqual(model.rebuildCount, after + 1,
+                       "one new item recomputes rendered exactly once")
+        XCTAssertEqual(model.rendered.map(\.id), ["1040#0", "1090#0", "1200#0"])
     }
 
     // MARK: A resumed link
@@ -418,7 +470,7 @@ final class SessionTimelineModelTests: XCTestCase {
     /// The retry, and it is why no button came back. `onAppear` fires once for a row that is
     /// already on screen, so a failed prefetch would strand a reader at the top of what the
     /// phone managed to load with nothing to touch. The screen re-arms this on the reader's
-    /// own scroll — see `SessionTimelineScreen.prefetchTrigger` — and the second attempt has
+    /// own scroll — see `SessionTimelineModel.prefetchTrigger` — and the second attempt has
     /// to be a real request, not a refusal from a model still holding the first one's state.
     func testAFailedPrefetchIsAskedForAgainRatherThanStrandingTheReaderAtTheTop() {
         let pager = StubPager()
@@ -881,5 +933,142 @@ final class SessionTimelineModelTests: XCTestCase {
         let items = [item(1040, "first"), item(1090, "second")]
 
         XCTAssertNil(SessionTimelineModel.highlightTarget(offset: 240, in: items))
+    }
+
+    // MARK: - Spill / rehydrate
+
+    @MainActor
+    func testItemsFarFromTheWindowSpillWhenOverBudget() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.spillBudgetBytesOverride = 100     // tiny, so a few bodies exceed it
+        model.spillMarginOverride = 1
+        model.open()
+        let big = (0..<10).map { item($0 * 10, String(repeating: "x", count: 50)) }
+        pager.answer(page(big, start: 0, end: 100, hasMore: false))
+
+        model.reportVisibleWindow(firstID: "80#0", lastID: "90#0")  // window at the bottom
+        XCTAssertTrue(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
+                      "an item far from the window spilled")
+        XCTAssertFalse(model.feed.items.first(where: { $0.id == "90#0" })!.body.isPlaceholder,
+                       "the visible item stays resident")
+        XCTAssertFalse(model.feed.items.first(where: { $0.id == "80#0" })!.body.isPlaceholder)
+    }
+
+    @MainActor
+    func testApproachingASpilledRegionRehydratesFromDisk() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.spillBudgetBytesOverride = 100
+        model.spillMarginOverride = 1
+        model.open()
+        let big = (0..<10).map { item($0 * 10, String(repeating: "x", count: 50)) }
+        pager.answer(page(big, start: 0, end: 100, hasMore: false))
+
+        model.reportVisibleWindow(firstID: "80#0", lastID: "90#0")   // spills the top
+        XCTAssertTrue(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder)
+
+        model.reportVisibleWindow(firstID: "0#0", lastID: "10#0")    // scroll back to the top
+        XCTAssertFalse(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
+                       "an approached spilled item rehydrates synchronously from the store")
+        XCTAssertEqual(model.feed.items.first(where: { $0.id == "0#0" })!.body.text.count, 50,
+                       "the full body is back")
+    }
+
+    /// The disk cache is a `Caches` file the OS is free to purge. When a rehydrate reads an id
+    /// the store no longer holds, the model falls back to one quiet wire re-fetch of that id's
+    /// offset rather than leaving the placeholder stuck forever.
+    ///
+    /// **Async, and that is why this waits for the spill before simulating the purge.**
+    /// `TimelineSpillStore.write` is dispatched off the main thread now (see its own doc
+    /// comment), so `reportVisibleWindow` returning is no longer proof the file is actually on
+    /// disk yet. Purging out from under a write that has not landed would not reproduce what
+    /// this test means to simulate — a file the OS dropped *after* it existed — it would just
+    /// race it, and either outcome of that race would be the wrong reason for this test to pass
+    /// or fail. `settle` waits for the real thing.
+    @MainActor
+    func testApproachingASpilledRegionThatWasPurgedRefetchesFromTheWire() async {
+        let pager = StubPager()
+        let spillDirectory = tempSpillDirectory()
+        let model = model(pager, spillDirectory: spillDirectory)
+        model.spillBudgetBytesOverride = 100
+        model.spillMarginOverride = 1
+        model.open()
+        let big = (0..<10).map { item($0 * 10, String(repeating: "x", count: 50)) }
+        pager.answer(page(big, start: 0, end: 100, hasMore: false))
+
+        model.reportVisibleWindow(firstID: "80#0", lastID: "90#0")   // spills the top
+        XCTAssertTrue(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder)
+
+        // A second store built on the same session and directory sees the same file — once the
+        // async write behind the spill above has actually reached it.
+        let probe = TimelineSpillStore(session: session, directory: spillDirectory)
+        await settle(until: { !probe.read(["0#0"]).isEmpty }, "the spill's write to reach disk")
+
+        // The cache the spill just wrote is gone, as if the OS purged it under pressure.
+        probe.purge()
+
+        model.reportVisibleWindow(firstID: "0#0", lastID: "10#0")    // scroll back to the top
+        XCTAssertTrue(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
+                      "still a placeholder until the re-fetch lands")
+        XCTAssertEqual(pager.anchors.last, .around(0), "a purged rehydrate falls back to the wire")
+
+        pager.answer(page([item(0, String(repeating: "x", count: 50))], start: 0, end: 50, hasMore: false))
+        XCTAssertFalse(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
+                       "the wire re-fetch clears the placeholder")
+    }
+
+    /// The other half of the bound `reconcileSpill` puts on the file: a body back in memory does
+    /// not need to keep growing it, so a rehydrate prunes the id it just restored. See
+    /// `TimelineSpillStore.remove`.
+    @MainActor
+    func testRehydratingAnItemPrunesItFromTheSpillStore() {
+        let pager = StubPager()
+        let spillDirectory = tempSpillDirectory()
+        let model = model(pager, spillDirectory: spillDirectory)
+        model.spillBudgetBytesOverride = 100
+        model.spillMarginOverride = 1
+        model.open()
+        let big = (0..<10).map { item($0 * 10, String(repeating: "x", count: 50)) }
+        pager.answer(page(big, start: 0, end: 100, hasMore: false))
+
+        model.reportVisibleWindow(firstID: "80#0", lastID: "90#0")   // spills the top
+        model.reportVisibleWindow(firstID: "0#0", lastID: "10#0")    // and rehydrates it back
+
+        XCTAssertFalse(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
+                       "the premise: it rehydrated")
+        // `read` is `queue.sync` on the model's own store instance, the same one `remove` just
+        // ran on synchronously inside `reconcileSpill` — so this probe, built after
+        // `reportVisibleWindow` has already returned, is not racing anything.
+        let probe = TimelineSpillStore(session: session, directory: spillDirectory)
+        XCTAssertTrue(probe.read(["0#0"]).isEmpty,
+                      "a rehydrated body no longer needs a disk copy")
+    }
+
+    /// A reset means the transcript these ids came from is gone — item ids are byte offsets, so
+    /// a spilled body kept past a reset would misname a different record entirely. The session's
+    /// whole spill file goes with the feed rather than surviving it. See `TimelineSpillStore`'s
+    /// own doc comment and `SessionTimelineModel`'s success handler.
+    @MainActor
+    func testAResetPagePurgesTheSessionsSpillFile() {
+        let pager = StubPager()
+        let spillDirectory = tempSpillDirectory()
+        let model = model(pager, spillDirectory: spillDirectory)
+        model.spillBudgetBytesOverride = 100
+        model.spillMarginOverride = 1
+        model.open()
+        let big = (0..<10).map { item($0 * 10, String(repeating: "x", count: 50)) }
+        pager.answer(page(big, start: 0, end: 100, hasMore: false))
+
+        model.reportVisibleWindow(firstID: "80#0", lastID: "90#0")   // spills the top
+        XCTAssertTrue(model.feed.items.first(where: { $0.id == "0#0" })!.body.isPlaceholder,
+                      "the premise: something is actually spilled")
+
+        model.loadNewer()
+        pager.answer(page([], start: 60, end: 60, reset: true))
+
+        XCTAssertTrue(model.feed.items.isEmpty, "the reset itself — see the Reset section above")
+        let probe = TimelineSpillStore(session: session, directory: spillDirectory)
+        XCTAssertTrue(probe.read(["0#0"]).isEmpty, "a reset invalidates every spilled body too")
     }
 }
