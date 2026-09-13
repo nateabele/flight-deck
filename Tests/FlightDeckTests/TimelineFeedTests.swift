@@ -344,4 +344,43 @@ final class TimelineFeedTests: XCTestCase {
         XCTAssertTrue(feed.merge(page([item("20#0", "b")], start: 20, end: 30)),
                       "a page with a new item changes items")
     }
+
+    func testSpillSwapsBodyTextForAPlaceholderWithoutTouchingOrderOrCursors() {
+        var feed = TimelineFeed()
+        feed.merge(page([item("0#0", "aaa long"), item("10#0", "bbb long"), item("20#0", "ccc long")],
+                        start: 0, end: 30, hasMore: true))
+        let originals = feed.spill(["0#0", "20#0"])
+
+        XCTAssertEqual(feed.items.map(\.id), ["0#0", "10#0", "20#0"], "order is untouched")
+        XCTAssertTrue(feed.items[0].body.isPlaceholder)
+        XCTAssertFalse(feed.items[1].body.isPlaceholder, "an unspilled item is unchanged")
+        XCTAssertTrue(feed.items[2].body.isPlaceholder)
+        XCTAssertEqual(originals["0#0"]?.text, "aaa long", "the full body is returned for the store")
+        XCTAssertEqual(feed.oldest, 0)
+        XCTAssertEqual(feed.newest, 30)
+        XCTAssertTrue(feed.hasOlder)
+    }
+
+    func testRehydrateRestoresTheFullBodyAndClearsThePlaceholder() {
+        var feed = TimelineFeed()
+        feed.merge(page([item("0#0", "aaa long")], start: 0, end: 10))
+        let originals = feed.spill(["0#0"])
+        XCTAssertTrue(feed.items[0].body.isPlaceholder)
+        feed.rehydrate(originals)
+        XCTAssertFalse(feed.items[0].body.isPlaceholder)
+        XCTAssertEqual(feed.items[0].body.text, "aaa long")
+    }
+
+    /// A merge that re-delivers a spilled id with a full body must clear the placeholder — a
+    /// re-delivery never leaves a stale placeholder.
+    func testMergingAFullBodyClearsAHeldPlaceholder() {
+        var feed = TimelineFeed()
+        feed.merge(page([item("0#0", "aaa long")], start: 0, end: 10))
+        _ = feed.spill(["0#0"])
+        XCTAssertTrue(feed.items[0].body.isPlaceholder)
+        let changed = feed.merge(page([item("0#0", "aaa long")], start: 0, end: 10))
+        XCTAssertTrue(changed, "a full body replacing a placeholder is a real change")
+        XCTAssertFalse(feed.items[0].body.isPlaceholder, "the incoming full body is authoritative")
+        XCTAssertEqual(feed.items[0].body.text, "aaa long")
+    }
 }

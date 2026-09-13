@@ -110,6 +110,33 @@ public struct TimelineFeed: Equatable, Sendable {
         return items != before
     }
 
+    /// Swap the full `body.text` of each item in `ids` for a placeholder preview, returning the
+    /// original bodies for the spill store. **Ordering and both cursors are untouched** — this
+    /// only mutates body text in place, which is the clean part this approach buys over
+    /// eviction: the paging cursors never learn a spill happened. An id not present, or already
+    /// a placeholder, is skipped.
+    @discardableResult
+    public mutating func spill(_ ids: Set<String>) -> [String: TimelineItem.Body] {
+        guard !ids.isEmpty else { return [:] }
+        var originals: [String: TimelineItem.Body] = [:]
+        for index in items.indices {
+            let item = items[index]
+            guard ids.contains(item.id), !item.body.isPlaceholder else { continue }
+            originals[item.id] = item.body
+            items[index].body = item.body.spilledPlaceholder()
+        }
+        return originals
+    }
+
+    /// Restore full bodies for the ids in `bodies`, clearing their placeholders. Ordering and
+    /// cursors are untouched, exactly as `spill`. An id not present is skipped.
+    public mutating func rehydrate(_ bodies: [String: TimelineItem.Body]) {
+        guard !bodies.isEmpty else { return }
+        for index in items.indices {
+            if let full = bodies[items[index].id] { items[index].body = full }
+        }
+    }
+
     /// Two lists of items in file order, folded into one, in file order, with an id held once.
     ///
     /// **A merge by position, not a prepend or an append.** Prepending an older page and
