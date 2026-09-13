@@ -482,7 +482,12 @@ struct SessionTimelineScreen: View {
     /// inside it, so a row cannot be a link and carry a button at once.
     @ViewBuilder
     private func entryRow(_ entry: TimelineEntry) -> some View {
-        if entry.isGhost {
+        if entry.item.body.isPlaceholder {
+            // A spilled row never got as far as being a ghost — a ghost is an outbox entry,
+            // never spilled — but checking this first is correct regardless of what else the
+            // entry is: a skeleton is the one thing a spilled body can ever draw.
+            TimelineSkeletonRow(item: entry.item)
+        } else if entry.isGhost {
             ghostRow(entry)
         } else {
             let row = TimelineRow(
