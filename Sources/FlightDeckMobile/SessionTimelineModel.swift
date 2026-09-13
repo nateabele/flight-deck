@@ -243,6 +243,13 @@ final class SessionTimelineModel {
 
     private(set) var answerState = AnswerState.idle
 
+    /// Whether this model must not be evicted: it holds a message the reader was told is in
+    /// flight, or a dialog they may still answer. Only a truly idle model is eligible to be
+    /// dropped and rebuilt on reopen.
+    var hasOutstandingWork: Bool {
+        !outbox.entries.isEmpty || blockedPrompt != nil || answerState.call != nil
+    }
+
     @ObservationIgnored private let fleet:
         any TimelinePaging & PromptSending & PromptAnswering & PresenceReporting
     @ObservationIgnored private let timeout: Duration
