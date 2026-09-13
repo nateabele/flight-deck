@@ -307,6 +307,32 @@ final class TimelineFeedTests: XCTestCase {
                hasOlder: false, hasLoadedAnything: true)
     }
 
+    /// A quiet poll re-delivers a page already fully held. The merge must return the SAME array
+    /// instance — no reallocation — and report no change.
+    func testANoOpPageReturnsTheHeldArrayWithoutReallocating() {
+        var feed = TimelineFeed()
+        feed.merge(page([item("10#0", "a"), item("20#0", "b")], start: 10, end: 30, hasMore: true))
+        let heldBefore = feed.items
+        let changed = feed.merge(page([item("10#0", "a"), item("20#0", "b")], start: 10, end: 30, hasMore: true))
+        XCTAssertFalse(changed, "every incoming id is already present with an equal body")
+        XCTAssertTrue(feed.items.withUnsafeBufferPointer { held in
+            heldBefore.withUnsafeBufferPointer { $0.baseAddress == held.baseAddress }
+        }, "the held array buffer must be returned unchanged, not rebuilt")
+        expect(feed, texts: ["a", "b"], oldest: 10, newest: 30,
+               hasOlder: true, hasLoadedAnything: true)
+    }
+
+    /// The case that must NOT be skipped: same id, longer body. A body cut short by one page's
+    /// budget and delivered whole by another has to replace the short one.
+    func testASameIdLongerBodyIsNotTreatedAsANoOp() {
+        var feed = TimelineFeed()
+        var short = item("10#0", "abc"); short.body.truncatedBytes = 100
+        feed.merge(page([short], start: 10, end: 20))
+        let changed = feed.merge(page([item("10#0", "abcdef")], start: 10, end: 20))
+        XCTAssertTrue(changed, "a longer body for a held id is a real change")
+        XCTAssertEqual(feed.items.map(\.body.text), ["abcdef"])
+    }
+
     /// `merge`'s return is what lets `SessionTimelineModel.rebuild()` skip recomputing its
     /// fold on a quiet poll: only a page that actually changes `items` should ask for that.
     func testMergeReportsWhetherItemsChanged() {

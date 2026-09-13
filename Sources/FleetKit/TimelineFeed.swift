@@ -126,13 +126,24 @@ public struct TimelineFeed: Equatable, Sendable {
         _ held: [TimelineItem], _ page: [TimelineItem]
     ) -> [TimelineItem] {
         guard !page.isEmpty else { return held }
+        guard !held.isEmpty else {
+            return page.sorted { order(of: $0.id) < order(of: $1.id) }
+        }
+
+        // A quiet poll re-delivers a page already fully held. If every incoming id is present
+        // with an equal item, the merge is a copy that changes nothing — so return the held
+        // array unchanged and allocate nothing on the 1.5s tick. Cursor widening is decided by
+        // the caller from the page boundaries, not from here, so this only skips the rebuild.
+        var heldByID: [String: TimelineItem] = Dictionary(minimumCapacity: held.count)
+        for item in held { heldByID[item.id] = item }
+        if page.allSatisfy({ heldByID[$0.id] == $0 }) { return held }
+
         // `TimelinePage.items` is documented as file order for every anchor, so this sort is
         // ordinarily a no-op. It is here because the alternative to re-establishing the
         // precondition is assuming it: a page that ever arrived out of order would leave
         // `items` permanently unsorted, and every merge after it wrong. Bounded by
         // `TimelineLimits.maxLimit` records, so the cost is not on the poll's critical path.
         let incoming = page.sorted { order(of: $0.id) < order(of: $1.id) }
-        guard !held.isEmpty else { return incoming }
 
         var merged: [TimelineItem] = []
         merged.reserveCapacity(held.count + incoming.count)
