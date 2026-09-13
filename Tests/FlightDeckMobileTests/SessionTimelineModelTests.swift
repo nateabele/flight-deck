@@ -230,6 +230,45 @@ final class SessionTimelineModelTests: XCTestCase {
                           "the page's own end, not the last item's offset")
     }
 
+    // MARK: Rendered state
+
+    /// The fold that used to run in the view on every render now runs once here and is held.
+    func testRenderedIsMaintainedAfterAFetchLands() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.open()
+        pager.answer(tail())
+        XCTAssertEqual(model.rendered.map(\.id), ["1040#0", "1090#0"],
+                       "rendered is folded from the merged feed and held")
+    }
+
+    /// The recompute-count guard: a poll that merges nothing must cost nothing.
+    func testAQuietNoOpPollTriggersNoRebuild() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.open()
+        pager.answer(tail(hasMore: false))
+        let after = model.rebuildCount
+        model.loadNewer()
+        pager.answer(page([], start: 1200, end: 1200))  // nothing new
+        XCTAssertEqual(model.rebuildCount, after,
+                       "a poll that merges nothing must not recompute rendered")
+    }
+
+    /// The other half of the guard: a real change recomputes exactly once, not zero and not twice.
+    func testOneNewItemTriggersExactlyOneRebuild() {
+        let pager = StubPager()
+        let model = model(pager)
+        model.open()
+        pager.answer(tail(hasMore: false))
+        let after = model.rebuildCount
+        model.loadNewer()
+        pager.answer(page([item(1200, "third")], start: 1200, end: 1260))
+        XCTAssertEqual(model.rebuildCount, after + 1,
+                       "one new item recomputes rendered exactly once")
+        XCTAssertEqual(model.rendered.map(\.id), ["1040#0", "1090#0", "1200#0"])
+    }
+
     // MARK: A resumed link
 
     /// **The guard `linkResumed()` exists for.** `FleetModel.timelineModels` is never evicted
@@ -418,7 +457,7 @@ final class SessionTimelineModelTests: XCTestCase {
     /// The retry, and it is why no button came back. `onAppear` fires once for a row that is
     /// already on screen, so a failed prefetch would strand a reader at the top of what the
     /// phone managed to load with nothing to touch. The screen re-arms this on the reader's
-    /// own scroll — see `SessionTimelineScreen.prefetchTrigger` — and the second attempt has
+    /// own scroll — see `SessionTimelineModel.prefetchTrigger` — and the second attempt has
     /// to be a real request, not a refusal from a model still holding the first one's state.
     func testAFailedPrefetchIsAskedForAgainRatherThanStrandingTheReaderAtTheTop() {
         let pager = StubPager()

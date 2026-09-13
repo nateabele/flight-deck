@@ -128,6 +128,21 @@ final class SessionTimelineModel {
     /// row instead, where the history that is missing would have been.
     private(set) var olderFailure: String?
 
+    /// The folded, ghost-appended list the `ForEach` draws — maintained state, recomputed by
+    /// `rebuild()` exactly once per change to its inputs, never from the view. The lag this whole
+    /// change removes was this fold running O(N) on every render and every row lifecycle.
+    private(set) var rendered: [TimelineEntry] = []
+
+    /// The id of the row whose appearance triggers a backward prefetch, computed once alongside
+    /// `rendered`. The view compares an id here instead of re-folding the feed in every row's
+    /// `.onAppear`.
+    private(set) var prefetchTriggerID: String?
+
+    /// How many times `rebuild()` has run. `@ObservationIgnored` because a busy poll must not
+    /// invalidate the view merely by counting, and because the recompute-count guard test asserts
+    /// on it directly — a quiet poll must add zero, one new item exactly one.
+    @ObservationIgnored private(set) var rebuildCount = 0
+
     /// How many pages of history the phone keeps ahead of the reader.
     ///
     /// Three, because one is not a buffer. A page is `TimelineLimits.defaultLimit` records
@@ -333,6 +348,50 @@ final class SessionTimelineModel {
             ?? candidates.first?.id
     }
 
+    /// The pure fold plus the ghost-append. The fold itself is `TimelineRender.entries(from:)` in
+    /// FleetKit; the ghosts need `PromptOutboxEntry` and so stay here, appended after the folded
+    /// feed, one per `.delivered` entry, in send order. Each carries a `"ghost:<token>"` id that
+    /// exists only in this array — never written into `TimelineFeed`, so a page reset or a
+    /// reconcile cannot find it.
+    static func rendered(from items: [TimelineItem], delivered: [PromptOutboxEntry]) -> [TimelineEntry] {
+        var entries = TimelineRender.entries(from: items)
+        entries.append(contentsOf: delivered.map { entry in
+            TimelineEntry(
+                item: TimelineItem(
+                    id: "ghost:\(entry.id.uuidString)", kind: .userTurn, status: .complete,
+                    body: .init(text: entry.text)
+                ),
+                result: nil
+            )
+        })
+        return entries
+    }
+
+    /// One page's worth of runway below the top of history — moved here from the view because the
+    /// trigger id is now maintained state. `defaultLimit` is in records and one record can carry
+    /// several entries, so this is a floor on the real distance.
+    static let prefetchDepth = TimelineLimits.defaultLimit
+
+    /// Falls back to the OLDEST entry (index 0), never the newest and never nil: a feed shorter
+    /// than the depth has no runway, so the earliest possible ask is the right one; clamping to
+    /// `count - 1` would fire the prefetch the instant the screen draws.
+    static func prefetchTrigger(_ entries: [TimelineEntry]) -> String? {
+        guard !entries.isEmpty else { return nil }
+        return entries.count > prefetchDepth ? entries[prefetchDepth].id : entries[0].id
+    }
+
+    /// The one place `rendered` and the derived prefetch id are recomputed. Called only when an
+    /// input actually changed — after a merge that moved items, after a reconcile that retired an
+    /// outbox entry — never from the view.
+    private func rebuild() {
+        rebuildCount += 1
+        rendered = Self.rendered(
+            from: feed.items,
+            delivered: outbox.entries.filter { $0.state == .delivered }
+        )
+        prefetchTriggerID = feed.hasOlder ? Self.prefetchTrigger(rendered) : nil
+    }
+
     /// Make the screen current: the opening fetch, the fetch on coming back to a screen whose
     /// model was kept, and the recovery after a `reset`.
     ///
@@ -357,7 +416,7 @@ final class SessionTimelineModel {
     /// reader upward. What made it tolerable was that the reader was never surprised by the
     /// wait — they had asked for it. That is the wrong trade: the wait is the defect, and the
     /// fix is to have already done the reading. The trigger now sits a page BELOW the top
-    /// (`SessionTimelineScreen.prefetchTrigger`), which is both far enough from the rubber-band
+    /// (`Self.prefetchTrigger`), which is both far enough from the rubber-band
     /// to be untouched by it and early enough that the page lands before the reader arrives.
     ///
     /// **Both conditions, and `hasOlder` is the one that stops the fetch.** `olderAnchor` is
@@ -900,12 +959,21 @@ final class SessionTimelineModel {
             guard let self, self.claim(fetch) else { return }
             switch result {
             case .success(let page):
-                self.feed.merge(page)
+                let hadOlder = self.feed.hasOlder
+                let outboxBefore = self.outbox
+                let itemsChanged = self.feed.merge(page)
                 // The transcript is the only thing that confirms a sent message reached the
                 // agent — see `PromptOutbox`. Done here rather than in `send` because the page
                 // that holds it can arrive from any fetch: the `loadNewer` an ack triggers,
                 // a reader scrolling, or a return to a screen kept in `FleetModel`.
                 self.outbox.reconcile(with: self.feed.items)
+                // Recompute maintained state only when an input to it actually moved: the folded
+                // items, whether there is more history (drives the prefetch id), or the set of
+                // delivered outbox ghosts. A quiet 1.5s poll changes none of these and rebuilds
+                // nothing.
+                if itemsChanged || self.feed.hasOlder != hadOlder || self.outbox != outboxBefore {
+                    self.rebuild()
+                }
                 self.phase = .idle
                 // A reset emptied the feed: the transcript these cursors came from is gone,
                 // so start again from the end rather than leaving a blank screen that will

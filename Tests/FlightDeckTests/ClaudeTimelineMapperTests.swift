@@ -418,7 +418,7 @@ final class ClaudeTimelineMapperTests: XCTestCase {
     /// that is genuinely a question put to the user. This is that row.
     ///
     /// Everything else about it is a tool call's, and each of those fields is load-bearing
-    /// somewhere: the `callID` is what `SessionTimelineScreen.entries(from:)` folds the
+    /// somewhere: the `callID` is what `TimelineRender.entries(from:)` folds the
     /// answering `tool_result` onto, and the tool name is what a detail screen titles it
     /// with. Only the kind moves.
     func testAnAskUserQuestionIsAPromptRatherThanAToolCall() throws {

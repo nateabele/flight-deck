@@ -21,7 +21,7 @@ import UIKit
 /// - **A call and its result belong in one card.** Rendered as two sibling rows they read as
 ///   two unrelated events, and a `⎿` marker did not join them across a row separator. Folded
 ///   into one card, a command and what it printed are one thing on screen, which is what they
-///   are. `SessionTimelineScreen.entries(from:)` does the folding, on `callID` and never on
+///   are. `TimelineRender.entries(from:)` does the folding, on `callID` and never on
 ///   position.
 ///
 /// **A MACHINE body is rendered, never parsed — in the ROW.** A body is cut at the per-item

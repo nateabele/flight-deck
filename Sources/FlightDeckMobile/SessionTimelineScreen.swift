@@ -419,7 +419,7 @@ struct SessionTimelineScreen: View {
     }
 
     private var entries: [TimelineEntry] {
-        Self.entries(
+        SessionTimelineModel.rendered(
             from: model.feed.items,
             delivered: model.outbox.entries.filter { $0.state == .delivered }
         )
@@ -544,34 +544,10 @@ struct SessionTimelineScreen: View {
     }
 
     /// The entry whose appearance starts the next read of history, or `nil` when there is no
-    /// history left to read.
+    /// history left to read. `prefetchDepth` and the trigger computation itself moved to
+    /// `SessionTimelineModel` — this just calls through.
     private var prefetchTriggerID: String? {
-        model.feed.hasOlder ? Self.prefetchTrigger(entries) : nil
-    }
-
-    /// How far below the oldest loaded row the trigger sits, in entries.
-    ///
-    /// One page's worth. Shallower and the rubber-band at the top of the list starts reaching
-    /// it — the defect that made this a button in the first place. Deeper and it fires while
-    /// the reader is still in the middle of what they have, which is a read they may never
-    /// need. `defaultLimit` is in *records* and one record can carry several entries, so this
-    /// is a floor on the real distance rather than an estimate of it.
-    static let prefetchDepth = TimelineLimits.defaultLimit
-
-    /// **Falls back to the OLDEST entry, and the direction is the trap.** `entries` is
-    /// oldest-first, so the trigger's index counts down from the top of history: index
-    /// `prefetchDepth` is the row with a page of history above it. A feed shorter than that
-    /// has no such row — and clamping the index to `count - 1` picks the *newest* row instead,
-    /// which fires the read the instant the screen draws and every time the reader returns to
-    /// the bottom. The fallback has to be index 0: on a feed this short there is no runway to
-    /// be had, so the earliest possible ask is the right one.
-    ///
-    /// Not `nil`, which is what an unclamped lookup answers: a screen that loaded one short
-    /// page would then never ask for a second, and those are exactly the sessions where the
-    /// reader reaches the top fastest.
-    static func prefetchTrigger(_ entries: [TimelineEntry]) -> String? {
-        guard !entries.isEmpty else { return nil }
-        return entries.count > prefetchDepth ? entries[prefetchDepth].id : entries[0].id
+        model.feed.hasOlder ? SessionTimelineModel.prefetchTrigger(entries) : nil
     }
 
     // MARK: Which long answers are open
@@ -612,27 +588,6 @@ struct SessionTimelineScreen: View {
         mutating func toggle(_ id: String) {
             if open.contains(id) { open.remove(id) } else { open.insert(id) }
         }
-    }
-
-    /// Temporary wrapper over `TimelineRender.entries(from:)`, removed in Task 1.2 once the
-    /// ghost-append moves to `SessionTimelineModel`. `delivered` is appended AFTER the folded
-    /// feed, one ghost per entry, in send order — `entries` is oldest-first, so the ghosts land
-    /// at the bottom whatever page the feed is showing. Each carries a `"ghost:<token>"` id,
-    /// which is `TimelineEntry.isGhost`'s whole test, and exists only in this array: it is never
-    /// written into `TimelineFeed`, so a page reset or a `reconcile` cannot find it and cannot
-    /// mistake it for a record the agent wrote.
-    static func entries(from items: [TimelineItem], delivered: [PromptOutboxEntry] = []) -> [TimelineEntry] {
-        var mapped = TimelineRender.entries(from: items)
-        mapped.append(contentsOf: delivered.map { entry in
-            TimelineEntry(
-                item: TimelineItem(
-                    id: "ghost:\(entry.id.uuidString)", kind: .userTurn, status: .complete,
-                    body: .init(text: entry.text)
-                ),
-                result: nil
-            )
-        })
-        return mapped
     }
 
     // MARK: Following the live edge
