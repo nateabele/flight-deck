@@ -107,13 +107,17 @@ final class SessionRenameTests: XCTestCase {
         XCTAssertEqual(spy.events, [.killLine, .text("/rename fresh"), .ret])
     }
 
-    /// A one-row draft is killed before the paste and yanked back after the Return, so the
-    /// user gets their text returned intact and it is never submitted.
-    func testRenameRestoresASingleRowDraft() {
+    /// A one-row draft is never typed over. The kill-probe finds the draft — the kill removes
+    /// something, so the box was not empty — and BAILS: it yanks the draft back out of Claude's
+    /// ring and types nothing, leaving the rename pending for a tick when the bar is free. A
+    /// draft is a draft whether it spans one row or many; the old "type over a single row and
+    /// restore it" would have submitted a `/rename` while the user's own words sat in the box.
+    func testARenameDefersRatherThanTypeOverASingleRowDraft() {
         let (store, spy, id) = makeStore()
         spy.typeDraft(["half-written thought"])
         store.rename(id, to: "named")
-        XCTAssertEqual(spy.events, [.killLine, .text("/rename named"), .ret, .yank])
+        XCTAssertEqual(spy.events, [.killLine, .yank], "the draft is probed and put straight back")
+        XCTAssertFalse(spy.sent.contains("/rename named"), "the rename is not typed over the draft")
     }
 
     /// The dangerous case: a hint looks exactly like a draft on screen, but the buffer
@@ -135,19 +139,28 @@ final class SessionRenameTests: XCTestCase {
         XCTAssertTrue(spy.events.isEmpty)
     }
 
-    func testRenameDefersWhileTheSessionIsBusy() {
+    /// **Inverted on purpose.** `inject` no longer gates on activity — a composer box on
+    /// screen is what it asks for, and `.busy` draws exactly the composer `.idle` does (see
+    /// `ClaudeTextChannel.isComposerBox`). Claude queues text typed mid-turn, so a rename sent
+    /// while busy is typed now rather than left pending for an idle tick that a back-to-back
+    /// turn might never reach.
+    func testARenameSentWhileBusyIsInjectedRatherThanDeferred() {
         let (store, spy, id) = makeStore()
         store.applyRegistry([1: entry(id, .busy, cwd: tmp.path)])
         spy.events.removeAll()
         store.rename(id, to: "busy")
-        XCTAssertTrue(spy.events.isEmpty)
+        XCTAssertEqual(spy.sent, ["/rename busy"])
     }
 
-    /// `waiting` is a permission prompt or an open dialog. A Return there answers the
-    /// dialog rather than submitting a command.
-    func testRenameDefersWhileTheSessionIsWaiting() {
+    /// **Rewritten, not merely inverted.** The refusal used to come from the status file's
+    /// `.waiting`; now nothing reads activity at all, so what has to refuse is the SCREEN — a
+    /// real captured permission dialog, which draws its own `❯` but never the rule immediately
+    /// above it that a genuine composer does (see `ClaudeTextChannel.isComposerBox`). The
+    /// `.waiting` status is set anyway, for realism, but it is the viewport that does the work.
+    func testARenameIntoADialogIsDeferredForWantOfAComposerBox() throws {
         let (store, spy, id) = makeStore()
         store.applyRegistry([1: entry(id, .waiting, cwd: tmp.path)])
+        spy.viewportOverride = try TimelineFixtureTests.text("permission-bash.captured", in: "Claude")
         spy.events.removeAll()
         store.rename(id, to: "waiting")
         XCTAssertTrue(spy.events.isEmpty)

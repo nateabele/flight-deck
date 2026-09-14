@@ -89,7 +89,9 @@ final class PromptTypedEmitTests: XCTestCase {
 
         store.submitPrompt("ship it", token: token, to: id)
 
-        XCTAssertTrue(spy.events.isEmpty, "a draft is not clobbered mid-turn, so nothing was sent")
+        // The kill-probe leaves a kill and a yank in the transcript on a deferral; the property
+        // this test guards is that nothing was SENT, and `.promptTyped` is not emitted.
+        XCTAssertTrue(spy.sent.isEmpty, "a draft is not clobbered mid-turn, so nothing was sent")
         XCTAssertNotNil(store.promptQueue[id], "held, waiting for the box to clear")
         XCTAssertFalse(
             replicator.recorded.contains { if case .promptTyped = $0 { return true }

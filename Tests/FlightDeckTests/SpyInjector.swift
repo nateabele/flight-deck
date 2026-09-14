@@ -6,9 +6,11 @@ import XCTest
 /// see `SessionStore.rename`.
 ///
 /// It also models the input bar, not just records against it. A kill that lands on a
-/// draft clears the box; a kill that lands on an empty bar (or on one showing a
-/// placeholder hint) changes nothing. That difference is the entire safety mechanism,
-/// so a fake that ignored it would let the dangerous case pass.
+/// draft stashes it in the kill-ring and clears the box; a kill that lands on an empty bar
+/// (or on one showing a placeholder hint) changes nothing; a yank restores whatever the last
+/// kill stashed. That round-trip is the entire safety mechanism the kill-probe rests on — the
+/// probe kills to find out whether the box held a draft and yanks it back when it did — so a
+/// fake that dropped the draft on yank would make `submit`'s defer look like a clobber.
 @MainActor
 final class SpyInjector: TextInjecting {
     enum Event: Equatable {
@@ -70,11 +72,23 @@ final class SpyInjector: TextInjecting {
     func sendKillLine() {
         record(.killLine)
         guard !buffer.isEmpty else { return }   // Ctrl+U on an empty line is a no-op
+        killRing = (buffer, renderedRows)       // Claude keeps a deleted-text ring; so do we
         buffer = ""
         renderedRows = ["❯"]
     }
 
-    func sendYank() { record(.yank) }
+    /// Ctrl+Y pastes the last kill back. Modelled so a draft `submit` killed to probe with is
+    /// really put back on the bail path — the box that was a draft stays a draft, and the next
+    /// retry defers again rather than typing into a box the probe emptied.
+    func sendYank() {
+        record(.yank)
+        guard let killRing else { return }
+        buffer = killRing.buffer
+        renderedRows = killRing.rows
+    }
+
+    /// What the last `sendKillLine` removed, for `sendYank` to restore. See `TextInjecting`.
+    private var killRing: (buffer: String, rows: [String])?
 
     func sendArrowDown() { move(by: 1) }
     func sendArrowUp() { move(by: -1) }

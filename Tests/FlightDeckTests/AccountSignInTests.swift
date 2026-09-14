@@ -85,9 +85,18 @@ final class AccountSignInTests: XCTestCase {
     /// queue drives `Self.resumePrompt`, so a delivery path that special-cased "Keep going",
     /// or a `DeferredPrompt` that lost its own text on the way through, would leave this
     /// suite and the auto-resume suite both green while sign-in silently did nothing.
+    ///
+    /// The pre-boot screen is set by hand rather than left to `SpyInjector`'s default: that
+    /// default already renders a full rule-sandwich (it models an agent's composer, which is
+    /// what nearly every other test in this suite needs), so leaving it alone here would have
+    /// `hasComposerBox` see a composer before `claude` has even started — the exact shape
+    /// `inject`'s old activity gate used to refuse for a different reason. A bare shell prompt
+    /// draws neither rule (see `ClaudeTextChannel.isComposerBox`), which is what actually stops
+    /// this until the agent is up.
     func testTheQueuedLoginIsTypedOnceTheAgentIsUp() {
         let (store, _) = makeStore()
         let spy = SpyInjector()
+        spy.viewportOverride = "user@host ~ % "
         store.injectorOverride = spy
         store.injectionSettle = { work in work() }
         let session = store.openSignInSession(
@@ -99,7 +108,9 @@ final class AccountSignInTests: XCTestCase {
         store.flushPendingResumePromptsForTesting()
         XCTAssertTrue(spy.sent.isEmpty, "typing at a shell prompt is how this bug looked")
 
-        // `claude` registers in the status registry and settles.
+        // `claude` registers in the status registry, its composer is now on screen, and it
+        // settles.
+        spy.viewportOverride = nil
         store.applyRegistryForTesting([session.id: SessionStatus(activity: .idle)])
         store.flushPendingResumePromptsForTesting()
 

@@ -164,10 +164,16 @@ final class SessionAutoResumeTests: XCTestCase {
         XCTAssertNil(store.pendingPrompts[id], "one-shot")
     }
 
+    /// No status at all yet: `claude` has not registered, and the screen is still whatever
+    /// pre-boot shell prompt started the tab. `viewportOverride` is set by hand because
+    /// `SpyInjector`'s default rendering already carries a full rule-sandwich — the shape a
+    /// running claude's composer draws, and every other test in this file needs it to. A bare
+    /// shell draws neither rule (see `ClaudeTextChannel.isComposerBox`), which is what actually
+    /// refuses the injection here now that `inject` no longer reads activity at all.
     func testNothingIsSentWhileTheSessionIsStillBooting() {
         let (store, id, spy) = restoredSession()
+        spy.viewportOverride = "user@host ~ % "
 
-        // No status at all yet: `claude` has not registered.
         store.flushPendingResumePromptsForTesting()
 
         XCTAssertTrue(spy.sent.isEmpty)

@@ -89,13 +89,19 @@ final class PhonePromptDispatchTests: XCTestCase {
         XCTAssertEqual(SessionStore.PromptDispatch.notRunning.errorCode, "not_running")
     }
 
-    /// A prompt goes through `inject`, not through `sendToShell`: the kill-and-yank is what
-    /// gives the user their half-typed draft back instead of destroying it.
-    func testAOneRowDraftIsRestoredAfterThePromptIsSubmitted() {
+    /// A prompt goes through `inject`, not through `sendToShell`, and the kill-probe is what
+    /// keeps it from destroying a half-typed draft. The probe kills to find out whether the box
+    /// held anything; it did, so the prompt BAILS — the draft is yanked back out of Claude's
+    /// ring and nothing is typed, so the message stays queued for a tick when the bar is free.
+    /// The user's own words are never typed over, idle or busy.
+    func testAOneRowDraftDefersThePromptRatherThanBeingTypedOver() {
         let (store, spy, id) = makeStore()
         spy.typeDraft(["half-written thought"])
-        store.submitPrompt("ship it", token: UUID(), to: id)
-        XCTAssertEqual(spy.events, [.killLine, .text("ship it"), .ret, .yank])
+        let token = UUID()
+        store.submitPrompt("ship it", token: token, to: id)
+        XCTAssertEqual(spy.events, [.killLine, .yank], "probe the draft, put it straight back")
+        XCTAssertTrue(spy.sent.isEmpty, "the prompt is not typed over the draft")
+        XCTAssertEqual(store.promptQueue[id]?.map(\.token), [token], "held for a free bar")
     }
 
     /// What is queued is the NORMALISED text, not the wire string. `PromptText` strips
@@ -264,7 +270,9 @@ final class PhonePromptDispatchTests: XCTestCase {
         spy.events.removeAll()
         XCTAssertEqual(store.submitPrompt("one", token: UUID(), to: id), .queued)
         XCTAssertEqual(store.submitPrompt("two", token: UUID(), to: id), .queued)
-        XCTAssertTrue(spy.events.isEmpty, "nothing may be typed into a running turn")
+        // The kill-probe fires on each deferral — a kill to test the box, a yank to put the
+        // draft back — so the transcript is not empty; what matters is nothing was SENT.
+        XCTAssertTrue(spy.sent.isEmpty, "nothing may be typed into a running turn")
 
         let queued = store.promptQueue[id] ?? []
         XCTAssertEqual(queued.count, 2, "two messages are two messages, not one replacing the other")
