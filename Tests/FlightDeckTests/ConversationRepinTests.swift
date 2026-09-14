@@ -1,6 +1,27 @@
 import XCTest
 @testable import FlightDeck
 
+/// Scripts surface ownership for `pinResolutions`' process-tree walk: which pids a seeded
+/// surface's `descendants(of:)` reports, and which identities are "alive" enough for the
+/// registry's own record to be trusted in the first place.
+private final class FakeOwnershipInspector: ProcessInspecting, @unchecked Sendable {
+    private let aliveIdentities: [ProcessIdentity]
+    private let descendantsByPid: [pid_t: [ProcessIdentity]]
+
+    init(aliveIdentities: [ProcessIdentity], descendants: [pid_t: [ProcessIdentity]]) {
+        self.aliveIdentities = aliveIdentities
+        self.descendantsByPid = descendants
+    }
+
+    func children(of ppid: pid_t) -> Set<pid_t> { [] }
+    func descendants(of pid: pid_t) -> [ProcessIdentity] { descendantsByPid[pid] ?? [] }
+    func startTime(of pid: pid_t) -> UInt64? {
+        aliveIdentities.first(where: { $0.pid == pid })?.procStart
+    }
+    func isAlive(_ identity: ProcessIdentity) -> Bool { aliveIdentities.contains(identity) }
+    func pgid(of pid: pid_t) -> pid_t? { pid }
+}
+
 @MainActor
 final class ConversationRepinTests: XCTestCase {
     private func makeStore() -> SessionStore {
@@ -17,9 +38,10 @@ final class ConversationRepinTests: XCTestCase {
     // a transcript under `/w` on its first tick — which is the very thing the repin
     // assertions below read back.
     private func row(_ sid: UUID, pid: pid_t = 1, cwd: String,
-                     procStart: String = "start-a") -> ClaudeStatusFile.Entry {
-        .init(pid: pid, sessionID: sid, activity: .busy, waitingFor: nil,
-              startedAt: 1, cwd: cwd, procStart: procStart)
+                     procStart: String = "start-a", startedAt: Double = 1,
+                     activity: SessionActivity = .busy) -> ClaudeStatusFile.Entry {
+        .init(pid: pid, sessionID: sid, activity: activity, waitingFor: nil,
+              startedAt: startedAt, cwd: cwd, procStart: procStart)
     }
 
     private var tmp: URL { URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true) }
@@ -206,6 +228,71 @@ final class ConversationRepinTests: XCTestCase {
         ])
 
         XCTAssertEqual(store.conflictedSessionIDs, [first.id, second.id])
+    }
+
+    /// End-to-end proof of the reopen fix at the `SessionStore` level: the tab's own surface
+    /// owning the newer of two live processes on its conversation must move the badge, not
+    /// just `ConversationPin`'s own pure-function tests.
+    func testBadgeActivityFollowsTheProcessTheTabsSurfaceOwns() {
+        let store = makeStore()
+        let session = store.newSession(in: tmp)
+
+        store.applyRegistry([
+            1: row(session.pinnedConversationID, pid: 1, cwd: tmp.path, startedAt: 1, activity: .idle),
+        ])
+        XCTAssertEqual(store.status(for: session.id)?.activity, .idle)
+
+        // Seed the tab's surface (its `login` child) and script the fake inspector so pid 2 —
+        // the newer, busy row — is a descendant of it: the reopen's own `claude --resume`.
+        store.processRegistry.keep(
+            session.id, as: SessionProcess(identity: ProcessIdentity(pid: 100, procStart: 100))
+        )
+        store.processInspector = FakeOwnershipInspector(
+            aliveIdentities: [ProcessIdentity(pid: 100, procStart: 100)],
+            descendants: [100: [ProcessIdentity(pid: 2, procStart: 200)]]
+        )
+
+        store.applyRegistry([
+            1: row(session.pinnedConversationID, pid: 1, cwd: tmp.path, startedAt: 1, activity: .idle),
+            2: row(session.pinnedConversationID, pid: 2, cwd: tmp.path, procStart: "start-b",
+                   startedAt: 2, activity: .busy),
+        ])
+        XCTAssertEqual(
+            store.status(for: session.id)?.activity, .busy,
+            "badge follows the process the tab's surface owns"
+        )
+    }
+
+    /// The other half: a newer process on the conversation exists, but the tab's surface owns
+    /// the OLDER one — a stranger resumed the conversation elsewhere. The badge must not move,
+    /// protecting the invariant `5f40b38` was written for.
+    func testBadgeDoesNotFollowANewerStrangerTheTabDoesNotOwn() {
+        let store = makeStore()
+        let session = store.newSession(in: tmp)
+
+        store.applyRegistry([
+            1: row(session.pinnedConversationID, pid: 1, cwd: tmp.path, startedAt: 1, activity: .idle),
+        ])
+        XCTAssertEqual(store.status(for: session.id)?.activity, .idle)
+
+        // Same seed, but now the tab's surface owns the OLDER pid (1); pid 2 is a stranger.
+        store.processRegistry.keep(
+            session.id, as: SessionProcess(identity: ProcessIdentity(pid: 100, procStart: 100))
+        )
+        store.processInspector = FakeOwnershipInspector(
+            aliveIdentities: [ProcessIdentity(pid: 100, procStart: 100)],
+            descendants: [100: [ProcessIdentity(pid: 1, procStart: 150)]]
+        )
+
+        store.applyRegistry([
+            1: row(session.pinnedConversationID, pid: 1, cwd: tmp.path, startedAt: 1, activity: .idle),
+            2: row(session.pinnedConversationID, pid: 2, cwd: tmp.path, procStart: "start-b",
+                   startedAt: 2, activity: .busy),
+        ])
+        XCTAssertEqual(
+            store.status(for: session.id)?.activity, .idle,
+            "a newer stranger the tab does not own must not move the badge"
+        )
     }
 
     func testDistinctConversationsAreNotFlagged() {

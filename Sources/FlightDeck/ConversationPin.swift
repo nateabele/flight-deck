@@ -71,7 +71,8 @@ enum ConversationPin {
         conversationID: UUID,
         transcriptDirectory: String,
         anchor: Anchor?,
-        rows: [pid_t: ClaudeStatusFile.Entry]
+        rows: [pid_t: ClaudeStatusFile.Entry],
+        ownedPIDs: Set<pid_t> = []
     ) -> Resolution {
         let unchanged = Resolution(
             anchor: nil,
@@ -79,6 +80,26 @@ enum ConversationPin {
             reportedDirectory: nil,
             transcriptDirectory: transcriptDirectory
         )
+
+        // Ground truth when the surface registry attributed a process to this tab: among the
+        // rows for our pinned conversation, prefer the one this tab's own surface owns. This is
+        // the only signal that distinguishes our own reopen/resume (owned) from a stranger
+        // resuming the same conversation in a plain terminal (not owned) — the rows alone
+        // cannot. Scoped to `conversationID` so an unrelated descendant (a tool subprocess)
+        // can never steal the anchor, and a conversation change still flows through the
+        // pid-follow branch below as a repin. `ownedPIDs` is empty on the common single-process
+        // tick (the caller only computes it when a conversation actually has two rows), so this
+        // is a no-op then.
+        if !ownedPIDs.isEmpty,
+           let owned = rows.values
+            .filter({ ownedPIDs.contains($0.pid) && $0.sessionID == conversationID })
+            .max(by: { ($0.startedAt, $0.pid) < ($1.startedAt, $1.pid) }) {
+            return resolution(
+                anchor: Anchor(pid: owned.pid, procStart: owned.procStart),
+                row: owned,
+                fallback: transcriptDirectory
+            )
+        }
 
         if let anchor {
             // A row under our pid whose process start time differs is a *different*
