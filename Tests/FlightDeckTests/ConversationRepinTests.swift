@@ -17,9 +17,10 @@ final class ConversationRepinTests: XCTestCase {
     // a transcript under `/w` on its first tick — which is the very thing the repin
     // assertions below read back.
     private func row(_ sid: UUID, pid: pid_t = 1, cwd: String,
-                     procStart: String = "start-a") -> ClaudeStatusFile.Entry {
-        .init(pid: pid, sessionID: sid, activity: .busy, waitingFor: nil,
-              startedAt: 1, cwd: cwd, procStart: procStart)
+                     procStart: String = "start-a", startedAt: Double = 1,
+                     activity: SessionActivity = .busy) -> ClaudeStatusFile.Entry {
+        .init(pid: pid, sessionID: sid, activity: activity, waitingFor: nil,
+              startedAt: startedAt, cwd: cwd, procStart: procStart)
     }
 
     private var tmp: URL { URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true) }
@@ -206,6 +207,29 @@ final class ConversationRepinTests: XCTestCase {
         ])
 
         XCTAssertEqual(store.conflictedSessionIDs, [first.id, second.id])
+    }
+
+    /// End-to-end proof of the reopen fix at the `SessionStore` level: a second, newer
+    /// `claude` on the same conversation must move the badge, not just `ConversationPin`'s
+    /// own pure-function tests.
+    func testBadgeActivityFollowsTheNewestProcessForTheConversation() {
+        let store = makeStore()
+        let session = store.newSession(in: tmp)
+
+        store.applyRegistry([
+            1: row(session.pinnedConversationID, pid: 1, cwd: tmp.path, startedAt: 1, activity: .idle),
+        ])
+        XCTAssertEqual(store.status(for: session.id)?.activity, .idle)
+
+        store.applyRegistry([
+            1: row(session.pinnedConversationID, pid: 1, cwd: tmp.path, startedAt: 1, activity: .idle),
+            2: row(session.pinnedConversationID, pid: 2, cwd: tmp.path, procStart: "start-b",
+                   startedAt: 2, activity: .busy),
+        ])
+        XCTAssertEqual(
+            store.status(for: session.id)?.activity, .busy,
+            "badge must track the newest live process for the conversation"
+        )
     }
 
     func testDistinctConversationsAreNotFlagged() {
