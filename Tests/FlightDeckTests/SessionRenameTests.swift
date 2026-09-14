@@ -107,17 +107,19 @@ final class SessionRenameTests: XCTestCase {
         XCTAssertEqual(spy.events, [.killLine, .text("/rename fresh"), .ret])
     }
 
-    /// A one-row draft is never typed over. The kill-probe finds the draft — the kill removes
-    /// something, so the box was not empty — and BAILS: it yanks the draft back out of Claude's
-    /// ring and types nothing, leaving the rename pending for a tick when the bar is free. A
-    /// draft is a draft whether it spans one row or many; the old "type over a single row and
-    /// restore it" would have submitted a `/rename` while the user's own words sat in the box.
-    func testARenameDefersRatherThanTypeOverASingleRowDraft() {
+    /// A one-row draft is typed AROUND, then restored. The kill-probe kills the line to find out
+    /// whether the box held anything; it did, so — after the `/rename` is typed and submitted —
+    /// the draft is yanked back out of Claude's ring, and Claude queues text typed mid-draft, so
+    /// the user's own words reappear behind the rename rather than being lost. An earlier cut
+    /// BAILED here, typing nothing, which broke 100% of sidebar renames: an idle box's rotating
+    /// placeholder reads as a draft, so every rename bailed.
+    func testARenameIntoAOneRowDraftIsTypedThenRestoresTheDraft() {
         let (store, spy, id) = makeStore()
         spy.typeDraft(["half-written thought"])
         store.rename(id, to: "named")
-        XCTAssertEqual(spy.events, [.killLine, .yank], "the draft is probed and put straight back")
-        XCTAssertFalse(spy.sent.contains("/rename named"), "the rename is not typed over the draft")
+        XCTAssertEqual(spy.events, [.killLine, .text("/rename named"), .ret, .yank],
+                       "type the rename, then put the draft straight back")
+        XCTAssertTrue(spy.sent.contains("/rename named"), "the rename is typed")
     }
 
     /// The dangerous case: a hint looks exactly like a draft on screen, but the buffer
