@@ -246,6 +246,21 @@ protocol AgentTextChannel {
     /// same thing it does for a box with something in it.
     func isComposerEmpty(_ injector: TextInjecting) -> Bool
 
+    /// Whether this agent's own composer is genuinely on screen right now — as opposed to a
+    /// dialog, a bare shell, or a screen this build cannot read.
+    ///
+    /// **This is the gate `SessionStore.inject` asks, in place of the status-file activity it
+    /// used to consult.** Activity said nothing about what was actually on screen: `.busy` and
+    /// `.idle` both draw the composer, a `.waiting` dialog draws something that only looks
+    /// like it, and a pre-boot bare shell draws neither. Each agent answers this from its own
+    /// screen grammar — see `ClaudeTextChannel`'s rule-sandwich and `CodexTextChannel`'s
+    /// footer check — so the gate stays correct without `SessionStore` knowing either one.
+    ///
+    /// Presence only, never emptiness: a box that is on screen but holds a draft still answers
+    /// `true` here, because `submit`'s kill-and-compare is what decides whether that draft can
+    /// be preserved.
+    func hasComposerBox(_ injector: TextInjecting) -> Bool
+
     /// Type `text` and submit it, preserving whatever draft was there — or refuse.
     ///
     /// **The contract the caller's bookkeeping depends on: `settle` is called exactly once
