@@ -86,6 +86,23 @@ enum ConversationPin {
             guard let row = rows[anchor.pid], row.procStart == anchor.procStart else {
                 return unchanged
             }
+            // Follow our process, unless a strictly-newer process is running the SAME
+            // conversation this one currently is. That newer process is a reopen/resume
+            // that superseded us (two `claude --resume` on one conversation); the badge
+            // must track the process actually doing the work. Compared on `startedAt`
+            // (epoch ms, a per-process constant) so the winner is stable tick-to-tick and
+            // never flaps, and keyed on `row.sessionID` — the anchored process's *current*
+            // conversation, not the pin — so a process that itself resumed into a new
+            // conversation is not abandoned for a stranger that still holds the old pin.
+            if let newer = rows.values
+                .filter({ $0.sessionID == row.sessionID && $0.startedAt > row.startedAt })
+                .max(by: { ($0.startedAt, $0.pid) < ($1.startedAt, $1.pid) }) {
+                return resolution(
+                    anchor: Anchor(pid: newer.pid, procStart: newer.procStart),
+                    row: newer,
+                    fallback: transcriptDirectory
+                )
+            }
             return resolution(anchor: anchor, row: row, fallback: transcriptDirectory)
         }
 
