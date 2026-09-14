@@ -238,7 +238,10 @@ struct TimelineBodyBlock: View {
                 .font(.body)
                 .textSelection(.enabled)
         } else {
-            Text(item.body.text)
+            // `TimelineStyle.linkedPlainText`, not the row's cache: this screen draws one item,
+            // never a recycled `List` cell of hundreds, so the memo `TimelineLinkCache` exists
+            // for has nothing to save here.
+            Text(TimelineStyle.linkedPlainText(item.body.text))
                 .font(monospaced ? .system(.footnote, design: .monospaced) : .body)
                 .foregroundStyle(item.body.isError ? .red : .primary)
                 // Selectable as well as copyable: the button takes the whole body, and a
