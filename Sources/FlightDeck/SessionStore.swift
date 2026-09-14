@@ -4915,8 +4915,25 @@ final class SessionStore: ObservableObject {
     private func pinResolutions(
         _ rows: [pid_t: ClaudeStatusFile.Entry]
     ) -> [(tab: UUID, resolution: ConversationPin.Resolution)] {
-        repos.flatMap(\.sessions).filter(\.agent.hasStatusRegistry).map { session in
-            (session.id, ConversationPin.resolve(
+        // Surface ownership disambiguates two live processes on one conversation, but reading
+        // it means a process-tree walk — so only pay it where a conversation actually has more
+        // than one row this tick. Everywhere else `ownedPIDs` stays empty and `resolve` takes
+        // its ordinary anchor/newest path.
+        let duplicated = Set(
+            Dictionary(grouping: rows.values, by: \.sessionID)
+                .filter { $0.value.count > 1 }
+                .keys
+        )
+        return repos.flatMap(\.sessions).filter(\.agent.hasStatusRegistry).map { session in
+            var ownedPIDs: Set<pid_t> = []
+            if duplicated.contains(session.pinnedConversationID),
+               let surface = processRegistry.process(for: session.id),
+               processInspector.isAlive(surface.identity) {
+                // The tab's own claude is a descendant of its surface's `login` child; a
+                // stranger resuming the same conversation elsewhere is not.
+                ownedPIDs = Set(processInspector.descendants(of: surface.identity.pid).map(\.pid))
+            }
+            return (session.id, ConversationPin.resolve(
                 conversationID: session.pinnedConversationID,
                 // The transcript directory, not the project: this is the value echoed
                 // back when no row names one, and what comes back feeds
@@ -4925,7 +4942,8 @@ final class SessionStore: ObservableObject {
                 // first time a row omitted its cwd.
                 transcriptDirectory: session.transcriptDirectory,
                 anchor: anchors[session.id],
-                rows: rows
+                rows: rows,
+                ownedPIDs: ownedPIDs
             ))
         }
     }
