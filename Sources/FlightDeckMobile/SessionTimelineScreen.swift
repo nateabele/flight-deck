@@ -88,6 +88,10 @@ struct SessionTimelineScreen: View {
     /// passes collapse to one cached split that survives re-render and cell recycling. See
     /// `TimelineSegmentCache`.
     @State private var segmentCache = TimelineSegmentCache()
+    /// The link-detection memo every plain-text row on this screen shares — `TimelineLinkCache`,
+    /// `segmentCache`'s counterpart for the machine-text kinds a row draws with `Text(_:)`
+    /// rather than through the segmenter.
+    @State private var linkCache = TimelineLinkCache()
     /// The list's own width, bucketed to 32pt so hairline jitter does not invalidate the memo
     /// while portrait/landscape/split-view widths — which change where the clamp lands — do.
     /// Fed to every `TimelineRow` alongside `segmentCache`; see the `GeometryReader` below.
@@ -503,7 +507,8 @@ struct SessionTimelineScreen: View {
                 // learns that a composer exists.
                 onReply: { model.quote($0) },
                 segmentCache: segmentCache,
-                widthBucket: widthBucket
+                widthBucket: widthBucket,
+                linkCache: linkCache
             )
             if TimelineStyle.opensDetail(entry.item) {
                 NavigationLink(value: entry.item) { row }

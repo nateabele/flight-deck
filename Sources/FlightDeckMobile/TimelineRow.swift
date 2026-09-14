@@ -75,6 +75,11 @@ struct TimelineRow: View {
     /// segments directly through `TimelineStyle` as it always has.
     var segmentCache: TimelineSegmentCache?
     var widthBucket: Int = 0
+    /// The screen's shared link memo for the plain-text kinds, the `TimelineLinkCache`
+    /// counterpart to `segmentCache` above. Optional for the same reason: a row built with no
+    /// screen behind it — the offscreen harnesses, the filler rows in tests — detects links
+    /// directly through `TimelineStyle` as it always has.
+    var linkCache: TimelineLinkCache?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -271,12 +276,21 @@ struct TimelineRow: View {
             .font(proseFont)
             .foregroundStyle(proseColor)
         } else {
-            Text(item.body.text)
+            Text(linkedPlainText)
                 .font(proseFont)
                 .italic(item.kind == .thinking)
                 .foregroundStyle(proseColor)
                 .lineLimit(TimelineStyle.proseLineLimit(for: item, expanded: isExpanded))
         }
+    }
+
+    /// `item.body.text`, with its bare URLs turned into taps — see `TimelineLinkCache` for why
+    /// this goes through the screen's memo rather than `TimelineStyle.linkedPlainText` directly.
+    private var linkedPlainText: AttributedString {
+        if let linkCache {
+            return linkCache.linked(for: item)
+        }
+        return TimelineStyle.linkedPlainText(item.body.text)
     }
 
     /// The body this row draws, already cut to the ceiling if it needed cutting.
