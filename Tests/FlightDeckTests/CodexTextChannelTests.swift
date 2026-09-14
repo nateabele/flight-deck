@@ -111,6 +111,29 @@ final class CodexTextChannelTests: XCTestCase {
                       "blank line then footer is exactly what both real captures show")
     }
 
+    // MARK: - hasComposerBox
+
+    /// **The detector `SessionStore.inject` now gates on is per-agent.** Claude's rule-sandwich
+    /// (see `ClaudeTextChannel.isComposerBox`) is not what codex draws at all, so codex's own
+    /// presence check — reused from `composer(_:)` via `isComposerEmpty` above — has to keep
+    /// answering for real codex screens once the shared activity gate is gone.
+    func testARealIdleScreenHasAComposerBox() throws {
+        let injector = FakeInjector(viewport: try viewport("tui-idle.captured"))
+        XCTAssertTrue(channel.hasComposerBox(injector))
+    }
+
+    func testARealWorkingScreenStillHasAComposerBox() throws {
+        let injector = FakeInjector(viewport: try viewport("tui-working.captured"))
+        XCTAssertTrue(channel.hasComposerBox(injector))
+    }
+
+    /// The same shell-prompt trap `isComposerEmpty` already refuses: `›` with no footer beneath
+    /// it is not codex's composer, whichever question is asked of it.
+    func testAShellPromptDrawingTheSameGlyphHasNoComposerBox() {
+        let injector = FakeInjector(viewport: "› ls -la\n")
+        XCTAssertFalse(channel.hasComposerBox(injector))
+    }
+
     // MARK: - submit
 
     func testSubmittingIntoAnEmptyComposerTypesAndReturnsWithoutRestoring() throws {

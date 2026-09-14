@@ -83,11 +83,13 @@ final class ClaudeSessionTests: XCTestCase {
         XCTAssertEqual(ClaudeSession.sanitizedName("a\nb\tc\u{7}d"), "abcd")
     }
 
-    /// Defense in depth: when `claude` isn't running, an injected `/rename` goes straight
-    /// to a shell prompt, so these must never reach it — otherwise `/rename x; rm -rf ~`
-    /// executes. See ClaudeSession.shellMetacharacters.
-    func testSanitizerStripsShellMetacharacters() {
-        XCTAssertEqual(ClaudeSession.sanitizedName("a;b&c|d`e$f(g)h<i>j"), "abcdefghij")
+    /// **Inverted on purpose.** These used to be stripped as defense in depth against an
+    /// injected `/rename` reaching a bare shell when `claude` was not yet running. That path
+    /// is closed now: `SessionStore.inject` refuses to type anywhere but a rule-sandwiched
+    /// composer actually on screen (see `ClaudeTextChannel`), which a bare shell never draws,
+    /// so a name is free to keep the characters ordinary people use in one.
+    func testSanitizerKeepsShellMetacharacters() {
+        XCTAssertEqual(ClaudeSession.sanitizedName("a;b&c|d`e$f(g)h<i>j"), "a;b&c|d`e$f(g)h<i>j")
     }
 
     /// Ordinary punctuation people actually use in session names must survive.

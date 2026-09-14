@@ -95,21 +95,34 @@ final class PhonePromptQueueTests: XCTestCase {
         let (store, spy, id, _) = makeBusyStoreWithADraft()
         store.submitPrompt("ship it", token: UUID(), to: id)
 
-        XCTAssertTrue(spy.events.isEmpty, "a draft is not clobbered mid-turn")
+        // The kill-probe kills to test the box and yanks the draft back when it finds one, so
+        // a deferral is not silent — but nothing is SENT, which is the guarantee that matters.
+        XCTAssertTrue(spy.sent.isEmpty, "a draft is not clobbered mid-turn")
         XCTAssertNotNil(store.promptQueue[id], "held until the box is free")
     }
 
-    func testAPromptToAWaitingTabIsHeldAndNeverTyped() {
+    /// **Rewritten, not merely inverted.** `inject` no longer reads activity at all, so what
+    /// has to refuse a dialog is the SCREEN: a real captured permission prompt, which draws
+    /// its own `❯` but never the rule immediately above it that a genuine composer does (see
+    /// `ClaudeTextChannel.isComposerBox`). `.waiting` is set anyway, for realism, but the
+    /// viewport is what does the work.
+    func testAPromptToAWaitingTabIsHeldAndNeverTyped() throws {
         let (store, spy, id, _) = makeStore(activity: .waiting)
+        spy.viewportOverride = try TimelineFixtureTests.text("permission-bash.captured", in: "Claude")
         store.submitPrompt("ship it", token: UUID(), to: id)
 
         XCTAssertTrue(spy.events.isEmpty, "nothing may be typed at a dialog")
         XCTAssertNotNil(store.promptQueue[id], "held, not discarded")
     }
 
-    func testAQueuedPromptIsTypedOnceTheTurnEnds() {
+    /// **What frees the box is the draft clearing, not the turn ending.** The kill-probe defers
+    /// on any draft, busy or idle, so the queue drains when the user submits or clears what was
+    /// in the bar — modelled here by emptying it — and the next registry scan types the prompt.
+    func testAQueuedPromptIsTypedOnceTheBoxClears() {
         let (store, spy, id, conversation) = makeBusyStoreWithADraft()
         store.submitPrompt("ship it", token: UUID(), to: id)
+        spy.buffer = ""                                     // user submitted or cleared the draft
+        spy.renderedRows = ["❯"]
         goIdle(store, conversation)
         XCTAssertEqual(spy.sent, ["ship it"])
         XCTAssertNil(store.promptQueue[id])
@@ -138,6 +151,8 @@ final class PhonePromptQueueTests: XCTestCase {
         store.submitPrompt("second", token: UUID(), to: id)
         XCTAssertEqual(store.promptQueue[id]?.map(\.text), ["first", "second"])
 
+        spy.buffer = ""                                     // user submitted or cleared the draft
+        spy.renderedRows = ["❯"]
         goIdle(store, conversation)
         XCTAssertEqual(spy.sent, ["first"], "one per pass — the second would land on a bar "
                        + "that has just started a turn")
@@ -174,7 +189,9 @@ final class PhonePromptQueueTests: XCTestCase {
         store.now = { [clock] in clock.addingTimeInterval(SessionStore.phonePromptWindow + 1) }
 
         goIdle(store, conversation)
-        XCTAssertTrue(spy.events.isEmpty)
+        // The one deferral before the window lapsed left a kill+yank in the transcript; the
+        // point is that the prompt was never SENT and is now dropped for having expired.
+        XCTAssertTrue(spy.sent.isEmpty)
         XCTAssertNil(store.promptQueue[id])
     }
 
@@ -306,10 +323,15 @@ final class PhonePromptQueueTests: XCTestCase {
         // left refusing.
         store.applyRegistryForTesting([id: SessionStatus(activity: .idle, waitingFor: nil)])
         store.flushPromptQueueForTesting()
-        XCTAssertTrue(spy.events.isEmpty, "the rename owns the bar until it has landed")
+        // The draft defers BOTH the rename and the prompt via the kill-probe, so a kill+yank is
+        // on the transcript, but nothing has been SENT and the prompt is still queued — the
+        // rename has yet to land, and the prompt is behind it.
+        XCTAssertTrue(spy.sent.isEmpty, "nothing lands over the draft, rename or prompt")
         XCTAssertEqual(store.promptQueue[id]?.map(\.text), ["ship it"],
                        "yielding to the rename defers the prompt, it does not drop it")
 
+        spy.buffer = ""                                     // user submitted or cleared the draft
+        spy.renderedRows = ["❯"]
         goIdle(store, conversation)
         XCTAssertEqual(spy.sent, ["/rename renamed", "ship it"],
                        "the rename goes first and the prompt follows it")
