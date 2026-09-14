@@ -3804,10 +3804,12 @@ final class SessionStore: ObservableObject {
     /// One tab's turn at the input box.
     ///
     /// **The head only, never the whole queue.** `inject` submits with a Return, so a second
-    /// entry in the same pass would be typed into a bar that has just started a turn.
-    /// `inject`'s idle gate would refuse it — but only after the settle, by which point the
-    /// entry looks flushed to everything upstream. One per pass, and the next pass is a
-    /// registry tick away.
+    /// entry in the same pass would be typed into a bar that has just started a turn. Right
+    /// after the submit the screen is an echo of the sent message, not a composer box, so
+    /// `hasComposerBox` refuses the second entry (see
+    /// `ClaudeComposerDetectorTests.testTheEchoOnlyScreenRightAfterSubmittingIsNotAComposer`) —
+    /// but only after the settle, by which point the entry looks flushed to everything
+    /// upstream. One per pass, and the next pass is a registry tick away.
     private func flushPromptQueue(_ id: UUID) {
         // Expiry first, and it runs whether or not this tab can be typed into: a queue that
         // is never drained because its tab lost its surface must still empty itself.
