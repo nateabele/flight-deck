@@ -2638,6 +2638,32 @@ final class SessionStore: ObservableObject {
         parkedSurfaces.removeValue(forKey: id)
     }
 
+    /// Pids of live processes already resuming `conversation`, from one registry read.
+    /// Pure so the capture is unit-testable apart from the reap.
+    static func duplicateResumePids(
+        conversation: UUID, in rows: [pid_t: ClaudeStatusFile.Entry]
+    ) -> [pid_t] {
+        rows.values.filter { $0.sessionID == conversation }.map(\.pid)
+    }
+
+    /// Reap processes that were resuming a conversation we are about to resume again.
+    ///
+    /// The registry row gives us a pid and a *string* start time; the reaper's liveness
+    /// gate needs the OS identity (whole-microsecond `procStart`), so we resolve each pid
+    /// through `processInspector` right before signalling. A pid that is no longer alive
+    /// resolves to `nil` and is skipped — never signalled — so a recycled pid is not a
+    /// wrong-process kill. Mirrors `sweepOrphans`' reap.
+    func reapResumeDuplicates(_ pids: [pid_t], context: String) async {
+        for pid in pids {
+            guard let procStart = processInspector.startTime(of: pid) else { continue }
+            let identity = ProcessIdentity(pid: pid, procStart: procStart)
+            guard processInspector.isAlive(identity) else { continue }
+            let livePgid = processInspector.pgid(of: pid)
+            let outcome = await reaper.reap(shell: identity, pgid: livePgid)
+            reapReporter?.report(outcome, context: context)
+        }
+    }
+
     /// Terminate processes recorded by a previous run that outlived it.
     ///
     /// Gated twice over: the recording instance must be gone (otherwise these are somebody
@@ -2983,6 +3009,25 @@ final class SessionStore: ObservableObject {
                 // reopened inside a worktree still gets its project's overrides.
                 options(for: session.agent, project: session.workingDirectory)
             )
+        }
+
+        // Reap any live process already resuming this conversation before we spawn a fresh
+        // `--resume` beside it. A tab whose process was started in restore()'s batch is
+        // filed under a random UUID, so closing the tab could not reap it (see reapSession's
+        // nil-process path); reopening then duplicates it. Two `claude --resume` on one
+        // conversation also both append to one transcript, so this is a correctness fix, not
+        // only a cosmetic one. Capture the doomed pids SYNCHRONOUSLY from the pre-spawn
+        // registry snapshot — the fresh process has not written its status file yet, so it
+        // cannot be in this snapshot and can never be self-reaped — then reap fire-and-forget
+        // like closeSession does.
+        let doomed = SessionStore.duplicateResumePids(
+            conversation: session.pinnedConversationID,
+            in: registryRows[session.accountID] ?? [:]
+        )
+        if !doomed.isEmpty {
+            Task { [weak self] in
+                await self?.reapResumeDuplicates(doomed, context: "reopen dedupe")
+            }
         }
 
         insertSession(
