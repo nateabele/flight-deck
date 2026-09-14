@@ -341,6 +341,32 @@ targets:
         # SWIFT_INCLUDE_PATHS (the module search path itself) is set project-wide, at the top.
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
 
+  # The phone app's UI-test suite: a Phase 0 probe, and the first XCUITest on this side.
+  # Where FlightDeckMobileTests exercises model/view-model code inside the app process, this
+  # drives the running UI from the outside — the one place a question about SwiftUI *tap
+  # routing* (does an inline `.link` run inside a `NavigationLink` open Safari or navigate?)
+  # can be answered at all. It launches the app with `-UITestHarness linkInNavLink`, which
+  # `UITestHarness` turns into an isolated reproduction of that exact structure. Mirrors the
+  # macOS FlightDeckUITests declaration, but iOS, targeting FlightDeckMobile.
+  FlightDeckMobileUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [Tests/FlightDeckMobileUITests]
+    dependencies:
+      - target: FlightDeckMobile
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: "YES"
+        # Ad-hoc for the simulator, same identity as the app and the unit bundle — a UI-test
+        # runner is itself an app installed onto the simulator, so it needs an identity for
+        # the same keychain-access-group reason the host does. See FlightDeckMobile above.
+        CODE_SIGN_IDENTITY[sdk=iphonesimulator*]: "-"
+        CODE_SIGN_IDENTITY[sdk=iphoneos*]: Apple Development
+        DEVELOPMENT_TEAM[sdk=iphoneos*]: 2T9E3N27J8
+        CODE_SIGNING_REQUIRED: "YES"
+        CODE_SIGNING_ALLOWED: "YES"
+
 # FleetKitiOS and FlightDeckMobile both need a persisted shared scheme, not xcodebuild's
 # own implicit synthesis for a buildable target — that synthesis is unpersisted,
 # undocumented, and exactly what scripts/build-ios.sh's `-scheme` (over `-target`) is
@@ -359,5 +385,6 @@ schemes:
         # `build-for-testing`, which is what scripts/build-ios.sh runs) but not by a plain
         # `build`, which stays the app-only check it has always been.
         FlightDeckMobileTests: [test]
+        FlightDeckMobileUITests: [test]
     test:
-      targets: [FlightDeckMobileTests]
+      targets: [FlightDeckMobileTests, FlightDeckMobileUITests]

@@ -10,7 +10,13 @@ struct FlightDeckMobileApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if model.mac == nil {
+            // A UI-test launch short-circuits the real app: the harness reproduces one
+            // SwiftUI structure in isolation (see `UITestHarness`) and must never touch the
+            // fleet, so it stands in front of pairing entirely. Present only when the launch
+            // argument is set, which a shipping run never does.
+            if let harness = UITestHarness.requested {
+                UITestHarness.view(for: harness)
+            } else if model.mac == nil {
                 PairingScreen(model: model)
             } else {
                 FleetListScreen(model: model)
