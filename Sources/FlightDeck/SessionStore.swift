@@ -2640,6 +2640,28 @@ final class SessionStore: ObservableObject {
         parkedSurfaces.removeValue(forKey: id)
     }
 
+    /// Pids of live processes already resuming `conversation`, from one registry read.
+    /// Pure so the capture is unit-testable apart from the reap.
+    static func duplicateResumePids(
+        conversation: UUID, in rows: [pid_t: ClaudeStatusFile.Entry]
+    ) -> [pid_t] {
+        rows.values.filter { $0.sessionID == conversation }.map(\.pid)
+    }
+
+    /// Reap processes that were resuming a conversation we are about to resume again.
+    ///
+    /// Each identity is captured synchronously at reopen (pid + the OS start time read then),
+    /// so a pid that has since died and been recycled to an unrelated process fails `isAlive`
+    /// here and is skipped — never signalled. Mirrors `sweepOrphans`' identity-gated reap.
+    func reapResumeDuplicates(_ doomed: [ProcessIdentity], context: String) async {
+        for identity in doomed {
+            guard processInspector.isAlive(identity) else { continue }
+            let livePgid = processInspector.pgid(of: identity.pid)
+            let outcome = await reaper.reap(shell: identity, pgid: livePgid)
+            reapReporter?.report(outcome, context: context)
+        }
+    }
+
     /// Terminate processes recorded by a previous run that outlived it.
     ///
     /// Gated twice over: the recording instance must be gone (otherwise these are somebody
@@ -2985,6 +3007,29 @@ final class SessionStore: ObservableObject {
                 // reopened inside a worktree still gets its project's overrides.
                 options(for: session.agent, project: session.workingDirectory)
             )
+        }
+
+        // Reap any live process already resuming this conversation before we spawn a fresh
+        // `--resume` beside it. A tab whose process was started in restore()'s batch is
+        // filed under a random UUID, so closing the tab could not reap it (see reapSession's
+        // nil-process path); reopening then duplicates it. Two `claude --resume` on one
+        // conversation also both append to one transcript, so this is a correctness fix, not
+        // only a cosmetic one. Capture the doomed identities SYNCHRONOUSLY from the pre-spawn
+        // registry snapshot — the fresh process has not written its status file yet, so it
+        // cannot be in this snapshot and can never be self-reaped — then reap fire-and-forget
+        // like closeSession does. Capturing the OS identity now, rather than re-resolving the
+        // pid inside the later `Task`, is what stops a pid that dies and is recycled to an
+        // unrelated process in the meantime from being signalled.
+        let doomed = SessionStore.duplicateResumePids(
+            conversation: session.pinnedConversationID,
+            in: registryRows[session.accountID] ?? [:]
+        ).compactMap { pid in
+            processInspector.startTime(of: pid).map { ProcessIdentity(pid: pid, procStart: $0) }
+        }
+        if !doomed.isEmpty {
+            Task { [weak self] in
+                await self?.reapResumeDuplicates(doomed, context: "reopen dedupe")
+            }
         }
 
         insertSession(
@@ -4902,8 +4947,25 @@ final class SessionStore: ObservableObject {
     private func pinResolutions(
         _ rows: [pid_t: ClaudeStatusFile.Entry]
     ) -> [(tab: UUID, resolution: ConversationPin.Resolution)] {
-        repos.flatMap(\.sessions).filter(\.agent.hasStatusRegistry).map { session in
-            (session.id, ConversationPin.resolve(
+        // Surface ownership disambiguates two live processes on one conversation, but reading
+        // it means a process-tree walk — so only pay it where a conversation actually has more
+        // than one row this tick. Everywhere else `ownedPIDs` stays empty and `resolve` takes
+        // its ordinary anchor/newest path.
+        let duplicated = Set(
+            Dictionary(grouping: rows.values, by: \.sessionID)
+                .filter { $0.value.count > 1 }
+                .keys
+        )
+        return repos.flatMap(\.sessions).filter(\.agent.hasStatusRegistry).map { session in
+            var ownedPIDs: Set<pid_t> = []
+            if duplicated.contains(session.pinnedConversationID),
+               let surface = processRegistry.process(for: session.id),
+               processInspector.isAlive(surface.identity) {
+                // The tab's own claude is a descendant of its surface's `login` child; a
+                // stranger resuming the same conversation elsewhere is not.
+                ownedPIDs = Set(processInspector.descendants(of: surface.identity.pid).map(\.pid))
+            }
+            return (session.id, ConversationPin.resolve(
                 conversationID: session.pinnedConversationID,
                 // The transcript directory, not the project: this is the value echoed
                 // back when no row names one, and what comes back feeds
@@ -4912,7 +4974,8 @@ final class SessionStore: ObservableObject {
                 // first time a row omitted its cwd.
                 transcriptDirectory: session.transcriptDirectory,
                 anchor: anchors[session.id],
-                rows: rows
+                rows: rows,
+                ownedPIDs: ownedPIDs
             ))
         }
     }
