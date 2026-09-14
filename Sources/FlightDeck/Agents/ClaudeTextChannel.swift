@@ -11,18 +11,21 @@ import Foundation
 /// The gates below, and why each one:
 ///
 /// - **One row only.** Ctrl+U kills a single logical line and yank-pop *replaces* rather than
-///   appends, so a draft spanning rows cannot be taken apart and put back.
-/// - **The kill IS the emptiness gate**, not a step before typing. Claude Code renders its
-///   rotating placeholder hint in exactly the same shape as a real draft (see `InputBar`), so
-///   the screen cannot be trusted to say whether the buffer is empty. So `submit` reads the
-///   box, kills the line, lets it repaint, and reads again: if nothing changed the box was
-///   empty (or held a placeholder / queued-messages hint, neither of which is editable
-///   content) and the text is typed; if the kill removed something a real draft was there, so
-///   it is yanked back and the whole injection BAILS — nothing typed, no Return, no `onSent`,
-///   and the pending entry stays queued to retry when the box is free.
-/// - **A draft is never typed over.** The old code always typed after the kill and yanked only
-///   to restore; this refuses instead, because clobbering someone's half-written thought is
-///   the one outcome the whole dance exists to prevent.
+///   appends, so a draft spanning rows cannot be taken apart and put back — so a multi-row box
+///   is refused untouched.
+/// - **The kill probes; it does not gate typing.** Claude Code renders its rotating placeholder
+///   hint in exactly the same shape as a real draft (see `InputBar`), so the screen cannot be
+///   trusted to say whether the buffer is empty — and an idle box shows that placeholder, so
+///   treating "the kill removed something" as "a draft is here, defer" refused to type into
+///   idle boxes and broke 100% of sidebar renames. So `submit` reads the box, kills the line,
+///   then types the pending text and Returns it regardless (Claude queues it if a turn is
+///   running), and uses the before/after change ONLY to decide whether it owes a draft back: if
+///   the kill removed real content, the draft is yanked back out of the ring AFTER the text was
+///   submitted.
+/// - **A draft is never clobbered.** The text is typed *around* a draft, not over it — the yank
+///   puts the draft back — and when the request is superseded mid-settle the text is not typed
+///   at all but a killed draft is still yanked back, because leaving someone's half-written
+///   thought destroyed is the one outcome the whole dance exists to prevent.
 ///
 /// `sendText` and `sendReturn` are separate because a paste is not typing — see
 /// `TextInjecting.sendReturn()`.
@@ -62,11 +65,11 @@ struct ClaudeTextChannel: AgentTextChannel {
     ///
     /// **Presence, not emptiness.** This is `SessionStore.inject`'s gate now, replacing the
     /// status-file activity check — see `AgentTextChannel.hasComposerBox`. Whether the box is
-    /// empty enough to type into is `submit`'s question, and its kill-probe IS that emptiness
-    /// gate: it kills the line and compares, typing only when the kill removed nothing and
-    /// DEFERRING when it removed a draft — never typing around one. This check only asks whether
-    /// a real composer is there to probe at all, as opposed to a dialog, a shell, or a screen
-    /// this build cannot read.
+    /// empty enough to type into is `submit`'s question, and its kill-probe answers it: it kills
+    /// the line and compares, types the text regardless — Claude queues it mid-turn — and yanks
+    /// a killed draft back afterward so a draft is typed around, never clobbered. This check only
+    /// asks whether a real composer is there to probe at all, as opposed to a dialog, a shell,
+    /// or a screen this build cannot read.
     static func isComposerBox(_ viewport: String) -> Bool {
         let lines = viewport.components(separatedBy: "\n")
         guard let start = lines.lastIndex(where: { $0.first == InputBar.claudeMarker }),
@@ -106,29 +109,29 @@ struct ClaudeTextChannel: AgentTextChannel {
             // the reader now takes a marker, and a defaulted parameter cannot be spelled as
             // a bare function reference.
             let after = injector.readViewport().flatMap { InputBar.read(fromViewport: $0) }?.content
-            // **Restore first, decide second.** A real draft was present and the kill removed
-            // it (`after != before`), OR the screen went unreadable so we cannot confirm it was
-            // empty. Either way we killed something we may owe back, so yank it out of Claude's
-            // own kill-ring UNCONDITIONALLY — before any `stillWanted` check — and BAIL: type
-            // nothing, press no Return, call no `onSent`. If we gated the restore on
-            // `stillWanted`, a prompt superseded (or a tab closed / entry expired) during the
-            // settle window would leave the killed draft destroyed, which is the one outcome
-            // this whole dance exists to prevent. The pending entry, if still wanted, stays
-            // queued and retries when the box is free. The unreadable case chooses safety over
-            // the old code's "type anyway": clobbering a draft is worse than a deferral.
-            if after != before {
+            // **A changed, readable screen means a real draft was killed — but that CANNOT
+            // decide whether we type.** An idle box shows Claude's rotating placeholder, which
+            // the real screen reader returns as `before` content and which the kill clears, so
+            // `after != before` fires on essentially every idle box. Treating that as "a draft
+            // is here, defer" — as an earlier version did — refused to type into idle boxes and
+            // broke 100% of sidebar renames. So always type the pending text (Claude queues it
+            // if a turn is running); use the change ONLY to restore a draft we may owe back.
+            //
+            // The one thing we still never do is clobber a real draft: when the request was
+            // superseded (or the tab closed / entry expired) mid-settle we do not type, but we
+            // still yank a killed draft back rather than leave the box empty.
+            let killedADraft = after != nil && after != before
+            if stillWanted() {
+                injector.sendText(text)
+                injector.sendReturn()
+                // Restore a real draft AFTER the pending text was submitted. On an empty box or
+                // a placeholder this yanks whatever is in Claude's kill-ring — usually nothing,
+                // and harmless since nothing was submitted from it.
+                if killedADraft { injector.sendYank() }
+                onSent()
+            } else if killedADraft {
                 injector.sendYank()
-                return
             }
-            // `after == before`: the kill removed nothing — an empty box, a rotating
-            // placeholder, or a queued-messages hint, none of which are editable buffer
-            // content — so there is nothing to restore and it is safe to abandon here if the
-            // request was superseded. Otherwise type it (Claude queues it if a turn is running)
-            // and retire the entry.
-            guard stillWanted() else { return }
-            injector.sendText(text)
-            injector.sendReturn()
-            onSent()
         }
         return true
     }
