@@ -251,6 +251,25 @@ enum TimelineStyle {
         }
     }
 
+    /// A machine-text body, with every bare URL `NSDataDetector` finds turned into a `.link`
+    /// run — the plain-text kinds `rendersMarkdown(_:)` excludes have no Markdown parser to
+    /// autolink one for them, and MarkdownUI's own autolink extension is exactly the gap this
+    /// closes for the two kinds that DO reach a parser (see `URLLinkDetection`'s doc comment).
+    ///
+    /// **Unstyled runs carry no attributes at all**, so `Text(_:)` draws them exactly as the
+    /// row's own `.font`/`.foregroundStyle`/`.italic` modifiers already do — only the detected
+    /// ranges diverge, tinted `.accentColor` to match the tint `TimelineMarkdown.theme` gives a
+    /// MarkdownUI link and `TimelineProseText.attributed` gives an attributed one.
+    static func linkedPlainText(_ text: String) -> AttributedString {
+        var attributed = AttributedString(text)
+        for (range, url) in URLLinkDetection.matches(in: text) {
+            guard let swiftRange = Range(range, in: attributed) else { continue }
+            attributed[swiftRange].link = url
+            attributed[swiftRange].foregroundColor = .accentColor
+        }
+        return attributed
+    }
+
     /// The same words, without the syntax that was carrying them.
     ///
     /// **VoiceOver has the same bug the screen had, one layer down, and worse.** A raw body
