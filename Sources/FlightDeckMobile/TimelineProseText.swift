@@ -110,7 +110,34 @@ enum TimelineProseText {
             output.append(NSAttributedString(string: String(parsed[run.range].characters), attributes: attributes))
         }
 
+        linkifyBareURLs(in: output)
         return output
+    }
+
+    /// The bare-URL half of link handling. `run.link` above already turned every `[text](url)`
+    /// into a `.link` run — this is for `https://…` typed with no brackets around it, which
+    /// `AttributedString(markdown:)` parses as a literal run of text, `.link` attribute and all,
+    /// unlike the MarkdownUI path this one is kept in lockstep with (see the preflight note on
+    /// `MarkdownParser.swift`'s `autolink` extension).
+    ///
+    /// A match is skipped rather than applied where it lands on `.link` (already a markdown
+    /// link — no double-linking one) or on `.backgroundColor` (the one attribute only the
+    /// `isCode` branch above ever sets — a URL inside a code span stays code, exactly as it
+    /// would if MarkdownUI's own autolink extension had produced it, since cmark does not
+    /// autolink inside a code span either).
+    private static func linkifyBareURLs(in output: NSMutableAttributedString) {
+        for (range, url) in URLLinkDetection.matches(in: output.string) {
+            guard range.location != NSNotFound, NSMaxRange(range) <= output.length else { continue }
+            var overlapsExisting = false
+            output.enumerateAttributes(in: range, options: []) { attributes, _, stop in
+                guard attributes[.link] != nil || attributes[.backgroundColor] != nil else { return }
+                overlapsExisting = true
+                stop.pointee = true
+            }
+            guard !overlapsExisting else { continue }
+            output.addAttribute(.link, value: url, range: range)
+            output.addAttribute(.foregroundColor, value: UIColor.tintColor, range: range)
+        }
     }
 
     private static func font(size: CGFloat, bold: Bool, italic: Bool, monospaced: Bool) -> UIFont {
