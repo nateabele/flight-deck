@@ -1,3 +1,4 @@
+import Network
 import SwiftUI
 
 @main
@@ -7,19 +8,39 @@ struct FlightDeckMobileApp: App {
     /// Remembers whether the app was actually suspended. See `RedialOnReturn` — reading it off
     /// a single transition is the version that shipped and never fired.
     @State private var redial = RedialOnReturn()
+    /// The foreground-network-switch counterpart to `redial` above: `RedialOnReturn` only ever
+    /// sees `scenePhase`, so a Wi-Fi↔cellular change that happens without the app leaving the
+    /// foreground is invisible to it. See `RedialOnPathChange`'s doc comment for the full case.
+    @State private var pathWatcher = PathChangeWatcher()
 
     var body: some Scene {
         WindowGroup {
-            // A UI-test launch short-circuits the real app: the harness reproduces one
-            // SwiftUI structure in isolation (see `UITestHarness`) and must never touch the
-            // fleet, so it stands in front of pairing entirely. Present only when the launch
-            // argument is set, which a shipping run never does.
-            if let harness = UITestHarness.requested {
-                UITestHarness.view(for: harness)
-            } else if model.mac == nil {
-                PairingScreen(model: model)
-            } else {
-                FleetListScreen(model: model)
+            // A `Group`, not the bare `if`/`else`, so `onAppear` below has one stable view to
+            // attach to rather than three — attaching it inside each branch would re-run it
+            // every time `model.mac` flips PairingScreen to FleetListScreen, which is exactly
+            // the moment `pathWatcher` should already be running, not (re)starting.
+            Group {
+                // A UI-test launch short-circuits the real app: the harness reproduces one
+                // SwiftUI structure in isolation (see `UITestHarness`) and must never touch the
+                // fleet, so it stands in front of pairing entirely. Present only when the launch
+                // argument is set, which a shipping run never does.
+                if let harness = UITestHarness.requested {
+                    UITestHarness.view(for: harness)
+                } else if model.mac == nil {
+                    PairingScreen(model: model)
+                } else {
+                    FleetListScreen(model: model)
+                }
+            }
+            // Started here, once, alongside the view it backs — `start()` is idempotent so a
+            // second `onAppear` (the window regaining an already-appeared root, which SwiftUI
+            // does not promise never to deliver) costs nothing beyond the guard check.
+            .onAppear {
+                pathWatcher.onRedial = {
+                    guard model.mac != nil else { return }
+                    model.reconnect()
+                }
+                pathWatcher.start()
             }
         }
         // **Redial on every return from the background.**
