@@ -89,19 +89,21 @@ final class PhonePromptDispatchTests: XCTestCase {
         XCTAssertEqual(SessionStore.PromptDispatch.notRunning.errorCode, "not_running")
     }
 
-    /// A prompt goes through `inject`, not through `sendToShell`, and the kill-probe is what
-    /// keeps it from destroying a half-typed draft. The probe kills to find out whether the box
-    /// held anything; it did, so the prompt BAILS — the draft is yanked back out of Claude's
-    /// ring and nothing is typed, so the message stays queued for a tick when the bar is free.
-    /// The user's own words are never typed over, idle or busy.
-    func testAOneRowDraftDefersThePromptRatherThanBeingTypedOver() {
+    /// A prompt goes through `inject`, not through `sendToShell`, and the kill-probe types
+    /// AROUND a one-row draft rather than over it: it kills the line to probe the box, types and
+    /// submits the prompt (Claude queues it mid-turn), then yanks the draft back out of Claude's
+    /// ring so the user's own words reappear behind it. An earlier cut BAILED on any draft — but
+    /// an idle box's rotating placeholder reads as a draft, so bailing broke 100% of renames;
+    /// typing-and-restoring is what fixes them.
+    func testAOneRowDraftIsTypedAroundAndThenRestored() {
         let (store, spy, id) = makeStore()
         spy.typeDraft(["half-written thought"])
         let token = UUID()
         store.submitPrompt("ship it", token: token, to: id)
-        XCTAssertEqual(spy.events, [.killLine, .yank], "probe the draft, put it straight back")
-        XCTAssertTrue(spy.sent.isEmpty, "the prompt is not typed over the draft")
-        XCTAssertEqual(store.promptQueue[id]?.map(\.token), [token], "held for a free bar")
+        XCTAssertEqual(spy.events, [.killLine, .text("ship it"), .ret, .yank],
+                       "type the prompt, then put the draft straight back")
+        XCTAssertEqual(spy.sent, ["ship it"], "the prompt is typed around the draft")
+        XCTAssertNil(store.promptQueue[id], "typed, so nothing waits in the queue")
     }
 
     /// What is queued is the NORMALISED text, not the wire string. `PromptText` strips
@@ -264,15 +266,16 @@ final class PhonePromptDispatchTests: XCTestCase {
     /// one-per-tab with replace semantics, could not have held.
     func testTwoPromptsForABusyTabBothWaitInOrder() {
         let (store, spy, id) = makeStore(activity: .busy)
-        // A draft in the box, so the pair still queues: mid-turn typing is allowed into an
-        // EMPTY box only, and this test is about ORDER, not about the mid-turn rule.
-        spy.typeDraft(["half a thought"])
+        // A multi-row draft in the box, so the pair still queues: `submit` types around a
+        // ONE-row draft now, but a draft spanning rows can't be Ctrl+U-restored, so it defers.
+        // This test is about ORDER, not about the typing rule.
+        spy.typeDraft(["half a thought", "and the rest of it"])
         spy.events.removeAll()
         XCTAssertEqual(store.submitPrompt("one", token: UUID(), to: id), .queued)
         XCTAssertEqual(store.submitPrompt("two", token: UUID(), to: id), .queued)
-        // The kill-probe fires on each deferral — a kill to test the box, a yank to put the
-        // draft back — so the transcript is not empty; what matters is nothing was SENT.
-        XCTAssertTrue(spy.sent.isEmpty, "nothing may be typed into a running turn")
+        // A multi-row draft is refused before any keystroke, so the transcript stays empty;
+        // what matters is nothing was SENT.
+        XCTAssertTrue(spy.sent.isEmpty, "nothing may be typed over a draft that spans rows")
 
         let queued = store.promptQueue[id] ?? []
         XCTAssertEqual(queued.count, 2, "two messages are two messages, not one replacing the other")

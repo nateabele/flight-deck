@@ -76,21 +76,24 @@ final class PromptTypedEmitTests: XCTestCase {
                        "exactly one promptTyped, for the prompt that just landed")
     }
 
-    /// **The other half.** A busy box with a draft already in it is the one case `inject`
-    /// refuses outright — see `PhonePromptQueueTests.testAPromptSentMidTurnWaitsWhenTheBoxHasADraft`
-    /// — so the prompt sits in `promptQueue` and nothing is ever typed. `onSent` never runs,
-    /// and neither must the event that only belongs beside it.
-    func testAPromptDeferredByABusyDraftBoxNeverEmitsPromptTyped() {
+    /// **The other half.** A box holding a MULTI-ROW draft is the case `inject` refuses
+    /// outright: Ctrl+U kills one logical line and yank-pop replaces rather than appends, so a
+    /// draft spanning rows cannot be taken apart and put back, and `submit` will not type over
+    /// one (see `SessionRenameTests.testRenameDefersWhileTheDraftSpansMultipleRows`). So the
+    /// prompt sits in `promptQueue` and nothing is ever typed. `onSent` never runs, and neither
+    /// must the event that only belongs beside it. (A one-row draft is a different case now — it
+    /// is typed around and restored — so this must span rows to genuinely defer.)
+    func testAPromptDeferredByAMultiRowDraftBoxNeverEmitsPromptTyped() {
         let (store, spy, id, _) = makeStore(activity: .busy)
-        spy.typeDraft(["half a thought"])
+        spy.typeDraft(["half a thought", "and the rest of it"])
         spy.events.removeAll()
         let replicator = attachedReplicator(to: store)
         let token = UUID()
 
         store.submitPrompt("ship it", token: token, to: id)
 
-        // The kill-probe leaves a kill and a yank in the transcript on a deferral; the property
-        // this test guards is that nothing was SENT, and `.promptTyped` is not emitted.
+        // A multi-row draft is refused before any keystroke; the property this test guards is
+        // that nothing was SENT, and `.promptTyped` is not emitted.
         XCTAssertTrue(spy.sent.isEmpty, "a draft is not clobbered mid-turn, so nothing was sent")
         XCTAssertNotNil(store.promptQueue[id], "held, waiting for the box to clear")
         XCTAssertFalse(

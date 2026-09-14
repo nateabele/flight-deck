@@ -36,14 +36,25 @@ final class PhonePromptQueueTests: XCTestCase {
 
     private let clock = Date(timeIntervalSince1970: 1_000_000)
 
-    /// A busy tab whose input box already holds a draft, so the queue still forms.
+    /// A busy tab whose input box holds a MULTI-ROW draft, so the queue still forms.
     ///
-    /// Typing mid-turn is allowed now, into an EMPTY box only — the agent queues it, which is
-    /// what a person at the keyboard relies on. So a test about queue MECHANICS (ordering,
-    /// expiry, a close dropping the queue) needs the other half of that rule to hold the
-    /// prompt: something already in the box. The draft is what makes these tests still about
-    /// what they were about.
-    private func makeBusyStoreWithADraft() -> (SessionStore, SpyInjector, UUID, UUID) {
+    /// `submit` types AROUND a one-row draft now — kill, type, yank it back — so a single line
+    /// no longer holds a prompt. A draft spanning rows still defers: Ctrl+U kills one logical
+    /// line and yank-pop replaces rather than appends, so a multi-row draft cannot be taken
+    /// apart and put back, and `submit` refuses it untouched (see
+    /// `SessionRenameTests.testRenameDefersWhileTheDraftSpansMultipleRows`). That refusal is
+    /// what holds the prompt for the queue-MECHANICS tests below — ordering, expiry, a close
+    /// dropping the queue — none of which are about the typing rule itself.
+    private func makeBusyStoreThatHoldsTheQueue() -> (SessionStore, SpyInjector, UUID, UUID) {
+        let made = makeStore(activity: .busy)
+        made.1.typeDraft(["half a thought", "and the rest of it"])
+        made.1.events.removeAll()
+        return made
+    }
+
+    /// A busy tab whose input box holds a ONE-ROW draft — the case the kill-probe types AROUND
+    /// rather than defers. Used only where the probe itself (kill, type, restore) is under test.
+    private func makeBusyStoreWithAOneRowDraft() -> (SessionStore, SpyInjector, UUID, UUID) {
         let made = makeStore(activity: .busy)
         made.1.typeDraft(["half a thought"])
         made.1.events.removeAll()
@@ -87,18 +98,20 @@ final class PhonePromptQueueTests: XCTestCase {
         XCTAssertNil(store.promptQueue[id], "nothing waits for an idle that may never come")
     }
 
-    /// **The other half, and the reason the rule is not just "type mid-turn".** `submit`
-    /// restores a draft by killing and yanking it back, which depends on reading a settled
-    /// screen. Mid-turn the screen is repainting, so a box with something in it is deferred
-    /// rather than risked — someone's half-written thought is not ours to gamble with.
-    func testAPromptSentMidTurnWaitsWhenTheBoxHasADraft() {
-        let (store, spy, id, _) = makeBusyStoreWithADraft()
+    /// **A one-row draft is typed AROUND, not deferred.** `submit` kills the line to probe the
+    /// box, types the prompt — the agent queues text typed mid-turn, which is what a person at
+    /// the keyboard relies on — and then yanks the draft back out of the kill-ring so the
+    /// half-written thought reappears behind it. Deferring on any draft (an earlier cut) also
+    /// refused to type into idle boxes, because an idle box's rotating placeholder reads as a
+    /// draft — which broke 100% of sidebar renames.
+    func testAPromptSentMidTurnIntoAOneRowDraftIsTypedAndRestoresTheDraft() {
+        let (store, spy, id, _) = makeBusyStoreWithAOneRowDraft()
         store.submitPrompt("ship it", token: UUID(), to: id)
 
-        // The kill-probe kills to test the box and yanks the draft back when it finds one, so
-        // a deferral is not silent — but nothing is SENT, which is the guarantee that matters.
-        XCTAssertTrue(spy.sent.isEmpty, "a draft is not clobbered mid-turn")
-        XCTAssertNotNil(store.promptQueue[id], "held until the box is free")
+        XCTAssertEqual(spy.events, [.killLine, .text("ship it"), .ret, .yank],
+                       "type the prompt, then put the draft straight back")
+        XCTAssertEqual(spy.sent, ["ship it"], "typed around the draft")
+        XCTAssertNil(store.promptQueue[id], "typed, so nothing waits")
     }
 
     /// **Rewritten, not merely inverted.** `inject` no longer reads activity at all, so what
@@ -115,11 +128,12 @@ final class PhonePromptQueueTests: XCTestCase {
         XCTAssertNotNil(store.promptQueue[id], "held, not discarded")
     }
 
-    /// **What frees the box is the draft clearing, not the turn ending.** The kill-probe defers
-    /// on any draft, busy or idle, so the queue drains when the user submits or clears what was
-    /// in the bar — modelled here by emptying it — and the next registry scan types the prompt.
+    /// **What frees the box is the draft clearing, not the turn ending.** A multi-row draft
+    /// defers the prompt (`submit` will not type over one), so the queue drains when the user
+    /// submits or clears what was in the bar — modelled here by emptying it — and the next
+    /// registry scan types the prompt.
     func testAQueuedPromptIsTypedOnceTheBoxClears() {
-        let (store, spy, id, conversation) = makeBusyStoreWithADraft()
+        let (store, spy, id, conversation) = makeBusyStoreThatHoldsTheQueue()
         store.submitPrompt("ship it", token: UUID(), to: id)
         spy.buffer = ""                                     // user submitted or cleared the draft
         spy.renderedRows = ["❯"]
@@ -133,7 +147,7 @@ final class PhonePromptQueueTests: XCTestCase {
     /// which is right for "Keep going" and catastrophic for a message a person typed: their
     /// words would vanish at exactly the transition they sent them across.
     func testAQueuedPromptSurvivesTheAgentGoingBusy() {
-        let (store, _, id, _) = makeBusyStoreWithADraft()
+        let (store, _, id, _) = makeBusyStoreThatHoldsTheQueue()
         store.submitPrompt("ship it", token: UUID(), to: id)
         store.cancelSupersededPromptsForTesting([
             StatusTransition(id: id, old: nil,
@@ -146,7 +160,7 @@ final class PhonePromptQueueTests: XCTestCase {
     /// Two messages are two messages, in order. Distinct texts, and the ORDER asserted, so a
     /// LIFO or a dictionary-backed store fails rather than passing on a count.
     func testTwoPromptsAreTypedInOrderOneTickApart() {
-        let (store, spy, id, conversation) = makeBusyStoreWithADraft()
+        let (store, spy, id, conversation) = makeBusyStoreThatHoldsTheQueue()
         store.submitPrompt("first", token: UUID(), to: id)
         store.submitPrompt("second", token: UUID(), to: id)
         XCTAssertEqual(store.promptQueue[id]?.map(\.text), ["first", "second"])
@@ -188,7 +202,7 @@ final class PhonePromptQueueTests: XCTestCase {
     /// did) destroyed the very draft the kill-probe exists to protect: Ctrl+U had already gone
     /// out, and the abandoned settle returned without the Ctrl+Y. Restore first, decide second.
     func testAKilledDraftIsRestoredEvenWhenTheRequestIsAbandonedDuringTheSettle() {
-        let (store, spy, id, _) = makeBusyStoreWithADraft()
+        let (store, spy, id, _) = makeBusyStoreWithAOneRowDraft()
         var settle: (() -> Void)?
         store.injectionSettle = { settle = $0 }
         store.submitPrompt("ship it", token: UUID(), to: id)
@@ -204,13 +218,13 @@ final class PhonePromptQueueTests: XCTestCase {
     /// A window, for the reason `resumePromptWindow` has one, and a longer one because a
     /// claude turn running a test suite outlives two minutes routinely.
     func testAnExpiredPromptIsDroppedUnsent() {
-        let (store, spy, id, conversation) = makeBusyStoreWithADraft()
+        let (store, spy, id, conversation) = makeBusyStoreThatHoldsTheQueue()
         store.submitPrompt("ship it", token: UUID(), to: id)
         store.now = { [clock] in clock.addingTimeInterval(SessionStore.phonePromptWindow + 1) }
 
         goIdle(store, conversation)
-        // The one deferral before the window lapsed left a kill+yank in the transcript; the
-        // point is that the prompt was never SENT and is now dropped for having expired.
+        // A multi-row draft is refused before any keystroke, so nothing was ever SENT; the point
+        // is that the prompt is now dropped for having expired.
         XCTAssertTrue(spy.sent.isEmpty)
         XCTAssertNil(store.promptQueue[id])
     }
@@ -224,7 +238,7 @@ final class PhonePromptQueueTests: XCTestCase {
     /// The token is what carries the news, because the token is what the phone's outbox is
     /// keyed on; the text is already over there.
     func testAnExpiredPromptTellsThePhoneItWasDropped() {
-        let (store, _, id, conversation) = makeBusyStoreWithADraft()
+        let (store, _, id, conversation) = makeBusyStoreThatHoldsTheQueue()
         let replicator = attachedReplicator(to: store)
         let token = UUID()
         store.submitPrompt("ship it", token: token, to: id)
@@ -264,7 +278,7 @@ final class PhonePromptQueueTests: XCTestCase {
 
     /// Closing the tab is the most literal case of "a prompt that will never be typed".
     func testClosingATabDropsItsQueue() {
-        let (store, _, id, _) = makeBusyStoreWithADraft()
+        let (store, _, id, _) = makeBusyStoreThatHoldsTheQueue()
         store.submitPrompt("ship it", token: UUID(), to: id)
         XCTAssertNotNil(store.promptQueue[id])
 
@@ -308,7 +322,7 @@ final class PhonePromptQueueTests: XCTestCase {
     /// dead session happened to have seen, and the phone would call a send landed that never
     /// was.
     func testAReopenedTabDoesNotInheritTheClosedOnesTokens() {
-        let (store, _, id, conversation) = makeBusyStoreWithADraft()
+        let (store, _, id, conversation) = makeBusyStoreThatHoldsTheQueue()
         store.titleResolver = { _, _, done in done(nil) }
         store.launchFailureReporter = SilentReporter()
         let token = UUID()
@@ -334,18 +348,17 @@ final class PhonePromptQueueTests: XCTestCase {
     /// settles on a later turn of the run loop, where the rename is still pending when the
     /// same tick reaches this queue — which is the state the two lines below reproduce.
     func testAPendingRenameGoesFirst() {
-        let (store, spy, id, conversation) = makeBusyStoreWithADraft()
+        let (store, spy, id, conversation) = makeBusyStoreThatHoldsTheQueue()
         store.submitPrompt("ship it", token: UUID(), to: id)
         store.rename(id, to: "renamed")
-        // An idle status without a tick, so nothing flushes the rename. Every other gate
-        // `inject` has is now open — idle status, a readable one-row bar, an injector — so
-        // the assertion below is only worth something because the rename is the one thing
-        // left refusing.
+        // An idle status without a tick, so nothing flushes the rename. The multi-row draft in
+        // the bar defers both the rename and the prompt, and the `pendingRenames` guard keeps
+        // the prompt behind the rename — so the assertion below is worth something because the
+        // rename is the one thing left to land first.
         store.applyRegistryForTesting([id: SessionStatus(activity: .idle, waitingFor: nil)])
         store.flushPromptQueueForTesting()
-        // The draft defers BOTH the rename and the prompt via the kill-probe, so a kill+yank is
-        // on the transcript, but nothing has been SENT and the prompt is still queued — the
-        // rename has yet to land, and the prompt is behind it.
+        // A multi-row draft is refused before any keystroke, so nothing has been SENT and the
+        // prompt is still queued — the rename has yet to land, and the prompt is behind it.
         XCTAssertTrue(spy.sent.isEmpty, "nothing lands over the draft, rename or prompt")
         XCTAssertEqual(store.promptQueue[id]?.map(\.text), ["ship it"],
                        "yielding to the rename defers the prompt, it does not drop it")
