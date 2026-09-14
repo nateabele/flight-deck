@@ -178,11 +178,10 @@ final class ConversationPinTests: XCTestCase {
         }
     }
 
-    /// The reopen bug: anchored to an OLD live process for our conversation while a
-    /// strictly-newer live process (the reopen's own `claude --resume`) runs the same
-    /// conversation. The anchor must hand off to the newer process so the badge follows
-    /// the one actually doing the work.
-    func testAnchorHandsOffToAStrictlyNewerProcessForTheSameConversation() {
+    /// Ground truth: when the tab's surface owns the newer process (the reopen's own
+    /// `claude --resume`), the anchor hands off to it even though we were anchored to the
+    /// older one. This is the reopen bug.
+    func testOwnedProcessWinsOverAStaleAnchorForTheSameConversation() {
         let conversation = UUID()
         let resolution = ConversationPin.resolve(
             conversationID: conversation,
@@ -191,53 +190,72 @@ final class ConversationPinTests: XCTestCase {
             rows: [
                 7: row(pid: 7, session: conversation, procStart: "old", startedAt: 1),
                 9: row(pid: 9, session: conversation, procStart: "new", startedAt: 2),
-            ]
+            ],
+            ownedPIDs: [9]
         )
-
         XCTAssertEqual(resolution.anchor, .init(pid: 9, procStart: "new"))
         XCTAssertEqual(resolution.conversationID, conversation)
     }
 
-    /// No flapping: once anchored to the newest, it stays put — the older sibling never
-    /// steals the anchor back. This is the fixed point that makes the handoff converge.
-    func testAnchorStaysOnTheNewestProcessAndDoesNotFlapBack() {
+    /// The stranger case (what 5f40b38 protects): a newer process for the same conversation
+    /// exists, but the tab's surface owns the OLDER one. The anchor must stay on the owned
+    /// (older) process — following the stranger would be wrong for the badge and would drag the
+    /// transcript onto someone else's path.
+    func testOwnedOlderProcessIsKeptOverANewerStranger() {
         let conversation = UUID()
-        let rows: [pid_t: ClaudeStatusFile.Entry] = [
-            7: row(pid: 7, session: conversation, procStart: "old", startedAt: 1),
-            9: row(pid: 9, session: conversation, procStart: "new", startedAt: 2),
-        ]
-        for _ in 0..<20 {
-            let resolution = ConversationPin.resolve(
-                conversationID: conversation,
-                transcriptDirectory: "/w",
-                anchor: .init(pid: 9, procStart: "new"),
-                rows: rows
-            )
-            XCTAssertEqual(resolution.anchor, .init(pid: 9, procStart: "new"))
-        }
+        let resolution = ConversationPin.resolve(
+            conversationID: conversation,
+            transcriptDirectory: "/w",
+            anchor: .init(pid: 7, procStart: "old"),
+            rows: [
+                7: row(pid: 7, session: conversation, procStart: "old", startedAt: 1),
+                9: row(pid: 9, session: conversation, procStart: "new", startedAt: 2),
+            ],
+            ownedPIDs: [7]
+        )
+        XCTAssertEqual(resolution.anchor, .init(pid: 7, procStart: "old"))
     }
 
-    /// The supersede check keys off the ANCHORED process's current conversation, not the
-    /// pin. A process that itself resumed into a new conversation must still repin (and must
-    /// NOT be abandoned for a stranger that happens to hold the old pinned id). Guards the
-    /// repin feature against the new code path.
-    func testSupersedeDoesNotHijackAProcessThatChangedConversation() {
+    /// Without an ownership signal (the registry could not attribute a process to this tab,
+    /// e.g. a restore orphan, or no conflict was detected), resolve must NOT prefer the newest
+    /// — it keeps following the anchored pid, exactly as before this change. This is the
+    /// invariant `SessionStoreStuckPromptTests.testTheAnchoredRowIsChosenWhenTwoProcessesShareOneConversation`
+    /// depends on.
+    func testWithoutOwnershipTheAnchoredProcessIsKept() {
+        let conversation = UUID()
+        let resolution = ConversationPin.resolve(
+            conversationID: conversation,
+            transcriptDirectory: "/w",
+            anchor: .init(pid: 7, procStart: "old"),
+            rows: [
+                7: row(pid: 7, session: conversation, procStart: "old", startedAt: 1),
+                9: row(pid: 9, session: conversation, procStart: "new", startedAt: 2),
+            ],
+            ownedPIDs: []
+        )
+        XCTAssertEqual(resolution.anchor, .init(pid: 7, procStart: "old"),
+                       "no ownership signal ⇒ keep following the anchor, do not prefer newest")
+    }
+
+    /// An owned pid on a DIFFERENT conversation than the pin does not steal the anchor: the
+    /// owned-preference is scoped to the pinned conversation, so an unrelated descendant (a tool
+    /// subprocess that happens to write a session file) is ignored and normal pid-follow/repin
+    /// still governs.
+    func testOwnedPidOnAnotherConversationDoesNotStealTheAnchor() {
         let pinned = UUID()
-        let moved = UUID()   // the anchored process resumed into this conversation
+        let other = UUID()
         let resolution = ConversationPin.resolve(
             conversationID: pinned,
             transcriptDirectory: "/w",
             anchor: .init(pid: 7, procStart: "old"),
             rows: [
-                // our anchored process, now on `moved`
-                7: row(pid: 7, session: moved, procStart: "old", startedAt: 1),
-                // a newer stranger holding the OLD pinned conversation
-                9: row(pid: 9, session: pinned, procStart: "new", startedAt: 2),
-            ]
+                7: row(pid: 7, session: pinned, procStart: "old", startedAt: 1),
+                9: row(pid: 9, session: other, procStart: "new", startedAt: 2),
+            ],
+            ownedPIDs: [9]
         )
-
-        XCTAssertEqual(resolution.conversationID, moved, "still a repin to our process's new conversation")
-        XCTAssertEqual(resolution.anchor, .init(pid: 7, procStart: "old"), "did not jump to the stranger")
+        XCTAssertEqual(resolution.anchor, .init(pid: 7, procStart: "old"))
+        XCTAssertEqual(resolution.conversationID, pinned)
     }
 
     func testConflictedFlagsEveryTabSharingAConversation() {
