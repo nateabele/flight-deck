@@ -83,14 +83,16 @@ final class ReopenDedupeTests: XCTestCase {
         )
     }
 
-    /// The async reap: a captured, still-live duplicate pid is signalled; the reaper's
+    /// The async reap: a captured, still-live duplicate identity is signalled; the reaper's
     /// identity gate is satisfied via processInspector (NOT the registry row's string time).
     func testReapResumeDuplicatesSignalsTheLiveStaleProcess() async {
         let signals = SpySignals()
         let inspector = FakeInspector(living: [3404])   // isAlive requires procStart == 100
         let store = store(inspector: inspector, signals: signals)
 
-        await store.reapResumeDuplicates([3404], context: "reopen dedupe test")
+        await store.reapResumeDuplicates(
+            [ProcessIdentity(pid: 3404, procStart: 100)], context: "reopen dedupe test"
+        )
 
         XCTAssertTrue(signals.targets.contains(3404),
                       "the stale duplicate process must be reaped")
@@ -102,8 +104,27 @@ final class ReopenDedupeTests: XCTestCase {
         let inspector = FakeInspector(living: [])   // nothing alive
         let store = store(inspector: inspector, signals: signals)
 
-        await store.reapResumeDuplicates([3404], context: "reopen dedupe test")
+        await store.reapResumeDuplicates(
+            [ProcessIdentity(pid: 3404, procStart: 100)], context: "reopen dedupe test"
+        )
 
         XCTAssertTrue(signals.targets.isEmpty)
+    }
+
+    /// The recycle guard: the identity was captured at reopen time with `procStart: 999`, but
+    /// pid 3404 is alive now under a *different* start time (100) — a different process that
+    /// merely recycled the pid. `isAlive` gates on the captured identity, not on "is the pid
+    /// alive at all", so this must be skipped, never signalled.
+    func testReapResumeDuplicatesSkipsAPidRecycledSinceCapture() async {
+        let signals = SpySignals()
+        let inspector = FakeInspector(living: [3404])   // alive, but only at procStart == 100
+        let store = store(inspector: inspector, signals: signals)
+
+        await store.reapResumeDuplicates(
+            [ProcessIdentity(pid: 3404, procStart: 999)], context: "reopen dedupe test"
+        )
+
+        XCTAssertTrue(signals.targets.isEmpty,
+                      "a pid recycled since capture must not be signalled")
     }
 }

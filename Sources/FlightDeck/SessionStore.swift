@@ -2648,17 +2648,13 @@ final class SessionStore: ObservableObject {
 
     /// Reap processes that were resuming a conversation we are about to resume again.
     ///
-    /// The registry row gives us a pid and a *string* start time; the reaper's liveness
-    /// gate needs the OS identity (whole-microsecond `procStart`), so we resolve each pid
-    /// through `processInspector` right before signalling. A pid that is no longer alive
-    /// resolves to `nil` and is skipped — never signalled — so a recycled pid is not a
-    /// wrong-process kill. Mirrors `sweepOrphans`' reap.
-    func reapResumeDuplicates(_ pids: [pid_t], context: String) async {
-        for pid in pids {
-            guard let procStart = processInspector.startTime(of: pid) else { continue }
-            let identity = ProcessIdentity(pid: pid, procStart: procStart)
+    /// Each identity is captured synchronously at reopen (pid + the OS start time read then),
+    /// so a pid that has since died and been recycled to an unrelated process fails `isAlive`
+    /// here and is skipped — never signalled. Mirrors `sweepOrphans`' identity-gated reap.
+    func reapResumeDuplicates(_ doomed: [ProcessIdentity], context: String) async {
+        for identity in doomed {
             guard processInspector.isAlive(identity) else { continue }
-            let livePgid = processInspector.pgid(of: pid)
+            let livePgid = processInspector.pgid(of: identity.pid)
             let outcome = await reaper.reap(shell: identity, pgid: livePgid)
             reapReporter?.report(outcome, context: context)
         }
@@ -3016,14 +3012,18 @@ final class SessionStore: ObservableObject {
         // filed under a random UUID, so closing the tab could not reap it (see reapSession's
         // nil-process path); reopening then duplicates it. Two `claude --resume` on one
         // conversation also both append to one transcript, so this is a correctness fix, not
-        // only a cosmetic one. Capture the doomed pids SYNCHRONOUSLY from the pre-spawn
+        // only a cosmetic one. Capture the doomed identities SYNCHRONOUSLY from the pre-spawn
         // registry snapshot — the fresh process has not written its status file yet, so it
         // cannot be in this snapshot and can never be self-reaped — then reap fire-and-forget
-        // like closeSession does.
+        // like closeSession does. Capturing the OS identity now, rather than re-resolving the
+        // pid inside the later `Task`, is what stops a pid that dies and is recycled to an
+        // unrelated process in the meantime from being signalled.
         let doomed = SessionStore.duplicateResumePids(
             conversation: session.pinnedConversationID,
             in: registryRows[session.accountID] ?? [:]
-        )
+        ).compactMap { pid in
+            processInspector.startTime(of: pid).map { ProcessIdentity(pid: pid, procStart: $0) }
+        }
         if !doomed.isEmpty {
             Task { [weak self] in
                 await self?.reapResumeDuplicates(doomed, context: "reopen dedupe")
