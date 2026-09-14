@@ -62,7 +62,11 @@ enum InputBar {
     }
 
     /// A box border: a run of `─` and nothing else.
-    private static func isRule(_ line: String) -> Bool {
+    ///
+    /// Internal rather than private: `ClaudeTextChannel`'s composer detector reuses this to
+    /// check the line immediately above the marker and the one that closes its run — see
+    /// that type's doc comment for why the rule-adjacency check itself stays out of `read`.
+    static func isRule(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         return !trimmed.isEmpty && trimmed.allSatisfy { $0 == "─" }
     }

@@ -75,6 +75,13 @@ struct CodexTextChannel: AgentTextChannel {
         return content.isEmpty || content == Self.placeholder
     }
 
+    /// Codex's own presence rule — the marker plus its footer, from `composer(_:)` above —
+    /// never claude's rule-sandwich, which codex's rounded `╭─╮│╰╯` panels do not draw at
+    /// all. See `AgentTextChannel.hasComposerBox`.
+    func hasComposerBox(_ injector: TextInjecting) -> Bool {
+        composer(injector) != nil
+    }
+
     /// **Restores the draft by re-typing it, not by yanking.**
     ///
     /// Claude's channel puts a killed draft back with Ctrl+Y, which works only because Claude
