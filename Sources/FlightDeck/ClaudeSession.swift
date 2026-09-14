@@ -67,20 +67,22 @@ enum ClaudeSession {
         return title
     }
 
-    /// Trims, strips control and shell-metacharacters, and caps length. Returns nil when
-    /// nothing usable remains, which callers treat as "revert to the previous title".
+    /// Trims, strips control characters, and caps length. Returns nil when nothing usable
+    /// remains, which callers treat as "revert to the previous title".
     ///
-    /// **The shell strip is claude's, and it is about claude's channel.** A name typed into
-    /// the sidebar (or received from Claude) must not be able to act as shell syntax when
-    /// injected as `/rename <name>` to a pty that has no `claude` running — an explicitly
-    /// supported degradation where the text goes straight to a shell prompt. An agent that
-    /// renames over a wire needs none of it; see `AgentTitle`.
+    /// **No shell-metacharacter strip, and that is a deliberate change to shipped behaviour.**
+    /// The strip used to exist because an injected `/rename <name>` could, in theory, reach a
+    /// bare shell rather than a live claude — but `SessionStore.inject` now gates on a
+    /// rule-sandwiched composer box actually being on screen (see `ClaudeTextChannel`), which a
+    /// bare shell never draws. With that gate load-bearing, the strip bought nothing and cost
+    /// the user their punctuation: `&`, `;`, `|` and the rest are ordinary characters in a
+    /// session name and now survive, the same as codex's; see `AgentTitle`.
     ///
     /// This is claude's *only* sanitization point: `rename` sets the stored title from this
     /// same output before injecting it, so the injected text and the stored title stay
     /// byte-identical and the loop-suppression check in `applyExternalTitle` keeps working.
     static func sanitizedName(_ raw: String) -> String? {
-        AgentTitle.sanitized(raw, removing: AgentTitle.shellMetacharacters)
+        AgentTitle.sanitized(raw, removing: CharacterSet())
     }
 
     /// POSIX single-quoting: wrap in `'…'` and rewrite embedded `'` as `'\''`. Also used by

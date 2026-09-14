@@ -32,8 +32,10 @@ struct ClaudeAdapter: AgentAdapter {
     /// where every claude status glyph in the sidebar comes from.
     static let hasStatusRegistry = true
 
-    /// Claude's rename is `/rename <name>` typed at a pty that may be a bare shell, so the
-    /// shell strip is load-bearing here in a way it is nowhere else.
+    /// Claude's rename is `/rename <name>` typed at a pty, but `SessionStore.inject` now
+    /// refuses to type it anywhere but a live, on-screen composer (see `ClaudeTextChannel`),
+    /// so the bare-shell case the old shell-metacharacter strip guarded against cannot reach
+    /// this path any more. See `ClaudeSession.sanitizedName`.
     nonisolated static func sanitizedTitle(_ raw: String) -> String? {
         ClaudeSession.sanitizedName(raw)
     }
