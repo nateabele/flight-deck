@@ -100,28 +100,33 @@ struct ClaudeTextChannel: AgentTextChannel {
         injector.sendKillLine()
         // Claude Code needs a moment to repaint before the screen reflects the kill.
         settle {
-            guard stillWanted() else { return }
             // A closure rather than the `InputBar.read(fromViewport:)` function reference:
             // the reader now takes a marker, and a defaulted parameter cannot be spelled as
             // a bare function reference.
             let after = injector.readViewport().flatMap { InputBar.read(fromViewport: $0) }?.content
-            // The kill-probe is the value-detector. `after == before` means the kill removed
-            // nothing — an empty box, a rotating placeholder, or a queued-messages hint, none
-            // of which are editable buffer content — so the bar was safe to type into. Type it
-            // (Claude queues it if a turn is running) and retire the entry.
-            if after == before {
-                injector.sendText(text)
-                injector.sendReturn()
-                onSent()
+            // **Restore first, decide second.** A real draft was present and the kill removed
+            // it (`after != before`), OR the screen went unreadable so we cannot confirm it was
+            // empty. Either way we killed something we may owe back, so yank it out of Claude's
+            // own kill-ring UNCONDITIONALLY — before any `stillWanted` check — and BAIL: type
+            // nothing, press no Return, call no `onSent`. If we gated the restore on
+            // `stillWanted`, a prompt superseded (or a tab closed / entry expired) during the
+            // settle window would leave the killed draft destroyed, which is the one outcome
+            // this whole dance exists to prevent. The pending entry, if still wanted, stays
+            // queued and retries when the box is free. The unreadable case chooses safety over
+            // the old code's "type anyway": clobbering a draft is worse than a deferral.
+            if after != before {
+                injector.sendYank()
                 return
             }
-            // A real draft was present and the kill removed it (`after != before`), OR the
-            // screen went unreadable so we cannot confirm it was empty. Either way we refuse:
-            // yank the draft back out of Claude's own kill-ring and BAIL — type nothing, press
-            // no Return, call no `onSent`. The pending entry stays queued and retries on the
-            // next registry scan, when the box may be free. The unreadable case chooses safety
-            // over the old code's "type anyway": clobbering a draft is worse than a deferral.
-            injector.sendYank()
+            // `after == before`: the kill removed nothing — an empty box, a rotating
+            // placeholder, or a queued-messages hint, none of which are editable buffer
+            // content — so there is nothing to restore and it is safe to abandon here if the
+            // request was superseded. Otherwise type it (Claude queues it if a turn is running)
+            // and retire the entry.
+            guard stillWanted() else { return }
+            injector.sendText(text)
+            injector.sendReturn()
+            onSent()
         }
         return true
     }
