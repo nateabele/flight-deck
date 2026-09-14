@@ -505,7 +505,7 @@ struct HistoricalPromptBody: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            Text(item.body.text)
+            Text(TimelineStyle.linkedPlainText(item.body.text))
                 .font(.footnote.monospaced())
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)

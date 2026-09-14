@@ -352,7 +352,7 @@ struct TimelineRow: View {
             }
             if let output, !output.body.text.isEmpty {
                 if item.kind == .toolCall { Divider() }
-                Text(output.body.text)
+                Text(TimelineStyle.linkedPlainText(output.body.text))
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(output.body.isError ? .red : .secondary)
                     // Six lines of output is enough to recognise it and not enough to bury
