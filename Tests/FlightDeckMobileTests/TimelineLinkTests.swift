@@ -117,6 +117,32 @@ final class TimelineLinkTests: XCTestCase {
         XCTAssertTrue(linkURLs(in: attributed).isEmpty)
     }
 
+    // MARK: Fix round 1 — the two row-level surfaces that route around `proseBody` entirely
+    //
+    // `.toolResult` draws through `toolCard`'s own output block (`TimelineRow.swift:355`), and
+    // a free-text `.prompt` draws through `HistoricalPromptBody`'s else-branch in
+    // `PromptCard.swift:508` — neither goes through `TimelineRow.proseBody`, so the tests above
+    // (which exercise the helper against `.toolResult`/`.thinking`-shaped `TimelineItem`s) don't
+    // actually cover either row. These do, tied to the call sites by name.
+
+    /// The headline case: a URL inline in a tool's output text, as drawn by `toolCard`'s own
+    /// `Text(...)` at `TimelineRow.swift:355`, not the general `proseBody` arm.
+    func testABareURLInAToolOutputCardBecomesALinkRun() {
+        let attributed = NSAttributedString(
+            TimelineStyle.linkedPlainText("output written to https://example.com/artifact.zip")
+        )
+        XCTAssertEqual(linkURLs(in: attributed), ["https://example.com/artifact.zip"])
+    }
+
+    /// The free-text branch of `HistoricalPromptBody` (`PromptCard.swift:508`) — a prompt with
+    /// no parseable `PromptQuestion` falls back to raw text, now linkified the same way.
+    func testABareURLInAFreeTextPromptCardBecomesALinkRun() {
+        let attributed = NSAttributedString(
+            TimelineStyle.linkedPlainText("approve the change at https://example.com/review")
+        )
+        XCTAssertEqual(linkURLs(in: attributed), ["https://example.com/review"])
+    }
+
     // MARK: Lockstep — the two prose renderers agree
 
     /// **The target the brief names: match MarkdownUI.** Both renderers are handed the same
