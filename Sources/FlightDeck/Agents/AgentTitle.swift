@@ -3,19 +3,18 @@ import Foundation
 /// What every agent's title sanitizer has in common, so the part that differs is one
 /// argument rather than two copies of the same trim-and-cap.
 ///
-/// The difference is real and it is about the **channel the name travels down**, not about
-/// taste. Claude's rename is `/rename <name>` typed into a pty that may have no `claude`
-/// running — an explicitly supported degradation where the text reaches a bare shell — so a
-/// name that could act as shell syntax is stripped. Codex's rename is `thread/name/set` over
-/// JSON-RPC and touches no shell at any point, so the same strip would only mangle the user's
-/// title: `fix build (part 2)` became `fix build part 2` in codex's own thread list.
+/// **Neither agent strips shell metacharacters, and the two converged on that answer for
+/// different reasons — the channel the name travels down.** Codex's rename is
+/// `thread/name/set` over JSON-RPC and touches no shell at any point, so the strip only ever
+/// mangled the user's title: `fix build (part 2)` became `fix build part 2` in codex's own
+/// thread list. Claude's rename is `/rename <name>` typed into a pty, which used to double as
+/// a bare shell whenever `claude` itself was not yet running — an explicitly supported
+/// degradation the strip existed to guard. `SessionStore.inject` now refuses to type anywhere
+/// but a live, on-screen composer (see `ClaudeTextChannel`), so that bare-shell case cannot
+/// reach this path any more, and claude dropped the strip too.
 enum AgentTitle {
     /// Long enough for a sentence, short enough for a sidebar row and for `claude --name`.
     static let maxLength = 120
-
-    /// Characters with special meaning to `sh`/`bash`/`zsh`. Kept minimal: ordinary
-    /// punctuation people use in names is left alone.
-    static let shellMetacharacters = CharacterSet(charactersIn: ";&|`$()<>")
 
     /// Trims, strips control characters and `forbidden`, and caps length. Returns nil when
     /// nothing usable remains, which callers treat as "revert to the previous title".
