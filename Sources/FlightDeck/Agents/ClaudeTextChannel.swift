@@ -29,9 +29,11 @@ import Foundation
 struct ClaudeTextChannel: AgentTextChannel {
     /// Claude shows this in the input box when messages are queued behind a running turn — the
     /// input itself is empty and typing appends another queued message, so it is a hint, not a
-    /// draft. Version-pinned to Claude Code's wording (verified 2.1.268). If the wording drifts,
-    /// this match simply fails and behaviour reverts to today's (refuse-until-idle) — never a
-    /// clobber, because `submit()` still kills-and-compares.
+    /// draft. Version-pinned to Claude Code's wording (verified 2.1.268). Only `isComposerEmpty`
+    /// reads it now, and `isComposerEmpty` only feeds the `composer=` diagnostic string
+    /// (`promptTypingComposerState`) — nothing gates typing on it. So a wording drift merely
+    /// mislabels that log line; it can never cause a clobber, because injection is gated on
+    /// `hasComposerBox` and `submit()` kills-and-compares regardless.
     static let queuedMessagesHint = "Press up to edit queued messages"
 
     func isComposerEmpty(_ injector: TextInjecting) -> Bool {
