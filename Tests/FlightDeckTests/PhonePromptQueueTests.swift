@@ -181,6 +181,26 @@ final class PhonePromptQueueTests: XCTestCase {
         XCTAssertEqual(spy.sent, [], "the tab those words were meant for is gone")
     }
 
+    /// **The restore is owed even when the request is abandoned mid-settle.** A one-row draft is
+    /// killed to probe the box; if the request is superseded — here the tab closes — while
+    /// claude repaints, the settle must STILL yank the draft back out of the kill-ring. Gating
+    /// the restore on the same `stillWanted` re-check that guards the typing (as an earlier cut
+    /// did) destroyed the very draft the kill-probe exists to protect: Ctrl+U had already gone
+    /// out, and the abandoned settle returned without the Ctrl+Y. Restore first, decide second.
+    func testAKilledDraftIsRestoredEvenWhenTheRequestIsAbandonedDuringTheSettle() {
+        let (store, spy, id, _) = makeBusyStoreWithADraft()
+        var settle: (() -> Void)?
+        store.injectionSettle = { settle = $0 }
+        store.submitPrompt("ship it", token: UUID(), to: id)
+        XCTAssertEqual(spy.events, [.killLine],
+                       "the kill goes out before the settle; nothing else has yet")
+
+        store.closeSession(id)          // supersedes the request: stillWanted() is now false
+        settle?()
+        XCTAssertEqual(spy.events, [.killLine, .yank], "the draft is restored, not abandoned")
+        XCTAssertTrue(spy.sent.isEmpty, "and nothing is typed")
+    }
+
     /// A window, for the reason `resumePromptWindow` has one, and a longer one because a
     /// claude turn running a test suite outlives two minutes routinely.
     func testAnExpiredPromptIsDroppedUnsent() {
