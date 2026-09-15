@@ -264,8 +264,8 @@ final class CodexTextChannelTests: XCTestCase {
     }
 
     /// A screen that draws the rename modal's marker glyph as its very last line, but not the
-    /// modal's own title two rows above it — proof that the title check at
-    /// `CodexTextChannel.swift:139` is load-bearing, not decorative. Without it, any repaint
+    /// modal's own title two rows above it — proof that the title check in
+    /// `CodexTextChannel.renameModal` is load-bearing, not decorative. Without it, any repaint
     /// ending in a `▌`-prefixed line would be read as the open modal, and the name would be
     /// typed into whatever that line actually is.
     func testAScreenWithTheMarkerButNotTheModalTitleIsRefused() throws {
@@ -292,7 +292,7 @@ final class CodexTextChannelTests: XCTestCase {
     /// as 136x45 with per-line trailing whitespace stripped before it was committed — but other
     /// fixture batches in this repo are stored WITHOUT that stripping, so `readViewport()` can
     /// legitimately hand back a title row padded out to the full terminal width in production.
-    /// Before Fix 2, the raw `==` at `CodexTextChannel.swift:139` would refuse this screen; the
+    /// Before Fix 2, the raw `==` in `CodexTextChannel.renameModal` would refuse this screen; the
     /// `trimmingCharacters` fix must accept it. The padding is computed here from the fixture
     /// that is actually committed, never checked in as a second, padded copy of it.
     func testAModalScreenPaddedToTheCaptureWidthIsStillRecognised() throws {
