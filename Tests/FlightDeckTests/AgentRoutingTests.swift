@@ -351,6 +351,7 @@ final class AgentRoutingTests: XCTestCase {
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.
         static let textChannel: AgentTextChannel? = ClaudeTextChannel()
+        static let renameTyping: AgentRenameTyping? = nil
         static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
         static let negotiatesIdentity = false
         static let needsRuntimeStart = false
@@ -411,6 +412,7 @@ final class AgentRoutingTests: XCTestCase {
         // once, when the protocol grew and it did not. Delegating means the next requirement
         // added costs nothing here.
         static var textChannel: (any AgentTextChannel)? { ClaudeAdapter.textChannel }
+        static var renameTyping: (any AgentRenameTyping)? { ClaudeAdapter.renameTyping }
         static var dialogDriver: (any AgentDialogDriver)? { ClaudeAdapter.dialogDriver }
         static var negotiatesIdentity: Bool { ClaudeAdapter.negotiatesIdentity }
         static var needsRuntimeStart: Bool { ClaudeAdapter.needsRuntimeStart }
