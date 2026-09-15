@@ -162,6 +162,160 @@ final class CodexTextChannelTests: XCTestCase {
         XCTAssertEqual(sentCount, 1, "the store clears its mid-injection mark in here")
     }
 
+    // MARK: - submitRename
+    //
+    // Asserted against the Task 1 capture, `Fixtures/Codex/tui-rename-modal.captured.txt` —
+    // verbatim output from a real codex 0.154.0 `/rename`. Nothing here describes a modal
+    // anybody authored.
+
+    /// The full two-stage happy path, typed in one exact sequence: `/rename`⏎ to open the
+    /// modal, then the field-clearing `.killLine` (the fix for the prefill hazard — see
+    /// `CodexTextChannel.submitRename`), then `<name>`⏎ to commit it. No draft restore at the
+    /// end because the composer held only the placeholder.
+    func testTheFullHappyPathTypesRenameThenClearsAndTypesTheName() throws {
+        let injector = FakeInjector(viewport: try viewport("tui-idle.captured"))
+        injector.script([try viewport("tui-idle.captured"), try viewport("tui-rename-modal.captured")])
+        var finished: Bool?
+        XCTAssertTrue(channel.submitRename("new name", into: injector,
+                                           settle: { $0() }, stillWanted: { true },
+                                           onFinished: { finished = $0 }))
+        XCTAssertEqual(injector.actions,
+                       [.killLine, .text("/rename"), .return, .killLine, .text("new name"), .return],
+                       "the second .killLine is the field-clearing step — losing it reopens the prefill hazard")
+        XCTAssertEqual(finished, true)
+    }
+
+    /// The token-safety test. If `/rename` never actually opens a modal — a slow repaint, a
+    /// version mismatch, anything — typing the name anyway would submit it to the model as a
+    /// real prompt. The name must appear nowhere in what was sent, and the call escapes
+    /// instead of pressing on.
+    func testAMissingModalEscapesAndTypesNoName() throws {
+        let injector = FakeInjector(viewport: try viewport("tui-idle.captured"))
+        injector.script([try viewport("tui-idle.captured")])   // never repaints into the modal
+        var finished: Bool?
+        XCTAssertTrue(channel.submitRename("should never be sent", into: injector,
+                                           settle: { $0() }, stillWanted: { true },
+                                           onFinished: { finished = $0 }))
+        XCTAssertFalse(injector.actions.contains(.text("should never be sent")),
+                       "no modal means the name must never reach the pty")
+        XCTAssertTrue(injector.actions.contains(.escape))
+        XCTAssertEqual(finished, false)
+    }
+
+    /// A real draft is restored only once the modal has committed the new name — never typed
+    /// into the modal's own name field, which is the specific hazard that rules out reusing
+    /// `submit` for this.
+    func testARealDraftIsRestoredOnlyAfterTheModalCommits() throws {
+        let draftScreen = """
+        › half-written thought
+
+          gpt-5.6-sol default · /tmp/work
+        """
+        let injector = FakeInjector(viewport: draftScreen)
+        injector.script([draftScreen, try viewport("tui-rename-modal.captured")])
+        var finished: Bool?
+        XCTAssertTrue(channel.submitRename("new name", into: injector,
+                                           settle: { $0() }, stillWanted: { true },
+                                           onFinished: { finished = $0 }))
+        XCTAssertEqual(injector.actions,
+                       [.killLine, .text("/rename"), .return,
+                        .killLine, .text("new name"), .return,
+                        .text("half-written thought")],
+                       "the restore is the LAST action — strictly after the modal's own Return")
+        XCTAssertEqual(finished, true)
+    }
+
+    /// The request can be replaced or cancelled while codex repaints between the two stages —
+    /// re-checked once, right after the first kill, exactly as `submit` does.
+    func testACancelledRenameTypesNothingAfterTheKill() throws {
+        let injector = FakeInjector(viewport: try viewport("tui-idle.captured"))
+        var finished: Bool?
+        XCTAssertTrue(channel.submitRename("new name", into: injector,
+                                           settle: { $0() }, stillWanted: { false },
+                                           onFinished: { finished = $0 }))
+        XCTAssertEqual(injector.actions, [.killLine],
+                       "a request replaced while codex repainted must not be typed")
+        XCTAssertEqual(finished, false)
+    }
+
+    /// `onFinished` is the one-shot guarantee `AgentRenameTyping` substitutes for `submit`'s
+    /// one-shot `settle` — it must fire exactly once on every one of the three ways this call
+    /// can end.
+    func testOnFinishedRunsExactlyOnceOnSuccessAbortAndCancellation() throws {
+        let success = FakeInjector(viewport: try viewport("tui-idle.captured"))
+        success.script([try viewport("tui-idle.captured"), try viewport("tui-rename-modal.captured")])
+        var successCount = 0
+        _ = channel.submitRename("new name", into: success, settle: { $0() },
+                                 stillWanted: { true }, onFinished: { _ in successCount += 1 })
+        XCTAssertEqual(successCount, 1, "success must finish exactly once")
+
+        let abort = FakeInjector(viewport: try viewport("tui-idle.captured"))
+        abort.script([try viewport("tui-idle.captured")])   // no modal ever appears
+        var abortCount = 0
+        _ = channel.submitRename("new name", into: abort, settle: { $0() },
+                                 stillWanted: { true }, onFinished: { _ in abortCount += 1 })
+        XCTAssertEqual(abortCount, 1, "a refused modal must finish exactly once")
+
+        let cancelled = FakeInjector(viewport: try viewport("tui-idle.captured"))
+        var cancelledCount = 0
+        _ = channel.submitRename("new name", into: cancelled, settle: { $0() },
+                                 stillWanted: { false }, onFinished: { _ in cancelledCount += 1 })
+        XCTAssertEqual(cancelledCount, 1, "a cancellation must finish exactly once")
+    }
+
+    /// A screen that draws the rename modal's marker glyph as its very last line, but not the
+    /// modal's own title two rows above it — proof that the title check at
+    /// `CodexTextChannel.swift:139` is load-bearing, not decorative. Without it, any repaint
+    /// ending in a `▌`-prefixed line would be read as the open modal, and the name would be
+    /// typed into whatever that line actually is.
+    func testAScreenWithTheMarkerButNotTheModalTitleIsRefused() throws {
+        let injector = FakeInjector(viewport: try viewport("tui-idle.captured"))
+        injector.script([
+            try viewport("tui-idle.captured"),
+            """
+            ▌ Not Rename Thread
+            ▌
+            ▌ some field value
+            """,
+        ])
+        var finished: Bool?
+        XCTAssertTrue(channel.submitRename("should never be sent", into: injector,
+                                           settle: { $0() }, stillWanted: { true },
+                                           onFinished: { finished = $0 }))
+        XCTAssertFalse(injector.actions.contains(.text("should never be sent")),
+                       "a screen that merely draws the marker must not be read as the modal")
+        XCTAssertTrue(injector.actions.contains(.escape))
+        XCTAssertEqual(finished, false)
+    }
+
+    /// Fix 2's regression test. `tui-rename-modal.captured.provenance.json` records the capture
+    /// as 136x45 with per-line trailing whitespace stripped before it was committed — but other
+    /// fixture batches in this repo are stored WITHOUT that stripping, so `readViewport()` can
+    /// legitimately hand back a title row padded out to the full terminal width in production.
+    /// Before Fix 2, the raw `==` at `CodexTextChannel.swift:139` would refuse this screen; the
+    /// `trimmingCharacters` fix must accept it. The padding is computed here from the fixture
+    /// that is actually committed, never checked in as a second, padded copy of it.
+    func testAModalScreenPaddedToTheCaptureWidthIsStillRecognised() throws {
+        let raw = try viewport("tui-rename-modal.captured")
+        let capturedColumns = 136
+        let padded = raw
+            .components(separatedBy: "\n")
+            .map { line -> String in
+                guard line.count < capturedColumns else { return line }
+                return line + String(repeating: " ", count: capturedColumns - line.count)
+            }
+            .joined(separator: "\n")
+
+        let injector = FakeInjector(viewport: try viewport("tui-idle.captured"))
+        injector.script([try viewport("tui-idle.captured"), padded])
+        var finished: Bool?
+        XCTAssertTrue(channel.submitRename("new name", into: injector,
+                                           settle: { $0() }, stillWanted: { true },
+                                           onFinished: { finished = $0 }))
+        XCTAssertEqual(finished, true,
+                       "trailing padding on the title row must not defeat the modal check")
+    }
+
     // MARK: - Fixture
 
     private final class FakeInjector: TextInjecting {
@@ -173,11 +327,35 @@ final class CodexTextChannelTests: XCTestCase {
         var viewportAfterKill: String?
         private(set) var actions: [Action] = []
 
+        /// A verbatim screen sequence that advances on `sendReturn()`, modelling `codex
+        /// resume` REPLACING the screen with each Return the way `SpyInjector.script(_:)`
+        /// documents for claude — `/rename`⏎ opens the modal, `<name>`⏎ closes it, and each
+        /// press is a repaint this fake must show. Off by default: most cases in this file
+        /// are about `submit`, which never advances past one screen.
+        private var scriptedScreens: [String] = []
+        private var screenIndex = 0
+
         init(viewport: String) { self.viewport = viewport }
+
+        /// Screens handed back in turn as `sendReturn()` is called — the first is what
+        /// `readViewport()` returns until the first Return, the second from then on, and so
+        /// on. Fewer Returns than screens, or more, both leave the last-reached screen in
+        /// place rather than going out of bounds, which is what a real terminal does when
+        /// nothing further repaints it.
+        func script(_ screens: [String]) {
+            scriptedScreens = screens
+            screenIndex = 0
+            if let first = screens.first { viewport = first }
+        }
 
         func readViewport() -> String? { viewport }
         func sendText(_ text: String) { actions.append(.text(text)) }
-        func sendReturn() { actions.append(.return) }
+        func sendReturn() {
+            actions.append(.return)
+            guard screenIndex + 1 < scriptedScreens.count else { return }
+            screenIndex += 1
+            viewport = scriptedScreens[screenIndex]
+        }
         func sendKillLine() {
             actions.append(.killLine)
             if let after = viewportAfterKill { viewport = after }
