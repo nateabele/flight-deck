@@ -4975,7 +4975,8 @@ final class SessionStore: ObservableObject {
     /// **The gate list `inject` and `injectRename` both stand behind, in exactly one copy.**
     ///
     /// Extracted so the two cannot drift apart. They differ in what they type and in when
-    /// they release the `injecting` mark, and in nothing else — and a second copy of these
+    /// they release the `injecting` mark, and in nothing else that bears on whether this is a
+    /// good moment — and a second copy of these
     /// four conditions is how one caller quietly acquires a laxer idea of "a good moment"
     /// than the other.
     ///
@@ -5075,6 +5076,18 @@ final class SessionStore: ObservableObject {
     /// `renameTyping` has a modal to drive and goes through `injectRename`; everything else
     /// types `/rename <name>` in a single shot through `inject`. Claude is the second case,
     /// and its leg is byte-for-byte what it always was.
+    ///
+    /// **An entry here also holds that tab's prompt queue, which is new for codex.** Both
+    /// `flushPromptQueue(_:)` and `flushPendingPrompts` skip a tab while `pendingRenames[id]`
+    /// is non-nil, and before codex reached this queue no codex tab ever had an entry in it —
+    /// now every codex rename seeds one, and `testTheWireCallStillFiresWithNoAttachedInjector`
+    /// pins that a tab with no injector keeps its entry pending indefinitely, by design. So
+    /// "deferral is free" is not quite the whole story, and the part that makes it safe today
+    /// is worth stating rather than rediscovering: every condition that defers a rename
+    /// forever — no injector, an unreadable composer — also makes `inject` refuse a prompt on
+    /// its own, and `flushPromptQueue` expires its entries BEFORE it consults this interlock,
+    /// so a phone still gets its `.promptExpired` instead of hanging. Whoever next widens the
+    /// set of agents that queue here should re-check both of those.
     private func flushPendingRename(_ id: UUID) {
         guard let name = pendingRenames[id] else { return }
         // Shared verbatim by both legs. A second rename during the settle window replaces the
