@@ -141,6 +141,11 @@ final class CodexRenameTests: XCTestCase {
         XCTAssertTrue(spy.events.isEmpty, "not one keystroke, not even the kill")
         XCTAssertEqual(tab.store.pendingRenamesForTesting[tab.id], "busy",
                        "a DEFERRAL keeps the entry for the retry tick")
+
+        // Drained, as the three wire tests above drain: the `.codex` arm's `thread/name/set`
+        // is a fire-and-forget `Task`, and one left in flight resumes on the main actor during
+        // some LATER test — after `tearDown` has deleted this one's `projectsRoot`.
+        try await settle(tab.transport, untilMethodCountExceeds: 4)
     }
 
     /// `waiting` means a dialog is up: a Return there answers the dialog instead of
@@ -156,6 +161,8 @@ final class CodexRenameTests: XCTestCase {
 
         XCTAssertTrue(spy.events.isEmpty, "not one keystroke, not even the kill")
         XCTAssertEqual(tab.store.pendingRenamesForTesting[tab.id], "waiting")
+
+        try await settle(tab.transport, untilMethodCountExceeds: 4)   // see the test above
     }
 
     /// Deferral is a delay, not a loss: the registry scan is the retry tick. Ported from
@@ -181,11 +188,19 @@ final class CodexRenameTests: XCTestCase {
                        [.killLine, .text("/rename"), .ret,
                         .killLine, .text("later"), .ret])
         XCTAssertNil(tab.store.pendingRenamesForTesting[tab.id])
+
+        try await settle(tab.transport, untilMethodCountExceeds: 4)   // see the busy test
     }
 
-    /// One pending rename per tab, replaced rather than queued. Ported from
-    /// `SessionRenameTests.testASecondRenameReplacesThePendingOne`.
-    func testASecondCodexRenameReplacesThePendingOne() async throws {
+    /// One pending rename per tab, replaced rather than queued — while BOTH are still merely
+    /// queued. Ported from `SessionRenameTests.testASecondRenameReplacesThePendingOne`.
+    ///
+    /// Named for the queue and not for the mid-flight case on purpose: the composer is
+    /// unreadable for both renames here, so each defers inside `CodexTextChannel.submitRename`
+    /// at `guard let bar = composer(injector)` having typed nothing. Nothing is ever in
+    /// flight, so `stillWanted` is never called and the identity guard in `flushPendingRename`
+    /// is never reached. The test below that one covers that.
+    func testASecondCodexRenameReplacesThePendingEntry() async throws {
         let spy = SpyInjector()
         let tab = try await makeCodexTab(injector: spy)
         spy.viewportIsReadable = false
@@ -200,6 +215,90 @@ final class CodexRenameTests: XCTestCase {
         XCTAssertEqual(spy.sent, ["/rename", "second"],
                        "the superseded name is never typed, and never typed in turn")
         XCTAssertEqual(tab.store.title(of: tab.id), "second")
+
+        // 5, not 4: two renames means two `thread/name/set` Tasks, and waiting for only the
+        // first would leave the second in flight — the very leak this drain is here to close.
+        try await settle(tab.transport, untilMethodCountExceeds: 5)
+    }
+
+    /// **A rename superseded MID-FLIGHT must not take its replacement down with it.**
+    ///
+    /// The test above cannot see this: there, both renames defer before typing. Here the first
+    /// one really starts — the kill goes out and the `injecting` mark is held — so the second
+    /// is refused by the shared gate and sits in `pendingRenames`. When the first attempt's
+    /// settle finally runs, `stillWanted()` reads false and `submitRename` unwinds with
+    /// `onFinished(false)`, which is the ONLY path that reaches the identity guard in
+    /// `flushPendingRename`. Without that guard the store clears `pendingRenames[id]`
+    /// unconditionally and wipes "second": it is never typed and never retried, the sidebar
+    /// shows it, the TUI shows the old name forever, and the sole trace is a log line claiming
+    /// a modal failed to appear — which is not what happened.
+    ///
+    /// Driven by pumping the settle in steps rather than the fixture's synchronous `{ $0() }`,
+    /// because a settle that runs inline leaves no window in which a second rename can arrive.
+    func testARenameSupersededMidFlightKeepsItsReplacement() async throws {
+        let spy = SpyInjector()
+        let tab = try await makeCodexTab(injector: spy)
+        // Hold the continuations instead of running them, so the first drive is genuinely
+        // suspended mid-flight when the second rename lands.
+        var pending: [() -> Void] = []
+        tab.store.injectionSettle = { pending.append($0) }
+        spy.script(try renameScreens())
+
+        XCTAssertTrue(tab.store.rename(tab.id, to: "first"))    // kill sent, mark held
+        XCTAssertTrue(tab.store.rename(tab.id, to: "second"))   // refused by the gate, queued
+        XCTAssertEqual(spy.events, [.killLine],
+                       "the superseded attempt stops at the kill")
+
+        while !pending.isEmpty { pending.removeFirst()() }       // the first attempt cancels
+
+        XCTAssertEqual(tab.store.pendingRenamesForTesting[tab.id], "second",
+                       "the replacement survives the cancellation it caused")
+        XCTAssertFalse(spy.sent.contains("first"),
+                       "a cancelled rename types its name nowhere")
+
+        // And it is not merely retained — the retry tick really types it.
+        tab.store.injectionSettle = { $0() }
+        tab.store.applyRegistry([:])
+        XCTAssertEqual(spy.sent, ["/rename", "second"])
+        XCTAssertNil(tab.store.pendingRenamesForTesting[tab.id],
+                     "committed, so the entry is retired")
+
+        try await settle(tab.transport, untilMethodCountExceeds: 5)
+    }
+
+    /// **The `injecting` mark is RELEASED when the drive finishes, and nothing else in this
+    /// file can see that.** Every other test here drives one rename per tab, so all of them
+    /// would still pass with the mark left permanently set — and a leaked mark wedges every
+    /// future injection into that tab, silently, for the life of the process. `injectRename`
+    /// holds the mark across both stages of the modal and clears it in `onFinished`, which is
+    /// a strictly longer window than `inject`'s, so it is the one worth pinning.
+    ///
+    /// Asked by renaming a SECOND time and requiring that drive to land, rather than by
+    /// reading the mark: `injectionGate` refuses on `injecting.contains(id)` before anything is
+    /// typed, so a second transcript arriving at all is proof the mark was let go. The shape
+    /// `SessionStoreAbortTests.testATabAlreadyInjectingIsRefused` establishes is the same
+    /// question from the other side — it holds the mark and asserts the refusal.
+    func testACompletedRenameReleasesTheTabForTheNextInjection() async throws {
+        let spy = SpyInjector()
+        let tab = try await makeCodexTab(injector: spy)
+        spy.script(try renameScreens())
+
+        XCTAssertTrue(tab.store.rename(tab.id, to: "first rename"))
+        XCTAssertEqual(spy.sent, ["/rename", "first rename"])
+
+        // A fresh pair of screens: the drive advanced the first script to its end.
+        spy.script(try renameScreens())
+        spy.events.removeAll()
+
+        XCTAssertTrue(tab.store.rename(tab.id, to: "second rename"))
+
+        XCTAssertEqual(spy.events,
+                       [.killLine, .text("/rename"), .ret,
+                        .killLine, .text("second rename"), .ret],
+                       "a tab whose mark leaked would refuse this drive before the kill")
+        XCTAssertNil(tab.store.pendingRenamesForTesting[tab.id])
+
+        try await settle(tab.transport, untilMethodCountExceeds: 5)
     }
 
     /// **The no-TUI path must not regress.** Typing is additive: with no injector attached
