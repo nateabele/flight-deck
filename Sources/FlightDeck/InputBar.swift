@@ -37,6 +37,20 @@ enum InputBar {
     /// `Fixtures/Codex/tui-idle.captured.txt`.
     static let codexMarker: Character = "›"
 
+    /// U+258C, LEFT HALF BLOCK — the rule codex's `/rename` modal draws down its left edge.
+    /// A third glyph, not a third parser: `Fixtures/Codex/tui-rename-modal.captured.txt`
+    /// (captured against real codex 0.154.0, see its `.provenance.json`) proved `▌` sits flush
+    /// against column 0 on every row the modal draws it, with neither of `read`'s two hazards
+    /// — no indentation, and no surrounding box rule for the continuation loop below to stop
+    /// on, unlike `ChoiceDialog`'s framed dialogs. So `read(marker:)` finds it unchanged.
+    ///
+    /// The modal draws `▌` on three rows — title, a bare rule, then the input row — and
+    /// `lastIndex(where:)` below locks onto the LAST one, which is the input row, not the
+    /// title. That is deliberate, not a miss: it means one `read` call both proves the modal
+    /// is on screen (a non-nil result) and returns the field's current value, which is
+    /// exactly what `CodexTextChannel.submitRename` needs before it clears that field.
+    static let renameModalMarker: Character = "▌"
+
     /// Reads the *last* box on screen. Earlier markers are echoes of submitted messages
     /// sitting in the scrollback; locking onto one would read a frozen old prompt. Both
     /// agents echo submitted prompts with their own marker, so this rule is shared, not

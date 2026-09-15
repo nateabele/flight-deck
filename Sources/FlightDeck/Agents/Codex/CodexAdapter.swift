@@ -42,6 +42,18 @@ struct CodexAdapter: AgentAdapter {
     /// restored by re-typing rather than by the Ctrl-Y ring codex was never shown to keep.
     static let textChannel: AgentTextChannel? = CodexTextChannel()
 
+    /// **The stage `thread/name/set` cannot reach.** That call renames the thread's own
+    /// metadata over JSON-RPC, but it types nothing at the pty a running `codex resume` is
+    /// drawing — so left alone, the terminal keeps the old name on screen and
+    /// `CodexNameWatcher` tails that stale name straight back into the sidebar, making a
+    /// rename that DID succeed look like it reverted. This is what types `/rename` at the
+    /// terminal the way claude's rename already does, so the screen agrees with the rename
+    /// the moment codex answers.
+    ///
+    /// The same value `textChannel` holds, not a second type — the modal reader needs
+    /// `composer(_:)` and `hasFooter`, which live on `CodexTextChannel` alone.
+    static let renameTyping: AgentRenameTyping? = CodexTextChannel()
+
     /// **The closer of the two, and now a separate question.** Driving a dialog needs no
     /// input box and no kill ring, so everything blocking `textChannel` above is irrelevant
     /// to it: codex's approval list is nearer `ChoiceDialog`'s model than claude's own —
