@@ -21,7 +21,7 @@ import Foundation
 /// 3. **The composer is byte-identical idle and mid-turn.** Codex keeps it up and accepting
 ///    during a turn, and the only busy signal is a separate `◦ Working (…)` line above. So
 ///    nothing here may infer "ready" from how the composer looks — and nothing does.
-struct CodexTextChannel: AgentTextChannel {
+struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
     /// Codex's empty-composer placeholder, which is rendered in exactly the shape of a real
     /// draft and differs only in colour — which `ghostty_surface_read_text` does not return.
     /// Claude has the same hazard with a rotating hint; codex's is one fixed string, which is
@@ -113,6 +113,131 @@ struct CodexTextChannel: AgentTextChannel {
                 injector.sendText(before)
             }
             onSent()
+        }
+        return true
+    }
+
+    /// Reads codex's `/rename` modal off screen, or nil when it is not up.
+    ///
+    /// **Keys on the title, not on the glyph alone** — mirroring `hasFooter`'s own "position
+    /// is the guard, not mere presence" idiom above. The modal's footer, `Press enter to
+    /// confirm or esc to go back`, is one word away from `approval-command.captured.txt`'s
+    /// `Press enter to confirm or esc to cancel`, so a footer-only check cannot tell the two
+    /// dialogs apart; the title, `▌ Rename thread`, is unique to this one and is what this
+    /// checks. The footer is real corroboration codex draws, but this reader does not need it
+    /// to be certain, so it is not re-checked here.
+    ///
+    /// `InputBar.renameModalMarker`'s own doc explains why `InputBar.read` — unchanged —
+    /// lands on the INPUT row rather than the title: `lastIndex(where:)` finds the *last*
+    /// `▌`-prefixed line, and the modal draws three (title, a bare rule, then the input row).
+    /// That single call both proves the modal is up (non-nil) and returns what the field
+    /// already holds, which `submitRename` needs before it clears that field.
+    private func renameModal(_ injector: TextInjecting) -> InputBar.Reading? {
+        guard let viewport = injector.readViewport() else { return nil }
+        let lines = viewport.components(separatedBy: "\n")
+        guard let inputRow = lines.lastIndex(where: { $0.first == InputBar.renameModalMarker }),
+              inputRow >= 2,
+              lines[inputRow - 2].trimmingCharacters(in: .whitespaces) == "▌ Rename thread",
+              let bar = InputBar.read(fromViewport: viewport, marker: InputBar.renameModalMarker),
+              // Same one-row rule as `composer(_:)`: a field spanning rows cannot be taken
+              // apart and put back a row at a time.
+              bar.rows.count == 1
+        else { return nil }
+        return bar
+    }
+
+    /// Types the killed draft back, unless there was nothing real to restore. Shared by both
+    /// of `submitRename`'s exit paths — a refused modal and a committed one — because the
+    /// draft is the same thing to protect either way, and the emptiness check is the same
+    /// `isComposerEmpty` already uses: an empty box or the placeholder means there is nothing
+    /// to put back.
+    ///
+    /// **This is not `submit`'s guard.** `submit` restores only on a CONFIRMED change — it
+    /// re-reads the composer after the kill and compares `after != before` before typing
+    /// anything back. This function drops that re-read: by the time either exit path calls
+    /// it, the screen has moved through `/rename` and, on the success path, the modal's own
+    /// submission — there is no "after the kill" screen left to read back against `before`.
+    /// The emptiness check is what stands in its place, and it is a weaker guarantee: it
+    /// protects against retyping nothing, not against retyping something the kill never
+    /// actually removed.
+    private func restoreDraft(_ before: String, into injector: TextInjecting) {
+        guard !before.isEmpty, before != Self.placeholder else { return }
+        injector.sendText(before)
+    }
+
+    /// **Types codex's `/rename` and, once the modal answers, the new name — never the other
+    /// way around.**
+    ///
+    /// Two submissions, two repaints to wait through, so this calls `settle` twice rather
+    /// than once — see `AgentRenameTyping`'s doc comment for why that is legal here and is
+    /// not for `submit`. `onFinished` is what carries the one-shot guarantee instead, firing
+    /// exactly once whichever of the three ways this ends: the name committed, the modal
+    /// never came up, or the request was cancelled while codex repainted.
+    ///
+    /// **Stage two gates on a POSITIVE modal reading**, not an emptiness check. If `/rename`
+    /// did not open a modal — a version mismatch, a slow repaint, codex refusing for a reason
+    /// of its own — typing `<name>`⏎ anyway would submit it to the model as a real prompt,
+    /// spending tokens and polluting the user's thread with a name nobody asked it about. So
+    /// an unread or absent modal escapes and stops, exactly as `composer(_:)`'s own guard at
+    /// the top of `submit` fails closed rather than guesses.
+    ///
+    /// **The modal's field is killed unconditionally before the name is typed, with no
+    /// compare.** The captured field reads `session 2` — the thread's CURRENT name — and
+    /// pyte cannot see ANSI dim, so the capture cannot prove whether that is real prefilled
+    /// text or a dim placeholder hint. Typing straight into prefilled text would produce
+    /// `session 2newname`, so the kill runs regardless of which reading is true: on the dim
+    /// reading it is a no-op (`sendKillLine()` on an empty line is documented as one, both in
+    /// `SpyInjector` and in the real injector), and on the prefilled reading it is the only
+    /// thing standing between this call and a corrupted thread name. This is NOT the
+    /// kill-and-compare the 54769a4 regression made — that regression bailed on typing when a
+    /// read disagreed; this always types, and only ever varies whether it restores a draft
+    /// afterward.
+    func submitRename(
+        _ name: String,
+        into injector: TextInjecting,
+        settle: @escaping (@escaping () -> Void) -> Void,
+        stillWanted: @escaping @MainActor () -> Bool,
+        onFinished: @escaping @MainActor (Bool) -> Void
+    ) -> Bool {
+        guard let bar = composer(injector) else { return false }
+        let before = bar.content
+
+        injector.sendKillLine()
+        settle {
+            guard stillWanted() else {
+                onFinished(false)
+                return
+            }
+            injector.sendText("/rename")
+            injector.sendReturn()
+            settle {
+                guard self.renameModal(injector) != nil else {
+                    // No `settle` between the Escape and the restore, unlike every other
+                    // injection pair in this method. That is deliberate, not an oversight:
+                    // `sendEscape` here is dismissing a modal that this branch has already
+                    // established is NOT open (`renameModal` read nil), so there is nothing
+                    // pending to wait out — the Escape is a defensive no-op for the case
+                    // where the modal opened after this read but before this line runs, not
+                    // a repaint this call depends on. Restoring immediately keeps the two
+                    // keystrokes atomic from the terminal's point of view. Residual risk: if
+                    // the modal really is mid-open and Escape has not yet been processed
+                    // when `before` is typed, that text could land in the still-open modal's
+                    // field rather than the composer — a narrow race, and the same class of
+                    // risk `submit` accepts by typing right after `sendKillLine()` with no
+                    // settle in between.
+                    injector.sendEscape()
+                    self.restoreDraft(before, into: injector)
+                    onFinished(false)
+                    return
+                }
+                injector.sendKillLine()
+                injector.sendText(name)
+                injector.sendReturn()
+                settle {
+                    self.restoreDraft(before, into: injector)
+                    onFinished(true)
+                }
+            }
         }
         return true
     }
