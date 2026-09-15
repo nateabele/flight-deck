@@ -146,11 +146,25 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
         return bar
     }
 
-    /// Types the killed draft back, unless there was nothing real to restore. Shared by both
-    /// of `submitRename`'s exit paths — a refused modal and a committed one — because the
+    /// Types the killed draft back, unless there was nothing real to restore. Shared by two of
+    /// `submitRename`'s THREE exit paths — a refused modal and a committed one — because the
     /// draft is the same thing to protect either way, and the emptiness check is the same
     /// `isComposerEmpty` already uses: an empty box or the placeholder means there is nothing
     /// to put back.
+    ///
+    /// **The third path — cancellation — deliberately does not call this, and the draft is
+    /// then simply gone.** `submitRename` kills the composer unconditionally before its first
+    /// settle, because comparing before and after is the only way to learn whether anything
+    /// was there; so by the time `stillWanted()` reads false, a real draft has already been
+    /// destroyed and nothing types it back. The retry cannot recover it either — it re-reads
+    /// the now-empty composer, so its own `before` is empty. Recorded here as known and
+    /// intentional rather than left to look like an oversight.
+    ///
+    /// `ClaudeTextChannel.submit` also skips its restore on cancellation, but the two are not
+    /// equally cheap, and the asymmetry is the part a reader needs. Claude leaves the draft one
+    /// Ctrl+Y away in its own kill ring; this function re-types instead precisely because codex
+    /// has never been shown to keep such a ring — see the doc above, which deliberately does
+    /// not depend on one. Reaching this case at all takes two renames in flight at once.
     ///
     /// **This is not `submit`'s guard.** `submit` restores only on a CONFIRMED change — it
     /// re-reads the composer after the kill and compares `after != before` before typing

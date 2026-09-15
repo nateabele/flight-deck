@@ -98,7 +98,7 @@ protocol AgentAdapter {
     /// needed a second settle would either leak the mark early or never fire at all. See
     /// `AgentRenameTyping`'s doc comment for the rest of that reasoning.
     ///
-    /// Read through `AgentID.renameTyping` below, which is what Task 3's store will consult.
+    /// Read through `AgentID.renameTyping` below, which is what the store consults.
     static var renameTyping: AgentRenameTyping? { get }
 
     /// **How a select-list dialog this agent has raised is driven — or `nil`, the refusal.**
@@ -407,9 +407,9 @@ extension AgentID {
         }
     }
 
-    /// See `AgentAdapter.renameTyping`. Consulted by `SessionStore.flushPendingRename`
-    /// (Task 3), after `rename`'s `thread/name/set` succeeds, to type the same name at the
-    /// pty that call cannot reach.
+    /// See `AgentAdapter.renameTyping`. Consulted by `SessionStore.flushPendingRename`,
+    /// alongside `rename`'s `thread/name/set` — which it does not wait for — to type the same
+    /// name at the pty that call cannot reach.
     var renameTyping: AgentRenameTyping? {
         switch self {
         case .claude: ClaudeAdapter.renameTyping
