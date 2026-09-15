@@ -1170,7 +1170,15 @@ final class SessionStore: ObservableObject {
     private var closeObserver: NSObjectProtocol?
     private var appActivationObserver: NSObjectProtocol?
 
-    /// Renames typed into the sidebar but not yet typed into `claude`, one per tab.
+    /// Renames typed into the sidebar but not yet typed at the agent's pty, one per tab.
+    ///
+    /// No longer claude-only. Codex joins this queue too — `rename`'s `.codex` arm seeds it
+    /// alongside the `thread/name/set` it already sends, because the wire call renames the
+    /// thread's metadata and the attached `codex resume` TUI never learns. Which agent a
+    /// given entry belongs to is not recorded here and does not need to be:
+    /// `flushPendingRename` re-derives it from the tab, and both agents type `/rename` — the
+    /// difference is only whether a modal follows.
+    ///
     /// See `flushPendingRename` for why an injection waits.
     private var pendingRenames: [UUID: String] = [:]
 
@@ -3899,11 +3907,22 @@ final class SessionStore: ObservableObject {
     /// tab therefore never sent `thread/name/set`, so the sidebar title and codex's thread
     /// name diverged permanently — and since the thread name is what `session_index.jsonl`
     /// and `thread/read` both report, the next tail or restore flicked the sidebar back to
-    /// the old one. Worse, it
-    /// queued `/rename <name>` for a pty nothing would ever retire it from: `flushPendingRename`
-    /// retried it on every registry tick for the life of the process, and `InputBar.read`
-    /// keys on a line starting with `❯` — a common shell prompt glyph — so a match would have
-    /// sent Ctrl-U and pasted `/rename foo` into the user's live codex session.
+    /// the old one.
+    ///
+    /// **The second half of that warning was wrong, and is retracted here rather than left
+    /// to mislead.** It claimed the queued `/rename <name>` would be pasted into the user's
+    /// live codex session, because `InputBar.read` keys on a line starting with `❯` — a
+    /// common shell prompt glyph. Codex draws `›` (U+203A), so claude's marker matched
+    /// NOTHING on a codex screen and no stray paste was ever possible;
+    /// `CodexTextChannelTests.testClaudesMarkerFindsNothingOnACodexScreen` pins exactly that.
+    /// The real defect was the opposite of a stray paste — it was silence.
+    ///
+    /// Both halves are closed now, and through one funnel rather than two paths. The `.codex`
+    /// arm below sends `thread/name/set` AND seeds `pendingRenames`, so the name is also
+    /// typed at codex's own composer under `CodexTextChannel`'s grammar. The "queued for a
+    /// pty nothing would ever retire it from" hazard is real for that queue, and it is
+    /// answered in `flushPendingRename`, which retires a codex entry on an ABORT as well as
+    /// on success — see the deferral-versus-abort note there.
     ///
     /// Claude's leg stays synchronous and inline, deliberately. `AgentAdapter.rename` is
     /// `async`, and dispatching claude through it would push `injectPendingRename` into a
@@ -3984,6 +4003,24 @@ final class SessionStore: ObservableObject {
                     )
                 }
             }
+            // **Belt and braces, and the two are not redundant.** The wire call above renames
+            // the thread's METADATA, and it is the only half that works when no TUI is
+            // attached — it reaches the app-server rather than the screen, which is why it
+            // survives the writer lock a live `codex resume` holds. What it cannot do is
+            // reach that running TUI, which owns the screen and goes on drawing the old name.
+            // This types the same name at its composer. Drop either half and a real case
+            // breaks: without the wire call a tab with no surface never renames at all,
+            // without this one the sidebar and the TUI disagree until the tab restarts.
+            //
+            // **Double-writing cannot echo-loop, and that is provable rather than hoped.**
+            // Typing the rename makes codex write a `session_index.jsonl` line, which
+            // `CodexNameWatcher` tails and delivers as an `AgentEvent.title`. That lands in
+            // `CodexRuntime`'s `apply(_:to:)` → `applyExternalTitle`, which sets the title
+            // directly behind an equality loop-guard and NEVER re-enters `rename()`. So the
+            // line our own typing produces either equals the title already set and stops at
+            // that guard, or is a genuine external rename — and neither outcome can queue a
+            // second injection.
+            injectPendingRename(id, name)
         }
         // True means the name was ACCEPTED and the local title changed — not that the agent
         // has been told. The codex arm above is deliberately fire-and-forget and the claude
@@ -4006,11 +4043,19 @@ final class SessionStore: ObservableObject {
     /// One pending rename per tab, replaced rather than queued: renaming twice before the
     /// injection lands should type the second name once, not both names in turn.
     private func injectPendingRename(_ id: UUID, _ title: String) {
-        // Claude's rule by name, not by lookup: what this queues is text typed at claude's
-        // pty, so it is claude's channel whatever tab asked for it. `pendingRenames` has no
-        // other producer — `AgentAdapter.rename` for an agent that renames over a wire never
-        // reaches here.
-        guard let name = ClaudeAdapter.sanitizedTitle(title) else { return }
+        // **This agent's rule, by lookup.** It was claude's rule by name, hardcoded, on the
+        // reasoning that whatever queued here became text at claude's pty — and every
+        // sentence of that is now false: codex reaches here too, so the tab asking is no
+        // longer evidence of which grammar the name is about to be typed into. A codex name
+        // run through claude's shell-metacharacter strip would be sanitized for a hazard
+        // codex does not have, and would disagree with the title `rename` already put in the
+        // sidebar, which used this same per-agent rule.
+        //
+        // Safe for codex's modal regardless of which agent answers: `AgentTitle.sanitized`
+        // holds the half BOTH rules share, and it strips control characters for every agent.
+        // A newline therefore still cannot be smuggled into the modal to submit it early.
+        // See `AgentAdapter.sanitizedTitle`.
+        guard let name = agent(of: id)?.sanitizedTitle(title) else { return }
         pendingRenames[id] = name
         flushPendingRename(id)
     }
@@ -4859,12 +4904,18 @@ final class SessionStore: ObservableObject {
     ///   this build cannot read, and `AgentID.textChannel` is the question it asks — a `nil`
     ///   there is the whole refusal.
     ///
-    ///   **Widening this back out is not the cautious move.** Nothing codex has goes through
-    ///   here: `sendToShell` types resume commands and `initialInput` directly at the pty and
-    ///   never touches this funnel, and `CodexAdapter.loginInvocation` has `inject: nil`, so
-    ///   no codex sign-in text is ever queued either. What passes through today is claude's
-    ///   `/login`, claude's `/rename`, a restore's "Keep going" and a phone's message — all
-    ///   of them claude's, all of them typed into a box only claude's grammar can find.
+    ///   **Widening this back out is still not the cautious move — but the reason has moved.**
+    ///   It used to be that nothing codex had came through here at all. That is no longer
+    ///   true: a codex rename does, via `injectRename` below, which shares these same gates.
+    ///   What has NOT changed is that every one of them arrives holding a channel this build
+    ///   can actually read — claude's `/login`, claude's `/rename`, a restore's "Keep going",
+    ///   a phone's message, and now codex's rename, each typed into a box its own agent's
+    ///   grammar can find. The refusal being narrow is what makes that true, so the caution
+    ///   is aimed at the same place: widen the set of agents by giving one a channel, never
+    ///   by letting a `nil` through. `sendToShell`'s resume commands and `initialInput` still
+    ///   go straight to the pty without touching this funnel, and
+    ///   `CodexAdapter.loginInvocation` still has `inject: nil`, so no codex sign-in text is
+    ///   queued here either.
     /// - **Idle only.** While `busy` the text queues behind the running turn; while
     ///   `waiting` a Return answers a permission prompt or dialog instead of submitting;
     ///   `shell` was `idle` plus a background task — the turn had already finished, so the
@@ -4900,31 +4951,15 @@ final class SessionStore: ObservableObject {
         // the Return after it PICKS AN OPTION. Answering a dialog is `answerPrompt`'s job,
         // behind an interlock that reads the screen before committing — a prompt must never
         // become an answer by arriving at the wrong moment.
-        guard let channel = session(for: id)?.agent.textChannel,
-              let activity = statuses[id]?.activity,
-              activity == .idle || activity == .busy,
-              let injector = injector(for: id)
-        else { return false }
-        // Mid-turn is for PROMPTS, not for everything that types. A rename is `/rename x`,
-        // a slash command whose effect the user is watching for, and queueing it behind a
-        // running turn to land minutes later is worse than waiting for the box. A prompt is
-        // the opposite: it is a message to the agent, and landing in its queue is exactly
-        // where the sender wanted it.
-        if activity == .busy {
-            guard allowMidTurn, channel.isComposerEmpty(injector) else { return false }
-        }
-        // See `injecting`'s doc comment: this is the one place both callers funnel through,
-        // so it is the one place that can refuse a second injection for a tab that already
-        // has one resolving.
-        guard !injecting.contains(id) else { return false }
+        guard let gate = injectionGate(id, allowMidTurn: allowMidTurn) else { return false }
 
         // Marked before the channel is asked, and cleared again if it refuses: the channel's
         // contract is that it settles exactly once iff it returns true (see
         // `AgentTextChannel.submit`), so the mark is retired either here or inside that
         // settle and never both.
         injecting.insert(id)
-        let started = channel.submit(
-            text, into: injector,
+        let started = gate.channel.submit(
+            text, into: gate.injector,
             settle: { [weak self] work in
                 self?.injectionSettle {
                     defer { self?.injecting.remove(id) }
@@ -4937,19 +4972,163 @@ final class SessionStore: ObservableObject {
         return started
     }
 
+    /// **The gate list `inject` and `injectRename` both stand behind, in exactly one copy.**
+    ///
+    /// Extracted so the two cannot drift apart. They differ in what they type and in when
+    /// they release the `injecting` mark, and in nothing else — and a second copy of these
+    /// four conditions is how one caller quietly acquires a laxer idea of "a good moment"
+    /// than the other.
+    ///
+    /// `nil` here is a DEFERRAL, never a failure: nothing has been typed, so the caller
+    /// leaves its entry pending and the registry tick retries it. Telling that apart from an
+    /// abort — typed, but the agent did not do what we expected — is `flushPendingRename`'s
+    /// job, and the two must not be conflated.
+    ///
+    /// **The channel handed back is the `textChannel`, even on the rename path**, and that is
+    /// deliberate. The only thing this gate needs a channel FOR is `isComposerEmpty`, which
+    /// lives on `AgentTextChannel`; codex has both channels, so asking for that one costs
+    /// the rename path nothing. An agent declaring `renameTyping` but no `textChannel` is
+    /// refused here — correct, since nothing could then say whether its composer was clear.
+    private func injectionGate(
+        _ id: UUID, allowMidTurn: Bool
+    ) -> (channel: AgentTextChannel, injector: TextInjecting)? {
+        guard let channel = session(for: id)?.agent.textChannel,
+              let activity = statuses[id]?.activity,
+              activity == .idle || activity == .busy,
+              let injector = injector(for: id)
+        else { return nil }
+        // Mid-turn is for PROMPTS, not for everything that types. A rename is `/rename x`,
+        // a slash command whose effect the user is watching for, and queueing it behind a
+        // running turn to land minutes later is worse than waiting for the box. A prompt is
+        // the opposite: it is a message to the agent, and landing in its queue is exactly
+        // where the sender wanted it.
+        if activity == .busy {
+            guard allowMidTurn, channel.isComposerEmpty(injector) else { return nil }
+        }
+        // See `injecting`'s doc comment: this is the one place every caller funnels through,
+        // so it is the one place that can refuse a second injection for a tab that already
+        // has one resolving.
+        guard !injecting.contains(id) else { return nil }
+        return (channel, injector)
+    }
+
+    /// Types a rename through an agent's two-stage modal, or defers. Codex's leg; claude
+    /// declares no `renameTyping` and never arrives here. See `AgentRenameTyping`.
+    ///
+    /// **The single difference from `inject` that matters is WHEN the `injecting` mark is
+    /// released, and it is the entire reason this method exists.** `inject` clears the mark
+    /// inside its settle wrapper, which is exactly right for a channel contracted to settle
+    /// once. `submitRename` settles three times on its success path — once per repaint it
+    /// must wait through — so clearing there would drop the mark while the modal was still
+    /// open and unnamed, and a rename arriving in that window would fire a second Ctrl+U into
+    /// a half-driven modal. That is the race `injecting`'s own doc comment exists to close,
+    /// reopened at a worse moment. So the mark is held across BOTH stages and released in
+    /// `onFinished`, which `AgentRenameTyping` guarantees runs exactly once on every path:
+    /// success, a refused modal, or cancellation.
+    ///
+    /// **The settle wrapper therefore has to run its closure on every path, including the one
+    /// where the store is already gone.** `submitRename` only ever reaches `onFinished` from
+    /// inside a closure it hands to `settle`, so a wrapper that dropped one would leave
+    /// `onFinished` unfired and this tab's mark held forever — wedging every later injection
+    /// into that tab, not just this rename. That is why `self` is unwrapped below with a
+    /// fallback that still runs the work, rather than with a `self?.` that would silently
+    /// swallow it. No test can be relied on to catch that mistake: a test's settle is
+    /// `{ $0() }` and always fires.
+    @discardableResult
+    private func injectRename(
+        _ name: String,
+        into id: UUID,
+        stillWanted: @escaping @MainActor () -> Bool,
+        onFinished: @escaping @MainActor (Bool) -> Void
+    ) -> Bool {
+        guard let typing = session(for: id)?.agent.renameTyping,
+              // `allowMidTurn: false`, matching `inject`'s default for a rename: a slash
+              // command whose effect the user is watching for is worth waiting for the box.
+              let gate = injectionGate(id, allowMidTurn: false)
+        else { return false }
+
+        injecting.insert(id)
+        let started = typing.submitRename(
+            name, into: gate.injector,
+            settle: { [weak self] work in
+                // Runs `work` even with no store left — see this method's doc comment. With
+                // `self` gone, `stillWanted` below reads false and `submitRename` unwinds
+                // without typing anything, which is the right answer regardless.
+                guard let self else { return work() }
+                self.injectionSettle(work)
+            },
+            stillWanted: stillWanted,
+            onFinished: { [weak self] committed in
+                // Released HERE rather than in the settle above, which is what holds it
+                // across both stages of the modal.
+                self?.injecting.remove(id)
+                onFinished(committed)
+            }
+        )
+        if !started { injecting.remove(id) }
+        return started
+    }
+
     /// Types a pending rename into a session, or leaves it pending if this is a bad moment.
+    ///
+    /// Branches on the agent's declared capability rather than on its name: an agent with a
+    /// `renameTyping` has a modal to drive and goes through `injectRename`; everything else
+    /// types `/rename <name>` in a single shot through `inject`. Claude is the second case,
+    /// and its leg is byte-for-byte what it always was.
     private func flushPendingRename(_ id: UUID) {
         guard let name = pendingRenames[id] else { return }
-        inject(
-            "/rename \(name)",
+        // Shared verbatim by both legs. A second rename during the settle window replaces the
+        // first; typing the superseded name would be wrong, and typing both in turn worse.
+        // This identity check is what makes "replaced, not queued" actually true.
+        let stillWanted: @MainActor () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return self.pendingRenames[id] == name
+        }
+
+        guard session(for: id)?.agent.renameTyping != nil else {
+            inject(
+                "/rename \(name)",
+                into: id,
+                stillWanted: stillWanted,
+                onSent: { [weak self] in self?.pendingRenames[id] = nil }
+            )
+            return
+        }
+
+        injectRename(
+            name,
             into: id,
-            // A second rename during the settle window replaces the first; typing the
-            // superseded name would be wrong, and typing both in turn worse.
-            stillWanted: { [weak self] in
-                guard let self else { return false }
-                return self.pendingRenames[id] == name
-            },
-            onSent: { [weak self] in self?.pendingRenames[id] = nil }
+            stillWanted: stillWanted,
+            onFinished: { [weak self] committed in
+                guard let self else { return }
+                // **Retired on BOTH outcomes, because a DEFERRAL and an ABORT are different
+                // things and only one of them is worth retrying.**
+                //
+                // A deferral never reaches here at all: the gates refused before anything was
+                // typed, `injectRename` returned false, and the entry sits in the queue until
+                // the registry tick retries it. That is the good case, and it is unchanged.
+                //
+                // An abort DOES reach here, as `committed == false`: `/rename`⏎ was really
+                // typed and no modal came up, so our model of codex is wrong. Retrying that
+                // on every tick for the life of the process is precisely the "queued
+                // `/rename` for a pty nothing would ever retire it from" hazard `rename`'s
+                // own doc comment warns about — and unlike when that warning was written,
+                // there is now a real `›` composer for it to land in. Retiring is defensible
+                // exactly because `thread/name/set` was sent unconditionally: the thread
+                // really is renamed, so the cost here is a stale tab label until the TUI
+                // restarts, not a lost rename.
+                //
+                // Guarded on identity for the same reason `stillWanted` is. A cancellation
+                // also arrives as `committed == false`, and it means a SECOND rename replaced
+                // this one mid-flight — the entry in the queue is the newer name, and
+                // retiring blind would throw that replacement away unsent.
+                guard self.pendingRenames[id] == name else { return }
+                self.pendingRenames[id] = nil
+                guard !committed else { return }
+                Self.renameLogger.error(
+                    "codex rename typed but no modal appeared for tab \(id.uuidString.lowercased(), privacy: .public); the thread was renamed over the wire, the attached TUI still shows the old name"
+                )
+            }
         )
     }
 
