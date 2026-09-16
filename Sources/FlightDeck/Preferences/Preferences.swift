@@ -11,15 +11,40 @@ struct ShellPreferences: Codable, Equatable {
     /// sidebar's inbound rename sync, since the watcher tails a file that is never
     /// written. See docs/FOLLOWUPS.md. Defaults on.
     var clearChildSessionMarker: Bool
+    /// Bytes of terminal output `fd-abduco` keeps in its replay ring, so a reattach can
+    /// redraw the scrollback a session had before it detached. Applies to every session's
+    /// shell, regardless of agent — this is terminal infrastructure, not a Claude setting.
+    /// Optional for the same reason every field added to this struct after
+    /// `clearChildSessionMarker` must be: a `"shell": {...}` blob already on disk predates
+    /// this field, and a non-optional property with no default would fail to decode every
+    /// one of them. `nil` means "never configured", which reads as 4 MiB.
+    var scrollbackBudgetBytes: Int?
+    /// Whether an idle session's agent is put to sleep (SIGSTOP'd, its terminal detached)
+    /// after `sleepIdleThresholdSeconds` of inactivity. Applies to every session's shell,
+    /// regardless of agent — sleep freezes a process group and tears down a terminal surface,
+    /// neither of which is Claude-specific. Optional for the same reason `scrollbackBudgetBytes`
+    /// is: a `"shell": {...}` blob already on disk predates this field, and a non-optional
+    /// property with no default would fail to decode every one of them. `nil` means "never
+    /// configured", which reads as on — idle sleep is on by default.
+    var idleSleepEnabled: Bool?
+    /// How long a session must sit idle before it is put to sleep. Optional for the same
+    /// reason as `idleSleepEnabled`. `nil` reads as 600 (10 minutes).
+    var sleepIdleThresholdSeconds: Int?
 
     init(
         shellOverride: String? = nil,
         environment: [String: String] = [:],
-        clearChildSessionMarker: Bool = true
+        clearChildSessionMarker: Bool = true,
+        scrollbackBudgetBytes: Int? = nil,
+        idleSleepEnabled: Bool? = nil,
+        sleepIdleThresholdSeconds: Int? = nil
     ) {
         self.shellOverride = shellOverride
         self.environment = environment
         self.clearChildSessionMarker = clearChildSessionMarker
+        self.scrollbackBudgetBytes = scrollbackBudgetBytes
+        self.idleSleepEnabled = idleSleepEnabled
+        self.sleepIdleThresholdSeconds = sleepIdleThresholdSeconds
     }
 }
 

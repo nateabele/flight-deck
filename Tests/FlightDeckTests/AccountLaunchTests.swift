@@ -31,11 +31,15 @@ final class AccountLaunchTests: XCTestCase {
     }
 
     /// No account is not the same as a wrong one: a store with nothing to resolve must hand
-    /// the shell exactly what it handed it before accounts existed.
+    /// the shell exactly what it handed it before accounts existed, plus the scrollback
+    /// budget every session's shell carries regardless of account or agent.
     func testNoAccountLeavesTheEnvironmentUntouched() {
         let store = PreferencesStore(persistence: nil)
         store.preferences.shell.environment = ["FOO": "bar"]
-        XCTAssertEqual(store.sessionEnvironment(inherited: [:]), ["FOO": "bar"])
+        XCTAssertEqual(
+            store.sessionEnvironment(inherited: [:]),
+            ["FOO": "bar", "FD_OUTLOG_BUDGET": String(store.scrollbackBudgetBytes)]
+        )
     }
 
     // MARK: - Refusing a login that is gone

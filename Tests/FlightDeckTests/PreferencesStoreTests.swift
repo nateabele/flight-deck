@@ -196,6 +196,102 @@ final class PreferencesStoreTests: XCTestCase {
         XCTAssertNil(store.sessionEnvironment(inherited: [:])["CLAUDE_CODE_CHILD_SESSION"])
     }
 
+    // MARK: Scrollback budget
+
+    func testScrollbackBudgetDefaultsToFourMiB() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        XCTAssertEqual(store.scrollbackBudgetBytes, 4 * 1024 * 1024)
+        XCTAssertNil(store.preferences.shell.scrollbackBudgetBytes)
+    }
+
+    func testScrollbackBudgetRoundTripsAndClamps() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        store.scrollbackBudgetBytes = 8 * 1024 * 1024
+        XCTAssertEqual(store.scrollbackBudgetBytes, 8 * 1024 * 1024)
+        store.scrollbackBudgetBytes = 999 * 1024 * 1024 // over max
+        XCTAssertEqual(store.scrollbackBudgetBytes, 16 * 1024 * 1024)
+        store.scrollbackBudgetBytes = 1 // under min
+        XCTAssertEqual(store.scrollbackBudgetBytes, 262_144)
+    }
+
+    func testSessionEnvironmentCarriesScrollbackBudget() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        store.scrollbackBudgetBytes = 2 * 1024 * 1024
+        XCTAssertEqual(store.sessionEnvironment(inherited: [:])["FD_OUTLOG_BUDGET"], String(2 * 1024 * 1024))
+    }
+
+    /// Same trap `testShellPreferencesWithoutTheIdleSleepKeysStillDecode` guards, for
+    /// `scrollbackBudgetBytes`: a `"shell": {...}` blob written before this field existed
+    /// must still decode, with the other shell fields intact and the new one nil (which the
+    /// store's getter reads as 4 MiB).
+    func testShellPreferencesWithoutTheScrollbackBudgetKeyStillDecode() throws {
+        let original = ShellPreferences(
+            shellOverride: "/bin/fish", environment: ["FOO": "bar"], clearChildSessionMarker: false,
+            scrollbackBudgetBytes: 8 * 1024 * 1024
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try JSONEncoder().encode(original))
+                as? [String: Any]
+        )
+        object.removeValue(forKey: "scrollbackBudgetBytes")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(ShellPreferences.self, from: legacy)
+
+        XCTAssertEqual(decoded.shellOverride, "/bin/fish")
+        XCTAssertEqual(decoded.environment, ["FOO": "bar"])
+        XCTAssertFalse(decoded.clearChildSessionMarker)
+        XCTAssertNil(decoded.scrollbackBudgetBytes)
+    }
+
+    // MARK: Idle sleep
+
+    func testIdleSleepDefaultsOnAtTenMinutes() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        XCTAssertTrue(store.idleSleepEnabled)
+        XCTAssertEqual(store.sleepIdleThresholdSeconds, 600)
+        XCTAssertNil(store.preferences.shell.idleSleepEnabled)
+        XCTAssertNil(store.preferences.shell.sleepIdleThresholdSeconds)
+    }
+
+    func testIdleSleepPreferencesRoundTrip() {
+        let persistence = MemoryPersistence()
+        let store = PreferencesStore(persistence: persistence)
+        store.idleSleepEnabled = false
+        store.sleepIdleThresholdSeconds = 120
+        XCTAssertEqual(persistence.stored?.shell.idleSleepEnabled, false)
+        XCTAssertEqual(persistence.stored?.shell.sleepIdleThresholdSeconds, 120)
+
+        let relaunched = PreferencesStore(persistence: persistence)
+        XCTAssertFalse(relaunched.idleSleepEnabled)
+        XCTAssertEqual(relaunched.sleepIdleThresholdSeconds, 120)
+    }
+
+    /// Same trap `testShellPreferencesWithoutTheScrollbackBudgetKeyStillDecode` guards, for
+    /// these two fields: a `"shell": {...}` blob written before they existed must still
+    /// decode a `ShellPreferences`, with the other shell fields intact and the new ones nil.
+    func testShellPreferencesWithoutTheIdleSleepKeysStillDecode() throws {
+        let original = ShellPreferences(
+            shellOverride: "/bin/fish", environment: ["FOO": "bar"], clearChildSessionMarker: false,
+            idleSleepEnabled: false, sleepIdleThresholdSeconds: 120
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try JSONEncoder().encode(original))
+                as? [String: Any]
+        )
+        object.removeValue(forKey: "idleSleepEnabled")
+        object.removeValue(forKey: "sleepIdleThresholdSeconds")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(ShellPreferences.self, from: legacy)
+
+        XCTAssertEqual(decoded.shellOverride, "/bin/fish")
+        XCTAssertEqual(decoded.environment, ["FOO": "bar"])
+        XCTAssertFalse(decoded.clearChildSessionMarker)
+        XCTAssertNil(decoded.idleSleepEnabled)
+        XCTAssertNil(decoded.sleepIdleThresholdSeconds)
+    }
+
     // MARK: Auto-resume
 
     func testAutoResumeDefaultsOff() {

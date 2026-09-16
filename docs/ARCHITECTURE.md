@@ -77,6 +77,50 @@ Net: **~97% of `GhosttyEmbed/` is reused Ghostty code**; the Flight-Deck-authore
   every update, not just on attach: re-parenting is how tab switching works, so a surface last
   shown at a different window size would otherwise carry a stale grid.
 
+## Detached sessions
+
+Each session's agent shell runs inside its own `fd-abduco` daemon rather than directly under
+the surface's PTY — a separate process tree (`fd-abduco` `setsid`'s itself) that survives
+Flight Deck quitting, crashing, or being replaced by `scripts/swap-release.sh`. This is what
+makes those events invisible to a running `claude`/`codex`: the agent's own pid never changes.
+
+- **`SessionDaemon`** (`Sources/FlightDeck/SessionDaemon.swift`) is a pure path calculator: a
+  session id maps to a socket (`<directory>/<uuid>.sock`), a pidfile (that path + `.pid`), and
+  a space-free symlink to the bundled binary — all rooted at `/tmp/flight-deck-<uid>`, chosen
+  over an Application Support path so `sun_path`'s 104-byte cap always has room regardless of
+  the login's home directory depth. The symlink exists because the real bundled binary
+  (`.../Flight Deck.app/Contents/Resources/fd-abduco`) contains a space, which is fatal to
+  ghostty's shell-command tokenizer.
+- **`LaunchPlan`** decides attach-vs-cold-create from one bool: if `DaemonControlling.isLive`
+  says the id's daemon already has a session, the launch command is `fd-abduco -a <sock>` and
+  types nothing — the shell inside is already running whatever it was running, so a resumed
+  `claude` or `codex resume` must not be re-typed into it. Otherwise the command is
+  `fd-abduco -c <sock> <shell>` (cold-create) and the usual `typed` text (`claude --resume ...`,
+  the "Keep going" auto-resume prompt, an empty string for a plain shell) is sent exactly as it
+  was before this daemon existed. The distinction is agent-agnostic: Claude and Codex sessions
+  go through the same `LaunchPlan.decide`, keyed only on their own daemon's liveness.
+- **`PosixDaemonControl`** is the live `DaemonControlling`: `isLive` probes the `AF_UNIX`
+  socket directly (ground truth a pidfile alone can't give — a crashed daemon can leave a
+  stale socket, or a stale pidfile naming a recycled pid), and `terminate` is `SIGTERM`, poll
+  for up to ~1s, `SIGKILL` if it didn't listen, then unconditionally unlink the socket and
+  pidfile. `SessionStore` owns one `SessionDaemon` and one `DaemonControlling`; the latter now
+  always derives from the former (`PosixDaemonControl(daemon: daemon)`) so a caller can't
+  inject one without the other and end up probing the wrong socket path.
+- **Lifecycle:** a daemon is created on first cold launch, reused on every subsequent attach,
+  and left running across app quit — `reapAllForQuit` deliberately never calls
+  `daemonControl.terminate`. It's torn down in exactly two places: closing its tab
+  (`closeSession`, after the client's own process tree is reaped), and `restore()`'s
+  `reconcileDaemons`, which kills any daemon whose socket survived on disk but whose session
+  didn't come back on this launch (a crash, a hand-edited `sessions.json`, or a
+  pre-this-feature snapshot). A daemon left by a hard crash mid-run is not reaped at all until
+  the next launch reaches that point — it just sits there, reattachable, until then.
+- **Scope:** `fd-abduco` sits below `AgentRuntime`/`ShellResolver` and knows nothing about
+  Claude or Codex — it detaches a shell command, not an agent. Surviving a Mac reboot is out
+  of scope (daemons live in `/tmp`, which does not survive one); cold-resume remains the
+  post-reboot path. See [FOLLOWUPS.md](FOLLOWUPS.md) for carried-forward hardening
+  (replay backpressure, nested-binary code-signing validation) and the debug/release
+  socket-directory sharing caveat.
+
 ## Preferences
 
 `Sources/FlightDeck/Preferences/` holds a pure core and a SwiftUI shell over it.

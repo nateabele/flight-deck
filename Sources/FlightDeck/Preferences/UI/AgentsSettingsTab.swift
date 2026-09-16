@@ -107,10 +107,10 @@ struct ClaudeOptionsPane: View {
                                 )
                             )
                             .accessibilityIdentifier("prefs-auto-resume")
-                        // States the busy/shell rule in the user's terms: "running" is not
-                        // self-evident from the label, and the exclusions are the surprising
-                        // half.
-                        Text("Sessions that were working when Flight Deck last quit are asked to continue once they have resumed. Sessions that were idle, or waiting on you, are left alone.")
+                            // States the busy/shell rule in the user's terms: "running" is not
+                            // self-evident from the label, and the exclusions are the surprising
+                            // half.
+                            Text("Sessions that were working when Flight Deck last quit are asked to continue once they have resumed. Sessions that were idle, or waiting on you, are left alone.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

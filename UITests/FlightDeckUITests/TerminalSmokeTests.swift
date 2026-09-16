@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import XCTest
 
 /// The whole UI gate, in **one** app launch.
@@ -324,13 +325,18 @@ final class TerminalSmokeTests: XCTestCase {
     ///   the search index, whose path is derived independently in `AppDelegate`. Without it a run
     ///   opens the developer's real `search-index.sqlite` and starts a backfill over their whole
     ///   transcript corpus mid-test.
+    /// Shared by `launchIsolated(_:)` and `launchPreservingState(_:)` so the two can name the
+    /// same directory without repeating the literal — the whole point of the pair is that a
+    /// relaunch land on the state the first launch wrote.
+    private static let isolatedStateDir = NSTemporaryDirectory() + "fd-smoke-state"
+
     @discardableResult
     private func launchIsolated(_ extraArguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments += [
             "-ApplePersistenceIgnoreState", "YES",
             "-FlightDeckResetState", "YES",
-            "-FlightDeckStateDir", NSTemporaryDirectory() + "fd-smoke-state",
+            "-FlightDeckStateDir", Self.isolatedStateDir,
         ] + extraArguments
         app.launch()
         app.activate()
@@ -338,6 +344,237 @@ final class TerminalSmokeTests: XCTestCase {
             app.windows.firstMatch.waitForExistence(timeout: 15), "no window appeared"
         )
         return app
+    }
+
+    /// The counterpart to `launchIsolated(_:)`: relaunches against the SAME state directory but
+    /// WITHOUT `-FlightDeckResetState`, so `SessionStore.restore()` runs against whatever the
+    /// previous launch left in `sessions.json` instead of a freshly seeded slate. This is what
+    /// `testSessionReattachesWithScrollbackAfterRelaunch` uses to prove a session survives a
+    /// kill-and-relaunch: reusing `isolatedStateDir` rather than taking a path parameter is what
+    /// guarantees the second launch actually sees the first one's session.
+    ///
+    /// Also used for that same test's FIRST launch, paired with `clearIsolatedStateDir()` —
+    /// see that method's doc comment for why `launchIsolated(_:)` cannot be used there.
+    @discardableResult
+    private func launchPreservingState(_ extraArguments: [String] = []) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "-ApplePersistenceIgnoreState", "YES",
+            "-FlightDeckStateDir", Self.isolatedStateDir,
+        ] + extraArguments
+        app.launch()
+        app.activate()
+        XCTAssertTrue(
+            app.windows.firstMatch.waitForExistence(timeout: 15), "no window appeared"
+        )
+        return app
+    }
+
+    /// Deletes `isolatedStateDir` outright, so a launch against it starts from a genuinely
+    /// empty slate WITHOUT going through `-FlightDeckResetState`.
+    ///
+    /// That flag cannot be used for `testSessionReattachesWithScrollbackAfterRelaunch`'s FIRST
+    /// launch: `FlightDeckApp.makeStore` wires `SessionStore`'s persistence to `nil` under
+    /// reset (`persistence: resetState ? nil : Self.fileSessionPersistence()`), so the seeded
+    /// session is never written to `sessions.json` at all, and `sessionUUIDFromIsolatedState()`
+    /// would find nothing to capture before the app is even killed. Clearing the directory by
+    /// hand and launching with `launchPreservingState(_:)` (live persistence) instead reaches
+    /// the same clean slate a different way: `SessionStore.init`'s
+    /// `if resetState || !restore() { seedInitialSession() }` still seeds a fresh session on an
+    /// empty directory — `restore()` returns false, same as under reset — but this time
+    /// `seedInitialSession()` also PERSISTS it, which is what makes the capture below possible.
+    ///
+    /// `try?` swallows "doesn't exist" along with everything else: a launch against a directory
+    /// this failed to clear for some other reason would surface as that launch's own
+    /// window-existence assertion failing, which names the real problem better than this would.
+    private func clearIsolatedStateDir() {
+        try? FileManager.default.removeItem(atPath: Self.isolatedStateDir)
+    }
+
+    /// Resolves `testSessionReattachesWithScrollbackAfterRelaunch`'s OWN session id by reading
+    /// its isolated state directory's `sessions.json` directly, rather than assuming there is
+    /// exactly one session anywhere — `/tmp/flight-deck-<uid>` (where the daemon actually lives)
+    /// is shared with every other live Flight Deck session on this machine, so teardown needs
+    /// the precise id to target rather than a directory-wide guess.
+    private func sessionUUIDFromIsolatedState() -> UUID? {
+        struct Entry: Decodable { let id: UUID }
+        struct Snapshot: Decodable { let sessions: [Entry] }
+        let url = URL(fileURLWithPath: Self.isolatedStateDir).appendingPathComponent("sessions.json")
+        guard
+            let data = try? Data(contentsOf: url),
+            let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data)
+        else { return nil }
+        return snapshot.sessions.first?.id
+    }
+
+    /// Kills exactly one session's `fd-abduco` daemon, by id, and removes its socket and
+    /// pidfile — SIGTERM, a short poll, then SIGKILL if it is still alive, mirroring
+    /// `DaemonControl.terminate(_:)`'s own mechanics without depending on it: this test bundle
+    /// is a separate process with no access to the app's internals, only to the same
+    /// well-known `/tmp/flight-deck-<uid>/<id>.sock(.pid)` layout (`SessionDaemon.swift`) the
+    /// app itself writes to.
+    ///
+    /// Deliberately takes a single `id` rather than a directory to sweep: that directory holds
+    /// every OTHER live session's daemon too (the developer's own, or a teammate's), and this
+    /// must never touch them.
+    private func terminateOwnDaemon(_ id: UUID) {
+        let socketPath = "/tmp/flight-deck-\(getuid())/\(id.uuidString.lowercased()).sock"
+        let pidPath = socketPath + ".pid"
+        defer {
+            unlink(socketPath)
+            unlink(pidPath)
+        }
+        guard
+            let contents = try? String(contentsOfFile: pidPath, encoding: .utf8),
+            let pid = Int32(contents.trimmingCharacters(in: .whitespacesAndNewlines)),
+            pid > 0
+        else { return }
+        guard kill(pid, 0) == 0 else { return }
+
+        kill(pid, SIGTERM)
+        for _ in 0..<20 {
+            if kill(pid, 0) != 0 { return }
+            usleep(50_000)
+        }
+        if kill(pid, 0) == 0 {
+            kill(pid, SIGKILL)
+        }
+    }
+
+    /// A single point-in-time reading of whether a session's `fd-abduco` daemon is actually
+    /// alive after Flight Deck has been killed, gathered by `captureDaemonLiveness(sessionID:
+    /// socketPath:pidPath:)` for `testCodexReattachDaemonLivenessProbe`'s decisive capture. Kept
+    /// as a `CustomStringConvertible` value rather than logged piecemeal so `print` and the
+    /// `XCTAttachment` dump below say exactly the same thing.
+    private struct DaemonLivenessSnapshot: CustomStringConvertible {
+        let socketExists: Bool
+        let pidfileExists: Bool
+        let pid: Int32?
+        let pidAlive: Bool
+        let connectSucceeded: Bool
+        let connectDetail: String
+        let matchingProcessLines: [String]
+
+        var description: String {
+            """
+            socket file exists: \(socketExists)
+            pidfile exists: \(pidfileExists)
+            pidfile pid: \(pid.map(String.init) ?? "none")
+            pid alive (kill(pid, 0) == 0): \(pidAlive)
+            raw AF_UNIX connect() to the socket: \(connectSucceeded ? "SUCCEEDED" : "FAILED") (\(connectDetail))
+            matching `ps` lines (by session id or socket path), \(matchingProcessLines.count) found:
+            \(matchingProcessLines.isEmpty ? "  (none)" : matchingProcessLines.map { "  " + $0 }.joined(separator: "\n"))
+            """
+        }
+    }
+
+    /// Replicates `PosixDaemonControl.isLive(_:)` (`Sources/FlightDeck/DaemonControl.swift`)
+    /// inline, from the test process, rather than calling it: this bundle cannot `import
+    /// FlightDeck` (separate process, same reason every marker/glyph in this file is restated as
+    /// a local literal), and the whole point of this probe is to observe exactly what `isLive`
+    /// would have seen — a nonblocking `AF_UNIX` `connect()` to the session's socket — with the
+    /// specific errno attached, not just a bool.
+    private func probeUnixSocketConnect(_ path: String) -> (succeeded: Bool, detail: String) {
+        guard path.utf8.count <= 103 else { return (false, "path too long for sun_path") }
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            return (false, "socket() failed: \(String(cString: strerror(errno)))")
+        }
+        defer { close(fd) }
+
+        let flags = fcntl(fd, F_GETFL, 0)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        withUnsafeMutablePointer(to: &address.sun_path) { field in
+            field.withMemoryRebound(to: CChar.self, capacity: 104) {
+                _ = strlcpy($0, path, 104)
+            }
+        }
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        if result == 0 { return (true, "connect() succeeded immediately") }
+
+        let code = errno
+        switch code {
+        case EISCONN:
+            return (true, "EISCONN")
+        case ENOENT:
+            return (false, "ENOENT — no socket file (nothing ever listened, or it was cleaned up)")
+        case ECONNREFUSED:
+            return (false, "ECONNREFUSED — socket file exists but nothing is listening behind it")
+        case EINPROGRESS:
+            return (false, "EINPROGRESS — connect did not resolve synchronously (unusual for local AF_UNIX)")
+        default:
+            return (false, "errno \(code) (\(String(cString: strerror(code))))")
+        }
+    }
+
+    /// The full process table, one `ps` line per process, for `captureDaemonLiveness` to search
+    /// for anything referencing the daemon's session id or socket path — the "is something
+    /// actually running that thinks it owns this session" half of the probe, independent of
+    /// whatever the socket/pidfile *files* claim. Column order matches the pidfile parsing
+    /// elsewhere in this file (`pid=,ppid=,command=`) purely for a human skimming the dump.
+    private func psProcessTableLines() -> [String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-Ao", "pid=,ppid=,command="]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = Pipe()
+        guard (try? process.run()) != nil else { return ["ps failed to launch"] }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (String(data: data, encoding: .utf8) ?? "").split(separator: "\n").map(String.init)
+    }
+
+    /// The decisive capture `testCodexReattachDaemonLivenessProbe` exists to make: after Flight
+    /// Deck is killed, is the codex session's `fd-abduco` daemon actually DEAD (socket/pidfile
+    /// gone, pid dead, connect refused), or ALIVE-but-unreachable-by-`isLive` (pid alive and/or
+    /// `ps` still shows it, yet the raw connect this method replicates fails)? Bundled as one
+    /// snapshot — rather than four separate assertions — because the whole point is to read all
+    /// four facts together and see which combination actually occurred; a partial read (e.g. the
+    /// pidfile alone) is exactly the kind of guess this investigation is trying to replace with
+    /// ground truth.
+    private func captureDaemonLiveness(
+        sessionID: UUID, socketPath: String, pidPath: String
+    ) -> DaemonLivenessSnapshot {
+        let socketExists = FileManager.default.fileExists(atPath: socketPath)
+        let pidfileExists = FileManager.default.fileExists(atPath: pidPath)
+
+        var pid: Int32?
+        var pidAlive = false
+        if
+            let contents = try? String(contentsOfFile: pidPath, encoding: .utf8),
+            let parsed = Int32(contents.trimmingCharacters(in: .whitespacesAndNewlines)),
+            parsed > 0
+        {
+            pid = parsed
+            pidAlive = kill(parsed, 0) == 0
+        }
+
+        let (connectSucceeded, connectDetail) = probeUnixSocketConnect(socketPath)
+
+        let idNeedle = sessionID.uuidString.lowercased()
+        let matching = psProcessTableLines().filter {
+            $0.lowercased().contains(idNeedle) || $0.contains(socketPath)
+        }
+
+        return DaemonLivenessSnapshot(
+            socketExists: socketExists,
+            pidfileExists: pidfileExists,
+            pid: pid,
+            pidAlive: pidAlive,
+            connectSucceeded: connectSucceeded,
+            connectDetail: connectDetail,
+            matchingProcessLines: matching
+        )
     }
 
     /// ⌘K opens the search overlay while a terminal has focus.
@@ -402,6 +639,828 @@ final class TerminalSmokeTests: XCTestCase {
         XCTAssertEqual(
             app.windows.firstMatch.title, "Flight Deck - \(project)",
             "the window title does not name the active project"
+        )
+    }
+
+    /// The spec's end-to-end payoff: a live session's scrollback survives Flight Deck being
+    /// killed and relaunched, because the pty lives inside a detached `fd-abduco` daemon rather
+    /// than inside Flight Deck's own process. `app.terminate()` kills the ghostty/Flight Deck
+    /// client, but Phase 1 starts each session's daemon `setsid`'d specifically so that SIGTERM
+    /// to its parent never reaches it, and the second launch's `SessionStore.restore()` finds
+    /// the session recorded in `sessions.json` and attaches (`fd-abduco -a`) to whatever is
+    /// still running for it — `LaunchPlan.decide` only types a fresh resume command when
+    /// `daemonControl.isLive` says otherwise. A cold-started shell would never have seen this
+    /// test's marker at all, which is exactly the failure mode this guards against.
+    ///
+    /// Its own launch, like the other standalone behaviours in this file: nothing here depends
+    /// on the shared sequence, and the sequence's ⌘Q at the very end would leave no app alive
+    /// for this test to kill and relaunch anyway.
+    ///
+    /// **Deliberately does not use `launchIsolated(_:)` for its first launch either** — see
+    /// `clearIsolatedStateDir()`'s doc comment for why `-FlightDeckResetState` is unusable here:
+    /// it wires `SessionStore`'s persistence to `nil`, so nothing would ever be written to
+    /// `sessions.json` for this test to capture. `clearIsolatedStateDir()` +
+    /// `launchPreservingState(_:)` reaches the same clean slate with persistence left live.
+    ///
+    /// **Reading terminal output.** `SurfaceView.accessibilityRole` reports `.textArea`, which
+    /// XCUITest surfaces as a `textView` — the same element kind this file already reads with
+    /// `.value as? String` for the Preferences command field. Its value is
+    /// `cachedScreenContents`, a 500ms-cached live snapshot of the terminal's screen, so polling
+    /// it is how this test observes output without a dedicated on-screen text query.
+    ///
+    /// **The marker.** A UUID-suffixed string never seen on screen before this test types it, so
+    /// neither assertion can pass vacuously — a stale sighting from an earlier run or a
+    /// similar-looking prompt cannot satisfy it.
+    ///
+    /// **Why there is a wait before the first `echo`.** A freshly seeded session already has a
+    /// resume/launch command (`claude ...`) queued into its shell the moment the surface is
+    /// created (`LaunchPlan.decide`'s cold path) — and no `claude` binary exists under test, so
+    /// it fails immediately with "command not found" and the shell falls back to its own prompt.
+    /// Typing this test's `echo` before that settles risks interleaving the two into one
+    /// corrupted line, so this waits for the shell to finish that round trip first.
+    func testSessionReattachesWithScrollbackAfterRelaunch() {
+        let nonce = UUID().uuidString.prefix(8)
+        let marker = "FD-REATTACH-\(nonce)"
+
+        // Clear-then-launch-without-reset, not `launchIsolated()` — see this test's own doc
+        // comment and `clearIsolatedStateDir()`'s for why: `-FlightDeckResetState` disables
+        // `SessionStore` persistence outright, which would leave `sessions.json` unwritten for
+        // the capture just below to ever find.
+        clearIsolatedStateDir()
+        var app = launchPreservingState()
+
+        // Captured HERE, right after the seeded session is confirmed running, and BEFORE
+        // anything below that could tear it down — deliberately NOT resolved from inside
+        // teardown. A successful in-app close (below) runs `SessionStore.closeSession` ->
+        // `persist()`, which writes an EMPTY `sessions` array back to this same
+        // `sessions.json`; resolving the id after that point would read `nil` on every
+        // SUCCESSFUL run and only ever "find" one on a run that already failed to clean up —
+        // exactly backwards. Polled rather than read once: `persist()` runs synchronously, but
+        // nothing guarantees it has already landed on disk in the instant the window appears.
+        var sessionID: UUID?
+        _ = waitFor(timeout: 5) {
+            sessionID = sessionUUIDFromIsolatedState()
+            return sessionID != nil
+        }
+        guard let sessionID else {
+            XCTFail(
+                "could not resolve the seeded session's id from "
+                + "\(Self.isolatedStateDir)/sessions.json"
+            )
+            return
+        }
+
+        // Unconditional teardown so a failure partway through this test cannot leak the
+        // daemon and its socket/pidfile under `/tmp/flight-deck-<uid>` past the run. The
+        // in-app graceful close (`SessionStore.closeSession` -> `DaemonControl.terminate`, the
+        // same path a user quitting a tab takes) is attempted first as a nicety, but does not
+        // gate cleanup and must not fail the test if its hover-gated button never appears —
+        // `terminateOwnDaemon` below covers cleanup unconditionally either way. Targeting the
+        // `sessionID` captured above (not re-resolved here) is what makes this idempotent and
+        // correct on the success path: whether or not the close above already tore the daemon
+        // down, `terminateOwnDaemon` finds no live pid in that case and just unlinks whatever
+        // socket/pidfile remain — a no-op, not a failure.
+        //
+        // Never a directory-wide sweep: `/tmp/flight-deck-<uid>` is shared with every other
+        // live Flight Deck session on this machine (the developer's own, or a teammate's), so
+        // only `sessionID` is ever targeted.
+        defer {
+            if app.state != .notRunning {
+                let rows = app.staticTexts.matching(identifier: "session-row-title")
+                rows.firstMatch.hover()
+                let close = app.buttons["close-session"].firstMatch
+                if close.waitForExistence(timeout: 5) {
+                    close.click()
+                    settle()
+                }
+                app.terminate()
+            }
+            terminateOwnDaemon(sessionID)
+        }
+
+        // Give the terminal keyboard focus — the same click this file already uses elsewhere
+        // to hand focus from the sidebar back to the detail pane.
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let terminal = app.textViews.firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface found")
+        func terminalText() -> String { (terminal.value as? String) ?? "" }
+
+        // See the doc comment above: let the doomed `claude` resume attempt finish and the
+        // shell return to its own prompt before typing anything of this test's own.
+        settle()
+        settle()
+        settle()
+
+        app.typeText("echo \(marker)\n")
+        XCTAssertTrue(
+            waitFor(timeout: 10) { terminalText().contains(marker) },
+            "marker never appeared in the terminal before the app was killed"
+        )
+
+        // Kills the Flight Deck process outright. The session's `fd-abduco` daemon was started
+        // `setsid`'d in Phase 1 specifically so it outlives its parent's death — this line is
+        // the whole feature under test.
+        app.terminate()
+
+        // Same state directory, no `-FlightDeckResetState`: `SessionStore.restore()` reads the
+        // session `sessions.json` recorded and, finding its daemon still live, attaches rather
+        // than starting a fresh shell.
+        app = launchPreservingState()
+
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let reattached = app.textViews.firstMatch
+        XCTAssertTrue(
+            reattached.waitForExistence(timeout: 10), "no terminal surface found after relaunch"
+        )
+        func reattachedText() -> String { (reattached.value as? String) ?? "" }
+
+        // Presence is the whole proof, and count is deliberately not asserted. A correct
+        // reattach shows the marker TWICE, not once: an interactive shell echoes typed input,
+        // so both the input-echo line (`echo FD-REATTACH-<nonce>`) and the command's own output
+        // line (`FD-REATTACH-<nonce>`) land in scrollback pre-terminate, and both replay on
+        // reattach — the same echoed-prompt trap `CodexDialogDriver.swift:13-17` documents for
+        // codex's own approval screens ("a live session carries the marker twice"). A cold
+        // shell, by contrast, shows the marker ZERO times: `LaunchPlan.decide` only retypes the
+        // resume command when `daemonControl.isLive` is false, and it retypes the ORIGINAL
+        // `claude` command, not this test's `echo` — there is no path that retypes `echo` a
+        // second time, so there is no over-count case to guard against either. Visible after
+        // relaunch therefore means reattached-and-replayed; absent means cold-started; a count
+        // would only be measuring the tty's own echo behavior, not the feature under test.
+        XCTAssertTrue(
+            waitFor(timeout: 10) { reattachedText().contains(marker) },
+            "marker did not survive relaunch — the reattach replayed no scrollback (or the "
+            + "session cold-started instead of reattaching)"
+        )
+    }
+
+    /// Investigative, not a strict behaviour gate: does a LIVE `claude` session's on-screen
+    /// TUI actually come back after Flight Deck is killed and relaunched, and does the
+    /// reattached prompt still accept a freshly typed command? The scrollback test above
+    /// proves the *text* the pty already emitted survives a relaunch; this asks the harder
+    /// question the marker trick cannot answer — whether claude's alt-screen redraw and its
+    /// live input box come back too, and whether the box is still wired up to receive input.
+    /// Answered by DUMPING the terminal surface at three points (pre-detach, post-reattach,
+    /// post-command) to stdout and as `XCTAttachment`s, so a human can read exactly what
+    /// painted — the asserts here are deliberately light, because what shape a correct
+    /// reattach takes is itself the open question.
+    ///
+    /// **Makes one real `claude` API call** (a one-word prompt, step 8 below) against the
+    /// default, already-logged-in `~/.claude` account — this is not a fixture run.
+    ///
+    /// Shares its isolation machinery with `testSessionReattachesWithScrollbackAfterRelaunch`
+    /// above: `clearIsolatedStateDir()` + `launchPreservingState()` for a clean slate with
+    /// live persistence, `sessionUUIDFromIsolatedState()` to capture the daemon's id before
+    /// anything could tear it down, and `terminateOwnDaemon(_:)` to reap only that daemon
+    /// (never a directory-wide sweep) in teardown. See that test's doc comments for why each
+    /// piece is shaped the way it is; this reuses them rather than re-deriving them.
+    ///
+    /// **No New Session UI needed.** The seeded initial session already IS a claude session:
+    /// `SessionStore.seedInitialSession` calls `newSession(in:waking:)` with no `agent:`
+    /// argument, and `Session.agent` defaults to `.claude` (`SessionModel.swift`). Confirmed
+    /// below with a light assertion rather than assumed silently, so a change to that default
+    /// would fail loudly here instead of this test silently investigating a codex session.
+    ///
+    /// **Detecting "claude painted".** `❯` (U+276F) is `InputBar.claudeMarker` —
+    /// `InputBar.swift` documents it as the character Claude Code's own input box begins every
+    /// row with, and `Fixtures/Claude/idle-empty-box.captured.txt` shows it landing at rest. A
+    /// bare shell prompt never draws it, so polling the surface for that glyph is a reasonably
+    /// specific signal that the TUI — not a `command not found` fallback shell — is on screen.
+    /// Restated as a local literal rather than imported: this test bundle runs as a separate
+    /// process from the app and cannot `import FlightDeck`.
+    func testClaudeSessionReattachDisplayAndCommandFlush() {
+        let claudeMarker: Character = "\u{276F}" // ❯ — see InputBar.claudeMarker
+
+        // Clear-then-launch-without-reset, exactly like the scrollback test above — see that
+        // test's doc comment and `clearIsolatedStateDir()`'s for why `-FlightDeckResetState`
+        // is unusable here: it disables `SessionStore` persistence outright.
+        clearIsolatedStateDir()
+        var app = launchPreservingState()
+
+        // Captured HERE, before anything below could tear the session down — see the
+        // scrollback test's note on why this is polled rather than read once and resolved
+        // before, not after, any close.
+        var sessionID: UUID?
+        _ = waitFor(timeout: 5) {
+            sessionID = sessionUUIDFromIsolatedState()
+            return sessionID != nil
+        }
+        guard let sessionID else {
+            XCTFail(
+                "could not resolve the seeded session's id from "
+                + "\(Self.isolatedStateDir)/sessions.json"
+            )
+            return
+        }
+
+        // Unconditional teardown, exactly like the scrollback test: a failure partway through
+        // must not leak the daemon and its socket/pidfile past this run. Targets only
+        // `sessionID`, never a directory-wide sweep — `/tmp/flight-deck-<uid>` is shared with
+        // every other live Flight Deck session on this machine.
+        defer {
+            if app.state != .notRunning {
+                app.terminate()
+            }
+            terminateOwnDaemon(sessionID)
+        }
+
+        let rows = app.staticTexts.matching(identifier: "session-row-title")
+        XCTAssertTrue(
+            waitFor(timeout: 10) { rows.count == 1 }, "expected exactly one seeded session"
+        )
+
+        // Give the terminal keyboard focus, the same click this file already uses elsewhere.
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let terminal = app.textViews.firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface found")
+        func terminalText() -> String { (terminal.value as? String) ?? "" }
+
+        // claude can take several seconds to boot before it paints its input box — generous
+        // on purpose, this is the first thing under investigation.
+        let painted = waitFor(timeout: 45) { terminalText().contains(claudeMarker) }
+        XCTAssertTrue(
+            painted,
+            "claude never painted its input box before detach — is it installed and logged "
+            + "in for the default ~/.claude account? got:\n\(terminalText())"
+        )
+
+        let preDetach = terminalText()
+        print("PRE-DETACH SURFACE:\n\(preDetach)")
+        let preDetachAttachment = XCTAttachment(string: preDetach)
+        preDetachAttachment.name = "pre-detach"
+        preDetachAttachment.lifetime = .keepAlways
+        add(preDetachAttachment)
+
+        // Kill Flight Deck outright. Phase 1 starts each session's `fd-abduco` daemon
+        // `setsid`'d specifically so SIGTERM to its parent never reaches it — this line is
+        // the detach half of the feature under investigation.
+        app.terminate()
+
+        // Same state directory, no `-FlightDeckResetState`: `SessionStore.restore()` finds
+        // the session's daemon still live and attaches (`fd-abduco -a`) rather than starting
+        // a fresh shell.
+        app = launchPreservingState()
+
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let reattached = app.textViews.firstMatch
+        XCTAssertTrue(
+            reattached.waitForExistence(timeout: 10), "no terminal surface found after relaunch"
+        )
+        func reattachedText() -> String { (reattached.value as? String) ?? "" }
+
+        // THE CRUX: does claude's alt-screen UI come back on reattach? Waited on generously
+        // and then dumped — asserted only as non-empty (soft — the point is to SEE it, not to
+        // pin a specific shape this investigation does not yet know to expect).
+        _ = waitFor(timeout: 15) { !reattachedText().isEmpty }
+        let postReattach = reattachedText()
+        print("POST-REATTACH SURFACE:\n\(postReattach)")
+        let postReattachAttachment = XCTAttachment(string: postReattach)
+        postReattachAttachment.name = "post-reattach"
+        postReattachAttachment.lifetime = .keepAlways
+        add(postReattachAttachment)
+        XCTAssertFalse(postReattach.isEmpty, "surface was completely empty after reattach")
+
+        // Flush a fresh command at the reattached prompt — a real turn, kept to one cheap
+        // word. Clicking first is what hands the reattached surface keyboard focus; the
+        // surface changing at all after typing is this test's evidence that the box actually
+        // accepted the keystrokes rather than swallowing them into a dead pty.
+        reattached.click()
+        settle()
+        app.typeText("hi\n")
+        _ = waitFor(timeout: 20) { reattachedText() != postReattach }
+
+        let postCommand = reattachedText()
+        print("POST-COMMAND SURFACE:\n\(postCommand)")
+        let postCommandAttachment = XCTAttachment(string: postCommand)
+        postCommandAttachment.name = "post-command"
+        postCommandAttachment.lifetime = .keepAlways
+        add(postCommandAttachment)
+        XCTAssertNotEqual(
+            postCommand, postReattach,
+            "the surface did not change at all after typing and submitting — the reattached "
+            + "input box may not be accepting keystrokes"
+        )
+    }
+
+    /// The same investigation as `testClaudeSessionReattachDisplayAndCommandFlush` above, for a
+    /// **codex** session instead: does codex's on-screen TUI come back after Flight Deck is
+    /// killed and relaunched, and does the reattached box still accept a freshly typed command?
+    /// Answered the same way — DUMPING the terminal surface at three points (pre-detach,
+    /// post-reattach, post-command) to stdout and as `XCTAttachment`s — because what shape a
+    /// correct codex reattach takes is exactly as open a question as it was for claude.
+    ///
+    /// **Makes one real `codex` API call** (a one-word prompt, near the end below) against
+    /// whatever account `Preferences.migrateAccountsIfNeeded` resolves as codex's default —
+    /// this is not a fixture run. If no codex account is actually logged in, codex itself is
+    /// expected to show that (a login prompt, a trust dialog, an error) rather than this test
+    /// crashing; the dumps are what let a human tell the two apart.
+    ///
+    /// **Unlike the claude investigation, this needs the New Session UI**, because the seeded
+    /// initial session already IS claude (`SessionStore.seedInitialSession` defaults
+    /// `Session.agent` to `.claude`), so a second, codex, session has to be created on top of
+    /// it. That makes this run with TWO live daemons under `Self.isolatedStateDir` — the seeded
+    /// claude tab and the new codex tab — so teardown below reaps both by id, never a
+    /// directory-wide sweep, exactly like every other test in this file that touches
+    /// `terminateOwnDaemon`.
+    ///
+    /// **Creating the codex session.** Clicking File -> "New Codex Session"
+    /// (`SessionCommands`'s per-agent menu item, built from `NewSessionAffordance.menu`) rather
+    /// than the sidebar's New Session button/dropdown: `Preferences.migrateAccountsIfNeeded`
+    /// seeds a built-in "Default" account for every `AgentID` — codex included — the first time
+    /// preferences are read, regardless of whether a real codex login exists, so the File-menu
+    /// item is present on any machine this suite runs on (`testTheWholeShellInOneSession`
+    /// already asserts its existence, unconditionally, above). `NewSessionAffordance.menu`
+    /// renders it as a single flat item, "New Codex Session", whenever codex has exactly one
+    /// live account — the common case this targets — and only nests it under a submenu of
+    /// account names when there are several; this does not attempt to drive that nested case.
+    /// `SessionStore.createFromMenu(agent:)` behind the click both creates AND selects the new
+    /// session (`createSession(..., selecting: true)`), so no extra click is needed to make it
+    /// active.
+    ///
+    /// **Detecting "codex painted".** `›` (U+203A) is `InputBar.codexMarker` — codex's own
+    /// analogue of claude's `❯`, documented in `CodexAdapter.swift` and `CodexDialogDriver.swift`
+    /// ("codex draws `›` (U+203A)") and shown landing at the idle composer's left edge in
+    /// `Fixtures/Codex/tui-idle.captured.txt` (`› Ask Codex to do anything`). A bare shell
+    /// prompt never draws it, so polling the surface for that glyph is the codex-specific
+    /// version of the same signal the claude investigation uses. Restated as a local literal
+    /// rather than imported, for the same reason as the claude test: this bundle runs as a
+    /// separate process from the app and cannot `import FlightDeck`.
+    func testCodexSessionReattachDisplayAndCommandFlush() {
+        let codexMarker: Character = "\u{203A}" // › — see InputBar.codexMarker
+
+        // Clear-then-launch-without-reset, exactly like the claude investigation above — see
+        // that test's doc comment and `clearIsolatedStateDir()`'s for why
+        // `-FlightDeckResetState` is unusable here: it disables `SessionStore` persistence
+        // outright, and this test needs BOTH sessions it touches to land in `sessions.json`.
+        clearIsolatedStateDir()
+        var app = launchPreservingState()
+
+        // The seeded session's id, captured the same way and for the same reason the claude
+        // test captures its one session's id: before anything below could tear it down. This
+        // test creates a SECOND session on top of it, so both ids are needed for teardown.
+        var seededSessionID: UUID?
+        _ = waitFor(timeout: 5) {
+            seededSessionID = sessionUUIDFromIsolatedState()
+            return seededSessionID != nil
+        }
+        guard let seededSessionID else {
+            XCTFail(
+                "could not resolve the seeded session's id from "
+                + "\(Self.isolatedStateDir)/sessions.json"
+            )
+            return
+        }
+
+        // Resolves the id of whichever session in `sessions.json` is NOT the seeded one —
+        // i.e. the codex tab this test is about to create. `sessionUUIDFromIsolatedState()`
+        // itself always answers the FIRST entry, which is the seeded claude session both
+        // before and after the codex tab is appended, so it cannot be reused here; this reads
+        // the same file with the same shape (see `SessionSnapshot.Entry` for the schema) but
+        // filters on it instead.
+        func codexSessionID() -> UUID? {
+            struct Entry: Decodable { let id: UUID; let agent: String? }
+            struct Snapshot: Decodable { let sessions: [Entry] }
+            let url = URL(fileURLWithPath: Self.isolatedStateDir).appendingPathComponent("sessions.json")
+            guard
+                let data = try? Data(contentsOf: url),
+                let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data)
+            else { return nil }
+            return snapshot.sessions.first { $0.id != seededSessionID }?.id
+        }
+
+        // Unconditional teardown, exactly like the claude investigation, but for TWO daemons:
+        // the seeded claude session's and the codex session's, each targeted by id — never a
+        // directory-wide sweep of `/tmp/flight-deck-<uid>`, which is shared with every other
+        // live Flight Deck session on this machine. `codexSessionID` may still be nil here if
+        // creation itself failed partway through; guarded so a failed creation cannot leak a
+        // half-started daemon either.
+        var codexID: UUID?
+        defer {
+            if app.state != .notRunning {
+                app.terminate()
+            }
+            terminateOwnDaemon(seededSessionID)
+            if let codexID {
+                terminateOwnDaemon(codexID)
+            }
+        }
+
+        let rows = app.staticTexts.matching(identifier: "session-row-title")
+        XCTAssertTrue(
+            waitFor(timeout: 10) { rows.count == 1 }, "expected exactly one seeded session"
+        )
+
+        // See this test's doc comment for why the File menu, not the sidebar control.
+        let file = app.menuBarItems["File"]
+        XCTAssertTrue(file.waitForExistence(timeout: 5), "File menu missing")
+        file.click()
+        let newCodexItem = app.menuItems["New Codex Session"]
+        XCTAssertTrue(
+            newCodexItem.waitForExistence(timeout: 5),
+            "no \"New Codex Session\" menu item — expected one even with no real codex login, "
+            + "since Preferences.migrateAccountsIfNeeded seeds a built-in account for every "
+            + "agent"
+        )
+        newCodexItem.click()
+
+        XCTAssertTrue(
+            waitFor(timeout: 10) { rows.count == 2 }, "creating a codex session added no row"
+        )
+        _ = waitFor(timeout: 5) {
+            codexID = codexSessionID()
+            return codexID != nil
+        }
+        XCTAssertNotNil(codexID, "could not resolve the new codex session's own id")
+
+        // Give the terminal keyboard focus, the same click this file already uses elsewhere.
+        // `createFromMenu` both creates and selects the new session, so the detail pane is
+        // already showing the codex tab's surface by the time this lands.
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let terminal = app.textViews.firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface found")
+        func terminalText() -> String { (terminal.value as? String) ?? "" }
+
+        // Codex is slower to reach its own prompt than claude: `CodexAdapter.needsRuntimeStart`
+        // means a `codex app-server` process has to spawn and negotiate a thread id BEFORE the
+        // pty even types `codex resume <id>`, and only then does codex itself paint. Generous
+        // on purpose, this is the first thing under investigation.
+        let painted = waitFor(timeout: 45) { terminalText().contains(codexMarker) }
+        XCTAssertTrue(
+            painted,
+            "codex never painted its composer before detach — is it installed and logged in? "
+            + "got:\n\(terminalText())"
+        )
+
+        let preDetach = terminalText()
+        print("PRE-DETACH SURFACE:\n\(preDetach)")
+        let preDetachAttachment = XCTAttachment(string: preDetach)
+        preDetachAttachment.name = "pre-detach"
+        preDetachAttachment.lifetime = .keepAlways
+        add(preDetachAttachment)
+
+        // Kill Flight Deck outright. Phase 1 starts each session's `fd-abduco` daemon
+        // `setsid`'d specifically so SIGTERM to its parent never reaches it — this line is
+        // the detach half of the feature under investigation, exactly as in the claude test.
+        app.terminate()
+
+        // Same state directory, no `-FlightDeckResetState`: `SessionStore.restore()` finds
+        // both sessions' daemons still live and attaches (`fd-abduco -a`) to each rather than
+        // starting a fresh shell — and, for the codex tab specifically, restarts its
+        // `codex app-server` and rebinds it to the still-live thread (`CodexAdapter.rebind`).
+        app = launchPreservingState()
+
+        // The codex row is not necessarily selected again after relaunch, so it is picked by
+        // position rather than assumed to already be showing: `SessionStore.restore()`
+        // preserves each project's session order, and `newSession`/`createSession` append —
+        // never insert above an existing row — whenever nothing is selected the way it was
+        // right after the seeded slate's first launch, so the codex tab created second is
+        // still row 1 (row 0 is the seeded claude session).
+        XCTAssertTrue(waitFor(timeout: 10) { rows.count == 2 }, "expected both sessions after relaunch")
+        rows.element(boundBy: 1).click()
+        settle()
+
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let reattached = app.textViews.firstMatch
+        XCTAssertTrue(
+            reattached.waitForExistence(timeout: 10), "no terminal surface found after relaunch"
+        )
+        func reattachedText() -> String { (reattached.value as? String) ?? "" }
+
+        // THE CRUX: does codex's TUI come back on reattach? Waited on generously — codex's
+        // slower boot applies again here, on top of Flight Deck's own relaunch — and then
+        // dumped, asserted only as non-empty (soft — the point is to SEE it, not to pin a
+        // specific shape this investigation does not yet know to expect).
+        _ = waitFor(timeout: 20) { !reattachedText().isEmpty }
+        let postReattach = reattachedText()
+        print("POST-REATTACH SURFACE:\n\(postReattach)")
+        let postReattachAttachment = XCTAttachment(string: postReattach)
+        postReattachAttachment.name = "post-reattach"
+        postReattachAttachment.lifetime = .keepAlways
+        add(postReattachAttachment)
+        XCTAssertFalse(postReattach.isEmpty, "surface was completely empty after reattach")
+
+        // Flush a fresh command at the reattached prompt — a real turn, kept to one cheap
+        // word. Clicking first is what hands the reattached surface keyboard focus; the
+        // surface changing at all after typing is this test's evidence that the box actually
+        // accepted the keystrokes rather than swallowing them into a dead pty.
+        reattached.click()
+        settle()
+        app.typeText("hi\n")
+        _ = waitFor(timeout: 25) { reattachedText() != postReattach }
+
+        let postCommand = reattachedText()
+        print("POST-COMMAND SURFACE:\n\(postCommand)")
+        let postCommandAttachment = XCTAttachment(string: postCommand)
+        postCommandAttachment.name = "post-command"
+        postCommandAttachment.lifetime = .keepAlways
+        add(postCommandAttachment)
+        XCTAssertNotEqual(
+            postCommand, postReattach,
+            "the surface did not change at all after typing and submitting — the reattached "
+            + "input box may not be accepting keystrokes"
+        )
+    }
+
+    /// The decisive follow-up to `testCodexSessionReattachDisplayAndCommandFlush` above: that
+    /// test only ever reaches codex's TRUST PROMPT before detaching (`›` is drawn by both the
+    /// prompt's "1. Yes, continue" row and the composer's own idle state, so waiting on the
+    /// glyph alone stops at whichever one paints first) — never codex's actual running composer
+    /// — and never asks the one question that would explain a cold-started reattach: after
+    /// Flight Deck is killed, is the codex session's `fd-abduco` daemon actually DEAD, or
+    /// ALIVE-but-unreachable by whatever `isLive(_:)` sees? id-mismatch and "something kills the
+    /// daemon on quit" have both been ruled out already; this exists to capture the one fact that
+    /// would settle which of those two remains.
+    ///
+    /// **Makes one real `codex` API call**, exactly like the display/flush investigation above —
+    /// this is not a fixture run.
+    ///
+    /// Reuses that test's machinery wholesale (`clearIsolatedStateDir()` +
+    /// `launchPreservingState()`, `sessionUUIDFromIsolatedState()` for the seeded claude
+    /// session's id, the same `codexSessionID()` filter-by-exclusion pattern for the new codex
+    /// tab, `terminateOwnDaemon(_:)` for both in teardown, the New-Codex-Session File-menu route,
+    /// and the `›` `codexMarker` literal) — see that test's doc comment for why each piece is
+    /// shaped the way it is. What is new here is entirely between detach and relaunch.
+    ///
+    /// **Getting past the trust prompt.** The prompt only appears the first time codex sees a
+    /// given working directory — `Fixtures/Codex/workspace-trust.captured.txt` shows its shape,
+    /// ending in "Press enter to continue" with "1. Yes, continue" already focused — so a machine
+    /// where this directory was already trusted from an earlier run goes straight to the
+    /// composer instead. Handled by waiting for EITHER state first (the marker, or trust-prompt
+    /// text), then conditionally clicking the terminal and pressing Return only if the trust
+    /// text is actually present. Return is enough on its own — "Press enter to continue" — and
+    /// "1. Yes, continue" is the row already focused (`›`), so no arrow key is needed first.
+    ///
+    /// **Detecting the composer, not just the marker.** Both screens draw `›`, so the marker
+    /// alone cannot distinguish them (that ambiguity is this test's whole reason to exist).
+    /// `Fixtures/Codex/tui-idle.captured.txt` shows the composer's idle placeholder, "Ask Codex
+    /// to do anything" — checked and logged as a bonus signal — but the actual gate is the
+    /// simpler, version-independent one the task calls out as the fallback: the marker present
+    /// AND the trust-prompt text gone. That holds whether or not a trust decision was needed at
+    /// all (a pre-trusted directory never shows the trust text in the first place, so the "gone"
+    /// half is vacuously true and only the marker matters).
+    ///
+    /// **The decisive capture itself.** `captureDaemonLiveness(sessionID:socketPath:pidPath:)`
+    /// (see its doc comment) is run from THIS test process — not the app under test — against
+    /// the well-known `/tmp/flight-deck-<uid>/<id>.sock(.pid)` layout, polled 5×200ms after
+    /// `app.terminate()` in case teardown itself is racy, with only the final reading dumped.
+    /// Socket/pidfile path are computed BEFORE `app.terminate()`, from the codex session id
+    /// captured before that — mirroring why `sessionID` itself is captured early throughout this
+    /// file: nothing below this point may still be able to answer "which session was this" once
+    /// the app is gone.
+    ///
+    /// **Reading the dump.** DEAD looks like: no socket file, connect ENOENT, pid dead, no
+    /// matching `ps` line. ALIVE-BUT-UNREACHABLE looks like: pid alive and/or a matching `ps`
+    /// line, but connect fails (most tellingly ECONNREFUSED — a socket file with nothing
+    /// listening — or some other errno). ALIVE-AND-REACHABLE looks like: connect succeeds outright
+    /// — meaning `isLive` should itself have returned true, and the bug is elsewhere entirely.
+    ///
+    /// Asserts here are deliberately soft, per the task's own framing: the DUMPS are the
+    /// deliverable, not a pass/fail verdict this investigation does not yet know how to state.
+    func testCodexReattachDaemonLivenessProbe() {
+        let codexMarker: Character = "\u{203A}" // › — see InputBar.codexMarker
+
+        // Clear-then-launch-without-reset, exactly like the display/flush investigation above —
+        // see that test's doc comment for why `-FlightDeckResetState` is unusable here.
+        clearIsolatedStateDir()
+        var app = launchPreservingState()
+
+        // The seeded claude session's id, captured before anything below could tear it down —
+        // needed only for teardown, since this probe's subject is the codex session created
+        // next.
+        var seededSessionID: UUID?
+        _ = waitFor(timeout: 5) {
+            seededSessionID = sessionUUIDFromIsolatedState()
+            return seededSessionID != nil
+        }
+        guard let seededSessionID else {
+            XCTFail(
+                "could not resolve the seeded session's id from "
+                + "\(Self.isolatedStateDir)/sessions.json"
+            )
+            return
+        }
+
+        // Same filter-by-exclusion pattern as `testCodexSessionReattachDisplayAndCommandFlush`:
+        // `sessionUUIDFromIsolatedState()` always answers the FIRST entry (the seeded claude
+        // session), so the codex tab this test creates has to be found by excluding that id
+        // instead. Restated locally rather than shared — this file already duplicates this
+        // exact closure per test that needs it.
+        func codexSessionID() -> UUID? {
+            struct Entry: Decodable { let id: UUID; let agent: String? }
+            struct Snapshot: Decodable { let sessions: [Entry] }
+            let url = URL(fileURLWithPath: Self.isolatedStateDir).appendingPathComponent("sessions.json")
+            guard
+                let data = try? Data(contentsOf: url),
+                let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data)
+            else { return nil }
+            return snapshot.sessions.first { $0.id != seededSessionID }?.id
+        }
+
+        // Unconditional teardown for both daemons, targeted by id — never a directory-wide
+        // sweep of `/tmp/flight-deck-<uid>`, which is shared with every other live Flight Deck
+        // session on this machine. `capturedDaemonPID` is filled in by the liveness probe below
+        // and killed here too, belt-and-suspenders: `terminateOwnDaemon` already re-reads and
+        // kills whatever pid the pidfile names at teardown time, so this only matters if the
+        // pidfile itself is gone by then but the pid the probe saw is somehow still alive.
+        var codexID: UUID?
+        var capturedDaemonPID: Int32?
+        defer {
+            if app.state != .notRunning {
+                app.terminate()
+            }
+            terminateOwnDaemon(seededSessionID)
+            if let codexID {
+                terminateOwnDaemon(codexID)
+            }
+            if let capturedDaemonPID, kill(capturedDaemonPID, 0) == 0 {
+                kill(capturedDaemonPID, SIGKILL)
+            }
+        }
+
+        let rows = app.staticTexts.matching(identifier: "session-row-title")
+        XCTAssertTrue(
+            waitFor(timeout: 10) { rows.count == 1 }, "expected exactly one seeded session"
+        )
+
+        // See `testCodexSessionReattachDisplayAndCommandFlush`'s doc comment for why the File
+        // menu, not the sidebar control.
+        let file = app.menuBarItems["File"]
+        XCTAssertTrue(file.waitForExistence(timeout: 5), "File menu missing")
+        file.click()
+        let newCodexItem = app.menuItems["New Codex Session"]
+        XCTAssertTrue(
+            newCodexItem.waitForExistence(timeout: 5),
+            "no \"New Codex Session\" menu item — expected one even with no real codex login, "
+            + "since Preferences.migrateAccountsIfNeeded seeds a built-in account for every "
+            + "agent"
+        )
+        newCodexItem.click()
+
+        XCTAssertTrue(
+            waitFor(timeout: 10) { rows.count == 2 }, "creating a codex session added no row"
+        )
+        _ = waitFor(timeout: 5) {
+            codexID = codexSessionID()
+            return codexID != nil
+        }
+        guard let sessionID = codexID else {
+            XCTFail("could not resolve the new codex session's own id")
+            return
+        }
+
+        // Computed BEFORE `app.terminate()`, from the id captured above — nothing after that
+        // point can still ask the app which session this was.
+        let socketPath = "/tmp/flight-deck-\(getuid())/\(sessionID.uuidString.lowercased()).sock"
+        let pidPath = socketPath + ".pid"
+
+        // Give the terminal keyboard focus, the same click this file already uses elsewhere.
+        // `createFromMenu` both creates and selects the new session, so the detail pane is
+        // already showing the codex tab's surface by the time this lands.
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let terminal = app.textViews.firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface found")
+        func terminalText() -> String { (terminal.value as? String) ?? "" }
+
+        // First checkpoint: EITHER the trust prompt or the composer — whichever codex draws
+        // first depends on whether this directory was already trusted on this machine. Codex is
+        // slow to boot (see the display/flush test's note on `needsRuntimeStart`), so this is
+        // generous on purpose.
+        let sawSomething = waitFor(timeout: 45) {
+            let text = terminalText()
+            return text.contains(codexMarker) || text.contains("Do you trust")
+        }
+        XCTAssertTrue(
+            sawSomething,
+            "codex drew neither its trust prompt nor its composer before detach — is it "
+            + "installed and logged in? got:\n\(terminalText())"
+        )
+
+        // Only accept the trust prompt if it is actually on screen — a pre-trusted directory
+        // must not have a spurious Return sent into what would already be the composer.
+        if terminalText().contains("Do you trust") || terminalText().contains("Press enter to continue") {
+            print("TRUST PROMPT DETECTED — accepting with Return (default-focused \"1. Yes, continue\")")
+            terminal.click()
+            settle()
+            app.typeKey(.return, modifierFlags: [])
+        }
+
+        // Second checkpoint: the composer specifically, distinguished from the trust prompt by
+        // the trust text having gone away — see this test's doc comment for why that is the
+        // reliable half of the check and the placeholder-text match is only a bonus signal.
+        let composerReached = waitFor(timeout: 30) {
+            let text = terminalText()
+            return text.contains(codexMarker)
+                && !text.contains("Do you trust")
+                && !text.contains("Press enter to continue")
+        }
+        let sawComposerHint = terminalText().contains("Ask Codex to do anything")
+        XCTAssertTrue(
+            composerReached,
+            "codex never reached its composer after accepting the trust prompt — got:\n"
+            + "\(terminalText())"
+        )
+        print("composer placeholder (\"Ask Codex to do anything\") seen: \(sawComposerHint)")
+
+        let preDetach = terminalText()
+        print("PRE-DETACH SURFACE:\n\(preDetach)")
+        let preDetachAttachment = XCTAttachment(string: preDetach)
+        preDetachAttachment.name = "pre-detach"
+        preDetachAttachment.lifetime = .keepAlways
+        add(preDetachAttachment)
+
+        // Kill Flight Deck outright — same mechanics as every other detach in this file.
+        app.terminate()
+
+        // THE DECISIVE CAPTURE. Polled 5×200ms in case teardown itself is racy (the daemon
+        // exiting a beat after its parent, or the socket/pidfile being unlinked a beat late);
+        // only the final reading is dumped. See `captureDaemonLiveness`'s doc comment for what
+        // each field means and how DEAD / ALIVE-BUT-UNREACHABLE / ALIVE-AND-REACHABLE read.
+        var liveness = captureDaemonLiveness(sessionID: sessionID, socketPath: socketPath, pidPath: pidPath)
+        for _ in 0..<4 {
+            usleep(200_000)
+            liveness = captureDaemonLiveness(sessionID: sessionID, socketPath: socketPath, pidPath: pidPath)
+        }
+        capturedDaemonPID = liveness.pid
+        print("DAEMON-LIVENESS-AFTER-QUIT:\n\(liveness)")
+        let livenessAttachment = XCTAttachment(string: "\(liveness)")
+        livenessAttachment.name = "daemon-liveness-after-quit"
+        livenessAttachment.lifetime = .keepAlways
+        add(livenessAttachment)
+
+        // Same state directory, no `-FlightDeckResetState`: `SessionStore.restore()` should find
+        // the codex daemon still live (per the capture above) and attach rather than starting a
+        // fresh shell.
+        app = launchPreservingState()
+
+        // See `testCodexSessionReattachDisplayAndCommandFlush`'s doc comment for why the codex
+        // row is picked by position (row 1) rather than assumed selected.
+        XCTAssertTrue(waitFor(timeout: 10) { rows.count == 2 }, "expected both sessions after relaunch")
+        rows.element(boundBy: 1).click()
+        settle()
+
+        app.windows.firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .click()
+        settle()
+
+        let reattached = app.textViews.firstMatch
+        XCTAssertTrue(
+            reattached.waitForExistence(timeout: 10), "no terminal surface found after relaunch"
+        )
+        func reattachedText() -> String { (reattached.value as? String) ?? "" }
+
+        _ = waitFor(timeout: 20) { !reattachedText().isEmpty }
+        let postReattach = reattachedText()
+        print("POST-REATTACH SURFACE:\n\(postReattach)")
+        let postReattachAttachment = XCTAttachment(string: postReattach)
+        postReattachAttachment.name = "post-reattach"
+        postReattachAttachment.lifetime = .keepAlways
+        add(postReattachAttachment)
+        XCTAssertFalse(postReattach.isEmpty, "surface was completely empty after reattach")
+
+        // Flush a fresh command, exactly like the display/flush investigation.
+        reattached.click()
+        settle()
+        app.typeText("hi\n")
+        _ = waitFor(timeout: 25) { reattachedText() != postReattach }
+
+        let postCommand = reattachedText()
+        print("POST-COMMAND SURFACE:\n\(postCommand)")
+        let postCommandAttachment = XCTAttachment(string: postCommand)
+        postCommandAttachment.name = "post-command"
+        postCommandAttachment.lifetime = .keepAlways
+        add(postCommandAttachment)
+        XCTAssertNotEqual(
+            postCommand, postReattach,
+            "the surface did not change at all after typing and submitting — the reattached "
+            + "input box may not be accepting keystrokes"
         )
     }
 
