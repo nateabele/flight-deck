@@ -166,4 +166,34 @@ final class SessionDaemonPathsTests: XCTestCase {
         XCTAssertFalse(expectedBinary.contains(" "))
         XCTAssertFalse(expectedSocket.contains(" "))
     }
+
+    // MARK: - Default directory (debug vs release isolation)
+
+    /// Debug and release builds must default to DIFFERENT socket roots, so a locally launched
+    /// debug build never shares the directory `reconcileDaemons` sweeps with a released build —
+    /// the two can then never reap each other's daemons. Both flavors are checked from one
+    /// (Debug) test run via the `debug:` parameter.
+    func testDefaultDirectoryDiffersBetweenDebugAndRelease() {
+        let uid = getuid()
+        XCTAssertEqual(
+            SessionDaemon.defaultDirectory(debug: true).path, "/tmp/flight-deck-debug-\(uid)")
+        XCTAssertEqual(
+            SessionDaemon.defaultDirectory(debug: false).path, "/tmp/flight-deck-\(uid)")
+        XCTAssertNotEqual(
+            SessionDaemon.defaultDirectory(debug: true).path,
+            SessionDaemon.defaultDirectory(debug: false).path)
+    }
+
+    /// `directory: nil` resolves to the build's default; an explicit directory overrides it
+    /// (the seam `-FlightDeckDaemonDir` and tests both use).
+    func testInitResolvesNilToBuildDefaultAndHonorsOverride() {
+        XCTAssertEqual(
+            SessionDaemon(bundledBinary: fakeBinary).directory.path,
+            SessionDaemon.defaultDirectory().path)
+
+        let custom = URL(fileURLWithPath: "/tmp/fd-custom-\(getuid())", isDirectory: true)
+        XCTAssertEqual(
+            SessionDaemon(directory: custom, bundledBinary: fakeBinary).directory.path,
+            custom.path)
+    }
 }

@@ -1450,12 +1450,14 @@ final class SessionStore: ObservableObject {
         persistence: SessionPersisting?,
         statusRoot: URL? = nil,
         transcriptsRoot: URL? = nil,
-        statusIsAlive: ((pid_t) -> Bool)? = nil
+        statusIsAlive: ((pid_t) -> Bool)? = nil,
+        daemon: SessionDaemon = SessionDaemon()
     ) {
         self.init(
             provider: ghostty,
             persistence: persistence,
-            preferences: preferences
+            preferences: preferences,
+            daemon: daemon
         )
         // Load-bearing: `display` defaults to the always-permissive `AlwaysDrawableDisplay()`
         // so tests that construct a `SessionStore` don't have to stub it (see that type's doc

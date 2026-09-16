@@ -16,10 +16,10 @@ import Foundation
 /// being `/tmp/flight-deck-<uid>` — and only that symlink's path is ever assembled into a
 /// command.
 struct SessionDaemon {
-    /// Root for every socket, pidfile and the binary symlink. `/tmp/flight-deck-<uid>` rather
-    /// than a per-app-support directory: abduco's control socket is a Unix domain socket, and
-    /// `sun_path` is capped at 104 bytes on macOS — `/tmp` keeps the fixed prefix short enough
-    /// to leave room for the uuid regardless of the logged-in user's home directory depth.
+    /// Root for every socket, pidfile and the binary symlink. `/tmp/flight-deck[-debug]-<uid>`
+    /// rather than a per-app-support directory: abduco's control socket is a Unix domain socket,
+    /// and `sun_path` is capped at 104 bytes on macOS — `/tmp` keeps the fixed prefix short
+    /// enough to leave room for the uuid regardless of the logged-in user's home directory depth.
     let directory: URL
 
     /// The real, space-containing on-disk binary. `nil` when running outside a real app bundle
@@ -27,12 +27,34 @@ struct SessionDaemon {
     /// producing a symlink to nothing.
     let bundledBinary: URL?
 
+    /// `directory: nil` resolves to `defaultDirectory()` — the build-specific root. Pass an
+    /// explicit directory to override it (tests inject a temp dir; `makeStore` threads the
+    /// `-FlightDeckDaemonDir` launch arg through here).
     init(
-        directory: URL = URL(fileURLWithPath: "/tmp/flight-deck-\(getuid())"),
+        directory: URL? = nil,
         bundledBinary: URL? = Bundle.main.url(forResource: "fd-abduco", withExtension: nil)
     ) {
-        self.directory = directory
+        self.directory = directory ?? SessionDaemon.defaultDirectory()
         self.bundledBinary = bundledBinary
+    }
+
+    /// True in a Debug build, false in Release — the `-D DEBUG` flag the Debug configuration
+    /// compiles with. Exposed as a value (not just `#if`) so `defaultDirectory(debug:)` can be
+    /// exercised for both builds from a single test run.
+    #if DEBUG
+    static let isDebugBuild = true
+    #else
+    static let isDebugBuild = false
+    #endif
+
+    /// The default socket/pidfile root, **different between Debug and Release builds**
+    /// (`/tmp/flight-deck-debug-<uid>` vs `/tmp/flight-deck-<uid>`). This is what keeps a locally
+    /// launched debug build from ever sharing the directory a released build uses: `restore()`'s
+    /// `reconcileDaemons` reaps every daemon in *its own* `directory` that isn't in the sessions
+    /// it restored, so two builds that never share a directory can never reap each other's
+    /// daemons. Overridable via the `directory:` init param.
+    static func defaultDirectory(debug: Bool = isDebugBuild) -> URL {
+        URL(fileURLWithPath: "/tmp/flight-deck-\(debug ? "debug-" : "")\(getuid())")
     }
 
     enum PathError: Error, CustomStringConvertible {

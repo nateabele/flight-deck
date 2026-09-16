@@ -58,6 +58,21 @@ struct FlightDeckApp: App {
             fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
     }
 
+    /// `-FlightDeckDaemonDir <path>`. Overrides the fd-abduco socket/pidfile root
+    /// (`SessionDaemon`'s build-specific default). Debug and release builds already default to
+    /// *different* roots so they never share one; this is the explicit override for finer
+    /// isolation — e.g. running two debug instances at once, or pinning a test's daemons to a
+    /// scratch directory. `nil` when unset, so `SessionDaemon(directory:)` falls back to its
+    /// default. Like `-FlightDeckStateDir`, not gated on anything: a real launch simply never
+    /// passes it.
+    static func daemonDirectory(_ defaults: UserDefaults = .standard) -> URL? {
+        guard let path = defaults.string(forKey: "FlightDeckDaemonDir"), !path.isEmpty else {
+            return nil
+        }
+        return URL(
+            fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
+    }
+
     /// The session store for this launch, honouring `-FlightDeckStateDir`.
     ///
     /// `legacyDefaults: nil` under an override is load-bearing, not tidiness.
@@ -205,7 +220,12 @@ struct FlightDeckApp: App {
             // check would drop every row.
             statusRoot: fixture?.statusRoot,
             transcriptsRoot: fixture?.projectsRoot,
-            statusIsAlive: fixture == nil ? nil : { _ in true }
+            statusIsAlive: fixture == nil ? nil : { _ in true },
+            // Honour `-FlightDeckDaemonDir`; `nil` falls back to `SessionDaemon`'s build-specific
+            // default (debug and release already differ, so they never share a socket dir).
+            // The store forwards this same daemon to its `PosixDaemonControl`, so `liveSessionIDs`
+            // and `terminate` operate on one consistent directory.
+            daemon: SessionDaemon(directory: Self.daemonDirectory())
         )
 
         // Test-only second project, so the sidebar has something to reorder. Guarded by
