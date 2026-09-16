@@ -887,6 +887,60 @@ final class SessionStore: ObservableObject {
     /// Not `private`: `AppDelegate` reads this to wire the Tools menu to the same store.
     let preferences: PreferencesStore?
 
+    /// The path calculator for `fd-abduco` sockets/pidfiles/binary — see its doc comment.
+    /// Injected (default `SessionDaemon()`) so tests can point it at a temp directory with a
+    /// fake executable, matching `daemonControl` below.
+    private let daemon: SessionDaemon
+
+    /// Whether each session's daemon is already live, and how to tear it down. `nil` by default
+    /// and resolved in `init` to `PosixDaemonControl(daemon: daemon)` — derived from the actual
+    /// `daemon` this store was given, not from a second independent default, so a caller that
+    /// overrides `daemon` alone still gets a control that probes the same socket paths. A
+    /// caller that passes its own `daemonControl` (every fake-daemon test) still gets exactly
+    /// that instance.
+    private let daemonControl: DaemonControlling
+
+    /// Owns the idle-session sleep/wake bookkeeping. Constructed lazily so its closures can
+    /// capture `self` after `init` has finished assigning every property they read
+    /// (`daemonControl`, `processInspector`, `statuses`, …).
+    ///
+    /// Registered on `clock` from the production convenience init, alongside `wakeIfAsleep(_:)`
+    /// — the seam `injector(for:)` and `TerminalPane.updateNSView` both call before touching a
+    /// session's surface — so a build that can put a session to sleep always has a way to wake
+    /// it back up.
+    private(set) lazy var sleepController = SessionSleepController(
+        // Read once, here at construction — a threshold changed in Preferences applies on the
+        // next launch, not live. `sleepEnabled` below is the live half of this preference.
+        policy: SleepPolicy(idleThreshold: TimeInterval(preferences?.sleepIdleThresholdSeconds ?? 600)),
+        daemonControl: daemonControl,
+        inspector: processInspector,
+        resolver: PosixAgentGroupResolver(),
+        inputs: SleepInputs(
+            candidates: { [weak self] in self?.repos.flatMap(\.sessions).map(\.id) ?? [] },
+            activity: { [weak self] in self?.statuses[$0]?.activity },
+            selectedID: { [weak self] in self?.selectedSessionID },
+            reportsBackgroundWork: { [weak self] in self?.backgroundWorkSessions.contains($0) ?? false },
+            daemonPID: { [weak self] in self?.daemonControl.daemonPID($0) }
+        ),
+        tearDownSurface: { [weak self] in self?.tearDownSurface(for: $0) },
+        // Mirrors `respawnSurface`'s post-attach size report: `makeAttachSurface` forks a
+        // fresh attach-client surface here too, so without this it would start on libghostty's
+        // 800x600 placeholder just like an unreported respawn would. This matters most for a
+        // session woken while NOT the selected tab (e.g. a background/programmatic injection);
+        // the selected-tab wake path (`TerminalPane.updateNSView`) also reports its own size via
+        // `activateTerminalSize` right after `wakeIfAsleep`, but `report(_:to:)` dedupes a
+        // repeat of an unchanged size for free, so the two routes never fight.
+        rebuildSurface: { [weak self] id in
+            guard let self, self.makeAttachSurface(id: id) != nil else { return }
+            self.report(self.terminalSize, to: id)
+            self.provider?.tick()
+        },
+        // Read every tick, unlike the threshold above: flipping the Off switch in Preferences
+        // must take effect immediately, not on the next launch.
+        sleepEnabled: { [weak self] in self?.preferences?.idleSleepEnabled ?? true },
+        now: { Date() }
+    )
+
     /// Test seam. Production sets this from the convenience init.
     var notifier: Notifying?
 
@@ -1042,6 +1096,53 @@ final class SessionStore: ObservableObject {
         case respawned, alreadyRunning, displayAsleep, unknownSession, failed
     }
 
+    /// Builds (or rebuilds) an attached `SurfaceView` for an existing session: resolves the
+    /// adapter/shell, asks `LaunchPlan` whether to attach the live daemon or cold-create, and
+    /// records the result. Used both by `respawnSurface` (an inert tab getting its first real
+    /// terminal) and by the sleep controller's wake path — a SIGSTOP'd agent's daemon is still
+    /// `daemonControl.isLive`, so `LaunchPlan.decide` returns `.attach` and the daemon's ring
+    /// replay restores the screen. On success this also sets `surfaces[id]`.
+    @discardableResult
+    func makeAttachSurface(id: UUID) -> Ghostty.SurfaceView? {
+        guard let at = locate(id) else { return nil }
+        let session = repos[at.repo].sessions[at.session]
+
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = session.transcriptDirectory
+        // `nil` when unset: `withCValue` already maps that to `0`, meaning "inherit
+        // libghostty's configured default" — the same thing a never-touched size means.
+        config.fontSize = preferences?.preferences.terminalFontSize
+        // Adapter and options resolved exactly as `newSession(in:)` does: `launchCommand` takes
+        // a NON-optional `AgentOptions`, and the adapter comes from the tab's instance, not
+        // from `AgentID`.
+        let adapter = adapter(for: instance(for: session))
+        let options = options(for: session.agent, project: session.workingDirectory)
+        let shell = preferences?.resolvedShell() ?? ShellResolver.resolve()
+        let typedText = adapter.launchCommand(adapter.binding(for: session), session, options)
+        do {
+            try daemon.ensureDirectory()
+            let plan = try LaunchPlan.decide(
+                sessionID: session.id, isLive: daemonControl.isLive(session.id), shell: shell,
+                resumeOrLaunch: typedText, daemon: daemon
+            )
+            config.command = plan.command
+            config.initialInput = plan.typed
+        } catch {
+            // Graceful degradation: fd-abduco not resolvable (e.g. no app bundle in the
+            // unit-test host). Fall back to today's non-detached behavior so nothing breaks.
+            config.command = shell
+            config.initialInput = typedText
+        }
+        let orphaned = accountIsMissing(for: session)
+        config.environmentVariables =
+            preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
+
+        guard let surface = processRegistry.record(for: id, around: { provider?.makeSurface(config) })
+        else { return nil }
+        surfaces[id] = surface
+        return surface
+    }
+
     /// Replaces an inert terminal with a working one.
     ///
     /// *Replaces*, not fills: the broken tab already holds a `SurfaceView`: it just has no
@@ -1064,34 +1165,47 @@ final class SessionStore: ObservableObject {
         surfaces[id] = nil
         _ = processRegistry.forget(id)
 
-        var config = Ghostty.SurfaceConfiguration()
-        config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
-        config.workingDirectory = session.transcriptDirectory
-        // `nil` when unset: `withCValue` already maps that to `0`, meaning "inherit
-        // libghostty's configured default" — the same thing a never-touched size means.
-        config.fontSize = preferences?.preferences.terminalFontSize
-        // Adapter and options resolved exactly as `newSession(in:)` does: `launchCommand` takes
-        // a NON-optional `AgentOptions`, and the adapter comes from the tab's instance, not
-        // from `AgentID`.
-        let adapter = adapter(for: instance(for: session))
-        let options = options(for: session.agent, project: session.workingDirectory)
-        config.initialInput = adapter.launchCommand(adapter.binding(for: session), session, options)
-        let orphaned = accountIsMissing(for: session)
-        config.environmentVariables =
-            preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
-
-        guard let surface = processRegistry.record(for: id, around: { provider?.makeSurface(config) })
-        else {
+        guard makeAttachSurface(id: id) != nil else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: false))
             return .failed
         }
-        surfaces[id] = surface
         // Same ordering and reason as `insertSession`: before anything is typed, so the child
         // is not left talking to libghostty's placeholder 800x600 grid.
         report(terminalSize, to: id)
         provider?.tick()
-        if !orphaned { startWatching(tabID: id) }
+        // Recomputed rather than threaded back from `makeAttachSurface` above: cheap, and
+        // `makeAttachSurface(id:) -> SurfaceView?` has no room to also return it.
+        if !accountIsMissing(for: session) { startWatching(tabID: id) }
         return .respawned
+    }
+
+    /// Drops the attach-client surface for a session without touching its daemon — the sleep
+    /// controller's teardown side. The daemon keeps the (frozen) agent alive; this only frees
+    /// the ghostty renderer/buffers on Flight Deck's side, so the SIGSTOP'd agent can be
+    /// re-attached later by `makeAttachSurface`.
+    ///
+    /// MUST NOT call `daemonControl.terminate` and MUST NOT go anywhere near quit, reap, or
+    /// `sweepOrphans` — a stopped agent's daemon has to survive this, that is the entire point
+    /// of detach persistence.
+    @MainActor
+    func tearDownSurface(for id: UUID) {
+        surfaces[id] = nil            // release the SurfaceView → client disconnects from daemon
+        _ = processRegistry.forget(id)
+    }
+
+    /// Wake a session if the sleep controller has it frozen — the one seam both the
+    /// selection path (`TerminalPane`) and the injection path (`injector(for:)`) call before
+    /// touching a session's surface. Idempotent and safe on any id, including one the sleep
+    /// controller never heard of: `SessionSleepController.wake` itself no-ops unless `id` is
+    /// in `asleep`.
+    ///
+    /// A session deleted while asleep can still reach here — nothing removes an id from
+    /// `asleep` on close — and `wake(_:)`'s `rebuildSurface` closure calls `makeAttachSurface`,
+    /// which returns nil for a session `locate` can no longer find. That is an acceptable
+    /// no-op: a gone session has no surface to rebuild, and nothing here crashes on it.
+    @MainActor
+    func wakeIfAsleep(_ id: UUID) {
+        if sleepController.asleep.contains(id) { sleepController.wake(id) }
     }
 
     /// Test seam for frontmost-ness; production reads `NSApplication`.
@@ -1263,12 +1377,16 @@ final class SessionStore: ObservableObject {
         preferences: PreferencesStore? = nil,
         reaper: SessionReaper = SessionReaper(
             inspector: ProcessTree(), signals: PosixSignals(), sleeper: RealSleeper()
-        )
+        ),
+        daemon: SessionDaemon = SessionDaemon(),
+        daemonControl: DaemonControlling? = nil
     ) {
         self.provider = provider
         self.persistence = persistence
         self.preferences = preferences
         self.reaper = reaper
+        self.daemon = daemon
+        self.daemonControl = daemonControl ?? PosixDaemonControl(daemon: daemon)
         // Shell records land asynchronously, up to half a second after the tab they belong to
         // (see `SurfaceProcessRegistry`), so the `persist()` that `newSession`/`restore` already
         // ran is too early to contain them. Without this the snapshot names no shell for any
@@ -1332,12 +1450,14 @@ final class SessionStore: ObservableObject {
         persistence: SessionPersisting?,
         statusRoot: URL? = nil,
         transcriptsRoot: URL? = nil,
-        statusIsAlive: ((pid_t) -> Bool)? = nil
+        statusIsAlive: ((pid_t) -> Bool)? = nil,
+        daemon: SessionDaemon = SessionDaemon()
     ) {
         self.init(
             provider: ghostty,
             persistence: persistence,
-            preferences: preferences
+            preferences: preferences,
+            daemon: daemon
         )
         // Load-bearing: `display` defaults to the always-permissive `AlwaysDrawableDisplay()`
         // so tests that construct a `SessionStore` don't have to stub it (see that type's doc
@@ -1371,11 +1491,38 @@ final class SessionStore: ObservableObject {
         // the previous run's records with this one's. The sweep itself is async and may land
         // well after that write; it works from this snapshot, not from disk.
         let previousRun = persistence?.load()
-        if resetState || !restore() { seedInitialSession() }
+        if resetState || !restore() {
+            if let override = SessionStore.seedDirectoryOverride {
+                seedInitialSession(homeURL: override)
+            } else {
+                seedInitialSession()
+            }
+        }
         startStatusWatching()
+        // Same idiom `SessionStatusWatcher`/`TranscriptWatcher` use to register themselves,
+        // and the same lifecycle point as `startStatusWatching()` above: only the production
+        // convenience init reaches here, so a store built by a test never arms sleep. `add`
+        // replaces rather than duplicates a registration for the same owner, and `sleepController`
+        // itself is the weak owner — held alive by this store's `lazy var` for the run.
+        clock.add(sleepController) { [weak self] in self?.sleepController.tick() }
         if let previousRun {
             Task { [weak self] in await self?.sweepOrphans(from: previousRun) }
         }
+    }
+
+    /// Test-only: `-FlightDeckSeedProjectDir <path>` makes the initial seeded session open in
+    /// `<path>` instead of `$HOME`, so a UI test can place a session in a directory codex has
+    /// not trusted — its directory-trust prompt only appears for an untrusted dir, and `$HOME`
+    /// is trusted on the developer's machine. Honoured ONLY when `-FlightDeckStateDir` is also
+    /// isolating persistence, so it can never seed the developer's real `sessions.json`. Read at
+    /// seed time (first launch against an empty state dir); a relaunch restores instead of
+    /// re-seeding, so passing the flag only on the first launch is what a reattach test wants.
+    static var seedDirectoryOverride: URL? {
+        let defaults = UserDefaults.standard
+        guard defaults.string(forKey: "FlightDeckStateDir")?.isEmpty == false,
+              let path = defaults.string(forKey: "FlightDeckSeedProjectDir"), !path.isEmpty
+        else { return nil }
+        return URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
     }
 
     func seedInitialSession(
@@ -1967,12 +2114,25 @@ final class SessionStore: ObservableObject {
         emit(.sessionAdded(wire(session), project: repos[repoIndex].id, at: insertedAt))
 
         var config = Ghostty.SurfaceConfiguration()
-        config.command = preferences?.resolvedShell() ?? ShellResolver.resolve()
         config.workingDirectory = session.transcriptDirectory
         // `nil` when unset: `withCValue` already maps that to `0`, meaning "inherit
         // libghostty's configured default" — the same thing a never-touched size means.
         config.fontSize = preferences?.preferences.terminalFontSize
-        config.initialInput = initialInput
+        let shell = preferences?.resolvedShell() ?? ShellResolver.resolve()
+        do {
+            try daemon.ensureDirectory()
+            let plan = try LaunchPlan.decide(
+                sessionID: session.id, isLive: daemonControl.isLive(session.id), shell: shell,
+                resumeOrLaunch: initialInput, daemon: daemon
+            )
+            config.command = plan.command
+            config.initialInput = plan.typed
+        } catch {
+            // Graceful degradation: fd-abduco not resolvable (e.g. no app bundle in the
+            // unit-test host). Fall back to today's non-detached behavior so nothing breaks.
+            config.command = shell
+            config.initialInput = initialInput
+        }
         // The account is what actually makes this tab run as its login: the shell libghostty
         // forks below inherits these, and the agent reads its home out of one of them. Every
         // creation path and `restore` funnel through here, so a restored tab is relaunched as
@@ -2133,8 +2293,16 @@ final class SessionStore: ObservableObject {
             // settling it would spawn an app-server for a login that no longer exists.
             let deferred = session.agent.negotiatesIdentity
             if deferred, !orphaned { deferredCodexResumes.append(session.id) }
+            // The agent never stopped: `fd-abduco` still has its shell attached and running,
+            // so there is nothing to resume and nothing to nudge. Same probe `insertSession`
+            // makes below (through `LaunchPlan.decide`) — this is the one that decides whether
+            // a resume string is worth building at all, keyed on the tab's own id exactly as
+            // the daemon is. Agent-agnostic on purpose: a live Codex shell is exactly as
+            // "already running" as a live Claude one, and neither reads the daemon's answer
+            // differently.
+            let isLive = daemonControl.isLive(entry.id)
             let initialInput: String
-            if orphaned || deferred {
+            if orphaned || deferred || isLive {
                 initialInput = ""
             } else {
                 // Built here rather than above the branch so an orphaned tab does not
@@ -2194,7 +2362,12 @@ final class SessionStore: ObservableObject {
             //
             // After `!orphaned` on purpose: the ordering costs an orphaned codex tab nothing,
             // and it keeps this gate from being the thing that first asks about an agent.
-            if autoResume, !orphaned, session.agent.textChannel != nil,
+            //
+            // `!isLive`: "Keep going" exists to nudge an agent the restart actually stopped.
+            // One still attached inside `fd-abduco` never stopped — it has been sitting there,
+            // possibly finishing the very work `activity` describes, since before this launch
+            // began — and pasting a nudge at it answers a question nobody asked.
+            if autoResume, !orphaned, !isLive, session.agent.textChannel != nil,
                let activity = restored.activity,
                Self.isResumable(activity: activity, hasBackgroundWork: hasBackgroundWork) {
                 pendingPrompts[entry.id] = DeferredPrompt(
@@ -2211,6 +2384,10 @@ final class SessionStore: ObservableObject {
         }
 
         let restoredIDs = repos.flatMap(\.sessions).map(\.id)
+        // Every session this run actually rebuilt is now known, so any daemon whose socket
+        // outlived that set belongs to a tab this run has no other way of finding — see
+        // `reconcileDaemons`.
+        reconcileDaemons(restored: Set(restoredIDs))
         selectedSessionID = snapshot.selectedSessionID.flatMap {
             restoredIDs.contains($0) ? $0 : nil
         } ?? restoredIDs.first
@@ -2233,6 +2410,34 @@ final class SessionStore: ObservableObject {
         // the replicator re-reads and anyone behind is sent back for a snapshot.
         replicator?.reset()
         return !restoredIDs.isEmpty || !repos.isEmpty
+    }
+
+    /// Kills every daemon whose socket is still on disk but whose session did not come back in
+    /// this restore — a tab closed by a crash, a hand-edited `sessions.json`, or a snapshot
+    /// from a run that predates this feature. `restore()` is the only caller: this is what
+    /// keeps a daemon's lifetime from silently outliving the very last thing that could ever
+    /// reattach to it.
+    ///
+    /// Never called from `reapAllForQuit` or `sweepOrphans` — see their own doc comments for
+    /// why persisting daemons across quit is the point, not a gap.
+    ///
+    /// Guarded on `bundledBinary` for a reason neither surface-creation site needs to be: this
+    /// runs unconditionally from `restore()`, with no `try/catch` and no dependence on the
+    /// binary actually resolving — it only lists a directory and signals pids. A process with
+    /// no app bundle (the unit-test host, chiefly) never created a daemon in the first place,
+    /// but `daemon`'s *default* directory (`/tmp/flight-deck-<uid>`) is real and shared with
+    /// whatever a genuinely bundled Flight Deck has left running there. Without this guard, a
+    /// default-wired `SessionStore` built by a bundle-less process would list that real
+    /// directory, find sockets for none of its own fixture ids, and `SIGTERM`/`SIGKILL` every
+    /// live daemon it finds — destroying exactly the persisted agent state this feature exists
+    /// to protect, from something as routine as running the unit tests. A process that cannot
+    /// bundle the binary cannot have created any of the daemons in that directory, so it must
+    /// never be the one deciding which of them are orphans.
+    private func reconcileDaemons(restored: Set<UUID>) {
+        guard daemon.bundledBinary != nil else { return }
+        for id in daemon.liveSessionIDs() where !restored.contains(id) {
+            daemonControl.terminate(id)
+        }
     }
 
     /// Settles every restored codex tab against the app-server, then types its resume
@@ -2311,7 +2516,24 @@ final class SessionStore: ObservableObject {
                 apply(.title(title), to: tabID)
             }
 
-            sendToShell(adapter.resumeCommand(binding, repinned, options), into: tabID)
+            // A live daemon means `restore`'s `insertSession` already attached this tab to a
+            // shell where `codex resume` (or the thread it opened) is still running — the
+            // title refresh above is still worth doing, since that answers whether the
+            // *thread* changed while Flight Deck was closed, not whether the *shell* did, but
+            // typing the resume command again here would paste it into a live TUI.
+            if !daemonControl.isLive(tabID) {
+                // Codex only: if the pinned thread never wrote a rollout (it never got past
+                // the trust prompt), `codex resume <id>` would error out to a bare shell — see
+                // `CodexAdapter.coldCreateCommand`. Claude and any other adapter keep typing
+                // `resumeCommand` exactly as before.
+                let command: String
+                if let codexAdapter = adapter as? CodexAdapter {
+                    command = codexAdapter.coldCreateCommand(binding, repinned, options)
+                } else {
+                    command = adapter.resumeCommand(binding, repinned, options)
+                }
+                sendToShell(command, into: tabID)
+            }
         }
     }
 
@@ -2582,6 +2804,12 @@ final class SessionStore: ObservableObject {
 
         Task { [weak self] in
             await self?.reapSession(id, process: doomed, context: "tab close")
+            // After the client reap above, not folded into `reapSession` itself: that method
+            // is shared with `reapAllForQuit`, which must leave every daemon running — see its
+            // doc comment. Closing a tab is the one path that actually means "end this agent",
+            // and only the client's own tree needs to detach first; the daemon (and the agent
+            // still attached to it) is torn down second.
+            self?.daemonControl.terminate(id)
         }
     }
 
@@ -2668,6 +2896,12 @@ final class SessionStore: ObservableObject {
     /// else's live children, and killing them would be a second Flight Deck instance
     /// sabotaging the first), and each identity's start time must still match (otherwise the
     /// pid has been recycled and now belongs to an unrelated process).
+    ///
+    /// Never reaches a daemon, and must not: every `SessionProcess` here is a *client* shell,
+    /// `setsid`'d into its own session by `fd-abduco` on attach — outside the process group
+    /// this sweep signals — so a daemon was never reachable through this path even
+    /// accidentally. Reconciling daemons against a dead run's leftovers is `reconcileDaemons`'s
+    /// job, run once from `restore()`, not this method's.
     ///
     /// The pgid used to signal is re-derived from the live process table. A number carried on
     /// the record would be evidence about some previous boot's process table, not this one —
@@ -2778,6 +3012,14 @@ final class SessionStore: ObservableObject {
     /// session to finish would win the outer `group.next()`, and the `cancelAll()` that
     /// followed cancelled every reap still in flight, so quitting with several tabs open
     /// reaped only one of them.
+    ///
+    /// Deliberately never reaches `daemonControl.terminate` — the whole feature this daemon
+    /// exists for is surviving an app quit so the next launch can reattach to it. `reapSession`
+    /// (called below, same as `closeSession` calls it) only tears down the *client* shell,
+    /// `setsid`'d outside this store's own process group; the daemon and the agent still
+    /// attached to it are untouched, on purpose, until either a real tab close
+    /// (`closeSession`'s own `Task` tail) or a future launch's `reconcileDaemons` decides its
+    /// session is really gone.
     func reapAllForQuit(budget: Double = SessionStore.quitBudget) async {
         // Before any `await` — see `isTerminating`'s doc comment for the race this closes.
         isTerminating = true
@@ -5538,7 +5780,8 @@ final class SessionStore: ObservableObject {
     }
 
     private func injector(for id: UUID) -> TextInjecting? {
-        injectorOverride ?? surfaces[id]
+        wakeIfAsleep(id)   // rebuilds the surface (+ SIGCONT) if this session was asleep
+        return injectorOverride ?? surfaces[id]
     }
 
     func surface(for id: UUID) -> Ghostty.SurfaceView? { surfaces[id] }

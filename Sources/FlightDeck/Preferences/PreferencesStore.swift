@@ -304,7 +304,46 @@ final class PreferencesStore: ObservableObject {
         if let account {
             environment[account.agent.homeEnvironmentKey] = account.home.path
         }
+        environment["FD_OUTLOG_BUDGET"] = String(scrollbackBudgetBytes)
         return environment
+    }
+
+    /// Bytes `fd-abduco` keeps in its replay ring for every session's shell, regardless of
+    /// agent. Reads through the optional so an unconfigured `Preferences` (or one predating
+    /// this field) defaults to 4 MiB — see `ShellPreferences.scrollbackBudgetBytes`. Clamped
+    /// on write to `[256 KiB, 16 MiB]`: the daemon sizes a fixed ring from this value at
+    /// cold-create, so a value handed to it must stay within limits that are neither a
+    /// pointless sliver nor an unbounded per-session allocation.
+    var scrollbackBudgetBytes: Int {
+        get { preferences.shell.scrollbackBudgetBytes ?? (4 * 1024 * 1024) }
+        set {
+            var shell = preferences.shell
+            shell.scrollbackBudgetBytes = min(max(newValue, 262_144), 16_777_216)
+            preferences.shell = shell
+        }
+    }
+
+    /// Whether idle sessions are put to sleep automatically. Reads through the optional so an
+    /// unconfigured `Preferences` (or one predating this field) keeps today's behaviour — see
+    /// `ShellPreferences.idleSleepEnabled`.
+    var idleSleepEnabled: Bool {
+        get { preferences.shell.idleSleepEnabled ?? true }
+        set {
+            var shell = preferences.shell
+            shell.idleSleepEnabled = newValue
+            preferences.shell = shell
+        }
+    }
+
+    /// Seconds an idle session waits before it is put to sleep. Reads through the optional the
+    /// same way `idleSleepEnabled` does — see `ShellPreferences.sleepIdleThresholdSeconds`.
+    var sleepIdleThresholdSeconds: Int {
+        get { preferences.shell.sleepIdleThresholdSeconds ?? 600 }
+        set {
+            var shell = preferences.shell
+            shell.sleepIdleThresholdSeconds = newValue
+            preferences.shell = shell
+        }
     }
 
     // MARK: Confirmations

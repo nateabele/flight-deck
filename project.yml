@@ -53,6 +53,20 @@ targets:
     productName: Flight Deck
     sources:
       - Sources/FlightDeck
+      # `fd-abduco` (scripts/build-fd-abduco.sh → vendor/fd-abduco-artifacts/fd-abduco) is a
+      # plain Mach-O helper binary, not a framework — there is nothing to link. It rides into
+      # the bundle via a real Copy Files build phase (destination: resources, not `resources:`
+      # / the "Copy Bundle Resources" phase, which is the same underlying `builtin-copy` and
+      # would work too, but a distinct Copy Files phase is the conventional place for a
+      # standalone executable so it reads as one at a glance in the target). Bundling here
+      # rather than lazily locating it at runtime because Phase 2 needs a stable path it can
+      # resolve via `Bundle.main.url(forResource: "fd-abduco", withExtension: nil)` — see
+      # docs/BUILD.md for the exact bundle-relative path this lands at.
+      - path: vendor/fd-abduco-artifacts/fd-abduco
+        buildPhase:
+          copyFiles:
+            destination: resources
+            subpath: ""
     dependencies:
       - framework: vendor/ghostty-artifacts/GhosttyKit.xcframework
         embed: false

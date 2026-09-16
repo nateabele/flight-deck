@@ -99,6 +99,53 @@ struct ShellSettingsTab: View {
                 }
             }
 
+            Section("Scrollback") {
+                Picker(
+                    "Terminal scrollback kept for reattach",
+                    selection: Binding(
+                        get: { preferences.scrollbackBudgetBytes },
+                        set: { preferences.scrollbackBudgetBytes = $0 }
+                    )
+                ) {
+                    ForEach(Self.scrollbackBudgetChoices, id: \.self) { bytes in
+                        Text(Self.scrollbackBudgetLabel(forBytes: bytes)).tag(bytes)
+                    }
+                }
+                .accessibilityIdentifier("prefs-scrollback-budget")
+                Text("How much output a session's terminal keeps so a reattach can redraw it. Applies to a session's next cold start — a session that is already running, or merely detached, keeps the ring it started with.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Sleep") {
+                Toggle(
+                    "Sleep idle sessions",
+                    isOn: Binding(
+                        get: { preferences.idleSleepEnabled },
+                        set: { preferences.idleSleepEnabled = $0 }
+                    )
+                )
+                .accessibilityIdentifier("prefs-idle-sleep-enabled")
+
+                if preferences.idleSleepEnabled {
+                    Stepper(
+                        "After \(preferences.sleepIdleThresholdSeconds / 60) min",
+                        value: Binding(
+                            get: { preferences.sleepIdleThresholdSeconds / 60 },
+                            set: { preferences.sleepIdleThresholdSeconds = $0 * 60 }
+                        ),
+                        in: 1...120
+                    )
+                    .accessibilityIdentifier("prefs-idle-sleep-threshold")
+                }
+                // A threshold changed here applies on the next launch — see the comment on
+                // `SessionStore.sleepController`'s `policy:` argument. The Off switch above
+                // is live.
+                Text("An idle session's agent is paused and its terminal detached, freezing the tab until you select it again — regardless of which agent it's running. A threshold change takes effect the next time Flight Deck launches.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 Text("Applies to new sessions. Running sessions keep the environment they started with.")
                     .font(.caption)
@@ -106,6 +153,16 @@ struct ShellSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// Bytes, not MiB, so the `Picker`'s `selection` binds straight to
+    /// `PreferencesStore.scrollbackBudgetBytes` with no unit conversion at the call site.
+    private static let scrollbackBudgetChoices: [Int] = [
+        262_144, 524_288, 1_048_576, 2_097_152, 4_194_304, 8_388_608, 16_777_216,
+    ]
+
+    private static func scrollbackBudgetLabel(forBytes bytes: Int) -> String {
+        bytes < 1024 * 1024 ? "\(bytes / 1024) KiB" : "\(bytes / (1024 * 1024)) MiB"
     }
 
     private func chooseShell() {
