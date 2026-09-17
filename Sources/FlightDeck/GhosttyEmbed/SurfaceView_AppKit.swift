@@ -291,14 +291,22 @@ extension Ghostty {
                 guard let self else { return "" }
                 guard let surface = self.surface else { return "" }
                 var text = ghostty_text_s()
+                // GHOSTTY_POINT_ACTIVE, not _VIEWPORT: viewport's top-left tracks scroll
+                // position (`vendor/ghostty/src/terminal/point.zig`'s `Tag.viewport` doc:
+                // "if the user has scrolled in any direction, top-left changes"), so a
+                // surface whose scroll offset isn't pinned to the tail reads stale/wrong
+                // content here while still rendering correctly on screen — this is what let
+                // `hasComposerBox` permanently reject a composer that looked completely
+                // normal to the eye. `active` is the cursor-addressable live screen,
+                // unaffected by scroll, which is what "what's on screen right now" means.
                 let sel = ghostty_selection_s(
                     top_left: ghostty_point_s(
-                        tag: GHOSTTY_POINT_VIEWPORT,
+                        tag: GHOSTTY_POINT_ACTIVE,
                         coord: GHOSTTY_POINT_COORD_TOP_LEFT,
                         x: 0,
                         y: 0),
                     bottom_right: ghostty_point_s(
-                        tag: GHOSTTY_POINT_VIEWPORT,
+                        tag: GHOSTTY_POINT_ACTIVE,
                         coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT,
                         x: 0,
                         y: 0),
