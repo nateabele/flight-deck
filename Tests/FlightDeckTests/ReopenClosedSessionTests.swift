@@ -26,6 +26,14 @@ final class ReopenClosedSessionTests: XCTestCase {
     private let projectA = URL(fileURLWithPath: "/w/a", isDirectory: true)
     private let projectB = URL(fileURLWithPath: "/w/b", isDirectory: true)
 
+    /// The thread a codex tab created against `ScriptedTransport` is pinned to — what its
+    /// `thread/start` hands back, and therefore what a reopen of that tab must resume.
+    private let createdThread = "01a01269-baa6-7493-8d15-8fa21bcb602b"
+    /// A newer thread in the same directory, never pinned in this process and carrying a
+    /// rollout path: precisely the candidate `reconcileCodexPins` re-pins onto. Stands in for
+    /// the thread a `codex` started by hand at another prompt is driving.
+    private let rivalThread = "01a0878d-0000-7000-8000-000000000002"
+
     private func registryRow(
         _ conversation: UUID, pid: pid_t = 1, cwd: String
     ) -> ClaudeStatusFile.Entry {
@@ -216,6 +224,57 @@ final class ReopenClosedSessionTests: XCTestCase {
         XCTAssertEqual(injector.sent.last, "codex resume 01a01269-baa6-7493-8d15-8fa21bcb602b")
     }
 
+    /// Settles the thread — and does not *choose* a different one. The relaunch path reconciles
+    /// every codex pin against its directory's newest thread before typing, because a pin read
+    /// back off disk may name a conversation the user abandoned in some previous run. A reopen
+    /// resurrects a pin they picked out of the closed-tab history seconds ago, so there is
+    /// nothing there to repair: following the newest thread instead would override the choice.
+    ///
+    /// And it would usually fail loudly while doing it. The thread that makes a rival newest is
+    /// typically one a `codex` started by hand is still driving, which means its writer lock is
+    /// still held and the tab's `codex resume` dies with
+    /// `already has an active writer (code -32600)` — the rare relaunch-time risk
+    /// `resumeRestoredCodex`'s stage 2 notes, turned into the common case.
+    ///
+    /// The listing is stocked with exactly the candidate a pass would take: newer than the pin,
+    /// carrying a rollout path, and never pinned in this process. Removing the gate types that
+    /// thread's id here instead.
+    func testAReopenedCodexTabResumesThePinTheUserChoseNotTheDirectorysNewestThread() async {
+        let store = makeStore()
+        let transport = ScriptedTransport()
+        transport.threads = [
+            ["id": rivalThread, "updatedAt": 2_000, "path": "/r/rival.jsonl"],
+            ["id": createdThread, "updatedAt": 1_000, "path": "/r/x.jsonl"],
+        ]
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: transport), rolloutExists: { _ in true }),
+            for: .codex, account: nil
+        )
+        let injector = SpyInjector()
+        store.injectorOverride = injector
+        store.injectionSettle = { $0() }
+        guard case .success(let id) = await store.createSession(agent: .codex, in: "/w/a") else {
+            return XCTFail("codex tab creation must succeed against a scripted transport")
+        }
+        store.closeSession(id)
+        injector.events.removeAll()
+
+        store.reopenLastClosed(directoryExists: { _ in true })
+        await store.codexRestoreTask?.value
+
+        XCTAssertEqual(injector.sent.last, "codex resume \(createdThread)",
+                       "a reopen types the thread it was asked to bring back, whatever else "
+                       + "has been written in that directory since")
+        XCTAssertEqual(
+            store.repos.first?.sessions.first?.pinnedConversationID.uuidString.lowercased(),
+            createdThread,
+            "and the record stays on it too — a re-pin here is the same override, filed"
+        )
+        XCTAssertFalse(transport.methods.contains("thread/list"),
+                       "the reopen path must not ask the reconcile question at all: the answer "
+                       + "could only disagree with the user")
+    }
+
     /// The lazy half of the same rule: reopening a claude tab must not spawn `codex`.
     func testReopeningAClaudeTabNeverAsksForCodex() async {
         let store = makeStore()
@@ -302,12 +361,29 @@ final class ReopenClosedSessionTests: XCTestCase {
     final class ScriptedTransport: CodexTransport {
         var onLine: ((String) -> Void)?
         private(set) var methods: [String] = []
+        /// `thread/list` results, as raw entries — the shape `CodexAdapter.threads` decodes.
+        ///
+        /// Not keyed by `cwd` the way `CodexResumeTests`'s namesake is: every fixture in this
+        /// file lives in one project, so answering the same listing whatever directory is asked
+        /// about keeps the reopen tests independent of how a rebuilt tab's
+        /// `transcriptDirectory` resolves.
+        ///
+        /// Empty by default — a directory codex reports no threads for leaves every pin where
+        /// it is. This case was missing entirely until the reconcile pass moved in front of the
+        /// sends, and its absence is why the suite could not see that a reopen had started
+        /// reconciling: `default:` answers `{"result":{}}`, which decodes to no threads, so a
+        /// pass that should never have run looked exactly like one that found nothing.
+        var threads: [[String: Any]] = []
 
         func send(_ line: String) {
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
                   let method = obj["method"] as? String, let id = obj["id"] as? Int else { return }
             methods.append(method)
             switch method {
+            case "thread/list":
+                let body: [String: Any] = ["id": id, "result": ["data": threads]]
+                guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+                onLine?(String(decoding: data, as: UTF8.self))
             case "thread/read":
                 onLine?(#"{"id":\#(id),"result":{"thread":{"id":"01a01269-baa6-7493-8d15-8fa21bcb602b","name":"reopened","status":{"type":"idle"},"path":"/r/x.jsonl","cwd":"/w/a"}}}"#)
             case "thread/start":

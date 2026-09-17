@@ -410,13 +410,89 @@ final class TimelineFixtureTests: XCTestCase {
         }
     }
 
+    // MARK: - Codex, `event_msg`/`item_completed` surface (codex-cli ≥0.151)
+
+    /// A `codex exec`-originated capture, on codex-cli 0.153.4, so this surface is pinned
+    /// against bytes codex actually writes today rather than the pre-0.151 three-arm surface
+    /// every other Codex fixture in this directory predates. Two trivial turns: the first
+    /// runs a shell command and replies, the second just replies. Rollout.captured.provenance
+    /// json's capturedBy explains why `exec`, what was dropped, and what remains.
+    private func newSurfaceRollout() throws -> [String] {
+        try Self.lines("rollout-item-completed.captured", in: "Codex")
+    }
+
+    /// The whole mapping, in order, over bytes codex actually wrote — the same check
+    /// `testTheCapturedRolloutMapsToTheConversationThatWasHeld` makes for the older surface.
+    func testTheNewSurfaceCaptureMapsToTheConversationThatWasHeld() throws {
+        let items = mappedCodex(try newSurfaceRollout())
+        XCTAssertEqual(items.map(\.kind), [
+            .userTurn, .assistantText, .toolCall, .toolResult, .assistantText,
+            .userTurn, .assistantText,
+        ], "two prompts; the first ran a tool before replying, the second just replied. "
+        + "CommandExecution's own item_completed record contributes nothing — the tool call "
+        + "and its result come from response_item/custom_tool_call and its output instead, "
+        + "per the mapper's documented finer-grained-decomposition rule.")
+        XCTAssertEqual(items.filter { $0.kind != .toolCall && $0.kind != .toolResult }
+            .map(\.body.text), [
+                "Run the shell command: echo hi. Then reply with exactly the word: done",
+                "I\u{2019}ll run the command now.\n",
+                "done",
+                "Reply with exactly the word: finished",
+                "finished",
+            ])
+        XCTAssertEqual(items[2].body.tool, "exec")
+        XCTAssertEqual(items[2].body.callID, "call_MTiFtG7cQABPuVRo3p1alp3a")
+        XCTAssertTrue(items[2].body.text.hasPrefix("text(await tools.exec_command("),
+                      "a custom_tool_call's input is a program, carried verbatim")
+        XCTAssertEqual(items[3].body.callID, items[2].body.callID,
+                       "the result must name the call it answers, which is what pairs them "
+                       + "on screen")
+        XCTAssertNil(items[3].body.tool, "no output record names its tool")
+        XCTAssertEqual(items[3].body.text,
+                       "Script completed\nWall time 0.1 seconds\nOutput:\n"
+                       + "{\"chunk_id\":\"5a2947\",\"wall_time_seconds\":0.000002041,"
+                       + "\"exit_code\":0,\"original_token_count\":1,\"output\":\"hi\\n\"}",
+                       "the block's own \\n is literal text one level down, not a real "
+                       + "newline — the mapper joins blocks verbatim and does not re-parse "
+                       + "their contents")
+        XCTAssertTrue(items.allSatisfy { $0.status == .complete })
+    }
+
+    /// **`.thinking` is absent from this surface, and that is a measured loss, not a bug.**
+    /// This capture has no `Reasoning` item_completed record at all — it ran with reasoning
+    /// effort `none` — so the absence here is not even exercised by omission; it is asserted
+    /// against the mapper's own documented survey instead: `item_completed`/`Reasoning` has
+    /// `summary_text: []` and `raw_content: []` in 289 of 289 records surveyed, the same as
+    /// `response_item`/`reasoning`'s empty `summary` in 308 of 308 — there is no thinking text
+    /// to recover from a new-format thread. If a future codex starts writing one, this test
+    /// (and `CodexTimelineMapper`'s `default` arm under `.thinking` in its `item_completed`
+    /// switch) is what should fail and tell the next person to map it.
+    func testTheNewSurfaceCaptureHasNoThinkingBecauseThereIsNoneToRecover() throws {
+        let kinds = Set(mappedCodex(try newSurfaceRollout()).map(\.kind))
+        XCTAssertFalse(kinds.contains(.thinking),
+                       ".thinking is unrecoverable for item_completed/Reasoning — its "
+                       + "summary_text and raw_content are empty in every record surveyed — "
+                       + "so this must stay absent until a future codex starts writing one")
+    }
+
+    /// The bug this whole plan exists to fix: a codex thread that mapped to nothing but tool
+    /// rows, or nothing at all, because the mapper only knew the pre-0.151 three-arm surface.
+    /// Without this, the fixture above could silently regress into a tool-only file and every
+    /// other assertion on it would still pass.
+    func testTheNewSurfaceCaptureHasAtLeastOneUserTurnAndOneAssistantReply() throws {
+        let kinds = mappedCodex(try newSurfaceRollout()).map(\.kind)
+        XCTAssertTrue(kinds.contains(.userTurn), "the capture must contain at least one prompt")
+        XCTAssertTrue(kinds.contains(.assistantText),
+                      "the capture must contain at least one reply")
+    }
+
     /// The leak this capture shipped with, pinned so it cannot come back. Two of its records
     /// carried this machine's home directory and an inventory of the operator's private
     /// `~/.agents/skills`, and were dropped; codex reads that directory regardless of
     /// `CODEX_HOME`, so the throwaway home the capture ran under did not isolate it.
     func testNoCapturedRolloutNamesAHomeDirectoryOrAPrivateSkill() throws {
         for file in ["rollout-content.captured", "rollout.captured", "turn-aborted.captured",
-                     "session-index.captured"] {
+                     "session-index.captured", "rollout-item-completed.captured"] {
             for line in try Self.lines(file, in: "Codex") {
                 XCTAssertFalse(line.contains("/Users/"),
                                "\(file) names a home directory: \(line.prefix(60))")

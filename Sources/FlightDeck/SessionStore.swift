@@ -487,12 +487,81 @@ final class SessionStore: ObservableObject {
         stopCodex(account: account, expected: stack)
     }
 
+    /// The one thing that notices a codex tab has wandered onto another thread.
+    ///
+    /// **One, not one per account.** A pass groups by directory and resolves its adapter per
+    /// group, so a single subscriber already covers every login. It is also not on
+    /// `CodexStack`: `adapter(for:)` answers codex from `adapters[instance]` first and only
+    /// builds a stack on a miss — deliberately, so `overrideAdapter` keeps winning — which
+    /// means no store-level codex test in this repo ever builds a `CodexStack`, and a
+    /// stack-owned reconciler would never exist to be tested.
+    private var codexPinReconciler: CodexPinReconciler?
+
+    /// Starts the reconciler the first time a codex tab needs one.
+    ///
+    /// Hung off `preparedAdapter` rather than `makeCodexStackIfNeeded` for two reasons.
+    /// `preparedAdapter` is on both codex paths — `createSession` and `resumeRestoredCodex`
+    /// take it and nothing else does — and, unlike the stack builder, it is still reached when
+    /// a caller has installed its own adapter, which is every store-level codex test and the
+    /// only way this is observable without spawning `codex`.
+    private func startCodexPinReconcilerIfNeeded() {
+        guard codexPinReconciler == nil else { return }
+        let reconciler = CodexPinReconciler(clock: clock) { [weak self] in
+            await self?.reconcileCodexPins()
+        }
+        codexPinReconciler = reconciler
+        reconciler.start()
+    }
+
+    /// Drops it once no codex tab anywhere justifies it.
+    ///
+    /// `stopCodexIfUnused`'s predicate, widened from one account to all of them: the app-server
+    /// it tears down is per-login, this subscriber is not, so narrowing it the same way would
+    /// leave the clock ticking a reconciler for a login whose last tab closed. Called from the
+    /// same two sites, including `createSession`'s `defer`, so a creation that failed before
+    /// inserting its tab does not leave a subscriber behind for the rest of the run.
+    private func stopCodexPinReconcilerIfUnused() {
+        guard let reconciler = codexPinReconciler else { return }
+        guard !repos.flatMap(\.sessions).contains(where: { $0.agent == .codex }) else { return }
+        reconciler.stop()
+        codexPinReconciler = nil
+    }
+
+    /// Test seam. Whether a reconciler is currently subscribed — the lifecycle's only
+    /// observable fact, since the object itself stays private.
+    var hasCodexPinReconcilerForTesting: Bool { codexPinReconciler != nil }
+
     /// How many codex creations are between "asked for an app-server" and "tab inserted",
     /// per account.
     ///
     /// A counter and not a `Bool`: two tabs can be created at once, and the second finishing
     /// must not clear a guard the first still needs.
     private var codexCreationsInFlight: [UUID?: Int] = [:]
+
+    /// Every codex thread this run has seen a tab pinned to, whether or not a tab still holds
+    /// it. `reconcileCodexPins` treats all of them as untakeable.
+    ///
+    /// **Why it is not enough to exclude the threads live tabs pin right now.** That set —
+    /// `taken` — loses a thread the moment its tab closes. Two codex tabs in one directory,
+    /// T1 on thread A and T2 on the newer B: while both are live the two-tab guard skips the
+    /// group, but closing T2 drops B out of `taken`, and the next pass re-pins T1 to B while
+    /// T1's terminal is still driving A. That state is stable (B is now both the pin and the
+    /// newest entry) and survives a relaunch, where `resumeRestoredCodex` types
+    /// `codex resume B` into T1 and orphans A outright. Remembering B closes it.
+    ///
+    /// **What it costs, deliberately.** A hand-typed
+    /// `codex resume <a thread some Flight Deck tab once held>` is now refused rather than
+    /// followed — a case `vscode` in `CodexAdapter.threads`' `sourceKinds` was kept for. Taken
+    /// knowingly, because the two failure directions are not symmetric: a false refusal leaves
+    /// a stale timeline, which is recoverable and no worse than the behaviour before any of
+    /// this existed, while a false follow orphans a live conversation and mis-resumes the tab
+    /// on the next launch.
+    ///
+    /// **Process-lifetime, not persisted.** A relaunch starts it empty (seeded only from the
+    /// restored sessions' own pins), so the scenario above can recur exactly once after a
+    /// restart. Making it durable needs a new persisted field and is deliberately out of this
+    /// plan's scope.
+    private var codexThreadsEverPinned: Set<UUID> = []
 
     /// Tears down the stack the caller meant, whatever the reason. `stop()` funnels into the
     /// transport's termination hook, so every request still in flight fails rather than
@@ -1215,7 +1284,15 @@ final class SessionStore: ObservableObject {
     private var closeObserver: NSObjectProtocol?
     private var appActivationObserver: NSObjectProtocol?
 
-    /// Renames typed into the sidebar but not yet typed into `claude`, one per tab.
+    /// Renames typed into the sidebar but not yet typed at the agent's pty, one per tab.
+    ///
+    /// No longer claude-only. Codex joins this queue too — `rename`'s `.codex` arm seeds it
+    /// alongside the `thread/name/set` it already sends, because the wire call renames the
+    /// thread's metadata and the attached `codex resume` TUI never learns. Which agent a
+    /// given entry belongs to is not recorded here and does not need to be:
+    /// `flushPendingRename` re-derives it from the tab, and both agents type `/rename` — the
+    /// difference is only whether a modal follows.
+    ///
     /// See `flushPendingRename` for why an injection waits.
     private var pendingRenames: [UUID: String] = [:]
 
@@ -1694,6 +1771,9 @@ final class SessionStore: ObservableObject {
             // app-server would outlive every codex tab. A creation that SUCCEEDED inserted
             // its tab already, so the tab count below refuses the teardown by itself.
             stopCodexIfUnused(account: instance.account)
+            // Same reasoning, one scope wider: a creation that never inserted its tab must not
+            // leave a reconciler subscribed to the clock for the rest of the run.
+            stopCodexPinReconcilerIfUnused()
         }
 
         let binding: AgentBinding
@@ -1719,6 +1799,11 @@ final class SessionStore: ObservableObject {
             accountID: draft.accountID,
             transcriptPath: binding.transcriptURL?.path
         )
+        // One of the three places a codex pin is first established — see
+        // `codexThreadsEverPinned`. Recorded here rather than left to `repinCodex`, which this
+        // path never calls: a thread this tab was born on must stay untakeable by its
+        // neighbours even after the tab is closed.
+        codexThreadsEverPinned.insert(binding.conversationID)
         let adapter = adapter(for: instance)
         addSession(
             session,
@@ -1870,6 +1955,11 @@ final class SessionStore: ObservableObject {
         // that a path *asked* for a running app-server, and a test that let it actually start
         // one would spawn `codex`. One ask is one account's — two logins asking is two.
         if instance.agent.needsRuntimeStart { codexServerRequestsForTesting += 1 }
+        // Both codex paths pass through here — creation and restore — and this one still runs
+        // when an override adapter short-circuits the lines below. See
+        // `startCodexPinReconcilerIfNeeded` for why that matters and why the stack builder is
+        // the wrong hook.
+        if instance.agent == .codex { startCodexPinReconcilerIfNeeded() }
         if let registered = adapters[instance] { return registered }
         guard instance.agent.needsRuntimeStart else { return adapter(for: instance) }
         try await startCodex(account: instance.account)
@@ -2271,6 +2361,11 @@ final class SessionStore: ObservableObject {
                 accountID: entry.accountID,
                 transcriptPath: entry.transcriptPath
             )
+            // Seeded from every restored codex pin, orphaned tabs included — see
+            // `codexThreadsEverPinned`. An orphan is exactly the case that matters: it never
+            // resumes and never re-pins, so this is the only chance to record the thread it
+            // is holding, and a neighbour in the same directory must not be handed it.
+            if session.agent == .codex { codexThreadsEverPinned.insert(conversationID) }
             // A tab whose login has been deleted since the last run. Rebuilt, but never
             // resumed — see `accountIsMissing`. The tab still appears, because a tab that
             // vanishes at relaunch is its own bug: the user has to be able to see which tabs
@@ -2397,7 +2492,9 @@ final class SessionStore: ObservableObject {
         // behind their back at launch. See `resumeRestoredCodex`.
         if !deferredCodexResumes.isEmpty {
             codexRestoreTask = Task { [weak self] in
-                await self?.resumeRestoredCodex(deferredCodexResumes)
+                // The one caller whose pins came off disk rather than out of this run, so the
+                // only one that reconciles before typing. See `resumeRestoredCodex`'s stage 2.
+                await self?.resumeRestoredCodex(deferredCodexResumes, pinsPredateThisRun: true)
             }
         }
         // Projects count as "restored something": `SessionStore.init` reads this as
@@ -2450,15 +2547,30 @@ final class SessionStore: ObservableObject {
     ///   marked unread until the user happened to create a *new* codex tab, which started the
     ///   memoized stack and incidentally revived it. `preparedAdapter` is what starts it, and
     ///   this method only runs when a codex tab came back, so the laziness holds.
-    /// - **Identity is settled** with `rebind` rather than read off the pin, and the tab is
-    ///   re-pinned when codex answers with a different thread. See `CodexAdapter.rebind`.
+    /// - **Identity is settled** — on a relaunch first by one `reconcileCodexPins` pass over
+    ///   every codex tab, then per tab with `rebind` rather than read off the pin — and the tab
+    ///   is re-pinned when codex answers with a different thread. See `CodexAdapter.rebind`.
     /// - **The resume command is typed afterwards**, which is why `restore` left
     ///   `initialInput` empty for these tabs.
     ///
     /// Degrades to the pinned thread whenever it cannot ask — no app-server, or one that will
     /// not answer. Not knowing whether a thread is gone is not the same as knowing it is, and
     /// the command this types then is exactly the one restore used to type unconditionally.
-    private func resumeRestoredCodex(_ tabIDs: [UUID]) async {
+    ///
+    /// **Three stages, and the order between them is the whole point.** Prepare every account,
+    /// then reconcile once, then bind and send. See the comment on stage 2 for what typing
+    /// first cost, and for why only a relaunch takes that middle stage.
+    ///
+    /// - Parameter pinsPredateThisRun: whether these tabs' pins were negotiated before this
+    ///   process existed — true from `restore`, which reads them back off disk. Only then is
+    ///   stage 2 a repair: a reopen (⌘⇧T, the phone's `reopenClosedSession`) resurrects a pin
+    ///   the user chose seconds ago, and reconciling it would override that choice rather than
+    ///   correct a stale one. ⌘K's `openConversation` also passes false, but as an answer held
+    ///   ready rather than one in use: it is claude-only in practice and never defers into this
+    ///   method (see `CodexPinReconciler.lastPass`'s doc comment). Passed explicitly at all
+    ///   three call sites rather than defaulted, so a fourth caller has to answer the question
+    ///   instead of inheriting an answer.
+    private func resumeRestoredCodex(_ tabIDs: [UUID], pinsPredateThisRun: Bool) async {
         // One prepare per account, not per tab. `startCodex` already memoizes the handshake,
         // so a second ask would not spawn a second app-server — but it would count as a
         // second ask (see `codexServerRequestsForTesting`) and re-await a settled task for
@@ -2466,6 +2578,9 @@ final class SessionStore: ObservableObject {
         // waiting on the other's `initialize`.
         var preparedPerAccount: [AgentInstance: (any AgentAdapter)?] = [:]
 
+        // **Stage 1 — every account's app-server up.** Nothing here reads or writes a pin, so
+        // it can precede the reconcile pass, which is the point: that pass needs a started
+        // app-server and nothing else this method produces.
         for tabID in tabIDs {
             // A tab the user closed while the app-server was starting has nothing to resume,
             // and re-pinning it would file state against a row that no longer exists.
@@ -2478,8 +2593,6 @@ final class SessionStore: ObservableObject {
                 prepared = try? await preparedAdapter(for: instance)
                 preparedPerAccount[instance] = prepared
             }
-            let adapter = prepared ?? self.adapter(for: instance)
-            let options = options(for: .codex, project: session.workingDirectory)
 
             // A failed probe or handshake tore the stack down — `startCodex` calls
             // `stopCodex` so the next attempt re-probes rather than replaying the failure —
@@ -2492,6 +2605,110 @@ final class SessionStore: ObservableObject {
                 stopWatching(tabID)
                 startWatching(tabID: tabID)
             }
+        }
+
+        // **Stage 2 — one pass, BEFORE anything is typed, and only for pins that predate this
+        // run.** `rebind` below asks only whether the *pinned* thread still exists, never
+        // whether it is still the thread the user works in, so a pin left behind by a previous
+        // run survives it untouched. This pass is the only thing that answers the second
+        // question, and it used to run after the loop — which meant a relaunch typed
+        // `codex resume <abandoned-thread>` and only then learned better, leaving the store,
+        // the watcher, the title and the phone on the right thread while the terminal sat on an
+        // empty TUI. Flight Deck creates its pinned thread itself in `prepare`, so "wrong
+        // thread" reads as "blank conversation": that is the whole of the "codex resume is
+        // broken" symptom. Measured live across 26 Flight-Deck-created threads, only 2 ever
+        // carried a turn.
+        //
+        // Immediate rather than waiting up to a throttle window for the reconciler's first
+        // tick, for the same reason: a relaunch is precisely when a tab is most likely to be
+        // pinned to a thread the user abandoned in the previous run.
+        //
+        // **Gated, because all of that is true only of a relaunch.** The live other callers
+        // are the reopens — ⌘⇧T and the phone's `reopenClosedSession`, both through
+        // `settleReopen` — and they hand this a pin the user chose seconds ago. Following the
+        // directory's newest thread there overrides that choice instead of repairing a stale
+        // pin, and it usually collides while doing it: the hand-started TUI that made the rival
+        // thread newest is typically still alive, so the limitation below stops being a rare
+        // risk and becomes the common case. Reopens therefore skip this stage and behave
+        // exactly as they did before it existed; stages 1 and 3 run for every caller.
+        //
+        // ⌘K's `openConversation` passes `false` too, but that call site is claude-only in
+        // practice: it resolves its login with `launchAccount(for: .claude, …)` and builds its
+        // `Session` with no `agent:` argument, and `resumeExisting` defers only for an agent
+        // that `negotiatesIdentity` — which claude does not. So no codex tab reaches this
+        // method from search today; the argument is written out so the answer is already right
+        // the day one can, rather than defaulted into being wrong.
+        //
+        // It needs no state stage 1 produced beyond a started app-server: it reads `repos` and
+        // resolves its own adapters through `adapter(for:)`. A group whose server never came up
+        // is skipped by its own per-group `try?`, so the degraded path is unchanged in what it
+        // does — but not in when it waits. `threads(inDirectory:)` over the unstarted transport
+        // a missing or wedged codex leaves behind burns the full `readTimeout` (5 s), per
+        // directory, sequentially, and now it burns it *before* the first keystroke: four
+        // broken-codex tabs across four directories sit at empty prompts for ~20 s where they
+        // used to be populated at once. Total settle time is the same either way; only the
+        // order of the wait moved, and on a relaunch that wait is what the pass costs.
+        //
+        // A perfectly healthy codex pays it too, once, for any **orphaned** tab in the fleet.
+        // The pass visits every codex session in `repos`, and a tab whose login was deleted is
+        // restored but deliberately never added to `deferredCodexResumes` — so stage 1 never
+        // prepares it. Its `instance(for:)` collapses to the nil account, `adapter(for:)`
+        // answers from `makeCodexStackIfNeeded`, and that builds a stack while spawning
+        // nothing: an unstarted transport, one full `readTimeout` for that group, ahead of
+        // every other tab's first keystroke.
+        //
+        // **Known limitation, deliberately not fixed.** Its `taken` set excludes threads pinned
+        // by other Flight Deck tabs, not one held by a TUI started by hand outside Flight Deck.
+        // Selecting such a thread while its writer lock is still held makes `codex resume` fail
+        // visibly in the tab (`already has an active writer (code -32600)`) — a loud,
+        // correctable failure, where the behaviour it replaces is a silent wrong thread. Lock
+        // probing before selection is not worth the round trip for that trade — and the gate
+        // above confines the trade to relaunch, where the thread being left behind is one
+        // nobody has taken a turn in.
+        if pinsPredateThisRun {
+            // Through the reconciler rather than straight into `reconcileCodexPins()`, for the
+            // stamp and nothing else — the pass itself is identical. `passNow()` also closes
+            // this pass against any ticker pass already in flight or starting underneath it;
+            // the stamp handles what those two do not, a *later* tick. `lastPass` was seeded
+            // when stage 1 constructed the reconciler, so without it the first tick would fall
+            // due a window from *that* instant, which this stage can outlast on its own (a
+            // `readTimeout` per unreachable group, sequentially). That tick would then land
+            // inside stage 3, which reads a tab's binding before awaiting `rebind` and types
+            // what it read — so a pass moving the record across that suspension puts the
+            // terminal and the record back on different threads. `passNow()` stamps, and the
+            // next tick falls a full window after this pass instead. See its doc comment.
+            //
+            // nil by two routes, both benign. Either stage 1 reached `preparedAdapter` for no
+            // tab at all — every restored tab closed between the two stages — because that
+            // method starts the reconciler before anything in it can throw; `repos` can still
+            // hold an orphaned codex tab for a pass to visit, so the fallback reconciles rather
+            // than skipping. Or `stopCodexPinReconcilerIfUnused` tore it down mid-stage-1, from
+            // a `closeSession` interleaved with this method's awaits — and on that route
+            // `repos` holds no codex tab at all, by the very check that nilled it, so the
+            // fallback pass below simply finds nothing to reconcile.
+            if let reconciler = codexPinReconciler {
+                await reconciler.passNow()
+            } else {
+                await reconcileCodexPins()
+            }
+        }
+
+        // **Stage 3 — bind and send, on a pin stage 2 has just made current — or, on a reopen,
+        // on the one the user picked, which is already current by construction.**
+        for tabID in tabIDs {
+            guard let session = session(for: tabID) else { continue }
+            let instance = instance(for: session)
+            // Flattened: a miss and a stored nil both mean "no app-server for this account",
+            // and stage 1 visited exactly these tabs, so a miss here is a tab that has since
+            // been closed — which the guard above has already dropped — or one whose account
+            // was deleted between the stages: `instance(for:)` resolves through
+            // `resolvedAccountID`, which collapses a tombstoned account to nil, so the key
+            // stage 1 filed this tab's adapter under is no longer the key it is looked up by.
+            // Benign, and the same answer either way: no `rebind`, no title read, the pin it
+            // already had is typed — the degraded path's own contract.
+            let prepared = preparedPerAccount[instance] ?? nil
+            let adapter = prepared ?? self.adapter(for: instance)
+            let options = options(for: .codex, project: session.workingDirectory)
 
             var binding = adapter.binding(for: session)
             if prepared != nil,
@@ -2499,7 +2716,7 @@ final class SessionStore: ObservableObject {
                 binding = settled
             }
             if binding.conversationID != session.pinnedConversationID {
-                repinRestoredCodex(tabID, to: binding)
+                repinCodex(tabID, to: binding)
             }
             // Re-read: the re-pin above rewrote the row, and the command names the session.
             guard let repinned = self.session(for: tabID) else { continue }
@@ -2535,19 +2752,206 @@ final class SessionStore: ObservableObject {
                 sendToShell(command, into: tabID)
             }
         }
+
+        // No second pass behind the loop. The only pin stage 3 can change is one `rebind`
+        // re-pointed because its thread was *gone*, and the replacement `prepare` creates is by
+        // definition the newest thread in that directory — and already in
+        // `codexThreadsEverPinned` — so a fresh pass would re-select it and stop at the
+        // strictly-greater test, having paid one `thread/list` round trip per directory to
+        // learn nothing.
+        //
+        // That is the benign half, and it holds only while the replacement's rollout is
+        // already on disk. When it is not, `pinnedUpdatedAt` falls through to
+        // `rolloutModifiedAt(session.transcriptPath)`, which answers 0 for a file codex has yet
+        // to write — and against 0 *any* never-pinned candidate in the directory wins. A
+        // retained second pass would then re-pin the record off the thread stage 3 has just
+        // typed, recreating the exact terminal-versus-record split this ordering exists to
+        // remove. Deleting it is the stronger call, not the cheaper one. The 5 s ticker covers
+        // everything after restore.
     }
 
-    /// The restored tab's thread was gone and codex started it a new one.
+    /// Follows a codex tab to the thread it is actually driving.
+    ///
+    /// **The bug this closes.** A user who types `codex` at a Flight Deck tab's shell gets a
+    /// brand-new thread and nothing tells the store. Claude's counterpart — `pinResolutions`
+    /// → `repin` — is driven by claude's status registry; codex has no registry, so without
+    /// this nothing follows it. Measured on the live machine: a tab driving a 676-line thread
+    /// while its record pinned a different one whose rollout was one line long and three days
+    /// stale. The rollout watcher, the phone, and the tab title were all reading the dead file.
+    ///
+    /// Called from `CodexPinReconciler` on a throttled tick, and once directly by
+    /// `resumeRestoredCodex` on the relaunch path — between starting the app-servers and typing
+    /// anything, never after, or a relaunch types a command naming the thread this pass is
+    /// about to move off. Relaunch only: its reopen callers pass `pinsPredateThisRun: false`,
+    /// because a pin the user picked out of history seconds ago is not one to second-guess.
+    /// Directly callable, and taking nothing, so every rule below is assertable with no clock
+    /// and no expectations.
+    func reconcileCodexPins() async {
+        // Grouped by the pair that decides which app-server to ask and what to ask it about.
+        // `instance(for:)` is the store's one normalisation for the account key — a second one
+        // invented here is how a group ends up asking the wrong login's server.
+        struct Group: Hashable {
+            let instance: AgentInstance
+            let directory: String
+        }
+        var members: [Group: [UUID]] = [:]
+        // Insertion-ordered alongside the dictionary so a pass visits groups in a stable order.
+        // Dictionary iteration order is not, and a test that proves one group's RPC failure
+        // does not abort another needs the two to be visited in a knowable sequence.
+        var order: [Group] = []
+        for session in repos.flatMap(\.sessions) where session.agent == .codex {
+            let group = Group(instance: instance(for: session), directory: session.transcriptDirectory)
+            if members[group] == nil { order.append(group) }
+            members[group, default: []].append(session.id)
+        }
+        guard !order.isEmpty else { return }
+
+        for group in order {
+            guard let tabs = members[group] else { continue }
+            // **Load-bearing guard.** Two live codex tabs in one directory: `thread/list`
+            // reports the directory's threads, not which tab is driving which, so a newly
+            // appeared thread cannot be attributed to either of them. Guessing wrong re-pins a
+            // tab away from the user's real conversation — the unrecoverable loss
+            // `CodexAdapter.rebind`'s doc comment exists to prevent — and the pin is the only
+            // record of where that conversation was. Skipping costs the feature in a rare
+            // layout; guessing costs a conversation.
+            guard tabs.count == 1, let tabID = tabs.first else { continue }
+            // **A creation in flight makes every other guard here stale.** `members`, `order`
+            // and the two-tab count above are all read from `repos` before the round trip
+            // below, and `createSession` does not insert its tab until long after
+            // `thread/name/set` has committed — and named — the thread it is claiming. A tick
+            // landing in that window sees a one-tab directory, cannot see the new thread in
+            // the rebuilt `taken`, and re-pins the existing tab onto the thread the new tab is
+            // about to be born on: two tabs, one thread, created by the guard that exists to
+            // refuse exactly that. The same predicate `stopCodexIfUnused` uses at :484, for
+            // the same reason — a creation between "asked for an app-server" and "tab
+            // inserted" is invisible to anything that reads `repos`. Before the `await`, so a
+            // pass that cannot act on the answer does not pay for one either.
+            guard codexCreationsInFlight[group.instance.account, default: 0] == 0 else { continue }
+            // `adapter(for:)`, never a fresh `CodexAdapter`: that is what lets an override
+            // installed through `overrideAdapter` win, which is the only reason any of this is
+            // testable without spawning `codex`.
+            guard let codex = adapter(for: group.instance) as? CodexAdapter else { continue }
+
+            // `try?` per group, not per pass. An app-server that is missing, crashed, or too
+            // slow says nothing about this directory's threads — every pin in the group stays
+            // exactly where it is — but it says nothing about the *other* directories either,
+            // and aborting the pass on it would let one broken login silence every other one.
+            // Task 3 deliberately does not collapse a remote error to `[]`, so "asked, and
+            // there are none" and "could not ask" arrive here as genuinely different values.
+            //
+            // The directory is passed VERBATIM. `thread/list` matches `cwd` as an exact
+            // string and answers a non-matching one with an empty array and no error, so any
+            // normalisation — `standardizedFileURL`, resolving a symlink, a `/private` prefix,
+            // adding or stripping a trailing slash — turns this into a silent no-op that looks
+            // exactly like "no threads here". Probed live: an abbreviated form of a real cwd
+            // came back `data: []`.
+            guard let threads = try? await codex.threads(inDirectory: group.directory) else { continue }
+
+            // Re-read after the await: the tab may have been closed, moved, or re-pinned by
+            // the restore path while this round trip was in flight.
+            guard let session = self.session(for: tabID) else { continue }
+            let pinned = session.pinnedConversationID
+
+            // Every pin held by a *different* live tab, whatever agent it runs. Built here
+            // rather than from `ConversationPin.conflicted(_:)`: that one is claude-registry
+            // code and a post-hoc detector of tabs that already collide, where what is needed
+            // here is the opposite — refusing to create a collision in the first place.
+            let taken = Set(
+                repos.flatMap(\.sessions).filter { $0.id != tabID }.map(\.pinnedConversationID)
+            )
+
+            // Newest-first as the server sorted it (`sortKey: updated_at`, `desc`), so the
+            // first survivor of the filters is the newest survivor.
+            let candidate = threads.first { thread in
+                // No rollout path means nothing for the watcher or the phone to read, so
+                // re-pinning to it would trade one dead file for no file at all.
+                thread.path != nil && !taken.contains(thread.id)
+                    // The tab's own pin is deliberately exempt from the ever-pinned memory
+                    // and left in the pool: it is `codexThreadsEverPinned`'s first entry, and
+                    // the strictly-greater comparison below — not this filter — is what
+                    // rejects it. Excluding it here would make a tie select some *other*
+                    // thread and turn `>` into a rule nothing tests.
+                    && (thread.id == pinned || !codexThreadsEverPinned.contains(thread.id))
+            }
+            guard let candidate, let path = candidate.path else { continue }
+
+            // Strictly greater, never `>=`: an equal timestamp is not evidence that anything
+            // moved, and re-pinning on one would flap between two threads written in the same
+            // second. A `updatedAt` that failed to decode is 0 (see `CodexAdapter.threads`),
+            // so it can never win either.
+            //
+            // **A pinned thread absent from the window is scored from its own rollout, not
+            // from 0.** `thread/list` is capped at `codexThreadListLimit` (10), so any
+            // long-lived project directory eventually pushes an idle tab's thread out of the
+            // window — and scoring that 0 makes the comparison inert, because every candidate
+            // beats 0. Raising the cap only moves the cliff. Failing closed on absence is
+            // worse still: the reported bug's own stub rollout may not be listed at all (codex
+            // need not list a thread that has taken no turn), so refusing the group would
+            // un-fix it. The local answer is always available instead — when was this thread's
+            // rollout last written.
+            //
+            // Mixing a wire `updatedAt` with a filesystem mtime is sound because they measure
+            // the same thing in the same unit: wall-clock seconds since the epoch at which
+            // this thread was last written. The only sensitivity is a sub-second tie, which
+            // the strictly-greater rule resolves in the pin's favour and the next pass
+            // restabilises.
+            let pinnedUpdatedAt = threads.first { $0.id == pinned }?.updatedAt
+                ?? Self.rolloutModifiedAt(session.transcriptPath)
+            guard candidate.updatedAt > pinnedUpdatedAt else { continue }
+
+            repinCodex(tabID, to: AgentBinding(
+                conversationID: candidate.id,
+                transcriptURL: URL(fileURLWithPath: path)
+            ))
+            // The same route `resumeRestoredCodex` takes for a title, and what makes the fix
+            // visible on the Mac within one tick rather than only on the phone: without it the
+            // tab keeps the name of a conversation it is no longer having.
+            if let name = candidate.name, !name.isEmpty {
+                apply(.title(name), to: tabID)
+            }
+        }
+    }
+
+    /// When a rollout file was last written, in unix seconds — 0 when there is no path, or
+    /// nothing readable at it.
+    ///
+    /// The fallback `reconcileCodexPins` scores a pinned thread with when codex's own
+    /// `thread/list` window does not carry it. 0 for a missing file is the right answer rather
+    /// than a defeat: a pin whose rollout is gone names a thread that cannot be read, and a
+    /// live candidate should win against it.
+    ///
+    /// `resourceValues` rather than `attributesOfItem`, as `SessionStatusWatcher` and
+    /// `FleetService` both do: the latter builds a dictionary of every attribute the file
+    /// system can report in order to read one date.
+    private static func rolloutModifiedAt(_ path: String?) -> Int {
+        guard let path,
+              let mtime = (try? URL(fileURLWithPath: path)
+                  .resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        else { return 0 }
+        return Int(mtime.timeIntervalSince1970)
+    }
+
+    /// Points a codex tab at a different thread than the one its record names.
+    ///
+    /// Two callers, and the name says what it does rather than when it runs because they are
+    /// nothing alike: `resumeRestoredCodex` uses it when the restored tab's thread was *gone*
+    /// and codex started a fresh one, and `reconcileCodexPins` uses it when the thread is
+    /// perfectly alive but the tab has been observed driving a different, newer one.
     ///
     /// Deliberately not `repin`: that one is claude's in-session `/resume`, and every step it
     /// takes past the pin describes an agent this is not — a transcript *directory* codex
     /// does not derive paths from, a sub-agent count no registry feeds, a title read out of a
     /// transcript file that has just been created empty. What has to happen here is narrower:
     /// follow the new thread, keep the rollout path codex reported for it, and repoint the
-    /// runtime, because the attachment `insertSession` made names the dead thread and no
+    /// runtime, because the attachment `insertSession` made names the old thread and no
     /// notification will ever arrive on it.
-    private func repinRestoredCodex(_ tabID: UUID, to binding: AgentBinding) {
+    private func repinCodex(_ tabID: UUID, to binding: AgentBinding) {
         guard let at = locate(tabID) else { return }
+        // The chokepoint for both re-pinning callers — see `codexThreadsEverPinned`. Includes
+        // the candidate `reconcileCodexPins` has just adopted, so a thread stays this tab's
+        // even after it closes.
+        codexThreadsEverPinned.insert(binding.conversationID)
         repos[at.repo].sessions[at.session].pinnedConversationID = binding.conversationID
         repos[at.repo].sessions[at.session].transcriptPath = binding.transcriptURL?.path
         stopWatching(tabID)
@@ -2756,6 +3160,9 @@ final class SessionStore: ObservableObject {
         // store with no accounts configured at all, where the one nil key serves everything
         // and closing any tab runs exactly the check it always did.
         stopCodexIfUnused(account: closed.account)
+        // Not per account, unlike the line above: the reconciler is one object covering every
+        // login, so it goes only when the last codex tab anywhere has gone.
+        stopCodexPinReconcilerIfUnused()
         // The claude half of the same rule: an account whose last claude tab just closed has
         // no reason to keep scanning its registry, and a watcher left registered on the
         // `WatchClock` outlives every tab that justified it.
@@ -3178,7 +3585,10 @@ final class SessionStore: ObservableObject {
         persist()
         if !deferredCodexResumes.isEmpty {
             codexRestoreTask = Task { [weak self] in
-                await self?.resumeRestoredCodex(deferredCodexResumes)
+                // No reconcile pass: a reopen names the thread the user picked out of the
+                // closed-tab history seconds ago, so there is no stale pin to repair — only a
+                // choice to obey. See `resumeRestoredCodex`'s stage 2 for the rest.
+                await self?.resumeRestoredCodex(deferredCodexResumes, pinsPredateThisRun: false)
             }
         }
     }
@@ -3218,6 +3628,19 @@ final class SessionStore: ObservableObject {
     /// gone (a deleted worktree, usually) falls back to the project so `--resume` runs where
     /// claude actually wrote; a tab whose login was deleted is rebuilt but never launched;
     /// codex is typed at only after `resumeRestoredCodex` confirms its thread still exists.
+    ///
+    /// Confirms it, and nothing more. Every caller of this one is a reopen, so all of them pass
+    /// `pinsPredateThisRun: false` and the settling skips the reconcile pass `restore` takes:
+    /// the thread being resurrected here is one the user named seconds ago, not a pin left over
+    /// from a previous run, so following the directory's newest thread instead would override
+    /// the choice rather than repair anything — and would usually run into the writer lock of
+    /// the TUI that made that thread newest.
+    ///
+    /// Two of those callers actually arrive with a codex tab: ⌘⇧T and the phone's reopen. The
+    /// third, ⌘K's `openConversation`, is claude-only as things stand — it resolves a claude
+    /// login and builds a `Session` that defaults to `.claude`, and `deferred` below is
+    /// `negotiatesIdentity`, which claude answers false — so it has never once settled a codex
+    /// tab. Its `false` is a right answer held ready, not one being exercised.
     ///
     /// Returns true when it is a codex tab whose resume text still has to be settled.
     @discardableResult
@@ -3464,7 +3887,14 @@ final class SessionStore: ObservableObject {
 
         if deferred {
             codexRestoreTask = Task { [weak self] in
-                await self?.resumeRestoredCodex([session.id])
+                // No reconcile pass, for `settleReopen`'s reason at its sharpest: this pin
+                // would be the conversation the user searched for by name and selected, so a
+                // pass that followed the directory's newest thread would answer a different
+                // question than the one they asked. Conditional rather than live: search
+                // builds claude sessions only, so `deferred` is never true here today — the
+                // argument is spelled out anyway, because a default would decide this the
+                // wrong way round on the first day search learns about codex.
+                await self?.resumeRestoredCodex([session.id], pinsPredateThisRun: false)
             }
         }
         return session.id
@@ -3766,11 +4196,22 @@ final class SessionStore: ObservableObject {
     /// tab therefore never sent `thread/name/set`, so the sidebar title and codex's thread
     /// name diverged permanently — and since the thread name is what `session_index.jsonl`
     /// and `thread/read` both report, the next tail or restore flicked the sidebar back to
-    /// the old one. Worse, it
-    /// queued `/rename <name>` for a pty nothing would ever retire it from: `flushPendingRename`
-    /// retried it on every registry tick for the life of the process, and `InputBar.read`
-    /// keys on a line starting with `❯` — a common shell prompt glyph — so a match would have
-    /// sent Ctrl-U and pasted `/rename foo` into the user's live codex session.
+    /// the old one.
+    ///
+    /// **The second half of that warning was wrong, and is retracted here rather than left
+    /// to mislead.** It claimed the queued `/rename <name>` would be pasted into the user's
+    /// live codex session, because `InputBar.read` keys on a line starting with `❯` — a
+    /// common shell prompt glyph. Codex draws `›` (U+203A), so claude's marker matched
+    /// NOTHING on a codex screen and no stray paste was ever possible;
+    /// `CodexTextChannelTests.testClaudesMarkerFindsNothingOnACodexScreen` pins exactly that.
+    /// The real defect was the opposite of a stray paste — it was silence.
+    ///
+    /// Both halves are closed now, and through one funnel rather than two paths. The `.codex`
+    /// arm below sends `thread/name/set` AND seeds `pendingRenames`, so the name is also
+    /// typed at codex's own composer under `CodexTextChannel`'s grammar. The "queued for a
+    /// pty nothing would ever retire it from" hazard is real for that queue, and it is
+    /// answered in `flushPendingRename`, which retires a codex entry on an ABORT as well as
+    /// on success — see the deferral-versus-abort note there.
     ///
     /// Claude's leg stays synchronous and inline, deliberately. `AgentAdapter.rename` is
     /// `async`, and dispatching claude through it would push `injectPendingRename` into a
@@ -3851,6 +4292,24 @@ final class SessionStore: ObservableObject {
                     )
                 }
             }
+            // **Belt and braces, and the two are not redundant.** The wire call above renames
+            // the thread's METADATA, and it is the only half that works when no TUI is
+            // attached — it reaches the app-server rather than the screen, which is why it
+            // survives the writer lock a live `codex resume` holds. What it cannot do is
+            // reach that running TUI, which owns the screen and goes on drawing the old name.
+            // This types the same name at its composer. Drop either half and a real case
+            // breaks: without the wire call a tab with no surface never renames at all,
+            // without this one the sidebar and the TUI disagree until the tab restarts.
+            //
+            // **Double-writing cannot echo-loop, and that is provable rather than hoped.**
+            // Typing the rename makes codex write a `session_index.jsonl` line, which
+            // `CodexNameWatcher` tails and delivers as an `AgentEvent.title`. That lands in
+            // `CodexRuntime`'s `apply(_:to:)` → `applyExternalTitle`, which sets the title
+            // directly behind an equality loop-guard and NEVER re-enters `rename()`. So the
+            // line our own typing produces either equals the title already set and stops at
+            // that guard, or is a genuine external rename — and neither outcome can queue a
+            // second injection.
+            injectPendingRename(id, name)
         }
         // True means the name was ACCEPTED and the local title changed — not that the agent
         // has been told. The codex arm above is deliberately fire-and-forget and the claude
@@ -3873,11 +4332,19 @@ final class SessionStore: ObservableObject {
     /// One pending rename per tab, replaced rather than queued: renaming twice before the
     /// injection lands should type the second name once, not both names in turn.
     private func injectPendingRename(_ id: UUID, _ title: String) {
-        // Claude's rule by name, not by lookup: what this queues is text typed at claude's
-        // pty, so it is claude's channel whatever tab asked for it. `pendingRenames` has no
-        // other producer — `AgentAdapter.rename` for an agent that renames over a wire never
-        // reaches here.
-        guard let name = ClaudeAdapter.sanitizedTitle(title) else { return }
+        // **This agent's rule, by lookup.** It was claude's rule by name, hardcoded, on the
+        // reasoning that whatever queued here became text at claude's pty — and every
+        // sentence of that is now false: codex reaches here too, so the tab asking is no
+        // longer evidence of which grammar the name is about to be typed into. A codex name
+        // run through claude's shell-metacharacter strip would be sanitized for a hazard
+        // codex does not have, and would disagree with the title `rename` already put in the
+        // sidebar, which used this same per-agent rule.
+        //
+        // Safe for codex's modal regardless of which agent answers: `AgentTitle.sanitized`
+        // holds the half BOTH rules share, and it strips control characters for every agent.
+        // A newline therefore still cannot be smuggled into the modal to submit it early.
+        // See `AgentAdapter.sanitizedTitle`.
+        guard let name = agent(of: id)?.sanitizedTitle(title) else { return }
         pendingRenames[id] = name
         flushPendingRename(id)
     }
@@ -4757,12 +5224,18 @@ final class SessionStore: ObservableObject {
     ///   this build cannot read, and `AgentID.textChannel` is the question it asks — a `nil`
     ///   there is the whole refusal.
     ///
-    ///   **Widening this back out is not the cautious move.** Nothing codex has goes through
-    ///   here: `sendToShell` types resume commands and `initialInput` directly at the pty and
-    ///   never touches this funnel, and `CodexAdapter.loginInvocation` has `inject: nil`, so
-    ///   no codex sign-in text is ever queued either. What passes through today is claude's
-    ///   `/login`, claude's `/rename`, a restore's "Keep going" and a phone's message — all
-    ///   of them claude's, all of them typed into a box only claude's grammar can find.
+    ///   **Widening this back out is still not the cautious move — but the reason has moved.**
+    ///   It used to be that nothing codex had came through here at all. That is no longer
+    ///   true: a codex rename does, via `injectRename` below, which shares these same gates.
+    ///   What has NOT changed is that every one of them arrives holding a channel this build
+    ///   can actually read — claude's `/login`, claude's `/rename`, a restore's "Keep going",
+    ///   a phone's message, and now codex's rename, each typed into a box its own agent's
+    ///   grammar can find. The refusal being narrow is what makes that true, so the caution
+    ///   is aimed at the same place: widen the set of agents by giving one a channel, never
+    ///   by letting a `nil` through. `sendToShell`'s resume commands and `initialInput` still
+    ///   go straight to the pty without touching this funnel, and
+    ///   `CodexAdapter.loginInvocation` still has `inject: nil`, so no codex sign-in text is
+    ///   queued here either.
     /// - **A composer box on screen, not an activity.** The status file used to gate this —
     ///   `idle` or `busy` only, `waiting` refused — and it was the wrong question: `.busy` and
     ///   `.idle` both draw the composer, so gating on them was really gating on what the
@@ -4775,7 +5248,10 @@ final class SessionStore: ObservableObject {
     ///   turn running back-to-back never starves the queue, and a dialog's select-list, which
     ///   draws its own `❯` but is not a composer, still refuses correctly: a Return there would
     ///   PICK AN OPTION instead of submitting, and answering a dialog is `answerPrompt`'s job,
-    ///   behind an interlock that reads the screen before committing.
+    ///   behind an interlock that reads the screen before committing. This applies to a rename
+    ///   exactly as it does to a prompt: `injectRename` shares this same gate rather than
+    ///   keeping an idle-only rule of its own, because there is no longer an idle-only rule to
+    ///   keep — see `injectionGate` below.
     ///
     /// Everything past that gate — finding the input box, the kill, the settle, the
     /// before/after comparison and the yank — is `AgentTextChannel.submit`'s, and the reasons
@@ -4791,22 +5267,15 @@ final class SessionStore: ObservableObject {
         stillWanted: @escaping @MainActor () -> Bool,
         onSent: @escaping @MainActor () -> Void
     ) -> Bool {
-        guard let channel = session(for: id)?.agent.textChannel,
-              let injector = injector(for: id),
-              channel.hasComposerBox(injector)
-        else { return false }
-        // See `injecting`'s doc comment: this is the one place both callers funnel through,
-        // so it is the one place that can refuse a second injection for a tab that already
-        // has one resolving.
-        guard !injecting.contains(id) else { return false }
+        guard let gate = injectionGate(id) else { return false }
 
         // Marked before the channel is asked, and cleared again if it refuses: the channel's
         // contract is that it settles exactly once iff it returns true (see
         // `AgentTextChannel.submit`), so the mark is retired either here or inside that
         // settle and never both.
         injecting.insert(id)
-        let started = channel.submit(
-            text, into: injector,
+        let started = gate.channel.submit(
+            text, into: gate.injector,
             settle: { [weak self] work in
                 self?.injectionSettle {
                     defer { self?.injecting.remove(id) }
@@ -4819,19 +5288,174 @@ final class SessionStore: ObservableObject {
         return started
     }
 
+    /// **The gate list `inject` and `injectRename` both stand behind, in exactly one copy.**
+    ///
+    /// Extracted so the two cannot drift apart. They differ in what they type and in when
+    /// they release the `injecting` mark, and in nothing else that bears on whether this is a
+    /// good moment — and a second copy of these conditions is how one caller quietly acquires
+    /// a laxer idea of "a good moment" than the other.
+    ///
+    /// **Presence, not activity — same criterion as `AgentTextChannel.hasComposerBox`, because
+    /// this gate answers exactly that question.** A rename used to be held to a stricter,
+    /// idle-only rule than a prompt on the theory that its effect is something the user is
+    /// watching for. That theory did not survive `hasComposerBox` replacing activity here:
+    /// there is no longer an idle/busy distinction available to hold a rename to, and codex's
+    /// own `submitRename` was already written activity-agnostic — its composer reads the same
+    /// mid-turn as idle, by design (see `CodexTextChannel`'s header). Gating the rename tighter
+    /// than the prompt it shares this function with would be inventing an asymmetry neither
+    /// agent's screen grammar asks for.
+    ///
+    /// `nil` here is a DEFERRAL, never a failure: nothing has been typed, so the caller
+    /// leaves its entry pending and the registry tick retries it. Telling that apart from an
+    /// abort — typed, but the agent did not do what we expected — is `flushPendingRename`'s
+    /// job, and the two must not be conflated.
+    ///
+    /// **The channel handed back is the `textChannel`, even on the rename path**, and that is
+    /// deliberate. The only thing this gate needs a channel FOR is `hasComposerBox`, which
+    /// lives on `AgentTextChannel`; codex has both channels, so asking for that one costs
+    /// the rename path nothing. An agent declaring `renameTyping` but no `textChannel` is
+    /// refused here — correct, since nothing could then say whether its composer was on screen.
+    private func injectionGate(
+        _ id: UUID
+    ) -> (channel: AgentTextChannel, injector: TextInjecting)? {
+        guard let channel = session(for: id)?.agent.textChannel,
+              let injector = injector(for: id),
+              channel.hasComposerBox(injector)
+        else { return nil }
+        // See `injecting`'s doc comment: this is the one place every caller funnels through,
+        // so it is the one place that can refuse a second injection for a tab that already
+        // has one resolving.
+        guard !injecting.contains(id) else { return nil }
+        return (channel, injector)
+    }
+
+    /// Types a rename through an agent's two-stage modal, or defers. Codex's leg; claude
+    /// declares no `renameTyping` and never arrives here. See `AgentRenameTyping`.
+    ///
+    /// **The single difference from `inject` that matters is WHEN the `injecting` mark is
+    /// released, and it is the entire reason this method exists.** `inject` clears the mark
+    /// inside its settle wrapper, which is exactly right for a channel contracted to settle
+    /// once. `submitRename` settles three times on its success path — once per repaint it
+    /// must wait through — so clearing there would drop the mark while the modal was still
+    /// open and unnamed, and a rename arriving in that window would fire a second Ctrl+U into
+    /// a half-driven modal. That is the race `injecting`'s own doc comment exists to close,
+    /// reopened at a worse moment. So the mark is held across BOTH stages and released in
+    /// `onFinished`, which `AgentRenameTyping` guarantees runs exactly once on every path:
+    /// success, a refused modal, or cancellation.
+    ///
+    /// **The settle wrapper therefore has to run its closure on every path, including the one
+    /// where the store is already gone.** `submitRename` only ever reaches `onFinished` from
+    /// inside a closure it hands to `settle`, so a wrapper that dropped one would leave
+    /// `onFinished` unfired and this tab's mark held forever — wedging every later injection
+    /// into that tab, not just this rename. That is why `self` is unwrapped below with a
+    /// fallback that still runs the work, rather than with a `self?.` that would silently
+    /// swallow it. No test can be relied on to catch that mistake: a test's settle is
+    /// `{ $0() }` and always fires.
+    @discardableResult
+    private func injectRename(
+        _ name: String,
+        into id: UUID,
+        stillWanted: @escaping @MainActor () -> Bool,
+        onFinished: @escaping @MainActor (Bool) -> Void
+    ) -> Bool {
+        guard let typing = session(for: id)?.agent.renameTyping,
+              let gate = injectionGate(id)
+        else { return false }
+
+        injecting.insert(id)
+        let started = typing.submitRename(
+            name, into: gate.injector,
+            settle: { [weak self] work in
+                // Runs `work` even with no store left — see this method's doc comment. With
+                // `self` gone, `stillWanted` below reads false and `submitRename` unwinds
+                // without typing anything, which is the right answer regardless.
+                guard let self else { return work() }
+                self.injectionSettle(work)
+            },
+            stillWanted: stillWanted,
+            onFinished: { [weak self] committed in
+                // Released HERE rather than in the settle above, which is what holds it
+                // across both stages of the modal.
+                self?.injecting.remove(id)
+                onFinished(committed)
+            }
+        )
+        if !started { injecting.remove(id) }
+        return started
+    }
+
     /// Types a pending rename into a session, or leaves it pending if this is a bad moment.
+    ///
+    /// Branches on the agent's declared capability rather than on its name: an agent with a
+    /// `renameTyping` has a modal to drive and goes through `injectRename`; everything else
+    /// types `/rename <name>` in a single shot through `inject`. Claude is the second case,
+    /// and its leg is byte-for-byte what it always was.
+    ///
+    /// **An entry here also holds that tab's prompt queue, which is new for codex.** Both
+    /// `flushPromptQueue(_:)` and `flushPendingPrompts` skip a tab while `pendingRenames[id]`
+    /// is non-nil, and before codex reached this queue no codex tab ever had an entry in it —
+    /// now every codex rename seeds one, and `testTheWireCallStillFiresWithNoAttachedInjector`
+    /// pins that a tab with no injector keeps its entry pending indefinitely, by design. So
+    /// "deferral is free" is not quite the whole story, and the part that makes it safe today
+    /// is worth stating rather than rediscovering: every condition that defers a rename
+    /// forever — no injector, an unreadable composer — also makes `inject` refuse a prompt on
+    /// its own, and `flushPromptQueue` expires its entries BEFORE it consults this interlock,
+    /// so a phone still gets its `.promptExpired` instead of hanging. Whoever next widens the
+    /// set of agents that queue here should re-check both of those.
     private func flushPendingRename(_ id: UUID) {
         guard let name = pendingRenames[id] else { return }
-        inject(
-            "/rename \(name)",
+        // Shared verbatim by both legs. A second rename during the settle window replaces the
+        // first; typing the superseded name would be wrong, and typing both in turn worse.
+        // This identity check is what makes "replaced, not queued" actually true.
+        let stillWanted: @MainActor () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return self.pendingRenames[id] == name
+        }
+
+        guard session(for: id)?.agent.renameTyping != nil else {
+            inject(
+                "/rename \(name)",
+                into: id,
+                stillWanted: stillWanted,
+                onSent: { [weak self] in self?.pendingRenames[id] = nil }
+            )
+            return
+        }
+
+        injectRename(
+            name,
             into: id,
-            // A second rename during the settle window replaces the first; typing the
-            // superseded name would be wrong, and typing both in turn worse.
-            stillWanted: { [weak self] in
-                guard let self else { return false }
-                return self.pendingRenames[id] == name
-            },
-            onSent: { [weak self] in self?.pendingRenames[id] = nil }
+            stillWanted: stillWanted,
+            onFinished: { [weak self] committed in
+                guard let self else { return }
+                // **Retired on BOTH outcomes, because a DEFERRAL and an ABORT are different
+                // things and only one of them is worth retrying.**
+                //
+                // A deferral never reaches here at all: the gates refused before anything was
+                // typed, `injectRename` returned false, and the entry sits in the queue until
+                // the registry tick retries it. That is the good case, and it is unchanged.
+                //
+                // An abort DOES reach here, as `committed == false`: `/rename`⏎ was really
+                // typed and no modal came up, so our model of codex is wrong. Retrying that
+                // on every tick for the life of the process is precisely the "queued
+                // `/rename` for a pty nothing would ever retire it from" hazard `rename`'s
+                // own doc comment warns about — and unlike when that warning was written,
+                // there is now a real `›` composer for it to land in. Retiring is defensible
+                // exactly because `thread/name/set` was sent unconditionally: the thread
+                // really is renamed, so the cost here is a stale tab label until the TUI
+                // restarts, not a lost rename.
+                //
+                // Guarded on identity for the same reason `stillWanted` is. A cancellation
+                // also arrives as `committed == false`, and it means a SECOND rename replaced
+                // this one mid-flight — the entry in the queue is the newer name, and
+                // retiring blind would throw that replacement away unsent.
+                guard self.pendingRenames[id] == name else { return }
+                self.pendingRenames[id] = nil
+                guard !committed else { return }
+                Self.renameLogger.error(
+                    "codex rename typed but no modal appeared for tab \(id.uuidString.lowercased(), privacy: .public); the thread was renamed over the wire, the attached TUI still shows the old name"
+                )
+            }
         )
     }
 

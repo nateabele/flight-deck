@@ -59,6 +59,58 @@ enum CodexTimelineMapper {
             guard let text = payload["text"] as? String, !text.isEmpty else { return [] }
             return [item(id, .thinking, TimelineItem.Body(text: text), at)]
 
+        case ("event_msg", "item_completed"):
+            // codex-cli ≥0.151 replaced the three arms above with this single envelope for
+            // threads codex itself originates, keyed by `payload.item.type` instead of a
+            // dedicated `event_msg` type per row. Both families are current at once: a
+            // thread Flight Deck originates still writes the three arms above even on
+            // codex-cli 0.151.0 and 0.152.1 (verified on this machine), the discriminator is
+            // the thread's originator rather than the codex version, and no rollout of 518
+            // surveyed mixes the two prose families — so this arm can never double an
+            // old-format thread's rows.
+            guard let completedItem = payload["item"] as? [String: Any],
+                  let itemType = completedItem["type"] as? String
+            else { return [] }
+            switch itemType {
+            case "UserMessage":
+                let text = itemContentText(completedItem)
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else { return [] }
+                return [item(id, .userTurn, TimelineItem.Body(text: text), at)]
+
+            case "AgentMessage":
+                // `phase` is `"commentary"` or `"final_answer"`; both are prose the
+                // terminal showed the user, so neither is filtered on.
+                let text = itemContentText(completedItem)
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else { return [] }
+                return [item(id, .assistantText, TimelineItem.Body(text: text), at)]
+
+            default:
+                // Applying the file's standing rule — prose from `event_msg`, tools from
+                // `response_item`, nothing from either family's duplicate of the other's
+                // job — a second time, to this surface:
+                //
+                // `CommandExecution` / `McpToolCall` / `FileChange` are a finer-grained
+                // decomposition of operations `response_item` already supplies as
+                // `toolCall`/`toolResult` rows — a live 676-line rollout's 77 `toolCall` +
+                // 77 `toolResult` rows sit alongside 56 `CommandExecution` + 42
+                // `McpToolCall` + 5 `FileChange` items, so mapping both would show every
+                // operation twice, at two granularities.
+                //
+                // `Reasoning` has no source left to map: its `summary_text` and
+                // `raw_content` are empty in 289 of 289 records surveyed, the same as
+                // `response_item`/`reasoning`'s `summary` in 308 of 308 — `.thinking` is
+                // unrecoverable for new-format threads, a measured loss rather than an
+                // oversight.
+                //
+                // `ContextCompaction` is bookkeeping, like `token_count` and
+                // `turn_context`. And no `item_started` record exists in any surveyed
+                // rollout, so there is no started/completed doubling to guard against
+                // either.
+                return []
+            }
+
         case ("response_item", "function_call"):
             // `arguments` is a JSON **string**, not an object — the one shape difference from
             // claude's `input`. Parsed so the detail screen shows structure rather than one
@@ -122,6 +174,16 @@ enum CodexTimelineMapper {
         _ id: String, _ kind: TimelineItem.Kind, _ body: TimelineItem.Body, _ at: String?
     ) -> TimelineItem {
         TimelineItem(id: id, kind: kind, status: .complete, body: body, at: at)
+    }
+
+    /// `item_completed`'s prose types' content entries spell their own `type` differently —
+    /// `UserMessage`'s are `"text"`, `AgentMessage`'s are `"Text"` — so this does not look at
+    /// the entry `type` at all, and just concatenates every entry's `text` in order. Missing
+    /// `content`, a non-array `content`, and entries with no `text` all fall through to an
+    /// empty string rather than crashing.
+    private static func itemContentText(_ item: [String: Any]) -> String {
+        guard let content = item["content"] as? [[String: Any]] else { return "" }
+        return content.compactMap { $0["text"] as? String }.joined()
     }
 
     /// Both codex agents' tool names in one spelling. Codex splits an MCP tool into
