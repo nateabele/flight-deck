@@ -75,14 +75,24 @@ enum InputBar {
         return Reading(rows: rows.map(normalized))
     }
 
-    /// A box border: a run of `─` and nothing else.
+    /// A box border: a run of `─` and nothing else, OR a *titled* rule — dashes, then
+    /// arbitrary text, then dashes (`──…── New Phone Sessions ─`).
+    ///
+    /// The titled shape is real, not defensive: a Claude Code build newer than every fixture
+    /// pinned here draws the tab's own title into the rule directly above the composer's `❯`
+    /// marker (found live, 2026-09-17, from a screen that otherwise reads as a completely
+    /// ordinary empty composer — see `ClaudeComposerDetectorTests.testATitledTopBorderIsStillAComposer`).
+    /// Requiring the line to both start AND end with `─` — not just contain one somewhere —
+    /// is what keeps this from matching ordinary prose that happens to mention a dash.
     ///
     /// Internal rather than private: `ClaudeTextChannel`'s composer detector reuses this to
     /// check the line immediately above the marker and the one that closes its run — see
     /// that type's doc comment for why the rule-adjacency check itself stays out of `read`.
     static func isRule(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        return !trimmed.isEmpty && trimmed.allSatisfy { $0 == "─" }
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.allSatisfy({ $0 == "─" }) { return true }
+        return trimmed.first == "─" && trimmed.last == "─"
     }
 
     /// The separator after the marker is U+00A0, which `CharacterSet.whitespaces` covers
