@@ -4524,6 +4524,9 @@ final class SessionStore: ObservableObject {
 
     /// Emits one `.typing` record through the same sink dialog records use.
     private func logPromptTyping(_ stage: String, for id: UUID) {
+        if stage == "inject=false" {
+            Self.dumpViewportOnInjectFailure(session: id, viewport: injector(for: id)?.readViewport())
+        }
         promptLifecycleSink(PromptLifecycleRecord(
             session: id,
             event: .typing(
@@ -4534,6 +4537,37 @@ final class SessionStore: ObservableObject {
                 composer: promptTypingComposerState(for: id)
             )
         ))
+    }
+
+    /// TEMPORARY diagnostic for the phone-typing composer-detection bug (2026-09-17): dumps
+    /// the exact raw screen `hasComposerBox` rejected, beside `flight-deck-prompt.log`, in the
+    /// same delimited style as `AnswerAbortLog` — the derived `composer=` field is not enough
+    /// to see WHY the box shape didn't match. Remove once root-caused.
+    private static let viewportDumpURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/flight-deck-prompt-viewport.log")
+
+    private static func dumpViewportOnInjectFailure(session id: UUID, viewport: String?) {
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        stamp.timeZone = .current
+        let record = """
+            \(stamp.string(from: Date())) session=\(id)
+            --- viewport begin ---
+            \(viewport ?? "(nil)")
+            --- viewport end ---
+
+            """
+        let url = viewportDumpURL
+        let manager = FileManager.default
+        if !manager.fileExists(atPath: url.path) {
+            try? manager.createDirectory(at: url.deletingLastPathComponent(),
+                                         withIntermediateDirectories: true)
+            manager.createFile(atPath: url.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        handle.seekToEndOfFile()
+        if let data = record.data(using: .utf8) { handle.write(data) }
     }
 
     /// Files a token against a tab, oldest evicted first. See `acceptedPromptTokens`.
