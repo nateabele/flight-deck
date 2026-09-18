@@ -1,3 +1,4 @@
+import Combine
 import FleetKit
 import XCTest
 @testable import FlightDeck
@@ -98,5 +99,50 @@ final class SessionStoreAnswerlessTests: XCTestCase {
         advance(30)
         store.applyRegistryForTesting([id: SessionStatus(activity: .waiting)])
         XCTAssertFalse(store.status(for: id)?.answerless ?? true)
+    }
+
+    /// **The regression a review caught.** `commitStatuses` assigns `statuses` twice a tick —
+    /// once before `derivedOpenPromptCalls` runs (so `PromptService.openPrompt`'s own read of
+    /// `store.status(for:)` sees this tick's fresh activity), once after (so the field that
+    /// derivation just filled in reaches `statuses` at all). Every caller builds `next` fresh
+    /// with `answerless: false`, with no way to know an ongoing episode's real value — so
+    /// without seeding `next[id].answerless` from the CURRENT `statuses` ahead of the first
+    /// comparison, a session sitting in a steady, multi-tick `answerless` episode (the ladder's
+    /// own comment documents these running 24 minutes to 3 hours) would trip that first
+    /// comparison on `answerless` alone, publish `false`, and then have the second comparison
+    /// immediately republish `true` — every tick, for the life of the episode. That is exactly
+    /// the cost the comment beside this code already names as unacceptable ("re-assigning an
+    /// equal value at 2 Hz would invalidate the whole sidebar twice a second"), just not
+    /// guarded for this field until the seed was added.
+    ///
+    /// A tick that changes nothing else at all — same activity, same `waitingFor`, same
+    /// `subagentCount`, same episode already past its debounce — must publish `statuses`
+    /// zero times, not once and not twice: `@Published` sends nothing when the assigned value
+    /// equals the current one, and with the seed in place, both of `commitStatuses`'s
+    /// assignments see `next == statuses` on a tick like this.
+    func testAnUnchangedTickForAnAnswerlessSessionPublishesStatusesNoMoreThanOnce() {
+        let (store, id) = makeStore(probe: { _ in .failure("prompt_changed") })
+        store.applyRegistryForTesting([id: SessionStatus(activity: .waiting)])
+        advance(5)
+        store.applyRegistryForTesting([id: SessionStatus(activity: .waiting)])
+        XCTAssertTrue(store.status(for: id)?.answerless ?? false, "the debounce must have fired")
+
+        var publishCount = 0
+        // `dropFirst()`: `@Published`'s projected publisher replays the current value to a new
+        // subscriber immediately, which is not a tick this test is about — only changes from
+        // here on count.
+        let subscription = store.$statuses.dropFirst().sink { _ in publishCount += 1 }
+        defer { subscription.cancel() }
+
+        store.applyRegistryForTesting([id: SessionStatus(activity: .waiting)])
+
+        XCTAssertLessThanOrEqual(
+            publishCount, 1,
+            "the pre-fix double assignment published this tick's unchanged status twice"
+        )
+        XCTAssertEqual(
+            publishCount, 0,
+            "nothing changed this tick, so `statuses` must not publish at all"
+        )
     }
 }
