@@ -11,6 +11,11 @@ import Foundation
 /// from `thread/name/set`, not from a `/rename` typed into the TUI — and the app-server tells
 /// only the connection that made the change. Verified against codex-cli 0.148.0: three
 /// renames from two different writers produced three lines here and nothing anywhere else.
+///
+/// Live is 0.154.0 now, and that re-verification was only partial: the INDEX half above is
+/// confirmed — renames still land here, which is what `SessionStore.rename`'s typed leg
+/// depends on. The rollout half is merely UNTESTED at 0.154.0, not contradicted; nothing has
+/// been seen to suggest the rollout started carrying names, and no capture proves it has not.
 @MainActor
 final class CodexNameWatcher {
     /// The index inside one `CODEX_HOME`. Getting this wrong fails silently — a watcher on the

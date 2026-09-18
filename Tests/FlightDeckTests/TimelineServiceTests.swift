@@ -32,6 +32,7 @@ final class TimelineServiceTests: XCTestCase {
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.
         static let textChannel: AgentTextChannel? = ClaudeTextChannel()
+        static let renameTyping: AgentRenameTyping? = nil
         static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
         static let negotiatesIdentity = false
         static let needsRuntimeStart = false

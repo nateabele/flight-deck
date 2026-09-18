@@ -88,6 +88,19 @@ protocol AgentAdapter {
     /// Read through `AgentID.textChannel` below, which is what the store consults.
     static var textChannel: AgentTextChannel? { get }
 
+    /// **How this agent's two-stage rename modal is driven at the pty — or `nil`, the
+    /// refusal `ClaudeAdapter` states because it has no second stage to drive.**
+    ///
+    /// A separate capability from `textChannel` rather than a case inside `submit`, because
+    /// codex's `/rename` is a MODAL with two submissions and `AgentTextChannel.submit`'s
+    /// whole contract — settle exactly once iff this returns `true` — cannot carry that: the
+    /// caller releases its `injecting` mark inside that one settle, so a second stage that
+    /// needed a second settle would either leak the mark early or never fire at all. See
+    /// `AgentRenameTyping`'s doc comment for the rest of that reasoning.
+    ///
+    /// Read through `AgentID.renameTyping` below, which is what the store consults.
+    static var renameTyping: AgentRenameTyping? { get }
+
     /// **How a select-list dialog this agent has raised is driven — or `nil`, the refusal.**
     ///
     /// Split from `textChannel` because the two are genuinely different channels and an
@@ -164,8 +177,18 @@ protocol AgentAdapter {
     /// **A legal conversation name for THIS agent's rename channel.**
     ///
     /// Claude strips shell metacharacters, because its rename is typed at a pty that may be a
-    /// bare shell. Codex does not, because `thread/name/set` is JSON-RPC and touches no
-    /// shell — see `AgentTitle`, which holds the half both agents share.
+    /// bare shell. Codex does not — even though `CodexAdapter.renameTyping` now ALSO types at
+    /// a pty, `thread/name/set` is still the call that actually commits the name, and it is
+    /// JSON-RPC, not shell. What lands in the modal is `AgentTitle.sanitized`'s output, not a
+    /// second, differently-sanitized string, so there is nothing extra a shell strip could be
+    /// protecting there either.
+    ///
+    /// Control characters are stripped for EVERY agent — `AgentTitle.sanitized`, which holds
+    /// the half both agents share — so a newline still cannot be smuggled into codex's modal.
+    /// That is why codex's rule does not need to grow a shell-metacharacter strip to match:
+    /// the hazard a strip like that guards against (a name reaching a shell prompt) does not
+    /// exist here, and the hazard that does exist (a control character reaching the modal) is
+    /// already covered. Do not "fix" this by copying claude's strip.
     nonisolated static func sanitizedTitle(_ raw: String) -> String?
 
     /// **A conversation's own name, read out of its transcript** — for a tab that repointed
@@ -279,6 +302,49 @@ protocol AgentTextChannel {
     ) -> Bool
 }
 
+/// **The second stage of a rename that cannot be said in one shot.**
+///
+/// `AgentTextChannel.submit` types one message and submits it, and its whole contract turns
+/// on a SINGLE settle: `SessionStore` marks a tab mid-injection before calling and clears
+/// that mark inside the one `settle` it is handed, so "returns `true`" and "settles" have to
+/// name the same moment or the mark either leaks (never cleared) or is cleared too early
+/// (cleared before the work it was guarding is done). That works for `submit` because typing
+/// a message is one repaint away from submitted.
+///
+/// Codex's `/rename` is not: it is a MODAL with two submissions — `/rename`⏎ opens it,
+/// `<name>`⏎ commits it — so there are two screen repaints to wait through, and therefore
+/// two points where the caller needs to be told "the terminal has caught up, keep going."
+/// Reusing `submit`'s contract here would force a choice between two wrong answers: settle
+/// once after the first repaint and the caller's `injecting` mark is released while the
+/// modal is still open and unnamed, leaving the tab open to a second, concurrent rename
+/// mid-flight; or settle once after the second and the caller has no way to learn that the
+/// modal actually opened, which it needs to know before it can safely type the name.
+///
+/// So this protocol splits the two: `settle` may be called any number of times — once per
+/// stage that needs the terminal to catch up — and it is **`onFinished`** that carries the
+/// one-shot guarantee instead, firing exactly once on every path (success, a refused modal,
+/// or cancellation), which is the caller's cue that it may finally release its mark.
+@MainActor
+protocol AgentRenameTyping {
+    /// Returns false having sent nothing. Returns true and then runs `onFinished` EXACTLY ONCE —
+    /// on every path, including cancellation and a refused modal. `settle` may be called any
+    /// number of times. `onFinished(true)` means the name was submitted.
+    ///
+    /// The exactly-once guarantee is the conformer's to keep, but it is conditional on the
+    /// caller: it holds only if `settle`'s own closure argument is invoked exactly once per
+    /// call. A `settle` that drops a call leaves `onFinished` unfired and the caller's mark
+    /// held forever; a `settle` that fires twice can run a later stage's work twice. Callers
+    /// implementing `settle` — most likely once, for the app — must honor that contract for
+    /// this guarantee to mean anything.
+    func submitRename(
+        _ name: String,
+        into injector: TextInjecting,
+        settle: @escaping (@escaping () -> Void) -> Void,
+        stillWanted: @escaping @MainActor () -> Bool,
+        onFinished: @escaping @MainActor (Bool) -> Void
+    ) -> Bool
+}
+
 /// **Driving a select-list dialog the agent has raised.**
 ///
 /// The interlock in front of an irreversible keypress, as `ChoiceDialog` documents it, with
@@ -351,6 +417,16 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.textChannel
         case .codex: CodexAdapter.textChannel
+        }
+    }
+
+    /// See `AgentAdapter.renameTyping`. Consulted by `SessionStore.flushPendingRename`,
+    /// alongside `rename`'s `thread/name/set` — which it does not wait for — to type the same
+    /// name at the pty that call cannot reach.
+    var renameTyping: AgentRenameTyping? {
+        switch self {
+        case .claude: ClaudeAdapter.renameTyping
+        case .codex: CodexAdapter.renameTyping
         }
     }
 
