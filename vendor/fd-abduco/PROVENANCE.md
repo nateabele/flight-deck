@@ -107,3 +107,92 @@ in this tree invokes it correctly as `fd-abduco -n "$SOCK" sh -c '...'` (no `--`
 — the server daemonizes via the standard double-fork and detaches
 immediately, which is the "detached session" behavior Flight Deck needs. The
 baseline smoke test uses `-n`.
+
+## Fork-delta log
+
+### 2026-09-18: DEC private mode tracking + reattach preamble (`fd_outlog.c`/`.h`, `server.c`)
+
+Extends the `FdOutlog` per-byte CSI scanner (added earlier to drop
+terminal-capability *query* sequences on reattach) to also track the
+last-seen set/reset state of every DEC private mode (`CSI ? Pm h` /
+`CSI ? Pm l`, including multi-param forms like `CSI ?1000;1006h`) it sees
+flow through the pty stream — mouse tracking, alternate-scroll, alt-screen,
+bracketed paste, cursor keys, whichever ones a given program happens to set,
+generically, at no extra parsing cost beyond the grammar the scanner already
+walks for the query-drop logic. Unlike the query-drop path, these bytes are
+**not** dropped — a mode set/reset is real program behavior, not a stale
+query — they're classified in `csi_is_private_mode()`/tracked in
+`track_private_modes()` on the way through, into a small growable
+`FdOutlogMode` table on `FdOutlog` (`fd_outlog.c`/`.h`).
+
+Motivation: `FdOutlog.data` is a *bounded* ring (default 4 MiB, configurable).
+A program's one-time "enable mouse tracking" escape sequence, sent once at
+startup, ages out of that ring in any long-running session, so a rebuilt
+terminal surface reattaching later never re-learns the mode was on — this is
+exactly the "two-finger scroll turns into arrow keys after sleep/wake" bug
+the mode table fixes. `fd_outlog_preamble_size()`/`fd_outlog_preamble()`
+synthesize a preamble that unconditionally re-asserts every tracked mode's
+*current* value; `server.c`'s `MSG_RESIZE` first-attach block
+(`server_send_content()`) sends it as its own `MSG_CONTENT` packet
+immediately before the existing history replay. This is idempotent: if a
+mode's own set/reset bytes are still inside the replay window, the preamble
+duplicates them harmlessly; once they've aged out, the preamble is what
+restores the mode.
+
+Scope is deliberately narrow, per the reported bug: only *private*
+(`CSI ? ... h/l`) modes are tracked — non-private ANSI modes (`CSI Pm h/l`,
+no `?`) aren't implicated and go untouched. DECRQM (`CSI ? Pm $p`, a mode
+*query*, not a set/reset) is unaffected — it already flows through the
+scanner unclassified, same as before this change.
+
+Known limitation: `CSI ? Pm s` (XTSAVE) / `CSI ? Pm r` (XTRESTORE) — saving
+and later restoring a private mode's state via those sequences, rather than
+setting/resetting it directly with `h`/`l` — aren't recognized by
+`csi_is_private_mode()`, so a program that relies on them can desync the
+tracked table from the terminal's real state. This is believed rare in
+practice: mode 1049 (the alt-screen mode, by far the dominant real-world
+case this tracker exists to fix) is set/reset with `h`/`l` directly, not
+saved/restored. Documented as a known limitation rather than fixed now.
+
+Test coverage: `Tests/fd-abduco/test_outlog_modes.c` (unit-level: a mode set
+sequence pushed out of the trim budget by filler bytes, a set-then-reset,
+and a multi-param sequence, plus DECRQM/non-private-mode/no-modes-seen
+negative cases) and `Tests/fd-abduco/run_mode_preamble_test.sh`
+(protocol-level: a live session sets mode 1000 and prints a marker, both get
+trimmed by a small budget, and a client attaching afterward still receives
+the mode via the preamble even though neither the original bytes nor the
+marker are present in history anymore).
+
+**Follow-up fix (same day):** `track_private_modes()`'s digit accumulation
+(`val = val * 10 + digit`) had no bound beyond `FD_OUTLOG_PEND_CAP` (32 bytes
+for the whole escape sequence), so a private-mode parameter with ~10+ digits
+signed-integer-overflowed a 32-bit `int` (confirmed with
+`-fsanitize=undefined` on input `\x1b[?3217300869h`). Fixed by capping
+accumulation at `FD_OUTLOG_MODE_MAX` (999999 — no real DEC private mode is
+anywhere near that large): once a parameter's running value exceeds it,
+further digits are still consumed (to stay in sync with the rest of the
+sequence) but no longer folded into `val`, so `val` can never exceed
+`FD_OUTLOG_MODE_MAX * 10 + 9`, nowhere near overflow, regardless of how many
+digits follow; such an oversized parameter is dropped rather than tracked
+(it's adversarial/corrupted input, not a real mode number). Covered by a new
+case 9 in `test_outlog_modes.c` using the reviewer's exact reproducer.
+
+**Second follow-up fix (final review):** the `FdOutlogMode` table itself had
+no cap, unlike the byte ring — the reviewer measured ~200,000 distinct mode
+numbers (reachable in ~1.8 MiB of crafted pty input, well within a session's
+normal output budget) building a 2 MiB table, a 5.2s CPU parse, and a
+~1.9 MiB preamble resent on *every* reattach. Fixed by capping the table at
+`FD_OUTLOG_MODE_CAP` (256 — far above any real program's distinct-mode
+count) in `track_mode()`: existing entries still update in place past the
+cap (a session using fewer than 256 distinct modes is unaffected), only
+*new* mode numbers beyond it are dropped. Covered by a new case 10 in
+`test_outlog_modes.c`. Separately, `FD_OUTLOG_MODE_MAX`'s bound-before-multiply
+check in `track_private_modes()` was tightened from `val <= FD_OUTLOG_MODE_MAX`
+to `val < FD_OUTLOG_MODE_MAX / 10`, closing an off-by-one that let a 7-digit
+value (up to 9,999,999) through before tripping — cosmetic (structurally safe
+either way) but now the cutoff actually matches the documented ~999999
+ceiling. And `server_send_content()`'s chunking loop now bails out on the
+first failed `server_send_packet()` instead of continuing to write to a
+now-dead socket; the pre-existing history-replay loop right below it (which
+open-coded the identical chunking logic, with the identical gap) now just
+calls `server_send_content()` instead of duplicating it.

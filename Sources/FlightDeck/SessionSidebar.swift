@@ -307,6 +307,9 @@ private struct SessionRow: View {
     ///
     /// Selecting first is deliberate: renaming a row should also make it the active one.
     private func beginRename() {
+        #if DEBUG
+        store.tagNextSelectionChange("beginRename()")
+        #endif
         store.selectedSessionID = session.id
         draft = session.title
         isEditing = true
@@ -374,7 +377,27 @@ struct SessionSidebar: View {
     var body: some View {
         let conflicted = store.conflictedSessionIDs
         let mismatched = store.accountMismatchedSessionIDs
-        return List(selection: $store.selectedSessionID) {
+        // TEMPORARY DIAGNOSTIC INSTRUMENTATION — double-click session-swap investigation
+        // (`.superpowers/sdd/quiet-foraging-babbage/task-2-brief.md`). In Debug, wraps the
+        // plain `$store.selectedSessionID` binding just to tag the write with a reason before
+        // it lands, since `SessionStore.selectionChangeReason` is private. In Release this
+        // whole `#if` compiles out and `selectionBinding` is exactly `$store.selectedSessionID`
+        // — no new code in the shipped path. Revert to `$store.selectedSessionID` directly
+        // once the real fix lands — see the full removal checklist on `SessionStore.swift`'s
+        // `selectedSessionID` `didSet` comment, which also covers `beginRename()`'s
+        // `tagNextSelectionChange` call just above in this file.
+        #if DEBUG
+        let selectionBinding = Binding<UUID?>(
+            get: { store.selectedSessionID },
+            set: { newValue in
+                store.tagNextSelectionChange("List(selection:) binding")
+                store.selectedSessionID = newValue
+            }
+        )
+        #else
+        let selectionBinding = $store.selectedSessionID
+        #endif
+        return List(selection: selectionBinding) {
             // One flat ForEach rather than a Section per project: `.onMove` is not supported
             // on a ForEach that yields Sections, and this is what lets one gesture reorder
             // both projects and sessions. See `SidebarRow`.

@@ -5,6 +5,9 @@ import SwiftUI
 import CoreText
 import UserNotifications
 import GhosttyKit
+#if DEBUG
+import OSLog
+#endif
 
 extension Ghostty {
     /// The NSView implementation for a terminal surface.
@@ -15,6 +18,40 @@ extension Ghostty {
 
         /// Unique ID per surface
         let id: UUID
+
+        // TEMPORARY DIAGNOSTIC INSTRUMENTATION — double-click session-swap investigation
+        // (`.superpowers/sdd/quiet-foraging-babbage/task-2-brief.md`). Same OSLog category as
+        // `SessionStore`'s, `TerminalPane`'s, and `Ghostty.SurfaceView`'s matching
+        // instrumentation so `log show` interleaves all files' events. Remove this block
+        // (`mouseDebugLogger`, `wallClockTimestamp(for:)`, `debugSessionID`) and all four
+        // `localEventLeftMouseDown` logging calls below (including the `hit-test-miss` branch
+        // and the `clickCount` field added in the final review's Fix 3) once the real fix
+        // lands — see the full removal checklist on `SessionStore.swift`'s `selectedSessionID`
+        // `didSet` comment, which also covers `TerminalPane.swift`'s and
+        // `SurfaceConfiguration.swift`'s matching instrumentation added in the final review's
+        // Fix 2.
+        #if DEBUG
+        private static let mouseDebugLogger = Logger(
+            subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
+            category: "selection-debug"
+        )
+
+        /// `NSEvent.timestamp` is seconds since system boot, not wall-clock — this converts it
+        /// to a `Date().timeIntervalSince1970`-comparable value so it can be correlated against
+        /// `SessionStore`'s `selectedSessionID` log lines by timestamp.
+        private static func wallClockTimestamp(for event: NSEvent) -> TimeInterval {
+            Date().timeIntervalSince1970 + (event.timestamp - ProcessInfo.processInfo.systemUptime)
+        }
+
+        /// The session id this surface displays, threaded in by `SessionStore` right after it
+        /// creates the surface (`makeAttachSurface(id:)`, `insertSession`) — the only two
+        /// places `SessionStore.surfaces` is ever populated. Diagnostic-only: `id` above is
+        /// this `SurfaceView` instance's own identity (`Identifiable` conformance), a UUID
+        /// generated fresh per surface with no relationship to the session it belongs to, so
+        /// it cannot be joined against `SessionStore`'s session-keyed logging. `nil` until
+        /// `SessionStore` sets it.
+        var debugSessionID: UUID?
+        #endif
 
         // The current title of the surface as defined by the pty. This can be
         // changed with escape codes. This is public because the callbacks go
@@ -719,7 +756,14 @@ extension Ghostty {
 
             // The clicked location in this window should be this view.
             let location = convert(event.locationInWindow, from: nil)
-            guard hitTest(location) == self else { return event }
+            guard hitTest(location) == self else {
+                #if DEBUG
+                Self.mouseDebugLogger.debug(
+                    "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=hit-test-miss clickCount=\(event.clickCount, privacy: .public) t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
+                )
+                #endif
+                return event
+            }
 
             // We always assume that we're resetting our mouse suppression
             // unless we see the specific scenario below to set it.
@@ -728,6 +772,11 @@ extension Ghostty {
             // If we're already the first responder then no focus transfer is
             // happening, so the click should continue as normal.
             guard window.firstResponder !== self else {
+                #if DEBUG
+                Self.mouseDebugLogger.debug(
+                    "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=already-first-responder-passthrough clickCount=\(event.clickCount, privacy: .public) t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
+                )
+                #endif
                 return event
             }
 
@@ -737,11 +786,22 @@ extension Ghostty {
             if NSApp.isActive && window.isKeyWindow {
                 window.makeFirstResponder(self)
                 suppressNextLeftMouseUp = true
+                #if DEBUG
+                Self.mouseDebugLogger.debug(
+                    "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=swallowed-for-focus-transfer clickCount=\(event.clickCount, privacy: .public) t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
+                )
+                #endif
                 return nil
             }
 
             // Make ourselves the first responder
             window.makeFirstResponder(self)
+
+            #if DEBUG
+            Self.mouseDebugLogger.debug(
+                "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=window-not-key-passthrough clickCount=\(event.clickCount, privacy: .public) t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
+            )
+            #endif
 
             // We have to keep processing the event so that AppKit can properly
             // focus the window and dispatch events. If you return nil here then
