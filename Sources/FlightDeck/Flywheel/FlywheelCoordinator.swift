@@ -1,7 +1,7 @@
 import Foundation
 
 /// Errors `FlywheelCoordinator.boot` can throw.
-enum FlywheelError: Error {
+enum FlywheelError: Error, LocalizedError {
     /// `am macros start-session` exited non-zero. `output` is its stdout, for
     /// surfacing to the user/logs.
     case startSession(exitCode: Int32, output: String)
@@ -11,6 +11,27 @@ enum FlywheelError: Error {
     /// `am guard install` (part of `FlywheelSetup.enable`) exited non-zero. `output`
     /// is its stdout, for surfacing to the user/logs.
     case guardInstall(exitCode: Int32, output: String)
+
+    /// Read by `SessionStore.launchError(from:)`'s generic `default` branch — the one path
+    /// that surfaces this to the user — so a boot failure reads as one clean sentence rather
+    /// than `String(describing:)`'s `startSession(exitCode: 1, output: "...")`.
+    var errorDescription: String? {
+        switch self {
+        case .startSession(let exitCode, let output):
+            "Agent Mail start-session failed (exit \(exitCode)): \(Self.firstLine(of: output))"
+        case .unparseable(let output):
+            "Agent Mail start-session returned something unparseable: \(Self.firstLine(of: output))"
+        case .guardInstall(let exitCode, let output):
+            "Agent Mail guard install failed (exit \(exitCode)): \(Self.firstLine(of: output))"
+        }
+    }
+
+    /// `output` is a whole process's stdout — often several lines of Agent-Mail's own
+    /// logging — and the alert/log line this feeds wants one sentence, not a dump.
+    private static func firstLine(of output: String) -> String {
+        output.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true)
+            .first.map(String.init) ?? "(no output)"
+    }
 }
 
 /// Maps a Flight Deck `AgentID` to the `--program` value Agent-Mail's CLI expects.
