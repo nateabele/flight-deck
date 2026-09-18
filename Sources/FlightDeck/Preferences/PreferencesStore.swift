@@ -292,8 +292,13 @@ final class PreferencesStore: ObservableObject {
     /// The pair is built here rather than through `AgentAdapter.environment(for:)` on purpose:
     /// preferences must not depend on the adapter layer, and `AgentID` already owns the
     /// variable's name, so this is the same expression that default evaluates.
+    ///
+    /// `flywheel`, if present, is applied last, after everything above — a session running
+    /// under a flywheel identity must see its own `AGENT_NAME`/`AGENT_MAIL_*` regardless of
+    /// what the account or shell prefs set.
     func sessionEnvironment(
         for account: AgentAccount? = nil,
+        flywheel: FlywheelIdentity? = nil,
         inherited: [String: String] = ProcessInfo.processInfo.environment
     ) -> [String: String] {
         var environment = preferences.shell.environment
@@ -305,6 +310,9 @@ final class PreferencesStore: ObservableObject {
             environment[account.agent.homeEnvironmentKey] = account.home.path
         }
         environment["FD_OUTLOG_BUDGET"] = String(scrollbackBudgetBytes)
+        if let flywheel {
+            environment.merge(flywheel.environment) { _, new in new }
+        }
         return environment
     }
 
