@@ -900,6 +900,11 @@ final class SessionStore: ObservableObject {
     /// that instance.
     private let daemonControl: DaemonControlling
 
+    /// Boots the Agent-Mail identity a flywheel-enabled project's spawned agent runs as. Real
+    /// by default; a test injects `FlywheelCoordinator(runner: <fake>)` the same way `reaper`
+    /// and `daemon` above are overridden. See `bootFlywheelIdentityIfNeeded`.
+    private let flywheelCoordinator: FlywheelCoordinator
+
     /// Owns the idle-session sleep/wake bookkeeping. Constructed lazily so its closures can
     /// capture `self` after `init` has finished assigning every property they read
     /// (`daemonControl`, `processInspector`, `statuses`, …).
@@ -1381,7 +1386,8 @@ final class SessionStore: ObservableObject {
             inspector: ProcessTree(), signals: PosixSignals(), sleeper: RealSleeper()
         ),
         daemon: SessionDaemon = SessionDaemon(),
-        daemonControl: DaemonControlling? = nil
+        daemonControl: DaemonControlling? = nil,
+        flywheelCoordinator: FlywheelCoordinator = FlywheelCoordinator()
     ) {
         self.provider = provider
         self.persistence = persistence
@@ -1389,6 +1395,7 @@ final class SessionStore: ObservableObject {
         self.reaper = reaper
         self.daemon = daemon
         self.daemonControl = daemonControl ?? PosixDaemonControl(daemon: daemon)
+        self.flywheelCoordinator = flywheelCoordinator
         // Shell records land asynchronously, up to half a second after the tab they belong to
         // (see `SurfaceProcessRegistry`), so the `persist()` that `newSession`/`restore` already
         // ran is too early to contain them. Without this the snapshot names no shell for any
@@ -1566,10 +1573,16 @@ final class SessionStore: ObservableObject {
     ///   to true, preserving every existing desk caller's behaviour; `createSession` threads a
     ///   client's `false` through this same parameter for its claude branch. See
     ///   `select(_:selecting:)`.
+    /// - Parameter flywheelIdentity: the Agent-Mail identity this tab was already booted under,
+    ///   or nil for every non-flywheel caller (the default, and ~140 existing call sites).
+    ///   `createSession`'s claude branch is the only caller that ever passes non-nil — see
+    ///   `bootFlywheelIdentityIfNeeded`, which must run and succeed BEFORE this is called, since
+    ///   `newSession` itself has no `async` to boot one with.
     @discardableResult
     func newSession(
         in url: URL, at index: Int? = nil, account explicit: UUID? = nil,
-        waking: DisplayWakePolicy = .wakeIfNeeded, selecting: Bool = true
+        waking: DisplayWakePolicy = .wakeIfNeeded, selecting: Bool = true,
+        flywheelIdentity: FlywheelIdentity? = nil
     ) -> Session {
         guard ensureTerminalCreatable(waking) else {
             launchFailureReporter.report(.terminalUnavailable(displayAsleep: true))
@@ -1591,7 +1604,8 @@ final class SessionStore: ObservableObject {
         // second login or reassigns this project's default, which would silently move every
         // existing tab's conversation to a home it was never written in.
         let session = Session(
-            title: nextSessionTitle(), workingDirectory: url.path, accountID: account?.id
+            title: nextSessionTitle(), workingDirectory: url.path, accountID: account?.id,
+            flywheelIdentity: flywheelIdentity
         )
         let adapter = adapter(for: instance(for: session))
         let options = options(for: session.agent, project: url.path)
@@ -1657,9 +1671,26 @@ final class SessionStore: ObservableObject {
         }
         // An agent that mints its own conversation id has nothing to negotiate, so it takes
         // the synchronous path and never touches anything this method builds below.
+        //
+        // Flywheel identity is booted here, before `newSession`, rather than inside it: booting
+        // is `async` and fallible, and `newSession` must stay neither — see its own doc comment.
+        // A non-flywheel project (the common case) sees `bootFlywheelIdentityIfNeeded` return
+        // nil immediately, so this branch's behaviour — and its await point — is unchanged from
+        // before Task 7a for every project that has not opted in.
         guard agent.negotiatesIdentity else {
+            let identity: FlywheelIdentity?
+            do {
+                identity = try await bootFlywheelIdentityIfNeeded(agent: agent, project: directory)
+            } catch {
+                let failure = launchError(from: error)
+                launchFailureReporter.report(failure)
+                return .failure(failure)
+            }
             return .success(
-                newSession(in: url, at: index, account: explicit, selecting: selecting).id
+                newSession(
+                    in: url, at: index, account: explicit, selecting: selecting,
+                    flywheelIdentity: identity
+                ).id
             )
         }
 
@@ -1707,6 +1738,19 @@ final class SessionStore: ObservableObject {
             return .failure(failure)
         }
 
+        // Booted after `prepare` succeeds rather than before: a codex thread that never got
+        // named is already refused above, and booting an Agent-Mail identity for a creation
+        // that was about to fail anyway would mint an identity nobody ever uses. `CodexAdapter`
+        // itself stays unaware of flywheel entirely — see the module doc comment.
+        let fwIdentity: FlywheelIdentity?
+        do {
+            fwIdentity = try await bootFlywheelIdentityIfNeeded(agent: agent, project: directory)
+        } catch {
+            let failure = launchError(from: error)
+            launchFailureReporter.report(failure)
+            return .failure(failure)
+        }
+
         // Rebuilt rather than mutated so the tab is pinned to what codex actually named,
         // including the rollout path it reported. `id` is carried over so the title minted
         // above still belongs to this tab.
@@ -1719,7 +1763,8 @@ final class SessionStore: ObservableObject {
             // Carried over from the draft, like `id`: the tab has to keep the account its
             // app-server was started for, or its next lookup keys a different instance.
             accountID: draft.accountID,
-            transcriptPath: binding.transcriptURL?.path
+            transcriptPath: binding.transcriptURL?.path,
+            flywheelIdentity: fwIdentity
         )
         let adapter = adapter(for: instance)
         addSession(
@@ -1730,6 +1775,65 @@ final class SessionStore: ObservableObject {
             selecting: selecting
         )
         return .success(session.id)
+    }
+
+    /// How long `bootFlywheelIdentityIfNeeded` waits for `am macros start-session` before
+    /// giving up. A generous budget — `am` shells out to its own store on first run — but
+    /// bounded, because an unbounded await here would wedge every codex/claude tab creation in
+    /// a flywheel-enabled project behind one hung process, with no way for the user to recover
+    /// short of force-quitting Flight Deck. Resolves the deferred concern noted when
+    /// `FlywheelCoordinator.boot` (Task 2) was given no deadline of its own.
+    static let flywheelBootTimeout: TimeInterval = 20
+
+    /// Thrown by `bootFlywheelIdentityIfNeeded` when `am` does not answer within
+    /// `flywheelBootTimeout`. Surfaces through `launchError(from:)`'s default branch exactly
+    /// like any other boot failure — this file never special-cases it.
+    private struct FlywheelBootTimedOut: LocalizedError {
+        var errorDescription: String? {
+            "Agent-Mail's `am` did not respond within \(Int(SessionStore.flywheelBootTimeout))s."
+        }
+    }
+
+    /// Boots an Agent-Mail identity for a flywheel project, else returns nil (non-flywheel).
+    /// Throws surface to the caller, which reports via `launchFailureReporter` and refuses the
+    /// tab — see both `createSession` branches above.
+    ///
+    /// Raced against `flywheelBootTimeout` with a `withThrowingTaskGroup`, the same shape
+    /// `CodexAdapter.read` uses for its own app-server round trip: `flywheelCoordinator.boot`
+    /// has no deadline of its own, so a hung `am` would otherwise wedge tab creation forever.
+    func bootFlywheelIdentityIfNeeded(
+        agent: AgentID, project: String, name: String? = nil
+    ) async throws -> FlywheelIdentity? {
+        guard preferences?.projectSettings(project).flywheelEnabled == true else { return nil }
+        // Matches `PreferencesStore.key(_:)`'s standardization, so the project string `am`
+        // records agrees with the one every project-settings lookup keys on.
+        let key = URL(fileURLWithPath: project, isDirectory: true).standardizedFileURL.path
+        // `am` only records this string; it does not validate it against either agent's real
+        // model catalog, so a non-empty placeholder for "no model configured" is fine — the
+        // canonical claude flag when set, else `"claude"`; codex's typed option when set, else
+        // `"codex"`.
+        let model: String
+        switch options(for: agent, project: project) {
+        case .claude(let flags):
+            if case .value(let value)? = flags.values["--model"] { model = value } else { model = "claude" }
+        case .codex(let codexOptions):
+            model = codexOptions.model ?? "codex"
+        }
+        let coordinator = flywheelCoordinator
+        let program = FlywheelProgram.rawValue(for: agent)
+        let seconds = Self.flywheelBootTimeout
+        return try await withThrowingTaskGroup(of: FlywheelIdentity.self) { group in
+            group.addTask {
+                try await coordinator.boot(project: key, program: program, model: model, name: name)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw FlywheelBootTimedOut()
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw FlywheelBootTimedOut() }
+            return first
+        }
     }
 
     /// The Accounts pane's "Sign In" / "Sign In Again" path: an ordinary tab, bound to a
