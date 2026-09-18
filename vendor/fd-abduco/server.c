@@ -156,6 +156,25 @@ static bool server_send_packet(Client *c, Packet *pkt) {
 	return false;
 }
 
+/* Flight Deck fork (mode preamble): send `len` bytes of `buf` to client `c`
+ * as one or more MSG_CONTENT packets, chunked to fit Packet.u.msg. Used for
+ * the synthesized mode-preamble sent below, ahead of the pre-existing
+ * outlog history replay. */
+static void server_send_content(Client *c, const char *buf, size_t len) {
+	for (size_t off = 0; off < len; ) {
+		Packet rp;
+		memset(&rp, 0, sizeof rp);
+		size_t chunk = len - off;
+		if (chunk > sizeof(rp.u.msg))
+			chunk = sizeof(rp.u.msg);
+		rp.type = MSG_CONTENT;
+		rp.len = chunk;
+		memcpy(rp.u.msg, buf + off, chunk);
+		server_send_packet(c, &rp);
+		off += chunk;
+	}
+}
+
 static void server_pty_died_handler(int sig) {
 	int errsv = errno;
 	pid_t pid;
@@ -289,6 +308,24 @@ static void server_mainloop(void) {
 					if (c->state != STATE_ATTACHED) {
 						c->state = STATE_ATTACHED;
 						fd_outlog_trim(&server.outlog);
+						/* Flight Deck fork (mode preamble): unconditionally
+						 * re-assert every tracked DEC private mode's current
+						 * value before the history replay below. Idempotent --
+						 * if the mode's own set/reset bytes are still inside
+						 * the replay window, re-asserting it here is a
+						 * harmless duplicate; once they've aged out of the
+						 * trimmed ring, this is what restores the mode on a
+						 * brand-new terminal surface. See fd_outlog_preamble()
+						 * in fd_outlog.c. */
+						size_t preamble_len = fd_outlog_preamble_size(&server.outlog);
+						if (preamble_len > 0) {
+							char *preamble = malloc(preamble_len);
+							if (preamble) {
+								fd_outlog_preamble(&server.outlog, preamble);
+								server_send_content(c, preamble, preamble_len);
+								free(preamble);
+							}
+						}
 						for (size_t off = 0; off < server.outlog.len; ) {
 							Packet rp;
 							memset(&rp, 0, sizeof rp);

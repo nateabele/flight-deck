@@ -107,3 +107,49 @@ in this tree invokes it correctly as `fd-abduco -n "$SOCK" sh -c '...'` (no `--`
 — the server daemonizes via the standard double-fork and detaches
 immediately, which is the "detached session" behavior Flight Deck needs. The
 baseline smoke test uses `-n`.
+
+## Fork-delta log
+
+### 2026-09-18: DEC private mode tracking + reattach preamble (`fd_outlog.c`/`.h`, `server.c`)
+
+Extends the `FdOutlog` per-byte CSI scanner (added earlier to drop
+terminal-capability *query* sequences on reattach) to also track the
+last-seen set/reset state of every DEC private mode (`CSI ? Pm h` /
+`CSI ? Pm l`, including multi-param forms like `CSI ?1000;1006h`) it sees
+flow through the pty stream — mouse tracking, alternate-scroll, alt-screen,
+bracketed paste, cursor keys, whichever ones a given program happens to set,
+generically, at no extra parsing cost beyond the grammar the scanner already
+walks for the query-drop logic. Unlike the query-drop path, these bytes are
+**not** dropped — a mode set/reset is real program behavior, not a stale
+query — they're classified in `csi_is_private_mode()`/tracked in
+`track_private_modes()` on the way through, into a small growable
+`FdOutlogMode` table on `FdOutlog` (`fd_outlog.c`/`.h`).
+
+Motivation: `FdOutlog.data` is a *bounded* ring (default 4 MiB, configurable).
+A program's one-time "enable mouse tracking" escape sequence, sent once at
+startup, ages out of that ring in any long-running session, so a rebuilt
+terminal surface reattaching later never re-learns the mode was on — this is
+exactly the "two-finger scroll turns into arrow keys after sleep/wake" bug
+the mode table fixes. `fd_outlog_preamble_size()`/`fd_outlog_preamble()`
+synthesize a preamble that unconditionally re-asserts every tracked mode's
+*current* value; `server.c`'s `MSG_RESIZE` first-attach block
+(`server_send_content()`) sends it as its own `MSG_CONTENT` packet
+immediately before the existing history replay. This is idempotent: if a
+mode's own set/reset bytes are still inside the replay window, the preamble
+duplicates them harmlessly; once they've aged out, the preamble is what
+restores the mode.
+
+Scope is deliberately narrow, per the reported bug: only *private*
+(`CSI ? ... h/l`) modes are tracked — non-private ANSI modes (`CSI Pm h/l`,
+no `?`) aren't implicated and go untouched. DECRQM (`CSI ? Pm $p`, a mode
+*query*, not a set/reset) is unaffected — it already flows through the
+scanner unclassified, same as before this change.
+
+Test coverage: `Tests/fd-abduco/test_outlog_modes.c` (unit-level: a mode set
+sequence pushed out of the trim budget by filler bytes, a set-then-reset,
+and a multi-param sequence, plus DECRQM/non-private-mode/no-modes-seen
+negative cases) and `Tests/fd-abduco/run_mode_preamble_test.sh`
+(protocol-level: a live session sets mode 1000 and prints a marker, both get
+trimmed by a small budget, and a client attaching afterward still receives
+the mode via the preamble even though neither the original bytes nor the
+marker are present in history anymore).
