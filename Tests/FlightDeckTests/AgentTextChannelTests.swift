@@ -248,4 +248,59 @@ final class AgentTextChannelTests: XCTestCase {
         XCTAssertEqual(spy.events.last, .ret, "Return must arrive after the paste closes")
         XCTAssertNil(store.pendingPrompts[id], "typed, so retired")
     }
+
+    // MARK: - inject: the mark survives codex's two-hop submit
+
+    /// **The regression `inject`'s mark-release rewrite guards against.** `CodexTextChannel
+    /// .submit` now takes two settle hops — the kill, then a later one just for Return, so
+    /// codex never sees a Return arrive in the same burst as the text before it (see that
+    /// method's doc comment). If `inject` still released its `injecting` mark on the first
+    /// hop, as a single-hop contract once let it, a second prompt landing in the gap before
+    /// Return goes out would be typed straight into the composer while the first prompt's own
+    /// Return was still pending — interleaving two turns' keystrokes.
+    ///
+    /// Driven by holding `injectionSettle`'s continuations rather than running them inline —
+    /// the same technique `CodexRenameTests.testARenameSupersededMidFlightKeepsItsReplacement`
+    /// uses to genuinely suspend a drive mid-flight, rather than merely asserting a final
+    /// sequence a bug could still have produced by luck.
+    func testASecondPromptArrivingBetweenCodexsTwoSettleHopsIsQueuedNotTyped() async throws {
+        let (store, id, spy) = try await liveTab(agent: .codex)
+        // A static override, not `spy.script(_:)`: codex keeps its composer up and byte-
+        // identical through a turn (see `CodexTextChannel`'s own doc comment), unlike the
+        // rename modal's screen-per-Return model `script` exists for.
+        spy.viewportOverride = """
+        › Ask Codex to do anything
+
+          gpt-5.6-sol default · /tmp/work
+        """
+        var pending: [() -> Void] = []
+        store.injectionSettle = { pending.append($0) }
+
+        XCTAssertEqual(store.submitPrompt("first", token: UUID(), to: id), .queued,
+                       "still mid-flight -- the first settle hop hasn't run yet")
+        XCTAssertEqual(pending.count, 1)
+
+        pending.removeFirst()()   // hop 1: the kill, then "first" is typed
+        XCTAssertEqual(spy.events, [.killLine, .text("first")])
+        XCTAssertEqual(pending.count, 1, "Return is still waiting on its own hop")
+
+        // A second prompt lands in the gap before Return goes out.
+        XCTAssertEqual(store.submitPrompt("second", token: UUID(), to: id), .queued,
+                       "the tab is still mid-injection; this must queue, never type")
+        XCTAssertEqual(spy.events, [.killLine, .text("first")],
+                       "not one keystroke of the second prompt while the first is still in flight")
+
+        pending.removeFirst()()   // hop 2: Return, then onSent releases the mark
+        XCTAssertEqual(spy.events, [.killLine, .text("first"), .ret])
+
+        // The queued second prompt gets its turn on the next tick, now that the mark is free
+        // -- and it drives through the very same two hops, kill+text then its own Return.
+        store.applyRegistry([:])
+        XCTAssertEqual(pending.count, 1)
+        pending.removeFirst()()   // hop 1 of "second"
+        XCTAssertEqual(Array(spy.events.suffix(2)), [.killLine, .text("second")])
+        XCTAssertEqual(pending.count, 1)
+        pending.removeFirst()()   // hop 2 of "second"
+        XCTAssertEqual(Array(spy.events.suffix(2)), [.text("second"), .ret])
+    }
 }
