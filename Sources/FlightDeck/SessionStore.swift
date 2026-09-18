@@ -5540,6 +5540,25 @@ final class SessionStore: ObservableObject {
         // field moves must be recognized as a change exactly like any other, not smuggled in
         // through a side channel `FleetReplicator`'s drift assertion never sees.
         var next = next
+        // Seeded from the CURRENT `statuses`, not left at `next`'s default `false` — every
+        // caller builds `next` fresh with `answerless: false`, having no way to know the
+        // ongoing episode this field remembers. Without this seed, the first comparison below
+        // would read a real, unchanged `answerless: true` episode as "changed" on every single
+        // tick for as long as it runs (`stuckPromptReportLadder`'s own comment documents
+        // episodes lasting 24 minutes to 3 hours), publishing `false` then immediately
+        // republishing `true` once `derivedOpenPromptCalls` recomputes it — the exact
+        // "re-assigning an equal value... twice a second" cost the comment below already says
+        // this file avoids, just not avoided for this field before this line existed.
+        //
+        // Scoped to tabs `next` itself already calls `waiting`: `derivedOpenPromptCalls`
+        // overwrites this field unconditionally for every one of those, so the seed only ever
+        // matters for making the FIRST comparison agree with what the second is about to
+        // recompute anyway. A tab `next` does not call `waiting` is left at the constructed
+        // default (`false`) — seeding it here from a stale `true` would plant a value nothing
+        // downstream ever clears, since `derivedOpenPromptCalls` only visits `waiting` tabs.
+        for id in next.compactMap({ $0.value.activity == .waiting ? $0.key : nil }) {
+            next[id]?.answerless = statuses[id]?.answerless ?? false
+        }
         // Installed **above** the guard rather than below it, because the third axis is
         // derived FROM them: `openPromptProbe` asks this store what each tab is doing, and
         // asking it against the statuses this tick is replacing would report no dialog on
@@ -5553,10 +5572,10 @@ final class SessionStore: ObservableObject {
         // this tab's activity off `store.status(for:)`, i.e. off `self.statuses` — never off a
         // parameter — so a probe run before this line sees LAST tick's activity and refuses a
         // freshly-`waiting` tab `"not_waiting"`, exactly the "a card a poll late" bug the
-        // comment above already names for `openPromptCalls`. The second assignment, after
-        // `next`'s `answerless` is filled in, is what lets that field reach `statuses` at all;
-        // it is a no-op assignment (caught by the same equality check) on every tick that
-        // does not touch `answerless`, which is nearly all of them.
+        // comment above already names for `openPromptCalls`. Thanks to the seed above, both
+        // assignments are no-ops (caught by the same equality check) on every tick that does
+        // not touch `answerless` OR any other field — which, for a tab sitting in a steady-state
+        // episode, is every tick until the episode ends.
         if next != statuses { statuses = next }
         let derived = derivedOpenPromptCalls(&next)
         if next != statuses { statuses = next }
