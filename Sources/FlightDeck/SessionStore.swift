@@ -108,6 +108,32 @@ final class SessionStore: ObservableObject {
     /// first close.
     private var activationOrder: [UUID] = []
 
+    // TEMPORARY DIAGNOSTIC INSTRUMENTATION — double-click session-swap investigation
+    // (`.superpowers/sdd/quiet-foraging-babbage/task-2-brief.md`). `didSet` alone has no
+    // caller context, so `selectionChangeReason` is set immediately before each assignment
+    // to tag *why* the value is about to change, then logged and reset to "unknown" inside
+    // `didSet`. Remove this block, every `selectionChangeReason =` / `tagNextSelectionChange`
+    // call site (including the one in `SessionSidebar.swift`), and the matching
+    // `#if DEBUG` logging in `SurfaceView_AppKit.swift`'s `localEventLeftMouseDown` once the
+    // real fix lands.
+    #if DEBUG
+    /// Read with:
+    /// `log show --predicate 'subsystem == "dev.flightdeck.FlightDeck" AND category == "selection-debug"' --last 30m`
+    private static let selectionDebugLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
+        category: "selection-debug"
+    )
+
+    private var selectionChangeReason: String = "unknown"
+
+    /// The one way a caller outside this file (`SessionSidebar`) can tag an assignment it is
+    /// about to make directly to `selectedSessionID`, since `selectionChangeReason` itself is
+    /// private. Diagnostic-only — see the block comment above.
+    func tagNextSelectionChange(_ reason: String) {
+        selectionChangeReason = reason
+    }
+    #endif
+
     /// `didSet` persists every change, including one made through `SessionSidebar`'s
     /// `List(selection:)` binding — the only way selection actually changes in
     /// production, since that binding writes here directly rather than through
@@ -115,6 +141,12 @@ final class SessionStore: ObservableObject {
     /// cannot recurse.
     @Published var selectedSessionID: UUID? {
         didSet {
+            #if DEBUG
+            Self.selectionDebugLogger.debug(
+                "selectedSessionID old=\(oldValue?.uuidString ?? "nil", privacy: .public) new=\(self.selectedSessionID?.uuidString ?? "nil", privacy: .public) reason=\(self.selectionChangeReason, privacy: .public) t=\(Date().timeIntervalSince1970, privacy: .public)"
+            )
+            selectionChangeReason = "unknown"
+            #endif
             if let id = selectedSessionID {
                 activationOrder.removeAll { $0 == id }
                 activationOrder.insert(id, at: 0)
@@ -1908,6 +1940,9 @@ final class SessionStore: ObservableObject {
     /// only what this one chokepoint enforces.
     private func select(_ id: UUID, selecting: Bool) {
         guard selecting || selectedSessionID == nil else { return }
+        #if DEBUG
+        selectionChangeReason = "select(_:selecting:)"
+        #endif
         selectedSessionID = id
     }
 
@@ -2489,6 +2524,9 @@ final class SessionStore: ObservableObject {
         // outlived that set belongs to a tab this run has no other way of finding — see
         // `reconcileDaemons`.
         reconcileDaemons(restored: Set(restoredIDs))
+        #if DEBUG
+        selectionChangeReason = "restore()"
+        #endif
         selectedSessionID = snapshot.selectedSessionID.flatMap {
             restoredIDs.contains($0) ? $0 : nil
         } ?? restoredIDs.first
@@ -3042,6 +3080,9 @@ final class SessionStore: ObservableObject {
     /// synchronous atomic write-and-rename cycles on the main thread.
     func selectSession(_ id: UUID) {
         guard locate(id) != nil else { return }
+        #if DEBUG
+        selectionChangeReason = "selectSession(_:)"
+        #endif
         selectedSessionID = id
     }
 
@@ -3104,6 +3145,9 @@ final class SessionStore: ObservableObject {
         let ordered = repos.flatMap(\.sessions)
         guard !ordered.isEmpty else { return }
 
+        #if DEBUG
+        selectionChangeReason = "cycleSelection(forward: \(forward))"
+        #endif
         guard
             let current = selectedSessionID,
             let index = ordered.firstIndex(where: { $0.id == current })
@@ -3207,6 +3251,9 @@ final class SessionStore: ObservableObject {
         // long-standing disagreement with `moveSession`, which has always left an emptied
         // source project standing.
         if selectedSessionID == id {
+            #if DEBUG
+            selectionChangeReason = "closeSession fallback (closed selected session \(id))"
+            #endif
             selectedSessionID = selectionAfterClosing(id, formerLocation: (repoIndex, sessionIndex))
         }
         // Prune regardless of whether the closed tab was active, so opening and closing
@@ -3541,7 +3588,12 @@ final class SessionStore: ObservableObject {
             }
             // The top row of what just came back, which is where the eye goes. A project
             // records no "active tab" of its own to return to.
-            if let first = closed.sessions.first { selectedSessionID = first.session.id }
+            if let first = closed.sessions.first {
+                #if DEBUG
+                selectionChangeReason = "reopenLastClosed(project)"
+                #endif
+                selectedSessionID = first.session.id
+            }
         }
 
         settleReopen(deferredCodexResumes)
