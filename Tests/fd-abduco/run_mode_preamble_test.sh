@@ -27,6 +27,17 @@ FD_OUTLOG_BUDGET=4096 "$BIN" -n "$SOCK" sh -c \
 sleep 0.6
 test -S "$SOCK"
 
+# WANT_ABSENT here relies on an invariant of test_replay.c's read loop: it
+# stops reading the instant WANT_MARKER is found, so the absence check only
+# inspects whatever was read in that same burst. That's still sound because
+# the server sends the preamble (which contains WANT_MARKER) and the trimmed
+# history (which must NOT contain WANT_ABSENT) back-to-back in one
+# synchronous MSG_RESIZE first-attach burst, with the child asleep(30) and no
+# live output to interleave -- so the marker and the absent text's fate are
+# decided together by the same read(s). If the preamble were ever missing,
+# WANT_MARKER wouldn't show up in the early reads either, the loop would keep
+# reading (and eventually time out), and assert(found) would fail rather than
+# the absence check being silently skipped.
 cc -Wall -O0 -I vendor/fd-abduco \
    -DWANT_MARKER='"\x1b[?1000h"' -DWANT_ABSENT='"START-99"' \
    -o /tmp/fd_mode_preamble_test Tests/fd-abduco/test_replay.c

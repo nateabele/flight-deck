@@ -8,8 +8,16 @@
  * fd_outlog.c's track_private_modes()/fd_outlog_preamble().
  */
 #include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "fd_outlog.h"
+
+/* Mirrors fd_outlog.c's FD_OUTLOG_MODE_CAP (not exposed via fd_outlog.h,
+ * since it's an internal implementation cap, not part of the public
+ * contract) -- kept in sync by test 10 below asserting o.modes_len actually
+ * stops growing at this value. */
+#define TEST_MODE_CAP 256
 
 int main(void) {
     FdOutlog o;
@@ -148,6 +156,42 @@ int main(void) {
     /* not a query -- the raw bytes (garbage mode number and all) still
      * belong in the ring verbatim */
     assert(memmem(o.data, o.len, "\x1b[?3217300869h", 14) != NULL);
+    fd_outlog_free(&o);
+
+    /* 10. a stream that sets far more than FD_OUTLOG_MODE_CAP distinct mode
+     * numbers must not grow the tracking table past the cap -- this is the
+     * fix for the reviewer's finding that ~200,000 distinct modes (easily
+     * reachable in crafted pty input) built an unbounded, multi-megabyte
+     * table with no relationship to the (budget-bounded) byte ring. Modes
+     * within the cap (first-seen order: 1..TEST_MODE_CAP here) must still
+     * be tracked correctly, including in-place updates to an
+     * already-tracked mode even once the cap has been reached elsewhere;
+     * only *new* mode numbers beyond the cap are dropped. */
+    fd_outlog_init(&o, 1024 * 1024);
+    for (int m = 1; m <= TEST_MODE_CAP + 50; m++) {
+        char seq[16];
+        int len = snprintf(seq, sizeof seq, "\x1b[?%dh", m);
+        fd_outlog_append(&o, seq, (size_t)len);
+    }
+    assert(o.modes_len == TEST_MODE_CAP);
+    /* an in-cap mode set right after the cap was reached elsewhere still
+     * updates in place, not appended as a new entry. */
+    fd_outlog_append(&o, "\x1b[?1l", 5);
+    assert(o.modes_len == TEST_MODE_CAP);
+    fd_outlog_trim(&o);
+    {
+        size_t n = fd_outlog_preamble_size(&o);
+        char *buf = malloc(n);
+        assert(buf != NULL);
+        fd_outlog_preamble(&o, buf);
+        /* mode 1 was reset by the update above */
+        assert(memmem(buf, n, "\x1b[?1l", 5) != NULL);
+        /* the last mode inside the cap (TEST_MODE_CAP itself) is tracked */
+        assert(memmem(buf, n, "\x1b[?256h", 7) != NULL);
+        /* the first mode beyond the cap was never tracked at all */
+        assert(memmem(buf, n, "\x1b[?257h", 7) == NULL);
+        free(buf);
+    }
     fd_outlog_free(&o);
 
     return 0;

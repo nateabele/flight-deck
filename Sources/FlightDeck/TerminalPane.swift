@@ -1,4 +1,7 @@
 import SwiftUI
+#if DEBUG
+import OSLog
+#endif
 
 /// The container the selected surface is parented into.
 ///
@@ -49,6 +52,19 @@ extension TerminalHostView: NSUserInterfaceValidations {
 struct TerminalPane: NSViewRepresentable {
     @ObservedObject var store: SessionStore
 
+    // TEMPORARY DIAGNOSTIC INSTRUMENTATION — double-click session-swap investigation
+    // (`.superpowers/sdd/quiet-foraging-babbage/task-2-brief.md`). Same OSLog category as
+    // `SessionStore`'s and `Ghostty.SurfaceView`'s matching instrumentation so `log show`
+    // interleaves all three files' events. Marks the actual reparent/focus race window: this
+    // logs the synchronous reparent below; `Ghostty.moveFocus`'s deferred work item logs the
+    // other edge of the same window. Remove alongside that block once the real fix lands.
+    #if DEBUG
+    private static let reparentDebugLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
+        category: "selection-debug"
+    )
+    #endif
+
     func makeNSView(context: Context) -> TerminalHostView {
         let container = TerminalHostView()
         container.autoresizingMask = [.width, .height]
@@ -72,6 +88,15 @@ struct TerminalPane: NSViewRepresentable {
             { [weak store] in store?.closeSession(id) }
         }
 
+        // TEMPORARY DIAGNOSTIC INSTRUMENTATION — see comment on `reparentDebugLogger` above.
+        // Captured before the detach loop below removes it, since that's the only place the
+        // outgoing surface's identity is still reachable.
+        #if DEBUG
+        let outgoingSessionID = container.subviews
+            .first(where: { $0 !== current })
+            .flatMap { ($0 as? Ghostty.SurfaceView)?.debugSessionID }
+        #endif
+
         // Detach any surface that isn't the current selection. It stays retained
         // by the Store, so its shell keeps running while off-screen.
         for sub in container.subviews where sub !== current {
@@ -80,6 +105,11 @@ struct TerminalPane: NSViewRepresentable {
 
         guard let surface = current else { return }
         if surface.superview !== container {
+            #if DEBUG
+            Self.reparentDebugLogger.debug(
+                "reparent outgoing=\(outgoingSessionID?.uuidString ?? "none", privacy: .public) incoming=\(store.selectedSessionID?.uuidString ?? "nil", privacy: .public) t=\(Date().timeIntervalSince1970, privacy: .public)"
+            )
+            #endif
             surface.frame = container.bounds
             surface.autoresizingMask = [.width, .height]
             container.addSubview(surface)

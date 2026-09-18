@@ -21,9 +21,15 @@ extension Ghostty {
 
         // TEMPORARY DIAGNOSTIC INSTRUMENTATION — double-click session-swap investigation
         // (`.superpowers/sdd/quiet-foraging-babbage/task-2-brief.md`). Same OSLog category as
-        // `SessionStore`'s matching instrumentation so `log show` interleaves both files'
-        // events. Remove alongside that block, and `localEventLeftMouseDown`'s logging calls
-        // below, once the real fix lands.
+        // `SessionStore`'s, `TerminalPane`'s, and `Ghostty.SurfaceView`'s matching
+        // instrumentation so `log show` interleaves all files' events. Remove this block
+        // (`mouseDebugLogger`, `wallClockTimestamp(for:)`, `debugSessionID`) and all four
+        // `localEventLeftMouseDown` logging calls below (including the `hit-test-miss` branch
+        // and the `clickCount` field added in the final review's Fix 3) once the real fix
+        // lands — see the full removal checklist on `SessionStore.swift`'s `selectedSessionID`
+        // `didSet` comment, which also covers `TerminalPane.swift`'s and
+        // `SurfaceConfiguration.swift`'s matching instrumentation added in the final review's
+        // Fix 2.
         #if DEBUG
         private static let mouseDebugLogger = Logger(
             subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
@@ -750,7 +756,14 @@ extension Ghostty {
 
             // The clicked location in this window should be this view.
             let location = convert(event.locationInWindow, from: nil)
-            guard hitTest(location) == self else { return event }
+            guard hitTest(location) == self else {
+                #if DEBUG
+                Self.mouseDebugLogger.debug(
+                    "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=hit-test-miss clickCount=\(event.clickCount, privacy: .public) t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
+                )
+                #endif
+                return event
+            }
 
             // We always assume that we're resetting our mouse suppression
             // unless we see the specific scenario below to set it.
@@ -761,7 +774,7 @@ extension Ghostty {
             guard window.firstResponder !== self else {
                 #if DEBUG
                 Self.mouseDebugLogger.debug(
-                    "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=already-first-responder-passthrough t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
+                    "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=already-first-responder-passthrough clickCount=\(event.clickCount, privacy: .public) t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
                 )
                 #endif
                 return event
@@ -775,7 +788,7 @@ extension Ghostty {
                 suppressNextLeftMouseUp = true
                 #if DEBUG
                 Self.mouseDebugLogger.debug(
-                    "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=swallowed-for-focus-transfer t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
+                    "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=swallowed-for-focus-transfer clickCount=\(event.clickCount, privacy: .public) t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
                 )
                 #endif
                 return nil
@@ -786,7 +799,7 @@ extension Ghostty {
 
             #if DEBUG
             Self.mouseDebugLogger.debug(
-                "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=window-not-key-passthrough t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
+                "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=window-not-key-passthrough clickCount=\(event.clickCount, privacy: .public) t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
             )
             #endif
 

@@ -383,7 +383,9 @@ struct SessionSidebar: View {
         // it lands, since `SessionStore.selectionChangeReason` is private. In Release this
         // whole `#if` compiles out and `selectionBinding` is exactly `$store.selectedSessionID`
         // — no new code in the shipped path. Revert to `$store.selectedSessionID` directly
-        // once the real fix lands.
+        // once the real fix lands — see the full removal checklist on `SessionStore.swift`'s
+        // `selectedSessionID` `didSet` comment, which also covers `beginRename()`'s
+        // `tagNextSelectionChange` call just above in this file.
         #if DEBUG
         let selectionBinding = Binding<UUID?>(
             get: { store.selectedSessionID },

@@ -37,13 +37,25 @@ static void modes_ensure(FdOutlog *o, size_t need) {
     o->modes = realloc(o->modes, c * sizeof(*o->modes)); o->modes_cap = c;
 }
 
+/* Flight Deck fork: no real terminal program tracks anywhere near this many
+ * distinct DEC private modes (the real-world set is a few dozen at most);
+ * this exists purely to cap the cost of adversarial/corrupted pty input that
+ * cycles through a huge number of distinct mode numbers, which -- unlike the
+ * byte ring -- this table has no other bound on. */
+#define FD_OUTLOG_MODE_CAP 256
+
 /* Flight Deck fork: record that DEC private mode `mode` is now set (nonzero
  * `set`) or reset (zero), updating an existing entry in place or appending
- * a new one in first-seen order. */
+ * a new one in first-seen order. New mode numbers beyond FD_OUTLOG_MODE_CAP
+ * are silently dropped rather than tracked -- a session using fewer than
+ * that many distinct modes (i.e. every real session) is unaffected; only
+ * pathological/adversarial input that cycles through many distinct mode
+ * numbers stops growing the table. */
 static void track_mode(FdOutlog *o, int mode, int set) {
     for (size_t i = 0; i < o->modes_len; i++) {
         if (o->modes[i].mode == mode) { o->modes[i].set = set; return; }
     }
+    if (o->modes_len >= FD_OUTLOG_MODE_CAP) return;
     modes_ensure(o, o->modes_len + 1);
     o->modes[o->modes_len].mode = mode;
     o->modes[o->modes_len].set = set;
@@ -131,11 +143,12 @@ static int csi_is_private_mode(const char *s, size_t n) {
  * unexpected non-digit byte between separators is skipped one byte at a
  * time rather than aborting the scan.
  *
- * A parameter is only ever multiplied up while it's still <=
- * FD_OUTLOG_MODE_MAX; once it exceeds that, further digits are still
+ * A parameter is only ever multiplied up while it's still <
+ * FD_OUTLOG_MODE_MAX / 10; once it reaches that, further digits are still
  * consumed (to stay in sync with the rest of the sequence) but no longer
- * folded into `val`, so `val` can never grow past
- * FD_OUTLOG_MODE_MAX * 10 + 9 -- nowhere near overflowing a 32-bit `int` --
+ * folded into `val`, so `val` can never grow to or past FD_OUTLOG_MODE_MAX
+ * (999999) -- nowhere near overflowing a 32-bit `int`, and matching the
+ * documented ceiling exactly rather than allowing one extra digit through --
  * no matter how many digits (10, 28, ...) the parameter actually has.
  * Such a parameter is real garbage, not a mode number, so it's dropped
  * rather than tracked. */
@@ -145,7 +158,7 @@ static void track_private_modes(FdOutlog *o, const char *s, size_t n) {
     while (i < n - 1) {
         int val = 0, have_digit = 0, oversized = 0;
         while (i < n - 1 && s[i] >= '0' && s[i] <= '9') {
-            if (val <= FD_OUTLOG_MODE_MAX) val = val * 10 + (s[i] - '0');
+            if (val < FD_OUTLOG_MODE_MAX / 10) val = val * 10 + (s[i] - '0');
             else oversized = 1;
             have_digit = 1;
             i++;

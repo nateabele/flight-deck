@@ -112,10 +112,40 @@ final class SessionStore: ObservableObject {
     // (`.superpowers/sdd/quiet-foraging-babbage/task-2-brief.md`). `didSet` alone has no
     // caller context, so `selectionChangeReason` is set immediately before each assignment
     // to tag *why* the value is about to change, then logged and reset to "unknown" inside
-    // `didSet`. Remove this block, every `selectionChangeReason =` / `tagNextSelectionChange`
-    // call site (including the one in `SessionSidebar.swift`), and the matching
-    // `#if DEBUG` logging in `SurfaceView_AppKit.swift`'s `localEventLeftMouseDown` once the
-    // real fix lands.
+    // `didSet`.
+    //
+    // Removal checklist, once the real fix lands (all line references as of this comment —
+    // re-check before deleting, since later fix rounds shift them):
+    //   In this file (`SessionStore.swift`):
+    //     - This comment block and the `#if DEBUG` block right below it: `selectionDebugLogger`,
+    //       `selectionChangeReason`, and `tagNextSelectionChange(_:)`.
+    //     - The `#if DEBUG` logging block inside `selectedSessionID`'s `didSet` (the
+    //       `Self.selectionDebugLogger.debug(...)` call and the `selectionChangeReason =
+    //       "unknown"` reset right after it).
+    //     - `surface.debugSessionID = id` in `makeAttachSurface(id:...)` and its local comment,
+    //       and `surface.debugSessionID = session.id` in `insertSession` and its local comment —
+    //       the two places `SessionStore.surfaces` is populated.
+    //     - Every `selectionChangeReason = "..."` tag-site: `select(_:selecting:)`, `restore()`,
+    //       `selectSession(_:)`, `cycleSelection(forward:)`, `closeSession`'s selected-session
+    //       fallback, and `reopenLastClosed(project:)`.
+    //   In `SessionSidebar.swift`:
+    //     - `beginRename()`'s `store.tagNextSelectionChange("beginRename()")` call.
+    //     - `SessionSidebar.body`'s `#if DEBUG` comment block and the custom `selectionBinding`
+    //       it defines (revert `List(selection:)` to `$store.selectedSessionID` directly, which
+    //       is already what the `#else` branch does).
+    //   In `GhosttyEmbed/SurfaceView_AppKit.swift`:
+    //     - `SurfaceView`'s `#if DEBUG` block: `mouseDebugLogger`, `wallClockTimestamp(for:)`,
+    //       and `debugSessionID`.
+    //     - All four `localEventLeftMouseDown` log calls (branches
+    //       `already-first-responder-passthrough`, `swallowed-for-focus-transfer`,
+    //       `window-not-key-passthrough`, and `hit-test-miss` — the last one added in the final
+    //       review's Fix 3, alongside `clickCount` on the other three).
+    //   In `TerminalPane.swift` (added in the final review's Fix 2):
+    //     - `reparentDebugLogger`, the `outgoingSessionID` capture ahead of the detach loop, and
+    //       the reparent log call in `updateNSView`.
+    //   In `GhosttyEmbed/SurfaceConfiguration.swift` (added in the final review's Fix 2):
+    //     - `moveFocusDebugLogger` and the log call inside `Ghostty.moveFocus`'s deferred work
+    //       item, right before `window.makeFirstResponder(to)`.
     #if DEBUG
     /// Read with:
     /// `log show --predicate 'subsystem == "dev.flightdeck.FlightDeck" AND category == "selection-debug"' --last 30m`
