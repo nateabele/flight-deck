@@ -2269,7 +2269,11 @@ final class SessionStore: ObservableObject {
                 pinnedConversationID: conversationID,
                 agent: entry.agent ?? .claude,
                 accountID: entry.accountID,
-                transcriptPath: entry.transcriptPath
+                transcriptPath: entry.transcriptPath,
+                flywheelIdentity: entry.flywheelAgentName.map {
+                    FlywheelIdentity(agentName: $0,
+                        project: URL(fileURLWithPath: entry.workingDirectory, isDirectory: true).standardizedFileURL.path)
+                }
             )
             // A tab whose login has been deleted since the last run. Rebuilt, but never
             // resumed — see `accountIsMissing`. The tab still appears, because a tab that
@@ -2601,7 +2605,8 @@ final class SessionStore: ObservableObject {
                     unread: unreadIdle.contains($0.id) ? true : nil,
                     agent: $0.agent,
                     accountID: $0.accountID,
-                    transcriptPath: $0.transcriptPath
+                    transcriptPath: $0.transcriptPath,
+                    flywheelAgentName: $0.flywheelIdentity?.agentName
                 )
             },
             projects: repos.map { .init(path: $0.url.path, isCollapsed: $0.isCollapsed) },
