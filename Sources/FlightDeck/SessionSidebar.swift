@@ -378,20 +378,23 @@ struct SessionSidebar: View {
         let conflicted = store.conflictedSessionIDs
         let mismatched = store.accountMismatchedSessionIDs
         // TEMPORARY DIAGNOSTIC INSTRUMENTATION — double-click session-swap investigation
-        // (`.superpowers/sdd/quiet-foraging-babbage/task-2-brief.md`). Wraps the plain
-        // `$store.selectedSessionID` binding just to tag the write with a reason before it
-        // lands, since `SessionStore.selectionChangeReason` is private. Behaviorally identical
-        // to `$store.selectedSessionID` in Release (the `#if DEBUG` body is a no-op there).
-        // Revert to `$store.selectedSessionID` once the real fix lands.
+        // (`.superpowers/sdd/quiet-foraging-babbage/task-2-brief.md`). In Debug, wraps the
+        // plain `$store.selectedSessionID` binding just to tag the write with a reason before
+        // it lands, since `SessionStore.selectionChangeReason` is private. In Release this
+        // whole `#if` compiles out and `selectionBinding` is exactly `$store.selectedSessionID`
+        // — no new code in the shipped path. Revert to `$store.selectedSessionID` directly
+        // once the real fix lands.
+        #if DEBUG
         let selectionBinding = Binding<UUID?>(
             get: { store.selectedSessionID },
             set: { newValue in
-                #if DEBUG
                 store.tagNextSelectionChange("List(selection:) binding")
-                #endif
                 store.selectedSessionID = newValue
             }
         )
+        #else
+        let selectionBinding = $store.selectedSessionID
+        #endif
         return List(selection: selectionBinding) {
             // One flat ForEach rather than a Section per project: `.onMove` is not supported
             // on a ForEach that yields Sections, and this is what lets one gesture reorder
