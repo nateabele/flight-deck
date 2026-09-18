@@ -15,6 +15,7 @@ struct ProjectHeaderRow: View {
     let onClose: () -> Void
 
     @State private var isHovered = false
+    @State private var showingFlywheelConfirmation = false
 
     var body: some View {
         HStack(spacing: 4) {
@@ -85,6 +86,16 @@ struct ProjectHeaderRow: View {
         .animation(.easeOut(duration: 0.12), value: repo.isCollapsed)
         .contextMenu {
             Button("New Session") { store.newClaudeTab(in: repo.url) }
+            // Only offered once the probe has actually detected a flywheel project
+            // (`.beads`/`.agent-mail.yaml` at add-time — see `insertSession`) and it has not
+            // already been enabled; an already-enabled project shows a disabled label instead
+            // of a redundant action.
+            if isFlywheelEnabled {
+                Button("Flywheel coordination enabled") {}
+                    .disabled(true)
+            } else if store.flywheelSuggestion(for: repo.url) != nil {
+                Button("Enable Flywheel coordination…") { showingFlywheelConfirmation = true }
+            }
             Button(repo.isCollapsed ? "Expand" : "Collapse") { toggle() }
             Divider()
             // A project is a folder, and its path is otherwise only visible in Settings. Both
@@ -116,10 +127,42 @@ struct ProjectHeaderRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityIdentifier("project-header")
+        // Confirmation-gated: `enableFlywheel` shells out to `am guard install` and writes a
+        // git hook, so the user sees exactly what it is about to do before it runs.
+        .confirmationDialog(
+            "Enable Flywheel coordination for \"\(repo.displayName)\"?",
+            isPresented: $showingFlywheelConfirmation
+        ) {
+            Button("Enable") { Task { await store.enableFlywheel(for: repo.url) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(flywheelSetupStepsDescription)
+        }
     }
 
     private func toggle() {
         store.setCollapsed(!repo.isCollapsed, forProjectAt: repo.id)
+    }
+
+    private var isFlywheelEnabled: Bool {
+        store.preferences?.projectSettings(repo.url.path).flywheelEnabled == true
+    }
+
+    /// What the confirmation dialog tells the user `enableFlywheel` is about to run, derived
+    /// from the cached probe (`store.flywheelSuggestion(for:)`) rather than re-probing the
+    /// filesystem here — the same steps `FlywheelSetup.enable` will actually perform, since
+    /// both consult the same `FlywheelStatus` shape.
+    private var flywheelSetupStepsDescription: String {
+        guard let status = store.flywheelSuggestion(for: repo.url) else {
+            return "Runs the one-time Flywheel setup for this project."
+        }
+        var steps: [String] = []
+        if !status.guardInstalled { steps.append("Agent Mail commit guard") }
+        if !status.beadsSyncHooksInstalled { steps.append("beads sync hook") }
+        guard !steps.isEmpty else {
+            return "Setup is already complete; this only marks the project as Flywheel-enabled."
+        }
+        return "Will install: " + steps.joined(separator: ", ") + "."
     }
 
     /// The count and the status glyph reach VoiceOver as words here; on screen they are a
