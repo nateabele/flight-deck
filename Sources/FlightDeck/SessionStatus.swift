@@ -34,11 +34,31 @@ struct SessionStatus: Equatable {
     var waitingFor: String?
     /// Outstanding top-level `Agent` tool calls. Only meaningful while `busy`.
     var subagentCount: Int
+    /// This Mac's own verdict that `waitingFor` is describing nothing a person can act on.
+    ///
+    /// `claude`'s own background-Task-subagent status reporting has no distinct value for
+    /// "foreground idle while a background Task subagent runs" — unlike `"shell"`, which it
+    /// does use for idle-with-background-bash — so it flips to `waiting` / `"input needed"`
+    /// with no `AskUserQuestion` or permission call open anywhere in the transcript tail.
+    /// `SessionStore.derivedOpenPromptCalls` is what notices: the same continuous-unnameable
+    /// episode `checkStuckPrompts` already tracked for its own log (`stuckPromptEpisodes`),
+    /// debounced the same way, so an ordinary race between the status file and the transcript
+    /// (a beat of "unnamed" before the record naming the real call lands) never sets this.
+    ///
+    /// Only ever true alongside `activity == .waiting`, and only for the specific refusal
+    /// `"prompt_changed"` — a build that cannot even ask (`"unsupported_agent"`, codex today)
+    /// is a Mac that might be looking at a real dialog it simply cannot read, which is a
+    /// different sentence and keeps the existing "Waiting for you" wording.
+    var answerless: Bool
 
-    init(activity: SessionActivity, waitingFor: String? = nil, subagentCount: Int = 0) {
+    init(
+        activity: SessionActivity, waitingFor: String? = nil, subagentCount: Int = 0,
+        answerless: Bool = false
+    ) {
         self.activity = activity
         self.waitingFor = waitingFor
         self.subagentCount = subagentCount
+        self.answerless = answerless
     }
 
     /// Tooltip and accessibility label. Kept on the model rather than in the view so
@@ -52,6 +72,10 @@ struct SessionStatus: Equatable {
             let noun = subagentCount == 1 ? "subagent" : "subagents"
             return "Working — \(subagentCount) \(noun)"
         case .waiting:
+            // Wins over `waitingFor` either way — a `waiting` tab this Mac has confirmed
+            // nothing is open under is never worth the reason `claude` gave for it, because
+            // that reason is precisely the string this field exists to stop repeating.
+            guard !answerless else { return "Still working (no response needed)" }
             guard let waitingFor, !waitingFor.isEmpty else { return "Waiting for you" }
             return "Waiting for you — \(waitingFor)"
         }

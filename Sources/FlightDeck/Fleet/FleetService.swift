@@ -139,36 +139,21 @@ final class FleetService: ObservableObject {
         // open dialog and what it *refuses an answer against* are now one object reading one
         // transcript. Two would be two opinions, and a phone told one thing and judged by
         // another is the failure this field exists to close.
-        store.openPromptCallReader = { [weak prompts] session in
-            guard case .success(let open) = prompts?.pushedOpenPrompt(inSession: session)
-            else { return nil }
-            return open.callID
-        }
-        // `pushedOpenPrompt`, exactly as `openPromptCallReader` above, and for the reason that
-        // method's own doc states as a rule rather than a preference: **a caller on a schedule
-        // must not resolve a transcript**, because that resolution builds and memoizes the
-        // agent's adapter — for codex a whole `CodexStack`, with a runtime and an index watcher
-        // in it. This probe runs from `checkStuckPrompts` on every registry tick, which is a
-        // schedule by any reading; `PromptLifecycleObserver` cites the same rule for the same
-        // reason. It was `openPrompt` and was safe only by accident: `checkStuckPrompts` filters
-        // on `hasStatusRegistry`, a different predicate that happens to select claude alone
-        // today. The two return identically for a claude tab, so this costs nothing and stops
-        // the invariant resting on that coincidence.
+        //
+        // **One closure, not the two this used to be** (`openPromptCallReader` for the call id,
+        // `openPromptProbe` for `checkStuckPrompts`'s refusal code) — see `openPromptProbe`'s
+        // own doc on `SessionStore` for why splitting them cost every `waiting` tab a second
+        // transcript-tail read a tick. `.map(\.callID)` is the only shaping this needs:
+        // `derivedOpenPromptCalls` reads the `Result` itself for the refusal code, over the
+        // exact same `PromptService.pushedOpenPrompt` call `pushedOpenPrompt`'s own doc
+        // requires of a caller on a schedule — never `openPrompt`, which resolves and memoizes
+        // the agent's adapter (a whole `CodexStack`, for codex) on every poll rather than once.
         //
         // `[weak prompts]` is required for the same reason `PlanGateService`'s closures above
         // capture `store` weakly: `FleetService` already holds `prompts` strongly, and a strong
         // capture here would be the second half of a cycle back through `store`.
         store.openPromptProbe = { [weak prompts] id in
-            guard let prompts else { return nil }
-            if case .failure(let code) = prompts.pushedOpenPrompt(inSession: id) {
-                // `.code`, not `String(describing:)`: `TimelineErrorCode` has no
-                // `CustomStringConvertible`, so `describing` would render the struct dump
-                // `TimelineErrorCode(code: "prompt_changed")` into the `.stuck` record's
-                // `code=` field instead of the bare wire string every other reader of this
-                // code expects — defeating the one thing that field exists to say.
-                return code.code
-            }
-            return nil
+            prompts?.pushedOpenPrompt(inSession: id).map(\.callID)
         }
         wireHandlers()
         Self.current = self

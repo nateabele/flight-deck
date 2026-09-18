@@ -56,7 +56,7 @@ final class PromptLifecycleObserver {
     func observe(_ batch: [SequencedEvent], clients: Int) {
         for entry in batch {
             switch entry.event {
-            case .activityChanged(let id, let activity, _, _, _, _):
+            case .activityChanged(let id, let activity, _, _, _, _, _):
                 note(id, activity: activity, clients: clients)
             case .sessionAdded(let session, _, _):
                 // A tab can be added already blocked — a restore, or a session adopted from a
@@ -88,7 +88,7 @@ final class PromptLifecycleObserver {
                     .flatMap(\.sessions)
                     .filter { $0.activity == SessionActivity.waiting.rawValue }
                     .count
-            case .event(_, .activityChanged(_, let activity, _, _, _, _)):
+            case .event(_, .activityChanged(_, let activity, _, _, _, _, _)):
                 if activity == SessionActivity.waiting.rawValue { waiting += 1 }
             default:
                 continue

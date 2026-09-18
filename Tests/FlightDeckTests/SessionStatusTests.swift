@@ -69,4 +69,49 @@ final class SessionStatusTests: XCTestCase {
         XCTAssertEqual(SessionStatus(activity: .idle).tooltip(unread: false), "Idle")
         XCTAssertEqual(SessionStatus(activity: .busy).tooltip(unread: false), "Working")
     }
+
+    // MARK: - answerless
+
+    /// The wording the whole feature exists for, verbatim — cross-checked against
+    /// `SessionStatusGlyphTests`/`PromptCardTests` on the phone.
+    func testAnswerlessReplacesTheWaitingForYouWording() {
+        XCTAssertEqual(
+            SessionStatus(activity: .waiting, waitingFor: "input needed", answerless: true)
+                .tooltip,
+            "Still working (no response needed)"
+        )
+    }
+
+    /// `answerless` wins even with no `waitingFor` reason at all — the design's own rule, and
+    /// the case a `SessionStatus(activity: .waiting, answerless: true)` construction produces.
+    func testAnswerlessWinsWithNoWaitingForReasonEither() {
+        XCTAssertEqual(
+            SessionStatus(activity: .waiting, answerless: true).tooltip,
+            "Still working (no response needed)"
+        )
+    }
+
+    /// The default `answerless: false` leaves every other `.waiting` test in this file provable
+    /// on the four-argument initializer without ever mentioning the new parameter.
+    func testAnswerlessDefaultsToFalse() {
+        XCTAssertFalse(SessionStatus(activity: .waiting).answerless)
+    }
+
+    /// `answerless` only ever means anything for `.waiting` — `tooltip` must not consult it for
+    /// `.idle`/`.busy`, which have no such derivation to report.
+    func testAnswerlessIsIgnoredOutsideWaiting() {
+        XCTAssertEqual(SessionStatus(activity: .idle, answerless: true).tooltip, "Idle")
+        XCTAssertEqual(SessionStatus(activity: .busy, answerless: true).tooltip, "Working")
+    }
+
+    /// The composed form picks up the new wording too, exactly as it does the ordinary
+    /// `.waiting` string — `answerless` is a fact about the base sentence, not a special case
+    /// `tooltip(unread:backgroundWork:)` has to know about separately.
+    func testAnswerlessComposesWithBackgroundWork() {
+        XCTAssertEqual(
+            SessionStatus(activity: .waiting, waitingFor: "input needed", answerless: true)
+                .tooltip(unread: false, backgroundWork: true),
+            "Still working (no response needed) — background command running"
+        )
+    }
 }

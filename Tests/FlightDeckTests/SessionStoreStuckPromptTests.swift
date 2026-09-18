@@ -339,7 +339,10 @@ final class SessionStoreStuckPromptTests: XCTestCase {
     func testTheProbeReturnsTheRawWireCodeNotAStructDump() throws {
         let (store, tab) = openFixtureSession()
 
-        XCTAssertEqual(store.openPromptProbe?(tab), "prompt_changed")
+        guard case .failure(let code) = try XCTUnwrap(store.openPromptProbe?(tab)) else {
+            return XCTFail("expected a refusal — the fixture's transcript starts empty")
+        }
+        XCTAssertEqual(code.code, "prompt_changed")
     }
 
     // MARK: - pathMatches and expectedTranscriptURL

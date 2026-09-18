@@ -93,7 +93,8 @@ enum FleetProjection {
             // A store-wide preference, not a per-session fact, but it rides on every session
             // because that is the shape a client reads: nothing else on the wire names "this
             // Mac" independent of a tab.
-            allowsBlockedAbort: allowsBlockedAbort
+            allowsBlockedAbort: allowsBlockedAbort,
+            answerless: status?.answerless ?? false
         )
     }
 }

@@ -45,6 +45,27 @@ final class SessionStatusGlyphTests: XCTestCase {
         XCTAssertEqual(label(activity: "waiting", waitingFor: ""), "Waiting for you")
     }
 
+    /// Must equal `SessionStatus.tooltip`'s `.waiting` branch on macOS, character for character
+    /// — `SessionStatusTests.testAnswerlessReplacesTheWaitingForYouWording` is the other end.
+    /// `answerless` wins over the reason either way, exactly as it does there.
+    func testAnswerlessReplacesTheWaitingForYouWording() {
+        XCTAssertEqual(
+            label(activity: "waiting", waitingFor: "input needed", answerless: true),
+            "Still working (no response needed)"
+        )
+        XCTAssertEqual(
+            label(activity: "waiting", answerless: true),
+            "Still working (no response needed)"
+        )
+    }
+
+    /// `answerless` only means anything for `waiting` — the flag must not leak into any other
+    /// activity's wording.
+    func testAnswerlessIsIgnoredOutsideWaiting() {
+        XCTAssertEqual(label(activity: "idle", answerless: true), "Idle")
+        XCTAssertEqual(label(activity: "busy", answerless: true), "Working")
+    }
+
     /// Must equal `SessionStatus.tooltip(unread:backgroundWork:)` on macOS, character for
     /// character. `SessionStatusTests.testTooltipComposesBackgroundWork` is the other end.
     func testLabelComposesBackgroundWork() {
@@ -121,25 +142,27 @@ final class SessionStatusGlyphTests: XCTestCase {
     private func label(
         activity: String?, waitingFor: String? = nil,
         subagentCount: Int = 0, isUnread: Bool = false,
-        apiError: SessionAPIError? = nil
+        apiError: SessionAPIError? = nil, answerless: Bool = false
     ) -> String? {
         SessionStatusGlyph.label(for: session(
             activity: activity, waitingFor: waitingFor,
             subagentCount: subagentCount, isUnread: isUnread,
-            apiError: apiError
+            apiError: apiError, answerless: answerless
         ))
     }
 
     private func session(
         activity: String?, waitingFor: String? = nil,
         subagentCount: Int = 0, isUnread: Bool = false,
-        hasBackgroundWork: Bool = false, apiError: SessionAPIError? = nil
+        hasBackgroundWork: Bool = false, apiError: SessionAPIError? = nil,
+        answerless: Bool = false
     ) -> WireSession {
         WireSession(
             id: UUID(), title: "flight-deck", agent: "claude",
             activity: activity, waitingFor: waitingFor,
             subagentCount: subagentCount, isUnread: isUnread,
-            hasBackgroundWork: hasBackgroundWork, apiError: apiError
+            hasBackgroundWork: hasBackgroundWork, apiError: apiError,
+            answerless: answerless
         )
     }
 }

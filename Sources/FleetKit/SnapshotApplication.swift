@@ -57,7 +57,7 @@ extension FleetSnapshot {
             mutate(id) { $0.title = title }
 
         case .activityChanged(let id, let activity, let waitingFor, let subagentCount,
-                              let hasBackgroundWork, let openPromptCall):
+                              let hasBackgroundWork, let openPromptCall, let answerless):
             // The wire version was deliberately not bumped for the `hasBackgroundWork`
             // split, so an older Mac can still send the pre-decomposition `"shell"` string
             // here, on the incremental path rather than a fresh snapshot. Same
@@ -75,6 +75,10 @@ extension FleetSnapshot {
                 // would let one build's assertion survive into a stream that has stopped
                 // making it — a client left holding a call id nothing will ever retire.
                 $0.openPromptCall = openPromptCall
+                // Same rule as `openPromptCall`: overwritten unconditionally, including back
+                // to `false`, so a Mac that stops asserting `answerless` (a new call arrived,
+                // the tab left `waiting`) is not left behind by a fold that only ever sets it.
+                $0.answerless = answerless
             }
 
         case .unreadChanged(let id, let isUnread):

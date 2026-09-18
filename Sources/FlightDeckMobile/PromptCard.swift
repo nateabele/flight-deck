@@ -46,6 +46,12 @@ struct PromptCard: View {
     /// neither is derived here — see that predicate for what each rules out.
     let activity: String?
     let openPromptCall: OpenPromptIdentity
+    /// The Mac's own verdict that `activity == "waiting"` names nothing a person can act on,
+    /// straight off the wire (`WireSession.answerless`) and never derived here — see
+    /// `SessionStatus.answerless` on the Mac for the debounce this rides on. Only consulted
+    /// inside `blockedCard`: `showsBlocked` already requires `.noPrompt`, and `answerless` just
+    /// says whether that absence is this Mac being certain or this Mac being unable to tell.
+    let answerless: Bool
     /// Sends `FleetCommand.abortPrompt`, via `FleetModel.abortBlockedPrompt(session:)`.
     ///
     /// A closure rather than a fourth verb on `model`'s `fleet` protocols: those three exist
@@ -308,6 +314,25 @@ struct PromptCard: View {
         }
     }
 
+    /// The second line of `blockedCard` — what this Mac can currently prove about why nothing
+    /// is on screen. Two states, not one: `"This Mac can't read the dialog on screen."` says a
+    /// real dialog might be up and this build simply cannot parse it, which is the ordinary
+    /// case `showsBlocked` was built for. `answerless` is stronger — the Mac's own transcript
+    /// derivation has watched long enough to say there is genuinely nothing open — and gets the
+    /// Mac's own words for that state, verbatim: `SessionStatus.tooltip`'s `.waiting` branch on
+    /// the Mac says the identical sentence for the identical fact, checked by
+    /// `SessionStatusTests`/`SessionStatusGlyphTests` on that end and by
+    /// `PromptCardTests` here.
+    ///
+    /// Pulled out to its own function, rather than inlined in `blockedCard`, for the same
+    /// reason `showsBlocked`/`title`/`footnote` are: a decision reachable without SwiftUI is a
+    /// decision a test can run without rendering a view.
+    static func blockedSubtitle(answerless: Bool) -> String {
+        answerless
+            ? "Still working (no response needed)"
+            : "This Mac can't read the dialog on screen."
+    }
+
     /// Flight Deck admitting it cannot read the dialog on screen, rather than a bare "Waiting
     /// for you" with no way out — see `showsBlocked` for when this replaces that. No footnote
     /// and no title variety: there are no words to show, because nothing here could read any.
@@ -315,7 +340,7 @@ struct PromptCard: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Blocked")
                 .font(.callout.weight(.medium))
-            Text("This Mac can't read the dialog on screen.")
+            Text(Self.blockedSubtitle(answerless: answerless))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

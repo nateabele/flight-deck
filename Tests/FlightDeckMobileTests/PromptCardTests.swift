@@ -262,6 +262,29 @@ final class PromptCardTests: XCTestCase {
     /// can't read the dialog on screen"* — false — and puts a blind Escape under it aimed at a
     /// real tool call they were never shown. Only `.noPrompt`, the Mac agreeing it can name
     /// nothing, earns the card.
+    // MARK: - The blocked card's own wording
+
+    /// The ordinary case: this build simply cannot read whatever is on screen, and says so —
+    /// unchanged from before `answerless` existed.
+    func testBlockedSubtitleAdmitsThisBuildCannotReadTheDialog() {
+        XCTAssertEqual(
+            PromptCard.blockedSubtitle(answerless: false),
+            "This Mac can't read the dialog on screen."
+        )
+    }
+
+    /// Once the Mac's own derivation has confirmed nothing is open, the card says so in the
+    /// Mac's own words — must equal `SessionStatus.tooltip`'s `.waiting` branch on macOS,
+    /// character for character (`SessionStatusTests.testAnswerlessReplacesTheWaitingForYouWording`
+    /// is the other end) and `SessionStatusGlyphTests.testAnswerlessReplacesTheWaitingForYouWording`
+    /// on this one.
+    func testBlockedSubtitleSaysStillWorkingWhenAnswerless() {
+        XCTAssertEqual(
+            PromptCard.blockedSubtitle(answerless: true),
+            "Still working (no response needed)"
+        )
+    }
+
     func testBlockedIsNotDrawnOverADialogTheMacCanName() {
         XCTAssertFalse(
             PromptCard.showsBlocked(

@@ -36,9 +36,16 @@ public enum FleetEvent: Equatable, Sendable {
     /// can move on its own: a dialog replaced by the next one leaves every other field of
     /// this event identical, which is precisely why nothing used to be sent at all. See
     /// `OpenPromptIdentity`, and `SessionStore.emitActivity`'s third axis.
+    ///
+    /// `answerless` is a field of `SessionStatus` itself, unlike the two above, so it rides in
+    /// the ordinary way: a tick that flips only this — a stuck episode crossing its debounce —
+    /// is already a `SessionStatus` change, and reaches here exactly as `waitingFor` moving on
+    /// its own would. Defaulted for the same reason `openPromptCall` is: every existing
+    /// construction site compiles unchanged.
     case activityChanged(id: UUID, activity: String?, waitingFor: String?,
                          subagentCount: Int, hasBackgroundWork: Bool,
-                         openPromptCall: OpenPromptIdentity = .unreported)
+                         openPromptCall: OpenPromptIdentity = .unreported,
+                         answerless: Bool = false)
     case unreadChanged(id: UUID, isUnread: Bool)
 
     /// This session's last turn died on an API error, or a newer record cleared it.
@@ -90,7 +97,7 @@ extension FleetEvent {
         switch self {
         case .sessionAdded(let s, _, _): return s.id
         case .sessionRemoved(let id), .sessionMoved(let id, _, _),
-             .renamed(let id, _, _), .activityChanged(let id, _, _, _, _, _),
+             .renamed(let id, _, _), .activityChanged(let id, _, _, _, _, _, _),
              .unreadChanged(let id, _), .planGateChanged(let id, _),
              .promptExpired(let id, _), .promptTyped(let id, _), .apiErrorChanged(let id, _):
             return id

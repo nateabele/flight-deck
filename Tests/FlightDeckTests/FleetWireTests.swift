@@ -83,6 +83,26 @@ final class FleetWireTests: XCTestCase {
                        "the field is additive; its absence must mean off, never a decode failure")
     }
 
+    /// An older Mac has never heard of `answerless` either, and the same rule applies: absence
+    /// decodes as `false`, which is today's "Waiting for you" wording, never a decode failure.
+    func testWireSessionDecodesWithoutTheAnswerlessKeyAsFalse() throws {
+        let json = #"""
+        {"id":"00000000-0000-0000-0000-0000000000AB","title":"t","agent":"claude",
+         "activity":"waiting","subagentCount":0,"isUnread":false}
+        """#
+        let session = try JSONDecoder().decode(WireSession.self, from: Data(json.utf8))
+        XCTAssertFalse(session.answerless)
+    }
+
+    /// A newer Mac's assertion round-trips, in both the snapshot and the incremental frame —
+    /// `testActivityChangedRoundTripsAnswerless` below covers the latter.
+    func testWireSessionRoundTripsAnswerless() throws {
+        let session = WireSession(
+            id: UUID(), title: "t", agent: "claude", activity: "waiting", answerless: true
+        )
+        XCTAssertTrue(try roundTrip(session).answerless)
+    }
+
     func testActivityChangedRoundTripsBackgroundWork() throws {
         let event = FleetEvent.activityChanged(
             id: UUID(), activity: "idle", waitingFor: nil,
@@ -144,7 +164,7 @@ final class FleetWireTests: XCTestCase {
         let json = Data(#"""
         {"t":"session.activity","id":"\#(id)","activity":"waiting","subagentCount":0}
         """#.utf8)
-        guard case .activityChanged(_, _, _, _, _, let call) =
+        guard case .activityChanged(_, _, _, _, _, let call, _) =
             try JSONDecoder().decode(FleetEvent.self, from: json)
         else { return XCTFail("expected .activityChanged") }
         XCTAssertEqual(call, .unreported)
@@ -156,10 +176,35 @@ final class FleetWireTests: XCTestCase {
         {"t":"session.activity","id":"\(id.uuidString)","activity":"idle","subagentCount":0}
         """.utf8)
         let event = try JSONDecoder().decode(FleetEvent.self, from: json)
-        guard case .activityChanged(_, _, _, _, let hasBackgroundWork, _) = event else {
+        guard case .activityChanged(_, _, _, _, let hasBackgroundWork, _, _) = event else {
             return XCTFail("expected .activityChanged, got \(event)")
         }
         XCTAssertFalse(hasBackgroundWork)
+    }
+
+    /// The incremental frame's own decode arm for `answerless`, wired up separately from
+    /// `WireSession`'s and so able to rot on its own — the same gap the two tests above close
+    /// for `openPromptCall` and `hasBackgroundWork`.
+    func testActivityChangedDecodesWithoutTheAnswerlessKeyAsFalse() throws {
+        let id = UUID()
+        let json = Data("""
+        {"t":"session.activity","id":"\(id.uuidString)","activity":"waiting","subagentCount":0}
+        """.utf8)
+        let event = try JSONDecoder().decode(FleetEvent.self, from: json)
+        guard case .activityChanged(_, _, _, _, _, _, let answerless) = event else {
+            return XCTFail("expected .activityChanged, got \(event)")
+        }
+        XCTAssertFalse(answerless)
+    }
+
+    func testActivityChangedRoundTripsAnswerless() throws {
+        let event = FleetEvent.activityChanged(
+            id: UUID(), activity: "waiting", waitingFor: "input needed",
+            subagentCount: 0, hasBackgroundWork: false, answerless: true
+        )
+        let data = try JSONEncoder().encode(event)
+        let decoded = try JSONDecoder().decode(FleetEvent.self, from: data)
+        XCTAssertEqual(decoded, event)
     }
 
     // MARK: Search's wire types
