@@ -5797,8 +5797,11 @@ final class SessionStore: ObservableObject {
             }
         }
         // A tab that stopped waiting this tick — or was filtered out of the loop above by not
-        // being in `next` at all — must not carry a stale episode into the next one.
-        for id in stuckPromptEpisodes.keys where next[id]?.activity != .waiting {
+        // being in `next` at all — must not carry a stale episode into the next one. Snapshotted
+        // into an array first, for the same mutate-while-iterating reason `waitingIDs` above is:
+        // `stuckPromptEpisodes.keys` is a live view over the same dictionary this loop writes.
+        let staleEpisodeIDs = stuckPromptEpisodes.keys.filter { next[$0]?.activity != .waiting }
+        for id in staleEpisodeIDs {
             stuckPromptEpisodes[id] = nil
         }
         return (calls, codes)
