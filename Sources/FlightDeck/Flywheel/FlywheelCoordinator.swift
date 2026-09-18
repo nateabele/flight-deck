@@ -8,6 +8,9 @@ enum FlywheelError: Error {
     /// `am macros start-session` exited zero but its stdout wasn't the JSON shape
     /// `boot` expects.
     case unparseable(String)
+    /// `am guard install` (part of `FlywheelSetup.enable`) exited non-zero. `output`
+    /// is its stdout, for surfacing to the user/logs.
+    case guardInstall(exitCode: Int32, output: String)
 }
 
 /// Maps a Flight Deck `AgentID` to the `--program` value Agent-Mail's CLI expects.
