@@ -2,6 +2,7 @@
  * Flight Deck: FdOutlog - bounded output log with boundary-aware trim
  */
 #include "fd_outlog.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -12,10 +13,12 @@ void fd_outlog_init(FdOutlog *o, size_t budget) {
     o->budget = budget ? budget : (4u * 1024 * 1024);
     o->pend_len = 0;
     o->dropping_dcs = 0; o->dropping_dcs_esc = 0;
+    o->modes = NULL; o->modes_len = 0; o->modes_cap = 0;
 }
 void fd_outlog_free(FdOutlog *o) {
     flush_pending(o);
     free(o->data); o->data = NULL; o->len = o->cap = 0;
+    free(o->modes); o->modes = NULL; o->modes_len = o->modes_cap = 0;
 }
 
 static void ensure(FdOutlog *o, size_t need) {
@@ -23,6 +26,28 @@ static void ensure(FdOutlog *o, size_t need) {
     size_t c = o->cap ? o->cap : 4096;
     while (c < need) c *= 2;
     o->data = realloc(o->data, c); o->cap = c;
+}
+
+/* grow o->modes (same doubling strategy as ensure() above, over the
+ * FdOutlogMode table instead of the byte ring). */
+static void modes_ensure(FdOutlog *o, size_t need) {
+    if (o->modes_cap >= need) return;
+    size_t c = o->modes_cap ? o->modes_cap : 8;
+    while (c < need) c *= 2;
+    o->modes = realloc(o->modes, c * sizeof(*o->modes)); o->modes_cap = c;
+}
+
+/* Flight Deck fork: record that DEC private mode `mode` is now set (nonzero
+ * `set`) or reset (zero), updating an existing entry in place or appending
+ * a new one in first-seen order. */
+static void track_mode(FdOutlog *o, int mode, int set) {
+    for (size_t i = 0; i < o->modes_len; i++) {
+        if (o->modes[i].mode == mode) { o->modes[i].set = set; return; }
+    }
+    modes_ensure(o, o->modes_len + 1);
+    o->modes[o->modes_len].mode = mode;
+    o->modes[o->modes_len].set = set;
+    o->modes_len++;
 }
 
 /* find the byte index of the last occurrence of `needle` at or after `from`, or (size_t)-1 */
@@ -74,6 +99,41 @@ static int csi_is_query(const char *s, size_t n) {
  * after "ESC P" identifies a termcap/terminfo capability request. */
 static int dcs_is_query(const char *s, size_t n) {
     return n >= 4 && s[2] == '+' && s[3] == 'q';
+}
+
+/* Flight Deck fork: is this completed CSI sequence a DEC private mode
+ * set/reset (`CSI ? Pm h` / `CSI ? Pm l`)? `s`/`n` is the full sequence
+ * including the leading ESC and the terminating final byte, as for
+ * csi_is_query() above. Scope is deliberately narrow: `?` must immediately
+ * follow `[` (a private-mode sequence), and the final byte must be `h`/`l`
+ * (set/reset) -- this excludes DECRQM (`CSI ? Pm $p`, a *query*, final byte
+ * `p`) and non-private ANSI modes (`CSI Pm h/l`, no `?`), neither of which
+ * this task tracks. */
+static int csi_is_private_mode(const char *s, size_t n) {
+    return n >= 4 && s[2] == '?' && (s[n - 1] == 'h' || s[n - 1] == 'l');
+}
+
+/* Flight Deck fork: parse the `;`-separated decimal parameters between the
+ * `?` and the final byte of a completed CSI ? ... h/l sequence (as matched
+ * by csi_is_private_mode() above) and record each as newly set or reset in
+ * o->modes. Tolerates the grammar's edge cases without ever getting stuck:
+ * an empty parameter (a bare `;`, a leading/trailing `;`, or no parameters
+ * at all -- e.g. `CSI ? h`) simply has nothing to record, and any
+ * unexpected non-digit byte between separators is skipped one byte at a
+ * time rather than aborting the scan. */
+static void track_private_modes(FdOutlog *o, const char *s, size_t n) {
+    int set = (s[n - 1] == 'h');
+    size_t i = 3; /* first byte after "ESC [ ?"; s[n - 1] is the final byte */
+    while (i < n - 1) {
+        int val = 0, have_digit = 0;
+        while (i < n - 1 && s[i] >= '0' && s[i] <= '9') {
+            val = val * 10 + (s[i] - '0');
+            have_digit = 1;
+            i++;
+        }
+        if (have_digit) track_mode(o, val, set);
+        if (i < n - 1) i++; /* skip the ';' separator, or any stray byte */
+    }
 }
 
 /* Scan one byte of pty output through the escape-candidate state machine
@@ -130,7 +190,19 @@ static void process_byte(FdOutlog *o, unsigned char b) {
         if (b >= 0x40 && b <= 0x7e) {
             o->pend[o->pend_len++] = (char)b;
             if (csi_is_query(o->pend, o->pend_len)) o->pend_len = 0; /* drop */
-            else flush_pending(o);
+            else {
+                /* Flight Deck fork: classify (but never drop) a DEC
+                 * private mode set/reset -- these bytes still belong in
+                 * the ring verbatim, this just also records the mode's
+                 * current value for fd_outlog_preamble(). If the sequence
+                 * instead hit FD_OUTLOG_PEND_CAP mid-flight it was already
+                 * flushed unclassified above (the existing under-strip,
+                 * never over-strip tradeoff); that rare case simply isn't
+                 * tracked. */
+                if (csi_is_private_mode(o->pend, o->pend_len))
+                    track_private_modes(o, o->pend, o->pend_len);
+                flush_pending(o);
+            }
             return;
         }
         /* doesn't fit CSI grammar (stray control byte, a new ESC, ...):
@@ -210,4 +282,34 @@ void fd_outlog_trim(FdOutlog *o) {
     }
     memmove(o->data, o->data + cut, o->len - cut);
     o->len -= cut;
+}
+
+/* Flight Deck fork: exact number of bytes fd_outlog_preamble() will write
+ * for the modes currently tracked in o->modes -- one `\x1b[?<digits><h|l>`
+ * sequence per entry, computed precisely (rather than assumed from a fixed
+ * per-entry cap) since a mode number's digit count varies. */
+size_t fd_outlog_preamble_size(const FdOutlog *o) {
+    size_t total = 0;
+    for (size_t i = 0; i < o->modes_len; i++)
+        total += 3 /* ESC [ ? */ + (size_t)snprintf(NULL, 0, "%d", o->modes[i].mode) + 1 /* h or l */;
+    return total;
+}
+
+/* Flight Deck fork: write the synthesized preamble -- one CSI set/reset
+ * sequence per tracked mode, in first-seen order -- into `buf`, which must
+ * be at least fd_outlog_preamble_size(o) bytes (the caller sizes it via
+ * that call). Formats each sequence into a small stack buffer first rather
+ * than snprintf'ing straight into `buf`, since snprintf always appends a
+ * trailing NUL that fd_outlog_preamble_size()'s exact byte count doesn't
+ * budget for -- writing that NUL into a buffer sized to the last byte of
+ * content would be a one-byte overflow. */
+size_t fd_outlog_preamble(const FdOutlog *o, char *buf) {
+    size_t off = 0;
+    for (size_t i = 0; i < o->modes_len; i++) {
+        char tmp[3 + 10 + 1 + 1]; /* "ESC[?" + up to 10 digits (32-bit int) + h/l + NUL */
+        int n = snprintf(tmp, sizeof tmp, "\x1b[?%d%c", o->modes[i].mode, o->modes[i].set ? 'h' : 'l');
+        memcpy(buf + off, tmp, (size_t)n);
+        off += (size_t)n;
+    }
+    return off;
 }
