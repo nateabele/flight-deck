@@ -79,6 +79,7 @@ final class CodexLaunchFailureTests: XCTestCase {
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.
         static let textChannel: AgentTextChannel? = nil
+        static let renameTyping: AgentRenameTyping? = nil
         static let dialogDriver: AgentDialogDriver? = nil
         static let negotiatesIdentity = true
         static let needsRuntimeStart = true
