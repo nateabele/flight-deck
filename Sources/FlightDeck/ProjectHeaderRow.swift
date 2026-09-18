@@ -84,7 +84,7 @@ struct ProjectHeaderRow: View {
         .animation(.easeOut(duration: 0.12), value: isHovered)
         .animation(.easeOut(duration: 0.12), value: repo.isCollapsed)
         .contextMenu {
-            Button("New Session") { store.newSession(in: repo.url) }
+            Button("New Session") { store.newClaudeTab(in: repo.url) }
             Button(repo.isCollapsed ? "Expand" : "Collapse") { toggle() }
             Divider()
             // A project is a folder, and its path is otherwise only visible in Settings. Both

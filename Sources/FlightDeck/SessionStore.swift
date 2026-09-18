@@ -1147,6 +1147,20 @@ final class SessionStore: ObservableObject {
         guard let surface = processRegistry.record(for: id, around: { provider?.makeSurface(config) })
         else { return nil }
         surfaces[id] = surface
+        // Best-effort lease/inbox refresh on wake, AFTER the surface exists: `am macros
+        // start-session -n <storedName>` is idempotent (Task 7a's boot already runs it once
+        // to mint the name), so re-running it here just renews the reservation a sleeping Mac
+        // let lapse. `try?` and an unawaited `Task` so a slow or failing `am` can never delay
+        // — or break — the tab actually appearing; `session.flywheelIdentity` is read from the
+        // stack-local capture rather than re-fetched, so a rename racing this has no effect on
+        // which name gets renewed.
+        if let flywheelIdentity = session.flywheelIdentity {
+            Task { [agent = session.agent, workingDirectory = session.workingDirectory] in
+                _ = try? await self.bootFlywheelIdentityIfNeeded(
+                    agent: agent, project: workingDirectory, name: flywheelIdentity.agentName
+                )
+            }
+        }
         return surface
     }
 
@@ -2054,6 +2068,47 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Every SYNCHRONOUS user-facing claude tab-creation entry point's actual routing —
+    /// `newSessionBelowActive`, `addProject` (and therefore `acceptDroppedURLs` and
+    /// `addProjectFromMenu`), `newSession(inProject:)` (the phone's plain `+` tap) and
+    /// `ProjectHeaderRow`'s context-menu "New Session" — funnels through here rather than
+    /// calling `newSession(in:)` directly, so the flywheel branch lives in exactly one place.
+    /// `createFromMenu(agent:)` and the New Session dropdown are NOT among these: Task 12
+    /// already routes every agent, claude included, through `createSession(agent:in:)`, so
+    /// they already boot an identity and need no change here.
+    ///
+    /// A flywheel-enabled project (`ProjectSettings.flywheelEnabled == true`) is rerouted to
+    /// `createSession(agent: .claude, ...)` — the same boot-then-stamp path `createSession`'s
+    /// own claude branch already gives every OTHER claude tab (Task 7a) — so a synchronously
+    /// created tab gets `AGENT_NAME` too, instead of being the one claude tab a flywheel
+    /// project's pre-commit guard cannot identify. Every other project takes the exact
+    /// existing synchronous `newSession(in:)` call, unchanged.
+    ///
+    /// Fire-and-forget for the flywheel branch: `createSession` is `@MainActor async` and this
+    /// stays synchronous — matching every caller above, none of which can afford to await
+    /// (`newSessionBelowActive`'s own ⌘N heritage cannot suddenly block; `addProject` backs a
+    /// `dropDestination` closure that must answer immediately) — so the `Task` below files the
+    /// tab once `bootFlywheelIdentityIfNeeded` returns, and this returns before that happens.
+    /// The `Session` handed back for that branch is the same un-inserted draft convention
+    /// `newSession(in:)` itself uses on a refusal (see its own doc comment): nothing is in
+    /// `repos` yet, so a caller that only checks non-nil (`acceptDroppedURLs`'s
+    /// `dropDestination`) still reads success, and a caller that discards the result
+    /// (`ProjectHeaderRow`'s button) is unaffected either way.
+    @discardableResult
+    func newClaudeTab(
+        in url: URL, at index: Int? = nil, account: UUID? = nil, selecting: Bool = true
+    ) -> Session {
+        guard preferences?.projectSettings(url.path).flywheelEnabled == true else {
+            return newSession(in: url, at: index, account: account, selecting: selecting)
+        }
+        Task {
+            _ = await createSession(
+                agent: .claude, in: url.path, at: index, account: account, selecting: selecting
+            )
+        }
+        return Session(title: "", workingDirectory: url.path)
+    }
+
     /// ⌘N. Creates a session in the ACTIVE session's project, directly below it, and
     /// activates it. Returns nil when nothing is active — the caller routes that case to
     /// `addProject` instead (see `SessionCreateAction`).
@@ -2062,7 +2117,7 @@ final class SessionStore: ObservableObject {
         guard let activeID = selectedSessionID, let at = locate(activeID) else { return nil }
         let active = repos[at.repo].sessions[at.session]
         let url = URL(fileURLWithPath: active.workingDirectory, isDirectory: true)
-        return newSession(in: url, at: at.session + 1)
+        return newClaudeTab(in: url, at: at.session + 1)
     }
 
     /// ⌘⇧A and folder drops. A new folder becomes a project; a known one gains another
@@ -2077,7 +2132,7 @@ final class SessionStore: ObservableObject {
     ///   own default. See `select(_:selecting:)`.
     @discardableResult
     func addProject(at url: URL, selecting: Bool = true) -> Session {
-        newSession(in: url, selecting: selecting)
+        newClaudeTab(in: url, selecting: selecting)
     }
 
     /// The ⌘N / sidebar-button action. Routes to Add Project when nothing is open, which is
@@ -3636,7 +3691,7 @@ final class SessionStore: ObservableObject {
     @discardableResult
     func newSession(inProject id: Repo.ID) -> Session? {
         guard let index = repos.firstIndex(where: { $0.id == id }) else { return nil }
-        return newSession(in: repos[index].url, selecting: false)
+        return newClaudeTab(in: repos[index].url, selecting: false)
     }
 
     func setCollapsed(_ isCollapsed: Bool, forProjectAt id: Repo.ID) {
