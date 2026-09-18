@@ -165,6 +165,46 @@ final class FlywheelSpawnTests: XCTestCase {
                        "codex boots under its own `--program`, not claude's")
     }
 
+    /// The codex-branch counterpart of `testABootFailureRefusesTheTabAndLeavesNoOrphanedSession`.
+    /// `prepare` succeeds (codex genuinely named a thread) and ONLY THEN does the boot fail —
+    /// the ordering `createSession`'s codex branch uses — so this also pins that a thread
+    /// negotiated just before a refused creation does not leave `codexCreationsInFlight` or the
+    /// app-server dangling. The stack is built explicitly first (`adapter(for:account:)`,
+    /// same trick `CodexLaunchFailureTests.testTheDeferredTeardownRunsOnceTheCreationFinishes`
+    /// uses) so `hasCodexStackForTesting` going true→false is actually informative rather than
+    /// trivially false because nothing was ever built.
+    func testACodexBootFailureRefusesTheTabAndTearsDownTheAppServer() async {
+        let url = project()
+        let preferences = PreferencesStore(persistence: nil)
+        preferences.setProjectSettings(url.path, ProjectSettings(flywheelEnabled: true))
+        let fake = FakeRunner(stdout: "", exitCode: 1)
+        let store = makeStore(preferences: preferences, coordinator: FlywheelCoordinator(runner: fake))
+        // `createSession` keys its stack/adapter/teardown off `instance(for: draft).account`,
+        // which `resolvedAccountID` resolves to preferences' seeded built-in codex account —
+        // NOT nil — the moment a real `PreferencesStore` (rather than no preferences at all)
+        // is in play. Building the fixture under that same id, rather than nil, is what makes
+        // `hasCodexStackForTesting` going true→false actually pin the real teardown instead of
+        // leaving an unrelated nil-keyed stack stranded while `createSession` tears down a
+        // different one.
+        let accountID = preferences.account(for: .codex, project: url.path)?.id
+        _ = store.adapter(for: .codex, account: accountID)
+        XCTAssertTrue(store.hasCodexStackForTesting, "the fixture must actually build a stack to tear down")
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: ThreadStartingTransport()), rolloutExists: { _ in true }),
+            for: .codex, account: accountID
+        )
+
+        let result = await store.createSession(agent: .codex, in: url.path)
+
+        guard case .failure = result else { return XCTFail("expected a failure") }
+        XCTAssertTrue(store.repos.flatMap(\.sessions).isEmpty,
+                      "a boot failure after a successful `prepare` must still leave no tab behind")
+        XCTAssertFalse(store.hasCodexStackForTesting,
+                       "a failed creation must not leave the app-server running with no codex tab — "
+                       + "codexCreationsInFlight must have unwound to 0 for `stopCodexIfUnused` to fire")
+        XCTAssertEqual(reporter.reported.count, 1, "the refusal must reach the user")
+    }
+
     // MARK: - `bootFlywheelIdentityIfNeeded` directly
 
     func testBootFlywheelIdentityIfNeededReturnsNilAndCallsAmZeroTimesWhenTheFlagIsOff() async throws {
