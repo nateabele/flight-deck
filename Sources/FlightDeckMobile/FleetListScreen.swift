@@ -707,8 +707,14 @@ struct FleetListScreen: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(SessionSearchResults.highlighted(session.title, ranges: ranges))
                     .font(.system(.body, design: .monospaced))
-                if let waitingFor = session.waitingFor {
-                    Text(waitingFor).font(.caption).foregroundStyle(.orange)
+                // `SessionStatusGlyph.waitingCaption(for:)`, not `session.waitingFor` directly:
+                // the raw field bypasses `answerless` entirely, which is exactly the bug a
+                // review caught here — the visible caption still said "input needed" while
+                // VoiceOver (`glyph(_:label:)`'s `.accessibilityLabel`, sourced from
+                // `SessionStatusGlyph.label`) already said "Still working (no response
+                // needed)". Sharing the source is what keeps the two from disagreeing again.
+                if let waitingCaption = SessionStatusGlyph.waitingCaption(for: session) {
+                    Text(waitingCaption).font(.caption).foregroundStyle(.orange)
                 }
             }
             Spacer()

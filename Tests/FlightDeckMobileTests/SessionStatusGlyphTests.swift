@@ -66,6 +66,37 @@ final class SessionStatusGlyphTests: XCTestCase {
         XCTAssertEqual(label(activity: "busy", answerless: true), "Working")
     }
 
+    // MARK: - FleetListScreen's caption
+
+    /// `FleetListScreen`'s orange caption — unchanged from before `answerless` existed: the
+    /// bare reason, with none of `baseLabel`'s "Waiting for you —" prefix.
+    func testWaitingCaptionIsTheBareReason() {
+        XCTAssertEqual(
+            SessionStatusGlyph.waitingCaption(for: session(
+                activity: "waiting", waitingFor: "permission prompt"
+            )),
+            "permission prompt"
+        )
+    }
+
+    func testWaitingCaptionIsNilWithoutAReason() {
+        XCTAssertNil(SessionStatusGlyph.waitingCaption(for: session(activity: "waiting")))
+    }
+
+    /// The fix a review caught: this caption used to be rendered straight from
+    /// `WireSession.waitingFor` in `FleetListScreen`, bypassing `answerless` (and this file)
+    /// entirely, so VoiceOver announced the new sentence while the visible caption still said
+    /// the old reason. Must equal `baseLabel`'s `"waiting"` branch — the same string
+    /// `testAnswerlessReplacesTheWaitingForYouWording` pins for `label(for:)`.
+    func testWaitingCaptionSaysStillWorkingWhenAnswerless() {
+        XCTAssertEqual(
+            SessionStatusGlyph.waitingCaption(for: session(
+                activity: "waiting", waitingFor: "permission prompt", answerless: true
+            )),
+            "Still working (no response needed)"
+        )
+    }
+
     /// Must equal `SessionStatus.tooltip(unread:backgroundWork:)` on macOS, character for
     /// character. `SessionStatusTests.testTooltipComposesBackgroundWork` is the other end.
     func testLabelComposesBackgroundWork() {

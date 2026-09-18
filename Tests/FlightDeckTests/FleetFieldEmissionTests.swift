@@ -172,4 +172,35 @@ final class FleetFieldEmissionTests: XCTestCase {
         XCTAssertNil(store.apiErrors[session.id])
         XCTAssertEqual(emitted(), 2)
     }
+
+    /// `answerless` end to end — not just `Codable` round-tripping, which is what
+    /// `FleetWireTests` already covers, but that a debounced episode actually reaches both the
+    /// emitted `FleetEvent.activityChanged` (`emitActivity`'s job) and a fresh
+    /// `FleetProjection` snapshot (`FleetProjection.project`'s job). The `DEBUG` drift check
+    /// would catch a regression in either of these in practice, but only as a generic "drift"
+    /// failure that never names which field disagreed — this test names it.
+    func testAnswerlessReachesBothTheEmittedEventAndTheSnapshot() {
+        let store = store()
+        let session = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+        var clock = Date(timeIntervalSince1970: 3_000_000)
+        store.now = { clock }
+        store.openPromptProbe = { _ in .failure("prompt_changed") }
+
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .waiting)])
+        clock = clock.addingTimeInterval(5)
+        let replicator = attachedReplicator(to: store)
+
+        store.applyRegistryForTesting([session.id: SessionStatus(activity: .waiting)])
+
+        XCTAssertTrue(replicator.recorded.contains(.activityChanged(
+            id: session.id, activity: "waiting", waitingFor: nil, subagentCount: 0,
+            hasBackgroundWork: false, openPromptCall: .noPrompt, answerless: true
+        )))
+        XCTAssertEqual(
+            FleetProjection.snapshot(of: store).projects.flatMap(\.sessions)
+                .first(where: { $0.id == session.id })?.answerless,
+            true,
+            "the snapshot a reconnecting phone gets must assert the same fact the event did"
+        )
+    }
 }
