@@ -905,6 +905,19 @@ final class SessionStore: ObservableObject {
     /// and `daemon` above are overridden. See `bootFlywheelIdentityIfNeeded`.
     private let flywheelCoordinator: FlywheelCoordinator
 
+    /// Runs the one-time per-repo flywheel setup (guard + beads-sync hook) that
+    /// `enableFlywheel(for:)` performs before flipping `ProjectSettings.flywheelEnabled`.
+    /// Injected the same defaulted way `flywheelCoordinator` above is, so a test can hand it
+    /// `FlywheelSetup(runner: <fake>)`.
+    private let flywheelSetup: FlywheelSetup
+
+    /// Detection results from `FlywheelProjectProbe`, cached at the moment a project is first
+    /// added (`insertSession`'s new-repo branch) and consulted by `flywheelSuggestion(for:)` to
+    /// drive the opt-in menu item — never recomputed on the spawn hot path. Keyed by the same
+    /// standardized path `PreferencesStore.key(_:)`/`bootFlywheelIdentityIfNeeded` use, so a
+    /// lookup by `repo.url` always agrees with how the entry was stored.
+    private var flywheelSuggestions: [String: FlywheelStatus] = [:]
+
     /// Owns the idle-session sleep/wake bookkeeping. Constructed lazily so its closures can
     /// capture `self` after `init` has finished assigning every property they read
     /// (`daemonControl`, `processInspector`, `statuses`, …).
@@ -1401,7 +1414,8 @@ final class SessionStore: ObservableObject {
         ),
         daemon: SessionDaemon = SessionDaemon(),
         daemonControl: DaemonControlling? = nil,
-        flywheelCoordinator: FlywheelCoordinator = FlywheelCoordinator()
+        flywheelCoordinator: FlywheelCoordinator = FlywheelCoordinator(),
+        flywheelSetup: FlywheelSetup = FlywheelSetup()
     ) {
         self.provider = provider
         self.persistence = persistence
@@ -1410,6 +1424,7 @@ final class SessionStore: ObservableObject {
         self.daemon = daemon
         self.daemonControl = daemonControl ?? PosixDaemonControl(daemon: daemon)
         self.flywheelCoordinator = flywheelCoordinator
+        self.flywheelSetup = flywheelSetup
         // Shell records land asynchronously, up to half a second after the tab they belong to
         // (see `SurfaceProcessRegistry`), so the `persist()` that `newSession`/`restore` already
         // ran is too early to contain them. Without this the snapshot names no shell for any
@@ -1850,6 +1865,40 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// Matches `PreferencesStore.key(_:)`'s standardization exactly (not
+    /// `indexOfRepo`'s `comparablePath`, which additionally resolves symlinks) so a
+    /// `flywheelSuggestions` entry cached from `url.path` is found by the same repo's
+    /// `ProjectSettings` lookup and vice versa.
+    private static func flywheelStandardizedKey(_ path: String) -> String {
+        URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.path
+    }
+
+    /// The cached probe result for `repo`, if `insertSession` found it to be a flywheel
+    /// project (`.beads`/`.agent-mail.yaml`) when it was added. `nil` for a project never
+    /// probed as one — including one enabled by hand via Settings, which this cache does not
+    /// track since the opt-in menu item only needs to know what to *suggest*.
+    func flywheelSuggestion(for repo: URL) -> FlywheelStatus? {
+        flywheelSuggestions[Self.flywheelStandardizedKey(repo.path)]
+    }
+
+    /// Runs the one-time flywheel repo setup, then marks the project flywheel-enabled on success.
+    /// On failure, reports and leaves the flag unset (no partial enable).
+    @MainActor
+    func enableFlywheel(for repo: URL) async {
+        do {
+            _ = try await flywheelSetup.enable(repo: repo)
+            var settings = preferences?.projectSettings(repo.path) ?? ProjectSettings()
+            settings.flywheelEnabled = true
+            preferences?.setProjectSettings(repo.path, settings)
+        } catch {
+            // `FlywheelError.guardInstall` (the only error `FlywheelSetup.enable` throws) is
+            // already handled by `launchError(from:)`'s generic `default` branch — see its own
+            // doc comment — so this reaches the user through the same reporter/alert every
+            // other tab-creation failure does, without a second error-surface for one method.
+            launchFailureReporter.report(launchError(from: error))
+        }
+    }
+
     /// The Accounts pane's "Sign In" / "Sign In Again" path: an ordinary tab, bound to a
     /// specific account the caller names outright rather than one `launchAccount` would
     /// resolve from project settings — a login is not the project's default agent, it is
@@ -2250,6 +2299,14 @@ final class SessionStore: ObservableObject {
         } else {
             repos.append(Repo(url: url))
             repoIndex = repos.count - 1
+            // Detected once, here at add-time, not on the spawn hot path: a repo whose
+            // `.beads`/`.agent-mail.yaml` marks it as a flywheel project gets cached so the
+            // opt-in menu item (`flywheelSuggestion(for:)`) can offer setup without re-probing
+            // the filesystem on every render.
+            let status = FlywheelProjectProbe.status(of: url)
+            if status.isFlywheelProject {
+                flywheelSuggestions[Self.flywheelStandardizedKey(url.path)] = status
+            }
             // Emitted here, before the session goes in, so a client never receives a
             // `sessionAdded` naming a project it has not been told about.
             emit(.projectAdded(
