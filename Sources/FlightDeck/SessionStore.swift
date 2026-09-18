@@ -1135,7 +1135,9 @@ final class SessionStore: ObservableObject {
         }
         let orphaned = accountIsMissing(for: session)
         config.environmentVariables =
-            preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
+            preferences?.sessionEnvironment(
+                for: orphaned ? nil : account(for: session), flywheel: session.flywheelIdentity
+            ) ?? [:]
 
         guard let surface = processRegistry.record(for: id, around: { provider?.makeSurface(config) })
         else { return nil }
@@ -2145,7 +2147,9 @@ final class SessionStore: ObservableObject {
         // unset one, so "no variable" is the strongest refusal available here.
         let orphaned = accountIsMissing(for: session)
         config.environmentVariables =
-            preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
+            preferences?.sessionEnvironment(
+                for: orphaned ? nil : account(for: session), flywheel: session.flywheelIdentity
+            ) ?? [:]
         // Wrapped so the registry can identify the shell libghostty forks for this surface;
         // libghostty exposes no pid of its own. The identification finishes asynchronously,
         // after `makeSurface` returns — see `SurfaceProcessRegistry`.
