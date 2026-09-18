@@ -5,6 +5,9 @@
 // that the single embedded NSView does not need.
 import SwiftUI
 import GhosttyKit
+#if DEBUG
+import OSLog
+#endif
 
 extension Ghostty {
     /// The configuration for a surface. For any configuration not set, defaults will be chosen from
@@ -145,6 +148,20 @@ extension Ghostty.SurfaceView {
 // Adapted from ghostty v1.3.1: macos/Sources/Ghostty/Surface View/SurfaceView.swift
 extension Ghostty {
     #if canImport(AppKit)
+    // TEMPORARY DIAGNOSTIC INSTRUMENTATION — double-click session-swap investigation
+    // (`.superpowers/sdd/quiet-foraging-babbage/task-2-brief.md`). Same OSLog category as
+    // `SessionStore`'s, `TerminalPane`'s, and `Ghostty.SurfaceView`'s matching instrumentation
+    // so `log show` interleaves all four files' events. Marks the other edge of the
+    // reparent/focus race window `TerminalPane.updateNSView` logs the start of: this fires
+    // when the deferred `window.makeFirstResponder(to)` below actually executes, not when
+    // `moveFocus` is called. Remove alongside that block once the real fix lands.
+    #if DEBUG
+    private static let moveFocusDebugLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
+        category: "selection-debug"
+    )
+    #endif
+
     /// When changing the split state, or going full screen (native or non), the terminal view
     /// will lose focus. There has to be some nice SwiftUI-native way to fix this but I can't
     /// figure it out so we're going to do this hacky thing to bring focus back to the terminal
@@ -188,6 +205,11 @@ extension Ghostty {
                 _ = from.resignFirstResponder()
             }
 
+            #if DEBUG
+            moveFocusDebugLogger.debug(
+                "moveFocus executing target=\(to.debugSessionID?.uuidString ?? "unknown", privacy: .public) t=\(Date().timeIntervalSince1970, privacy: .public)"
+            )
+            #endif
             window.makeFirstResponder(to)
         }
 

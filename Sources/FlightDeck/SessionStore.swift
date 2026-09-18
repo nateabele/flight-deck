@@ -108,6 +108,62 @@ final class SessionStore: ObservableObject {
     /// first close.
     private var activationOrder: [UUID] = []
 
+    // TEMPORARY DIAGNOSTIC INSTRUMENTATION — double-click session-swap investigation
+    // (`.superpowers/sdd/quiet-foraging-babbage/task-2-brief.md`). `didSet` alone has no
+    // caller context, so `selectionChangeReason` is set immediately before each assignment
+    // to tag *why* the value is about to change, then logged and reset to "unknown" inside
+    // `didSet`.
+    //
+    // Removal checklist, once the real fix lands (all line references as of this comment —
+    // re-check before deleting, since later fix rounds shift them):
+    //   In this file (`SessionStore.swift`):
+    //     - This comment block and the `#if DEBUG` block right below it: `selectionDebugLogger`,
+    //       `selectionChangeReason`, and `tagNextSelectionChange(_:)`.
+    //     - The `#if DEBUG` logging block inside `selectedSessionID`'s `didSet` (the
+    //       `Self.selectionDebugLogger.debug(...)` call and the `selectionChangeReason =
+    //       "unknown"` reset right after it).
+    //     - `surface.debugSessionID = id` in `makeAttachSurface(id:...)` and its local comment,
+    //       and `surface.debugSessionID = session.id` in `insertSession` and its local comment —
+    //       the two places `SessionStore.surfaces` is populated.
+    //     - Every `selectionChangeReason = "..."` tag-site: `select(_:selecting:)`, `restore()`,
+    //       `selectSession(_:)`, `cycleSelection(forward:)`, `closeSession`'s selected-session
+    //       fallback, and `reopenLastClosed(project:)`.
+    //   In `SessionSidebar.swift`:
+    //     - `beginRename()`'s `store.tagNextSelectionChange("beginRename()")` call.
+    //     - `SessionSidebar.body`'s `#if DEBUG` comment block and the custom `selectionBinding`
+    //       it defines (revert `List(selection:)` to `$store.selectedSessionID` directly, which
+    //       is already what the `#else` branch does).
+    //   In `GhosttyEmbed/SurfaceView_AppKit.swift`:
+    //     - `SurfaceView`'s `#if DEBUG` block: `mouseDebugLogger`, `wallClockTimestamp(for:)`,
+    //       and `debugSessionID`.
+    //     - All four `localEventLeftMouseDown` log calls (branches
+    //       `already-first-responder-passthrough`, `swallowed-for-focus-transfer`,
+    //       `window-not-key-passthrough`, and `hit-test-miss` — the last one added in the final
+    //       review's Fix 3, alongside `clickCount` on the other three).
+    //   In `TerminalPane.swift` (added in the final review's Fix 2):
+    //     - `reparentDebugLogger`, the `outgoingSessionID` capture ahead of the detach loop, and
+    //       the reparent log call in `updateNSView`.
+    //   In `GhosttyEmbed/SurfaceConfiguration.swift` (added in the final review's Fix 2):
+    //     - `moveFocusDebugLogger` and the log call inside `Ghostty.moveFocus`'s deferred work
+    //       item, right before `window.makeFirstResponder(to)`.
+    #if DEBUG
+    /// Read with:
+    /// `log show --predicate 'subsystem == "dev.flightdeck.FlightDeck" AND category == "selection-debug"' --last 30m`
+    private static let selectionDebugLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
+        category: "selection-debug"
+    )
+
+    private var selectionChangeReason: String = "unknown"
+
+    /// The one way a caller outside this file (`SessionSidebar`) can tag an assignment it is
+    /// about to make directly to `selectedSessionID`, since `selectionChangeReason` itself is
+    /// private. Diagnostic-only — see the block comment above.
+    func tagNextSelectionChange(_ reason: String) {
+        selectionChangeReason = reason
+    }
+    #endif
+
     /// `didSet` persists every change, including one made through `SessionSidebar`'s
     /// `List(selection:)` binding — the only way selection actually changes in
     /// production, since that binding writes here directly rather than through
@@ -115,6 +171,12 @@ final class SessionStore: ObservableObject {
     /// cannot recurse.
     @Published var selectedSessionID: UUID? {
         didSet {
+            #if DEBUG
+            Self.selectionDebugLogger.debug(
+                "selectedSessionID old=\(oldValue?.uuidString ?? "nil", privacy: .public) new=\(self.selectedSessionID?.uuidString ?? "nil", privacy: .public) reason=\(self.selectionChangeReason, privacy: .public) t=\(Date().timeIntervalSince1970, privacy: .public)"
+            )
+            selectionChangeReason = "unknown"
+            #endif
             if let id = selectedSessionID {
                 activationOrder.removeAll { $0 == id }
                 activationOrder.insert(id, at: 0)
@@ -1215,6 +1277,12 @@ final class SessionStore: ObservableObject {
         guard let surface = processRegistry.record(for: id, around: { provider?.makeSurface(config) })
         else { return nil }
         surfaces[id] = surface
+        // TEMPORARY DIAGNOSTIC INSTRUMENTATION — see `selectedSessionID`'s `didSet` above.
+        // `SurfaceView.id` is the view's own identity, not the session it displays, so this is
+        // the only way to join `SurfaceView`'s mouse-down logging back to a session.
+        #if DEBUG
+        surface.debugSessionID = id
+        #endif
         return surface
     }
 
@@ -1908,6 +1976,9 @@ final class SessionStore: ObservableObject {
     /// only what this one chokepoint enforces.
     private func select(_ id: UUID, selecting: Bool) {
         guard selecting || selectedSessionID == nil else { return }
+        #if DEBUG
+        selectionChangeReason = "select(_:selecting:)"
+        #endif
         selectedSessionID = id
     }
 
@@ -2248,6 +2319,10 @@ final class SessionStore: ObservableObject {
         let created = processRegistry.record(for: session.id) { provider?.makeSurface(config) }
         if let surface = created {
             surfaces[session.id] = surface
+            // TEMPORARY DIAGNOSTIC INSTRUMENTATION — see `selectedSessionID`'s `didSet` above.
+            #if DEBUG
+            surface.debugSessionID = session.id
+            #endif
         }
         // Before `tick()`, and before anything can be typed at the shell: `ghostty_surface_new`
         // has already forked the child, and until this lands it is talking to libghostty's
@@ -2489,6 +2564,9 @@ final class SessionStore: ObservableObject {
         // outlived that set belongs to a tab this run has no other way of finding — see
         // `reconcileDaemons`.
         reconcileDaemons(restored: Set(restoredIDs))
+        #if DEBUG
+        selectionChangeReason = "restore()"
+        #endif
         selectedSessionID = snapshot.selectedSessionID.flatMap {
             restoredIDs.contains($0) ? $0 : nil
         } ?? restoredIDs.first
@@ -3042,6 +3120,9 @@ final class SessionStore: ObservableObject {
     /// synchronous atomic write-and-rename cycles on the main thread.
     func selectSession(_ id: UUID) {
         guard locate(id) != nil else { return }
+        #if DEBUG
+        selectionChangeReason = "selectSession(_:)"
+        #endif
         selectedSessionID = id
     }
 
@@ -3104,6 +3185,9 @@ final class SessionStore: ObservableObject {
         let ordered = repos.flatMap(\.sessions)
         guard !ordered.isEmpty else { return }
 
+        #if DEBUG
+        selectionChangeReason = "cycleSelection(forward: \(forward))"
+        #endif
         guard
             let current = selectedSessionID,
             let index = ordered.firstIndex(where: { $0.id == current })
@@ -3207,6 +3291,9 @@ final class SessionStore: ObservableObject {
         // long-standing disagreement with `moveSession`, which has always left an emptied
         // source project standing.
         if selectedSessionID == id {
+            #if DEBUG
+            selectionChangeReason = "closeSession fallback (closed selected session \(id))"
+            #endif
             selectedSessionID = selectionAfterClosing(id, formerLocation: (repoIndex, sessionIndex))
         }
         // Prune regardless of whether the closed tab was active, so opening and closing
@@ -3541,7 +3628,12 @@ final class SessionStore: ObservableObject {
             }
             // The top row of what just came back, which is where the eye goes. A project
             // records no "active tab" of its own to return to.
-            if let first = closed.sessions.first { selectedSessionID = first.session.id }
+            if let first = closed.sessions.first {
+                #if DEBUG
+                selectionChangeReason = "reopenLastClosed(project)"
+                #endif
+                selectedSessionID = first.session.id
+            }
         }
 
         settleReopen(deferredCodexResumes)
