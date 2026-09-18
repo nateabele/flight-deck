@@ -113,6 +113,15 @@ static int csi_is_private_mode(const char *s, size_t n) {
     return n >= 4 && s[2] == '?' && (s[n - 1] == 'h' || s[n - 1] == 'l');
 }
 
+/* Flight Deck fork: no real DEC private mode number is anywhere near this
+ * large (the highest known ones, e.g. kitty's 2027/2031, are 4 digits); a
+ * parameter beyond this is either adversarial/corrupted pty content or a
+ * scanner mis-sync, not a mode worth restoring on reattach. Bounding
+ * accumulation against it below is what keeps the multiply in
+ * track_private_modes() from ever overflowing `int`, regardless of how
+ * many digits follow. */
+#define FD_OUTLOG_MODE_MAX 999999
+
 /* Flight Deck fork: parse the `;`-separated decimal parameters between the
  * `?` and the final byte of a completed CSI ? ... h/l sequence (as matched
  * by csi_is_private_mode() above) and record each as newly set or reset in
@@ -120,18 +129,28 @@ static int csi_is_private_mode(const char *s, size_t n) {
  * an empty parameter (a bare `;`, a leading/trailing `;`, or no parameters
  * at all -- e.g. `CSI ? h`) simply has nothing to record, and any
  * unexpected non-digit byte between separators is skipped one byte at a
- * time rather than aborting the scan. */
+ * time rather than aborting the scan.
+ *
+ * A parameter is only ever multiplied up while it's still <=
+ * FD_OUTLOG_MODE_MAX; once it exceeds that, further digits are still
+ * consumed (to stay in sync with the rest of the sequence) but no longer
+ * folded into `val`, so `val` can never grow past
+ * FD_OUTLOG_MODE_MAX * 10 + 9 -- nowhere near overflowing a 32-bit `int` --
+ * no matter how many digits (10, 28, ...) the parameter actually has.
+ * Such a parameter is real garbage, not a mode number, so it's dropped
+ * rather than tracked. */
 static void track_private_modes(FdOutlog *o, const char *s, size_t n) {
     int set = (s[n - 1] == 'h');
     size_t i = 3; /* first byte after "ESC [ ?"; s[n - 1] is the final byte */
     while (i < n - 1) {
-        int val = 0, have_digit = 0;
+        int val = 0, have_digit = 0, oversized = 0;
         while (i < n - 1 && s[i] >= '0' && s[i] <= '9') {
-            val = val * 10 + (s[i] - '0');
+            if (val <= FD_OUTLOG_MODE_MAX) val = val * 10 + (s[i] - '0');
+            else oversized = 1;
             have_digit = 1;
             i++;
         }
-        if (have_digit) track_mode(o, val, set);
+        if (have_digit && !oversized) track_mode(o, val, set);
         if (i < n - 1) i++; /* skip the ';' separator, or any stray byte */
     }
 }

@@ -125,5 +125,30 @@ int main(void) {
     }
     fd_outlog_free(&o);
 
+    /* 9. an oversized parameter (far more digits than any real DEC private
+     * mode ever has) must not be tracked, and -- the actual regression this
+     * guards -- must not signed-integer-overflow while being parsed. This
+     * is the reviewer's reproducer verbatim: 10 digits, well past
+     * FD_OUTLOG_MODE_MAX, previously overflowed `int` inside
+     * track_private_modes()'s accumulation (caught by
+     * -fsanitize=undefined; see PROVENANCE.md's 2026-09-18 entry). A
+     * well-formed mode right after still parses correctly, proving the
+     * scanner wasn't left wedged. */
+    fd_outlog_init(&o, 1024);
+    fd_outlog_append(&o, "\x1b[?3217300869h", 14);
+    assert(fd_outlog_preamble_size(&o) == 0);
+    fd_outlog_append(&o, "\x1b[?1000h", 8);
+    {
+        size_t n = fd_outlog_preamble_size(&o);
+        char buf[64];
+        assert(n < sizeof buf);
+        fd_outlog_preamble(&o, buf);
+        assert(n == 8 && memcmp(buf, "\x1b[?1000h", 8) == 0);
+    }
+    /* not a query -- the raw bytes (garbage mode number and all) still
+     * belong in the ring verbatim */
+    assert(memmem(o.data, o.len, "\x1b[?3217300869h", 14) != NULL);
+    fd_outlog_free(&o);
+
     return 0;
 }

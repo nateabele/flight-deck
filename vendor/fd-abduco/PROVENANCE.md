@@ -153,3 +153,17 @@ negative cases) and `Tests/fd-abduco/run_mode_preamble_test.sh`
 trimmed by a small budget, and a client attaching afterward still receives
 the mode via the preamble even though neither the original bytes nor the
 marker are present in history anymore).
+
+**Follow-up fix (same day):** `track_private_modes()`'s digit accumulation
+(`val = val * 10 + digit`) had no bound beyond `FD_OUTLOG_PEND_CAP` (32 bytes
+for the whole escape sequence), so a private-mode parameter with ~10+ digits
+signed-integer-overflowed a 32-bit `int` (confirmed with
+`-fsanitize=undefined` on input `\x1b[?3217300869h`). Fixed by capping
+accumulation at `FD_OUTLOG_MODE_MAX` (999999 — no real DEC private mode is
+anywhere near that large): once a parameter's running value exceeds it,
+further digits are still consumed (to stay in sync with the rest of the
+sequence) but no longer folded into `val`, so `val` can never exceed
+`FD_OUTLOG_MODE_MAX * 10 + 9`, nowhere near overflow, regardless of how many
+digits follow; such an oversized parameter is dropped rather than tracked
+(it's adversarial/corrupted input, not a real mode number). Covered by a new
+case 9 in `test_outlog_modes.c` using the reviewer's exact reproducer.
