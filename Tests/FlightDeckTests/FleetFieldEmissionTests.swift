@@ -49,7 +49,7 @@ final class FleetFieldEmissionTests: XCTestCase {
             hasBackgroundWork: false, openPromptCall: .noPrompt
         )))
         // `.noPrompt` and never `.unreported`, even for the waiting tab: this store has no
-        // fleet behind it, so `openPromptCallReader` names nothing — and "I looked and found
+        // fleet behind it, so `openPromptProbe` names nothing — and "I looked and found
         // nothing" is what the Mac asserts, which is what retires a phone's card. A tab that
         // is blocked on a dialog this build cannot name reaches the wire exactly this way.
         XCTAssertTrue(replicator.recorded.contains(.activityChanged(

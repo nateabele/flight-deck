@@ -67,7 +67,16 @@ final class SessionStore: ObservableObject {
     /// it names or the dialog it describes.
     private(set) var openPromptCalls: [UUID: String] = [:]
 
-    /// How this store learns which dialog a tab is blocked on.
+    /// This tick's refusal code for every `waiting` tab `derivedOpenPromptCalls` asked and could
+    /// not name — `"prompt_changed"` only; see that method. Not published and not part of
+    /// `SessionStatus`: it is a same-tick handoff to `checkStuckPrompts`, which runs moments
+    /// later inside `applyRegistry`, not state anything renders.
+    ///
+    /// Rebuilt wholesale by every `commitStatuses`, like `openPromptCalls` beside it.
+    private(set) var openPromptFailureCodes: [UUID: String] = [:]
+
+    /// How this store learns which dialog a tab is blocked on — the call id when one is
+    /// nameable, or the derivation's own refusal code when it is not.
     ///
     /// A closure rather than a call into `PromptService`, for two reasons. That service holds
     /// *this* store, so naming it here would be a cycle; and the derivation it runs is
@@ -76,24 +85,21 @@ final class SessionStore: ObservableObject {
     /// `PromptService` an inbound answer is judged against, so what is pushed and what a tap
     /// is refused against are one object reading one transcript.
     ///
-    /// Nil by default: a store with no fleet behind it reports no dialogs, which is what the
-    /// hundred-odd tests that never open a socket want, and costs them no transcript reads.
-    var openPromptCallReader: (UUID) -> String? = { _ in nil }
-
-    /// Whether a `waiting` tab's dialog can be named right now, for `checkStuckPrompts`'s use —
-    /// `nil` on success, the refusal code otherwise.
+    /// **One closure, not two.** This used to be `openPromptCallReader` (the call id) and
+    /// `openPromptProbe` (the refusal code) side by side, each running `PromptService`'s own
+    /// `pushedOpenPrompt` independently — so every `waiting` tab paid for two transcript-tail
+    /// reads a tick, one from `derivedOpenPromptCalls` and a second from `checkStuckPrompts`,
+    /// which that method's own former comment named as debt. Both facts come from the same
+    /// `Result`, so one closure call now answers both, and `derivedOpenPromptCalls` is the only
+    /// place that calls it on a schedule; `probeVerdict` (`dispatchAbort`'s on-demand path) is
+    /// the other caller, and an Escape keystroke is not a schedule.
     ///
-    /// A closure for the same reason `openPromptCallReader` is one and not a stored
-    /// `PromptService`: that service holds `store: SessionStore` strongly
-    /// (`PromptService.swift:35`), so a `SessionStore` holding a `PromptService` back would be a
-    /// retain cycle. `FleetService` installs the real one, weakly capturing the same
-    /// `PromptService` `openPromptCallReader` reads, so a stuck check and a phone's tap are
-    /// refused by one derivation, not two that could disagree.
-    ///
-    /// Nil by default, distinctly from `openPromptCallReader`'s empty-closure default: a store
-    /// built for a test with no fleet attached has no dialog derivation at all to probe, and
-    /// `checkStuckPrompts` must treat that as "nothing to check" rather than as "always stuck".
-    var openPromptProbe: ((UUID) -> String?)?
+    /// The outer optional is nil for a store built with no fleet attached at all — every test
+    /// that never opens a socket — which `derivedOpenPromptCalls` and `probeVerdict` both read
+    /// as "nothing to report" rather than "always stuck". The closure itself returns nil only
+    /// when installed but momentarily unable to answer (`PromptService` deallocated under a
+    /// weak capture), read the same way.
+    var openPromptProbe: ((UUID) -> Result<String, TimelineErrorCode>?)?
 
     /// Session ids in most-recently-active order (index 0 == current selection).
     /// Consulted by `closeSession` so closing the active tab returns to the tab you
@@ -4480,8 +4486,11 @@ final class SessionStore: ObservableObject {
     /// `.aborted` record carries. See `openPromptProbe` for why it can be absent entirely.
     private func probeVerdict(for id: UUID) -> PromptLifecycleRecord.AbortProbe {
         guard let openPromptProbe else { return .unavailable }
-        guard let code = openPromptProbe(id) else { return .nameable }
-        return .unnameable(code: code)
+        guard let result = openPromptProbe(id) else { return .nameable }
+        switch result {
+        case .success: return .nameable
+        case .failure(let code): return .unnameable(code: code.code)
+        }
     }
 
     /// `answerPrompt`'s own guards, in the same order, minus the call comparison it has nothing
@@ -5178,7 +5187,13 @@ final class SessionStore: ObservableObject {
         // stuck again against the row that fixed it. Handed the same `resolutions` that loop
         // ran on, never `rows` — see `checkStuckPrompts`'s own comment on why picking a row
         // out of the registry by hand is the bug this argument exists to prevent.
-        checkStuckPrompts(Dictionary(uniqueKeysWithValues: resolutions.map { ($0.tab, $0.1) }))
+        //
+        // `openPromptFailureCodes` is this same tick's read, taken by `commitStatuses` a few
+        // lines up through `derivedOpenPromptCalls` — not a second probe of the transcript.
+        checkStuckPrompts(
+            Dictionary(uniqueKeysWithValues: resolutions.map { ($0.tab, $0.1) }),
+            codes: openPromptFailureCodes
+        )
     }
 
     /// Every claude tab reconciled against one registry read — pure, applying nothing.
@@ -5271,8 +5286,17 @@ final class SessionStore: ObservableObject {
     /// The observed failures ran 24 minutes to 3 hours, which this covers end to end.
     private static let stuckPromptReportLadder: [TimeInterval] = [5, 30, 120, 600, 1_800, 7_200]
 
+    /// One simulated tick, for tests that drive `checkStuckPrompts` directly rather than through
+    /// `applyRegistry` — see that class's own doc comment for why. Goes through `commitStatuses`
+    /// first, exactly as a real tick does, so `openPromptFailureCodes` and `stuckPromptEpisodes`
+    /// are freshly read against whatever the test's transcript seam currently serves, rather
+    /// than a stale answer from whenever the fixture last committed a status.
     func stuckCheckForTesting(rows: [pid_t: ClaudeStatusFile.Entry]) {
-        checkStuckPrompts(Dictionary(uniqueKeysWithValues: pinResolutions(rows).map { ($0.tab, $0.1) }))
+        commitStatuses(statuses, backgroundWork: backgroundWorkSessions)
+        checkStuckPrompts(
+            Dictionary(uniqueKeysWithValues: pinResolutions(rows).map { ($0.tab, $0.1) }),
+            codes: openPromptFailureCodes
+        )
     }
     /// The open episode for `id`, or nil when none is — how long it has been running and how
     /// many records it has produced.
@@ -5298,39 +5322,30 @@ final class SessionStore: ObservableObject {
     /// lines above the call site, already retargets a tab the instant a row reports a new `cwd`.
     /// What reaches here is the residue that loop's `else if` did not take, and one rule read
     /// twice is worth more than a second threshold nobody would remember to keep aligned.
-    private func checkStuckPrompts(_ resolutions: [UUID: ConversationPin.Resolution]) {
-        guard let openPromptProbe else { return }
+    ///
+    /// **Reads no transcript of its own.** This used to call `openPromptProbe` a second time,
+    /// over the same file `commitStatuses` had just read through `derivedOpenPromptCalls` on
+    /// this same tick — that method's own former comment named the duplication and where to
+    /// fold it. `codes` is that fold: `derivedOpenPromptCalls` already created or continued
+    /// `stuckPromptEpisodes` for every tab it is worth tracking (specifically `"prompt_changed"`
+    /// while `waiting`, cleared for everything else), so this only ever finds an episode for a
+    /// tab `codes` names, and never has to reset one itself.
+    private func checkStuckPrompts(
+        _ resolutions: [UUID: ConversationPin.Resolution], codes: [UUID: String]
+    ) {
+        guard openPromptProbe != nil else { return }
         let now = now()
         for session in repos.flatMap(\.sessions) where session.agent.hasStatusRegistry {
             let id = session.id
-            guard statuses[id]?.activity == .waiting else {
-                stuckPromptEpisodes[id] = nil
-                continue
-            }
-            // **A second transcript tail read, per waiting tab, per tick** — `commitStatuses`
-            // already drives one through `openPromptCallReader` on this same tick, over the
-            // same file, for the same derivation. Triaged as acceptable and recorded here
-            // rather than left to be rediscovered: it costs one `TranscriptPager` page of at
-            // most `PromptService.tailRecords` lines, only for tabs that are actually
-            // `waiting`, and `PromptService` memoizes nothing that would make a shared read
-            // free. If the two are ever folded together, this is the read to fold into
-            // `derivedOpenPromptCalls` — one page, two consumers — and not a third one.
-            guard let code = openPromptProbe(id) else {
-                stuckPromptEpisodes[id] = nil
-                continue
-            }
+            guard let code = codes[id], var episode = stuckPromptEpisodes[id] else { continue }
 
-            var episode = stuckPromptEpisodes[id] ?? StuckEpisode(began: now, reported: 0)
             let elapsed = now.timeIntervalSince(episode.began)
             // How many rungs this episode has now passed. Compared against what it has already
             // reported rather than tested for equality, so a tick that crosses two at once — an
             // app that spent the interval in the background at `WatchClock.backgroundInterval`,
             // or a Mac that slept — files the one record it is due and not a backlog of them.
             let due = Self.stuckPromptReportLadder.prefix { elapsed >= $0 }.count
-            guard due > episode.reported else {
-                stuckPromptEpisodes[id] = episode
-                continue
-            }
+            guard due > episode.reported else { continue }
             episode.reported = due
             stuckPromptEpisodes[id] = episode
 
@@ -5520,16 +5535,34 @@ final class SessionStore: ObservableObject {
         let previous = statuses
         let previousBackgroundWork = backgroundWorkSessions
         let previousOpenPromptCalls = openPromptCalls
+        // Shadowed, mutable: `derivedOpenPromptCalls` fills in `answerless` on every `waiting`
+        // entry below, ahead of every comparison this function makes — a tick where only that
+        // field moves must be recognized as a change exactly like any other, not smuggled in
+        // through a side channel `FleetReplicator`'s drift assertion never sees.
+        var next = next
         // Installed **above** the guard rather than below it, because the third axis is
-        // derived FROM them: `openPromptCallReader` asks this store what each tab is doing,
-        // and asking it against the statuses this tick is replacing would report no dialog on
+        // derived FROM them: `openPromptProbe` asks this store what each tab is doing, and
+        // asking it against the statuses this tick is replacing would report no dialog on
         // the very tick a tab first blocks — a card a poll late for no reason. Written through
         // an equality check so an unchanged tick still publishes nothing, which is what the
         // single `guard` used to buy: both of these are `@Published`, and re-assigning an
         // equal value at 2 Hz would invalidate the whole sidebar twice a second.
+        //
+        // **`statuses` is assigned here, BEFORE `derivedOpenPromptCalls` runs, and again
+        // after it — not once.** `PromptService.openPrompt` (which the probe calls into) reads
+        // this tab's activity off `store.status(for:)`, i.e. off `self.statuses` — never off a
+        // parameter — so a probe run before this line sees LAST tick's activity and refuses a
+        // freshly-`waiting` tab `"not_waiting"`, exactly the "a card a poll late" bug the
+        // comment above already names for `openPromptCalls`. The second assignment, after
+        // `next`'s `answerless` is filled in, is what lets that field reach `statuses` at all;
+        // it is a no-op assignment (caught by the same equality check) on every tick that
+        // does not touch `answerless`, which is nearly all of them.
+        if next != statuses { statuses = next }
+        let derived = derivedOpenPromptCalls(&next)
         if next != statuses { statuses = next }
         if backgroundWork != backgroundWorkSessions { backgroundWorkSessions = backgroundWork }
-        openPromptCalls = derivedOpenPromptCalls()
+        openPromptCalls = derived.calls
+        openPromptFailureCodes = derived.codes
         // THREE axes, not one. A task starting or ending under an otherwise-idle tab moves
         // only `backgroundWork` — guarding on `statuses` alone swallowed that tick entirely,
         // so the badge never lit and no event ever reached the phone. One dialog replaced by
@@ -5671,12 +5704,15 @@ final class SessionStore: ObservableObject {
                 waitingFor: transition.new?.waitingFor,
                 subagentCount: transition.new?.subagentCount ?? 0,
                 hasBackgroundWork: backgroundWorkSessions.contains(transition.id),
-                openPromptCall: openPromptIdentity(of: transition.id)
+                openPromptCall: openPromptIdentity(of: transition.id),
+                answerless: transition.new?.answerless ?? false
             )
         })
     }
 
-    /// Which dialog every blocked tab is on, as this Mac reads it right now.
+    /// Which dialog every blocked tab is on, as this Mac reads it right now — and, from the
+    /// same read, whether a tab that cannot be named has gone unnameable long enough to call
+    /// `answerless`.
     ///
     /// **Re-derived on every commit and never cached, exactly as `PromptService` re-derives on
     /// every answer** — see that type for why a `served` table fails the case this whole
@@ -5686,14 +5722,67 @@ final class SessionStore: ObservableObject {
     /// Only `waiting` tabs are asked, so the cost is bounded to the state a human is being
     /// waited on in: an idle or busy fleet reads nothing at all, and the tail a blocked tab
     /// does cost is `PromptService.tailRecords` records once per poll for as long as its
-    /// dialog is up. `openPromptCallReader` refuses a codex tab on the agent alone, before any
+    /// dialog is up. `openPromptProbe` refuses a codex tab on the agent alone, before any
     /// transcript is resolved, so an agent this build cannot read a dialog for is free too.
-    private func derivedOpenPromptCalls() -> [UUID: String] {
-        var derived: [UUID: String] = [:]
-        for (id, status) in statuses where status.activity == .waiting {
-            derived[id] = openPromptCallReader(id)
+    ///
+    /// **One read per waiting tab, this tick — not two.** `checkStuckPrompts` used to run this
+    /// same derivation a second time, over the same transcript, purely to learn the refusal
+    /// code; that method's own former comment named the duplication and proposed folding it in
+    /// here. `next[id].answerless` and `openPromptFailureCodes` (returned as `codes`) are both
+    /// written from this one pass, so `checkStuckPrompts` — called moments later, still in this
+    /// same tick, from `applyRegistry` — never has to ask the transcript again.
+    ///
+    /// **`stuckPromptEpisodes` is created, continued, or cleared here**, exactly as
+    /// `checkStuckPrompts` always did it, just moved beside the read it depends on. Gated on
+    /// `code.code == "prompt_changed"` specifically, not on "any refusal": a codex tab's
+    /// `"unsupported_agent"` refusal means this build cannot even ask, which is a different
+    /// sentence — `answerless` and the episode behind it must never fire for it — and every
+    /// `hasStatusRegistry` tab this ever ran for realistically produced only `"prompt_changed"`
+    /// anyway, so nothing observable changes for the case that already existed.
+    ///
+    /// **`answerless` flips true the instant `stuckPromptEpisodes` crosses
+    /// `stuckPromptReportLadder`'s first rung (5s)** — the same episode, the same threshold,
+    /// checked here rather than waited for from `checkStuckPrompts`'s own ladder math, so the
+    /// two can never read as two different moments for what is one underlying fact.
+    private func derivedOpenPromptCalls(
+        _ next: inout [UUID: SessionStatus]
+    ) -> (calls: [UUID: String], codes: [UUID: String]) {
+        var calls: [UUID: String] = [:]
+        var codes: [UUID: String] = [:]
+        let now = now()
+        // Snapshotted before the loop, deliberately: the loop below mutates `next[id]` on every
+        // iteration, and `next` is the same `inout` dictionary being read here. Iterating a
+        // dictionary while writing into it through its own subscript is exactly the mutate-
+        // while-iterating hazard the standard library warns about — harmless for some shapes of
+        // edit and silently wrong for others, which is not a trade this method should make for
+        // the sake of skipping one array of ids.
+        let waitingIDs = next.compactMap { id, status in status.activity == .waiting ? id : nil }
+        for id in waitingIDs {
+            switch openPromptProbe.flatMap({ $0(id) }) {
+            case .success(let callID):
+                calls[id] = callID
+                stuckPromptEpisodes[id] = nil
+                next[id]?.answerless = false
+            case .failure(let code) where code.code == "prompt_changed":
+                codes[id] = code.code
+                let episode = stuckPromptEpisodes[id] ?? StuckEpisode(began: now, reported: 0)
+                stuckPromptEpisodes[id] = episode
+                next[id]?.answerless =
+                    now.timeIntervalSince(episode.began) >= Self.stuckPromptReportLadder[0]
+            case .failure, nil:
+                // A refusal this Mac cannot yet call "nothing to answer" (`"unsupported_agent"`,
+                // an agent this build cannot even ask) — or no probe installed at all. Either
+                // way, not the state `answerless` exists to report.
+                stuckPromptEpisodes[id] = nil
+                next[id]?.answerless = false
+            }
         }
-        return derived
+        // A tab that stopped waiting this tick — or was filtered out of the loop above by not
+        // being in `next` at all — must not carry a stale episode into the next one.
+        for id in stuckPromptEpisodes.keys where next[id]?.activity != .waiting {
+            stuckPromptEpisodes[id] = nil
+        }
+        return (calls, codes)
     }
 
     /// One tab's identity as it goes on the wire. Never `.unreported` — this build always
@@ -5775,7 +5864,11 @@ final class SessionStore: ObservableObject {
             // Omitting it is not an option either — the fold overwrites unconditionally, so an
             // event without it would replace a live call id with `.unreported` and drop this
             // Mac's assertion on the floor.
-            openPromptCall: openPromptIdentity(of: id)
+            openPromptCall: openPromptIdentity(of: id),
+            // Carried for the same reason: a sub-agent count is not news about whether a dialog
+            // is nameable, so `status.answerless` — already current, `commitStatuses` is the
+            // only writer of it — rides along unchanged.
+            answerless: status.answerless
         ))
     }
 

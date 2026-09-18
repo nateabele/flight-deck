@@ -138,7 +138,10 @@ struct SessionStatusGlyph: View {
             guard let summary = session.subagentSummary else { return "Working" }
             return "Working — \(summary)"
         case "waiting":
-            // `SessionStatus.tooltip`'s `.waiting` branch: the reason, when `claude` gave one.
+            // `SessionStatus.tooltip`'s `.waiting` branch: `answerless` wins over the reason
+            // either way, for the same reason it does there — it is this Mac's own verdict
+            // that nothing is open, which is truer than whatever string `claude` gave.
+            guard !session.answerless else { return "Still working (no response needed)" }
             guard let waitingFor = session.waitingFor, !waitingFor.isEmpty else {
                 return "Waiting for you"
             }

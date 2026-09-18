@@ -341,6 +341,7 @@ struct SessionTimelineScreen: View {
                     // cannot name the dialog" is asked of one snapshot rather than two.
                     activity: session?.activity,
                     openPromptCall: session?.openPromptCall ?? .unreported,
+                    answerless: session?.answerless ?? false,
                     onAbortBlocked: { await onAbortBlocked(model.sessionID) }
                 )
                 PromptComposer(session: session, model: model)
