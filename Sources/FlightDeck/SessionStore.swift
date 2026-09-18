@@ -5266,7 +5266,7 @@ final class SessionStore: ObservableObject {
     /// before/after comparison and the yank — is `AgentTextChannel.submit`'s, and the reasons
     /// each step is shaped the way it is live with it in `ClaudeTextChannel`.
     ///
-    /// `stillWanted` is re-checked after the settle delay, because the request can be
+    /// `stillWanted` is re-checked after the first settle delay, because the request can be
     /// replaced or cancelled while the agent repaints. `onSent` runs once the text has been
     /// submitted, and is where the caller retires its pending entry.
     @discardableResult
@@ -5278,20 +5278,31 @@ final class SessionStore: ObservableObject {
     ) -> Bool {
         guard let gate = injectionGate(id) else { return false }
 
-        // Marked before the channel is asked, and cleared again if it refuses: the channel's
-        // contract is that it settles exactly once iff it returns true (see
-        // `AgentTextChannel.submit`), so the mark is retired either here or inside that
-        // settle and never both.
+        // Marked before the channel is asked, and cleared again if it refuses: released in the
+        // wrapped `onSent` below, not tied to any one `settle` call — `AgentTextChannel.submit`
+        // now allows `settle` to fire more than once per drive (codex's Return needs a hop of
+        // its own, separate from its text; see `CodexTextChannel.submit`), so a mark released
+        // inside settle's own defer, as a single-settle contract once allowed, would reopen the
+        // tab mid-drive, between that text and its Return. `onSent` is `submit`'s one
+        // guaranteed-once signal instead, exactly as `onFinished` is `submitRename`'s below —
+        // this is that same pattern, not a new one.
         injecting.insert(id)
         let started = gate.channel.submit(
             text, into: gate.injector,
             settle: { [weak self] work in
-                self?.injectionSettle {
-                    defer { self?.injecting.remove(id) }
-                    work()
-                }
+                // Runs `work` even with no store left, for the same reason `injectRename`'s
+                // settle does below: the channel's own drive still needs to reach its
+                // `stillWanted` check to unwind cleanly, and a dropped continuation would
+                // instead leave a kill — or, now, a typed line with no Return — on screen with
+                // no restore ever attempted.
+                guard let self else { return work() }
+                self.injectionSettle(work)
             },
-            stillWanted: stillWanted, onSent: onSent
+            stillWanted: stillWanted,
+            onSent: { [weak self] in
+                self?.injecting.remove(id)
+                onSent()
+            }
         )
         if !started { injecting.remove(id) }
         return started

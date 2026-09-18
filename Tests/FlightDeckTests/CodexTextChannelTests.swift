@@ -145,6 +145,38 @@ final class CodexTextChannelTests: XCTestCase {
                        "an empty composer needs no restore — the placeholder survives any kill")
     }
 
+    /// The paste/Return timing bug, reproduced at the unit level. codex's TUI paste-detects: a
+    /// Return arriving in the same burst as the text before it is folded into that paste and
+    /// inserted as a literal newline instead of submitting — live-isolated against codex-cli
+    /// 0.153.4 (`scripts/adapterprobe/ptyscreen.py`'s `submit()`: a combined write leaves a
+    /// one-line rollout, a split write with a real gap produces a fourteen-line one). The two
+    /// calls must not share a settle hop, so a real caller's delay (`SessionStore
+    /// .injectionSettle`'s 120ms) actually lands between them on the wire.
+    ///
+    /// Captures continuations rather than running them inline — the same technique
+    /// `CodexRenameTests` uses on `SessionStore.injectionSettle` — so this can assert what has
+    /// and has not been sent *between* hops, not just the final sequence.
+    func testReturnWaitsForItsOwnSettleHopAfterTheText() throws {
+        let injector = FakeInjector(viewport: try viewport("tui-idle.captured"))
+        var pending: [() -> Void] = []
+        let sent = channel.submit("ship it", into: injector,
+                                  settle: { pending.append($0) }, stillWanted: { true }, onSent: {})
+        XCTAssertTrue(sent)
+
+        // Hop 1: fires after the kill, before anything is typed.
+        XCTAssertEqual(pending.count, 1)
+        pending.removeFirst()()
+
+        // The text goes out in this hop -- but Return must NOT ride along with it. If it does,
+        // this is the exact burst codex folds into one paste.
+        XCTAssertEqual(injector.actions, [.killLine, .text("ship it")],
+                       "Return must wait for its own settle hop, not share the text's")
+        XCTAssertEqual(pending.count, 1, "sendReturn needs a second settle hop to land in")
+
+        pending.removeFirst()()
+        XCTAssertEqual(injector.actions, [.killLine, .text("ship it"), .return])
+    }
+
     /// The draft is put back by RE-TYPING what was read, not by Ctrl-Y: codex has never been
     /// shown to keep a deleted-text ring, and the draft is on screen before the kill anyway.
     func testARealDraftIsRetypedAfterTheReturnNotYanked() {
@@ -205,6 +237,51 @@ final class CodexTextChannelTests: XCTestCase {
         XCTAssertEqual(injector.actions,
                        [.killLine, .text("/rename"), .return, .killLine, .text("new name"), .return],
                        "the second .killLine is the field-clearing step — losing it reopens the prefill hazard")
+        XCTAssertEqual(finished, true)
+    }
+
+    /// The same paste/Return timing bug as `testReturnWaitsForItsOwnSettleHopAfterTheText`,
+    /// checked at both of `submitRename`'s Return sites: `/rename`⏎ and `<name>`⏎ are each
+    /// their own settle hop, never sharing one with the text typed just before them.
+    func testEachRenameReturnWaitsForItsOwnSettleHop() throws {
+        let injector = FakeInjector(viewport: try viewport("tui-idle.captured"))
+        injector.script([try viewport("tui-idle.captured"), try viewport("tui-rename-modal.captured")])
+        var pending: [() -> Void] = []
+        var finished: Bool?
+        let sent = channel.submitRename("new name", into: injector,
+                                        settle: { pending.append($0) }, stillWanted: { true },
+                                        onFinished: { finished = $0 })
+        XCTAssertTrue(sent)
+
+        // Hop A: after the initial kill.
+        XCTAssertEqual(pending.count, 1)
+        pending.removeFirst()()
+        XCTAssertEqual(injector.actions, [.killLine, .text("/rename")],
+                       "the first Return must not share a hop with typing /rename")
+        XCTAssertEqual(pending.count, 1, "sendReturn needs its own hop, separate from the text")
+
+        // Hop B: sends the first Return, opening the modal.
+        pending.removeFirst()()
+        XCTAssertEqual(injector.actions, [.killLine, .text("/rename"), .return],
+                       "the modal must not be read in the same hop as the Return that opens it")
+        XCTAssertEqual(pending.count, 1)
+
+        // Hop C: reads the now-open modal, clears its field, and types the new name.
+        pending.removeFirst()()
+        XCTAssertEqual(injector.actions,
+                       [.killLine, .text("/rename"), .return, .killLine, .text("new name")],
+                       "the second Return must not share a hop with typing the new name")
+        XCTAssertEqual(pending.count, 1, "sendReturn needs its own hop before the draft restores")
+
+        // Hop D: sends the second Return, committing the name.
+        pending.removeFirst()()
+        XCTAssertEqual(injector.actions,
+                       [.killLine, .text("/rename"), .return, .killLine, .text("new name"), .return])
+        XCTAssertEqual(pending.count, 1, "the restore/finish is its own hop after the commit")
+        XCTAssertNil(finished, "onFinished must not fire before the restore hop runs")
+
+        // Hop E: restores the draft (none here — placeholder only) and finishes.
+        pending.removeFirst()()
         XCTAssertEqual(finished, true)
     }
 

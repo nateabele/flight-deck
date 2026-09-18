@@ -92,7 +92,7 @@ struct ClaudeTextChannel: AgentTextChannel {
     func submit(
         _ text: String,
         into injector: TextInjecting,
-        settle: (@escaping () -> Void) -> Void,
+        settle: @escaping (@escaping () -> Void) -> Void,
         stillWanted: @escaping @MainActor () -> Bool,
         onSent: @escaping @MainActor () -> Void
     ) -> Bool {

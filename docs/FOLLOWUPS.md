@@ -132,14 +132,23 @@ reader doesn't re-derive them.
   smoke suite cannot enter the broken state and never could have caught this. Any future
   monitor that captures a window at startup will reintroduce it silently — verify such changes
   by relaunching the real app in the background, not by a green suite.
-- **If a sidebar rename ever intermittently fails to submit, add a small delay before the
-  Return.** `SessionStore.rename` sends the command text (a paste, via `sendText`) and then
-  Return (a key event, via `sendReturn`) back to back. Ordering is preserved through
-  libghostty's IO queue, so no delay is needed today and none is shipped — but the two travel
-  different paths, and a program that debounces paste input could in principle still be
-  assembling the paste when the keypress lands. A ~50 ms gap before `sendReturn()` is the
-  first thing to try; do **not** "fix" it by putting the terminator back inside the text,
-  which is the bug that `TextInjecting.sendReturn()` exists to avoid.
+- **A small delay before Return, if typing ever fails to submit — RESOLVED for codex, and
+  it was real, not merely hypothetical.** This entry originally flagged the risk for claude's
+  `SessionStore.rename`, which sends the command text (a paste, via `sendText`) then Return (a
+  key event, via `sendReturn`) back to back, and speculated that "a program that debounces
+  paste input could in principle still be assembling the paste when the keypress lands."
+  claude has never shown that failure and still calls `settle` once. codex does show it:
+  live-isolated against codex-cli 0.153.4 (`scripts/adapterprobe/ptyscreen.py`'s `submit()`),
+  a Return arriving in the same burst as the text before it is folded into that paste and
+  inserted as a literal newline instead of submitting — reported by a user as "it types the
+  text, but instead of submitting... it just inserts a newline." Fixed in `CodexTextChannel
+  .submit`/`.submitRename` by giving `sendReturn()` its own `settle` hop, separate from the
+  text's — see that file's doc comments. `AgentTextChannel.submit`'s protocol contract changed
+  to allow `settle` more than once as part of the fix, with `onSent` (not settle) now carrying
+  the one-shot completion guarantee `SessionStore.inject` depends on, mirroring
+  `AgentRenameTyping.onFinished`. Do **not** "fix" a future case like this by putting the
+  terminator back inside the text, which is the bug that `TextInjecting.sendReturn()` exists
+  to avoid.
 - **`CLAUDE_CODE_CHILD_SESSION` in the inherited environment turns transcript saving off**,
   which silently kills inbound rename sync — the watcher tails a file that is never written.
   Claude Code sets this marker for nested sessions; a `claude` inheriting it prints

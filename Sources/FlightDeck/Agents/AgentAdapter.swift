@@ -284,19 +284,26 @@ protocol AgentTextChannel {
 
     /// Type `text` and submit it, preserving whatever draft was there — or refuse.
     ///
-    /// **The contract the caller's bookkeeping depends on: `settle` is called exactly once
-    /// iff this returns `true`.** `SessionStore` marks the tab mid-injection before calling
-    /// and clears the mark inside the `settle` it supplies, so a channel that returned `true`
-    /// without settling would leave the tab refusing every later injection for the life of
-    /// the process.
+    /// **`settle` may be called more than once — once per repaint the conformer must wait
+    /// through — and it is `onSent` that carries the one-shot guarantee the caller's
+    /// bookkeeping depends on, exactly as `onFinished` does for `AgentRenameTyping
+    /// .submitRename`.** A single settle was once the whole contract, and `ClaudeTextChannel`
+    /// still only ever needs the one; `CodexTextChannel` needs a second, later hop so its
+    /// Return is never issued in the same settle as the text before it — codex paste-detects
+    /// that burst and inserts a newline instead of submitting (see `CodexTextChannel.submit`'s
+    /// doc comment). `SessionStore` marks the tab mid-injection before calling and clears the
+    /// mark inside the `onSent` it supplies, so a channel that returned `true` without ever
+    /// running `onSent` would leave the tab refusing every later injection for the life of the
+    /// process — same failure mode `AgentRenameTyping`'s doc comment describes for
+    /// `onFinished`, now shared rather than reinvented per protocol.
     ///
-    /// `stillWanted` is re-checked after the settle delay, because the request can be
+    /// `stillWanted` is re-checked after the first settle delay, because the request can be
     /// replaced or cancelled while the agent repaints. `onSent` runs once the text has been
     /// submitted, and is where the caller retires its pending entry.
     func submit(
         _ text: String,
         into injector: TextInjecting,
-        settle: (@escaping () -> Void) -> Void,
+        settle: @escaping (@escaping () -> Void) -> Void,
         stillWanted: @escaping @MainActor () -> Bool,
         onSent: @escaping @MainActor () -> Void
     ) -> Bool

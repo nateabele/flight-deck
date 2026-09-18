@@ -95,10 +95,27 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
     /// before we know whether there was anything to kill, because comparing before and after
     /// is the only way to find out; and the restore happens after the Return, so a wrong
     /// guess can only leave text sitting in the composer, never submit it.
+    ///
+    /// **The text and the Return are two settle hops, not one.** codex's TUI paste-detects: a
+    /// `\r` arriving in the same burst as the text before it is folded into that paste and
+    /// inserted as a literal newline, so the turn sits typed but never sent — live-isolated
+    /// against codex-cli 0.153.4 by varying only this (`scripts/adapterprobe/ptyscreen.py`'s
+    /// `submit()`: a combined write leaves a one-line rollout, a split write with a real gap
+    /// produces a fourteen-line one). `sendReturn()` already goes through a real key event
+    /// rather than `sendText`'s paste (see `TextInjecting.sendReturn()`), which is necessary
+    /// but not sufficient here: codex's detector keys on *arrival timing*, not on which of
+    /// ghostty's two send paths carried the byte, so the two calls landing in the same run-loop
+    /// tick reproduces the same failure a paste-wrapped `\r` would. Giving `sendReturn()` its
+    /// own `settle` hop is what actually opens a gap on the wire — `SessionStore
+    /// .injectionSettle`'s 120ms in production, long past whatever window codex's detector
+    /// uses. Foreseen, not discovered late: `docs/FOLLOWUPS.md` flagged this exact remedy for
+    /// claude's rename path back when it was still a hypothetical ("a program that debounces
+    /// paste input could in principle still be assembling the paste when the keypress lands");
+    /// codex is where it turned out to be real.
     func submit(
         _ text: String,
         into injector: TextInjecting,
-        settle: (@escaping () -> Void) -> Void,
+        settle: @escaping (@escaping () -> Void) -> Void,
         stillWanted: @escaping @MainActor () -> Bool,
         onSent: @escaping @MainActor () -> Void
     ) -> Bool {
@@ -110,16 +127,18 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
             guard stillWanted() else { return }
             let after = self.composer(injector)?.content
             injector.sendText(text)
-            injector.sendReturn()
-            // Restore only on a CONFIRMED change, exactly as claude's channel does. An
-            // unreadable screen means we do not know, and typing a remembered string into a
-            // composer that may not have held it is worse than leaving the user one undo
-            // away. A kill that changed nothing means the line was empty — or held only the
-            // placeholder, which no kill can remove — so there is nothing to put back.
-            if let after, after != before, before != Self.placeholder {
-                injector.sendText(before)
+            settle {
+                injector.sendReturn()
+                // Restore only on a CONFIRMED change, exactly as claude's channel does. An
+                // unreadable screen means we do not know, and typing a remembered string into
+                // a composer that may not have held it is worse than leaving the user one undo
+                // away. A kill that changed nothing means the line was empty — or held only the
+                // placeholder, which no kill can remove — so there is nothing to put back.
+                if let after, after != before, before != Self.placeholder {
+                    injector.sendText(before)
+                }
+                onSent()
             }
-            onSent()
         }
         return true
     }
@@ -189,11 +208,15 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
     /// **Types codex's `/rename` and, once the modal answers, the new name — never the other
     /// way around.**
     ///
-    /// Two submissions, two repaints to wait through, so this calls `settle` twice rather
-    /// than once — see `AgentRenameTyping`'s doc comment for why that is legal here and is
-    /// not for `submit`. `onFinished` is what carries the one-shot guarantee instead, firing
-    /// exactly once whichever of the three ways this ends: the name committed, the modal
-    /// never came up, or the request was cancelled while codex repainted.
+    /// Two submissions, two repaints to wait through, plus one more `settle` hop per
+    /// submission for the Return alone — see `AgentRenameTyping`'s doc comment for why
+    /// multiple hops are legal here and are not for `submit`, and `submit`'s own doc comment
+    /// for why the Return needs a hop to itself at all: codex paste-detects a Return that
+    /// arrives in the same burst as the text before it and inserts a newline instead of
+    /// submitting, and that failure does not care which of these two submissions it lands in.
+    /// `onFinished` is what carries the one-shot guarantee instead, firing exactly once
+    /// whichever of the three ways this ends: the name committed, the modal never came up, or
+    /// the request was cancelled while codex repainted.
     ///
     /// **Stage two gates on a POSITIVE modal reading**, not an emptiness check. If `/rename`
     /// did not open a modal — a version mismatch, a slow repaint, codex refusing for a reason
@@ -230,33 +253,42 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
                 return
             }
             injector.sendText("/rename")
-            injector.sendReturn()
             settle {
-                guard self.renameModal(injector) != nil else {
-                    // No `settle` between the Escape and the restore, unlike every other
-                    // injection pair in this method. That is deliberate, not an oversight:
-                    // `sendEscape` here is dismissing a modal that this branch has already
-                    // established is NOT open (`renameModal` read nil), so there is nothing
-                    // pending to wait out — the Escape is a defensive no-op for the case
-                    // where the modal opened after this read but before this line runs, not
-                    // a repaint this call depends on. Restoring immediately keeps the two
-                    // keystrokes atomic from the terminal's point of view. Residual risk: if
-                    // the modal really is mid-open and Escape has not yet been processed
-                    // when `before` is typed, that text could land in the still-open modal's
-                    // field rather than the composer — a narrow race, and the same class of
-                    // risk `submit` accepts by typing right after `sendKillLine()` with no
-                    // settle in between.
-                    injector.sendEscape()
-                    self.restoreDraft(before, into: injector)
-                    onFinished(false)
-                    return
-                }
-                injector.sendKillLine()
-                injector.sendText(name)
+                // Its own hop, not appended to the one above: see `submit`'s doc comment for
+                // why a Return sharing a hop with the text just before it is exactly the burst
+                // codex's paste-detector folds into one paste and inserts as a newline.
                 injector.sendReturn()
                 settle {
-                    self.restoreDraft(before, into: injector)
-                    onFinished(true)
+                    guard self.renameModal(injector) != nil else {
+                        // No `settle` between the Escape and the restore, unlike every other
+                        // injection pair in this method. That is deliberate, not an oversight:
+                        // `sendEscape` here is dismissing a modal that this branch has already
+                        // established is NOT open (`renameModal` read nil), so there is nothing
+                        // pending to wait out — the Escape is a defensive no-op for the case
+                        // where the modal opened after this read but before this line runs, not
+                        // a repaint this call depends on. Restoring immediately keeps the two
+                        // keystrokes atomic from the terminal's point of view. Residual risk: if
+                        // the modal really is mid-open and Escape has not yet been processed
+                        // when `before` is typed, that text could land in the still-open modal's
+                        // field rather than the composer — a narrow race, and the same class of
+                        // risk `submit` accepts by typing right after `sendKillLine()` with no
+                        // settle in between.
+                        injector.sendEscape()
+                        self.restoreDraft(before, into: injector)
+                        onFinished(false)
+                        return
+                    }
+                    injector.sendKillLine()
+                    injector.sendText(name)
+                    settle {
+                        // Same reason as the `/rename` Return above: its own hop, not the
+                        // typing's.
+                        injector.sendReturn()
+                        settle {
+                            self.restoreDraft(before, into: injector)
+                            onFinished(true)
+                        }
+                    }
                 }
             }
         }
