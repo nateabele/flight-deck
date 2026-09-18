@@ -1807,16 +1807,26 @@ final class SessionStore: ObservableObject {
     }
 
     /// How long `bootFlywheelIdentityIfNeeded` waits for `am macros start-session` before
-    /// giving up. A generous budget — `am` shells out to its own store on first run — but
-    /// bounded, because an unbounded await here would wedge every codex/claude tab creation in
-    /// a flywheel-enabled project behind one hung process, with no way for the user to recover
-    /// short of force-quitting Flight Deck. Resolves the deferred concern noted when
-    /// `FlywheelCoordinator.boot` (Task 2) was given no deadline of its own.
+    /// giving up. A generous budget — `am` shells out to its own store on first run.
+    ///
+    /// This is a FAILURE bound, not a wall-clock one: `SystemFlywheelProcessRunner.run` drains
+    /// `am`'s output with a synchronous, non-cancellable `readDataToEndOfFile()` +
+    /// `waitUntilExit()`, and structured concurrency awaits that child task to completion before
+    /// `bootFlywheelIdentityIfNeeded` can return — cancelling it at the timeout only marks it
+    /// cancelled, which a blocking `Process` call never checks. So a *slow* `am` still turns into
+    /// a timeout failure only once `am` itself finishes (no time actually saved), and a *truly
+    /// hung* `am` wedges that one tab spawn until something kills the process — this bound does
+    /// not reach it. What it does buy: the spawn runs off the main actor (`group.addTask`'s
+    /// child tasks are unstructured, not main-actor-isolated), so neither case freezes the UI,
+    /// and flywheel is opt-in per project, so this is scoped to projects that turned it on. A
+    /// real wall-clock cap needs a cancellation-aware runner that terminates the `Process` itself
+    /// — deferred follow-up, tracked in the SDD ledger, not implemented here.
     static let flywheelBootTimeout: TimeInterval = 20
 
-    /// Thrown by `bootFlywheelIdentityIfNeeded` when `am` does not answer within
-    /// `flywheelBootTimeout`. Surfaces through `launchError(from:)`'s default branch exactly
-    /// like any other boot failure — this file never special-cases it.
+    /// Thrown by `bootFlywheelIdentityIfNeeded` once `am` finishes after `flywheelBootTimeout`
+    /// has already elapsed (see that property's doc comment for why this is a failure
+    /// classification, not an early return). Surfaces through `launchError(from:)`'s default
+    /// branch exactly like any other boot failure — this file never special-cases it.
     private struct FlywheelBootTimedOut: LocalizedError {
         var errorDescription: String? {
             "Agent-Mail's `am` did not respond within \(Int(SessionStore.flywheelBootTimeout))s."
@@ -1828,8 +1838,9 @@ final class SessionStore: ObservableObject {
     /// tab — see both `createSession` branches above.
     ///
     /// Raced against `flywheelBootTimeout` with a `withThrowingTaskGroup`, the same shape
-    /// `CodexAdapter.read` uses for its own app-server round trip: `flywheelCoordinator.boot`
-    /// has no deadline of its own, so a hung `am` would otherwise wedge tab creation forever.
+    /// `CodexAdapter.read` uses for its own app-server round trip — but see that property's doc
+    /// comment: against this runner the race classifies a slow `am` as a failure rather than
+    /// actually cutting the wait short, and cannot reach a truly hung one at all.
     func bootFlywheelIdentityIfNeeded(
         agent: AgentID, project: String, name: String? = nil
     ) async throws -> FlywheelIdentity? {
