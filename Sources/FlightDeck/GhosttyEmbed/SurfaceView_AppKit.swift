@@ -36,6 +36,15 @@ extension Ghostty {
         private static func wallClockTimestamp(for event: NSEvent) -> TimeInterval {
             Date().timeIntervalSince1970 + (event.timestamp - ProcessInfo.processInfo.systemUptime)
         }
+
+        /// The session id this surface displays, threaded in by `SessionStore` right after it
+        /// creates the surface (`makeAttachSurface(id:)`, `insertSession`) — the only two
+        /// places `SessionStore.surfaces` is ever populated. Diagnostic-only: `id` above is
+        /// this `SurfaceView` instance's own identity (`Identifiable` conformance), a UUID
+        /// generated fresh per surface with no relationship to the session it belongs to, so
+        /// it cannot be joined against `SessionStore`'s session-keyed logging. `nil` until
+        /// `SessionStore` sets it.
+        var debugSessionID: UUID?
         #endif
 
         // The current title of the surface as defined by the pty. This can be
@@ -752,7 +761,7 @@ extension Ghostty {
             guard window.firstResponder !== self else {
                 #if DEBUG
                 Self.mouseDebugLogger.debug(
-                    "leftMouseDown surface=\(self.id.uuidString, privacy: .public) branch=already-first-responder-passthrough t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
+                    "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=already-first-responder-passthrough t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
                 )
                 #endif
                 return event
@@ -766,7 +775,7 @@ extension Ghostty {
                 suppressNextLeftMouseUp = true
                 #if DEBUG
                 Self.mouseDebugLogger.debug(
-                    "leftMouseDown surface=\(self.id.uuidString, privacy: .public) branch=swallowed-for-focus-transfer t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
+                    "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=swallowed-for-focus-transfer t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
                 )
                 #endif
                 return nil
@@ -777,7 +786,7 @@ extension Ghostty {
 
             #if DEBUG
             Self.mouseDebugLogger.debug(
-                "leftMouseDown surface=\(self.id.uuidString, privacy: .public) branch=window-not-key-passthrough t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
+                "leftMouseDown session=\(self.debugSessionID?.uuidString ?? "unknown", privacy: .public) branch=window-not-key-passthrough t=\(Self.wallClockTimestamp(for: event), privacy: .public) eventTimestamp=\(event.timestamp, privacy: .public)"
             )
             #endif
 

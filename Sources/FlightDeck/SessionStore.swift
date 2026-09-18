@@ -1247,6 +1247,12 @@ final class SessionStore: ObservableObject {
         guard let surface = processRegistry.record(for: id, around: { provider?.makeSurface(config) })
         else { return nil }
         surfaces[id] = surface
+        // TEMPORARY DIAGNOSTIC INSTRUMENTATION — see `selectedSessionID`'s `didSet` above.
+        // `SurfaceView.id` is the view's own identity, not the session it displays, so this is
+        // the only way to join `SurfaceView`'s mouse-down logging back to a session.
+        #if DEBUG
+        surface.debugSessionID = id
+        #endif
         return surface
     }
 
@@ -2283,6 +2289,10 @@ final class SessionStore: ObservableObject {
         let created = processRegistry.record(for: session.id) { provider?.makeSurface(config) }
         if let surface = created {
             surfaces[session.id] = surface
+            // TEMPORARY DIAGNOSTIC INSTRUMENTATION — see `selectedSessionID`'s `didSet` above.
+            #if DEBUG
+            surface.debugSessionID = session.id
+            #endif
         }
         // Before `tick()`, and before anything can be typed at the shell: `ghostty_surface_new`
         // has already forked the child, and until this lands it is talking to libghostty's
