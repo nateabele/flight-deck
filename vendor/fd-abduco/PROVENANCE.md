@@ -145,6 +145,15 @@ no `?`) aren't implicated and go untouched. DECRQM (`CSI ? Pm $p`, a mode
 *query*, not a set/reset) is unaffected — it already flows through the
 scanner unclassified, same as before this change.
 
+Known limitation: `CSI ? Pm s` (XTSAVE) / `CSI ? Pm r` (XTRESTORE) — saving
+and later restoring a private mode's state via those sequences, rather than
+setting/resetting it directly with `h`/`l` — aren't recognized by
+`csi_is_private_mode()`, so a program that relies on them can desync the
+tracked table from the terminal's real state. This is believed rare in
+practice: mode 1049 (the alt-screen mode, by far the dominant real-world
+case this tracker exists to fix) is set/reset with `h`/`l` directly, not
+saved/restored. Documented as a known limitation rather than fixed now.
+
 Test coverage: `Tests/fd-abduco/test_outlog_modes.c` (unit-level: a mode set
 sequence pushed out of the trim budget by filler bytes, a set-then-reset,
 and a multi-param sequence, plus DECRQM/non-private-mode/no-modes-seen
@@ -167,3 +176,23 @@ sequence) but no longer folded into `val`, so `val` can never exceed
 digits follow; such an oversized parameter is dropped rather than tracked
 (it's adversarial/corrupted input, not a real mode number). Covered by a new
 case 9 in `test_outlog_modes.c` using the reviewer's exact reproducer.
+
+**Second follow-up fix (final review):** the `FdOutlogMode` table itself had
+no cap, unlike the byte ring — the reviewer measured ~200,000 distinct mode
+numbers (reachable in ~1.8 MiB of crafted pty input, well within a session's
+normal output budget) building a 2 MiB table, a 5.2s CPU parse, and a
+~1.9 MiB preamble resent on *every* reattach. Fixed by capping the table at
+`FD_OUTLOG_MODE_CAP` (256 — far above any real program's distinct-mode
+count) in `track_mode()`: existing entries still update in place past the
+cap (a session using fewer than 256 distinct modes is unaffected), only
+*new* mode numbers beyond it are dropped. Covered by a new case 10 in
+`test_outlog_modes.c`. Separately, `FD_OUTLOG_MODE_MAX`'s bound-before-multiply
+check in `track_private_modes()` was tightened from `val <= FD_OUTLOG_MODE_MAX`
+to `val < FD_OUTLOG_MODE_MAX / 10`, closing an off-by-one that let a 7-digit
+value (up to 9,999,999) through before tripping — cosmetic (structurally safe
+either way) but now the cutoff actually matches the documented ~999999
+ceiling. And `server_send_content()`'s chunking loop now bails out on the
+first failed `server_send_packet()` instead of continuing to write to a
+now-dead socket; the pre-existing history-replay loop right below it (which
+open-coded the identical chunking logic, with the identical gap) now just
+calls `server_send_content()` instead of duplicating it.
