@@ -37,18 +37,41 @@ final class PromptService {
     /// Test seam, in the shape and for the reason `TimelineService.reader` is one: the file
     /// read is the thing tests must substitute, and `@Sendable` and free of `self` so what
     /// crosses is a function value and two values, never the service or the store.
-    var tail: @Sendable (URL, Int) -> [SourceLine] = { url, limit in
-        TranscriptPager.page(url: url, anchor: .latest, limit: limit)?.lines ?? []
+    ///
+    /// **"Last records" means last *conversational* records, and `hasMore` is why that
+    /// distinction is carried up here at all.** Claude Code interleaves its own bookkeeping
+    /// lines — `last-prompt`, `custom-title`, `mode`, and others — into the same transcript
+    /// file, and `ClaudeTimelineMapper` correctly maps every one of them to no items. A small
+    /// fixed window can therefore land entirely on a run of bookkeeping and read as "nothing
+    /// open" when a real dialog sits one line above it — not a one-time artifact: the same
+    /// batch recurs for as long as a session sits idle. `TranscriptPager.page` already computes
+    /// whether more history precedes the window it returned; `hasMore` carries that fact up so
+    /// `openPrompt(inSession:)` can widen instead of trusting an empty read that had somewhere
+    /// else to look. See the widen loop there.
+    var tail: @Sendable (URL, Int) -> (lines: [SourceLine], hasMore: Bool) = { url, limit in
+        let page = TranscriptPager.page(url: url, anchor: .latest, limit: limit)
+        return (page?.lines ?? [], page?.hasMore ?? false)
     }
 
-    /// How many records back to look.
+    /// How many records back to look, first.
     ///
-    /// **Small on purpose.** An open call is always among the last records — claude cannot
-    /// proceed past a dialog — so one would nearly always do. A handful is read so that a
-    /// `tool_result` for an *earlier* call is inside the window and cannot make an
-    /// already-answered call look open, which is the only way this can be wrong in the
-    /// dangerous direction.
+    /// **Small on purpose, and almost always enough.** An open call is always among the last
+    /// *conversational* records — claude cannot proceed past a dialog — so one would nearly
+    /// always do. A handful is read so that a `tool_result` for an *earlier* call is inside the
+    /// window and cannot make an already-answered call look open, which is the only way this
+    /// can be wrong in the dangerous direction. What it is not proof against is a run of
+    /// non-conversational bookkeeping lines crowding the real dialog out of the window — see
+    /// `maxTailRecords` and the widen loop in `openPrompt(inSession:)`.
     static let tailRecords = 8
+
+    /// The hard ceiling the widen loop in `openPrompt(inSession:)` will not read past.
+    ///
+    /// A stop, not a suggestion: the loop must terminate fast on a hot path (every registry
+    /// tick, per waiting session), and this is what bounds it when a transcript is nothing but
+    /// bookkeeping all the way up — a malformed file, or a session old enough to predate the
+    /// window entirely. Reached, or `hasMore` false first, and the answer is `"prompt_changed"`,
+    /// exactly what a miss has always meant.
+    static let maxTailRecords = 4096
 
     /// Where a `PromptLifecycleRecord` goes. A seam on the SINK rather than a `#if DEBUG`
     /// around the recording, for the reason `SessionStore.answerAbortSink` is one: the failure
@@ -193,13 +216,30 @@ final class PromptService {
         // *from*: no transcript at all. `prompt_changed` is right for it, and is the only
         // thing that code now means.
         guard case .file(_, let url) = source else { return .failure("prompt_changed") }
-        let lines = tail(url, Self.tailRecords)
-        // A tab that is waiting on something this reader cannot name in the transcript. The
-        // terminal has a dialog up; nothing here knows which call it belongs to, so there is
-        // nothing safe to answer and nothing honest to show.
-        guard let open = reader.openPrompt(inTranscriptTail: lines, activity: activity)
-        else { return .failure("prompt_changed") }
-        return .success(open)
+
+        // **A bounded widen-retry, not a bigger constant.** `Self.tailRecords` finds the open
+        // call the overwhelmingly common time, so the loop starts there and its body runs once
+        // in the ordinary case. But Claude Code interleaves non-conversational bookkeeping
+        // lines into the same transcript file — `last-prompt`, `custom-title`, `mode`, and
+        // others seen in practice, with no promise that list is exhaustive or that a batch of
+        // them is a one-time artifact rather than something that recurs for as long as a
+        // session sits idle — and `ClaudeTimelineMapper` correctly maps every one of them to no
+        // items. A small fixed window can land entirely on such a run and read as "nothing
+        // open" while a real dialog sits just outside it. Rather than guess a bigger constant
+        // and bet against internals this build does not control, each read's own `hasMore`
+        // says whether more history precedes the window just read — "nothing found, but more
+        // exists above" is the signal to look further, not a name for what pushed the dialog
+        // out. `Self.maxTailRecords` is the hard stop: reached, or `hasMore` false, and the
+        // answer is `"prompt_changed"` — exactly what a miss has always meant, never worse.
+        var limit = Self.tailRecords
+        while true {
+            let (lines, hasMore) = tail(url, limit)
+            if let open = reader.openPrompt(inTranscriptTail: lines, activity: activity) {
+                return .success(open)
+            }
+            guard hasMore, limit < Self.maxTailRecords else { return .failure("prompt_changed") }
+            limit *= 8
+        }
     }
 }
 

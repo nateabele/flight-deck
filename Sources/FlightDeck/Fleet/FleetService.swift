@@ -841,7 +841,7 @@ final class FleetService: ObservableObject {
     /// Test seam, forwarding to `PromptService.tail` — the same seam `PromptServiceTests`
     /// substitutes, reached through here because `prompts` is private and a loopback test has
     /// no other way to put a transcript in front of it. No production caller.
-    var promptTailForTesting: @Sendable (URL, Int) -> [SourceLine] {
+    var promptTailForTesting: @Sendable (URL, Int) -> (lines: [SourceLine], hasMore: Bool) {
         get { prompts.tail }
         set { prompts.tail = newValue }
     }

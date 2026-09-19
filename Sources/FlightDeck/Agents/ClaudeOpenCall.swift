@@ -10,11 +10,16 @@ import Foundation
 /// one rule is how the Mac ends up typing an answer at a dialog the phone was not looking at,
 /// which is the specific failure this whole feature has to not have.
 ///
-/// **The window is a tail, and that is exact rather than a shortcut.** Claude cannot proceed
-/// past a dialog, so the open call is always among the last records; a read of a handful of
-/// them either finds it or proves there is none. A few rather than one, so that a
-/// `tool_result` for an *earlier* call is in the window and cannot make an already-answered
-/// call look open — the only way this can be wrong in the dangerous direction.
+/// **The window is a tail, but a small one only nearly always proves there is none.** Claude
+/// cannot proceed past a dialog, so the open call is always among the last *conversational*
+/// records — but Claude Code also interleaves its own non-conversational bookkeeping lines
+/// into the same transcript file, and those map to no items here, so a run of them can crowd
+/// the real dialog out of a small window. A few rather than one, so that a `tool_result` for an
+/// *earlier* call is in the window and cannot make an already-answered call look open — the
+/// only way this can be wrong in the dangerous direction — but a miss at a small size is not by
+/// itself proof of absence. `PromptService.openPrompt(inSession:)`, the caller, is what widens
+/// when a read finds nothing here but reports more history above; this function itself stays a
+/// pure, single-window derivation and does not know about retrying.
 enum ClaudeOpenCall {
     static func find(in lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt? {
         let items = lines.flatMap { ClaudeTimelineMapper.items(inLine: $0.text, at: $0.offset) }
