@@ -501,6 +501,13 @@ page.
     relaunch)** — a red `exclamationmark.triangle.fill` appears at the LEADING edge of that row
     on both devices, VoiceOver reads "Stopped — API error 529 (overloaded)" identically on
     both, and it survives with `activity == nil`.
+72. **Send from the phone mid-turn, then background the app or navigate back to the fleet
+    list before the turn ends.** Return once it has — the outbox row is gone on its own, with
+    no reopen needed to force it. This is `chaseDelivery`'s reason to exist, beside items 33-38's
+    composer: every other trigger that could retire a delivered ghost — an activity/dialog
+    change, the busy-poll, the reconnect refresh — is scoped to the screen being on top, so
+    before this fix a reader who looked away mid-turn could come back to "Queued to your
+    agent" that nothing but leaving and re-entering the session would clear.
 
 ## A second checklist: the iOS plumbing
 
