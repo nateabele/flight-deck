@@ -111,6 +111,12 @@ final class FleetService: ObservableObject {
                 guard let store,
                       case .file(.claude, let url) = store.timelineSource(of: session)
                 else { return nil }
+                // A single fixed-size read, with the same exposure `PromptService.openPrompt`
+                // had before its widen-retry fix: a run of non-conversational bookkeeping lines
+                // could crowd a real open `ExitPlanMode` out of this window too. Left
+                // unwidened here deliberately — out of scope for that fix — so this is not
+                // fully closed everywhere; widening this probe is a separate task if it is ever
+                // needed.
                 let lines = TranscriptPager.page(
                     url: url, anchor: .latest, limit: PromptService.tailRecords
                 )?.lines ?? []

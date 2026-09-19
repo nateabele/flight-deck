@@ -20,12 +20,14 @@ import Foundation
 /// ignores the field, and this is the only thing standing between any of those and a keystroke
 /// at a real terminal.
 ///
-/// The read is a tail — `TimelineLimits.window` at most, `tailRecords` records — done once per
-/// human tap, on the main queue, inline in `FleetService.apply`'s `.answerPrompt` arm, which
-/// (unlike `.newSession`) always answers synchronously. That is a deliberate trade against a
-/// cache and it is the cheaper of the two: `TimelineService` takes
-/// its read off the main actor because a *page* is parsed on every activity change, which is
-/// two orders of magnitude more often and larger.
+/// The read is a tail — `tailRecords` records the overwhelmingly common time, widening (see
+/// `maxTailRecords`) up to a handful of times only when a smaller read proves inconclusive —
+/// done once per human tap, on the main queue, inline in `FleetService.apply`'s `.answerPrompt`
+/// arm, which (unlike `.newSession`) always answers synchronously. That is a deliberate trade
+/// against a cache and it is the cheaper of the two in the ordinary case: `TimelineService`
+/// takes its read off the main actor because a *page* is parsed on every activity change, which
+/// is two orders of magnitude more often and larger. A widened read is not cheap — see
+/// `maxTailRecords` — but it stays rare: it only happens when the common case has already missed.
 ///
 /// Changes no fleet state and emits no `FleetEvent`, exactly as `TimelineService` does not:
 /// what the phone answered becomes visible through the status the agent writes and the
@@ -71,6 +73,16 @@ final class PromptService {
     /// bookkeeping all the way up — a malformed file, or a session old enough to predate the
     /// window entirely. Reached, or `hasMore` false first, and the answer is `"prompt_changed"`,
     /// exactly what a miss has always meant.
+    ///
+    /// **This number's own headroom is theoretical past roughly 1000 records on a typical
+    /// transcript, not a promise of "always this cheap."** `TranscriptPager.backwards` reads in
+    /// 512KB windows up to its own `maxScan` ceiling (`TimelineLimits.window * 16`, 8MB), and
+    /// real Claude transcripts run several KB per raw line near the tail — so a `limit: 4096`
+    /// request can force the pager to exhaust its whole byte budget without ever returning that
+    /// many lines. `TranscriptPager` itself is the real limiter above that point; this constant
+    /// only bounds how many *widen attempts* the loop below will make. The loop's own progress
+    /// guard (`lines.count > previousCount`) is what keeps a session stuck at the pager's byte
+    /// ceiling from paying for repeat widenings that cannot possibly return more.
     static let maxTailRecords = 4096
 
     /// Where a `PromptLifecycleRecord` goes. A seam on the SINK rather than a `#if DEBUG`
@@ -231,13 +243,26 @@ final class PromptService {
         // exists above" is the signal to look further, not a name for what pushed the dialog
         // out. `Self.maxTailRecords` is the hard stop: reached, or `hasMore` false, and the
         // answer is `"prompt_changed"` — exactly what a miss has always meant, never worse.
-        var limit = Self.tailRecords
+        //
+        // `previousCount` is a second, cheaper stop than the record-count ceiling alone. A wider
+        // read is always a superset of a narrower one — `TranscriptPager` only ever extends
+        // backwards from the same anchor — so if a bigger `limit` came back with the same
+        // number of lines as the last attempt, the file itself has run out before the requested
+        // count did (see `maxTailRecords`'s own doc comment: `TranscriptPager`'s byte-scan
+        // ceiling, not this loop's record ceiling, is what actually limits a real transcript).
+        // Widening again in that state cannot possibly find more, only pay for another full
+        // scan of the same bytes — exactly the sustained cost a multi-hour `answerless` episode,
+        // probed on every registry tick, cannot afford to repeat.
+        var limit = max(1, Self.tailRecords)
+        var previousCount = -1
         while true {
             let (lines, hasMore) = tail(url, limit)
             if let open = reader.openPrompt(inTranscriptTail: lines, activity: activity) {
                 return .success(open)
             }
-            guard hasMore, limit < Self.maxTailRecords else { return .failure("prompt_changed") }
+            guard hasMore, limit < Self.maxTailRecords, lines.count > previousCount
+            else { return .failure("prompt_changed") }
+            previousCount = lines.count
             limit *= 8
         }
     }

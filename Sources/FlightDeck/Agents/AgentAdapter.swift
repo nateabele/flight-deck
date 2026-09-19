@@ -235,9 +235,16 @@ protocol AgentAdapter {
 /// Deriving what an agent is blocked on from a window of its transcript.
 ///
 /// A window rather than the whole file because an agent cannot proceed past a dialog, so the
-/// open call is always among the last records; a few rather than one so that a result for an
-/// *earlier* call is inside the window and cannot make an already-answered call look open —
-/// the only way this can be wrong in the dangerous direction.
+/// open call is always among the last *conversational* records; a few rather than one so that
+/// a result for an *earlier* call is inside the window and cannot make an already-answered call
+/// look open — the only way this can be wrong in the dangerous direction. **A conformer must
+/// not treat "nothing found in this window" as proof there is no open call**, though — an agent
+/// can interleave non-conversational bookkeeping records into the same transcript file (Claude
+/// Code does; see `ClaudeOpenCall`'s own doc comment), and a run of those can crowd a real
+/// dialog out of a small window even though the transcript holds more history above it. The
+/// caller (`PromptService.openPrompt(inSession:)`) is what widens the window when that happens;
+/// this protocol's `openPrompt(inTranscriptTail:activity:)` stays a pure, single-window
+/// derivation and returns `nil` for "not in this window", not "does not exist".
 @MainActor
 protocol AgentOpenPromptReader {
     func openPrompt(inTranscriptTail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt?
