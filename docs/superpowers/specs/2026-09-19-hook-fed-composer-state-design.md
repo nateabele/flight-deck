@@ -171,12 +171,27 @@ fixed. A veto that only fires on positive recognition means drift fails
 **open** — injection keeps working, and the residual risk is typing into an
 unrecognised picker.
 
-That residual is bounded and deliberate: the dialogs that matter most
-(permission prompts) are hook-covered and never reach the veto. The veto
-guards only TUI-only surfaces — `/model`, `/resume`, the plan-mode gate —
-which are user-initiated, meaning the person is at the keyboard when one is
-open. A wrong menu keystroke is recoverable; injection that silently never
-works is the failure this design exists to end.
+**What the veto must recognise, corrected by probe (2026-09-19).** An earlier
+draft of this section argued the residual was bounded because TUI-only dialogs
+are user-initiated — the person is at the keyboard when one is open. **The
+interactive probe falsified that.** Immediately after `Stop` fired, Claude Code
+spontaneously raised a select-list dialog of its own ("Teach auto mode about
+your environment? 1. Yes / 2. Not now / 3. Don't show again"). Hook state at
+that instant reads `.present`, because `Stop` is the settle signal — and that
+is precisely the moment a queued phone prompt fires. An unprompted nudge dialog
+is therefore a **common** case arriving at the **worst** moment, not a rare
+user-initiated one.
+
+So the veto is load-bearing and must be good. It keys on **list-ness**, not on
+composer geometry: the footer `Enter to confirm · Esc to cancel` and numbered
+`❯`-marked rows. That is a far more stable signal than the box-drawing sandwich
+it replaces — it is user-facing copy with a fixed meaning rather than an
+incidental artefact of how a frame is drawn — and it is what makes fail-open
+defensible: the shapes that actually threaten an injection are recognised by a
+string that has no reason to churn, while an unrecognised *composer* variant
+still lets injection through.
+
+The hook-covered dialogs (permission prompts) never reach the veto at all.
 
 ### 3.6 Codex parity
 
@@ -223,13 +238,18 @@ feature to one agent.
   fixture may.
 - **Unit — gate.** `.unknown` takes the legacy path; `.dialog` refuses;
   `.present` injects.
-- **Live probe.** Extend `scripts/adapterprobe` to assert the real event
-  order against a real `claude`, and to establish what fires when a permission
-  prompt is **denied** — the one transition this design assumes rather than
-  knows.
-- **Interactive confirmation.** The probe ran headless (`-p`). Hooks are
-  documented to fire identically in the TUI, and that must be confirmed once
-  against a real interactive session before the gate depends on it.
+- **Live probe.** Extend `scripts/adapterprobe` to assert the real event order
+  against a real `claude`, and to establish the two transitions this design
+  still assumes rather than knows: that `PermissionRequest` fires at all (see
+  §7.1), and what clears it on deny.
+- **Interactive confirmation — done.** A PTY probe on 2026-09-19 observed
+  `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and
+  `SessionEnd` firing in a real interactive TUI session, in order. It also
+  established that **no hook fires at all until the folder is trusted** — an
+  untrusted directory leaves readiness `.unknown`, which correctly degrades to
+  the legacy path.
+- **Veto corpus.** The nudge dialog the probe caught ("Teach auto mode…") must
+  be captured as a fixture and must veto.
 
 `test-unit.sh` ignores `-only-testing:` and runs the whole macOS suite — budget
 ~8 minutes per run. Nothing here touches `Sources/FlightDeckMobile`, so
@@ -241,17 +261,24 @@ feature to one agent.
 |---|---|
 | Hook latency blocks the agent | One append, no `jq`, `exit 0` always. Measure in the probe. |
 | `.dialog` clear rule is wrong on deny | Probe it before relying on it; until proven, a denied prompt resolves via the next event or `Stop`. |
-| Veto fails open into a picker | Accepted, §3.5. Bounded, user-initiated, recoverable. |
+| Veto fails open into a picker | Accepted, §3.5 — but only because the veto keys on list-ness (`Enter to confirm · Esc to cancel`), which probe evidence shows is the shape that actually threatens an injection. Unprompted nudge dialogs land right after `Stop`, so this veto is load-bearing, not a backstop. |
 | Debug/release share an event dir | Different `FLIGHT_DECK_EVENT_DIR` per build. |
 | Plugin path has spaces (`Flight Deck.app`) | `ClaudeFlagQuoting` already handles it; assert with a test. |
 | Claude Code renames a hook event | Readiness degrades to `.unknown` → legacy path, not a break. |
 
 ## 7. Open questions
 
-1. What fires when a permission prompt is **denied**? Determines the
-   `.dialog`-clear rule. Probe.
-2. Does `Notification`/`idle_prompt` fire reliably enough to be a transition,
+1. **Does `PermissionRequest` fire at all?** Two probes have now failed to
+   observe it — headless raises no dialog (it auto-denies, and `PostToolUse`
+   still fires), and the interactive probe had its tool auto-approved. If it
+   turns out not to fire, `.dialog` loses its only source and the veto becomes
+   the *sole* defence against permission prompts too. **This must be settled
+   before the gate depends on it** — it is the first task of implementation,
+   not a later verification.
+2. What fires when a permission prompt is **denied**? Determines the
+   `.dialog`-clear rule. Same probe.
+3. Does `Notification`/`idle_prompt` fire reliably enough to be a transition,
    or should it be dropped and `Stop` left as the sole settle signal?
-3. Should injection additionally defer when the tab has focus and has seen
+4. Should injection additionally defer when the tab has focus and has seen
    recent keystrokes — a cheap way to avoid typing over someone mid-thought,
    independent of the screen? Deferred; not required by this design.
