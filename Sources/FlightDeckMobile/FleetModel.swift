@@ -260,6 +260,15 @@ final class FleetModel: TimelinePaging, PromptSending, PromptAnswering, Presence
         // that unpaired and kept a session's transcript in memory is showing the user
         // something they believe they revoked — and it is what the next pairing, to a
         // different Mac, would open a session onto if a tab id ever collided.
+        //
+        // **Cancelled before it is dropped, not just dropped.** `removeAll()` alone frees this
+        // dictionary's own reference, but a model with a running `chaseDelivery` (or any other
+        // background timer — see `cancelOutstandingWork()`) is kept alive by that Task's own
+        // `[weak self]` closure until it next checks in, which for a delivery chase can be up
+        // to fifteen minutes. That is exactly the transcript-and-prompt-content-past-the-revoke
+        // case this comment already describes — cancelling first is what makes "held conversation
+        // content" actually mean gone, not merely unreferenced from here.
+        timelineModels.values.forEach { $0.cancelOutstandingWork() }
         timelineModels.removeAll()
         timelineViewOrder.removeAll()
         evictedTimelineModelIDs.removeAll()
