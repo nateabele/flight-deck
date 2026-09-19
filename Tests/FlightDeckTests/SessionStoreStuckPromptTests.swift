@@ -85,7 +85,7 @@ final class SessionStoreStuckPromptTests: XCTestCase {
         harness.store.now = { [weak self] in self?.clock ?? Date() }
         let transcript = Transcript()
         self.transcript = transcript
-        harness.service.promptTailForTesting = { _, _ in transcript.lines }
+        harness.service.promptTailForTesting = { _, _ in (transcript.lines, false) }
 
         let session = harness.store.newSession(in: tmp)
         harness.store.applyRegistryForTesting([session.id: SessionStatus(activity: .waiting)])

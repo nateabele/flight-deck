@@ -110,7 +110,7 @@ final class PromptIdentityWireTests: XCTestCase {
         prompts.lifecycleSink = { _ in }
         prompts.tail = { _, _ in
             transcript.reads += 1
-            return transcript.lines
+            return (transcript.lines, false)
         }
         store.openPromptProbe = { [weak prompts] session in
             prompts?.pushedOpenPrompt(inSession: session).map(\.callID)
