@@ -4,8 +4,8 @@
 **Date:** 2026-09-19
 
 Replace the screen-grammar gate in front of pty injection with an event-fed
-session state machine, keeping the real pty and the real TUI for everything
-else.
+liveness signal plus a narrow, stable dialog veto — keeping the real pty and
+the real TUI for everything else.
 
 ## 1. Problem
 
@@ -13,272 +13,272 @@ else.
 into a live agent (phone prompts, `/rename`, `/login`, restore's "Keep going")
 — decides whether it is safe to type by *reading the screen*.
 `ClaudeTextChannel.isComposerBox` parses the viewport for a `─`/`❯`/`─`
-sandwich; `CodexTextChannel` parses a footer. Three failures follow from that:
+sandwich; `CodexTextChannel` parses a footer. Three failures follow:
 
-1. **The grammar is a guess about a UI, not a contract.** It is pinned to
-   Claude Code's rendering and re-derived from captured fixtures. Every shape
-   it has not seen — a picker, an unfamiliar dialog, a partially-drawn frame —
-   is a wrong answer in one direction or the other.
-2. **It reads a moving screen.** A viewport read taken while a turn is
-   streaming can land mid-repaint, which is exactly when a phone prompt
-   arrives.
-3. **It breaks on Claude Code updates, silently, in production.** The failure
-   is a regression discovered by a person, not by the build.
+1. **The grammar is a guess about a UI, not a contract.** Pinned to Claude
+   Code's rendering, re-derived from captured fixtures. Every shape it has not
+   seen is a wrong answer in one direction or the other.
+2. **It reads a moving screen.** A viewport read taken while a turn streams can
+   land mid-repaint — exactly when a phone prompt arrives.
+3. **It breaks on Claude Code updates, silently, in production.**
 
 Drafts are *not* the problem. The kill-and-compare dance in
-`ClaudeTextChannel.submit` works and is out of scope here.
+`ClaudeTextChannel.submit` works and is out of scope.
 
 ## 2. Approach
 
 Claude Code fires a documented set of lifecycle hooks, identically in the
 interactive TUI and headless. Flight Deck spawns these processes, so it can
-load a plugin into them and receive those events directly. The composer's
-presence stops being *inferred from pixels* and becomes *derived from the
-agent's own lifecycle*.
+load a plugin into them and receive those events directly.
 
-The screen read does not disappear. It is demoted from the gate to a **veto**
-that only fires when it positively recognises a non-composer shape.
+The design splits one question into two, and gives each to the source that can
+actually answer it:
 
-### Verified by probe (2026-09-19)
+- **"Is this session booted and alive?"** → hooks. A durable fact, derived from
+  the agent's own lifecycle, with no screen involved.
+- **"Is a dialog covering the composer right now?"** → a narrow screen veto
+  keyed on `Esc to cancel`, a piece of user-facing copy with a fixed meaning.
 
-A throwaway plugin loaded with `--plugin-dir` against Claude Code confirmed:
+The screen read is not eliminated. It is reduced from a geometry parse that
+must positively recognise a composer, to a string match that positively
+recognises a dialog.
+
+## 3. What the probes established
+
+Four probes on 2026-09-19, headless and under a real pty.
+
+**Confirmed:**
 
 - `--plugin-dir` loads a plugin with **no trust prompt**.
-- `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and
-  `SessionEnd` all fire, in order.
-- Every payload carries `session_id` as a UUID and `transcript_path`.
-- A hook that exits 0 when its env var is unset costs nothing.
-- No `jq` dependency: the hook forwards its own stdin with `tr -d '\n'`.
+- `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`,
+  `SessionEnd` all fire **in a real interactive TUI**, in order.
+- `PermissionRequest` fires when an approval dialog is raised, followed by
+  `Notification`.
+- Payloads carry `session_id` (a UUID) and `hook_event_name`, so the hook
+  script needs no argument and no `jq`.
+- **No hook fires at all until the folder is trusted.**
 
-### Non-goals
+**Two findings that changed the design:**
 
-- **The Agent SDK.** It has no TUI (fidelity) and bills per-token against the
-  API rather than the subscription (cost). Rejected on both counts.
-- **Replacing the pty.** The pty stays. Rendering, keystrokes and the TUI are
-  unchanged.
-- **A hook mailbox for injection.** `additionalContext` delivery was
-  considered and dropped: no hook can wake an idle session, and injected text
-  lands as a `system` reminder rather than a `user` turn, so a phone prompt
-  delivered that way would not read as the person's own message. Injection
-  stays typed.
-- **Removing `submit()`'s viewport reads.** The multi-row-draft guard stays.
-  Revisit once the state machine is proven.
+1. **Claude Code raises select-list dialogs of its own, unprompted, right
+   after `Stop`.** The probe caught "Teach auto mode about your environment?
+   1. Yes / 2. Not now / 3. Don't show again". Any model in which `Stop` means
+   "composer ready" is wrong at exactly the moment a queued prompt fires. An
+   earlier draft argued TUI-only dialogs are user-initiated and therefore safe
+   to fail open against; that is false.
+2. **Denying a permission prompt with `Esc` fires no hook at all.** Event
+   sequence was unchanged across the dismissal. There is no "dialog dismissed"
+   signal on the deny path.
 
-## 3. Components
+Finding 2 kills a `.dialog` state. A state entered by `PermissionRequest` and
+cleared "by any later event" deadlocks on deny: readiness stays `.dialog`,
+injection is refused, and the only event that would clear it —
+`UserPromptSubmit` — is the very thing being refused. The tab wedges until a
+human types into it locally.
 
-### 3.1 The plugin
+Both dialog families share the footer token **`Esc to cancel`** (permission:
+`Esc to cancel · Tab to amend`; nudge: `Enter to confirm · Esc to cancel`).
+Since the veto must catch family 2 regardless, it catches family 1 for free —
+so `.dialog` is redundant *and* hazardous. It is not in this design.
 
-A directory shipped inside the app bundle, loaded per-session by adding
-`--plugin-dir <bundle>/Contents/Resources/ClaudePlugin` to the launch command.
-Per-session only: the user's `~/.claude` is never written to, which matters
-because the built-in account's home *is* their real `~/.claude`.
+## 4. Components
 
-One script, registered against every lifecycle hook, whose whole body is:
+### 4.1 The plugin
+
+A directory shipped in the app bundle, loaded per-session by adding
+`--plugin-dir <path>` to the launch command. Per-session only: the user's
+`~/.claude` is never written to, which matters because the built-in account's
+home *is* their real `~/.claude`.
+
+One script, registered against the lifecycle hooks, whose whole body is:
 
 ```bash
 [ -n "${FLIGHT_DECK_EVENT_DIR:-}" ] || exit 0
-printf '%s\t%s\n' "$1" "$(cat | tr -d '\n')" >> "$FLIGHT_DECK_EVENT_DIR/$$.ndjson"
+cat | tr -d '\n' >> "$FLIGHT_DECK_EVENT_DIR/events.ndjson"
+printf '\n' >> "$FLIGHT_DECK_EVENT_DIR/events.ndjson"
 exit 0
 ```
 
-Hooks run synchronously and block the agent, so the script must stay a single
-append. No `jq`, no subshell beyond the one capture, no network.
+The payload already carries `hook_event_name` and `session_id`, so the script
+passes no arguments and parses nothing. Hooks run synchronously and block the
+agent, so this stays a single append. No `jq`, no network, `exit 0` always.
 
-Absent env var means absent Flight Deck: a user running `claude` with this
-plugin by hand pays one `exit 0`.
+An absent env var means an absent Flight Deck: a user running `claude` with
+this plugin by hand pays one `exit 0`.
 
-### 3.2 Transport
+### 4.2 Transport
 
-An append-only NDJSON file per session in a Flight-Deck-owned directory, named
-by the env var `FLIGHT_DECK_EVENT_DIR`, set in `ClaudeAdapter.environment(for:)`.
+**One** append-only NDJSON file for the whole app, in a directory named by
+`FLIGHT_DECK_EVENT_DIR`. Flight Deck demultiplexes by the `session_id` in each
+record.
+
+One shared file rather than one per session, because the hook script cannot
+cheaply derive a per-session filename without parsing its payload — and this
+mirrors the existing `SessionStatusWatcher` shape exactly: a single watcher
+that scans once per tick and fans out, rather than one watcher per tab.
 
 A file rather than a socket: Flight Deck already watches files
-(`TranscriptWatcher`, `SessionStatusWatcher`) and that machinery is proven,
-whereas a socket would need a per-session listener and a lifecycle to leak.
-`O_APPEND` writes of this size are atomic, and the reader is a tail.
+(`TranscriptWatcher`, `TailReader`, the shared `WatchClock`) and that machinery
+is proven; a socket needs a per-session listener and a lifecycle to leak.
+`O_APPEND` writes of this size are atomic.
 
-The env var is also the isolation seam. A debug build and a release build must
-name **different** directories, or they will read each other's events — the
-same trap `sessions.json` already has.
+`TailReader` is reused as-is with `TailTruncationPolicy.resumeAtEnd`, the
+policy meant for a shared append-only log.
 
-Events are keyed by `session_id`, which for Claude is the UUID Flight Deck
-minted and passed as `--session-id`, so it matches `binding.conversationID`
-with no extra mapping.
+The env var is also the isolation seam: **debug and release must name
+different directories**, or they read each other's events — the trap
+`sessions.json` already has.
 
-### 3.3 The state machine
+Claude's `session_id` is the UUID Flight Deck minted and passed as
+`--session-id`, so it matches `binding.conversationID` with no extra mapping.
+
+### 4.3 Readiness
 
 ```swift
 enum ComposerReadiness: Equatable {
-    case unknown   // no events yet
-    case absent    // not started, or ended
-    case present   // this agent's own composer is on screen
-    case dialog    // agent-raised dialog on screen
+    case unknown   // no events seen for this session yet
+    case live      // booted, running, not ended
+    case absent    // SessionEnd seen
 }
 ```
 
-Claude's transitions:
-
 | Event | Readiness |
 |---|---|
-| `SessionStart` | `.present` |
-| `UserPromptSubmit` | `.present` |
-| `PreToolUse` | `.present` |
-| `PermissionRequest` | `.dialog` |
-| `PostToolUse` | `.present` |
-| `Notification` (`idle_prompt`) | `.present` |
-| `Stop` | `.present` |
+| `SessionStart` | `.live` |
+| `UserPromptSubmit` | `.live` |
+| `PreToolUse` | `.live` |
+| `PostToolUse` | `.live` |
+| `Stop` | `.live` |
 | `SessionEnd` | `.absent` |
 
-**Busy versus idle is deliberately not modelled here.** Every event that is
-not a dialog collapses to the same answer, because the question this type
-exists to answer is "is there a composer to type into", and mid-turn injection
-is fine — Claude queues it. Activity already has an owner: the status registry
-(`ClaudeStatusFile`) feeds `AgentEvent.activity`, and a second, differently-
-derived answer to the same question would be free to disagree with it.
+**Busy versus idle is deliberately not modelled.** Mid-turn injection is fine —
+Claude queues it — so every non-terminal event collapses to the same answer.
+Activity already has an owner (`ClaudeStatusFile` → `AgentEvent.activity`); a
+second, differently-derived answer would be free to disagree with it.
 
-`.dialog` is cleared by *any* later event, because there is no dedicated
-"dialog dismissed" hook: an approved tool produces `PostToolUse`, a denied one
-produces a later event, and a turn abandoned at the dialog produces `Stop`.
-**This rule must be verified by live probe during implementation**, not
-assumed — particularly what fires on deny.
+**`PermissionRequest` and `Notification` are deliberately not wired.**
+`PermissionRequest` has no observable clear (§3, finding 2), and `Notification`
+fires for permission prompts as well as idle, so neither can carry a state
+transition honestly. The veto covers what they would have covered.
 
-`.unknown` is load-bearing, not a placeholder. It is the state of a session
-restored from a snapshot written by an older build, or one whose plugin failed
-to load. It falls back to today's behaviour — the full screen grammar, alone —
-so the change degrades to the status quo instead of to a refusal.
+`.unknown` is load-bearing, not a placeholder: it is a session restored from an
+older build's snapshot, one whose plugin failed to load, and one in an
+untrusted folder. It falls back to today's full screen grammar, so the change
+degrades to the status quo rather than to a refusal.
 
-### 3.4 The gate
+### 4.4 The gate
 
 `SessionStore.injectionGate` becomes:
 
 ```
-readiness == .present  AND  NOT channel.isKnownNonComposer(viewport)
-readiness == .unknown  →    today's full-grammar screen check
-readiness == .dialog / .absent  →  refuse
+.live     →  inject, unless channel.isKnownNonComposer(viewport)
+.unknown  →  today's full-grammar screen check (unchanged legacy path)
+.absent   →  refuse
 ```
 
-### 3.5 The veto, and why it fails open
+### 4.5 The veto
 
-`isKnownNonComposer(_ viewport: String) -> Bool` replaces
-`hasComposerBox` on the gate path. It returns `true` **only when it positively
-recognises** a full-screen picker or dialog shape, and `false` whenever it is
-unsure.
+`isKnownNonComposer(_ viewport: String) -> Bool` replaces `hasComposerBox` on
+the gate path. It returns `true` **only when it positively recognises** a
+dialog, and `false` whenever unsure.
 
-This inversion is the point. An `AND` of hook state with the *existing*
-predicate would keep failure-on-update: a drifted grammar that stops
-recognising a composer would still block injection, which is the bug being
-fixed. A veto that only fires on positive recognition means drift fails
-**open** — injection keeps working, and the residual risk is typing into an
-unrecognised picker.
+The inversion is the point. `AND`-ing hook state with the *existing* predicate
+would preserve failure-on-update: a drifted grammar that stopped recognising a
+composer would still block injection — the bug being fixed. A veto that fires
+only on positive recognition makes drift fail **open**.
 
-**What the veto must recognise, corrected by probe (2026-09-19).** An earlier
-draft of this section argued the residual was bounded because TUI-only dialogs
-are user-initiated — the person is at the keyboard when one is open. **The
-interactive probe falsified that.** Immediately after `Stop` fired, Claude Code
-spontaneously raised a select-list dialog of its own ("Teach auto mode about
-your environment? 1. Yes / 2. Not now / 3. Don't show again"). Hook state at
-that instant reads `.present`, because `Stop` is the settle signal — and that
-is precisely the moment a queued phone prompt fires. An unprompted nudge dialog
-is therefore a **common** case arriving at the **worst** moment, not a rare
-user-initiated one.
+It keys on **`Esc to cancel`**, which both dialog families carry and a composer
+never does. That is a far more stable signal than the box-drawing sandwich it
+replaces: user-facing copy with a fixed meaning, rather than an incidental
+artefact of how a frame is drawn.
 
-So the veto is load-bearing and must be good. It keys on **list-ness**, not on
-composer geometry: the footer `Enter to confirm · Esc to cancel` and numbered
-`❯`-marked rows. That is a far more stable signal than the box-drawing sandwich
-it replaces — it is user-facing copy with a fixed meaning rather than an
-incidental artefact of how a frame is drawn — and it is what makes fail-open
-defensible: the shapes that actually threaten an injection are recognised by a
-string that has no reason to churn, while an unrecognised *composer* variant
-still lets injection through.
+**It must not match a running turn.** Claude Code shows `esc to interrupt`
+while streaming, which is a different string and must stay unmatched — the
+whole point of allowing mid-turn injection is that Claude queues it. This is a
+required test, not an incidental one.
 
-The hook-covered dialogs (permission prompts) never reach the veto at all.
-
-### 3.6 Codex parity
+### 4.6 Codex parity
 
 Codex gets the same `ComposerReadiness`, fed from its app-server rather than
-from hooks: it already has structured thread status over `CodexRPC`, so its
-footer scrape is replaced by the same state machine from a better source. The
-readiness type and the gate are agent-agnostic; only the feed differs.
+hooks: it already has structured thread status over `CodexRPC`, so its footer
+scrape is replaced by the same readiness from a better source, with its own
+veto for its own dialog shapes. The readiness type and the gate are
+agent-agnostic; only the feed differs.
 
-This is the adapter rule, not an exception to it: a UI-surfaced capability
-lands through the adapter interface for every adapter, and an agent-specific
-*signal* is a reason to put detection behind the adapter, never to scope the
-feature to one agent.
+This is the adapter rule honoured, not excepted: an agent-specific *signal* is
+a reason to put detection behind the adapter, never to scope a feature to one
+agent.
 
-### 3.7 Wiring
+### 4.7 Wiring
 
-- `AgentEvent` gains `.lifecycle(ComposerReadiness)`. Every switch over
-  `AgentEvent` is exhaustive, so the case and all its handler arms land in one
-  commit.
-- `ClaudeRuntime` gains a `HookEventWatcher`, built alongside
-  `TranscriptWatcher` in `attach` and stopped in `detach` on the last
-  subscriber, emitting `.lifecycle(...)`.
-- `CodexRuntime` emits `.lifecycle(...)` from thread status.
+- `AgentEvent` gains `.lifecycle(ComposerReadiness)`. The only exhaustive
+  switch is `SessionStore.apply(_:to:)`, so the case and its arm land together.
+- `SessionStore` owns one `HookEventWatcher` (mirroring `SessionStatusWatcher`)
+  and fans its output to `ClaudeRuntime.ingest(...)`, which emits `.lifecycle`
+  to that conversation's subscribers.
 - `SessionStore` holds `composerReadiness: [UUID: ComposerReadiness]`, written
-  from the event handler and read by `injectionGate`.
+  by `apply` and read by `injectionGate`.
+- `--plugin-dir` is injected **where flags are resolved**, not in
+  `ClaudeAdapter` — `ClaudeAdapterTests` asserts `launchCommand`/`resumeCommand`
+  are byte-identical pass-throughs to `ClaudeSession`, and that property is
+  worth keeping.
 
-## 4. Error handling
+## 5. Error handling
 
-- **Plugin fails to load / hooks never fire.** Readiness stays `.unknown`
-  forever; the session behaves exactly as it does today. No refusal, no
-  regression.
-- **Event file grows unboundedly.** Truncated on session end; the watcher
-  tails from its own offset and never reads the backlog.
-- **Stale readiness after a crash.** Readiness is per-tab in memory, never
-  persisted, so a relaunch starts at `.unknown` and falls back.
-- **A hook script error.** Exits 0 on every path. A hook that fails must never
-  block the agent.
+- **Plugin never loads, or folder untrusted** → readiness stays `.unknown`;
+  behaves exactly as today. No refusal, no regression.
+- **Event file grows** → truncated at launch; `TailReader` resumes at end.
+- **Stale readiness after a crash** → never persisted; relaunch starts
+  `.unknown`.
+- **Hook script error** → exits 0 on every path; must never block the agent.
+- **A session whose events never arrive** (plugin stripped by `--bare`) →
+  `.unknown`, legacy path.
 
-## 5. Testing
+## 6. Testing
 
-- **Unit — state machine.** Synthetic event sequences to every state,
-  including the `.dialog`-clear rule and out-of-order arrival.
-- **Unit — the veto.** Run `isKnownNonComposer` against every capture in
-  `Fixtures/Claude/`: every dialog and picker fixture must veto; no composer
-  fixture may.
-- **Unit — gate.** `.unknown` takes the legacy path; `.dialog` refuses;
-  `.present` injects.
-- **Live probe.** Extend `scripts/adapterprobe` to assert the real event order
-  against a real `claude`, and to establish the two transitions this design
-  still assumes rather than knows: that `PermissionRequest` fires at all (see
-  §7.1), and what clears it on deny.
-- **Interactive confirmation — done.** A PTY probe on 2026-09-19 observed
-  `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and
-  `SessionEnd` firing in a real interactive TUI session, in order. It also
-  established that **no hook fires at all until the folder is trusted** — an
-  untrusted directory leaves readiness `.unknown`, which correctly degrades to
-  the legacy path.
-- **Veto corpus.** The nudge dialog the probe caught ("Teach auto mode…") must
-  be captured as a fixture and must veto.
+- **Unit — readiness.** Synthetic event sequences to every state, including
+  out-of-order arrival and an unknown `hook_event_name` (must be ignored, not
+  crash).
+- **Unit — the veto, against the existing corpus.** `Fixtures/Claude/` already
+  holds `permission-bash`, `permission-write`, `permission-write-60col`,
+  `permission-write-row2`, `question-*` (11 captures), and `workspace-trust`:
+  **every one must veto**. `idle-empty-box`, `busy-*` (5 captures): **none may
+  veto** — `busy-streaming-*` is the `esc to interrupt` case.
+- **New fixture.** The nudge dialog the probe caught ("Teach auto mode…") must
+  be captured and must veto. It is the shape that motivated the veto.
+- **Unit — gate.** `.unknown` takes the legacy path; `.absent` refuses;
+  `.live` injects; `.live` + veto refuses.
+- **Integration.** A denied permission prompt must leave the tab injectable —
+  the regression this design exists to avoid.
+- **End-to-end.** Phone prompt mid-turn and while idle; both land as real user
+  turns. `/rename` still works (the class that broke 100% of renames before).
 
-`test-unit.sh` ignores `-only-testing:` and runs the whole macOS suite — budget
-~8 minutes per run. Nothing here touches `Sources/FlightDeckMobile`, so
-`test-ios.sh` is not needed.
+`test-unit.sh` runs `xcodegen generate` then drives `xctest` on the bundle
+directly, and ignores `-only-testing:` — budget ~8 minutes per run. Nothing
+here touches `Sources/FlightDeckMobile`, so `test-ios.sh` is not needed.
 
-## 6. Risks
+**`Bundle.main` is the `xctest` tool under that runner, not `Flight Deck.app`.**
+The plugin-directory lookup must therefore be an injectable seam with a
+`Bundle.main` default, exactly as `SessionDaemon.bundledBinary` already is.
+
+## 7. Risks
 
 | Risk | Handling |
 |---|---|
-| Hook latency blocks the agent | One append, no `jq`, `exit 0` always. Measure in the probe. |
-| `.dialog` clear rule is wrong on deny | Probe it before relying on it; until proven, a denied prompt resolves via the next event or `Stop`. |
-| Veto fails open into a picker | Accepted, §3.5 — but only because the veto keys on list-ness (`Enter to confirm · Esc to cancel`), which probe evidence shows is the shape that actually threatens an injection. Unprompted nudge dialogs land right after `Stop`, so this veto is load-bearing, not a backstop. |
+| Hook latency blocks the agent | One append, no `jq`, always `exit 0`. Measure. |
+| Veto misses a new dialog family | Fails open — an injection lands in a picker. Bounded and recoverable; the alternative (fail closed) reintroduces the original bug. |
+| Veto matches a running turn | Explicit test on `busy-streaming-*`; `esc to interrupt` must not match. |
 | Debug/release share an event dir | Different `FLIGHT_DECK_EVENT_DIR` per build. |
-| Plugin path has spaces (`Flight Deck.app`) | `ClaudeFlagQuoting` already handles it; assert with a test. |
-| Claude Code renames a hook event | Readiness degrades to `.unknown` → legacy path, not a break. |
+| Plugin path has spaces (`Flight Deck.app`) | `ClaudeFlagSerializer` quoting; assert with a test. |
+| Claude Code renames a hook event | Unknown names ignored; readiness degrades to `.unknown` → legacy path. |
+| `--bare` strips plugins | `.unknown` → legacy path. |
 
-## 7. Open questions
+## 8. Open questions
 
-1. **Does `PermissionRequest` fire at all?** Two probes have now failed to
-   observe it — headless raises no dialog (it auto-denies, and `PostToolUse`
-   still fires), and the interactive probe had its tool auto-approved. If it
-   turns out not to fire, `.dialog` loses its only source and the veto becomes
-   the *sole* defence against permission prompts too. **This must be settled
-   before the gate depends on it** — it is the first task of implementation,
-   not a later verification.
-2. What fires when a permission prompt is **denied**? Determines the
-   `.dialog`-clear rule. Same probe.
-3. Does `Notification`/`idle_prompt` fire reliably enough to be a transition,
-   or should it be dropped and `Stop` left as the sole settle signal?
-4. Should injection additionally defer when the tab has focus and has seen
+1. Should `PermissionRequest` be re-introduced later as a veto *strengthener*
+   (set a flag that also vetoes, cleared by any later event **or** a short
+   timeout)? It would add defence-in-depth without the deadlock, but only
+   earns its place if the veto proves insufficient in practice. Deferred.
+2. Should injection additionally defer when the tab has focus and has seen
    recent keystrokes — a cheap way to avoid typing over someone mid-thought,
-   independent of the screen? Deferred; not required by this design.
+   independent of the screen? Deferred; not required here.
