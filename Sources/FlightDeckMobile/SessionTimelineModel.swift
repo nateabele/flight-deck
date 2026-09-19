@@ -854,6 +854,13 @@ final class SessionTimelineModel {
     /// Runs `deliveryChaseRetries`, then repeats its final cadence until `deliveryChaseCeiling`
     /// has elapsed, then stops. A ghost stuck longer than that is not going to be fixed by one
     /// more poll, and this must not become a background loop that outlives the session.
+    ///
+    /// **Checked again after the sleep, not only before it.** The entry can retire — or be
+    /// dismissed — while this chase is asleep, from a fetch some other trigger caused. Folding
+    /// that same membership check in beside `Task.isCancelled` right before `loadNewer()` is
+    /// what stops this chase from firing one redundant, already-unnecessary fetch on the round
+    /// where that happened, rather than waiting for the next iteration's top-of-loop check to
+    /// notice.
     private func chaseDelivery(_ token: UUID) async {
         var elapsed = Duration.zero
         var index = 0
@@ -863,7 +870,7 @@ final class SessionTimelineModel {
                 ? deliveryChaseRetries[index]
                 : deliveryChaseRetries.last ?? .seconds(30)
             try? await Task.sleep(for: delay)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, outbox.entries.contains(where: { $0.id == token }) else { return }
             loadNewer()
             elapsed += delay
             index += 1
@@ -879,6 +886,35 @@ final class SessionTimelineModel {
     func dismiss(_ id: UUID) {
         outbox.dismiss(id)
         deliveryChases.removeValue(forKey: id)?.cancel()
+    }
+
+    /// Revoked pairing: drop every timer this model is holding, so nothing keeps it — and the
+    /// transcript and prompt text inside it — alive past the revoke. Called from
+    /// `FleetModel.unpair()`, before it drops its own reference to this model.
+    ///
+    /// **`deliveryChases` is why this exists at all.** `promptTyped(_:)` starts one as
+    /// `Task { [weak self] in await self?.chaseDelivery(token); ... }`, and that `self?.` binds
+    /// a strong reference for the whole of `chaseDelivery`'s run — every sleep inside it,
+    /// up to `deliveryChaseCeiling` (fifteen minutes) — not only for starting it. `unpair()`'s
+    /// own doc comment is explicit that held transcript and prompt content must not survive a
+    /// revoke; an uncancelled chase would keep both alive, right here, for up to that long.
+    /// Cancelling does not break the retain the instant this call returns — the chase's current
+    /// `Task.sleep` still has to throw first — but `Task.sleep` answers cancellation promptly,
+    /// so that is a scheduler hop, not a real leak window.
+    ///
+    /// The other three tables are here for the same reason, cheaply: none of them was ever
+    /// cancelled on unpair either, and while their own worst case is bounded by one `timeout`
+    /// rather than the chase's fifteen minutes, there is no reason for any of them to keep
+    /// running against a connector this model no longer has.
+    func cancelOutstandingWork() {
+        deliveryChases.values.forEach { $0.cancel() }
+        deliveryChases.removeAll()
+        promptDeadlines.values.forEach { $0.cancel() }
+        promptDeadlines.removeAll()
+        answerDeadline?.cancel()
+        answerDeadline = nil
+        deadline?.cancel()
+        deadline = nil
     }
 
     /// The screen appeared or went away. Reported so the Mac can show, beside the tab, that a
