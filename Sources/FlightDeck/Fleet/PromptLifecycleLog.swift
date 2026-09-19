@@ -120,6 +120,13 @@ struct PromptLifecycleRecord: Equatable {
         /// construction and cannot separate a stall from a race that is about to resolve; the
         /// later ones are where a `lastRecordAgeMs` growing in step with the wall clock says the
         /// record is not coming. `SessionStore.stuckPromptReportLadder` is the schedule, and why.
+        ///
+        /// **`tailRecords` is this diagnostic's own fixed read, not this tick's `openPrompt`
+        /// derivation.** It is always `PromptService.tailRecords` (`lastRecordAgeMS`'s own read
+        /// through `TranscriptPager`, independent of `openPrompt`), never whatever a wider
+        /// `openPrompt(inSession:)` widen-retry may have reached in deciding `code` above — so a
+        /// `stuck` line naming `tailRecords=8` is not evidence the derivation itself only looked
+        /// at 8 records this tick.
         case stuck(
             code: String, watched: String?, registryCWD: String?, pathMatches: Bool,
             fileAgeMS: Int?, lastRecordAgeMS: Int?, tailRecords: Int

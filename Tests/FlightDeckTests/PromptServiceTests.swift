@@ -466,21 +466,70 @@ final class PromptServiceTests: XCTestCase {
         XCTAssertEqual(reads.value, 1, "no history above the first read means no reason to widen")
     }
 
-    /// **The ceiling is a hard stop, not a suggestion.** A transcript that is bookkeeping all
-    /// the way up — or a stub that lies and always claims more history — must not spin forever;
-    /// the loop starting at `Self.tailRecords` and multiplying by 8 reaches `Self.maxTailRecords`
-    /// in exactly four reads (8, 64, 512, 4096), and the fourth must be the last one performed.
+    /// **The ceiling is a hard stop, not a suggestion, and the growth factor is exactly ×8.**
+    /// A transcript that is bookkeeping all the way up — or a stub that lies and always claims
+    /// more history — must not spin forever; the loop starting at `Self.tailRecords` and
+    /// multiplying by 8 reaches `Self.maxTailRecords` in exactly four reads (8, 64, 512, 4096),
+    /// and the fourth must be the last one performed. The line count is made to grow with
+    /// `limit` (rather than being fixed, as the other tests here use) specifically so the
+    /// progress guard added alongside the ceiling never trips first — this test pins the
+    /// *record-count* ceiling; `testOpenPromptWidenLoopStopsEarlyWhenAWiderReadFindsNoMoreLines`
+    /// below pins the progress guard.
     func testOpenPromptWidenLoopStopsAtTheCeilingRatherThanSpinning() {
+        let (service, _, _, id) = makeService(activity: .waiting)
+        var limitsSeen: [Int] = []
+        let bookkeeping = bookkeepingLine()
+        service.tail = { _, limit in
+            limitsSeen.append(limit)
+            let lines = (0..<limit).map { _ in SourceLine(offset: 0, text: bookkeeping) }
+            return (lines, true)
+        }
+        XCTAssertEqual(code(service.answer(session: id, call: "toolu_A", answer: .deny,
+                                           token: UUID())), "prompt_changed")
+        XCTAssertEqual(limitsSeen, [8, 64, 512, 4096],
+                       "8, 64, 512, 4096 — ×8 each step, and the loop must stop there, not spin")
+    }
+
+    /// **A hit short-circuits immediately, even when `hasMore` says there is more to read.**
+    /// `hasMore` is only ever consulted after a miss — every other test above that finds
+    /// something uses `hasMore: false`, which would still pass a regression that checked
+    /// `hasMore` before attempting the find at all. This is the one that catches it.
+    func testOpenPromptStopsWideningTheInstantItFindsSomethingEvenWhenHasMoreIsTrue() {
+        let (service, _, _, id) = makeService(activity: .waiting)
+        let reads = ReadCount()
+        let lines = [SourceLine(offset: 0, text: askLine("toolu_A"))]
+        service.tail = { _, _ in
+            reads.value += 1
+            return (lines, true)
+        }
+        guard case .success(let open) = service.openPrompt(inSession: id) else {
+            return XCTFail("a found call must short-circuit regardless of hasMore")
+        }
+        XCTAssertEqual(open.callID, "toolu_A")
+        XCTAssertEqual(reads.value, 1, "a hit never triggers a widen, no matter what hasMore says")
+    }
+
+    /// **The progress guard is what actually protects a real, multi-hour `answerless` episode.**
+    /// `TranscriptPager` only ever extends backwards from the same anchor, so a wider read that
+    /// comes back with the exact same line count as the last one means the file ran out before
+    /// the requested count did — `TranscriptPager`'s own byte-scan ceiling (`maxScan`), not this
+    /// loop's record ceiling, is what is actually limiting it (see `maxTailRecords`'s own doc
+    /// comment). Widening again in that state cannot find more, only pay for a repeat scan of
+    /// the same bytes — exactly the cost that must not recur on every ~500ms registry tick for
+    /// as long as an episode lasts. So `hasMore: true` alone must not be enough to keep going:
+    /// a second read with no more lines than the first must stop, well short of the ceiling.
+    func testOpenPromptWidenLoopStopsEarlyWhenAWiderReadFindsNoMoreLines() {
         let (service, _, _, id) = makeService(activity: .waiting)
         let reads = ReadCount()
         let lines = [SourceLine(offset: 0, text: bookkeepingLine())]
         service.tail = { _, _ in
             reads.value += 1
-            return (lines, true)
+            return (lines, true) // same count every time, despite `hasMore` staying true
         }
         XCTAssertEqual(code(service.answer(session: id, call: "toolu_A", answer: .deny,
                                            token: UUID())), "prompt_changed")
-        XCTAssertEqual(reads.value, 4, "8, 64, 512, 4096 — the loop must stop there, not spin")
+        XCTAssertEqual(reads.value, 2,
+                       "no growth after the first widen attempt means stop, not spin to the ceiling")
     }
 
 }

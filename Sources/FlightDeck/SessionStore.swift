@@ -6466,10 +6466,16 @@ final class SessionStore: ObservableObject {
     /// leaving `waiting`, and a cache still matches while a re-derivation does not.
     ///
     /// Only `waiting` tabs are asked, so the cost is bounded to the state a human is being
-    /// waited on in: an idle or busy fleet reads nothing at all, and the tail a blocked tab
-    /// does cost is `PromptService.tailRecords` records once per poll for as long as its
-    /// dialog is up. `openPromptProbe` refuses a codex tab on the agent alone, before any
-    /// transcript is resolved, so an agent this build cannot read a dialog for is free too.
+    /// waited on in: an idle or busy fleet reads nothing at all. The ordinary blocked tab costs
+    /// one `PromptService.tailRecords`-record read per poll — but `PromptService.openPrompt`'s
+    /// own widen-retry loop means a tab whose tail is crowded with non-conversational
+    /// bookkeeping can cost up to a handful of reads, widening toward
+    /// `PromptService.maxTailRecords`, before it gives up for this poll. That widening is rare
+    /// and bounded (see `PromptService.openPrompt`'s own doc comment for the cost this can
+    /// actually reach on a real transcript), but it is no longer a flat one-read-per-poll
+    /// promise for every blocked tab. `openPromptProbe` refuses a codex tab on the agent alone,
+    /// before any transcript is resolved, so an agent this build cannot read a dialog for is
+    /// free too.
     ///
     /// **One read per waiting tab, this tick — not two.** `checkStuckPrompts` used to run this
     /// same derivation a second time, over the same transcript, purely to learn the refusal
