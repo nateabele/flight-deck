@@ -147,6 +147,10 @@ final class SessionTimelineDeliveredTests: XCTestCase {
         model.send("ship it")
         fleet.answerCommand(.success(()))
         let token = try XCTUnwrap(fleet.promptTokens.first)
+        // If an assertion below fails before the chase retires the entry on its own, this stops
+        // it rather than leaving a background `Task` polling `loadNewer()` for up to fifteen
+        // minutes of task time inside the same process running the rest of the suite.
+        defer { model.dismiss(token) }
 
         model.promptTyped(token)
         XCTAssertEqual(model.outbox.entries.map(\.state), [.delivered])
@@ -183,6 +187,9 @@ final class SessionTimelineDeliveredTests: XCTestCase {
         model.send("ship it")
         fleet.answerCommand(.success(()))
         let token = try XCTUnwrap(fleet.promptTokens.first)
+        // Belt-and-braces alongside the `dismiss(token)` call below: if an assertion fails
+        // first, this still stops the chase rather than leaving it running in the background.
+        defer { model.dismiss(token) }
 
         model.promptTyped(token)
         // The send's own post-ack fetch, then one round of the chase's own retries — both
@@ -217,6 +224,13 @@ final class SessionTimelineDeliveredTests: XCTestCase {
         fleet.answerCommand(.success(()))
         let tokenB = try XCTUnwrap(fleet.promptTokens.last)
         await fleet.answerWhenAsked(.success(emptyPage())) // second's own post-ack fetch
+        // If an assertion below fails before both chases retire on their own, this stops both
+        // rather than leaving either polling `loadNewer()` in the background for the rest of
+        // the suite's run.
+        defer {
+            model.dismiss(tokenA)
+            model.dismiss(tokenB)
+        }
 
         model.promptTyped(tokenA)
         model.promptTyped(tokenB)
