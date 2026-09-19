@@ -312,6 +312,9 @@ final class SessionTimelineModel {
     /// twice before either answer lands and a shared slot would leave the first send with no
     /// deadline at all — the exact "waits forever" case this whole mechanism exists for.
     @ObservationIgnored private var promptDeadlines: [UUID: Task<Void, Never>] = [:]
+    /// One delivery chase per outbox token, so two prompts in flight at once don't collide —
+    /// see `chaseDelivery` and `promptTyped(_:)`.
+    @ObservationIgnored private var deliveryChases: [UUID: Task<Void, Never>] = [:]
     /// The answer whose result is still allowed to change anything, or `nil` when none is.
     /// A single slot rather than the table a send needs, because `answer(_:to:)` refuses a
     /// second answer while one is outstanding — one dialog, one decision.
@@ -808,8 +811,75 @@ final class SessionTimelineModel {
             """)
     }
 
+    /// How long `chaseDelivery` waits between asking again for the transcript record that
+    /// retires a delivered ghost, before falling back to repeating its final cadence.
+    ///
+    /// Backs off, and is bounded together with `deliveryChaseCeiling` below. A `var` only so a
+    /// test can shorten it — nothing in the app assigns it. The same device as `promptRetries`.
+    @ObservationIgnored var deliveryChaseRetries: [Duration] = [
+        .milliseconds(900), .milliseconds(1_500), .seconds(3), .seconds(5), .seconds(8),
+        .seconds(15), .seconds(30), // then repeat the last step until the ceiling below
+    ]
+
+    /// The total window `chaseDelivery` keeps retrying in, past which a stuck ghost is left for
+    /// the reader to notice rather than polled forever.
+    ///
+    /// Fifteen minutes — the same round number as `SessionStore.phonePromptWindow`, not a fresh
+    /// constant invented for the same judgement call. Both answer "how long is a
+    /// phone-submitted prompt still worth chasing," one on each side of the wire.
+    static let deliveryChaseCeiling: Duration = .seconds(15 * 60)
+
+    /// Keeps asking until a delivered prompt's own turn shows up in the transcript, independent
+    /// of `session?.activity`/`openPromptCall` changing and independent of whether this screen
+    /// is on screen right now — see the doc comment on `promptTyped(_:)` for why those signals
+    /// cannot be trusted alone.
+    ///
+    /// **Owned by the model, not a screen-scoped `.task`, and that is the whole fix.** Every
+    /// other trigger that could retire this ghost — an activity/dialog change event, the
+    /// screen-scoped busy-poll, the one-shot reconnect refresh — is either fragile or scoped to
+    /// the screen being on top, so a reader who backgrounds the app or navigates away mid-turn
+    /// could be left with a "Queued to your agent" row nothing retires until they manually
+    /// reopen the session. A chase living here instead survives exactly that:
+    /// `hasOutstandingWork` already keeps this model alive while `outbox.entries` is non-empty,
+    /// so this chase is never cut off by eviction either.
+    ///
+    /// **Same three-step order as `chaseBlockedPrompt`, and it must not be reordered.** Check
+    /// membership first, so a chase that finds the entry already gone costs nothing more than
+    /// the look; sleep before acting, so the very first ask is not fired the instant the ghost
+    /// appears — the fetch that delivered it is usually still the one about to land the
+    /// matching turn; call `loadNewer()` last, a fire-and-forget nudge — `reconcile(with:)`,
+    /// run from `fetch()`'s own success handler, is what actually retires the entry, on
+    /// whichever fetch happens to land with the matching turn.
+    ///
+    /// Runs `deliveryChaseRetries`, then repeats its final cadence until `deliveryChaseCeiling`
+    /// has elapsed, then stops. A ghost stuck longer than that is not going to be fixed by one
+    /// more poll, and this must not become a background loop that outlives the session.
+    private func chaseDelivery(_ token: UUID) async {
+        var elapsed = Duration.zero
+        var index = 0
+        while elapsed < Self.deliveryChaseCeiling {
+            guard outbox.entries.contains(where: { $0.id == token }) else { return }
+            let delay = index < deliveryChaseRetries.count
+                ? deliveryChaseRetries[index]
+                : deliveryChaseRetries.last ?? .seconds(30)
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            loadNewer()
+            elapsed += delay
+            index += 1
+        }
+    }
+
     /// The reader has read a failure and wants the row gone.
-    func dismiss(_ id: UUID) { outbox.dismiss(id) }
+    ///
+    /// Cancels any delivery chase still running for this id — including one started for a
+    /// `.delivered` entry that later moved to `.failed` and is being dismissed now — so
+    /// dismissing a row never leaves an orphaned `Task` still calling `loadNewer()` for a
+    /// token `outbox.entries` no longer holds.
+    func dismiss(_ id: UUID) {
+        outbox.dismiss(id)
+        deliveryChases.removeValue(forKey: id)?.cancel()
+    }
 
     /// The screen appeared or went away. Reported so the Mac can show, beside the tab, that a
     /// phone is on this conversation — and remembered here too, so `linkResumed()` below can
@@ -1317,6 +1387,11 @@ final class SessionTimelineModel {
     func promptExpired(_ token: UUID) { outbox.fail(token, Self.expired) }
 
     /// The Mac typed this prompt into the agent. See `FleetEvent.promptTyped`.
+    ///
+    /// **Starts the delivery chase here, and guards it on `deliveryChases[token] == nil`.**
+    /// `deliver` is idempotent (see `PromptOutbox.deliver`), so a replayed or duplicate
+    /// `promptTyped` for the same token must not spawn a second `chaseDelivery` racing the
+    /// first for the one entry.
     func promptTyped(_ token: UUID) {
         outbox.deliver(token)
         // `deliver` adds to the `.delivered` set `rebuild()`'s ghost-append reads, and this
@@ -1324,6 +1399,11 @@ final class SessionTimelineModel {
         // changes. Without this the new ghost would sit unseen in `outbox.entries` until the
         // next successful fetch happened to land.
         rebuild()
+        guard deliveryChases[token] == nil else { return }
+        deliveryChases[token] = Task { [weak self] in
+            await self?.chaseDelivery(token)
+            self?.deliveryChases.removeValue(forKey: token)
+        }
     }
 
     /// Copy for a prompt that did not land.
