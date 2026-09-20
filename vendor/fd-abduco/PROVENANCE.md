@@ -110,6 +110,47 @@ baseline smoke test uses `-n`.
 
 ## Fork-delta log
 
+### 2026-09-20: no alternate screen buffer on attach (`client.c`)
+
+`client_setup_terminal` no longer emits `\033[?1049h\033[H`, and
+`client_restore_terminal` emits the matching `\033[?25h` unconditionally
+instead of only on the way out of the alternate buffer. Set
+`FD_ABDUCO_ALT_SCREEN=1` to restore upstream behavior; Flight Deck never sets
+it.
+
+Upstream enters the alternate buffer so that detaching restores whatever the
+user's shell had on screen before they attached. That is the right trade for a
+multiplexer you attach to from an existing terminal. It is the wrong one here:
+Flight Deck's attach client owns its ghostty surface for the tab's entire life,
+there is no prior screen to put back, and the switch therefore never gets
+undone. Every tab lived on the alternate screen permanently, which cost two
+things:
+
+1. **No scrollback.** The alternate screen has none, so a session's own history
+   was simply unreachable — two-finger scroll had nothing to scroll.
+2. **Scroll became arrow keys.** With no scrollback to move and no mouse
+   reporting active, ghostty converts wheel events into cursor-key presses
+   (DEC private mode 1007, "alternate scroll", default ON — see `mouseScroll`
+   in `vendor/ghostty/src/Surface.zig`, which fires on exactly alt-screen +
+   `mouse_event == .none` + 1007). Claude Code's composer binds Up/Down to
+   prompt-history recall, so every scroll gesture walked the user backwards
+   through previously submitted prompts.
+
+That combination was the "scrolling scrolls my prompt history" bug. It
+presented as intermittent — some tabs fine, some not, and a working tab
+breaking after being switched away from and back — because leaving the
+alternate screen again depended entirely on whether a stray `\033[?1049l`
+happened to appear later in the attach stream: from a pager that had exited
+somewhere in the replayed history, or (after 2026-09-18) from the mode preamble
+when 1049 was in the tracked table. A re-attach re-entered the alternate screen
+every time, which is why switching back to a tab could break it.
+
+Diagnosed by attaching read-only (`-r -a`) to ten live sessions and diffing
+their attach streams: eight arrived on the alternate screen, two — the ones
+carrying a matching `1049l` — did not. `Tests/fd-abduco/run_alt_screen_test.sh`
+pins both directions, including that a session genuinely inside a full-screen
+app still gets the alternate screen as it should.
+
 ### 2026-09-18: DEC private mode tracking + reattach preamble (`fd_outlog.c`/`.h`, `server.c`)
 
 Extends the `FdOutlog` per-byte CSI scanner (added earlier to drop
