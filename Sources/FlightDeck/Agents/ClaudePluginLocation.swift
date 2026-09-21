@@ -48,4 +48,18 @@ enum ClaudePluginLocation {
         out.values["--plugin-dir"] = .list(items)
         return out
     }
+
+    /// The whole composition `SessionStore.options(for:project:)` needs: unwrap `.claude`,
+    /// find the plugin in `bundle`, inject, re-wrap. Pulled out as a pure function — rather
+    /// than left inline at the one call site — so a test can drive it with a bundle that
+    /// actually carries the plugin (`Bundle(for: Self.self)` in the test target does; the
+    /// real call site's `Bundle.main` is the `xctest` tool under `scripts/test-unit.sh` and
+    /// never would). `.codex` and a bundle without the plugin both pass `options` through
+    /// unchanged.
+    static func applying(to options: AgentOptions, bundle: Bundle) -> AgentOptions {
+        guard case .claude(let flags) = options, let plugin = directory(bundle: bundle) else {
+            return options
+        }
+        return .claude(injecting(into: flags, pluginDirectory: plugin))
+    }
 }

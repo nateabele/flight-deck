@@ -10,11 +10,19 @@ final class AgentAccountEnvironmentTests: XCTestCase {
     func testEachAgentNamesItsOwnVariable() {
         // Claude also carries FLIGHT_DECK_EVENT_DIR — see `ClaudeAdapter.environment(for:)` —
         // which codex has no equivalent of, since only claude's plugin writes hook events.
+        // Built from a hand-written literal, not `ClaudePluginLocation.eventDirectory`
+        // itself: mirroring the production call would only catch a wrong key on the
+        // adapter's side, never a wrong path inside `eventDirectory`.
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let expectedEventDir = base
+            .appendingPathComponent("Flight Deck", isDirectory: true)
+            .appendingPathComponent("hook-events-debug", isDirectory: true)
+            .path
         XCTAssertEqual(
             ClaudeAdapter().environment(for: account(.claude)),
             [
                 "CLAUDE_CONFIG_DIR": "/tmp/home",
-                "FLIGHT_DECK_EVENT_DIR": ClaudePluginLocation.eventDirectory.path,
+                "FLIGHT_DECK_EVENT_DIR": expectedEventDir,
             ]
         )
         XCTAssertEqual(CodexAdapter(rpc: CodexRPC(transport: NullTransport())).environment(for: account(.codex)),
