@@ -488,6 +488,13 @@ struct SessionSidebar: View {
                 guard case .project(let id) = store.sidebarRows[index] else { return }
                 store.setCollapsed(!(store.repos.first { $0.id == id }?.isCollapsed ?? false),
                                    forProjectAt: id)
+            },
+            // How the monitor proves the row it decides about is the row that was pressed. A
+            // session closing in another project removes a row, and every index below it shifts;
+            // `SidebarRow.id` does not move.
+            rowIdentity: { index in
+                guard index >= 0, index < store.sidebarRows.count else { return nil }
+                return store.sidebarRows[index].id
             }
         )
         .dropDestination(for: URL.self) { urls, _ in

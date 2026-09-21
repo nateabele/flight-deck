@@ -5,25 +5,25 @@ import XCTest
 /// `SidebarInputMonitor`'s doc comment — so none of this needs a window or an `NSEvent`.
 @MainActor
 final class SidebarClickIntentTests: XCTestCase {
-    /// Far enough from the trailing edge to clear the close-button strip, which is where every
-    /// case below wants to be unless it says otherwise.
-    private let overTheTitle = SidebarClickIntent.closeButtonExclusion + 100
+    /// `SidebarRow.id`'s shape, since that is what the rule compares.
+    private let row = "p:\(UUID().uuidString)"
+    private let otherRow = "p:\(UUID().uuidString)"
 
     private func toggles(
         from down: CGPoint,
         to up: CGPoint,
-        downRow: Int = 3,
-        upRow: Int = 3,
+        downRow: String? = nil,
+        upRow: String? = nil,
         clickCount: Int = 1,
-        distanceFromTrailingEdge: CGFloat? = nil
+        pressedRowControl: Bool = false
     ) -> Bool {
         SidebarClickIntent.togglesCollapse(
             downPoint: down,
             upPoint: up,
-            downRow: downRow,
-            upRow: upRow,
+            downRow: downRow ?? row,
+            upRow: upRow ?? downRow ?? row,
             clickCount: clickCount,
-            downDistanceFromTrailingEdge: distanceFromTrailingEdge ?? overTheTitle
+            pressedRowControl: pressedRowControl
         )
     }
 
@@ -37,9 +37,7 @@ final class SidebarClickIntentTests: XCTestCase {
     }
 
     func testTravelBeyondTheThresholdIsADragNotAClick() {
-        // Straight down the sidebar, which is the direction a reorder drag moves. Most real
-        // drags never deliver their mouse-up here at all — see the doc comment — so this is
-        // the belt-and-braces half of the rule.
+        // Straight down the sidebar, which is the direction a reorder drag moves.
         XCTAssertFalse(toggles(from: CGPoint(x: 40, y: 200), to: CGPoint(x: 40, y: 190)))
     }
 
@@ -48,39 +46,90 @@ final class SidebarClickIntentTests: XCTestCase {
         XCTAssertFalse(toggles(from: CGPoint(x: 40, y: 200), to: CGPoint(x: 43, y: 203)))
     }
 
+    func testTheDragThresholdIsFourPoints() {
+        // Pinned, not inferred: the cases above still pass at 4.2 or 3.8, and this rule's whole
+        // job is to sit just above hand tremor and well below a deliberate drag.
+        XCTAssertEqual(SidebarClickIntent.dragThreshold, 4.0)
+
+        let origin = CGPoint(x: 40, y: 200)
+        XCTAssertTrue(toggles(from: origin, to: CGPoint(x: 40 + 3.99, y: 200)))
+        XCTAssertFalse(toggles(from: origin, to: CGPoint(x: 40 + 4.0, y: 200)))
+    }
+
     func testReleasingOverADifferentRowDoesNotToggle() {
         XCTAssertFalse(
-            toggles(from: CGPoint(x: 40, y: 200), to: CGPoint(x: 40, y: 199), downRow: 3, upRow: 4)
+            toggles(from: CGPoint(x: 40, y: 200), to: CGPoint(x: 40, y: 199),
+                    downRow: row, upRow: otherRow)
         )
     }
 
-    func testADoubleClickDoesNotToggle() {
-        // Without this the two clicks would toggle twice and the project would appear not to
-        // have moved.
-        XCTAssertFalse(toggles(from: CGPoint(x: 40, y: 200), to: CGPoint(x: 40, y: 200), clickCount: 2))
-    }
+    // The two nil cases call the rule directly: `toggles(...)` above defaults a missing row to
+    // the matching one, which is convenient everywhere else and cannot express "no row".
 
-    func testAClickOnTheCloseButtonStripDoesNotToggle() {
-        // The hover-revealed X. Excluded by geometry because the probe ruled out telling it
-        // apart by hit-test view — SwiftUI answers with the row's one hosting view either way.
+    func testReleasingWhereNoRowCanBeIdentifiedDoesNotToggle() {
+        // The pointer left the list, or the row it was on is gone.
         XCTAssertFalse(
-            toggles(
-                from: CGPoint(x: 230, y: 200),
-                to: CGPoint(x: 230, y: 200),
-                distanceFromTrailingEdge: 8
+            SidebarClickIntent.togglesCollapse(
+                downPoint: CGPoint(x: 40, y: 200), upPoint: CGPoint(x: 40, y: 200),
+                downRow: row, upRow: nil, clickCount: 1, pressedRowControl: false
             )
         )
     }
 
-    func testTheExclusionEndsAtItsConstant() {
-        let boundary = CGPoint(x: 40, y: 200)
+    func testAnUnidentifiableRowNeverToggles() {
+        // Two rows that cannot be named are not thereby "the same row".
         XCTAssertFalse(
-            toggles(from: boundary, to: boundary,
-                    distanceFromTrailingEdge: SidebarClickIntent.closeButtonExclusion)
+            SidebarClickIntent.togglesCollapse(
+                downPoint: CGPoint(x: 40, y: 200), upPoint: CGPoint(x: 40, y: 200),
+                downRow: nil, upRow: nil, clickCount: 1, pressedRowControl: false
+            )
         )
-        XCTAssertTrue(
-            toggles(from: boundary, to: boundary,
-                    distanceFromTrailingEdge: SidebarClickIntent.closeButtonExclusion + 0.5)
+    }
+
+    func testADoubleClickDoesNotToggle() {
+        // Unreachable from `SidebarInputMonitor`, which only schedules on `clickCount == 1`, but
+        // the rule is pure and stays total over its inputs rather than trusting one call site.
+        XCTAssertFalse(toggles(from: CGPoint(x: 40, y: 200), to: CGPoint(x: 40, y: 200), clickCount: 2))
+    }
+
+    func testAPressOnTheCloseButtonDoesNotToggle() {
+        // The hover-revealed X. Excluded by its own frame — there is no exclusion width here to
+        // assert, which is the point: see `SidebarInputMonitor.pressedControl(in:at:)`.
+        XCTAssertFalse(
+            toggles(from: CGPoint(x: 230, y: 200), to: CGPoint(x: 230, y: 200),
+                    pressedRowControl: true)
         )
+    }
+}
+
+/// `SidebarRow.id` is what the rule above compares, so its two documented properties — stable
+/// across a reorder, and distinct per row — are what make that comparison mean anything.
+@MainActor
+final class SidebarRowIdentityTests: XCTestCase {
+    private func repo(_ path: String, sessions: Int) -> Repo {
+        Repo(
+            url: URL(fileURLWithPath: path, isDirectory: true),
+            sessions: (0..<sessions).map { Session(title: "s\($0)", workingDirectory: path) }
+        )
+    }
+
+    func testARowsIdentitySurvivesTheIndexItSitsAt() {
+        let a = repo("/w/a", sessions: 1)
+        let b = repo("/w/b", sessions: 1)
+
+        let before = SidebarRow.rows(for: [a, b])
+        let after = SidebarRow.rows(for: [b, a])
+
+        // b's header is index 2 before and index 0 after. This is exactly the shift the monitor
+        // defends against by capturing identity rather than the index it pressed.
+        XCTAssertEqual(before[2].id, after[0].id)
+        XCTAssertNotEqual(before[0].id, after[0].id)
+    }
+
+    func testAProjectAndItsOwnSessionRowDoNotShareAnIdentity() {
+        let a = repo("/w/a", sessions: 1)
+        let rows = SidebarRow.rows(for: [a])
+
+        XCTAssertNotEqual(rows[0].id, rows[1].id)
     }
 }

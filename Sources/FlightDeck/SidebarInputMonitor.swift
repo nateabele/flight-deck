@@ -67,42 +67,66 @@ import SwiftUI
 /// the fact*. The obvious way to do that — widen the monitor's mask to `.leftMouseUp` and
 /// compare the two points — **does not work, and was measured not to work**:
 ///
-///     [plain SwiftUI view]  DOWN seen, UP seen
-///     [List row, .onMove ]  DOWN seen, UP NEVER SEEN
-///     [List row, no .onMove] DOWN seen, UP seen
+///     [plain SwiftUI view, key + active]   DOWN seen, UP seen
+///     [List row,           key + active]   DOWN seen, UP NEVER SEEN
+///     [List row,       window never key]   DOWN seen, UP seen
 ///
-/// A reorder-capable `NSTableView` runs a nested tracking loop from inside its `mouseDown:`,
-/// pulling events straight off the queue with `nextEventMatchingMask:` until the button comes
-/// up. Local monitors are invoked from `NSApplication.sendEvent`, which that loop bypasses
-/// entirely, so the up is consumed where no monitor can see it. It is `.onMove` that turns the
-/// loop on — which is exactly the feature this row must not break, so it cannot be given up.
+/// `NSTableView` runs a nested tracking loop from inside its `mouseDown:`, pulling events
+/// straight off the queue with `nextEventMatchingMask:` until the button comes up. Local
+/// monitors are invoked from `NSApplication.sendEvent`, which that loop bypasses entirely, so
+/// the up is consumed where no monitor can see it.
 ///
-/// What *is* observable is the loop **ending**: schedule a block for `NSDefaultRunLoopMode`
-/// only, and it cannot run until the run loop leaves `NSEventTrackingRunLoopMode`. Measured on
-/// the same probe, against a click held for 100ms:
+/// **The loop is not something the sidebar opts into, and nothing here can opt out of it.**
+/// `.onMove` does not cause it (measured with and without: identical, both swallow the up), and
+/// `.selectionDisabled()` — which every project header carries — does not avoid it either. The
+/// only condition that correlated across every variant was the window being key and the app
+/// active, which the real sidebar always is. So dropping reorder, or selection, would not bring
+/// the mouse-up back; there is nothing to trade away here.
 ///
-///     1574.7ms [?]                        monitor DOWN
-///     1575.8ms [NSEventTrackingRunLoopMode]   DispatchQueue.main.async ran   ← during, useless
-///     1677.8ms [NSEventTrackingRunLoopMode]   button released
-///     1680.6ms [kCFRunLoopDefaultMode]        RunLoop.perform(inModes:) ran  ← after
+/// What *is* observable is the loop **ending**: a block scheduled for `NSDefaultRunLoopMode`
+/// only cannot run until the run loop leaves `NSEventTrackingRunLoopMode`. Measured against a
+/// press held 100ms, on a `.selectionDisabled()` row:
 ///
-/// So the down records where it started and asks to be called back once the click is over, and
-/// the callback reads `NSEvent.mouseLocation` for where it ended. `DispatchQueue.main.async` is
+///     1573.5ms [?]                          monitor DOWN
+///     1575.7ms [NSEventTrackingRunLoopMode]   DispatchQueue.main.async ran  ← during, useless
+///     1674.0ms [kCFRunLoopDefaultMode]        RunLoop.perform(inModes:) ran ← after release
+///
+/// So the down records where the press started and asks to be called back once it is over; the
+/// callback reads `NSEvent.mouseLocation` for where it ended. `DispatchQueue.main.async` is
 /// **not** interchangeable here: `NSEventTrackingRunLoopMode` is a common mode, so it runs
-/// mid-drag with the button still down, and everything would toggle.
+/// mid-press with the button still down, and every drag would toggle.
+///
+/// The callback does not *assume* the tracking loop ran. On the one measured variant where it
+/// did not, the block ran ~4ms after the press — long before the release — so anything that
+/// skipped the loop would turn every drag into a toggle. `NSEvent.pressedMouseButtons` is what
+/// makes that a decision rather than luck: a press still in progress is declined outright.
 ///
 /// `SidebarClickIntent` holds the decision itself, over plain numbers, so it is testable without
 /// a window. Its travel threshold is belt and braces rather than the load-bearing check: a real
 /// drag both exceeds it *and* usually ends with the pointer on another row entirely. The
 /// threshold catches what is left — a press that wobbles a point or two and never drags at all.
 ///
-/// The hover-revealed close button is excluded **by geometry, not by a hit-test walk**, and that
-/// is the one place this file departs from the idiom in `sidebarRow(under:)` and
-/// `ToolOverlayInputMonitor.isOverTerminal`. A probe ruled the walk out: SwiftUI backs the row
-/// with a single `NSHostingView` whose `hitTest` returns *itself* even directly over the
-/// `SwiftUIAppKitButton` it creates for that button, so `SessionWindow.hitView(for:)` cannot tell
-/// the X from the project name. The fallback measures the down point against the trailing edge of
-/// the `NSTableRowView` this monitor already resolves — no geometry is plumbed out of SwiftUI.
+/// # Excluding the close button, by its own frame
+///
+/// A hit-test walk UP from the event cannot tell the hover-revealed X from the project name:
+/// SwiftUI backs the row with one `NSHostingView`, and its `hitTest` returns *itself* even at
+/// the button's exact center (probed). That is why this one decision departs from the idiom in
+/// `sidebarRow(under:)` and `ToolOverlayInputMonitor.isOverTerminal`.
+///
+/// Walking DOWN does work, and needs no geometry plumbed out of SwiftUI and no reserved strip of
+/// guessed width. The button is a real `NSView` in the row's subtree with a real frame, and
+/// SwiftUI backs it with an `NSButton` — the only `NSControl` anywhere under a row, since
+/// everything else in one is drawn by SwiftUI itself. So the exclusion is that control's actual
+/// frame: exact, and still right if the row ever gains a second control.
+///
+/// `.accessibilityIdentifier("close-project")` would have been the more pointed match and was
+/// tried first: it does not reach the `NSView`. SwiftUI serves accessibility from its own element
+/// tree, and every `accessibilityIdentifier()` under a row reads empty.
+///
+/// The button is in the tree only while the row is hovered, which is exactly when it can be
+/// clicked (verified: parking a window under a stationary pointer reveals it). When it is
+/// absent, nothing is excluded — which is correct, because a button that is not in the tree is
+/// not on screen and cannot have been the target.
 ///
 /// # Scoping: this monitor is app-wide, so it must prove which table it is looking at
 ///
@@ -137,6 +161,12 @@ final class SidebarInputMonitor {
     /// just project headers — this monitor has no model of what a row is — so the caller is what
     /// makes a click on a session row a no-op. See `SessionSidebar`.
     var toggleRow: ((Int) -> Void)?
+    /// The identity of the row at this table index — `SidebarRow.id`, supplied by the caller for
+    /// the same reason as above. Click-to-collapse decides a press-duration after it began, and
+    /// a bare index does not survive that: sessions come and go asynchronously here, so a row
+    /// removed above the pointer shifts everything below it up one, and the index pressed would
+    /// then name a different project. Identity is what is compared instead.
+    var rowIdentity: ((Int) -> String?)?
 
     /// `kVK_Return`. Hard-coded rather than importing Carbon for one constant.
     private static let returnKeyCode: UInt16 = 36
@@ -197,9 +227,14 @@ final class SidebarInputMonitor {
         // Ask to be called back once this click is over, so it can be told apart from a drag.
         // Deliberately *after* the field-editor guard above — so a click inside an open rename
         // field can never collapse a project — and deliberately *before* the selected-row guard
-        // below, which returns early on every row but one. `clickCount == 1` only: a
-        // double-click would otherwise toggle on its first click and again on its second, and
-        // read as having done nothing.
+        // below, which returns early on every row but one.
+        //
+        // `clickCount == 1` is the only value that reaches the scheduler, so a real double-click
+        // resolves like this: the first down (cc=1) schedules, and toggles once when the button
+        // comes up; the second (cc=2) goes to `renameRow` above, which guards `case .session`
+        // and no-ops on a project header. Net effect, one toggle — which is the right answer,
+        // but nobody should have to derive it. The rule keeps its own `clickCount` guard anyway,
+        // because a pure rule should be total over its inputs rather than rely on this call site.
         if event.clickCount == 1 {
             scheduleToggleDecision(
                 window: window, rowView: rowView, rowIndex: rowIndex,
@@ -217,8 +252,8 @@ final class SidebarInputMonitor {
     /// returns — which is the earliest moment this monitor can know a click was not a drag. See
     /// the doc comment for the measurements behind both halves.
     ///
-    /// Everything the decision needs is captured as a number here, while the down's view tree is
-    /// still the one under the pointer: by the time the block runs the list may have scrolled,
+    /// Everything the decision needs is resolved here, while the press's own view tree is still
+    /// the one under the pointer: by the time the block runs the list may have scrolled,
     /// reordered, or lost the window entirely.
     private func scheduleToggleDecision(
         window: NSWindow,
@@ -227,10 +262,13 @@ final class SidebarInputMonitor {
         downPoint: NSPoint,
         clickCount: Int
     ) {
+        // A row the caller cannot identify cannot be proved to be the same row later, so it is
+        // never scheduled at all.
+        guard let identity = rowIdentity?(rowIndex) else { return }
         // Screen coordinates, because that is the space the answer arrives in: the block reads
         // `NSEvent.mouseLocation`, and a reorder can slide the rows under the pointer in between.
         let downOnScreen = window.convertPoint(toScreen: downPoint)
-        let distanceFromTrailingEdge = rowView.bounds.maxX - rowView.convert(downPoint, from: nil).x
+        let pressedRowControl = Self.pressedControl(in: rowView, at: downPoint)
 
         // `.default` ONLY. A block that also listed `.eventTracking` — or a
         // `DispatchQueue.main.async`, which effectively does, since event tracking is a common
@@ -238,8 +276,8 @@ final class SidebarInputMonitor {
         RunLoop.main.perform(inModes: [.default]) { [weak self] in
             MainActor.assumeIsolated {
                 self?.finishToggleDecision(
-                    downOnScreen: downOnScreen, downRow: rowIndex,
-                    distanceFromTrailingEdge: distanceFromTrailingEdge, clickCount: clickCount
+                    downOnScreen: downOnScreen, downIdentity: identity,
+                    pressedRowControl: pressedRowControl, clickCount: clickCount
                 )
             }
         }
@@ -247,10 +285,16 @@ final class SidebarInputMonitor {
 
     private func finishToggleDecision(
         downOnScreen: NSPoint,
-        downRow: Int,
-        distanceFromTrailingEdge: CGFloat,
+        downIdentity: String,
+        pressedRowControl: Bool,
         clickCount: Int
     ) {
+        // The press is not over, so this is not yet a click — and it may never be one. Reached
+        // only when the table skipped its tracking loop, which was measured to run this block
+        // about 4ms after the press rather than after the release. Declining is what keeps the
+        // rest of this method from depending on that loop having run.
+        guard NSEvent.pressedMouseButtons & 1 == 0 else { return }
+
         // Resolved again rather than captured, the same rule the rest of this file follows: the
         // window may have closed while the button was held. `NSEvent.mouseLocation` is where the
         // pointer is *now*, which — the tracking loop having just returned — is where it was
@@ -259,17 +303,35 @@ final class SidebarInputMonitor {
         let upOnScreen = NSEvent.mouseLocation
         guard let hit = SessionWindow.hitView(
             inWindow: window, at: window.convertPoint(fromScreen: upOnScreen)
-        ), let (_, _, upRow) = Self.sidebarRow(under: hit) else { return }
+        ), let (_, _, rowIndex) = Self.sidebarRow(under: hit) else { return }
 
         guard SidebarClickIntent.togglesCollapse(
             downPoint: downOnScreen,
             upPoint: upOnScreen,
-            downRow: downRow,
-            upRow: upRow,
+            downRow: downIdentity,
+            upRow: rowIdentity?(rowIndex),
             clickCount: clickCount,
-            downDistanceFromTrailingEdge: distanceFromTrailingEdge
+            pressedRowControl: pressedRowControl
         ) else { return }
-        toggleRow?(downRow)
+        // The index resolved NOW, not the one pressed: the rule has just proved the two name the
+        // same row, and it is today's index that indexes today's `sidebarRows`.
+        toggleRow?(rowIndex)
+    }
+
+    /// Whether a press landed on a real AppKit control inside the row — today, the hover-revealed
+    /// close button, which is the only thing in a row SwiftUI backs with an `NSControl`.
+    ///
+    /// Walks DOWN, deliberately: walking up from the hit view cannot work here, because the
+    /// row's `NSHostingView` answers `hitTest` with itself. See the file's doc comment.
+    private static func pressedControl(in rowView: NSTableRowView, at pointInWindow: NSPoint) -> Bool {
+        let pointInRow = rowView.convert(pointInWindow, from: nil)
+        func covers(_ view: NSView) -> Bool {
+            if view is NSControl, view.convert(view.bounds, to: rowView).contains(pointInRow) {
+                return true
+            }
+            return view.subviews.contains(where: covers)
+        }
+        return rowView.subviews.contains(where: covers)
     }
 
     /// Returns true if the event was handled and should be consumed.
@@ -317,34 +379,25 @@ enum SidebarClickIntent {
     /// left — a press that wobbles a point or two without ever starting a drag.
     static let dragThreshold: CGFloat = 4.0
 
-    /// The trailing strip of a row that never toggles, reserved for the hover-revealed close
-    /// button.
-    ///
-    /// Geometry rather than a hit-test walk because a probe ruled the walk out: SwiftUI backs the
-    /// row with one `NSHostingView`, and its `hitTest` returns *itself* even directly over the
-    /// `SwiftUIAppKitButton` created for the close button, so the hit view cannot tell the X from
-    /// the project name.
-    ///
-    /// 32 rather than the button's own ~15pt width: the row's trailing inset and the button's
-    /// slop sit inside it. Over-reserving costs a strip of row that does not toggle;
-    /// under-reserving collapses a project on the way to closing it.
-    static let closeButtonExclusion: CGFloat = 32.0
-
     /// Whether a press/release pair should toggle the row it landed on.
     ///
     /// The two points only have to share a coordinate space — the caller passes screen points.
-    /// `downDistanceFromTrailingEdge` is the press point's distance from the trailing edge of the
-    /// row view, in the row's own coordinates.
+    /// The two row identities are `SidebarRow.id`, not indices: the release is decided a whole
+    /// press later, and an index can come to mean a different row in that time.
+    ///
+    /// `pressedRowControl` is whether the press landed on an AppKit control inside the row —
+    /// the close button. There is no exclusion *width* here to get wrong: the caller measures
+    /// the control's own frame. See `SidebarInputMonitor.pressedControl(in:at:)`.
     static func togglesCollapse(
         downPoint: CGPoint,
         upPoint: CGPoint,
-        downRow: Int,
-        upRow: Int,
+        downRow: String?,
+        upRow: String?,
         clickCount: Int,
-        downDistanceFromTrailingEdge: CGFloat
+        pressedRowControl: Bool
     ) -> Bool {
-        guard clickCount == 1, downRow == upRow else { return false }
-        guard downDistanceFromTrailingEdge > closeButtonExclusion else { return false }
+        guard clickCount == 1, !pressedRowControl else { return false }
+        guard let downRow, downRow == upRow else { return false }
         return hypot(upPoint.x - downPoint.x, upPoint.y - downPoint.y) < dragThreshold
     }
 }
@@ -357,13 +410,15 @@ extension View {
         _ monitor: SidebarInputMonitor,
         renameRow: @escaping (Int) -> Void,
         renameSelected: @escaping () -> Bool,
-        toggleRow: @escaping (Int) -> Void
+        toggleRow: @escaping (Int) -> Void,
+        rowIdentity: @escaping (Int) -> String?
     ) -> some View {
         self
             .onAppear {
                 monitor.renameRow = renameRow
                 monitor.renameSelected = renameSelected
                 monitor.toggleRow = toggleRow
+                monitor.rowIdentity = rowIdentity
                 monitor.start()
             }
             .onDisappear { monitor.stop() }

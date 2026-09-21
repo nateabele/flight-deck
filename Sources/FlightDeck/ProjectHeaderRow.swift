@@ -26,11 +26,14 @@ struct ProjectHeaderRow: View {
             // hit-testing with it, so expanded it was a 9×5 sliver) but it took repeated tries
             // to hit, and widening it to cover the name took the whole row's drag with it.
             //
-            // The toggle is `SidebarInputMonitor`'s instead. It watches mouse-down and mouse-up
-            // passively, returns both unchanged, and tells a click from a drag afterwards — so
-            // the entire row toggles on a click AND drags to reorder. Finder and the Xcode
-            // navigator toggle from the whole label too, so this is also the conventional
-            // behaviour.
+            // The toggle is `SidebarInputMonitor`'s instead. It watches mouse-DOWN passively —
+            // observing it and returning it unchanged, which is what leaves the drag intact —
+            // and then decides whether that press was a click only once the press is over. It
+            // cannot watch the mouse-up: `NSTableView` swallows that one inside its own tracking
+            // loop, where no local monitor can see it. That file's doc comment has the
+            // measurements. The upshot here is that the entire row toggles on a click AND drags
+            // to reorder. Finder and the Xcode navigator toggle from the whole label too, so
+            // this is also the conventional behaviour.
             //
             // Nothing is lost to VoiceOver by there being no button: the one that used to be
             // here was `.accessibilityHidden(true)`, so it was never actuatable. The context
@@ -39,9 +42,17 @@ struct ProjectHeaderRow: View {
                 .imageScale(.small)
                 .foregroundStyle(.secondary)
                 .rotationEffect(.degrees(repo.isCollapsed ? 0 : 90))
-                // Hidden but still occupying its space on an empty project: there is nothing to
-                // disclose, and collapsing the layout instead would knock every project name
-                // out of alignment as sessions come and go.
+                // Invisible on an empty project, but still occupying its space: collapsing the
+                // layout instead would knock every project name out of alignment as sessions
+                // come and go.
+                //
+                // The row still TOGGLES while empty, which the `Button` this replaced did not —
+                // it was hit-test-disabled there. Deliberate: the context menu's
+                // Expand/Collapse was never gated on emptiness either, so the row now matches
+                // it, and collapsing an empty project does something real — it drops the
+                // `.empty` placeholder row, whose whole job is to tell expanded-empty apart
+                // from collapsed (see `SidebarRow`). Only the chevron has nothing to say,
+                // because there is nothing to disclose.
                 .opacity(repo.sessions.isEmpty ? 0 : 1)
                 // Decorative — the row's own label says "collapsed"/"expanded" in words — and
                 // this is the ONLY thing here that may ever be hidden. The row is an
