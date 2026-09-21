@@ -89,6 +89,49 @@ struct ClaudeTextChannel: AgentTextChannel {
         return Self.isComposerBox(viewport)
     }
 
+    /// Every ordinary claude dialog carries this footer token, and a composer never does: a
+    /// permission prompt shows `Esc to cancel · Tab to amend`, an `AskUserQuestion`
+    /// `Esc to cancel`, the unprompted auto-mode nudge `Enter to confirm · Esc to cancel`.
+    /// Matching user-facing copy with a fixed meaning is markedly more stable than matching
+    /// box-drawing geometry. Fourteen of the fifteen dialog captures in `Fixtures/Claude/`
+    /// carry it — every one but `question-two-review`.
+    ///
+    /// Case-sensitive on purpose: a running turn shows lowercase `esc to interrupt`, and
+    /// mid-turn injection must stay allowed because claude queues it. Lowercasing both sides
+    /// would veto every busy screen and stop mid-turn injection dead.
+    static let dialogFooterToken = "Esc to cancel"
+
+    /// **The one dialog shape in the corpus that carries no `Esc to cancel` footer at all:**
+    /// `question-two-review`'s confirmation step — `Ready to submit your answers?` closed by
+    /// `❯ 1. Submit answers` / `  2. Cancel` — is a plain confirmation, not a cancellable
+    /// prompt, so it never prints that token.
+    ///
+    /// What it shares with every other dialog, and with nothing a composer draws, is the
+    /// marker-plus-numbered-row shape `ChoiceDialog.hasNumberedRowAtMarker` recognises.
+    /// `❯` is stated here rather than defaulted there for the reason
+    /// `ChoiceDialog.focusedRow` gives: codex draws `›`, and an agent that inherited claude's
+    /// glyph would be reading claude's screen grammar off somebody else's screen.
+    static func hasNumberedMarkerRow(_ viewport: String) -> Bool {
+        ChoiceDialog.hasNumberedRowAtMarker(inViewport: viewport, marker: ChoiceDialog.claudeMarker)
+    }
+
+    /// Either recognised dialog shape is enough. The two are independent on purpose: the
+    /// footer is copy claude can reword in any release, the row shape is layout it can restyle,
+    /// and a screen only has to trip one of them to be refused.
+    static func isKnownNonComposer(_ viewport: String) -> Bool {
+        viewport.contains(dialogFooterToken) || hasNumberedMarkerRow(viewport)
+    }
+
+    /// Unreadable screen means *no veto*, not a veto — the fail-open direction
+    /// `AgentTextChannel.isKnownNonComposer` documents. A screen that cannot be read is also
+    /// a screen `hasComposerBox` cannot confirm, so the caller's own gate still stands in
+    /// front of the injection; answering true here would instead make a transient read
+    /// failure look exactly like a dialog and drop the message.
+    func isKnownNonComposer(_ injector: TextInjecting) -> Bool {
+        guard let viewport = injector.readViewport() else { return false }
+        return Self.isKnownNonComposer(viewport)
+    }
+
     func submit(
         _ text: String,
         into injector: TextInjecting,

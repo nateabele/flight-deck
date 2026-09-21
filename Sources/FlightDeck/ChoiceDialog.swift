@@ -134,6 +134,40 @@ enum ChoiceDialog {
         return list[index].reads(normalized(label))
     }
 
+    /// Whether the **last** `marker` line on screen is a numbered row, or is immediately
+    /// followed by one. The shape that tells a dialog apart from a composer, for
+    /// `AgentTextChannel.isKnownNonComposer`.
+    ///
+    /// The discriminator is marker **plus a numbered row**, never the marker alone, because
+    /// both agents draw their marker on an ordinary composer too: claude echoes the user's own
+    /// prompt as `❯ Run this exact bash command …`, and codex's idle placeholder hint is
+    /// literally `› Ask Codex to do anything`. Both are prose after the marker; a dialog puts
+    /// ` N. ` there. Two positions are checked because the two agents disagree about where the
+    /// marker sits: claude's `question-two-review` marks the row itself (`❯ 1. Submit
+    /// answers`), while codex's `tui-rename-modal` draws its marker on a line of its own.
+    ///
+    /// **Deliberately looser than `list(inViewport:marker:)`, and it must stay that way.**
+    /// That parser requires a run of at least two contiguously numbered rows because it is an
+    /// interlock in front of an irreversible keypress, where "I am not certain" must mean
+    /// refuse. This is the opposite duty: it decides whether Flight Deck may *type into* the
+    /// screen, so the cost of being too strict is an injection landing inside a dialog. A
+    /// future single-row prompt, or one whose second row scrolls off a short viewport, would
+    /// be a list of one — invisible to `list`, and still a dialog. Tightening this into
+    /// agreement with `list` would silently make that dialog typeable.
+    ///
+    /// `parse` is nevertheless shared with `list`, since what counts as a numbered *row* — the
+    /// marker-then-space, the `N.`, the optional checkbox, the non-empty label — is the same
+    /// grammar in both duties, and a second copy of it would drift.
+    static func hasNumberedRowAtMarker(inViewport viewport: String, marker: Character) -> Bool {
+        let lines = viewport.components(separatedBy: "\n")
+        guard let markerLine = lines.lastIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces).first == marker
+        }) else { return false }
+        if parse(lines[markerLine], marker: marker) != nil { return true }
+        guard markerLine + 1 < lines.count else { return false }
+        return parse(lines[markerLine + 1], marker: marker) != nil
+    }
+
     // MARK: - Reading the screen
 
     /// One row of a select list.

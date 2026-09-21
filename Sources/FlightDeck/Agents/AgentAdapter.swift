@@ -289,6 +289,30 @@ protocol AgentTextChannel {
     /// be preserved.
     func hasComposerBox(_ injector: TextInjecting) -> Bool
 
+    /// Whether the screen positively shows a dialog covering this agent's composer.
+    ///
+    /// **The inversion of `hasComposerBox`, and that is the point.** A predicate that must
+    /// recognise a *composer* fails closed when the rendering drifts: injection stops
+    /// working on a claude or codex update, silently, in production. A predicate that only
+    /// fires on a positively-recognised *dialog* fails open instead — an unfamiliar
+    /// composer variant still gets typed into. So **unsure answers `false`**, including when
+    /// the screen cannot be read at all.
+    ///
+    /// It is nevertheless load-bearing rather than a backstop, and it is the ONLY defence
+    /// against a dialog: hook lifecycle events answer "is this session booted and alive", not
+    /// "what is on screen". Probing established that denying a permission prompt with Esc
+    /// fires no hook whatsoever, and that claude raises select-list dialogs of its own right
+    /// after `Stop` — so the event stream cannot cover either case, and a dialog this misses
+    /// is a dialog Flight Deck types into.
+    ///
+    /// **No protocol-extension default, for the reason `allowRow` gives below.** A defaulted
+    /// `false` reads as "this agent never raises a dialog", which is true of no agent; a new
+    /// conformer would inherit it and ship with the veto silently disabled. Every conformer
+    /// states its own rule, proved against that agent's own captured screens — see
+    /// `ClaudeDialogVetoTests` and `CodexDialogVetoTests` — and the compiler catches one that
+    /// forgets.
+    func isKnownNonComposer(_ injector: TextInjecting) -> Bool
+
     /// Type `text` and submit it, preserving whatever draft was there — or refuse.
     ///
     /// **`settle` may be called more than once — once per repaint the conformer must wait
