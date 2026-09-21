@@ -56,6 +56,16 @@ actor SearchIndexBuilder {
 
         // Before anything is added, so a project removed from the sidebar stops answering
         // immediately rather than at the end of a walk that may take a minute.
+        //
+        // `projects` is built from `files`, not from the caller's own project list, because
+        // `prune` dooms a row on `!keepingSources.contains(source) || !projects.contains
+        // (project)` — an OR, so `projects` is a second, independent kill switch rather than
+        // a scope that only protects. Handing it `files.map(\.projectPath)` cannot doom
+        // anything `keepingSources` was not already going to doom: every source kept by
+        // `keepingSources` came from one of `files`, whose `projectPath` is by construction
+        // already in this set. The newly-doomed set from this change is therefore provably
+        // empty — but it also means `build([])` prunes with both sets empty, which wipes the
+        // entire index. `AppDelegate`'s `refs ?? []` on a failed walk is one step from that.
         try? index.prune(
             keepingSources: Set(files.map(\.url)),
             projects: Set(files.map(\.projectPath))

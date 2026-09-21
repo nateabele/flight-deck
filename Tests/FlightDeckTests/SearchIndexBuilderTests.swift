@@ -288,10 +288,9 @@ final class SearchIndexBuilderTests: XCTestCase {
     /// run, and the two would take turns wiping each other — producing an index that looks
     /// populated and is missing half its corpus.
     ///
-    /// `CodexAdapter.searchCorpus` is still nil at this point in the plan, so the codex ref
-    /// here is driven through the builder's injected `corpus` lookup rather than the real
-    /// agent registry — the seam that exists precisely so this test does not have to wait
-    /// for codex's own conformer to ship before it can assert anything.
+    /// The codex ref here is driven through the builder's injected `corpus` lookup rather
+    /// than the real agent registry, so this test asserts the union-prune behavior without
+    /// depending on which agents happen to have a searchable corpus wired up.
     func testOneBuildOverBothAgentsPrunesNeither() async throws {
         let claudeFolder = directory.appendingPathComponent("claude-proj", isDirectory: true)
         try write([userLine("alpha-claude-text")], conversation: "c1", in: claudeFolder)
