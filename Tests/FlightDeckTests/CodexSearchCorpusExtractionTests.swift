@@ -134,6 +134,29 @@ final class CodexSearchCorpusExtractionTests: XCTestCase {
         )
     }
 
+    /// The three boundaries of the placeholder check, each a name that fails one of its three
+    /// conditions and so must NOT be treated as a placeholder: `"session"` has no trailing
+    /// space (fails the prefix check), `"session "` has an empty remainder (fails the
+    /// non-empty check), and `"session abc"` has a non-digit remainder (fails the all-digits
+    /// check). Each goes through the real naming path, with no user message in scope, so the
+    /// only way to reach `.authoritative` is `isPlaceholderName` correctly saying "no" — and
+    /// the name comes back byte-for-byte, trailing space included, because pinning exactly
+    /// what the implementation does is the point.
+    func testANameThatFailsEachPlaceholderConditionIsNotAPlaceholder() {
+        XCTAssertEqual(
+            corpus.conversationName(inLines: [], for: ref(indexedName: "session")),
+            .authoritative("session")
+        )
+        XCTAssertEqual(
+            corpus.conversationName(inLines: [], for: ref(indexedName: "session ")),
+            .authoritative("session ")
+        )
+        XCTAssertEqual(
+            corpus.conversationName(inLines: [], for: ref(indexedName: "session abc")),
+            .authoritative("session abc")
+        )
+    }
+
     func testNoNameAndNoMessageIsUnknown() {
         XCTAssertEqual(corpus.conversationName(inLines: [], for: ref(indexedName: nil)), .unknown)
     }
