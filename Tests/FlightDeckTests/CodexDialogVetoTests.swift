@@ -61,6 +61,16 @@ final class CodexDialogVetoTests: XCTestCase {
         XCTAssertTrue(CodexTextChannel.hasNumberedMarkerRow(screen))
     }
 
+    /// The mirror of the assertion above, and the reason neither rule may be dropped for the
+    /// other: `tui-rename-modal` draws no `›` at all — its own marker is
+    /// `InputBar.renameModalMarker` — so only `esc to go back` catches it. Between the two,
+    /// each rule is the sole defence for at least one real codex screen.
+    func testTheRenameModalHasNoNumberedRowAtItsMarker() throws {
+        let screen = try viewport("tui-rename-modal")
+        XCTAssertFalse(CodexTextChannel.hasNumberedMarkerRow(screen))
+        XCTAssertTrue(screen.contains("esc to go back"))
+    }
+
     /// `tui-idle`'s own placeholder hint sits directly after codex's `›` marker and must never
     /// be mistaken for a numbered row — the case that makes this rule about position and
     /// shape, never about the marker's presence.
