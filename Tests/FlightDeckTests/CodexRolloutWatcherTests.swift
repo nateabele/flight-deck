@@ -97,4 +97,43 @@ final class CodexRolloutWatcherTests: XCTestCase {
 
         XCTAssertEqual(seen, [])
     }
+
+    /// The other of `TailReader`'s two "does the file exist yet" orderings — the one its own
+    /// comment calls "deliberately not symmetric" with the pre-existing-file case above. This
+    /// is the routine production shape, not an edge case: `CodexAdapter.prepare` hands
+    /// `CodexRolloutWatcher` a computed path (`AgentBinding.transcriptURL`) before codex's
+    /// TUI has necessarily written anything there, so the watcher is constructed against a
+    /// URL with nothing on disk far more often than against one that already has a header.
+    ///
+    /// `TailReader` answers "no file yet" by marking its start chosen but leaving `offset` at
+    /// 0 rather than fast-forwarding to a size it cannot read — so once the file appears, the
+    /// NEXT poll reads it from byte 0, not from wherever it happened to have grown to. That
+    /// is exactly why this ordering needs its own test: the pre-existing-file case above
+    /// proves the gate does not fire on stale bytes it skips past, but says nothing about
+    /// whether it fires correctly once a file starts from nothing.
+    func testTheFirstLineEverWrittenStillGatesLifecycleLiveWhenTheFileDidNotExistAtAttach() throws {
+        let url = dir.appendingPathComponent("rollout.jsonl") // never created before this
+
+        var seen: [AgentEvent] = []
+        let watcher = CodexRolloutWatcher(url: url) { seen.append($0) }
+        watcher.drain() // the file does not exist yet — must not read as .live
+
+        XCTAssertEqual(
+            seen, [],
+            "no file on disk is not evidence of anything; a gate that fired here would mark "
+            + "a tab ready before codex's TUI has so much as been spawned"
+        )
+
+        let header = #"{"type":"session_meta","payload":{"id":"x"}}"# + "\n"
+        try (header + started + completed).data(using: .utf8)!.write(to: url)
+        watcher.drain()
+
+        XCTAssertEqual(
+            seen,
+            [.lifecycle(.live), .activity(.busy), .activity(.idle), .turnEnded],
+            "the file's first-ever content is read from byte 0 once it appears, unlike the "
+            + "pre-existing-file case, and must gate .live exactly once, leading the events "
+            + "it introduces"
+        )
+    }
 }
