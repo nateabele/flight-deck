@@ -126,6 +126,15 @@ final class ClaudeRuntime: AgentRuntime {
         }
     }
 
+    /// Fan-out point for the shared hook-event watcher, mirroring `ingest(_ entries:)` for
+    /// the status registry. `SessionStore` owns the one watcher; this maps its per-session
+    /// report onto the tabs subscribed to that conversation.
+    func ingest(readiness: [UUID: ComposerReadiness]) {
+        for (sessionID, value) in readiness {
+            sources[sessionID]?.subscribers.emit(.lifecycle(value))
+        }
+    }
+
     /// Test seam mirroring `TranscriptWatcher.drain()`, so runtime tests need no clock.
     func drainForTesting() {
         for source in sources.values { source.watcher?.drain() }

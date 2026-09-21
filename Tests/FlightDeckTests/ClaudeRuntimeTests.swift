@@ -67,6 +67,25 @@ final class ClaudeRuntimeTests: XCTestCase {
         XCTAssertEqual(seen, [.activity(.busy)])
     }
 
+    /// Mirrors `testStatusEntriesBecomeActivityEvents` above, for the hook-event fan-out point
+    /// instead of the status-registry one. `SessionStoreComposerReadinessTests` covers the
+    /// store's half of this wire (`.lifecycle` landing in `composerReadiness(for:)`); this is
+    /// the runtime's half — `ingest(readiness:)` turning a per-session report into `.lifecycle`
+    /// for exactly the subscribers on that conversation.
+    func testReadinessEntriesBecomeLifecycleEvents() {
+        let id = UUID()
+        let runtime = ClaudeRuntime()
+        var seen: [AgentEvent] = []
+        _ = runtime.attach(AgentBinding(conversationID: id, transcriptURL: nil), for: UUID()) { seen.append($0) }
+
+        // An entry keyed by an unrelated session id must not reach this subscriber — the same
+        // safe-miss `ingestHookEvents` in SessionStore relies on when it fans one report out to
+        // every account's runtime.
+        runtime.ingest(readiness: [id: .live, UUID(): .absent])
+
+        XCTAssertEqual(seen, [.lifecycle(.live)])
+    }
+
     func testTwoTabsOnOneConversationBothReceive() throws {
         let id = UUID()
         let url = dir.appendingPathComponent("shared.jsonl")

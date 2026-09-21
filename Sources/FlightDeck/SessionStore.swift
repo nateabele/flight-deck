@@ -905,6 +905,12 @@ final class SessionStore: ObservableObject {
     var transcriptsRootOverride: URL?
     var statusRootOverride: URL?
     var codexIndexURLOverride: URL?
+    /// The hook-event log's directory, the same override shape as the three above but for a
+    /// root that is not per-account: `HookEventWatcher` tails one file for the whole app, so
+    /// there is one override rather than one keyed by account. Nil means the real
+    /// `ClaudePluginLocation.eventDirectory` — a test that never sets this and calls
+    /// `startStatusWatching()` would otherwise tail the developer's live hook log.
+    var hookEventDirectoryOverride: URL?
 
     /// Where this account's claude transcripts live.
     func transcriptsRoot(for account: AgentAccount) -> URL { transcriptsRoot(forHome: account.home) }
@@ -937,6 +943,12 @@ final class SessionStore: ObservableObject {
 
     private func statusRoot(forHome home: URL) -> URL {
         statusRootOverride ?? home.appendingPathComponent("sessions", isDirectory: true)
+    }
+
+    /// Where the single hook-event log lives. Not keyed by account, unlike the two roots
+    /// above — see `hookEventDirectoryOverride`.
+    private var hookEventDirectory: URL {
+        hookEventDirectoryOverride ?? ClaudePluginLocation.eventDirectory
     }
 
     /// The home an instance key stands for, resolved on every use rather than cached.
@@ -974,6 +986,16 @@ final class SessionStore: ObservableObject {
     /// single watcher leaves those tabs with no glyph at all — silently, since an unwatched
     /// registry is indistinguishable from an idle one.
     private var statusWatchers: [UUID?: SessionStatusWatcher] = [:]
+
+    /// One instance for the whole app, unlike `statusWatchers` above: the hook-event log is a
+    /// single shared file, not a directory per account, so there is nothing to key this by.
+    /// Built once, from `startStatusWatching()`, and held here only so a later sweep can see
+    /// it already exists rather than registering a second tail on the shared `WatchClock`.
+    private var hookEventWatcher: HookEventWatcher?
+
+    /// Hook-derived composer readiness per tab. In memory only: a persisted value could
+    /// outlive the process that could correct it and leave a tab refusing injection forever.
+    private var composerReadinessByTab: [UUID: ComposerReadiness] = [:]
 
     /// The last scan from each account's registry, merged before it reaches `applyRegistry`.
     ///
@@ -3268,6 +3290,7 @@ final class SessionStore: ObservableObject {
         stopStatusWatchingIfUnused(account: closed.account)
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
+        composerReadinessByTab.removeValue(forKey: id)
         // A queued prompt for a tab that no longer exists is the most literal case of "text
         // that will never be typed", and its tokens go with it: `acceptedPromptTokens` is
         // keyed by tab, so a reopened tab reusing this id starts with a clean dedupe window
@@ -5711,6 +5734,14 @@ final class SessionStore: ObservableObject {
 
     func status(for id: UUID) -> SessionStatus? { statuses[id] }
 
+    /// This tab's hook-derived composer readiness. `.unknown` for any tab the hook watcher
+    /// has not reported on yet — a tab restored from an older build, one in an untrusted
+    /// folder, or simply one no `.lifecycle` event has reached — which is what falls back to
+    /// the legacy screen grammar. See `ComposerReadiness`.
+    func composerReadiness(for tabID: UUID) -> ComposerReadiness {
+        composerReadinessByTab[tabID] ?? .unknown
+    }
+
     /// The tab's terminal screen, or nil when there is no surface or it cannot be read.
     ///
     /// A read and only a read: it changes no fleet state and adds no mutation site for
@@ -5742,6 +5773,7 @@ final class SessionStore: ObservableObject {
         for session in repos.flatMap(\.sessions) where session.agent.hasStatusRegistry {
             startStatusWatching(account: instance(for: session).account)
         }
+        startHookEventWatching()
     }
 
     /// Builds this account's registry watcher on first ask and memoizes it — the same
@@ -5764,6 +5796,36 @@ final class SessionStore: ObservableObject {
         }
         watcher.start()
         statusWatchers[account] = watcher
+    }
+
+    /// Builds the single hook-event watcher on first ask and memoizes it — the once-only
+    /// half of `startStatusWatching(account:)`'s guard, without the per-account keying: the
+    /// hook log is one shared file, not a directory per account, so there is only ever one
+    /// watcher to build.
+    ///
+    /// Silent until `startStatusWatching()` has run, for the identical reason
+    /// `startStatusWatching(account:)` is: a test that never calls it must not start tailing
+    /// the developer's live hook log via `hookEventDirectory`'s fallback.
+    private func startHookEventWatching() {
+        guard isStatusWatchingEnabled, hookEventWatcher == nil else { return }
+        let watcher = HookEventWatcher(
+            directory: hookEventDirectory,
+            clock: clock
+        ) { [weak self] readiness in
+            self?.ingestHookEvents(readiness)
+        }
+        watcher.start()
+        hookEventWatcher = watcher
+    }
+
+    /// Fans one hook-log tick out to every live claude runtime. The log carries no account —
+    /// only the conversation id each `ClaudeRuntime.sources` is keyed by — so unlike
+    /// `applyRegistry`'s per-account merge, this hands the same report to every runtime and
+    /// lets each one keep only the sessions it actually has a subscriber for.
+    private func ingestHookEvents(_ readiness: [UUID: ComposerReadiness]) {
+        for runtime in runtimes.values {
+            (runtime as? ClaudeRuntime)?.ingest(readiness: readiness)
+        }
     }
 
     /// Stops one account's registry scan once that account's last claude tab is gone — the
@@ -6896,6 +6958,11 @@ final class SessionStore: ObservableObject {
         // would otherwise rewrite sessions.json for no change.
         case .apiError(let error):
             if setAPIError(tabID, error) { persist() }
+        // In-memory only — see `composerReadinessByTab`'s doc comment. No `persist()` call
+        // here, deliberately: this is the one case in this switch that must never reach
+        // `sessions.json`.
+        case .lifecycle(let readiness):
+            composerReadinessByTab[tabID] = readiness
         }
     }
 

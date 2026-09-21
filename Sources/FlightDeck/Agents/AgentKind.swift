@@ -56,6 +56,10 @@ enum AgentEvent: Equatable, Sendable {
     /// before it reaches here — the store never learns which channel carried it. Only the claude
     /// runtime raises it today; codex's failure shape is a separate probe.
     case apiError(SessionAPIError?)
+    /// What this tab's agent lifecycle says about whether its input box is there to type
+    /// into. Unlike `.activity`, which reports what the agent is *doing*, this reports
+    /// whether there is anything to talk to at all. See `ComposerReadiness`.
+    case lifecycle(ComposerReadiness)
 }
 
 /// Per-agent settings payload.
