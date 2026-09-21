@@ -131,6 +131,25 @@ final class TerminalSmokeTests: XCTestCase {
     /// and the close X are three readings of one mouse-down, so they are driven in one launch:
     /// any mechanism that satisfies one of them by consuming the event breaks the other two,
     /// and only a test that drives all three can see that.
+    ///
+    /// # A stated constraint on the fixture: the title press is machine-coupled
+    ///
+    /// The title-drag group presses a fixed 24pt in from the heading's leading edge, and that
+    /// is inside the project NAME only because of what the fixture seeds. The two projects are
+    /// the home directory and `FileManager.default.temporaryDirectory`, and `Repo.displayName`
+    /// is `url.lastPathComponent` — so the names are **`$HOME`'s basename** and `"T"`. The
+    /// title starts ≈12pt in (an 8pt `.small` chevron plus the HStack's 4pt spacing) and a
+    /// 4-character name at semibold `.subheadline` (11pt) is ≈24pt wide, so 24pt is its
+    /// midpoint on a machine whose username is four characters.
+    ///
+    /// **On a machine with a 2- or 3-character username the press lands past the glyphs and
+    /// this group goes quietly vacuous** — the very failure it exists to fix, one level up.
+    /// Nothing queryable can rescue it: the heading combines its children, so neither the name
+    /// nor its width is reachable from XCUITest, and nothing identifies WHICH project is at
+    /// index 0 either. If this suite is ever run somewhere other than this machine, the press
+    /// inset is the line to re-derive, and `-FlightDeckSeedSecondProject` is the place to make
+    /// it deterministic — a seeded project with a long, fixed name would remove the coupling
+    /// entirely.
     func testProjectHeadingsReorderByDragging() {
         let app = XCUIApplication()
         app.launchArguments += [
@@ -194,11 +213,38 @@ final class TerminalSmokeTests: XCTestCase {
 
         // The title drag runs BEFORE the midpoint control, inverting this file's usual
         // control-first order, for a fixture reason: the seeded projects are
-        // [home, temporary] = ["me", "T"], and any reorder puts the one-character name
-        // first. A press 24pt in from the leading edge is inside "me" and past the end of
-        // "T", so the only heading that can carry this assertion is whichever is at index 0
-        // before anything has moved.
+        // [home, temporary] = [$HOME's basename, "T"], and any reorder puts the
+        // one-character name first. 24pt in is inside a four-character name and past the end
+        // of "T", so the only heading that can carry this assertion is whichever is at index 0
+        // before anything has moved. See this test's doc comment for the rest of that
+        // constraint.
         XCTContext.runActivity(named: "a project heading reorders by dragging its title text") { _ in
+            // The press point's own premise, asserted rather than assumed, because if it is
+            // wrong this group fails the same way the midpoint control did: silently, by
+            // pressing empty row space and passing anyway.
+            //
+            // 24pt from the element's leading edge is inside the title only if that element
+            // spans the ROW. A combined accessibility element has two plausible frames, and
+            // they are NOT interchangeable here: the container's (the row's hosting view,
+            // measured in task 2 at `frameInRow=(16.0, 0.0, 248.0, 24.0)`) puts the chevron at
+            // minX and the title at ≈12–36pt, while a union of the *combined children* would
+            // start at the `Text` instead — the chevron is `.accessibilityHidden(true)`, and a
+            // hidden child cannot anchor a union — making the element only as wide as the name
+            // and 24pt its RIGHT edge. Which one XCUITest reports was never measured here, so
+            // the width decides it: a title-width element would be ≈24pt across, a row-wide
+            // one ≈248pt, and nothing sits between them.
+            //
+            // (Independent of the measurement, the element cannot be title-width: this test
+            // passed for the whole period title-dragging was broken, and the midpoint of a
+            // title-width element would have been ON the title, where it would have failed.)
+            XCTAssertGreaterThan(
+                headers.element(boundBy: 0).frame.width, 100,
+                "precondition: the project-header element must span the row, not just its "
+                + "title text — a title-width element makes the press below land past the "
+                + "name in empty row space, which is exactly the vacuous press this group "
+                + "exists to replace (width=\(headers.element(boundBy: 0).frame.width))"
+            )
+
             let before = sessionOrder()
             // 24pt in: past the chevron — a `.small` SF Symbol plus the HStack's 4pt spacing,
             // comfortably under 20pt — and into the first characters of the name.
@@ -225,6 +271,11 @@ final class TerminalSmokeTests: XCTestCase {
         }
 
         XCTContext.runActivity(named: "control: a project heading reorders by dragging its midpoint") { _ in
+            // Asserted here too, not just once at launch: the foreground can be taken between
+            // groups, and this group's failure message accuses a gesture in the header of
+            // swallowing the mouse-down. That accusation is only worth making about a press
+            // that reached this app.
+            assertFlightDeckIsFrontmost(app, "before the control drag")
             let before = sessionOrder()
             // Both ends are coordinates: the press/drag pair is typed, and mixing an element
             // source with a coordinate destination does not compile.
@@ -289,6 +340,19 @@ final class TerminalSmokeTests: XCTestCase {
             )
         }
 
+        // What this group does and does not establish, since the difference is not obvious.
+        //
+        // It proves the X is REACHABLE: present in the real layout, at a position a click can
+        // find, and wired to closing that project. The replica could not show any of that.
+        //
+        // It does NOT pin the close-button exclusion, and the brief's hope that it would is
+        // not met. `finishToggleDecision` re-resolves the row after the press and vetoes the
+        // toggle when the identity differs (`SidebarInputMonitor.swift`, the `downRow ==
+        // upRow` check) — and a successful close removes the row it was pressed on, so the
+        // veto fires whether or not `pressedRowControl` was ever true. The two paths are
+        // separable only in a narrow, nondeterministic window, so the assertions below do not
+        // try. The exclusion's real coverage is `SidebarPressedControlTests`, which walks a
+        // built `NSTableRowView` directly.
         XCTContext.runActivity(named: "the heading's close X closes the project instead of toggling it") { _ in
             assertFlightDeckIsFrontmost(app, "before the close-X click")
             // The X's own `.accessibilityIdentifier("close-project")` cannot be queried: the
@@ -306,10 +370,22 @@ final class TerminalSmokeTests: XCTestCase {
             let heading = headers.element(boundBy: 0)
             let (headingFrame, closeFrame) = (heading.frame, sessionClose.frame)
             print("[geometry] heading=\(headingFrame) close-session=\(closeFrame)")
-            XCTAssertTrue(
-                closeFrame.midX > headingFrame.midX,
-                "precondition: the close button is in the trailing half of the row "
-                + "(heading=\(headingFrame), close=\(closeFrame))"
+            // The aim is only transferable while the session row's button is where the
+            // heading's is: hard against the trailing edge. `SessionRow` draws two CONDITIONAL
+            // icons before its close button — the account-mismatch marker and the pin-conflict
+            // marker — and either one pushes it leftward by its own width while the heading's X
+            // does not move. Neither appears in this fixture, so this is latent rather than
+            // live, and 20pt is the slack: enough for the button's own trailing padding, less
+            // than the ≈16pt an inserted icon costs.
+            //
+            // "In the trailing HALF of the row" was the earlier form of this check and was
+            // nearly tautological — it holds in every configuration including the broken ones.
+            XCTAssertLessThan(
+                abs(closeFrame.midX - headingFrame.maxX), 20,
+                "precondition: the session row's close button is not hard against the trailing "
+                + "edge, so its x cannot stand in for the heading's X — a conditional icon has "
+                + "probably been inserted before it (heading=\(headingFrame), "
+                + "close=\(closeFrame))"
             )
             let survivor = rows.element(boundBy: 1).value as? String
 
@@ -326,11 +402,25 @@ final class TerminalSmokeTests: XCTestCase {
             // and `ProjectCloseCoordinator` only asks when there is more than one.
             XCTAssertTrue(
                 waitFor(timeout: 5) { headers.count == 1 },
-                "clicking the X did not close the project (headings=\(headers.count), "
-                + "rows=\(rows.count)). One heading means it closed. Two headings and one row "
-                + "means the click missed the button and collapsed the project instead — i.e. "
-                + "the control frame `SidebarInputMonitor.pressedControl` excludes does not "
-                + "line up with the real button in the real layout."
+                """
+                clicking the X did not close the project (headings=\(headers.count), \
+                rows=\(rows.count)). Two headings and one row is THREE different faults with \
+                one signature, in descending order of likelihood, and the \
+                `[geometry] heading=… close-session=…` line printed by this group above is \
+                what separates them:
+                  (a) the hover had not revealed the X yet when the click landed, so the press \
+                hit the row and collapsed it. A test fault. The geometry line proves nothing \
+                either way; look at the failure screenshot for a visible X.
+                  (b) the derived x mis-aimed. Also a test fault, and the likeliest of the \
+                three, because that x comes from a DIFFERENT row's button — compare \
+                close-session's midX against heading's maxX in the geometry line: more than \
+                ~20pt apart and the aim was never transferable.
+                  (c) the exclusion in `SidebarInputMonitor.pressedControl(in:at:)` does not \
+                line up with the real button. A product fault, and the least likely to show up \
+                HERE: a click that reaches the button closes the project whether or not the \
+                press was excluded. Only (c) survives a geometry line that says the aim was \
+                sound — and `SidebarPressedControlTests` is where it is actually pinned.
+                """
             )
             XCTAssertTrue(
                 waitFor(timeout: 5) { rows.count == 1 },
