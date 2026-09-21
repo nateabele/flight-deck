@@ -8,8 +8,11 @@ final class AgentAccountEnvironmentTests: XCTestCase {
     }
 
     func testEachAgentNamesItsOwnVariable() {
-        // Claude also carries FLIGHT_DECK_EVENT_DIR — see `ClaudeAdapter.environment(for:)` —
-        // which codex has no equivalent of, since only claude's plugin writes hook events.
+        // Claude also carries FLIGHT_DECK_EVENT_DIR, folded in from
+        // `ClaudeAdapter.launchEnvironment` — which codex has no equivalent of, since only
+        // claude's plugin writes hook events. That this reaches a *launched* session is a
+        // separate fact with its own test: `AccountLaunchTests`. This file only pins the
+        // adapter's answer.
         // Built from a hand-written literal, not `ClaudePluginLocation.eventDirectory`
         // itself: mirroring the production call would only catch a wrong key on the
         // adapter's side, never a wrong path inside `eventDirectory`.
@@ -27,6 +30,16 @@ final class AgentAccountEnvironmentTests: XCTestCase {
         )
         XCTAssertEqual(CodexAdapter(rpc: CodexRPC(transport: NullTransport())).environment(for: account(.codex)),
                        ["CODEX_HOME": "/tmp/home"])
+    }
+
+    /// The account-free half, which is the half the launch path actually uses: a tab whose
+    /// login was deleted is launched with no account at all and must still report its
+    /// lifecycle. Codex takes the empty default — its readiness comes from rollout evidence
+    /// on disk, which needs nothing in the child's environment.
+    func testTheAccountFreeLaunchEnvironmentCarriesOnlyClaudesHookDirectory() {
+        XCTAssertEqual(ClaudeAdapter().launchEnvironment,
+                       ["FLIGHT_DECK_EVENT_DIR": ClaudePluginLocation.eventDirectory.path])
+        XCTAssertEqual(CodexAdapter(rpc: CodexRPC(transport: NullTransport())).launchEnvironment, [:])
     }
 
     /// Claude has no shell-level login subcommand — it authenticates inside a running session —

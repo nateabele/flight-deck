@@ -151,16 +151,23 @@ struct ClaudeAdapter: AgentAdapter {
         LoginInvocation(command: "claude", inject: "/login")
     }
 
-    /// Adds the hook-event directory to claude's default home binding. Creating it here
-    /// rather than at launch keeps the hook script's single append from ever hitting a
-    /// missing directory.
-    func environment(for account: AgentAccount) -> [String: String] {
+    /// Where the bundled plugin's `record.sh` appends, and the only thing that switches the
+    /// hook feed on: the script's first line is `[ -n "${FLIGHT_DECK_EVENT_DIR:-}" ] || exit 0`,
+    /// so a session launched without this reports nothing at all and stays `.unknown` for the
+    /// life of the process.
+    ///
+    /// On `launchEnvironment` rather than on `environment(for:)` because a tab whose login was
+    /// deleted launches with no account — see `AgentAdapter.launchEnvironment`. The default
+    /// implementation there folds this into `environment(for:)`, so the Tools-menu path keeps
+    /// receiving it too.
+    ///
+    /// Creating the directory here rather than at launch keeps the hook script's single
+    /// append from ever hitting a missing directory — it has no `mkdir` of its own, by design:
+    /// a hook that fails blocks the agent.
+    var launchEnvironment: [String: String] {
         let events = ClaudePluginLocation.eventDirectory
         try? FileManager.default.createDirectory(at: events, withIntermediateDirectories: true)
-        return [
-            account.agent.homeEnvironmentKey: account.home.path,
-            "FLIGHT_DECK_EVENT_DIR": events.path,
-        ]
+        return ["FLIGHT_DECK_EVENT_DIR": events.path]
     }
 
     /// A codex payload here is a programming error, not a runtime condition: the store picks

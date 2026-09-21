@@ -59,7 +59,28 @@ protocol AgentAdapter {
 
     /// The environment that binds a process to this account. Claude answers `CLAUDE_CONFIG_DIR`,
     /// codex `CODEX_HOME`; a third agent answers its own, and no caller ever learns which.
+    ///
+    /// Composed of `launchEnvironment` plus the account's own variable, so a caller that has
+    /// an account gets both without having to know there are two halves.
     func environment(for account: AgentAccount) -> [String: String]
+
+    /// **What every process of this agent needs regardless of which login it runs as — or of
+    /// whether it has one at all.**
+    ///
+    /// Separate from `environment(for:)` because that one takes a non-optional account, and
+    /// the launch path has tabs with none: a login deleted between runs launches its shell
+    /// with no account variable at all (see `SessionStore.insertSession`). Claude's
+    /// hook-event directory belongs here rather than there for exactly that reason — it is
+    /// how the agent reports its composer lifecycle, and a tab that reported nothing is a tab
+    /// stuck on the legacy screen grammar forever.
+    ///
+    /// **This is the single expression of those variables, and it must stay single.** The
+    /// event directory first shipped set only inside `environment(for:)`, whose sole
+    /// production consumer is `ToolRunner` — so no launched session ever received it,
+    /// `record.sh` exited on its first line, and the claude half of the hook feature was dead
+    /// while every unit test around it passed. `AccountLaunchTests` now asserts this reaches
+    /// `Ghostty.SurfaceConfiguration.environmentVariables`.
+    var launchEnvironment: [String: String] { get }
 
     /// What to run, and what to type once it is up, to sign this account in.
     ///
@@ -436,9 +457,20 @@ extension AgentAdapter {
     /// The variable's name is the only agent-specific part, and `AgentID` already knows it —
     /// so this default is correct for every agent whose home is selected by one variable, and
     /// an agent that needs more can still override.
+    ///
+    /// The agent's own `launchEnvironment` is folded in here rather than left to each caller
+    /// to remember, and the account wins any collision: the account variable is the one thing
+    /// nothing else may repoint (see `PreferencesStore.sessionEnvironment`).
     func environment(for account: AgentAccount) -> [String: String] {
-        [account.agent.homeEnvironmentKey: account.home.path]
+        var environment = launchEnvironment
+        environment[account.agent.homeEnvironmentKey] = account.home.path
+        return environment
     }
+
+    /// Nothing beyond the account binding, for an agent that reports no lifecycle of its own.
+    /// Codex takes this default: its readiness comes from rollout evidence on disk, which
+    /// needs no variable in the child's environment.
+    var launchEnvironment: [String: String] { [:] }
 }
 
 /// The capability questions the store asks about an agent it is holding by name.
