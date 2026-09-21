@@ -50,11 +50,14 @@ public struct TranscriptHit: Codable, Equatable, Sendable {
     /// Empty when the index predates this field; `SessionStore.openConversation` falls back
     /// to `projectPath` in that case.
     public let workingDirectory: String
-    /// The on-disk transcript/rollout file this hit came from. Empty when the index predates
-    /// this field. `CodexAdapter.binding(for:)` reads a session's `transcriptPath` to find the
-    /// thread's rollout file; without it, resuming a codex search result starts a fresh, empty
-    /// thread instead of reopening the conversation the user searched for. Task 3 populates it
-    /// from `message.source`; here it only travels with its default.
+    /// The on-disk transcript file this hit came from — codex's rollout path. Empty when the
+    /// index predates this field, or has not started supplying it yet.
+    ///
+    /// `CodexAdapter.binding(for:)` reads `session.transcriptPath` to find the thread's rollout
+    /// file, and `CodexAdapter.resumeCommand` starts a fresh, empty thread when
+    /// `binding.transcriptURL` is nil — so without a real value here, pressing Return on a
+    /// codex search result opens a blank conversation instead of the one that was searched for.
+    /// A consumer must treat `""` as "unknown, do not pin" rather than as a real path.
     public let transcriptPath: String
 
     public init(
