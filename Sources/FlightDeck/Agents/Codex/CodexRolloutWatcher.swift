@@ -81,6 +81,15 @@ final class CodexRolloutWatcher {
         // whose codex process has not booted yet stays `.unknown` — exactly the boot window
         // the legacy screen gate exists to cover, and the same stale-`.live` hazard already
         // fixed once for claude's watcher.
+        //
+        // The other ordering — no file on disk yet at attach, which is the routine case:
+        // `CodexAdapter.prepare` hands this watcher a computed path before codex's TUI has
+        // necessarily written anything there — reads no lines on that same first pass either
+        // (`TailReader`'s "file missing" branch only marks a start chosen, at offset 0; see
+        // its own "deliberately not symmetric" comment), so the gate stays closed there too.
+        // Once the file appears, the FIRST poll to see it reads from byte 0 rather than
+        // fast-forwarding, so that file's opening content — not just what arrives after — is
+        // what correctly fires `.live`.
         if !read.lines.isEmpty {
             onEvent(.lifecycle(.live))
         }
