@@ -38,6 +38,10 @@ actually answer it:
   the agent's own lifecycle, with no screen involved.
 - **"Is a dialog covering the composer right now?"** → a narrow screen veto
   keyed on `Esc to cancel`, a piece of user-facing copy with a fixed meaning.
+  **Superseded during execution — see the ledger, Ruling G.** Fixture analysis
+  found dialog families that carry no footer token at all, so the shipped rule
+  is that token **or** a marker line followed by numbered ` N. ` rows. §4.5 has
+  the per-agent form.
 
 The screen read is not eliminated. It is reduced from a geometry parse that
 must positively recognise a composer, to a string match that positively
@@ -81,6 +85,13 @@ Both dialog families share the footer token **`Esc to cancel`** (permission:
 Since the veto must catch family 2 regardless, it catches family 1 for free —
 so `.dialog` is redundant *and* hazardous. It is not in this design.
 
+> **Superseded during execution — see the ledger, Ruling G.** The sentence
+> above is FALSE as a general claim, and direct analysis of the capture corpora
+> is what found it: claude's `question-two-review` and codex's
+> `workspace-trust` carry no `Esc to cancel` at all. The token is one of two
+> recognisers, not the recogniser. The `.dialog` conclusion is unaffected — it
+> rests on the deny-with-Esc probe, not on this — and remains correct.
+
 ## 4. Components
 
 ### 4.1 The plugin
@@ -111,6 +122,15 @@ this plugin by hand pays one `exit 0`.
 **One** append-only NDJSON file for the whole app, in a directory named by
 `FLIGHT_DECK_EVENT_DIR`. Flight Deck demultiplexes by the `session_id` in each
 record.
+
+> **Where that variable is set matters, and the plan got it wrong** (see the
+> plan's Task 1 Step 4, and the whole-branch review's C1). It reaches a launched
+> agent through `AgentAdapter.launchEnvironment`, merged over
+> `PreferencesStore.sessionEnvironment` by
+> `SessionStore.launchEnvironment(for:adapter:orphaned:)` at both
+> surface-config sites — not through `AgentAdapter.environment(for:)`, whose
+> only production consumer is the Tools menu, and not keyed on the tab having
+> an account.
 
 One shared file rather than one per session, because the hook script cannot
 cheaply derive a per-session filename without parsing its payload — and this
@@ -192,6 +212,20 @@ never does. That is a far more stable signal than the box-drawing sandwich it
 replaces: user-facing copy with a fixed meaning, rather than an incidental
 artefact of how a frame is drawn.
 
+> **Superseded during execution — see the ledger, Ruling G.** A single token is
+> not enough: some dialogs carry none. What shipped is **two** recognisers per
+> agent, OR-ed, each per-agent and owned by that agent's `AgentTextChannel`:
+>
+> | Agent | Footer token | Structural form |
+> |---|---|---|
+> | Claude | `Esc to cancel` | a `❯` marker line followed by numbered ` N. ` rows |
+> | Codex | `Esc to cancel` or `esc to go back` | a `›` marker line followed by numbered ` N. ` rows |
+>
+> The numbered-row rule reads only the marker's own line for the marker, so an
+> unrelated `❯` elsewhere on the screen cannot recruit rows below it. The
+> fail-open contract above is unchanged, and so is the `esc to interrupt`
+> requirement below — both are what make two loose recognisers affordable.
+
 **It must not match a running turn.** Claude Code shows `esc to interrupt`
 while streaming, which is a different string and must stay unmatched — the
 whole point of allowing mid-turn injection is that Claude queues it. This is a
@@ -204,6 +238,26 @@ hooks: it already has structured thread status over `CodexRPC`, so its footer
 scrape is replaced by the same readiness from a better source, with its own
 veto for its own dialog shapes. The readiness type and the gate are
 agent-agnostic; only the feed differs.
+
+> **Superseded during execution — see the ledger, Ruling J. The premise above
+> is false.** `CodexRuntime` deliberately never uses the app-server for a
+> running tab, and its own doc comment says why: codex's notifications are
+> connection-scoped, and Flight Deck runs turns in a *separate* `codex resume`
+> TUI that the app-server connection knows nothing about. There is no thread
+> status to read.
+>
+> What shipped instead: codex readiness comes from **rollout evidence** —
+> `CodexRolloutWatcher` already tails the rollout file, and a record appearing
+> in it is proof the TUI is alive. There is no source for `.absent` on the codex
+> side (codex writes no session-end record), so a codex tab is never reported
+> absent and keeps `.live` after its TUI is gone. That is safe because
+> `CodexTextChannel.composer(_:)` independently requires codex's `›` marker AND
+> its `model · mode · cwd` footer beneath it, which no shell draws —
+> `SessionStoreInjectionGateTests` pins exactly that.
+>
+> The paragraph below is the part that held: an agent-specific signal is a
+> reason to put detection behind the adapter, never to scope a feature to one
+> agent.
 
 This is the adapter rule honoured, not excepted: an agent-specific *signal* is
 a reason to put detection behind the adapter, never to scope a feature to one
@@ -227,7 +281,15 @@ agent.
 
 - **Plugin never loads, or folder untrusted** → readiness stays `.unknown`;
   behaves exactly as today. No refusal, no regression.
-- **Event file grows** → truncated at launch; `TailReader` resumes at end.
+- **Event file grows** → ~~truncated at launch; `TailReader` resumes at end.~~
+  **Superseded during execution — see the ledger, Ruling E: nothing truncates
+  it.** Truncating at launch would shrink the file under a concurrently-running
+  second instance, whose watcher would resume at the new end and miss every
+  event in between — a correctness bug traded for a disk-space one. The growth
+  is therefore unbounded and is recorded as a known gap in
+  `docs/FOLLOWUPS.md`, along with the rate this spec underestimated:
+  `PreToolUse`/`PostToolUse` payloads carry `tool_input` and `tool_response`,
+  so it is megabytes per minute on a busy fleet, not kilobytes per day.
 - **Stale readiness after a crash** → never persisted; relaunch starts
   `.unknown`.
 - **Hook script error** → exits 0 on every path; must never block the agent.
@@ -269,7 +331,7 @@ The plugin-directory lookup must therefore be an injectable seam with a
 | Veto misses a new dialog family | Fails open — an injection lands in a picker. Bounded and recoverable; the alternative (fail closed) reintroduces the original bug. |
 | Veto matches a running turn | Explicit test on `busy-streaming-*`; `esc to interrupt` must not match. |
 | Debug/release share an event dir | Different `FLIGHT_DECK_EVENT_DIR` per build. |
-| Plugin path has spaces (`Flight Deck.app`) | `ClaudeFlagSerializer` quoting; assert with a test. |
+| Plugin path has spaces (`Flight Deck.app`) | **Two halves, and this row saw only one.** The CLI flag is handled by `ClaudeFlagSerializer` quoting, asserted by a test — correct as written. The *hooks manifest* was never considered: `hooks.json` shipped with `${CLAUDE_PLUGIN_ROOT}` unquoted, Claude Code runs hook commands through a shell, and in production that path always contains a space — so every hook died with 127 and the claude feed was entirely off. Found in the whole-branch review, fixed by quoting every command; `ClaudePluginPayloadTests.testEveryHookCommandSurvivesAPluginPathWithASpace` runs each command in the shipped manifest from a plugin root with a space in it. Every probe taken during execution used a temp path with no space, which is why it survived. |
 | Claude Code renames a hook event | Unknown names ignored; readiness degrades to `.unknown` → legacy path. |
 | `--bare` strips plugins | `.unknown` → legacy path. |
 

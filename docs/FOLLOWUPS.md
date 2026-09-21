@@ -1176,3 +1176,49 @@ rather than fixed alongside the daemon wiring.
   something this feature introduced, and it only bites when the phone build is older than the
   Mac's — the ordinary direction of skew during a staged rollout, not the common case day to
   day.
+
+## Hook-fed composer state (2026-09-19)
+
+- **`events.ndjson` grows without bound, and faster than "log file" suggests.** Nothing ever
+  removes or rotates it. Launch-time truncation was considered and rejected on its merits
+  (ledger Ruling E): a shrink under a concurrently-running second instance would make that
+  instance's `HookEventWatcher` resume at the new end and miss everything in between, so
+  truncation trades a disk-space problem for a correctness one. What the ruling underweighted
+  is the rate. `PreToolUse` and `PostToolUse` payloads carry `tool_input` and `tool_response`
+  verbatim, and `record.sh` writes the whole payload, so a busy fleet writes **megabytes per
+  minute** — not the kilobytes-per-day a lifecycle log sounds like. Two candidate answers, both
+  deferred: size-triggered rotation (the watcher's `TailTruncationPolicy.resumeAtEnd` already
+  survives a shrink correctly, so this is mostly a question of who rotates and when), or
+  trimming the payload in `record.sh` to the two fields the decoder actually reads
+  (`session_id`, `hook_event_name`) — cheaper, and it shrinks the line rather than the file.
+  Trimming at the writer is probably the better first move: `HookEventRecord.decode` reads
+  nothing else, and it also removes tool arguments and tool output from a file that currently
+  accumulates them in plain text.
+
+- **`HookEventWatcher.drain()` decodes that delta synchronously on `@MainActor`, every
+  500 ms.** Harmless at today's line sizes and directly compounded by the entry above: the
+  bigger the per-tick delta, the more JSON parsing happens on the main thread. Trimming the
+  payload addresses both at once.
+
+- **A never-anchored claude tab sits at `.unknown` until its next turn, not "one beat".**
+  `applyRegistry` resets readiness whenever no status-registry row names a tab's conversation,
+  and `resetComposerReadiness` clears the watcher's fold for that session — but not the tail
+  offset, so the tab is re-reported only when the agent emits its *next* hook event. For a
+  freshly booted, genuinely idle claude that is its first prompt. Safe (the tab falls back to
+  the legacy screen grammar, which is what every tab did before this existed) and accepted: the
+  level trigger's protection against a stale `.live` at a bare shell is worth strictly more
+  than the boot window it costs.
+
+- **Multi-account amplification of that same reset.** While only one account has scanned,
+  tabs belonging to an account whose watcher has not yet run resolve `anchor == nil` and reset
+  on each such tick. Bounded by the second account's first scan, and in the safe direction.
+
+- **Live in-app verification is a hand-off checklist, not a test** (ledger Ruling L). The
+  end-to-end path — phone prompt idle and mid-turn, open a permission prompt and **deny** it,
+  then inject; sidebar rename — needs a GUI session and a paired phone. The deny-then-inject
+  case is the one that must not be skipped: it is the deadlock the design was reworked around,
+  and the only thing standing behind it is the dialog veto's fail-open contract.
+
+- **`closeSession`'s route through `resetComposerReadiness` is untested**, and two tabs sharing
+  a `pinnedConversationID` make closing one `forget` the conversation the survivor still holds.
+  The cost is one redundant re-emission of an already-correct value.

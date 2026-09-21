@@ -792,6 +792,25 @@ In `ClaudeAdapter`, override the protocol default (which supplies only `CLAUDE_C
     }
 ```
 
+> **⚠️ WRONG AS WRITTEN — this step is the whole-branch review's C1, and it shipped.**
+> `AgentAdapter.environment(for:)`'s only production consumer is
+> `SessionStore.toolContext()` → `ToolRunner`, the Tools-menu path. A tab's agent gets its
+> environment from `PreferencesStore.sessionEnvironment(for:)`, assigned to
+> `config.environmentVariables` at two surface-config sites — which this step never touched.
+> So `record.sh` hit `[ -n "${FLIGHT_DECK_EVENT_DIR:-}" ] || exit 0` on every event forever,
+> `events.ndjson` was never created, and every claude tab stayed `.unknown`: the claude half
+> of the feature was dead while every unit test around it passed.
+>
+> What shipped instead: a second protocol member, `AgentAdapter.launchEnvironment` — the
+> variables a process of this agent needs regardless of which login it runs as, or whether it
+> has one at all. `environment(for:)` folds it in (so the Tools path is unchanged), and
+> `SessionStore.launchEnvironment(for:adapter:orphaned:)` merges it over `sessionEnvironment`
+> at both config sites. Deliberately **not** keyed on `account != nil`: a tab whose login was
+> deleted launches with no account variable and must still report.
+> `AccountLaunchTests.testTheLaunchedShellIsToldWhereToReportHookEvents` asserts the launched
+> shell's variable equals `ClaudePluginLocation.eventDirectory.path` — the assertion that
+> binds the writer side to the reader side and would have failed on day one.
+
 - [ ] **Step 5: Inject the flag at option resolution**
 
 At the site that produces claude options for a launch (`SessionStore.swift:382`, `preferences?.resolvedOptions(for:project:)`), wrap the `.claude(FlagSet)` case:
@@ -846,6 +865,13 @@ git commit -m "Load the bundled plugin and name the event directory at launch"
 `hasComposerBox` stays for now — Task 8 keeps it as the `.unknown` legacy path.
 
 - [ ] **Step 1: Capture the nudge fixture**
+
+> **Superseded during execution — see the ledger, Ruling H.** The "hand-author the fixture"
+> fallback below was NOT taken, and must not be: `Tests/FlightDeckTests/Fixtures/` holds
+> verbatim captures only, so a hand-written file there would be indistinguishable from
+> evidence while proving only that the code matches the author's guess. The nudge did not
+> reproduce on demand, so the string below lives **inline in the test**, labelled synthetic.
+> The verbatim corpus is what carries the real proof.
 
 Reproduce the dialog the probe caught and capture it in the same format as the existing
 `Fixtures/Claude/*.captured.txt`. If it will not reproduce on demand, hand-author the
@@ -974,6 +1000,16 @@ In `ClaudeTextChannel`:
 > composer assertions to compensate. Add a second recognised shape (e.g. a numbered
 > `❯ 1.` row) and keep both corpora passing.
 
+> **That contingency fired — see the ledger, Ruling G. The sketch above is not what
+> shipped.** `question-two-review` (claude) and `workspace-trust` (codex) carry no footer
+> token at all, so the token alone vetoes neither. The shipped predicate OR-s two
+> recognisers per agent: the footer token (claude `Esc to cancel`; codex also
+> `esc to go back`) **or** a marker line (`❯` / `›`) followed by numbered ` N. ` rows. The
+> marker is read from its own line only, so an unrelated `❯` elsewhere on screen cannot
+> recruit the rows beneath it. The composer corpus was kept whole, not weakened — which is
+> what makes the second recogniser evidence rather than a patch. `ClaudeDialogVetoTests` and
+> `CodexDialogVetoTests` are the two corpora.
+
 - [ ] **Step 6: Run test to verify it passes**
 
 Run: `./scripts/test-unit.sh`
@@ -999,7 +1035,7 @@ git commit -m "Add the Esc-to-cancel dialog veto, proved against the capture cor
 - Consumes: `ComposerReadiness` (Task 2), `isKnownNonComposer` (Task 6).
 - Produces: `CodexTextChannel.isKnownNonComposer`; `CodexRuntime` emitting `.lifecycle`.
 
-A UI-surfaced capability lands through the adapter for **every** adapter. Codex's readiness comes from its app-server thread status, not from hooks — an agent-specific signal is a reason to put detection behind the adapter, never to scope the feature to one agent.
+A UI-surfaced capability lands through the adapter for **every** adapter. Codex's readiness comes from its app-server thread status, not from hooks — an agent-specific signal is a reason to put detection behind the adapter, never to scope the feature to one agent. *(The app-server half is wrong — superseded by Ruling J; readiness comes from rollout evidence. See Step 4 below. The adapter-symmetry rule is what held.)*
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1050,6 +1086,22 @@ Derive codex's own footer token from the fixtures, following `CodexTextChannel.c
 
 In `CodexRuntime`, emit `.lifecycle(.live)` when a thread is known to the app-server and `.lifecycle(.absent)` when it ends, alongside the existing event emission.
 
+> **Superseded during execution — see the ledger, Ruling J. This step's premise is false and
+> it was re-scoped.** `CodexRuntime` deliberately never uses the app-server for a running
+> tab: codex's notifications are connection-scoped, and Flight Deck runs turns in a separate
+> `codex resume` TUI the app-server connection knows nothing about. There is no thread status
+> to read, and no `.absent` source at all — codex writes no session-end record, so nothing
+> emits `.lifecycle(.absent)` and the code does not implement one.
+>
+> What shipped: readiness comes from **rollout evidence**. `CodexRolloutWatcher` already
+> tails the rollout file, and a record appearing in it is proof the TUI is alive, so it emits
+> `.lifecycle(.live)` alongside its existing events — including the case where the file does
+> not exist yet at watch time. A codex tab therefore keeps `.live` after its TUI is gone,
+> which is safe only because `CodexTextChannel.composer(_:)` independently requires codex's
+> `›` marker AND its `model · mode · cwd` footer beneath it; no shell draws either.
+> `SessionStoreInjectionGateTests.testACodexTabReportedLiveStillTypesNothingAtABareShell`
+> pins that invariant rather than leaving it to a comment.
+
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `./scripts/test-unit.sh`
@@ -1059,7 +1111,7 @@ Expected: PASS.
 
 ```bash
 git add Sources/FlightDeck/Agents/CodexTextChannel.swift Sources/FlightDeck/Agents/Codex/CodexRuntime.swift Tests/FlightDeckTests/CodexDialogVetoTests.swift
-git commit -m "Give codex the same readiness and veto, fed by its app-server"
+git commit -m "Give codex the same readiness and veto, fed by its rollout evidence"
 ```
 
 ---
