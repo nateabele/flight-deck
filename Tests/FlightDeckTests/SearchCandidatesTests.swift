@@ -43,7 +43,7 @@ final class SearchCandidatesTests: XCTestCase {
     func testIndexedConversationsWithNoTabBecomeCandidates() {
         let candidates = SearchCandidates.build(
             repos: [repo("/w/fd")],
-            conversations: ["c1": IndexedConversation(name: "mobile-ui", projectPath: "/w/fd")],
+            conversations: ["c1": IndexedConversation(name: "mobile-ui", projectPath: "/w/fd", agent: "claude")],
             modified: { _ in self.now }
         )
 
@@ -61,7 +61,7 @@ final class SearchCandidatesTests: XCTestCase {
             repos: [repo("/w/fd", sessions: [session])],
             conversations: [
                 id.uuidString.lowercased():
-                    IndexedConversation(name: "rename-break", projectPath: "/w/fd"),
+                    IndexedConversation(name: "rename-break", projectPath: "/w/fd", agent: "claude"),
             ],
             modified: { _ in self.now }
         )
@@ -78,7 +78,7 @@ final class SearchCandidatesTests: XCTestCase {
     func testConversationsFromAProjectNoLongerInTheSidebarAreNotCandidates() {
         let candidates = SearchCandidates.build(
             repos: [repo("/w/fd")],
-            conversations: ["c1": IndexedConversation(name: "mobile-ui", projectPath: "/w/other")],
+            conversations: ["c1": IndexedConversation(name: "mobile-ui", projectPath: "/w/other", agent: "claude")],
             modified: { _ in self.now }
         )
 

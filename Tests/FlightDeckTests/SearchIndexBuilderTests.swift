@@ -126,10 +126,8 @@ final class SearchIndexBuilderTests: XCTestCase {
 
         func setCancelTarget(_ task: Task<Void, Never>) { target = task }
 
-        func ingest(
-            _ messages: [IndexedMessage], from source: URL, projectPath: String, offset: UInt64?
-        ) throws {
-            try wrapped.ingest(messages, from: source, projectPath: projectPath, offset: offset)
+        func ingest(_ messages: [IndexedMessage], for ref: TranscriptRef, offset: UInt64?) throws {
+            try wrapped.ingest(messages, for: ref, offset: offset)
             if !hasCancelled {
                 hasCancelled = true
                 target?.cancel()
@@ -146,8 +144,10 @@ final class SearchIndexBuilderTests: XCTestCase {
             try wrapped.conversationNames()
         }
 
-        func setConversationName(_ name: String, projectPath: String, for id: String) throws {
-            try wrapped.setConversationName(name, projectPath: projectPath, for: id)
+        func setConversationName(
+            _ name: String, projectPath: String, agent: String, for id: String
+        ) throws {
+            try wrapped.setConversationName(name, projectPath: projectPath, agent: agent, for: id)
         }
 
         func prune(keepingSources: Set<URL>, projects: Set<String>) throws {

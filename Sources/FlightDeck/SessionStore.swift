@@ -836,17 +836,21 @@ final class SessionStore: ObservableObject {
         if instance.agent == .codex {
             return makeCodexStackIfNeeded(account: instance.account).runtime
         }
-        // `searchIndex` and `projectPath` are closures, re-read on every message batch rather
-        // than resolved once here — see `ClaudeRuntime.init` — so a runtime built before
-        // `AppDelegate` wires up search (or in any test, where it is never wired up at all)
-        // still gets live indexing the moment it is. `projectPath` looks the session up by
-        // its pinned conversation id rather than closing over one path, because a tab can be
-        // moved to another project while its watcher is still running, and a project moved
-        // out from under a stale closure would keep crediting the project it left.
+        // `searchIndex`, `projectPath` and `workingDirectory` are closures, re-read on every
+        // message batch rather than resolved once here — see `ClaudeRuntime.init` — so a
+        // runtime built before `AppDelegate` wires up search (or in any test, where it is
+        // never wired up at all) still gets live indexing the moment it is. Both lookups key
+        // off the pinned conversation id rather than closing over one path, because a tab can
+        // be moved to another project, or followed into a worktree, while its watcher is
+        // still running — a stale closure would keep crediting where the tab used to be.
         let runtime = ClaudeRuntime(clock: clock, searchIndex: { [weak self] in self?.searchIndex },
             projectPath: { [weak self] conversationID in
                 self?.repos.flatMap(\.sessions)
                     .first { $0.pinnedConversationID == conversationID }?.workingDirectory
+            },
+            workingDirectory: { [weak self] conversationID in
+                self?.repos.flatMap(\.sessions)
+                    .first { $0.pinnedConversationID == conversationID }?.transcriptDirectory
             })
         runtimes[instance] = runtime
         return runtime

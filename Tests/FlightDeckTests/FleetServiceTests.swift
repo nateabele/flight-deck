@@ -922,9 +922,9 @@ private final class StubSearchIndex: SearchIndex {
     var conversations: [String: IndexedConversation] = [:]
     var shouldThrow = false
 
-    func ingest(_: [IndexedMessage], from: URL, projectPath: String, offset: UInt64?) throws {}
+    func ingest(_: [IndexedMessage], for: TranscriptRef, offset: UInt64?) throws {}
     func readOffset(for: URL) -> UInt64 { 0 }
-    func setConversationName(_: String, projectPath: String, for: String) throws {}
+    func setConversationName(_: String, projectPath: String, agent: String, for: String) throws {}
     func prune(keepingSources: Set<URL>, projects: Set<String>) throws {}
     func messageCount(forConversation: String) throws -> Int { 0 }
 

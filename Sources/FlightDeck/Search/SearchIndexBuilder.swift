@@ -64,6 +64,16 @@ actor SearchIndexBuilder {
         let read = TailReader.read(url: file.url, offset: startOffset, hasChosenStart: true)
         guard !read.lines.isEmpty else { return }
 
+        // This builder only ever walks claude's `SearchCorpus.Entry` directories, so `agent`
+        // and `provenance` are fixed and `workingDirectory` falls back to the project itself
+        // — this legacy walk has no record of a worktree a conversation actually ran in,
+        // unlike the per-agent corpus walk that supersedes it.
+        let ref = TranscriptRef(
+            url: file.url, projectPath: file.projectPath, accountHome: AgentID.claude.builtInHome,
+            workingDirectory: file.projectPath, conversationID: file.conversationID, agent: .claude,
+            provenance: nil, indexedName: nil, modified: file.modified
+        )
+
         // Drop whatever this source already holds, once, before inserting anything new. Two
         // cases reach here: a source never seen before (the delete is a no-op) and one whose
         // file shrank and was therefore re-read from the top — `TailReader` resets its own
@@ -76,7 +86,7 @@ actor SearchIndexBuilder {
         // "restart" to the index, so every intra-loop commit passing it would leave only the
         // last batch standing.
         if startOffset == 0 || read.offset < startOffset {
-            try? index.ingest([], from: file.url, projectPath: file.projectPath, offset: 0)
+            try? index.ingest([], for: ref, offset: 0)
         }
 
         var batch: [IndexedMessage] = []
@@ -96,12 +106,12 @@ actor SearchIndexBuilder {
                 // interruption between here and there re-reads these lines rather than
                 // skipping them — and no intra-loop commit can be mistaken for the restart
                 // handled above, because only `offset: 0` means that and `nil` never does.
-                try? index.ingest(batch, from: file.url, projectPath: file.projectPath, offset: nil)
+                try? index.ingest(batch, for: ref, offset: nil)
                 batch.removeAll(keepingCapacity: true)
             }
         }
 
-        try? index.ingest(batch, from: file.url, projectPath: file.projectPath, offset: read.offset)
+        try? index.ingest(batch, for: ref, offset: read.offset)
 
         // Resolved once over the whole pass's lines, not line-by-line: `resolve`'s own
         // priority — a rename beats the first user message regardless of which comes first
@@ -116,14 +126,15 @@ actor SearchIndexBuilder {
             // on every later pass, with nothing to self-heal it. So a later pass may only
             // write when it actually saw a rename record, or when nothing is stored yet.
             //
-            // `setConversationName` is a `SearchIndex` protocol member (Task 6 delta), so
-            // this calls straight through it rather than downcasting to `SQLiteSearchIndex`
-            // — a downcast here would silently no-op against any other conformer, including
-            // an in-memory stub used by another task's tests.
+            // `setConversationName` is a `SearchIndex` protocol member, so this calls
+            // straight through it rather than downcasting to `SQLiteSearchIndex` — a
+            // downcast here would silently no-op against any other conformer, including an
+            // in-memory stub used by other tests.
             if Self.containsRename(read.lines)
                 || (try? index.conversationNames())?[file.conversationID] == nil {
                 try? index.setConversationName(
-                    name, projectPath: file.projectPath, for: file.conversationID
+                    name, projectPath: file.projectPath, agent: AgentID.claude.rawValue,
+                    for: file.conversationID
                 )
             }
         }

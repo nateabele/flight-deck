@@ -82,8 +82,7 @@ enum SearchCandidates {
                 // live tab is more likely to be what you want.
                 lastActivity: .distantPast,
                 conversationID: id,
-                // TODO(Task 3): pass `conversation.agent` once `IndexedConversation` carries it.
-                agent: AgentID.claude.rawValue
+                agent: conversation.agent
             ))
         }
         return candidates
