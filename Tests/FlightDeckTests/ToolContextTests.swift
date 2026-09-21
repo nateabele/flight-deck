@@ -78,7 +78,15 @@ final class ToolContextTests: XCTestCase {
 
         XCTAssertEqual(context?.accountName, "Work")
         XCTAssertEqual(context?.accountHome, home.path)
-        XCTAssertEqual(context?.accountEnvironment, ["CLAUDE_CONFIG_DIR": home.path])
+        // FLIGHT_DECK_EVENT_DIR rides along here too — same `ClaudeAdapter.environment(for:)`
+        // a launched session gets, per this test's own doc comment above.
+        XCTAssertEqual(
+            context?.accountEnvironment,
+            [
+                "CLAUDE_CONFIG_DIR": home.path,
+                "FLIGHT_DECK_EVENT_DIR": ClaudePluginLocation.eventDirectory.path,
+            ]
+        )
     }
 
     /// A tool is not a session: a tab whose stored account has been deleted must still hand

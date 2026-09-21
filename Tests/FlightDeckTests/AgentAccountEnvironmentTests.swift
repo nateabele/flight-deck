@@ -8,7 +8,15 @@ final class AgentAccountEnvironmentTests: XCTestCase {
     }
 
     func testEachAgentNamesItsOwnVariable() {
-        XCTAssertEqual(ClaudeAdapter().environment(for: account(.claude)), ["CLAUDE_CONFIG_DIR": "/tmp/home"])
+        // Claude also carries FLIGHT_DECK_EVENT_DIR — see `ClaudeAdapter.environment(for:)` —
+        // which codex has no equivalent of, since only claude's plugin writes hook events.
+        XCTAssertEqual(
+            ClaudeAdapter().environment(for: account(.claude)),
+            [
+                "CLAUDE_CONFIG_DIR": "/tmp/home",
+                "FLIGHT_DECK_EVENT_DIR": ClaudePluginLocation.eventDirectory.path,
+            ]
+        )
         XCTAssertEqual(CodexAdapter(rpc: CodexRPC(transport: NullTransport())).environment(for: account(.codex)),
                        ["CODEX_HOME": "/tmp/home"])
     }

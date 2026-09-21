@@ -378,10 +378,20 @@ final class SessionStore: ObservableObject {
     /// the Codex pane inert — a user who chose the `read-only` sandbox silently got codex's
     /// default.
     private func options(for agent: AgentID, project: String) -> AgentOptions {
+        var options: AgentOptions
         switch agent {
-        case .claude: return preferences?.resolvedOptions(for: agent, project: project) ?? .claude(FlagSet())
-        case .codex:  return preferences?.resolvedOptions(for: agent, project: project) ?? .codex(CodexThreadOptions())
+        case .claude: options = preferences?.resolvedOptions(for: agent, project: project) ?? .claude(FlagSet())
+        case .codex:  options = preferences?.resolvedOptions(for: agent, project: project) ?? .codex(CodexThreadOptions())
         }
+        // The bundled plugin rides in as an ordinary `--plugin-dir` entry so it serialises,
+        // quotes and round-trips exactly like a user's own. Done here rather than in
+        // `ClaudeAdapter` so `launchCommand`/`resumeCommand` stay byte-identical
+        // pass-throughs to `ClaudeSession` — a property `ClaudeAdapterTests` pins.
+        if case .claude(let flags) = options,
+           let plugin = ClaudePluginLocation.directory(bundle: .main) {
+            options = .claude(ClaudePluginLocation.injecting(into: flags, pluginDirectory: plugin))
+        }
+        return options
     }
 
     /// Codex's half of the two dictionaries above, held together rather than as four fields
