@@ -18,70 +18,50 @@ struct ProjectHeaderRow: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            // The toggle is a `Button` rather than a tap gesture on the row. That is
-            // load-bearing, not stylistic: a `.onTapGesture` anywhere on a row consumes the
-            // mouse-down that `List`'s `.onMove` needs to begin a drag, so the row-wide
-            // toggle this used to carry made project reordering impossible — dead across the
-            // whole row, because `.contentShape(Rectangle())` below extends the gesture to
-            // the full width. A `Button` does not have that effect outside its own bounds,
-            // so the toggle can be made as large as it needs to be and the row stays
-            // draggable everywhere the button is not.
+            // Nothing in this row toggles anything, and that is load-bearing: a `Button` — or
+            // a tap gesture, or an `NSViewRepresentable`, or a recognizer on the table —
+            // consumes the mouse-down that `List`'s `.onMove` needs to begin a drag, so a
+            // toggle placed here kills reordering everywhere it reaches. The chevron alone was
+            // once small enough to dodge that (a ~5×9pt glyph, and `.rotationEffect` turns
+            // hit-testing with it, so expanded it was a 9×5 sliver) but it took repeated tries
+            // to hit, and widening it to cover the name took the whole row's drag with it.
             //
-            // The button covers the chevron AND the name, plus a few points around both.
-            // The chevron alone was a ~5×9pt glyph — and `.rotationEffect` turns hit-testing
-            // with it, so expanded it was a 9×5 sliver — which took repeated tries to hit.
-            // Finder and the Xcode navigator likewise toggle from the whole label, not just
-            // the triangle.
-            Button(action: toggle) {
-                HStack(spacing: 4) {
-                    Image(systemName: "chevron.right")
-                        .imageScale(.small)
-                        .foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(repo.isCollapsed ? 0 : 90))
-                        // Hidden but still occupying its space on an empty project: there is
-                        // nothing to disclose, and collapsing the layout instead would knock
-                        // every project name out of alignment as sessions come and go.
-                        .opacity(repo.sessions.isEmpty ? 0 : 1)
-                        // Decorative: the row's own label says "collapsed"/"expanded" in
-                        // words. This is the ONLY thing in the button that may be hidden —
-                        // see the note on the button below.
-                        .accessibilityHidden(true)
+            // The toggle is `SidebarInputMonitor`'s instead. It watches mouse-down and mouse-up
+            // passively, returns both unchanged, and tells a click from a drag afterwards — so
+            // the entire row toggles on a click AND drags to reorder. Finder and the Xcode
+            // navigator toggle from the whole label too, so this is also the conventional
+            // behaviour.
+            //
+            // Nothing is lost to VoiceOver by there being no button: the one that used to be
+            // here was `.accessibilityHidden(true)`, so it was never actuatable. The context
+            // menu's Expand/Collapse is, and remains, the accessible route.
+            Image(systemName: "chevron.right")
+                .imageScale(.small)
+                .foregroundStyle(.secondary)
+                .rotationEffect(.degrees(repo.isCollapsed ? 0 : 90))
+                // Hidden but still occupying its space on an empty project: there is nothing to
+                // disclose, and collapsing the layout instead would knock every project name
+                // out of alignment as sessions come and go.
+                .opacity(repo.sessions.isEmpty ? 0 : 1)
+                // Decorative — the row's own label says "collapsed"/"expanded" in words — and
+                // this is the ONLY thing here that may ever be hidden. The row is an
+                // `.accessibilityElement(children: .combine)`, and combine needs at least one
+                // unhidden descendant to build from: hiding anything that contains the title
+                // leaves it with none, and SwiftUI drops the entire element,
+                // `.accessibilityIdentifier("project-header")` with it.
+                // `testProjectHeadingsReorderByDragging` caught that as "0 project headers
+                // found", with an assertion message that blamed the seed flag.
+                .accessibilityHidden(true)
 
-                    Text(repo.displayName)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                // Claims the whole stack — the 4pt gap between chevron and name, and the
-                // slack above and below the glyphs, are dead without this — and the negative
-                // inset then pushes the hit rect 4pt past the drawn content on every side.
-                // An outward-inset shape rather than `.padding()`: padding would move the
-                // chevron and the name off the pixels they align to (the session titles
-                // below share this leading edge), and cancelling it again with negative
-                // padding would leave the hit area depending on hits surviving a parent
-                // narrower than its child. This changes hit-testing only; layout is
-                // untouched, so there is nothing to cancel.
-                .contentShape(Rectangle().inset(by: -4))
-            }
-            .buttonStyle(.plain)
-            // Not `.disabled`: that dims the label, and an empty project's name should read
-            // exactly like every other project's. Dropping hit-testing instead makes the
-            // no-op unclickable and hands that row back to the drag gesture entirely.
-            .allowsHitTesting(!repo.sessions.isEmpty)
-            // NOT `.accessibilityHidden(true)`, though it was while the chevron was its only
-            // content. The row is an `.accessibilityElement(children: .combine)`, and combine
-            // needs at least one unhidden descendant to have anything to build from — hiding
-            // this button once it contained the name left the row with none, and SwiftUI
-            // dropped the whole element, `.accessibilityIdentifier("project-header")` with it.
-            // `testProjectHeadingsReorderByDragging` caught it: 0 headers matched, not 2. The
-            // chevron carries the hidden flag instead, which is what it was ever for.
+            Text(repo.displayName)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
 
-            // 24 rather than 4 so a long, truncating name cannot squeeze the bare row down to
-            // a hairline: everything left of this spacer is now button, and `.onMove` needs
-            // somewhere to start a drag from. This strip is that somewhere, at every name
-            // length.
-            Spacer(minLength: 24)
+            // 4, not a reserved grab strip: the whole row is drag surface again now that
+            // nothing in it takes the mouse-down.
+            Spacer(minLength: 4)
 
             if repo.isCollapsed {
                 Text("\(repo.sessions.count)")
