@@ -18,35 +18,70 @@ struct ProjectHeaderRow: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            // The chevron is the toggle, and it is a `Button` rather than a tap gesture on
-            // the row. That is load-bearing, not stylistic: a `.onTapGesture` anywhere on a
-            // row consumes the mouse-down that `List`'s `.onMove` needs to begin a drag, so
-            // the row-wide toggle this used to carry made project reordering impossible —
-            // dead across the whole row, because `.contentShape(Rectangle())` below extends
-            // the gesture to the full width. Restricting the toggle to the chevron leaves
-            // the rest of the row grabbable. Finder and the Xcode navigator toggle on the
-            // triangle too, so this is also the more conventional behaviour.
+            // The toggle is a `Button` rather than a tap gesture on the row. That is
+            // load-bearing, not stylistic: a `.onTapGesture` anywhere on a row consumes the
+            // mouse-down that `List`'s `.onMove` needs to begin a drag, so the row-wide
+            // toggle this used to carry made project reordering impossible — dead across the
+            // whole row, because `.contentShape(Rectangle())` below extends the gesture to
+            // the full width. A `Button` does not have that effect outside its own bounds,
+            // so the toggle can be made as large as it needs to be and the row stays
+            // draggable everywhere the button is not.
+            //
+            // The button covers the chevron AND the name, plus a few points around both.
+            // The chevron alone was a ~5×9pt glyph — and `.rotationEffect` turns hit-testing
+            // with it, so expanded it was a 9×5 sliver — which took repeated tries to hit.
+            // Finder and the Xcode navigator likewise toggle from the whole label, not just
+            // the triangle.
             Button(action: toggle) {
-                Image(systemName: "chevron.right")
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
-                    .rotationEffect(.degrees(repo.isCollapsed ? 0 : 90))
-                    // Hidden but still occupying its space on an empty project: there is
-                    // nothing to disclose, and collapsing the layout instead would knock
-                    // every project name out of alignment as sessions come and go.
-                    .opacity(repo.sessions.isEmpty ? 0 : 1)
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.right")
+                        .imageScale(.small)
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(repo.isCollapsed ? 0 : 90))
+                        // Hidden but still occupying its space on an empty project: there is
+                        // nothing to disclose, and collapsing the layout instead would knock
+                        // every project name out of alignment as sessions come and go.
+                        .opacity(repo.sessions.isEmpty ? 0 : 1)
+                        // Decorative: the row's own label says "collapsed"/"expanded" in
+                        // words. This is the ONLY thing in the button that may be hidden —
+                        // see the note on the button below.
+                        .accessibilityHidden(true)
+
+                    Text(repo.displayName)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                // Claims the whole stack — the 4pt gap between chevron and name, and the
+                // slack above and below the glyphs, are dead without this — and the negative
+                // inset then pushes the hit rect 4pt past the drawn content on every side.
+                // An outward-inset shape rather than `.padding()`: padding would move the
+                // chevron and the name off the pixels they align to (the session titles
+                // below share this leading edge), and cancelling it again with negative
+                // padding would leave the hit area depending on hits surviving a parent
+                // narrower than its child. This changes hit-testing only; layout is
+                // untouched, so there is nothing to cancel.
+                .contentShape(Rectangle().inset(by: -4))
             }
             .buttonStyle(.plain)
-            .disabled(repo.sessions.isEmpty)
-            .accessibilityHidden(true)
+            // Not `.disabled`: that dims the label, and an empty project's name should read
+            // exactly like every other project's. Dropping hit-testing instead makes the
+            // no-op unclickable and hands that row back to the drag gesture entirely.
+            .allowsHitTesting(!repo.sessions.isEmpty)
+            // NOT `.accessibilityHidden(true)`, though it was while the chevron was its only
+            // content. The row is an `.accessibilityElement(children: .combine)`, and combine
+            // needs at least one unhidden descendant to have anything to build from — hiding
+            // this button once it contained the name left the row with none, and SwiftUI
+            // dropped the whole element, `.accessibilityIdentifier("project-header")` with it.
+            // `testProjectHeadingsReorderByDragging` caught it: 0 headers matched, not 2. The
+            // chevron carries the hidden flag instead, which is what it was ever for.
 
-            Text(repo.displayName)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            Spacer(minLength: 4)
+            // 24 rather than 4 so a long, truncating name cannot squeeze the bare row down to
+            // a hairline: everything left of this spacer is now button, and `.onMove` needs
+            // somewhere to start a drag from. This strip is that somewhere, at every name
+            // length.
+            Spacer(minLength: 24)
 
             if repo.isCollapsed {
                 Text("\(repo.sessions.count)")
