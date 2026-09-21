@@ -68,6 +68,11 @@ struct ClaudeAdapter: AgentAdapter {
     /// `ClaudeOpenCall`, which exists so there is exactly one implementation of the
     /// call/result pairing rather than two that can disagree about which dialog is up.
     static let openPromptReader: AgentOpenPromptReader? = ClaudeOpenPromptReader()
+
+    // Filled in by Task 4. Stubbed rather than omitted so this file compiles against the new
+    // protocol requirement while the conformer is still being written.
+    static let searchCorpus: AgentSearchCorpus? = nil
+
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
         category: String(describing: ClaudeAdapter.self)

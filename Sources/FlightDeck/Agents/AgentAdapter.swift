@@ -230,6 +230,18 @@ protocol AgentAdapter {
     /// derivation", and those are different sentences on a phone — `prompt_changed` versus
     /// `unsupported_agent`. It also lets `PromptService` refuse before reading the file.
     static var openPromptReader: AgentOpenPromptReader? { get }
+
+    /// **How this agent's history becomes searchable — or `nil`, the refusal.**
+    ///
+    /// The fourth capability object, and the only one that is not `@MainActor` — see
+    /// `AgentSearchCorpus`'s own doc comment for why. `nil` means this agent contributes
+    /// nothing to ⌘K, which is an answer the overlay can state rather than a gap that reads
+    /// as "you have no conversations here".
+    ///
+    /// Deliberately has NO default implementation. The defaults in this file exist for
+    /// members with a genuine majority answer (`rebind`, `environment`); this has none, and a
+    /// silent default is how a third agent would ship looking searchable and finding nothing.
+    static var searchCorpus: AgentSearchCorpus? { get }
 }
 
 /// Deriving what an agent is blocked on from a window of its transcript.
@@ -460,6 +472,19 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.openPromptReader
         case .codex: CodexAdapter.openPromptReader
+        }
+    }
+
+    /// See `AgentAdapter.searchCorpus`. Consulted by `AppDelegate.startSearch`'s backfill and
+    /// by `SessionStore.openConversation`, neither of which holds an adapter — which is the
+    /// whole reason the capability hangs off the agent rather than off an instance.
+    ///
+    /// `nonisolated` unlike its siblings here: the backfill calls it from an actor, and the
+    /// object it returns is `Sendable`.
+    nonisolated var searchCorpus: AgentSearchCorpus? {
+        switch self {
+        case .claude: ClaudeAdapter.searchCorpus
+        case .codex: CodexAdapter.searchCorpus
         }
     }
 
