@@ -19,7 +19,7 @@ import SQLite3
 /// This is the only file in the app that sees a `sqlite3*`.
 final class SQLiteSearchIndex: SearchIndex {
     /// Bump on any schema change. A mismatch deletes the file — see `init`.
-    static let schemaVersion = 2
+    static let schemaVersion = 3
 
     /// SQLite's own "copy this string, I may free it" sentinel. It is a `#define` casting
     /// -1 to a function pointer, which does not survive into Swift, so it is respelled here.
@@ -74,9 +74,7 @@ final class SQLiteSearchIndex: SearchIndex {
 
     // MARK: - Ingest
 
-    func ingest(
-        _ messages: [IndexedMessage], from source: URL, projectPath: String, offset: UInt64?
-    ) throws {
+    func ingest(_ messages: [IndexedMessage], for ref: TranscriptRef, offset: UInt64?) throws {
         transactionLock.lock()
         defer { transactionLock.unlock() }
         try exec("BEGIN IMMEDIATE")
@@ -86,7 +84,7 @@ final class SQLiteSearchIndex: SearchIndex {
             // than appended to — otherwise every message in the replacement is doubled. A
             // nil offset (live ingest) must NOT trigger this: it carries no read position at
             // all, so treating it as "0" would wipe out everything the backfill has indexed.
-            if offset == .some(0) { try deleteRows(forSource: source) }
+            if offset == .some(0) { try deleteRows(forSource: ref.url) }
 
             // OR IGNORE: backfill and live ingest can both cover the same appended bytes, and
             // `message_identity` (source, timestamp, text) is what makes that overlap a no-op
@@ -101,11 +99,11 @@ final class SQLiteSearchIndex: SearchIndex {
 
             for message in messages {
                 bind(insert, 1, message.conversationID)
-                bind(insert, 2, projectPath)
+                bind(insert, 2, ref.projectPath)
                 bind(insert, 3, message.role.rawValue)
                 sqlite3_bind_double(insert, 4, message.timestamp?.timeIntervalSince1970 ?? 0)
                 bind(insert, 5, message.text)
-                bind(insert, 6, source.path)
+                bind(insert, 6, ref.url.path)
                 sqlite3_bind_int64(insert, 7, Int64(message.offset))
                 guard sqlite3_step(insert) == SQLITE_DONE else { throw failure() }
                 let inserted = sqlite3_changes(db) > 0
@@ -132,14 +130,26 @@ final class SQLiteSearchIndex: SearchIndex {
             // Live ingest (nil offset) must not touch the read position — see the doc
             // comment on the protocol member for why recording it would silently skip a
             // conversation's entire backfilled history.
+            //
+            // `INSERT OR REPLACE`, not an `ON CONFLICT DO UPDATE`, because every column here
+            // is written every time: a re-walk of a file whose codex provenance changed (or
+            // whose agent binding otherwise moved) must overwrite the stale value rather than
+            // leave it stuck at whatever the first ingest happened to see.
             if let offset {
                 let source_ = try prepare(
-                    "INSERT INTO source(path, offset) VALUES (?, ?) "
-                    + "ON CONFLICT(path) DO UPDATE SET offset = excluded.offset"
+                    "INSERT OR REPLACE INTO source(path, offset, agent, provenance, working_directory) "
+                    + "VALUES (?, ?, ?, ?, ?)"
                 )
                 defer { sqlite3_finalize(source_) }
-                bind(source_, 1, source.path)
+                bind(source_, 1, ref.url.path)
                 sqlite3_bind_int64(source_, 2, Int64(offset))
+                bind(source_, 3, ref.agent.rawValue)
+                if let provenance = ref.provenance {
+                    bind(source_, 4, provenance)
+                } else {
+                    sqlite3_bind_null(source_, 4)
+                }
+                bind(source_, 5, ref.workingDirectory)
                 guard sqlite3_step(source_) == SQLITE_DONE else { throw failure() }
             }
 
@@ -170,10 +180,15 @@ final class SQLiteSearchIndex: SearchIndex {
         // 200 and silently shrink what the user sees.
         let placeholders = Array(repeating: "?", count: projects.count).joined(separator: ", ")
         let statement = try prepare("""
-            SELECT m.id, m.conversation_id, m.project_path, m.timestamp, m.offset,
-                   snippet(message_fts, 0, char(2), char(3), '…', 24)
+            SELECT m.id, m.conversation_id, m.project_path, m.timestamp, m.offset, m.source,
+                   snippet(message_fts, 0, char(2), char(3), '…', 24),
+                   s.agent, s.provenance, s.working_directory
             FROM message_fts
             JOIN message m ON m.id = message_fts.rowid
+            -- LEFT JOIN, not JOIN: a message row is written before its source row's offset is
+            -- committed at the end of the file's pass, so an inner join would make every hit
+            -- from the file currently being indexed invisible until that pass finished.
+            LEFT JOIN source s ON s.path = m.source
             WHERE message_fts MATCH ? AND m.project_path IN (\(placeholders))
             ORDER BY bm25(message_fts)
             LIMIT ?
@@ -197,36 +212,53 @@ final class SQLiteSearchIndex: SearchIndex {
                 // Falls back to the conversation id's leading segment, which is what the
                 // sidebar shows for an unnamed conversation too.
                 conversationName: names[conversation]?.name ?? String(conversation.prefix(8)),
-                snippet: text(statement, 5),
+                snippet: text(statement, 6),
                 timestamp: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
-                offset: Int(sqlite3_column_int64(statement, 4))
+                offset: Int(sqlite3_column_int64(statement, 4)),
+                // Defaults to "claude" when NULL: a message row can outlive its `source` row
+                // being written (see the LEFT JOIN above), and every source predating this
+                // column really was claude.
+                agent: optionalText(statement, 7) ?? "claude",
+                provenance: optionalText(statement, 8),
+                workingDirectory: text(statement, 9),
+                // `m.source`, not `s.path`: `s.path` comes through the LEFT JOIN and is NULL
+                // for a file still mid-index, which would make `CodexAdapter.resumeCommand`
+                // treat an in-progress hit as having no transcript and start a fresh, empty
+                // thread instead of resuming the one that was searched for. `m.source` is on
+                // the inner-joined row and is never NULL.
+                transcriptPath: text(statement, 5)
             ))
         }
         return hits
     }
 
     func conversationNames() throws -> [String: IndexedConversation] {
-        let statement = try prepare("SELECT conversation_id, name, project_path FROM conversation")
+        let statement = try prepare(
+            "SELECT conversation_id, name, project_path, agent FROM conversation"
+        )
         defer { sqlite3_finalize(statement) }
         var names: [String: IndexedConversation] = [:]
         while sqlite3_step(statement) == SQLITE_ROW {
             names[text(statement, 0)] = IndexedConversation(
-                name: text(statement, 1), projectPath: text(statement, 2)
+                name: text(statement, 1), projectPath: text(statement, 2), agent: text(statement, 3)
             )
         }
         return names
     }
 
-    func setConversationName(_ name: String, projectPath: String, for id: String) throws {
+    func setConversationName(
+        _ name: String, projectPath: String, agent: String, for id: String
+    ) throws {
         let statement = try prepare(
-            "INSERT INTO conversation(conversation_id, name, project_path) VALUES (?, ?, ?) "
+            "INSERT INTO conversation(conversation_id, name, project_path, agent) VALUES (?, ?, ?, ?) "
             + "ON CONFLICT(conversation_id) DO UPDATE SET "
-            + "name = excluded.name, project_path = excluded.project_path"
+            + "name = excluded.name, project_path = excluded.project_path, agent = excluded.agent"
         )
         defer { sqlite3_finalize(statement) }
         bind(statement, 1, id)
         bind(statement, 2, name)
         bind(statement, 3, projectPath)
+        bind(statement, 4, agent)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw failure() }
     }
 
@@ -350,9 +382,20 @@ final class SQLiteSearchIndex: SearchIndex {
             CREATE VIRTUAL TABLE message_fts USING fts5(
               text, content='message', content_rowid='id', tokenize='unicode61'
             );
-            CREATE TABLE source(path TEXT PRIMARY KEY, offset INTEGER NOT NULL);
+            -- agent/provenance/working_directory live HERE rather than on `message`: a
+            -- transcript file has exactly one of each, so this is where they normalise.
+            -- Repeating them per message would cost three columns across hundreds of
+            -- thousands of rows to answer a question that is per-file.
+            CREATE TABLE source(
+              path TEXT PRIMARY KEY,
+              offset INTEGER NOT NULL,
+              agent TEXT NOT NULL,
+              provenance TEXT,
+              working_directory TEXT NOT NULL
+            );
             CREATE TABLE conversation(
-              conversation_id TEXT PRIMARY KEY, name TEXT NOT NULL, project_path TEXT NOT NULL
+              conversation_id TEXT PRIMARY KEY, name TEXT NOT NULL,
+              project_path TEXT NOT NULL, agent TEXT NOT NULL
             );
             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             INSERT INTO meta(key, value) VALUES ('schema_version', '\(Self.schemaVersion)');
@@ -375,6 +418,15 @@ final class SQLiteSearchIndex: SearchIndex {
 
     private func text(_ statement: OpaquePointer?, _ column: Int32) -> String {
         guard let cString = sqlite3_column_text(statement, column) else { return "" }
+        return String(cString: cString)
+    }
+
+    /// Distinguishes NULL from an empty string, unlike `text(_:_:)` — needed for
+    /// `provenance`, where "no provenance recorded" and "recorded as empty" are different
+    /// facts, and for `agent`, whose NULL/non-NULL split decides whether the "claude" default
+    /// applies.
+    private func optionalText(_ statement: OpaquePointer?, _ column: Int32) -> String? {
+        guard let cString = sqlite3_column_text(statement, column) else { return nil }
         return String(cString: cString)
     }
 

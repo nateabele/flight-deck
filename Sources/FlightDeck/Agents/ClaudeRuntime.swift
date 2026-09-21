@@ -18,21 +18,28 @@ final class ClaudeRuntime: AgentRuntime {
     /// wires it in after this runtime may already have been built and started watching — and
     /// nil in every test, where nothing ever wires it in at all.
     private let searchIndex: () -> SearchIndex?
-    /// Which project a conversation currently belongs to, for the same `ingest(_:from:
-    /// projectPath:offset:)` call. Looked up live rather than captured at `attach` time so a
-    /// tab moved to another project mid-life (`SessionStore.moveSession`) keeps crediting the
-    /// project it actually belongs to now, not the one it was filed under when its watcher
-    /// started.
+    /// Which project a conversation currently belongs to, for the same `ingest(_:for:offset:)`
+    /// call. Looked up live rather than captured at `attach` time so a tab moved to another
+    /// project mid-life (`SessionStore.moveSession`) keeps crediting the project it actually
+    /// belongs to now, not the one it was filed under when its watcher started.
     private let projectPath: (UUID) -> String?
+    /// Where a conversation's agent is working right now, for the same `ingest` call — the
+    /// literal directory, which follows the tab into a worktree while `projectPath` stays put.
+    /// A sibling closure rather than a stored value for the same reason as `projectPath`: a
+    /// tab that follows its agent into a worktree mid-life must credit the worktree it is in
+    /// now, not the directory its watcher happened to start in.
+    private let workingDirectory: (UUID) -> String?
 
     init(
         clock: WatchClock? = nil,
         searchIndex: @escaping () -> SearchIndex? = { nil },
-        projectPath: @escaping (UUID) -> String? = { _ in nil }
+        projectPath: @escaping (UUID) -> String? = { _ in nil },
+        workingDirectory: @escaping (UUID) -> String? = { _ in nil }
     ) {
         self.clock = clock
         self.searchIndex = searchIndex
         self.projectPath = projectPath
+        self.workingDirectory = workingDirectory
     }
 
     /// Subscribes `tab` to `binding`'s conversation, starting a watcher if this is the first
@@ -87,14 +94,21 @@ final class ClaudeRuntime: AgentRuntime {
                 // Not the "six hundred lines of tokenizer" cost this feature exists to avoid
                 // elsewhere.
                 onMessages: { [weak self] messages in
-                    guard let self, let index = self.searchIndex(), let path = self.projectPath(id)
+                    guard let self, let index = self.searchIndex(),
+                          let path = self.projectPath(id),
+                          let workingDirectory = self.workingDirectory(id)
                     else { return }
+                    let ref = TranscriptRef(
+                        url: url, projectPath: path, accountHome: AgentID.claude.builtInHome,
+                        workingDirectory: workingDirectory, conversationID: id.uuidString.lowercased(),
+                        agent: .claude, provenance: nil, indexedName: nil, modified: Date()
+                    )
                     // `offset: nil` — see `SearchIndex.ingest`'s doc comment. This watcher
                     // starts at end-of-file (it exists to catch titles, not backlog), so its
                     // own read position is never the right number to record as indexing
                     // progress: doing so would make the backfill resume from there and
                     // silently never index this conversation's history.
-                    try? index.ingest(messages, from: url, projectPath: path, offset: nil)
+                    try? index.ingest(messages, for: ref, offset: nil)
                 }
             )
             watcher?.start()
