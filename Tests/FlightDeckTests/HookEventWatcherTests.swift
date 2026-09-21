@@ -76,4 +76,24 @@ final class HookEventWatcherTests: XCTestCase {
 
         XCTAssertEqual(seen[a], .live)
     }
+
+    /// Simulates a relaunch: the shared log already carries a stale `.live` for `a` from a
+    /// session the previous run never got a graceful `SessionEnd` for (`SessionReaper` tears
+    /// sessions down by signal escalation, not a clean exit). Session ids are stable across
+    /// resume, so replaying that backlog would attach the stale `.live` to the *resumed*
+    /// tab and suppress the `.unknown` fallback during exactly the window it exists to
+    /// cover — this pins that the watcher never does that, while still picking up events
+    /// that arrive after it exists.
+    func testDoesNotReplayContentThatPredatesConstruction() throws {
+        try append("SessionStart", a)
+
+        var seen: [UUID: ComposerReadiness] = [:]
+        let watcher = HookEventWatcher(directory: dir, clock: nil) { seen.merge($0) { _, n in n } }
+        watcher.drain()
+        XCTAssertNil(seen[a], "content already on disk at construction must not be replayed")
+
+        try append("SessionStart", b)
+        watcher.drain()
+        XCTAssertEqual(seen[b], .live, "an event appended after construction is still read")
+    }
 }
