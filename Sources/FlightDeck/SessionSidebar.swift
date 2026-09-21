@@ -478,6 +478,23 @@ struct SessionSidebar: View {
                 else { return false }
                 store.renameRequest = selected
                 return true
+            },
+            // Click-to-collapse. The monitor reports every row it saw a click on, project header
+            // or not, so the `case .project` guard is load-bearing rather than defensive:
+            // `SidebarRow.projectID` is total across all three cases, and without the guard a
+            // click on a *session* row would collapse its parent out from under itself.
+            toggleRow: { index in
+                guard index >= 0, index < store.sidebarRows.count else { return }
+                guard case .project(let id) = store.sidebarRows[index] else { return }
+                store.setCollapsed(!(store.repos.first { $0.id == id }?.isCollapsed ?? false),
+                                   forProjectAt: id)
+            },
+            // How the monitor proves the row it decides about is the row that was pressed. A
+            // session closing in another project removes a row, and every index below it shifts;
+            // `SidebarRow.id` does not move.
+            rowIdentity: { index in
+                guard index >= 0, index < store.sidebarRows.count else { return nil }
+                return store.sidebarRows[index].id
             }
         )
         .dropDestination(for: URL.self) { urls, _ in

@@ -39,6 +39,28 @@ static bool client_recv_packet(Packet *pkt) {
 	return false;
 }
 
+/* Flight Deck fork: whether to use the alternate screen buffer at all.
+ *
+ * Upstream abduco unconditionally switches to the alternate buffer on attach so
+ * that a later detach restores whatever the user's shell had on screen. That is
+ * the right trade for a multiplexer you attach to from an existing terminal; it
+ * is the wrong one for Flight Deck, where the attach client owns its ghostty
+ * surface for the whole life of the tab and there is no prior screen to put
+ * back. See `client_setup_terminal` for what it cost us.
+ *
+ * Opt back in with FD_ABDUCO_ALT_SCREEN=1 for standalone/upstream-equivalent
+ * use. Flight Deck never sets it. Read once, because `client_restore_terminal`
+ * runs from an atexit handler where getenv is not async-signal-safe and the
+ * environment may already be torn down. */
+static bool fd_use_alternate_buffer(void) {
+	static int cached = -1;
+	if (cached == -1) {
+		const char *v = getenv("FD_ABDUCO_ALT_SCREEN");
+		cached = (v && v[0] == '1' && v[1] == '\0') ? 1 : 0;
+	}
+	return cached == 1;
+}
+
 static void client_restore_terminal(void) {
 	if (has_term)
 		tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_term);
@@ -46,6 +68,13 @@ static void client_restore_terminal(void) {
 		printf("\033[?25h\033[?1049l");
 		fflush(stdout);
 		alternate_buffer = false;
+	} else {
+		/* Flight Deck fork: upstream restored cursor visibility only as part of
+		 * leaving the alternate buffer. With that switch off by default, the
+		 * show-cursor still has to happen -- a session detached while its agent
+		 * had the cursor hidden would otherwise leave it hidden for good. */
+		printf("\033[?25h");
+		fflush(stdout);
 	}
 }
 
@@ -63,7 +92,34 @@ static void client_setup_terminal(void) {
 	cur_term.c_cc[VTIME] = 0;
 	tcsetattr(STDIN_FILENO, TCSANOW, &cur_term);
 
-	if (!alternate_buffer) {
+	/* Flight Deck fork: DO NOT switch to the alternate screen by default.
+	 *
+	 * Upstream ran `\033[?1049h\033[H` here unconditionally. Inside Flight Deck
+	 * the attach client owns its ghostty surface for the tab's entire life, so
+	 * that switch never gets undone, and everything the tab shows lives on the
+	 * alternate screen. Two consequences, both user-visible:
+	 *
+	 *   1. The alternate screen has no scrollback, so two-finger scroll has
+	 *      nothing to scroll -- the session's own history is unreachable.
+	 *   2. Ghostty therefore converts scroll into cursor-key presses (DEC
+	 *      private mode 1007, "alternate scroll", default ON -- see
+	 *      `mouseScroll` in vendor/ghostty/src/Surface.zig, which requires
+	 *      exactly alt-screen + no mouse reporting + 1007). Claude Code's
+	 *      composer binds Up/Down to prompt-history recall, so every scroll
+	 *      gesture walked the user backwards through old prompts instead of
+	 *      scrolling.
+	 *
+	 * That was the "scrolling recalls my prompt history" bug (2026-09-20). It
+	 * read as intermittent only because a stray `\033[?1049l` later in the
+	 * replayed history -- from a pager that had exited, or from the mode
+	 * preamble -- would sometimes leave the alternate screen again by accident,
+	 * which is why some tabs behaved and others did not, and why a tab could
+	 * break on the next re-attach.
+	 *
+	 * Verified by attaching read-only to 10 live sessions and diffing the
+	 * attach stream: 8 arrived on the alternate screen, 2 (the ones that
+	 * happened to carry a matching 1049l) did not. */
+	if (fd_use_alternate_buffer() && !alternate_buffer) {
 		printf("\033[?1049h\033[H");
 		fflush(stdout);
 		alternate_buffer = true;

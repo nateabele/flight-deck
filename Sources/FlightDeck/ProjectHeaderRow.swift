@@ -18,27 +18,51 @@ struct ProjectHeaderRow: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            // The chevron is the toggle, and it is a `Button` rather than a tap gesture on
-            // the row. That is load-bearing, not stylistic: a `.onTapGesture` anywhere on a
-            // row consumes the mouse-down that `List`'s `.onMove` needs to begin a drag, so
-            // the row-wide toggle this used to carry made project reordering impossible —
-            // dead across the whole row, because `.contentShape(Rectangle())` below extends
-            // the gesture to the full width. Restricting the toggle to the chevron leaves
-            // the rest of the row grabbable. Finder and the Xcode navigator toggle on the
-            // triangle too, so this is also the more conventional behaviour.
-            Button(action: toggle) {
-                Image(systemName: "chevron.right")
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
-                    .rotationEffect(.degrees(repo.isCollapsed ? 0 : 90))
-                    // Hidden but still occupying its space on an empty project: there is
-                    // nothing to disclose, and collapsing the layout instead would knock
-                    // every project name out of alignment as sessions come and go.
-                    .opacity(repo.sessions.isEmpty ? 0 : 1)
-            }
-            .buttonStyle(.plain)
-            .disabled(repo.sessions.isEmpty)
-            .accessibilityHidden(true)
+            // Nothing in this row toggles anything, and that is load-bearing: a `Button` — or
+            // a tap gesture, or an `NSViewRepresentable`, or a recognizer on the table —
+            // consumes the mouse-down that `List`'s `.onMove` needs to begin a drag, so a
+            // toggle placed here kills reordering everywhere it reaches. The chevron alone was
+            // once small enough to dodge that (a ~5×9pt glyph, and `.rotationEffect` turns
+            // hit-testing with it, so expanded it was a 9×5 sliver) but it took repeated tries
+            // to hit, and widening it to cover the name took the whole row's drag with it.
+            //
+            // The toggle is `SidebarInputMonitor`'s instead. It watches mouse-DOWN passively —
+            // observing it and returning it unchanged, which is what leaves the drag intact —
+            // and then decides whether that press was a click only once the press is over. It
+            // cannot watch the mouse-up: `NSTableView` swallows that one inside its own tracking
+            // loop, where no local monitor can see it. That file's doc comment has the
+            // measurements. The upshot here is that the entire row toggles on a click AND drags
+            // to reorder. Finder and the Xcode navigator toggle from the whole label too, so
+            // this is also the conventional behaviour.
+            //
+            // Nothing is lost to VoiceOver by there being no button: the one that used to be
+            // here was `.accessibilityHidden(true)`, so it was never actuatable. The context
+            // menu's Expand/Collapse is, and remains, the accessible route.
+            Image(systemName: "chevron.right")
+                .imageScale(.small)
+                .foregroundStyle(.secondary)
+                .rotationEffect(.degrees(repo.isCollapsed ? 0 : 90))
+                // Invisible on an empty project, but still occupying its space: collapsing the
+                // layout instead would knock every project name out of alignment as sessions
+                // come and go.
+                //
+                // The row still TOGGLES while empty, which the `Button` this replaced did not —
+                // it was hit-test-disabled there. Deliberate: the context menu's
+                // Expand/Collapse was never gated on emptiness either, so the row now matches
+                // it, and collapsing an empty project does something real — it drops the
+                // `.empty` placeholder row, whose whole job is to tell expanded-empty apart
+                // from collapsed (see `SidebarRow`). Only the chevron has nothing to say,
+                // because there is nothing to disclose.
+                .opacity(repo.sessions.isEmpty ? 0 : 1)
+                // Decorative — the row's own label says "collapsed"/"expanded" in words — and
+                // this is the ONLY thing here that may ever be hidden. The row is an
+                // `.accessibilityElement(children: .combine)`, and combine needs at least one
+                // unhidden descendant to build from: hiding anything that contains the title
+                // leaves it with none, and SwiftUI drops the entire element,
+                // `.accessibilityIdentifier("project-header")` with it.
+                // `testProjectHeadingsReorderByDragging` caught that as "0 project headers
+                // found", with an assertion message that blamed the seed flag.
+                .accessibilityHidden(true)
 
             Text(repo.displayName)
                 .font(.subheadline.weight(.semibold))
@@ -46,6 +70,8 @@ struct ProjectHeaderRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
 
+            // 4, not a reserved grab strip: the whole row is drag surface again now that
+            // nothing in it takes the mouse-down.
             Spacer(minLength: 4)
 
             if repo.isCollapsed {
