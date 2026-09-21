@@ -67,9 +67,8 @@ import SwiftUI
 /// the fact*. The obvious way to do that — widen the monitor's mask to `.leftMouseUp` and
 /// compare the two points — **does not work, and was measured not to work**:
 ///
-///     [plain SwiftUI view, key + active]   DOWN seen, UP seen
-///     [List row,           key + active]   DOWN seen, UP NEVER SEEN
-///     [List row,       window never key]   DOWN seen, UP seen
+///     [plain SwiftUI view]                       DOWN seen, UP seen
+///     [List row, press resolved to a row]        DOWN seen, UP NEVER SEEN
 ///
 /// `NSTableView` runs a nested tracking loop from inside its `mouseDown:`, pulling events
 /// straight off the queue with `nextEventMatchingMask:` until the button comes up. Local
@@ -78,10 +77,20 @@ import SwiftUI
 ///
 /// **The loop is not something the sidebar opts into, and nothing here can opt out of it.**
 /// `.onMove` does not cause it (measured with and without: identical, both swallow the up), and
-/// `.selectionDisabled()` — which every project header carries — does not avoid it either. The
-/// only condition that correlated across every variant was the window being key and the app
-/// active, which the real sidebar always is. So dropping reorder, or selection, would not bring
-/// the mouse-up back; there is nothing to trade away here.
+/// `.selectionDisabled()` — which every project header carries — does not avoid it either. So
+/// dropping reorder, or selection, would not bring the mouse-up back; there is nothing to trade
+/// away here.
+///
+/// An earlier version of this table claimed a third row — that a window which never becomes key
+/// *does* deliver the up — and it was wrong in a way worth recording, because the raw line it
+/// came from is true. Those runs do see the up. They also log `rowResolved=false`: with the app
+/// inactive there was no List row under the pointer to press, so the press landed on the table's
+/// background and was never the configuration the line described. Across every run gathered,
+/// `rowResolved` and key/active moved together perfectly, so the two cannot be told apart here:
+/// what is measured is that **a press landing on a row is never followed by an up**, and that
+/// every press that did see an up had not landed on a row. Whether an unfocused window would
+/// swallow the up if a row were under the pointer is simply not known — activation could not be
+/// forced on a machine in use, so that case was never produced.
 ///
 /// What *is* observable is the loop **ending**: a block scheduled for `NSDefaultRunLoopMode`
 /// only cannot run until the run loop leaves `NSEventTrackingRunLoopMode`. Measured against a
@@ -303,20 +312,31 @@ final class SidebarInputMonitor {
     ) {
         // The press is not over, so this is not yet a click — and it may never be one.
         //
-        // This is reachable, and the measurements do not pin down exactly when. The block is
-        // scheduled from `handleMouseDown`, and `SessionWindow.hitView(for:)` requires neither a
-        // key window nor an active app, so presses arrive here that never ran a tracking loop to
-        // wait on. Probing a window that never became key, the decision point landed after the
-        // release in four runs out of five and about 4ms into the press — long before it — in
-        // the fifth. Nothing was found that makes the loop's absence predictable, which is the
-        // argument for this guard rather than against it: without it, that fifth case turns a
-        // drag into a toggle.
+        // This is reachable, and the measurements do not pin down when. The block is scheduled
+        // from `handleMouseDown`, and `SessionWindow.hitView(for:)` requires neither a key window
+        // nor an active app, so a press can arrive here with no tracking loop to wait behind —
+        // and the decision then happens immediately, while the button is still down.
         //
-        // Declining costs a toggle on the press that is still in progress and nothing else; the
-        // next click on a settled window toggles normally. If that press is the one activating
-        // an unfocused Flight Deck, the result is that the activating click does not collapse a
-        // project and the one after it does — which is how macOS apps are supposed to behave,
-        // though that particular sequence has not been driven in the real app.
+        // That was seen exactly once, in one run of one probe variant (`upprobe3 --noselect`,
+        // window not key): no tracking loop ran at all and the block fired ~3ms into a 100ms
+        // press. It has not been reproduced since. Later probing of a never-key window — seven
+        // runs of a differently-built probe, so not a rerun of that one — always found a
+        // tracking loop and always decided after the release. Nothing was found that predicts
+        // which way it goes, and that is the argument FOR this guard rather than against it: an
+        // unpredictable early fire is exactly what turns a drag into a toggle.
+        //
+        // Two limits on all of the above, because the value of this comment is that it separates
+        // what was run from what was reasoned:
+        //
+        //   - `AXIsProcessTrusted()` is false on the machine this was probed on, so no synthetic
+        //     press can make `NSEvent.pressedMouseButtons` non-zero. What was verified is the
+        //     ORDERING this guard keys on — decision before release. That the guard then returns
+        //     early under a real finger is inference from the API, not an observation.
+        //   - The consequence for a click that activates an unfocused Flight Deck — that click
+        //     not collapsing a project, and the next one doing so, which is how macOS apps are
+        //     meant to behave — has not been driven in the real app either.
+        //
+        // Declining costs a toggle on a press still in progress and nothing else.
         guard NSEvent.pressedMouseButtons & 1 == 0 else { return }
 
         // Resolved again rather than captured, the same rule the rest of this file follows: the
