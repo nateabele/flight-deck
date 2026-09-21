@@ -35,10 +35,33 @@ public struct TranscriptHit: Codable, Equatable, Sendable {
     /// which is exactly what `TimelineAnchor.around` takes. This is what lets a hit be
     /// opened rather than only read.
     public let offset: Int
+    /// Which agent wrote this transcript, as `AgentID.rawValue`.
+    ///
+    /// **A `String`, not an `AgentID`, because `AgentID` is not in FleetKit** — this module
+    /// compiles for iOS and is limited to Foundation/Network/Security, and the phone has no
+    /// adapters to name. The desk maps it back with `AgentID(rawValue:)`; a value neither end
+    /// recognises degrades to "unknown agent", which is a row without a glyph rather than a
+    /// decode failure that would lose every other hit in the frame.
+    public let agent: String
+    /// codex: `session_meta.payload.source` — "exec", "cli", "vscode". nil for claude.
+    /// The only consumer is `SearchRanker`'s `.automated` tier.
+    public let provenance: String?
+    /// The literal directory this conversation ran in — the project, or one of its worktrees.
+    /// Empty when the index predates this field; `SessionStore.openConversation` falls back
+    /// to `projectPath` in that case.
+    public let workingDirectory: String
+    /// The on-disk transcript/rollout file this hit came from. Empty when the index predates
+    /// this field. `CodexAdapter.binding(for:)` reads a session's `transcriptPath` to find the
+    /// thread's rollout file; without it, resuming a codex search result starts a fresh, empty
+    /// thread instead of reopening the conversation the user searched for. Task 3 populates it
+    /// from `message.source`; here it only travels with its default.
+    public let transcriptPath: String
 
     public init(
         rowID: Int64, conversationID: String, projectPath: String,
-        conversationName: String, snippet: String, timestamp: Date, offset: Int
+        conversationName: String, snippet: String, timestamp: Date, offset: Int,
+        agent: String = "claude", provenance: String? = nil, workingDirectory: String = "",
+        transcriptPath: String = ""
     ) {
         self.rowID = rowID
         self.conversationID = conversationID
@@ -47,6 +70,29 @@ public struct TranscriptHit: Codable, Equatable, Sendable {
         self.snippet = snippet
         self.timestamp = timestamp
         self.offset = offset
+        self.agent = agent
+        self.provenance = provenance
+        self.workingDirectory = workingDirectory
+        self.transcriptPath = transcriptPath
+    }
+
+    /// Hand-written solely so the four fields added after the phone shipped decode as
+    /// absent rather than as a thrown error. A synthesised decoder treats a missing
+    /// non-optional key as a failure, and `WireSearchHits` decodes its whole array at once —
+    /// so one old payload would lose every hit in the frame, not just its new fields.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        rowID = try c.decode(Int64.self, forKey: .rowID)
+        conversationID = try c.decode(String.self, forKey: .conversationID)
+        projectPath = try c.decode(String.self, forKey: .projectPath)
+        conversationName = try c.decode(String.self, forKey: .conversationName)
+        snippet = try c.decode(String.self, forKey: .snippet)
+        timestamp = try c.decode(Date.self, forKey: .timestamp)
+        offset = try c.decode(Int.self, forKey: .offset)
+        agent = try c.decodeIfPresent(String.self, forKey: .agent) ?? "claude"
+        provenance = try c.decodeIfPresent(String.self, forKey: .provenance)
+        workingDirectory = try c.decodeIfPresent(String.self, forKey: .workingDirectory) ?? ""
+        transcriptPath = try c.decodeIfPresent(String.self, forKey: .transcriptPath) ?? ""
     }
 }
 
@@ -65,10 +111,16 @@ public struct NameCandidate: Equatable {
     /// would duplicate what the file already records exactly.
     public let lastActivity: Date
     public let conversationID: String?
+    /// Which agent this candidate belongs to, as `AgentID.rawValue`. See `TranscriptHit.agent`
+    /// for why this is a raw string rather than an `AgentID`.
+    public let agent: String
+    /// See `TranscriptHit.transcriptPath`. Carried here for the same later-task resume path.
+    public let transcriptPath: String
 
     public init(
         id: String, kind: SearchResultKind, name: String, projectPath: String,
-        projectName: String, lastActivity: Date, conversationID: String?
+        projectName: String, lastActivity: Date, conversationID: String?,
+        agent: String = "claude", transcriptPath: String = ""
     ) {
         self.id = id
         self.kind = kind
@@ -77,6 +129,8 @@ public struct NameCandidate: Equatable {
         self.projectName = projectName
         self.lastActivity = lastActivity
         self.conversationID = conversationID
+        self.agent = agent
+        self.transcriptPath = transcriptPath
     }
 }
 

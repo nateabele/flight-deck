@@ -39,7 +39,8 @@ enum SearchCandidates {
                     projectPath: repo.url.path,
                     projectName: repo.displayName,
                     lastActivity: stamp,
-                    conversationID: conversation
+                    conversationID: conversation,
+                    agent: session.agent.rawValue
                 ))
             }
             candidates.append(NameCandidate(
@@ -49,7 +50,10 @@ enum SearchCandidates {
                 projectPath: repo.url.path,
                 projectName: repo.displayName,
                 lastActivity: newest,
-                conversationID: nil
+                conversationID: nil,
+                // A project is not an agent; unused for `.project` kinds. Spelled out rather
+                // than left to the default so the choice is visible here, not implicit.
+                agent: AgentID.claude.rawValue
             ))
         }
 
@@ -77,7 +81,9 @@ enum SearchCandidates {
                 // sort last within their tier, which is the right default: anything with a
                 // live tab is more likely to be what you want.
                 lastActivity: .distantPast,
-                conversationID: id
+                conversationID: id,
+                // TODO(Task 3): pass `conversation.agent` once `IndexedConversation` carries it.
+                agent: AgentID.claude.rawValue
             ))
         }
         return candidates
