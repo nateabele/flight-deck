@@ -96,9 +96,16 @@ struct ClaudeTextChannel: AgentTextChannel {
     /// box-drawing geometry. Fourteen of the fifteen dialog captures in `Fixtures/Claude/`
     /// carry it — every one but `question-two-review`.
     ///
-    /// Case-sensitive on purpose: a running turn shows lowercase `esc to interrupt`, and
-    /// mid-turn injection must stay allowed because claude queues it. Lowercasing both sides
-    /// would veto every busy screen and stop mid-turn injection dead.
+    /// **Matched whole, never shortened to an `Esc to ` prefix.** A running turn's interrupt
+    /// hint begins with those same words, and injection must stay allowed mid-turn because
+    /// claude queues what it receives. `CodexTextChannel.dialogFooterTokens` states the same
+    /// constraint, where it is a live collision with codex's captured `esc to interrupt`.
+    ///
+    /// The casing is claude's own, as printed, but **nothing rests on the comparison being
+    /// case-sensitive and no test pins it**: no composer capture in `Fixtures/Claude` carries
+    /// this phrase in any casing — the fourteen dialog footers are its only occurrences — and
+    /// `esc to interrupt` cannot contain `esc to cancel` at any casing anyway. Said plainly
+    /// because the reverse was claimed here before and was not true.
     static let dialogFooterToken = "Esc to cancel"
 
     /// **The one dialog shape in the corpus that carries no `Esc to cancel` footer at all:**

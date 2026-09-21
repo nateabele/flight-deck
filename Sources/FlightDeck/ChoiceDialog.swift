@@ -172,6 +172,10 @@ enum ChoiceDialog {
     /// grammar in both duties, and a second copy of it would drift.
     static func hasNumberedRowAtMarker(inViewport viewport: String, marker: Character) -> Bool {
         let lines = viewport.components(separatedBy: "\n")
+        // The two steps disagree slightly about what leading whitespace is: this trims all of
+        // Unicode's, `parse` drops only spaces. A line indented with a tab or an NBSP would
+        // therefore be found here and rejected there — no veto. That is the fail-open
+        // direction and no capture exhibits it, since a terminal pads with spaces.
         guard let markerLine = lines.last(where: {
             $0.trimmingCharacters(in: .whitespaces).first == marker
         }) else { return false }

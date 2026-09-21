@@ -35,6 +35,46 @@ final class ClaudeDialogVetoTests: XCTestCase {
         "busy-queued-message", "busy-streaming-no-box", "busy-streaming-no-marker",
     ]
 
+    /// **Every `*.captured.txt` in `Fixtures/Claude` must appear in one of the two lists
+    /// above.** The lists are hand-written, so without this a capture added by a later task is
+    /// classified by nobody and asserted by nothing — it simply does not appear, which reads
+    /// exactly like passing. The corpus IS the proof for this predicate, so a screen nobody
+    /// has decided about is a hole in it, not a neutral addition.
+    func testTheCorpusSplitCoversEveryCapture() throws {
+        let classified = Set(Self.dialogs + Self.composers)
+        XCTAssertEqual(
+            classified.count, Self.dialogs.count + Self.composers.count,
+            "a name is listed as both a dialog and a composer"
+        )
+        let onDisk = try Self.capturedNames(in: "Claude")
+        XCTAssertEqual(
+            onDisk.subtracting(classified).sorted(), [],
+            "unclassified capture — decide whether it is a dialog or a composer and list it"
+        )
+        XCTAssertEqual(
+            classified.subtracting(onDisk).sorted(), [],
+            "listed capture that is no longer in Fixtures/Claude"
+        )
+    }
+
+    /// The `*.captured.txt` basenames the test bundle actually holds for `directory`, with both
+    /// extensions taken off so they read as the names the lists above use. Bundle-based rather
+    /// than a filesystem path because `Fixtures/` is a copied folder reference — what shipped
+    /// into the bundle is the only listing that can disagree with the lists.
+    static func capturedNames(in directory: String) throws -> Set<String> {
+        let urls = try XCTUnwrap(
+            Bundle(for: ClaudeDialogVetoTests.self).urls(
+                forResourcesWithExtension: "txt", subdirectory: "Fixtures/\(directory)"
+            ),
+            "Fixtures/\(directory) holds no .txt resources — did it reach the test bundle?"
+        )
+        return Set(
+            urls.map { $0.deletingPathExtension().lastPathComponent }
+                .filter { $0.hasSuffix(".captured") }
+                .map { String($0.dropLast(".captured".count)) }
+        )
+    }
+
     func testEveryDialogCaptureVetoes() throws {
         for name in Self.dialogs {
             XCTAssertTrue(
@@ -44,9 +84,9 @@ final class ClaudeDialogVetoTests: XCTestCase {
         }
     }
 
-    /// The whole point of allowing mid-turn injection is that claude queues it. A running
-    /// turn shows `esc to interrupt`, which must not be confused with `Esc to cancel`, and none
-    /// of these six carries a numbered row after its marker either.
+    /// The whole point of allowing mid-turn injection is that claude queues it, so the three
+    /// `busy-*` screens must pass as readily as the idle one. None of the six carries
+    /// `Esc to cancel` in any casing, and none puts a numbered row at its `❯`.
     func testNoComposerCaptureVetoes() throws {
         for name in Self.composers {
             XCTAssertFalse(
@@ -116,11 +156,21 @@ final class ClaudeDialogVetoTests: XCTestCase {
         XCTAssertTrue(ClaudeTextChannel.hasNumberedMarkerRow(Self.unpromptedNudge))
     }
 
-    /// Synthetic, not captured: the busy line reduced to the one token that matters. The real
-    /// screen it stands for is `busy-streaming-no-box.captured.txt`, asserted in the loop
-    /// above; this pins the case-sensitivity on its own so that lowercasing the comparison
-    /// fails here loudly rather than only as one entry in a six-name list.
-    func testEscToInterruptIsNotEscToCancel() {
+    /// Synthetic, and **it stands for no claude capture** — no screen in `Fixtures/Claude`
+    /// carries `esc to interrupt` at all; codex's `tui-working` is the corpus's only
+    /// occurrence. It is here so both channels are held to the same invariant rather than
+    /// letting claude's drift: **a screen whose only esc-text is an interrupt hint must not
+    /// veto**, because a running turn is exactly when injection must stay allowed, claude
+    /// queueing what it receives. Codex's twin, `testEscToInterruptIsNeitherDialogToken`,
+    /// pins it against a real capture.
+    ///
+    /// **What it does NOT pin, stated so the next reader does not assume otherwise:
+    /// case-sensitivity.** Lowercasing both sides of the comparison leaves this green, because
+    /// `esc to interrupt` does not contain `esc to cancel` at any casing. Nor does any capture
+    /// pin it — the phrase appears only in the fourteen dialog footers. The comment here
+    /// previously claimed this test guarded that; it did not, and that claim is the same
+    /// defect class as the dead position check removed in `0744a9e`.
+    func testEscToInterruptDoesNotMatchTheFooterToken() {
         XCTAssertFalse(ClaudeTextChannel.isKnownNonComposer("  esc to interrupt\n"))
     }
 

@@ -31,6 +31,28 @@ final class CodexDialogVetoTests: XCTestCase {
     /// busy line `esc to interrupt`, which must not collide with either dialog token.
     private static let composers = ["tui-idle", "tui-working"]
 
+    /// **Every `*.captured.txt` in `Fixtures/Codex` must appear in one of the two lists
+    /// above** — see `ClaudeDialogVetoTests.testTheCorpusSplitCoversEveryCapture` for why a
+    /// capture nobody classified is a hole in the proof rather than a neutral addition. The
+    /// directory's `.jsonl` and `.json` fixtures are not viewports and are excluded by
+    /// extension.
+    func testTheCorpusSplitCoversEveryCapture() throws {
+        let classified = Set(Self.dialogs + Self.composers)
+        XCTAssertEqual(
+            classified.count, Self.dialogs.count + Self.composers.count,
+            "a name is listed as both a dialog and a composer"
+        )
+        let onDisk = try ClaudeDialogVetoTests.capturedNames(in: "Codex")
+        XCTAssertEqual(
+            onDisk.subtracting(classified).sorted(), [],
+            "unclassified capture — decide whether it is a dialog or a composer and list it"
+        )
+        XCTAssertEqual(
+            classified.subtracting(onDisk).sorted(), [],
+            "listed capture that is no longer in Fixtures/Codex"
+        )
+    }
+
     func testEveryDialogCaptureVetoes() throws {
         for name in Self.dialogs {
             XCTAssertTrue(
