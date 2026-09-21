@@ -151,6 +151,18 @@ struct ClaudeAdapter: AgentAdapter {
         LoginInvocation(command: "claude", inject: "/login")
     }
 
+    /// Adds the hook-event directory to claude's default home binding. Creating it here
+    /// rather than at launch keeps the hook script's single append from ever hitting a
+    /// missing directory.
+    func environment(for account: AgentAccount) -> [String: String] {
+        let events = ClaudePluginLocation.eventDirectory
+        try? FileManager.default.createDirectory(at: events, withIntermediateDirectories: true)
+        return [
+            account.agent.homeEnvironmentKey: account.home.path,
+            "FLIGHT_DECK_EVENT_DIR": events.path,
+        ]
+    }
+
     /// A codex payload here is a programming error, not a runtime condition: the store picks
     /// the adapter and the options together. Degrade to defaults rather than trap.
     private func flags(_ options: AgentOptions) -> FlagSet {
