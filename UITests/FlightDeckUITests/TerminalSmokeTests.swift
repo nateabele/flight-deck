@@ -380,12 +380,32 @@ final class TerminalSmokeTests: XCTestCase {
             //
             // "In the trailing HALF of the row" was the earlier form of this check and was
             // nearly tautological — it holds in every configuration including the broken ones.
-            XCTAssertLessThan(
-                abs(closeFrame.midX - headingFrame.maxX), 20,
-                "precondition: the session row's close button is not hard against the trailing "
-                + "edge, so its x cannot stand in for the heading's X — a conditional icon has "
-                + "probably been inserted before it (heading=\(headingFrame), "
-                + "close=\(closeFrame))"
+            //
+            // It is NOT an assertion, because no threshold can be sized safely. Which frame
+            // XCUITest reports for a combined element is unobserved, and the two candidates sit
+            // a whole trailing inset apart. Task 2's probe measured the row at 280 wide, its
+            // cell container at (16, 0, 248, 24), and the close button at x=250.5 w=13.5, so
+            // midX ≈ 257:
+            //
+            //     container reading: |257 − 264| ≈  7   → a 20pt assertion passes
+            //     row reading:       |257 − 280| ≈ 23   → a 20pt assertion FAILS
+            //
+            // i.e. a perfectly healthy app can trip it, and the message would blame a
+            // conditional icon. Widening cannot separate the two either: the readings differ by
+            // the inset (≈16pt), which is the same order as the ≈16pt an inserted icon costs, so
+            // any constant that tolerates the row reading also tolerates the fault this is meant
+            // to catch. Those numbers come from a probe replica of the list, not from this app,
+            // and the real sidebar's inset has not been measured — which is the second reason
+            // not to pick a number here.
+            //
+            // So it prints instead. If the click below starts missing, this line and the
+            // `[geometry]` line above it are what tell you whether the button moved or the frame
+            // reading changed.
+            let trailingDelta = abs(closeFrame.midX - headingFrame.maxX)
+            print(
+                "[geometry] |close.midX - heading.maxX| = \(trailingDelta) "
+                + "(≈7 if heading reports the cell container, ≈23 if it reports the whole row; "
+                + "materially larger than both suggests a conditional icon before the button)"
             )
             let survivor = rows.element(boundBy: 1).value as? String
 
