@@ -244,13 +244,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let builder = SearchIndexBuilder(index: index)
         searchBuildTask = Task { [weak model] in
             try? await Task.sleep(for: .seconds(3))
-            let entries = SearchCorpus.directories(
+            // Claude's built-in account only, for now — the same single root the backfill
+            // has always read. Asking every account of every searchable agent is the next
+            // change, still to come; this keeps today's scope exactly as it was while the
+            // builder itself becomes agent-blind.
+            let refs = ClaudeAdapter.searchCorpus?.transcripts(
                 forProjects: store.repos.map(\.url.path),
-                projectsRoot: ClaudeSession.defaultProjectsRoot,
-                listing: SearchCorpus.defaultListing,
-                exists: { FileManager.default.fileExists(atPath: $0) }
-            )
-            await builder.build(entries) { progress in
+                accounts: [AgentAccount(
+                    agent: .claude, displayName: "Default", home: AgentID.claude.builtInHome
+                )]
+            ) ?? []
+            await builder.build(refs) { progress in
                 Task { @MainActor in
                     model?.indexingProgressChanged(progress)
                     // Mirrors the same progress into `FleetService`, so a phone searching
