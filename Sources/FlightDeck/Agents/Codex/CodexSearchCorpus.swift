@@ -65,18 +65,109 @@ struct CodexSearchCorpus: AgentSearchCorpus {
         }
     }
 
-    /// Extraction — turning a rollout line into indexable messages — is a separate change;
-    /// this type only discovers which rollouts exist.
+    /// `CodexTimelineMapper`'s own rule — prose from `event_msg`, nothing from
+    /// `response_item` — applied here for a different consumer. `response_item` is the model
+    /// transcript: it repeats the same prose a second time, plus a `role:"user"` record that
+    /// is the assembled prompt (skills, plugin catalogue, environment context — tens of KB
+    /// every turn), plus a `reasoning` record carrying an encrypted blob. Indexing it would
+    /// double every reply and put instruction text into search results. `agent_reasoning`
+    /// gets a timeline row elsewhere but not an index row, for the same reason
+    /// `TranscriptExtractor` drops tool blocks: searching should find what somebody asked
+    /// for, not everything a thought happened to mention.
     func indexedMessages(
         inLine line: String, conversationID: String, at offset: Int
     ) -> [IndexedMessage] {
-        []
+        guard let data = line.data(using: .utf8),
+              let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = record["payload"] as? [String: Any],
+              let kind = payload["type"] as? String
+        else { return [] }
+
+        let role: IndexedMessage.Role
+        switch (record["type"] as? String, kind) {
+        case ("event_msg", "user_message"): role = .user
+        case ("event_msg", "agent_message"): role = .assistant
+        default: return []
+        }
+
+        guard let text = payload["message"] as? String else { return [] }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        let timestamp = (record["timestamp"] as? String).flatMap(Self.timestamps.date(from:))
+        return [IndexedMessage(
+            conversationID: conversationID, role: role, text: trimmed, timestamp: timestamp,
+            offset: offset
+        )]
     }
 
-    /// Naming from a rollout's own content is a separate change; `indexedName`, populated at
-    /// discovery from `session_index.jsonl`, is the only name this type produces today.
+    /// The naming rule, in order:
+    ///
+    /// 1. `ref.indexedName` present and not a placeholder → authoritative.
+    /// 2. otherwise the first `event_msg`/`user_message` in `lines` → fallback.
+    /// 3. otherwise a placeholder `indexedName` → fallback (better than a bare UUID).
+    /// 4. otherwise unknown.
+    ///
+    /// Rule 2 outranking rule 3 is the whole point: `session_index.jsonl` mixes real renames
+    /// with Flight Deck's own default tab titles ("session 206" and friends), pushed there by
+    /// `thread/name/set`. Porting claude's "a rename always beats the first user message" rule
+    /// literally would let those win, and ⌘K would show a placeholder for a conversation whose
+    /// first line says what it is actually about.
     func conversationName(inLines lines: [String], for ref: TranscriptRef) -> ConversationNaming {
-        .unknown
+        if let indexedName = ref.indexedName, !Self.isPlaceholderName(indexedName) {
+            return .authoritative(indexedName)
+        }
+        if let message = Self.firstUserMessage(inLines: lines) {
+            return .fallback(message)
+        }
+        if let indexedName = ref.indexedName {
+            return .fallback(indexedName)
+        }
+        return .unknown
+    }
+
+    /// Shared because `ISO8601DateFormatter` is expensive to construct and this runs once per
+    /// record across hundreds of thousands of records during a backfill — the same reasoning
+    /// `TranscriptExtractor` documents for claude's formatter.
+    ///
+    /// `.withFractionalSeconds` is required, not optional: codex writes
+    /// `2026-09-16T16:25:50.889Z`, and the default option set rejects the milliseconds
+    /// outright rather than ignoring them — every timestamp would silently parse as nil and
+    /// every hit would fall back to the transcript's mtime.
+    private static let timestamps: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    /// `^session \d+$`, without a bare-slash regex literal — this project's pinned Swift 5
+    /// toolchain (vendored Ghostty isn't Swift 6 clean) does not need to answer for one
+    /// pattern. A prefix check plus "everything after it is only ASCII digits" rejects
+    /// "session 4 retrospective" (somebody's actual title) exactly as an anchored regex would,
+    /// while still catching "session 206" — Flight Deck's OWN default tab title
+    /// (`SessionStore.swift`'s `"session \(sessionCounter)"`), pushed to codex by
+    /// `thread/name/set`.
+    private static func isPlaceholderName(_ name: String) -> Bool {
+        guard name.hasPrefix("session ") else { return false }
+        let remainder = name.dropFirst("session ".count)
+        return !remainder.isEmpty && remainder.allSatisfy { $0.isASCII && $0.isNumber }
+    }
+
+    /// Codex's only equivalent of `ConversationTitle.resolve`'s "first real user message"
+    /// fallback: nothing else in a rollout says what a person actually asked for.
+    private static func firstUserMessage(inLines lines: [String]) -> String? {
+        for line in lines {
+            guard let data = line.data(using: .utf8),
+                  let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  record["type"] as? String == "event_msg",
+                  let payload = record["payload"] as? [String: Any],
+                  payload["type"] as? String == "user_message",
+                  let text = payload["message"] as? String
+            else { continue }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
     }
 
     /// Codex records the conversation's cwd in the first record, and nowhere else. There is

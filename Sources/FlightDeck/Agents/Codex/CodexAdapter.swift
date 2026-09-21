@@ -135,8 +135,7 @@ struct CodexAdapter: AgentAdapter {
     /// feature, not a refusal — see the audit's §3.2 part 1.
     static let openPromptReader: AgentOpenPromptReader? = nil
 
-    // Filled in by Task 6.
-    static let searchCorpus: AgentSearchCorpus? = nil
+    static let searchCorpus: AgentSearchCorpus? = CodexSearchCorpus()
 
     let rpc: CodexRPC
 
