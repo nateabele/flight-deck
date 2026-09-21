@@ -20,6 +20,27 @@ final class SessionStoreInjectionGateTests: XCTestCase {
         var defaultFontSize: Float { 12 }
     }
 
+    private struct SilentReporter: AgentLaunchFailureReporting {
+        func report(_ error: AgentLaunchError) {}
+    }
+
+    /// Answers `thread/name/set` so a codex tab can be created at all. Same stub as
+    /// `PhonePromptDispatchTests`, which is where the codex bare-shell case was pinned for the
+    /// `.unknown` arm.
+    private final class ScriptedCodexTransport: CodexTransport {
+        var onLine: ((String) -> Void)?
+        func send(_ line: String) {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let method = obj["method"] as? String, let id = obj["id"] as? Int else { return }
+            switch method {
+            case "thread/start":
+                onLine?(#"{"id":\#(id),"result":{"thread":{"id":"01a01269-baa6-7493-8d15-8fa21bcb602b","cwd":"/w/a","path":"/r/x.jsonl"}}}"#)
+            default:
+                onLine?(#"{"id":\#(id),"result":{}}"#)
+            }
+        }
+    }
+
     private var projectsRoot: URL!
     private var tmp: URL { URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true) }
 
@@ -221,24 +242,76 @@ final class SessionStoreInjectionGateTests: XCTestCase {
         XCTAssertEqual(spy.events, [], "so a rename defers instead of running as a command")
     }
 
-    /// The reset is edge-triggered — anchored, then not — rather than "no anchor right now",
-    /// and the distinction is load-bearing. Claude's `SessionStart` hook can land before
-    /// claude has written its status file, so a level rule would erase the `.live` it had just
-    /// reported on the tick in between, stranding the tab on the legacy path until some later
-    /// hook event happened to arrive.
-    func testReadinessSurvivesATickBeforeTheTabWasEverAnchored() {
+    /// **The same window, entered from the other side — and the reason the test is level
+    /// rather than the anchor's falling edge.** A `claude` whose `SessionStart` is logged and
+    /// which then dies before writing its status file is never anchored at all. An
+    /// edge-triggered reset ("had an anchor, lost it") cannot fire for it, so the tab would
+    /// keep `.live` permanently at a bare shell — and `ClaudeTextChannel.submit`'s only screen
+    /// precondition is `InputBar.read` finding one `❯` row, which a shell prompt satisfies. A
+    /// sidebar rename would then run `/rename foo` as a command. Sub-second to enter,
+    /// unbounded once entered.
+    func testADeathBeforeTheTabWasEverAnchoredIsAlsoCaught() {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
         store.statusRootOverride = projectsRoot
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { $0() }
         let session = store.newSession(in: tmp)
 
-        // The hook beat the status file: readiness is live, no registry row exists yet.
+        // The hook was logged; the status file never was, because the process died first.
         store.apply(.lifecycle(.live), to: session.id)
         store.applyRegistry([:])
 
-        XCTAssertEqual(store.composerReadiness(for: session.id), .live,
-                       "a tab that was never anchored has lost no anchor")
+        XCTAssertEqual(store.composerReadiness(for: session.id), .unknown,
+                       "never anchored is not the same as still alive")
+
+        spy.viewportOverride = bareShell
+        XCTAssertFalse(store.injectionGateAdmitsForTesting(session.id))
+        XCTAssertTrue(store.rename(session.id, to: "not a shell command"))
+        XCTAssertEqual(spy.events, [], "nothing runs at the shell")
+    }
+
+    /// **The boot window the level test costs, and the reason it is affordable.** A
+    /// `SessionStart` logged before claude has written its status file is erased by the very
+    /// next tick — which is safe (the tab falls back to the legacy screen grammar, exactly
+    /// what it did before any of this existed) but would be permanent if the reset were
+    /// one-way. `HookEventWatcher` emits only on a change and never forgets on its own, so
+    /// without `resetComposerReadiness` clearing its memory too, the resumed agent's next
+    /// event would fold to `.live`, compare equal to what the watcher still remembered, and
+    /// never reach the store at all.
+    func testAResetAlsoClearsTheHookWatchersMemoryOfTheSession() throws {
+        let hookDirectory = projectsRoot.appendingPathComponent("hook-events", isDirectory: true)
+        try FileManager.default.createDirectory(at: hookDirectory, withIntermediateDirectories: true)
+
+        let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.transcriptsRootOverride = projectsRoot
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
+        store.statusRootOverride = projectsRoot.appendingPathComponent("status", isDirectory: true)
+        store.hookEventDirectoryOverride = hookDirectory
+        let session = store.newSession(in: tmp)
+
+        // Built against an empty directory, so nothing already on disk is skipped as backlog.
+        store.startStatusWatching()
+        // Cast rather than widening the seam: `hookEventWatcherForTesting` is typed `AnyObject?`
+        // on purpose, because its other caller only ever asserts identity across two sweeps.
+        let watcher = try XCTUnwrap(store.hookEventWatcherForTesting as? HookEventWatcher)
+
+        let log = hookDirectory.appendingPathComponent("events.ndjson")
+        let start = """
+            {"session_id":"\(session.pinnedConversationID.uuidString)","hook_event_name":"SessionStart"}
+
+            """
+        try start.write(to: log, atomically: true, encoding: .utf8)
+        watcher.drain()
+        XCTAssertEqual(watcher.rememberedReadinessForTesting(session.pinnedConversationID), .live,
+                       "the premise: the watcher is now holding a fold for this session")
+
+        store.applyRegistry([:])
+
+        XCTAssertNil(watcher.rememberedReadinessForTesting(session.pinnedConversationID),
+                     "a reset the watcher does not know about makes the reset one-way")
     }
 
     /// A live tab is not reset by an ordinary tick. Without this, the test above would also
@@ -280,6 +353,85 @@ final class SessionStoreInjectionGateTests: XCTestCase {
         XCTAssertEqual(store.composerReadiness(for: id), .live, "still never moved")
         XCTAssertEqual(spy.sent, ["ship it"], "the held prompt goes — the tab never wedged")
         XCTAssertNil(store.promptQueue[id], "nothing left waiting")
+    }
+
+    // MARK: - The codex half of the asymmetry
+
+    /// **Codex is the adapter with no liveness reset, so the invariant that makes that safe
+    /// must be pinned rather than argued in a comment.**
+    ///
+    /// `pinResolutions` filters on `hasStatusRegistry`, so a codex tab never enters the loop
+    /// that resets readiness — it keeps whatever its rollout last reported, `.live` included,
+    /// long after its TUI has gone. What protects it is a second line claude does not have:
+    /// `CodexTextChannel.submit` opens with `guard let bar = composer(injector)`, and
+    /// `composer(_:)` requires codex's `›` marker AND a `model · mode · cwd` footer within
+    /// three rows beneath it — which no shell draws. The existing codex bare-shell tests
+    /// (`PhonePromptDispatchTests`, `AgentTextChannelTests`) all run at `.unknown`, so they
+    /// exercise the legacy arm and say nothing about this one.
+    ///
+    /// The screen is claude's `❯`, which is what a codex tab fallen back to a bare shell
+    /// actually shows, and which `CodexTextChannel` must refuse for a second reason too: it is
+    /// not even codex's glyph.
+    func testACodexTabReportedLiveStillTypesNothingAtABareShell() async throws {
+        let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.transcriptsRootOverride = projectsRoot
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
+        store.launchFailureReporter = SilentReporter()
+        store.promptLifecycleSink = { _ in }
+        // The fixture's rollout path does not exist on disk; stubbed true so creation reaches
+        // success rather than tripping `prepare`'s history-contract check.
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: ScriptedCodexTransport()), rolloutExists: { _ in true }),
+            for: .codex, account: nil
+        )
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { $0() }
+        guard case .success(let id) = await store.createSession(agent: .codex, in: tmp.path) else {
+            return XCTFail("codex tab creation must succeed against a scripted transport")
+        }
+        store.applyRegistryForTesting([id: SessionStatus(activity: .idle, waitingFor: nil)])
+        spy.events.removeAll()
+
+        // Codex's rollout said the TUI was alive, and nothing will ever say otherwise: there
+        // is no session-end rollout record, and no registry tick visits a codex tab.
+        store.apply(.lifecycle(.live), to: id)
+        spy.viewportOverride = bareShell
+        XCTAssertEqual(store.composerReadiness(for: id), .live,
+                       "the premise: no reset reaches a codex tab")
+
+        XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .queued)
+        XCTAssertTrue(spy.events.isEmpty,
+                      "codex's own composer precondition refuses a shell whatever the gate says")
+
+        XCTAssertTrue(store.rename(id, to: "renamed at a dead codex"))
+        XCTAssertEqual(spy.events, [], "and the rename modal is gated the same way")
+    }
+
+    // MARK: - Ordering within a registry tick
+
+    /// **The reset runs in `applyRegistry`'s body; the three flushes run in its `defer`.** So
+    /// on the very tick that detects a death, the flushes already read `.unknown`. That
+    /// closes the window where a prompt queued while the agent was alive would be typed into
+    /// the bare shell it left behind — and nothing else pins it, so a refactor moving the
+    /// reset into the `defer` would pass every other test in this file while reopening it.
+    func testTheReadinessResetRunsBeforeTheTickFlushesTheQueue() throws {
+        let (store, spy, id, _) = makeStore()
+        store.apply(.lifecycle(.live), to: id)
+
+        // Queued while alive and held by the veto, so it is still in the queue when the agent
+        // dies — which is the only way to be waiting at the moment the tick notices.
+        spy.viewportOverride = try screen("permission-bash")
+        XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .queued)
+        XCTAssertTrue(spy.events.isEmpty, "the premise: held, not typed")
+
+        // The agent dies. Its dialog goes with it; what is left is the shell underneath.
+        spy.viewportOverride = bareShell
+        store.applyRegistry([:])
+
+        XCTAssertEqual(spy.events, [],
+                       "the flush in the defer must see .unknown, not the .live it replaced")
+        XCTAssertNotNil(store.promptQueue[id], "so the entry is still held, not run as a command")
     }
 
     // MARK: - `/rename` shares this gate

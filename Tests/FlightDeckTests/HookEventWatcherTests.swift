@@ -59,6 +59,47 @@ final class HookEventWatcherTests: XCTestCase {
         )
     }
 
+    /// **The escape hatch that keeps `testOnlyReportsChanges` above from making a reset
+    /// one-way.** `SessionStore` resets a tab to `.unknown` when no registry row names its
+    /// conversation, and the deaths that reset exists for are exactly the ones that log no
+    /// `SessionEnd` — so this map is still holding `.live` when it happens. A claude resumed
+    /// in that tab reuses the same `session_id`, so its `SessionStart` would fold to `.live`,
+    /// compare equal, and never be emitted: the store would stay `.unknown` for the rest of
+    /// the process's life. Safe, and silently the feature switching itself off.
+    func testForgettingASessionMakesItsNextEventNewsAgain() throws {
+        var batches: [[UUID: ComposerReadiness]] = []
+        let watcher = HookEventWatcher(directory: dir, clock: nil) { batches.append($0) }
+        try append("SessionStart", a)
+        watcher.drain()
+        XCTAssertEqual(batches.count, 1, "the premise")
+
+        watcher.forget(a)
+        try append("SessionStart", a)
+        watcher.drain()
+
+        XCTAssertEqual(batches.count, 2, "a forgotten session's next event is news, not a repeat")
+        XCTAssertEqual(batches.last?[a], .live)
+    }
+
+    /// Forgetting is per session, not a flush. A shared log carries every tab's events, so a
+    /// reset on one tab must not make every other tab re-announce itself into the store.
+    func testForgettingOneSessionLeavesAnotherDeduped() throws {
+        var batches: [[UUID: ComposerReadiness]] = []
+        let watcher = HookEventWatcher(directory: dir, clock: nil) { batches.append($0) }
+        try append("SessionStart", a)
+        try append("SessionStart", b)
+        watcher.drain()
+
+        watcher.forget(a)
+        try append("PreToolUse", a)
+        try append("PreToolUse", b)
+        watcher.drain()
+
+        XCTAssertEqual(batches.count, 2)
+        XCTAssertEqual(batches.last?.keys.map { $0 }, [a],
+                       "only the forgotten session re-reports")
+    }
+
     func testAMissingDirectoryIsNotAnError() {
         let watcher = HookEventWatcher(
             directory: dir.appendingPathComponent("nope"), clock: nil

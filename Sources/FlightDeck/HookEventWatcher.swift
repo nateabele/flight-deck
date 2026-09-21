@@ -63,6 +63,32 @@ final class HookEventWatcher {
         clock?.remove(self)
     }
 
+    /// Drops what this watcher remembers about one session, so the next event for it is
+    /// reported as news rather than swallowed as unchanged.
+    ///
+    /// **Without this, the change-only emission in `drain()` below makes a reset one-way, and
+    /// the feature switches itself off.** `SessionStore` resets a tab to `.unknown` when it
+    /// loses its status-registry anchor, because neither agent reliably announces its own
+    /// death — and the deaths that reset exists for are exactly the ones that log no
+    /// `SessionEnd`, so this map is still holding `.live` when it happens. A claude resumed in
+    /// that tab reuses the same `session_id` (see the type doc above), so its `SessionStart`
+    /// folds to `.live`, compares equal to what is remembered here, and is never emitted: the
+    /// store stays `.unknown` and the tab is stranded on the legacy screen grammar for the
+    /// rest of the process's life. The direction is safe, which is what makes it easy to miss.
+    ///
+    /// The dedup itself stays — it is what keeps an idle log from re-announcing `.live` into
+    /// the store on every tick. Only the store's own resets punch through it, and they are the
+    /// one caller that positively knows this memory is stale.
+    func forget(_ sessionID: UUID) {
+        readiness.removeValue(forKey: sessionID)
+    }
+
+    /// What this watcher currently remembers for a session, or nil if it remembers nothing.
+    /// A read, for the suite to assert that a store-side reset and this map cannot disagree.
+    func rememberedReadinessForTesting(_ sessionID: UUID) -> ComposerReadiness? {
+        readiness[sessionID]
+    }
+
     /// Reads everything appended since the last call. Synchronous, so tests need no
     /// expectations — the seam `TranscriptWatcher.drain()` establishes.
     func drain() {
