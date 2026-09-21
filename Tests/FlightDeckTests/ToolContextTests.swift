@@ -79,12 +79,19 @@ final class ToolContextTests: XCTestCase {
         XCTAssertEqual(context?.accountName, "Work")
         XCTAssertEqual(context?.accountHome, home.path)
         // FLIGHT_DECK_EVENT_DIR rides along here too — same `ClaudeAdapter.environment(for:)`
-        // a launched session gets, per this test's own doc comment above.
+        // a launched session gets, per this test's own doc comment above. Built from a
+        // hand-written literal, not `ClaudePluginLocation.eventDirectory` itself — see the
+        // matching comment in `AgentAccountEnvironmentTests`.
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let expectedEventDir = base
+            .appendingPathComponent("Flight Deck", isDirectory: true)
+            .appendingPathComponent("hook-events-debug", isDirectory: true)
+            .path
         XCTAssertEqual(
             context?.accountEnvironment,
             [
                 "CLAUDE_CONFIG_DIR": home.path,
-                "FLIGHT_DECK_EVENT_DIR": ClaudePluginLocation.eventDirectory.path,
+                "FLIGHT_DECK_EVENT_DIR": expectedEventDir,
             ]
         )
     }

@@ -17,10 +17,45 @@ final class ClaudePluginLocationTests: XCTestCase {
         XCTAssertNil(ClaudePluginLocation.directory(bundle: Bundle(for: NSString.self)))
     }
 
+    /// Pinned against a hand-built literal, not `ClaudePluginLocation.buildTag`/`eventDirectory`
+    /// themselves — a `.contains(buildTag)` check (or comparing the property against itself)
+    /// can only catch a wrong *key*, never a wrong base directory, subpath, or tag literal.
+    /// `test-unit.sh` always builds Debug, so `hook-events-debug` is the real expected leaf.
     func testDebugAndReleaseDoNotShareAnEventDirectory() {
-        XCTAssertTrue(
-            ClaudePluginLocation.eventDirectory.path.contains(ClaudePluginLocation.buildTag),
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let expected = base
+            .appendingPathComponent("Flight Deck", isDirectory: true)
+            .appendingPathComponent("hook-events-debug", isDirectory: true)
+        XCTAssertEqual(
+            ClaudePluginLocation.eventDirectory,
+            expected,
             "a shared directory would let a debug build read the real fleet's events"
+        )
+    }
+
+    func testApplyingInjectsThePluginIntoAClaudePayload() throws {
+        let bundle = Bundle(for: Self.self)
+        let plugin = try XCTUnwrap(ClaudePluginLocation.directory(bundle: bundle))
+        let out = ClaudePluginLocation.applying(to: .claude(FlagSet()), bundle: bundle)
+        guard case .claude(let flags) = out, case .list(let items)? = flags.values["--plugin-dir"] else {
+            return XCTFail("expected a claude payload carrying --plugin-dir")
+        }
+        XCTAssertEqual(items, [plugin.path])
+    }
+
+    func testApplyingLeavesACodexPayloadUntouched() {
+        let options = AgentOptions.codex(CodexThreadOptions())
+        XCTAssertEqual(
+            ClaudePluginLocation.applying(to: options, bundle: Bundle(for: Self.self)),
+            options
+        )
+    }
+
+    func testApplyingLeavesAClaudePayloadUntouchedWithoutTheBundledPlugin() {
+        let options = AgentOptions.claude(FlagSet())
+        XCTAssertEqual(
+            ClaudePluginLocation.applying(to: options, bundle: Bundle(for: NSString.self)),
+            options
         )
     }
 
