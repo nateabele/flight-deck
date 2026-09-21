@@ -102,6 +102,86 @@ final class SidebarClickIntentTests: XCTestCase {
     }
 }
 
+/// The other half of the close-button exclusion. The rule above only forwards a `Bool`; this is
+/// what decides it, and it is the half that has to be right about AppKit.
+///
+/// No window is needed: `NSView.convert(_:from: nil)` treats the point as window coordinates,
+/// and with `row` as the root of its own tree those are the row's coordinates.
+@MainActor
+final class SidebarPressedControlTests: XCTestCase {
+    /// A row with a 15×13 button at its trailing edge, which is where SwiftUI puts the real one.
+    private func row(withButtonAt frame: NSRect, nested: Bool = false) -> NSTableRowView {
+        let row = NSTableRowView(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        let button = NSButton(frame: frame)
+        if nested {
+            // SwiftUI's real tree is row → cell view → hosting view → button, so the walk has to
+            // recurse rather than check the row's immediate children.
+            let cell = NSView(frame: NSRect(x: 16, y: 0, width: 248, height: 24))
+            let host = NSView(frame: cell.bounds)
+            button.frame = NSRect(
+                x: frame.origin.x - cell.frame.origin.x, y: frame.origin.y,
+                width: frame.width, height: frame.height
+            )
+            host.addSubview(button)
+            cell.addSubview(host)
+            row.addSubview(cell)
+        } else {
+            row.addSubview(button)
+        }
+        row.layoutSubtreeIfNeeded()
+        return row
+    }
+
+    private let buttonFrame = NSRect(x: 249, y: 6, width: 15, height: 13)
+
+    func testAPressInsideTheButtonFindsIt() {
+        let row = row(withButtonAt: buttonFrame)
+
+        XCTAssertTrue(SidebarInputMonitor.pressedControl(in: row, at: NSPoint(x: 256, y: 12)))
+    }
+
+    func testAPressOnTheTitleDoesNotFindTheButton() {
+        let row = row(withButtonAt: buttonFrame)
+
+        // Where a project name is, far from the trailing edge.
+        XCTAssertFalse(SidebarInputMonitor.pressedControl(in: row, at: NSPoint(x: 40, y: 12)))
+    }
+
+    func testAPressJustOutsideTheButtonDoesNotFindIt() {
+        let row = row(withButtonAt: buttonFrame)
+
+        // 2pt to its leading side: the exclusion is the control's frame and nothing more, which
+        // is the whole reason the guessed 32pt strip was deleted.
+        XCTAssertFalse(SidebarInputMonitor.pressedControl(in: row, at: NSPoint(x: 247, y: 12)))
+    }
+
+    func testTheWalkRecursesIntoNestedViews() {
+        // The real tree nests the button three deep under the row.
+        let row = row(withButtonAt: buttonFrame, nested: true)
+
+        XCTAssertTrue(SidebarInputMonitor.pressedControl(in: row, at: NSPoint(x: 256, y: 12)))
+        XCTAssertFalse(SidebarInputMonitor.pressedControl(in: row, at: NSPoint(x: 40, y: 12)))
+    }
+
+    func testARowWithNoControlExcludesNothing() {
+        // An un-hovered header: the button is removed from the tree, not hidden, so every point
+        // in the row is fair game for the toggle.
+        let row = NSTableRowView(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        row.addSubview(NSView(frame: row.bounds))
+
+        XCTAssertFalse(SidebarInputMonitor.pressedControl(in: row, at: NSPoint(x: 256, y: 12)))
+    }
+
+    func testANonControlViewIsNotAnExclusion() {
+        // A collapsed header draws a spinner; `NSProgressIndicator` is an `NSView` and not an
+        // `NSControl`, so it must not suppress the toggle.
+        let row = NSTableRowView(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        row.addSubview(NSProgressIndicator(frame: NSRect(x: 230, y: 6, width: 13, height: 13)))
+
+        XCTAssertFalse(SidebarInputMonitor.pressedControl(in: row, at: NSPoint(x: 236, y: 12)))
+    }
+}
+
 /// `SidebarRow.id` is what the rule above compares, so its two documented properties — stable
 /// across a reorder, and distinct per row — are what make that comparison mean anything.
 @MainActor

@@ -85,21 +85,18 @@ import SwiftUI
 ///
 /// What *is* observable is the loop **ending**: a block scheduled for `NSDefaultRunLoopMode`
 /// only cannot run until the run loop leaves `NSEventTrackingRunLoopMode`. Measured against a
-/// press held 100ms, on a `.selectionDisabled()` row:
+/// press held 100ms on a `.selectionDisabled()` row, key and active, with the release marked:
 ///
-///     1573.5ms [?]                          monitor DOWN
-///     1575.7ms [NSEventTrackingRunLoopMode]   DispatchQueue.main.async ran  ← during, useless
-///     1674.0ms [kCFRunLoopDefaultMode]        RunLoop.perform(inModes:) ran ← after release
+///       0.0ms [kCFRunLoopDefaultMode] window isKey=true app active=true
+///       0.7ms [-]                     monitor DOWN cc=1 rowResolved=true
+///       1.7ms [NSEventTrackingRunLoopMode]   DispatchQueue.main.async ran  ← during, useless
+///     104.3ms [NSEventTrackingRunLoopMode] RELEASING (posting the up now)
+///     107.8ms [kCFRunLoopDefaultMode]   RunLoop.perform(inModes:) ran      ← after the release
 ///
 /// So the down records where the press started and asks to be called back once it is over; the
 /// callback reads `NSEvent.mouseLocation` for where it ended. `DispatchQueue.main.async` is
 /// **not** interchangeable here: `NSEventTrackingRunLoopMode` is a common mode, so it runs
 /// mid-press with the button still down, and every drag would toggle.
-///
-/// The callback does not *assume* the tracking loop ran. On the one measured variant where it
-/// did not, the block ran ~4ms after the press — long before the release — so anything that
-/// skipped the loop would turn every drag into a toggle. `NSEvent.pressedMouseButtons` is what
-/// makes that a decision rather than luck: a press still in progress is declined outright.
 ///
 /// `SidebarClickIntent` holds the decision itself, over plain numbers, so it is testable without
 /// a window. Its travel threshold is belt and braces rather than the load-bearing check: a real
@@ -115,17 +112,32 @@ import SwiftUI
 ///
 /// Walking DOWN does work, and needs no geometry plumbed out of SwiftUI and no reserved strip of
 /// guessed width. The button is a real `NSView` in the row's subtree with a real frame, and
-/// SwiftUI backs it with an `NSButton` — the only `NSControl` anywhere under a row, since
-/// everything else in one is drawn by SwiftUI itself. So the exclusion is that control's actual
-/// frame: exact, and still right if the row ever gains a second control.
+/// SwiftUI backs it with an `NSButton`. So the exclusion is that control's actual frame: exact,
+/// and still right if a project header ever gains a second control.
+///
+/// **In a project-header row that button is the only `NSControl`** — everything else there, the
+/// chevron, the name, the collapsed session count, the status icon and the background-work
+/// badge, is drawn by SwiftUI, and a collapsed header's busy spinner is an `NSProgressIndicator`,
+/// an `NSView` and not an `NSControl`. That is not true of the sidebar's other rows, and
+/// `pressedControl` is asked about every row this monitor sees: a **session** row carries its own
+/// borderless close button, and a `TextField` while it is being renamed, both `NSControl`
+/// subclasses. Neither can cause a wrong toggle, but for reasons outside this function —
+/// `SessionSidebar`'s `toggleRow` drops anything that is not `case .project`, and an open rename
+/// field never reaches the scheduler at all, because the first-responder guard in
+/// `handleMouseDown` returns before it. The false positive is real; it is simply always caught
+/// downstream.
 ///
 /// `.accessibilityIdentifier("close-project")` would have been the more pointed match and was
 /// tried first: it does not reach the `NSView`. SwiftUI serves accessibility from its own element
 /// tree, and every `accessibilityIdentifier()` under a row reads empty.
 ///
 /// The button is in the tree only while the row is hovered, which is exactly when it can be
-/// clicked (verified: parking a window under a stationary pointer reveals it). When it is
-/// absent, nothing is excluded — which is correct, because a button that is not in the tree is
+/// clicked. Counted directly — `NSControl`s under one row across the three states — it is
+/// **removed and not merely hidden**, so there is no permanent dead strip to filter for:
+///
+///     never hovered: 0, hovered: 1, un-hovered again: 0
+///
+/// When it is absent nothing is excluded, which is correct: a button that is not in the tree is
 /// not on screen and cannot have been the target.
 ///
 /// # Scoping: this monitor is app-wide, so it must prove which table it is looking at
@@ -289,10 +301,22 @@ final class SidebarInputMonitor {
         pressedRowControl: Bool,
         clickCount: Int
     ) {
-        // The press is not over, so this is not yet a click — and it may never be one. Reached
-        // only when the table skipped its tracking loop, which was measured to run this block
-        // about 4ms after the press rather than after the release. Declining is what keeps the
-        // rest of this method from depending on that loop having run.
+        // The press is not over, so this is not yet a click — and it may never be one.
+        //
+        // This is reachable, and the measurements do not pin down exactly when. The block is
+        // scheduled from `handleMouseDown`, and `SessionWindow.hitView(for:)` requires neither a
+        // key window nor an active app, so presses arrive here that never ran a tracking loop to
+        // wait on. Probing a window that never became key, the decision point landed after the
+        // release in four runs out of five and about 4ms into the press — long before it — in
+        // the fifth. Nothing was found that makes the loop's absence predictable, which is the
+        // argument for this guard rather than against it: without it, that fifth case turns a
+        // drag into a toggle.
+        //
+        // Declining costs a toggle on the press that is still in progress and nothing else; the
+        // next click on a settled window toggles normally. If that press is the one activating
+        // an unfocused Flight Deck, the result is that the activating click does not collapse a
+        // project and the one after it does — which is how macOS apps are supposed to behave,
+        // though that particular sequence has not been driven in the real app.
         guard NSEvent.pressedMouseButtons & 1 == 0 else { return }
 
         // Resolved again rather than captured, the same rule the rest of this file follows: the
@@ -318,12 +342,17 @@ final class SidebarInputMonitor {
         toggleRow?(rowIndex)
     }
 
-    /// Whether a press landed on a real AppKit control inside the row — today, the hover-revealed
-    /// close button, which is the only thing in a row SwiftUI backs with an `NSControl`.
+    /// Whether a press landed on a real AppKit control inside the row — in a project header, the
+    /// hover-revealed close button, which is the only `NSControl` there.
     ///
-    /// Walks DOWN, deliberately: walking up from the hit view cannot work here, because the
-    /// row's `NSHostingView` answers `hitTest` with itself. See the file's doc comment.
-    private static func pressedControl(in rowView: NSTableRowView, at pointInWindow: NSPoint) -> Bool {
+    /// Answers for any row, including ones where a control is not the close button: a session
+    /// row has its own close button and, mid-rename, a text field. See the file's doc comment for
+    /// why that cannot produce a wrong toggle, and why this walks DOWN rather than up from the
+    /// hit view.
+    ///
+    /// Not private so the walk itself can be tested; the rule it feeds is pure, but this half is
+    /// the half that has to be right about AppKit.
+    static func pressedControl(in rowView: NSTableRowView, at pointInWindow: NSPoint) -> Bool {
         let pointInRow = rowView.convert(pointInWindow, from: nil)
         func covers(_ view: NSView) -> Bool {
             if view is NSControl, view.convert(view.bounds, to: rowView).contains(pointInRow) {
@@ -348,9 +377,9 @@ final class SidebarInputMonitor {
     }
 
     /// Resolves a hit view to its table, the row view, and the row index under it. Read-only:
-    /// nothing is attached, replaced, or reconfigured. The row view comes back because the
-    /// close-button exclusion is measured against its trailing edge — it is the only geometry
-    /// the click rule needs, and it is AppKit's, not SwiftUI's.
+    /// nothing is attached, replaced, or reconfigured. The row view comes back so that
+    /// `pressedControl(in:at:)` has a subtree to walk — it is the root of the only geometry the
+    /// click rule needs, and it is AppKit's, not SwiftUI's.
     private static func sidebarRow(under view: NSView) -> (NSTableView, NSTableRowView, Int)? {
         var candidate: NSView? = view
         while let current = candidate, !(current is NSTableRowView) { candidate = current.superview }
