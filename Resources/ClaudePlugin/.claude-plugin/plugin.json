@@ -1,0 +1,5 @@
+{
+  "name": "flight-deck",
+  "version": "1.0.0",
+  "description": "Reports Claude Code lifecycle events to Flight Deck."
+}
