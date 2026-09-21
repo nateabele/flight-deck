@@ -342,10 +342,20 @@ case automated = 4
 ```
 
 `SearchRanker` assigns `.automated` when `provenance == "exec"`, `.transcript` otherwise.
+
+**The tier alone does not move anything, and assuming it does is the trap here.**
+`SearchRanker.rank` appends the grouped transcript block *whole* after
+`results.sorted(by: byTierThenRecency)` — deliberately, because sorting everything together
+would interleave conversations and break grouping. A grouped row's tier therefore never
+reaches a comparator, so adding a case is the kind of change that passes review and does
+nothing. The ordering must be applied to the **group sort**: groups whose first hit is
+`exec` sort after those that are not, ahead of the existing recency-then-id keys. Doing it at
+group granularity is also what keeps a conversation's continuation rows adjacent to their
+heading row rather than split across the tier boundary. The row still carries `.automated`
+so its label is honest.
+
 The existing invariant — *transcript hits are always last, so late-arriving results can only
-append below what is drawn* — still holds, because the new tier is strictly below the old
-one and `MatchTier`'s `<` is `rawValue` order. `SearchModel`'s two-clock split (§`SearchModel`
-doc comment) is unaffected.
+append below what is drawn* — is unaffected, and so is `SearchModel`'s two-clock split.
 
 ## 8. Index schema and activation
 
