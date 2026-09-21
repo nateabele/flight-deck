@@ -66,6 +66,16 @@ final class ClaudeDialogVetoTests: XCTestCase {
         XCTAssertTrue(ClaudeTextChannel.hasNumberedMarkerRow(screen))
     }
 
+    /// The mirror of the assertion above, and the reason neither rule may be dropped for the
+    /// other: `question-checkbox-submit-focused` puts the marker on the UNNUMBERED action row
+    /// (`❯    Submit`), so no numbered row sits at its marker and only the footer token catches
+    /// it. Between the two, each rule is the sole defence for at least one real screen.
+    func testTheSubmitFocusedCheckboxScreenHasNoNumberedRowAtItsMarker() throws {
+        let screen = try viewport("question-checkbox-submit-focused")
+        XCTAssertFalse(ClaudeTextChannel.hasNumberedMarkerRow(screen))
+        XCTAssertTrue(screen.contains(ClaudeTextChannel.dialogFooterToken))
+    }
+
     /// A queued message's own echoed `❯` line, and the hint box's `❯` line beneath it, are
     /// both followed by prose — never a digit-dot row — so the marker-plus-numbered-row rule
     /// must not fire on either just because the screen happens to hold digits elsewhere (the

@@ -134,17 +134,29 @@ enum ChoiceDialog {
         return list[index].reads(normalized(label))
     }
 
-    /// Whether the **last** `marker` line on screen is a numbered row, or is immediately
-    /// followed by one. The shape that tells a dialog apart from a composer, for
-    /// `AgentTextChannel.isKnownNonComposer`.
+    /// Whether the **last** `marker` line on screen is itself a numbered row. The shape that
+    /// tells a dialog apart from a composer, for `AgentTextChannel.isKnownNonComposer`.
     ///
-    /// The discriminator is marker **plus a numbered row**, never the marker alone, because
-    /// both agents draw their marker on an ordinary composer too: claude echoes the user's own
+    /// The discriminator is marker **plus a number**, never the marker alone, because both
+    /// agents draw their marker on an ordinary composer too: claude echoes the user's own
     /// prompt as `❯ Run this exact bash command …`, and codex's idle placeholder hint is
     /// literally `› Ask Codex to do anything`. Both are prose after the marker; a dialog puts
-    /// ` N. ` there. Two positions are checked because the two agents disagree about where the
-    /// marker sits: claude's `question-two-review` marks the row itself (`❯ 1. Submit
-    /// answers`), while codex's `tui-rename-modal` draws its marker on a line of its own.
+    /// ` N. ` there. Keying on the marker alone would veto every idle tab of both agents and
+    /// stop injection entirely.
+    ///
+    /// **Only the marker's own line is read, and the line under it deliberately is not.** Every
+    /// dialog capture in `Fixtures/Claude` and `Fixtures/Codex` that this rule catches is
+    /// caught on the marker line itself; not one is caught by the line below, so widening to a
+    /// second row would buy nothing measured — and it would cost something real. A multi-row
+    /// composer draft puts its *second* row directly under the marker, so a person writing
+    /// `❯ Here are my picks` / `  1. foo` would have their own draft read as a dialog and their
+    /// message silently refused.
+    ///
+    /// **The residual cost of the rule, stated rather than hidden:** a single-row draft that
+    /// begins `1. ` is indistinguishable from a focused option and will be vetoed. That is a
+    /// refused injection, which the caller logs, versus typing into a live permission prompt —
+    /// and `question-two-review` (claude) and `workspace-trust` (codex) carry no footer token
+    /// at all, so nothing else catches them.
     ///
     /// **Deliberately looser than `list(inViewport:marker:)`, and it must stay that way.**
     /// That parser requires a run of at least two contiguously numbered rows because it is an
@@ -160,12 +172,10 @@ enum ChoiceDialog {
     /// grammar in both duties, and a second copy of it would drift.
     static func hasNumberedRowAtMarker(inViewport viewport: String, marker: Character) -> Bool {
         let lines = viewport.components(separatedBy: "\n")
-        guard let markerLine = lines.lastIndex(where: {
+        guard let markerLine = lines.last(where: {
             $0.trimmingCharacters(in: .whitespaces).first == marker
         }) else { return false }
-        if parse(lines[markerLine], marker: marker) != nil { return true }
-        guard markerLine + 1 < lines.count else { return false }
-        return parse(lines[markerLine + 1], marker: marker) != nil
+        return parse(markerLine, marker: marker) != nil
     }
 
     // MARK: - Reading the screen

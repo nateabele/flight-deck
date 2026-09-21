@@ -94,14 +94,17 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
     static let dialogFooterTokens = ["esc to cancel", "esc to go back"]
 
     /// **codex's workspace-trust prompt carries NEITHER footer token above** — its footer is
-    /// just `Press enter to continue` — so it is caught only by the marker-plus-numbered-row
-    /// shape `ChoiceDialog.hasNumberedRowAtMarker` recognises (`› 1. Yes, continue` /
-    /// `  2. No, quit`).
+    /// just `Press enter to continue` — so it is caught only by the marker-plus-number shape
+    /// `ChoiceDialog.hasNumberedRowAtMarker` recognises (`› 1. Yes, continue`).
     ///
-    /// This is the check that has to be right about POSITION, not just presence, and codex is
-    /// why: `tui-idle.captured.txt` draws the SAME `›` glyph a dialog does, for its composer's
-    /// placeholder hint (`› Ask Codex to do anything`) — prose, never a digit-dot row. Keying
-    /// on the marker alone would veto every idle codex tab and stop injection entirely.
+    /// codex is why that rule reads the number and not the marker: `tui-idle.captured.txt`
+    /// draws the SAME `›` glyph a dialog does, for its composer's placeholder hint
+    /// (`› Ask Codex to do anything`) — prose, never a digit-dot row. Keying on the marker
+    /// alone would veto every idle codex tab and stop injection entirely.
+    ///
+    /// The converse also holds, which is why neither rule may be dropped for the other:
+    /// `tui-rename-modal.captured.txt` draws no `›` at all (its own marker is
+    /// `InputBar.renameModalMarker`), so only `esc to go back` catches it.
     static func hasNumberedMarkerRow(_ viewport: String) -> Bool {
         ChoiceDialog.hasNumberedRowAtMarker(inViewport: viewport, marker: ChoiceDialog.codexMarker)
     }

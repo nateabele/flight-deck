@@ -106,8 +106,14 @@ struct ClaudeTextChannel: AgentTextChannel {
     /// `❯ 1. Submit answers` / `  2. Cancel` — is a plain confirmation, not a cancellable
     /// prompt, so it never prints that token.
     ///
-    /// What it shares with every other dialog, and with nothing a composer draws, is the
-    /// marker-plus-numbered-row shape `ChoiceDialog.hasNumberedRowAtMarker` recognises.
+    /// What it shares with most other dialogs, and with nothing a composer draws, is the
+    /// marker-plus-number shape `ChoiceDialog.hasNumberedRowAtMarker` recognises.
+    ///
+    /// The converse also holds, which is why neither rule may be dropped for the other:
+    /// `question-checkbox-submit-focused` puts the marker on the UNNUMBERED action row
+    /// (`❯    Submit`), so no numbered row sits at its marker and only `Esc to cancel`
+    /// catches it.
+    ///
     /// `❯` is stated here rather than defaulted there for the reason
     /// `ChoiceDialog.focusedRow` gives: codex draws `›`, and an agent that inherited claude's
     /// glyph would be reading claude's screen grammar off somebody else's screen.
