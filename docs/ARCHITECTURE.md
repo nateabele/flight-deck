@@ -315,10 +315,13 @@ and the screen is consulted only to veto a dialog.
   re-probes the anchor's pid at the instant of injection, which is what covers `submitPrompt`
   and `rename` — the two callers that inject inline rather than from the tick.
 
-Design and execution record: `docs/superpowers/specs/2026-09-19-hook-fed-composer-state-design.md`,
-`docs/superpowers/plans/2026-09-19-hook-fed-composer-state.md`, and the ledger
-`.superpowers/sdd/2026-09-19-hook-fed-composer-state/progress.md` — which is authoritative where
-the spec and plan disagree with it.
+Design record: `docs/superpowers/specs/2026-09-19-hook-fed-composer-state-design.md` and
+`docs/superpowers/plans/2026-09-19-hook-fed-composer-state.md`. Several of their decisions were
+overruled during execution; each such site carries a superseded note naming the ruling that
+replaced it and what shipped instead, so the two are safe to read — but **this section is the
+authority**, because the ledger those notes cite
+(`.superpowers/sdd/2026-09-19-hook-fed-composer-state/progress.md`) is git-ignored and exists
+only on the machine the work was done on.
 
 ## Tab navigation
 
