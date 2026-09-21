@@ -51,6 +51,7 @@ final class TimelineServiceTests: XCTestCase {
             ClaudeAdapter.identity(fromHomeData: data)
         }
         static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
+        static let searchCorpus: AgentSearchCorpus? = ClaudeAdapter.searchCorpus
         let url: URL?
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

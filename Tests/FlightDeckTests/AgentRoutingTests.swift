@@ -370,6 +370,7 @@ final class AgentRoutingTests: XCTestCase {
             ClaudeAdapter.identity(fromHomeData: data)
         }
         static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
+        static let searchCorpus: AgentSearchCorpus? = ClaudeAdapter.searchCorpus
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)
@@ -418,6 +419,7 @@ final class AgentRoutingTests: XCTestCase {
         static var needsRuntimeStart: Bool { ClaudeAdapter.needsRuntimeStart }
         static var hasStatusRegistry: Bool { ClaudeAdapter.hasStatusRegistry }
         static var openPromptReader: (any AgentOpenPromptReader)? { ClaudeAdapter.openPromptReader }
+        static var searchCorpus: (any AgentSearchCorpus)? { ClaudeAdapter.searchCorpus }
         nonisolated static var homeMarkerFile: String { ClaudeAdapter.homeMarkerFile }
 
         nonisolated static func sanitizedTitle(_ raw: String) -> String? {
