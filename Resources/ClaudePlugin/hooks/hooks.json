@@ -1,11 +1,11 @@
 {
-  "description": "Flight Deck lifecycle reporting",
+  "description": "Flight Deck lifecycle reporting. Every command quotes ${CLAUDE_PLUGIN_ROOT}: in production it expands to /Applications/Flight Deck.app/... and Claude Code runs hook commands through a shell, so unquoted it splits at the space and every hook dies with 127. See scripts/record.sh.",
   "hooks": {
-    "SessionStart": [{"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/scripts/record.sh"}]}],
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/scripts/record.sh"}]}],
-    "PreToolUse": [{"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/scripts/record.sh"}]}],
-    "PostToolUse": [{"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/scripts/record.sh"}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/scripts/record.sh"}]}],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/scripts/record.sh"}]}]
+    "SessionStart": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/record.sh\""}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/record.sh\""}]}],
+    "PreToolUse": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/record.sh\""}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/record.sh\""}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/record.sh\""}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/record.sh\""}]}]
   }
 }
