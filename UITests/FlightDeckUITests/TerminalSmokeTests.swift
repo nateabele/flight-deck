@@ -45,6 +45,56 @@ final class TerminalSmokeTests: XCTestCase {
         return condition()
     }
 
+    /// Fails unless the Flight Deck **this run built** holds the foreground.
+    ///
+    /// `app.activate()` is a request, not a guarantee. On a machine someone is using it loses
+    /// to whatever that person is working in, and XCUITest's synthetic clicks then land in
+    /// *their* app — at which point a group that drives real mouse events observes nothing at
+    /// all. Every group below that depends on a click reaching the sidebar asserts this first,
+    /// and names the app that actually held the foreground when it did not, so "the feature is
+    /// broken" and "the click went somewhere else" cannot be confused for one another.
+    ///
+    /// Asked of `NSWorkspace` from the runner process, which answers which app the window
+    /// server considers frontmost. `XCUIApplication.state` is not that question: it reports
+    /// this app's own lifecycle, not who is in front of it.
+    ///
+    /// The bundle id alone is NOT enough, and that is not theoretical: the developer's installed
+    /// `/Applications/Flight Deck.app` carries the same `dev.flightdeck.FlightDeck`, is usually
+    /// running, and would satisfy an id-only check while every click went to the deck full of
+    /// real sessions instead of the reset fixture. So the bundle PATH is checked too — the app
+    /// under test is the one `xcodebuild` built, which lives under a `DerivedData` directory
+    /// (`scripts/smoke.sh` passes `-derivedDataPath DerivedData`; Xcode's own default is also
+    /// under a directory of that name), and the installed copy never does.
+    private func assertFlightDeckIsFrontmost(
+        _ app: XCUIApplication, _ context: String,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        func isAppUnderTest(_ running: NSRunningApplication?) -> Bool {
+            running?.bundleIdentifier == "dev.flightdeck.FlightDeck"
+                && running?.bundleURL?.path.contains("/DerivedData/") == true
+        }
+        if !isAppUnderTest(NSWorkspace.shared.frontmostApplication) {
+            // One retry first, so this fails for the reason it is here for. The foreground can
+            // legitimately be somewhere else between groups — the test runner is an app too —
+            // and that is not the hazard. Flight Deck being unable to TAKE the foreground is,
+            // and a second `activate()` does not fix that.
+            app.activate()
+            settle()
+        }
+        let front = NSWorkspace.shared.frontmostApplication
+        XCTAssertTrue(
+            isAppUnderTest(front),
+            """
+            \(context): the app under test is not frontmost — "\(front?.localizedName ?? "nothing")" \
+            at \(front?.bundleURL?.path ?? "no path") is. Synthetic clicks go to the foreground \
+            app, so everything below would be measuring that app rather than this one. This is an \
+            environment failure, not a product one: something else has the foreground, or an \
+            installed Flight Deck is running and took it.
+            """,
+            file: file, line: line
+        )
+    }
+
     /// macOS names the Settings window inconsistently across releases ("Preferences" on
     /// some, SwiftUI's generated "FlightDeck Settings" on others), so it is located
     /// defensively by content — the window whose descendants include the Agents tab
@@ -73,6 +123,14 @@ final class TerminalSmokeTests: XCTestCase {
     /// row-wide `.onTapGesture` (collapse-on-click) consumed the mouse-down `List`'s `.onMove`
     /// needs. The toggle moved onto the chevron button, leaving the rest of the header
     /// grabbable.
+    ///
+    /// It now owns the project header's whole mouse contract, because collapse-on-click came
+    /// BACK — the chevron button is gone and the entire row toggles again, this time from a
+    /// passive `.leftMouseDown` monitor that returns every event unchanged and decides
+    /// click-versus-drag only once the press is over (`SidebarInputMonitor`). Reorder, toggle
+    /// and the close X are three readings of one mouse-down, so they are driven in one launch:
+    /// any mechanism that satisfies one of them by consuming the event breaks the other two,
+    /// and only a test that drives all three can see that.
     func testProjectHeadingsReorderByDragging() {
         let app = XCUIApplication()
         app.launchArguments += [
@@ -94,40 +152,193 @@ final class TerminalSmokeTests: XCTestCase {
         )
         XCTAssertEqual(headers.count, 2, "precondition: exactly two projects")
 
-        // Order is read from the SESSION rows, not the headings. The heading is an
-        // `.accessibilityElement(children: .combine)`, and XCUITest reports its label as ""
-        // (see the FOLLOWUPS note on project-header accessibility), so asserting on heading
-        // labels would compare "" to "" and pass no matter what happened. Each seeded project
-        // owns exactly one session, so the session order IS the project order.
         let rows = app.staticTexts.matching(identifier: "session-row-title")
         XCTAssertEqual(rows.count, 2, "precondition: one session per seeded project")
-        let before = (0..<2).map { rows.element(boundBy: $0).value as? String }
+        assertFlightDeckIsFrontmost(app, "after launch")
 
-        // Drag the first heading past the second. The drop lands below the second project's
-        // own rows, so aim well beneath it rather than exactly on it.
-        // Both ends are coordinates: the press/drag pair is typed, and mixing an element
-        // source with a coordinate destination does not compile. Pressing mid-header also
-        // keeps the press off the chevron button at the leading edge.
-        headers.element(boundBy: 0)
-            .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-            .press(
-                forDuration: 0.6,
-                thenDragTo: headers.element(boundBy: 1)
-                    .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1.0))
-                    .withOffset(CGVector(dx: 0, dy: 60))
+        /// A point `dx` **points** in from a heading's leading edge, vertically centred.
+        ///
+        /// Points rather than a normalized fraction, deliberately. The sidebar is ~240pt wide
+        /// and both seeded names are short — the home directory ("me" here) and the temporary
+        /// one ("T") — so any fraction big enough to clear the chevron on a wide sidebar
+        /// overshoots a short name into empty row space, which is exactly the hazard that made
+        /// the midpoint press below vacuous.
+        func headingPoint(_ index: Int, inset dx: CGFloat) -> XCUICoordinate {
+            headers.element(boundBy: index)
+                .coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5))
+                .withOffset(CGVector(dx: dx, dy: 0))
+        }
+
+        /// The drop target for a heading drag: the drop lands below that project's own rows,
+        /// so aim well beneath the heading rather than exactly on it.
+        func belowHeading(_ index: Int) -> XCUICoordinate {
+            headers.element(boundBy: index)
+                .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1.0))
+                .withOffset(CGVector(dx: 0, dy: 60))
+        }
+
+        /// The two session titles, top to bottom. Order is read from the SESSION rows, never
+        /// from the headings: a heading is an `.accessibilityElement(children: .combine)` and
+        /// XCUITest reports its label as `""` (see the FOLLOWUPS note on project-header
+        /// accessibility), so an assertion on heading labels compares `""` to `""` and passes
+        /// no matter what happened. Each seeded project owns exactly one session, so the
+        /// session order IS the project order — and the session COUNT is the collapse state,
+        /// since a collapsed project contributes no session rows (`SidebarRow.rows(for:)`).
+        func sessionOrder() -> [String?] { (0..<rows.count).map { rows.element(boundBy: $0).value as? String } }
+
+        // Evidence rather than an assertion: these are the numbers every coordinate below is
+        // derived from, and there is no stable value to pin them to. When a group here starts
+        // failing after a layout change, this line is what says whether the geometry moved.
+        print("[geometry] heading0=\(headers.element(boundBy: 0).frame) "
+              + "heading1=\(headers.element(boundBy: 1).frame)")
+
+        // The title drag runs BEFORE the midpoint control, inverting this file's usual
+        // control-first order, for a fixture reason: the seeded projects are
+        // [home, temporary] = ["me", "T"], and any reorder puts the one-character name
+        // first. A press 24pt in from the leading edge is inside "me" and past the end of
+        // "T", so the only heading that can carry this assertion is whichever is at index 0
+        // before anything has moved.
+        XCTContext.runActivity(named: "a project heading reorders by dragging its title text") { _ in
+            let before = sessionOrder()
+            // 24pt in: past the chevron — a `.small` SF Symbol plus the HStack's 4pt spacing,
+            // comfortably under 20pt — and into the first characters of the name.
+            //
+            // The midpoint is not good enough here, and that is not hypothetical: the control
+            // group below PASSED throughout the period when dragging a heading by its title
+            // was completely broken. With a short name on a wide sidebar the midpoint lands in
+            // empty row space, where there is no title view to swallow the mouse-down, so the
+            // one place a new recognizer would break first was the one place nothing pressed.
+            headingPoint(0, inset: 24).press(forDuration: 0.6, thenDragTo: belowHeading(1))
+            settle()
+
+            let after = sessionOrder()
+            XCTAssertNotEqual(
+                after, before,
+                "dragging a project heading BY ITS TITLE did not reorder anything — something "
+                + "on the title is probably swallowing the mouse-down (got \(after)). If the "
+                + "midpoint control below failed too, no drag reached the sidebar at all."
             )
-        settle()
+            XCTAssertEqual(
+                after.compactMap { $0 }.sorted(), before.compactMap { $0 }.sorted(),
+                "the reorder lost or duplicated a project"
+            )
+        }
 
-        let after = (0..<2).map { rows.element(boundBy: $0).value as? String }
-        XCTAssertNotEqual(
-            after, before,
-            "dragging a project heading did not reorder anything — a gesture on the header is "
-            + "probably swallowing the mouse-down again (got \(after))"
-        )
-        XCTAssertEqual(
-            after.compactMap { $0 }.sorted(), before.compactMap { $0 }.sorted(),
-            "the reorder lost or duplicated a project"
-        )
+        XCTContext.runActivity(named: "control: a project heading reorders by dragging its midpoint") { _ in
+            let before = sessionOrder()
+            // Both ends are coordinates: the press/drag pair is typed, and mixing an element
+            // source with a coordinate destination does not compile.
+            headers.element(boundBy: 0)
+                .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                .press(forDuration: 0.6, thenDragTo: belowHeading(1))
+            settle()
+
+            let after = sessionOrder()
+            XCTAssertNotEqual(
+                after, before,
+                "dragging a project heading did not reorder anything — a gesture on the header "
+                + "is probably swallowing the mouse-down again (got \(after))"
+            )
+            XCTAssertEqual(
+                after.compactMap { $0 }.sorted(), before.compactMap { $0 }.sorted(),
+                "the reorder lost or duplicated a project"
+            )
+        }
+
+        XCTContext.runActivity(named: "a single click on a project heading toggles collapse") { _ in
+            // Asserted, not assumed: `activate()` loses to a human using the machine, and a
+            // click that lands in someone else's app would leave every count below unchanged —
+            // which is indistinguishable from a broken toggle without this line. The two drag
+            // groups above are the other half of the precondition: they prove synthetic mouse
+            // events reach this very row.
+            assertFlightDeckIsFrontmost(app, "before the collapse click")
+            XCTAssertTrue(
+                waitFor(timeout: 5) { rows.count == 2 },
+                "precondition: both projects expanded, one session row each (rows=\(rows.count))"
+            )
+
+            // The midpoint deliberately, this time: the whole row is the toggle, and the
+            // midpoint is the one part of it that is neither the chevron nor the
+            // hover-revealed X.
+            let midpoint = headers.element(boundBy: 0)
+                .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+
+            midpoint.click()
+            XCTAssertTrue(
+                waitFor(timeout: 5) { rows.count == 1 },
+                "clicking a project heading did not collapse it (rows=\(rows.count)). The "
+                + "toggle is decided a press later, in `.default` mode only, so a press that "
+                + "never resolved to a row — or that was still down when the decision ran, "
+                + "which `finishToggleDecision` declines outright — looks exactly like this."
+            )
+            XCTAssertEqual(
+                headers.count, 2,
+                "collapsing removed the heading itself, not just its session rows"
+            )
+
+            // Two settles: a second click inside the double-click interval arrives as
+            // `clickCount == 2`, which is the rename path rather than a second toggle.
+            settle()
+            settle()
+
+            midpoint.click()
+            XCTAssertTrue(
+                waitFor(timeout: 5) { rows.count == 2 },
+                "clicking the collapsed heading did not expand it again (rows=\(rows.count)) — "
+                + "the toggle is one-way, or the second click was read as a double-click"
+            )
+        }
+
+        XCTContext.runActivity(named: "the heading's close X closes the project instead of toggling it") { _ in
+            assertFlightDeckIsFrontmost(app, "before the close-X click")
+            // The X's own `.accessibilityIdentifier("close-project")` cannot be queried: the
+            // heading combines its children, so nothing beneath it is a separate element (see
+            // the FOLLOWUPS note). Its position is measured from the SESSION row's close button
+            // instead — both are the trailing item of a plain `HStack` in the same `List`, so
+            // they share a trailing inset, and that one is queryable.
+            rows.element(boundBy: 0).hover()
+            let sessionClose = app.buttons["close-session"].firstMatch
+            XCTAssertTrue(
+                sessionClose.waitForExistence(timeout: 5),
+                "precondition: hovering a session row reveals its close button, which is what "
+                + "the heading's X is measured from"
+            )
+            let heading = headers.element(boundBy: 0)
+            let (headingFrame, closeFrame) = (heading.frame, sessionClose.frame)
+            print("[geometry] heading=\(headingFrame) close-session=\(closeFrame)")
+            XCTAssertTrue(
+                closeFrame.midX > headingFrame.midX,
+                "precondition: the close button is in the trailing half of the row "
+                + "(heading=\(headingFrame), close=\(closeFrame))"
+            )
+            let survivor = rows.element(boundBy: 1).value as? String
+
+            // Hover the heading and let it settle before clicking: the X is REMOVED from the
+            // view tree while the row is unhovered, so a click arriving before SwiftUI has
+            // inserted it presses the row and toggles rather than closing.
+            heading.hover()
+            settle()
+            heading.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5))
+                .withOffset(CGVector(dx: closeFrame.midX - headingFrame.minX, dy: 0))
+                .click()
+
+            // No confirmation sheet to dismiss: each seeded project owns exactly one session,
+            // and `ProjectCloseCoordinator` only asks when there is more than one.
+            XCTAssertTrue(
+                waitFor(timeout: 5) { headers.count == 1 },
+                "clicking the X did not close the project (headings=\(headers.count), "
+                + "rows=\(rows.count)). One heading means it closed. Two headings and one row "
+                + "means the click missed the button and collapsed the project instead — i.e. "
+                + "the control frame `SidebarInputMonitor.pressedControl` excludes does not "
+                + "line up with the real button in the real layout."
+            )
+            XCTAssertTrue(
+                waitFor(timeout: 5) { rows.count == 1 },
+                "the surviving project lost its session row — closing one project collapsed or "
+                + "closed the other (rows=\(rows.count))"
+            )
+            XCTAssertEqual(sessionOrder().first ?? nil, survivor, "the wrong project closed")
+        }
 
         app.terminate()
     }
