@@ -82,6 +82,43 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
         composer(injector) != nil
     }
 
+    /// codex's approval and rename-modal footers, both **lowercase** — unlike claude's
+    /// `Esc to cancel`, which is why this channel states its own tokens rather than sharing
+    /// claude's. Verified against `approval-command[-row1].captured.txt` (`Press enter to
+    /// confirm or esc to cancel`) and `tui-rename-modal.captured.txt` (`Press enter to
+    /// confirm or esc to go back`).
+    ///
+    /// Two entries and not one prefix: `esc to go back` shares no usable prefix with `esc to
+    /// cancel` past `esc to `, and matching that alone would match `esc to interrupt` — the
+    /// busy line `tui-working.captured.txt` draws mid-turn, where injection must stay allowed.
+    static let dialogFooterTokens = ["esc to cancel", "esc to go back"]
+
+    /// **codex's workspace-trust prompt carries NEITHER footer token above** — its footer is
+    /// just `Press enter to continue` — so it is caught only by the marker-plus-numbered-row
+    /// shape `ChoiceDialog.hasNumberedRowAtMarker` recognises (`› 1. Yes, continue` /
+    /// `  2. No, quit`).
+    ///
+    /// This is the check that has to be right about POSITION, not just presence, and codex is
+    /// why: `tui-idle.captured.txt` draws the SAME `›` glyph a dialog does, for its composer's
+    /// placeholder hint (`› Ask Codex to do anything`) — prose, never a digit-dot row. Keying
+    /// on the marker alone would veto every idle codex tab and stop injection entirely.
+    static func hasNumberedMarkerRow(_ viewport: String) -> Bool {
+        ChoiceDialog.hasNumberedRowAtMarker(inViewport: viewport, marker: ChoiceDialog.codexMarker)
+    }
+
+    /// Either recognised dialog shape is enough — see `ClaudeTextChannel.isKnownNonComposer`
+    /// for why the two stay independent.
+    static func isKnownNonComposer(_ viewport: String) -> Bool {
+        dialogFooterTokens.contains(where: viewport.contains) || hasNumberedMarkerRow(viewport)
+    }
+
+    /// Unreadable screen means *no veto*, for the reason
+    /// `ClaudeTextChannel.isKnownNonComposer(_:)` states.
+    func isKnownNonComposer(_ injector: TextInjecting) -> Bool {
+        guard let viewport = injector.readViewport() else { return false }
+        return Self.isKnownNonComposer(viewport)
+    }
+
     /// **Restores the draft by re-typing it, not by yanking.**
     ///
     /// Claude's channel puts a killed draft back with Ctrl+Y, which works only because Claude
