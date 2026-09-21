@@ -292,6 +292,14 @@ final class PreferencesStore: ObservableObject {
     /// The pair is built here rather than through `AgentAdapter.environment(for:)` on purpose:
     /// preferences must not depend on the adapter layer, and `AgentID` already owns the
     /// variable's name, so this is the same expression that default evaluates.
+    ///
+    /// **This is not the whole launch environment, and nothing agent-specific belongs here.**
+    /// What an *agent* needs of its host — claude's `FLIGHT_DECK_EVENT_DIR`, say — comes from
+    /// `AgentAdapter.launchEnvironment` and is merged over this by
+    /// `SessionStore.launchEnvironment(for:adapter:orphaned:)`, which is the one place the two
+    /// meet. Adding such a variable here instead would put a second, adapter-blind expression
+    /// of it in the codebase: exactly the duplication that left the hook feed switched off in
+    /// production while both halves' unit tests passed.
     func sessionEnvironment(
         for account: AgentAccount? = nil,
         inherited: [String: String] = ProcessInfo.processInfo.environment

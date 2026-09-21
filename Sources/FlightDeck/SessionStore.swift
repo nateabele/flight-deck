@@ -1309,8 +1309,9 @@ final class SessionStore: ObservableObject {
             config.initialInput = typedText
         }
         let orphaned = accountIsMissing(for: session)
-        config.environmentVariables =
-            preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
+        config.environmentVariables = launchEnvironment(
+            for: session, adapter: adapter, orphaned: orphaned
+        )
 
         guard let surface = processRegistry.record(for: id, around: { provider?.makeSurface(config) })
         else { return nil }
@@ -1322,6 +1323,34 @@ final class SessionStore: ObservableObject {
         surface.debugSessionID = id
         #endif
         return surface
+    }
+
+    /// **Everything a tab's shell is launched with, in one expression both surface-config
+    /// sites call.**
+    ///
+    /// Two sources, and they answer different questions. `PreferencesStore.sessionEnvironment`
+    /// owns what the *user* configured plus the account binding, and deliberately knows
+    /// nothing about adapters. `AgentAdapter.launchEnvironment` owns what the *agent* needs of
+    /// its host — today, where claude's hook plugin reports its composer lifecycle.
+    ///
+    /// **The adapter's half is applied last, and not keyed on having an account.** It first
+    /// shipped set only on `ClaudeAdapter.environment(for:)`, whose sole production consumer
+    /// is `ToolRunner`'s Tools-menu path — so `FLIGHT_DECK_EVENT_DIR` reached no launched
+    /// session, `record.sh` exited on its first line, `events.ndjson` was never created, and
+    /// every claude tab stayed `.unknown` for the life of the process while the legacy screen
+    /// grammar quietly carried the whole gate. A tab whose login was deleted gets no account
+    /// variable at all (see `orphaned` at both call sites) and must still report, which is why
+    /// this is merged outside the account branch rather than inside `sessionEnvironment`.
+    ///
+    /// Applied last for the same reason the account is: a variable typed into the Shell pane
+    /// must not be able to repoint a tab's hook log at a directory nothing tails.
+    private func launchEnvironment(
+        for session: Session, adapter: AgentAdapter, orphaned: Bool
+    ) -> [String: String] {
+        var environment =
+            preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
+        for (key, value) in adapter.launchEnvironment { environment[key] = value }
+        return environment
     }
 
     /// Replaces an inert terminal with a working one.
@@ -2349,8 +2378,9 @@ final class SessionStore: ObservableObject {
         // starts no agent — and a surface configuration can only *set* a variable, never
         // unset one, so "no variable" is the strongest refusal available here.
         let orphaned = accountIsMissing(for: session)
-        config.environmentVariables =
-            preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
+        config.environmentVariables = launchEnvironment(
+            for: session, adapter: adapter(for: instance(for: session)), orphaned: orphaned
+        )
         // Wrapped so the registry can identify the shell libghostty forks for this surface;
         // libghostty exposes no pid of its own. The identification finishes asynchronously,
         // after `makeSurface` returns — see `SurfaceProcessRegistry`.
@@ -5481,6 +5511,9 @@ final class SessionStore: ObservableObject {
     /// being treated as a live composer the veto has nothing to say about. The reset is
     /// re-armable rather than terminal: it clears the hook watcher's memory too, so the next
     /// event from a resumed agent is reported as news instead of swallowed as unchanged.
+    /// A poll is up to one tick behind, and two callers reach this gate between ticks, so
+    /// `injectableReadiness` below re-probes the anchor's pid here as well — read as one rule
+    /// in two places, not two rules.
     ///
     /// **Presence, not activity, on either path.** A rename used to be held to a stricter,
     /// idle-only rule than a prompt on the theory that its effect is something the user is
@@ -5509,7 +5542,7 @@ final class SessionStore: ObservableObject {
               let injector = injector(for: id)
         else { return nil }
 
-        switch composerReadiness(for: id) {
+        switch injectableReadiness(for: id) {
         case .absent:
             return nil
         case .live:
@@ -5543,6 +5576,44 @@ final class SessionStore: ObservableObject {
         // has one resolving.
         guard !injecting.contains(id) else { return nil }
         return (channel, injector)
+    }
+
+    /// **The tab's reported readiness, re-checked against the process at the instant of
+    /// injection rather than as of the last poll.**
+    ///
+    /// `applyRegistry` already demotes a claude tab to `.unknown` on any tick where no
+    /// registry row names its conversation, which is the durable half of this rule and stays
+    /// where it is — it also clears the hook watcher's memory, which a read like this one
+    /// cannot do. What it cannot cover is the gap *between* ticks, and two callers land
+    /// squarely in it: `submitPrompt` runs `flushPromptQueue(id)` inline and `rename` runs
+    /// `flushPendingRename(id)` inline, both arriving from a phone or a sidebar click at
+    /// whatever moment the user chose. A claude that died a moment ago therefore had up to
+    /// one poll interval — 500 ms frontmost, 2 s backgrounded — of reading `.live` at a bare
+    /// shell, where the veto finds no dialog to catch and `ClaudeTextChannel.submit`'s only
+    /// screen precondition is `InputBar.read` finding one `❯`, which a shell prompt
+    /// satisfies. `/rename foo` would then be RUN as a command.
+    ///
+    /// **It demotes only on a positively dead anchor, never on a missing one.** A tab with no
+    /// anchor is the boot window — `SessionStart` logged before claude has written its status
+    /// file — and `applyRegistry` owns that case one tick later by design. Demoting here as
+    /// well would mean a claude whose status file is momentarily unreadable loses the new path
+    /// and falls back to the screen grammar this branch exists to stop depending on. The only
+    /// question asked is the one a syscall can answer for certain: the process we are anchored
+    /// to, is it still there.
+    ///
+    /// `.unknown` rather than `.absent`, matching the reset: the tab falls back to
+    /// `hasComposerBox`, which is precisely what refuses a bare shell today. And the probe is
+    /// the same one `SessionStatusWatcher` uses to decide a registry row is stale, through the
+    /// same injected seam, so a test can make a tab's process dead without killing anything.
+    private func injectableReadiness(for id: UUID) -> ComposerReadiness {
+        let reported = composerReadiness(for: id)
+        // Only claude is anchored: `pinResolutions` filters on `hasStatusRegistry`, so a codex
+        // tab has no anchor to probe and must not be demoted for lacking one. What protects it
+        // instead is `CodexTextChannel.composer(_:)`, which requires codex's `›` marker AND its
+        // `model · mode · cwd` footer beneath — a shell draws neither.
+        guard reported == .live, let anchor = anchors[id] else { return reported }
+        let isAlive = statusIsAlive ?? SessionStatusWatcher.processIsAlive
+        return isAlive(anchor.pid) ? .live : .unknown
     }
 
     /// Whether the gate above would admit a typing attempt for this tab right now — its
@@ -6025,20 +6096,30 @@ final class SessionStore: ObservableObject {
             // `InputBar.read` finding one `❯` row, which a shell prompt satisfies. Unbounded
             // once entered, and a sidebar rename would then run `/rename foo` as a command.
             //
-            // A level test closes that, and the boot window it costs is no longer sticky:
+            // A level test closes that, and it is re-armable rather than terminal:
             // `resetComposerReadiness` also clears the hook watcher's memory of the session,
-            // so the very next hook event re-reports `.live` instead of being swallowed as
-            // unchanged. A tab in that window therefore spends it on the legacy screen
-            // grammar — which is exactly what it did before any of this existed — rather than
-            // being stranded there.
+            // so the session's next hook event re-reports `.live` instead of being swallowed
+            // as unchanged. Until that event arrives the tab is on the legacy screen grammar —
+            // exactly what it did before any of this existed — rather than stranded.
             //
-            // **One tick of latency is inherent and accepted.** This is a polled signal at
-            // `WatchClock.foregroundInterval` (500 ms, longer when Flight Deck is not
-            // frontmost), so a death is seen up to one tick after it happens. Nothing typed
-            // inside that window is protected by this reset; what covers it is that the
-            // injection paths are themselves driven from this same tick — see the `defer`
-            // above, which runs the three flushes at function exit, i.e. AFTER this reset has
-            // already been applied in the body.
+            // **That wait is a turn, not a beat, and it is the ordinary state of an idle
+            // tab.** Hook events fire on lifecycle, not on a clock: a freshly booted claude
+            // that logs `SessionStart` before writing its status file is reset here, and then
+            // emits nothing at all until somebody submits a prompt. So the honest cost of the
+            // level test is "every not-yet-anchored tab reads `.unknown` until its next turn",
+            // which is affordable only because `.unknown` is a working path, not because the
+            // window is short.
+            //
+            // **One tick of latency, and the two callers it does not cover.** This is a polled
+            // signal at `WatchClock.foregroundInterval` (500 ms, 2 s when Flight Deck is not
+            // frontmost), so a death is seen up to one tick after it happens. The three
+            // flushes in the `defer` above run AFTER this reset, so anything the *tick* drives
+            // is covered. Two paths are not driven from the tick: `submitPrompt` calls
+            // `flushPromptQueue(id)` inline and `rename` calls `flushPendingRename(id)` inline,
+            // both arriving whenever a phone or a sidebar click says so. What covers those is
+            // `injectableReadiness`, which re-probes the anchor's pid at the instant of
+            // injection — see its doc comment; this reset remains the durable half, because it
+            // is the half that can also clear the hook watcher's memory.
             //
             // Only claude tabs reach here — `pinResolutions` filters on `hasStatusRegistry` —
             // which is why a codex tab keeps whatever its rollout last reported. Codex needs no

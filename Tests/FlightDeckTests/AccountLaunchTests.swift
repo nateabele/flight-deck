@@ -297,6 +297,34 @@ final class AccountLaunchTests: XCTestCase {
         )
     }
 
+    /// **The seam the hook feature first shipped broken through: the writer side of the event
+    /// log and the reader side are named in two different places, and nothing made them
+    /// meet.**
+    ///
+    /// `ClaudeAdapter` names the directory; `SessionStore`'s `HookEventWatcher` tails it.
+    /// Each half had a unit test of its own against a hand-written literal, and both passed
+    /// while the variable reached no launched session at all — it was set only on
+    /// `ClaudeAdapter.environment(for:)`, whose sole production consumer is `ToolRunner`'s
+    /// Tools-menu path. `record.sh` exits on its first line without it, so `events.ndjson`
+    /// was never written and every claude tab stayed `.unknown` for the life of the process.
+    ///
+    /// Asserted against `ClaudePluginLocation.eventDirectory` itself rather than against a
+    /// literal, deliberately: a literal here would re-open the same seam one level up.
+    func testTheLaunchedShellIsToldWhereToReportHookEvents() {
+        let (preferences, _) = configured(.claude)
+        let provider = RecordingProvider()
+        retained.append(provider)
+        let store = makeStore(preferences, provider: provider)
+
+        store.newSession(in: projectURL)
+
+        XCTAssertEqual(
+            provider.configs.last?.environmentVariables["FLIGHT_DECK_EVENT_DIR"],
+            ClaudePluginLocation.eventDirectory.path,
+            "the watcher tails this exact directory — the hook script must write to it"
+        )
+    }
+
     /// A restored tab is launched too, and under the login it was created with rather than
     /// today's default — `restore` goes through the same `insertSession`.
     func testARestoredTabIsRelaunchedUnderTheAccountItWasCreatedWith() {
@@ -361,6 +389,13 @@ final class AccountLaunchTests: XCTestCase {
 
         XCTAssertNil(refused.environmentVariables["CLAUDE_CONFIG_DIR"],
                      "no variable at all beats one naming somebody else's home")
+        // **The hook-event directory is NOT keyed on having an account**, and this is the one
+        // launch in the suite that genuinely has none. Hanging it off the account branch would
+        // be the same silent, total failure the variable already shipped with once — no
+        // `events.ndjson`, every tab `.unknown` forever — reached by a narrower route.
+        XCTAssertEqual(refused.environmentVariables["FLIGHT_DECK_EVENT_DIR"],
+                       ClaudePluginLocation.eventDirectory.path,
+                       "a tab with no login still reports its lifecycle")
         XCTAssertEqual(refused.initialInput, "",
                        "nothing may be typed into a tab that cannot launch as itself")
         XCTAssertEqual(store.watchedSessionIDs, [healthy],

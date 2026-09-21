@@ -78,10 +78,17 @@ final class ToolContextTests: XCTestCase {
 
         XCTAssertEqual(context?.accountName, "Work")
         XCTAssertEqual(context?.accountHome, home.path)
-        // FLIGHT_DECK_EVENT_DIR rides along here too — same `ClaudeAdapter.environment(for:)`
-        // a launched session gets, per this test's own doc comment above. Built from a
-        // hand-written literal, not `ClaudePluginLocation.eventDirectory` itself — see the
-        // matching comment in `AgentAccountEnvironmentTests`.
+        // FLIGHT_DECK_EVENT_DIR rides along here too, via the `launchEnvironment` that
+        // `AgentAdapter.environment(for:)` folds in.
+        //
+        // **A launched session does NOT get its environment from here**, and believing it did
+        // is what shipped the hook feature dead: `environment(for:)`'s only production caller
+        // is `SessionStore.toolContext()` → `ToolRunner`, the Tools-menu path. The pty's
+        // environment is built by `SessionStore.launchEnvironment(for:adapter:orphaned:)`,
+        // and `AccountLaunchTests` is what pins that the two agree.
+        //
+        // Built from a hand-written literal, not `ClaudePluginLocation.eventDirectory` itself
+        // — see the matching comment in `AgentAccountEnvironmentTests`.
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let expectedEventDir = base
             .appendingPathComponent("Flight Deck", isDirectory: true)

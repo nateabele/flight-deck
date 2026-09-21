@@ -75,9 +75,12 @@ final class SessionStoreInjectionGateTests: XCTestCase {
     }
 
     /// Same shape as `PhonePromptQueueTests.makeStore`: a claude tab whose injection settles
-    /// synchronously, so each test reads as straight-line code. The registry row is what
-    /// anchors the tab — `testADeadAgentProcessResetsReadinessToUnknown` below takes it away
-    /// again, which is the only way a tab's anchor is ever lost.
+    /// synchronously, so each test reads as straight-line code.
+    ///
+    /// The registry row is what anchors the tab, and pid 1 is deliberate: `injectableReadiness`
+    /// re-probes the anchor's pid at injection time, and `kill(1, 0)` answers `EPERM` — "alive,
+    /// not yours" — so a tab built here reads live without the suite needing a process of its
+    /// own. A test that wants the opposite substitutes `statusIsAlive`.
     private func makeStore() -> (SessionStore, SpyInjector, UUID, UUID) {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
         store.transcriptsRootOverride = projectsRoot
@@ -214,8 +217,12 @@ final class SessionStoreInjectionGateTests: XCTestCase {
     /// dialog recognised" would type into the bare shell left behind, which is strictly worse
     /// than the behaviour this replaces, since a bare shell carries no dialog markers for the
     /// veto to catch. The liveness signal is the status-registry anchor: `SessionStatusWatcher`
-    /// drops rows whose pid is dead, so a tab that HAD an anchor and lost it is a tab whose
-    /// claude is gone.
+    /// drops rows whose pid is dead, so a tick that names no row for this conversation is a
+    /// tick on which no live process is ours. The test below is the level form of the same
+    /// question — never anchored at all — and
+    /// `testAnInjectionBetweenTicksReprobesTheAnchorsProcess` is the one that covers the gap
+    /// between two ticks.
+    ///
     /// **Driven through a rename rather than a phone prompt, deliberately.** `submitPrompt`
     /// refuses a tab with no status at all (`.notRunning`) before the gate is ever consulted,
     /// so a dead claude's queue never reaches `inject` down that path. A rename does: it is a
@@ -323,6 +330,78 @@ final class SessionStoreInjectionGateTests: XCTestCase {
         store.applyRegistry([1: entry(conversation, .busy, cwd: tmp.path)])
 
         XCTAssertEqual(store.composerReadiness(for: id), .live, "still running, still live")
+    }
+
+    /// **The gap between two ticks, which the reset above cannot cover and two callers land
+    /// in.**
+    ///
+    /// `applyRegistry` is polled at 500 ms frontmost and 2 s when Flight Deck is not — and the
+    /// argument that this is safe because "the injection paths are driven from this same tick"
+    /// is true of the three flushes in its `defer` and false of two others: `submitPrompt`
+    /// calls `flushPromptQueue(id)` inline, and `rename` calls `flushPendingRename(id)`
+    /// inline. Both arrive whenever a phone or a sidebar click says so. So a claude that died
+    /// a moment ago still reads `.live`, its bare shell offers the veto no dialog to catch,
+    /// and `ClaudeTextChannel.submit`'s only screen precondition is `InputBar.read` finding
+    /// one `❯` — which a shell prompt satisfies. `/rename foo` runs as a command.
+    ///
+    /// The anchor is left in place here, deliberately: that IS the between-ticks state. What
+    /// changes is the answer to the only question a syscall can settle — is the process we are
+    /// anchored to still there.
+    func testAnInjectionBetweenTicksReprobesTheAnchorsProcess() {
+        let (store, spy, id, _) = makeStore()
+        store.apply(.lifecycle(.live), to: id)
+        spy.viewportOverride = bareShell
+
+        // The process dies. No tick has run since, so both the anchor and the stored readiness
+        // are exactly as the last one left them.
+        store.statusIsAlive = { _ in false }
+        XCTAssertEqual(store.composerReadiness(for: id), .live,
+                       "the premise: nothing has re-polled, so the stored value is untouched")
+
+        XCTAssertFalse(store.injectionGateAdmitsForTesting(id),
+                       "the gate re-probes rather than trusting a value up to a tick old")
+        XCTAssertTrue(store.rename(id, to: "typed between ticks"))
+        XCTAssertEqual(spy.events, [], "so nothing is run at the shell the agent left behind")
+    }
+
+    /// The control the test above needs to mean anything: with the process still there, the
+    /// same rename at the same moment goes. Without this, a gate that simply refused every
+    /// `.live` tab would pass it.
+    func testAnInjectionBetweenTicksStillTypesWhileTheProcessLives() throws {
+        let (store, spy, id, _) = makeStore()
+        store.apply(.lifecycle(.live), to: id)
+        store.statusIsAlive = { _ in true }
+        spy.viewportOverride = try screen("idle-empty-box")
+
+        XCTAssertTrue(store.rename(id, to: "still alive"))
+
+        XCTAssertEqual(spy.sent, ["/rename still alive"])
+    }
+
+    /// **A tab with no anchor at all is NOT demoted by the re-probe**, and that asymmetry is
+    /// the point of it. No anchor is the boot window — `SessionStart` logged before claude has
+    /// written its status file — which `applyRegistry` owns one tick later, with the hook
+    /// watcher's memory cleared alongside, which a read-only probe could never do. Demoting
+    /// here as well would hand every momentarily-unreadable status file back to the screen
+    /// grammar this whole branch exists to stop depending on.
+    func testANeverAnchoredTabIsLeftToTheTickRatherThanDemotedAtTheGate() throws {
+        let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.transcriptsRootOverride = projectsRoot
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
+        store.statusRootOverride = projectsRoot
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { $0() }
+        store.statusIsAlive = { _ in false }
+        let session = store.newSession(in: tmp)
+
+        // Reported live, never anchored: no `applyRegistry` has run at all.
+        store.apply(.lifecycle(.live), to: session.id)
+        // A screen the legacy grammar would refuse, so a demotion would be visible.
+        spy.viewportOverride = bareShell
+
+        XCTAssertTrue(store.injectionGateAdmitsForTesting(session.id),
+                      "there is no dead process here — only one that has not reported yet")
     }
 
     // MARK: - The deadlock this design was reworked to avoid
