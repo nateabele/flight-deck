@@ -43,6 +43,34 @@ final class SessionStoreComposerReadinessTests: XCTestCase {
         XCTAssertEqual(store.composerReadiness(for: tab), .absent)
     }
 
+    /// `startHookEventWatching()`'s own gate: a store that never calls `startStatusWatching()`
+    /// must not build the app-wide watcher, mirroring `isStatusWatchingEnabled`'s existing
+    /// guard on the per-account watchers. This is what makes `makeStore()` above safe to use
+    /// without a `hookEventDirectoryOverride` — the fallback to the real
+    /// `ClaudePluginLocation.eventDirectory` is never reached because nothing here starts it.
+    func testHookEventWatcherStaysNilUntilStatusWatchingStarts() {
+        let (store, _) = makeStore()
+        XCTAssertNil(store.hookEventWatcherForTesting,
+                     "a store that never calls startStatusWatching() must not build the watcher")
+    }
+
+    /// Identity, not just non-nilness — the same distinction
+    /// `testEachAccountWithAClaudeTabGetsItsOwnStatusWatcher` draws for the per-account
+    /// watchers: rebuilding this one on a second sweep would leave the replaced object's
+    /// registration on the shared `WatchClock` behind, still polling beside the new one.
+    func testStartStatusWatchingBuildsTheHookEventWatcherOnceAndReusesIt() throws {
+        let (store, _) = makeStore()
+        store.statusRootOverride = projectsRoot.appendingPathComponent("status")
+        store.hookEventDirectoryOverride = projectsRoot.appendingPathComponent("hook-events")
+
+        store.startStatusWatching()
+        let first = try XCTUnwrap(store.hookEventWatcherForTesting)
+
+        store.startStatusWatching()
+        XCTAssertTrue(store.hookEventWatcherForTesting === first,
+                      "a second sweep must reuse the existing watcher, not register another")
+    }
+
     // The brief's third test asserts on `store.pendingPersistContainsReadiness`, a property
     // that does not exist and that the task instructions say not to invent. `persist()` is
     // private and `SessionPersistence.Entry` has no constructor from a live `Session` a test

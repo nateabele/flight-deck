@@ -594,8 +594,12 @@ final class AccountLaunchTests: XCTestCase {
 
     /// Every store gets the spy reporter, not only the tests that assert on it: the default
     /// is an `NSAlert`, and a refusal in any test here would otherwise put a real panel on
-    /// the machine running the suite. The two observation overrides keep the watchers off the
-    /// developer's real registry for the same reason.
+    /// the machine running the suite. The three observation overrides keep the watchers off
+    /// the developer's real registry and hook-event log for the same reason —
+    /// `hookEventDirectoryOverride` matters here because `startStatusWatching()` now also
+    /// starts the one app-wide `HookEventWatcher`; without it, every test in this file that
+    /// calls `startStatusWatching()` would tail the developer's actual
+    /// `ClaudePluginLocation.eventDirectory`.
     private func makeStore(
         _ preferences: PreferencesStore,
         provider: SurfaceProvider? = nil,
@@ -605,6 +609,7 @@ final class AccountLaunchTests: XCTestCase {
         store.launchFailureReporter = reporter
         store.transcriptsRootOverride = temporaryRoot("projects")
         store.statusRootOverride = temporaryRoot("status")
+        store.hookEventDirectoryOverride = temporaryRoot("hook-events")
         return store
     }
 

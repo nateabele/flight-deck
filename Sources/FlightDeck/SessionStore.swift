@@ -1026,6 +1026,13 @@ final class SessionStore: ObservableObject {
     /// Only identity can fail that assertion.
     func statusWatcherForTesting(account: UUID?) -> AnyObject? { statusWatchers[account] }
 
+    /// Test seam mirroring `statusWatcherForTesting`, for the one app-wide `HookEventWatcher`:
+    /// identity, not just non-nilness, is what proves a second `startHookEventWatching()` sweep
+    /// left the existing watcher (and its `WatchClock` registration) alone rather than replacing
+    /// it — the exact hazard `statusWatcherForTesting`'s doc comment describes, narrowed to one
+    /// instance instead of a keyed map.
+    var hookEventWatcherForTesting: AnyObject? { hookEventWatcher }
+
     /// Set the instant `reapAllForQuit` begins, before its first `await`. Nothing stops
     /// a `statusWatchers` poll or the `WatchClock` timer while that reap is in flight — there
     /// is no `applicationWillTerminate` — so a tick can land mid-reap and see every tracked

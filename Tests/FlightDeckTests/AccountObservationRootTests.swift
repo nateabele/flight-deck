@@ -90,9 +90,12 @@ final class AccountObservationRootTests: XCTestCase {
 
     /// One registry watcher per account with a live claude tab — not one for the app.
     ///
-    /// Hermetic by `statusRootOverride`, which every watcher here therefore shares: what is
-    /// under test is the *keying*, and pointing two accounts at a temp directory is the only
-    /// way to assert it without scanning the developer's real `~/.claude/sessions`.
+    /// Hermetic by `statusRootOverride` and `hookEventDirectoryOverride`, which every watcher
+    /// here therefore shares: what is under test is the *keying*, and pointing two accounts at
+    /// a temp directory is the only way to assert it without scanning the developer's real
+    /// `~/.claude/sessions` — and, since `startStatusWatching()` also starts the one app-wide
+    /// `HookEventWatcher`, without `hookEventDirectoryOverride` too it would tail the
+    /// developer's real hook-event log.
     func testEachAccountWithAClaudeTabGetsItsOwnStatusWatcher() throws {
         let (preferences, a, b) = accountsPair()
         let tabA = UUID(), tabB = UUID()
@@ -109,6 +112,7 @@ final class AccountObservationRootTests: XCTestCase {
         )
         let store = SessionStore(provider: nil, persistence: persistence, preferences: preferences)
         store.statusRootOverride = Self.temporaryStatusRoot
+        store.hookEventDirectoryOverride = Self.temporaryHookEventDirectory
         XCTAssertTrue(store.restore(directoryExists: { _ in true }))
 
         store.startStatusWatching()
@@ -151,6 +155,7 @@ final class AccountObservationRootTests: XCTestCase {
         )
         let store = SessionStore(provider: nil, persistence: persistence, preferences: preferences)
         store.statusRootOverride = Self.temporaryStatusRoot
+        store.hookEventDirectoryOverride = Self.temporaryHookEventDirectory
         XCTAssertTrue(store.restore(directoryExists: { _ in true }))
         store.startStatusWatching()
         XCTAssertEqual(store.statusWatcherAccountsForTesting, [other.id],
@@ -182,10 +187,18 @@ final class AccountObservationRootTests: XCTestCase {
     private static let temporaryStatusRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         .appendingPathComponent("account-observation-status", isDirectory: true)
 
+    /// Never the developer's real hook-event log: every store here that calls
+    /// `startStatusWatching()` — which also starts the one app-wide `HookEventWatcher` — must
+    /// pair this with `temporaryStatusRoot` above, or it tails
+    /// `ClaudePluginLocation.eventDirectory` for real.
+    private static let temporaryHookEventDirectory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("account-observation-hook-events", isDirectory: true)
+
     /// Two claude logins: the built-in one, which is what a tab naming no account resolves to,
     /// and a second homed under a temp directory. Only the *keys* matter to these tests — both
-    /// stores that use this also set `statusRootOverride`, so neither login's watcher can reach
-    /// the developer's real `~/.claude/sessions`.
+    /// stores that use this also set `statusRootOverride` (and, wherever they call
+    /// `startStatusWatching()`, `hookEventDirectoryOverride` too), so neither login's watcher
+    /// can reach the developer's real `~/.claude/sessions` or hook-event log.
     private func accountsPair() -> (PreferencesStore, AgentAccount, AgentAccount) {
         let builtIn = AgentAccount(
             agent: .claude, displayName: "Default", home: AgentID.claude.builtInHome
