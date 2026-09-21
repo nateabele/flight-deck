@@ -4696,11 +4696,16 @@ final class SessionStore: ObservableObject {
     ///
     /// **The head only, never the whole queue.** `inject` submits with a Return, so a second
     /// entry in the same pass would be typed into a bar that has just started a turn. Right
-    /// after the submit the screen is an echo of the sent message, not a composer box, so
-    /// `hasComposerBox` refuses the second entry (see
+    /// after the submit the screen is an echo of the sent message, not a composer box, so on a
+    /// tab taking the legacy path `hasComposerBox` refuses the second entry (see
     /// `ClaudeComposerDetectorTests.testTheEchoOnlyScreenRightAfterSubmittingIsNotAComposer`) —
     /// but only after the settle, by which point the entry looks flushed to everything
-    /// upstream. One per pass, and the next pass is a registry tick away.
+    /// upstream. **This loop's own rule is what makes that safe, and it no longer has that
+    /// backstop everywhere:** a tab whose agent has reported `.live` is gated on the dialog
+    /// veto, and an echo-only screen trips neither of its rules, so the head-only rule is now
+    /// the only thing standing between two queued prompts and one pass. One per pass, and the
+    /// next pass is a registry tick away — by which point the screen has moved on and the
+    /// second prompt is typed mid-turn, which claude queues, which is the point.
     private func flushPromptQueue(_ id: UUID) {
         // Expiry first, and it runs whether or not this tab can be typed into: a queue that
         // is never drained because its tab lost its surface must still empty itself.
@@ -5383,15 +5388,18 @@ final class SessionStore: ObservableObject {
     ///   Worse, a tab running back-to-back turns never reached `idle` at all, so a phone's
     ///   message sat in the queue until `phonePromptWindow` expired, having never been typed,
     ///   while the identical text typed at the Mac worked because Claude queues it mid-turn.
-    ///   `AgentTextChannel.hasComposerBox` asks the screen directly instead — see
-    ///   `ClaudeTextChannel.isComposerBox` for what a real composer looks like there — so a
-    ///   turn running back-to-back never starves the queue, and a dialog's select-list, which
-    ///   draws its own `❯` but is not a composer, still refuses correctly: a Return there would
-    ///   PICK AN OPTION instead of submitting, and answering a dialog is `answerPrompt`'s job,
-    ///   behind an interlock that reads the screen before committing. This applies to a rename
-    ///   exactly as it does to a prompt: `injectRename` shares this same gate rather than
-    ///   keeping an idle-only rule of its own, because there is no longer an idle-only rule to
-    ///   keep — see `injectionGate` below.
+    ///   The screen is asked directly instead, and a turn running back-to-back therefore never
+    ///   starves the queue. A dialog's select-list, which draws its own `❯` but is not a
+    ///   composer, still refuses: a Return there would PICK AN OPTION instead of submitting,
+    ///   and answering a dialog is `answerPrompt`'s job, behind an interlock that reads the
+    ///   screen before committing. This applies to a rename exactly as it does to a prompt:
+    ///   `injectRename` shares this same gate rather than keeping an idle-only rule of its own,
+    ///   because there is no longer an idle-only rule to keep.
+    /// - **And, since the hook feed landed, a lifecycle the agent reports for itself.** Which
+    ///   of the two screen predicates is asked — `AgentTextChannel.hasComposerBox`, which must
+    ///   recognise a composer, or `isKnownNonComposer`, which only has to recognise a dialog —
+    ///   now depends on whether the agent has said it is up. See `injectionGate` below, which
+    ///   is where the whole rule lives.
     ///
     /// Everything past that gate — finding the input box, the kill, the settle, the
     /// before/after comparison and the yank — is `AgentTextChannel.submit`'s, and the reasons
@@ -5446,10 +5454,30 @@ final class SessionStore: ObservableObject {
     /// good moment — and a second copy of these conditions is how one caller quietly acquires
     /// a laxer idea of "a good moment" than the other.
     ///
-    /// **Presence, not activity — same criterion as `AgentTextChannel.hasComposerBox`, because
-    /// this gate answers exactly that question.** A rename used to be held to a stricter,
+    /// **Two questions, each asked of the source that can actually answer it.** Whether the
+    /// session is up at all is a durable fact the agent reports through its own lifecycle —
+    /// claude's hook plugin, codex's rollout evidence — and no screen grammar can be relied on
+    /// to re-derive it. Whether a dialog is covering the composer *right now* is a property of
+    /// this instant, which only the screen knows: hook events cannot see one, because denying
+    /// a permission prompt with Esc fires no hook at all and claude raises select-lists of its
+    /// own right after `Stop`. So a reported-live session is gated on the dialog veto, which
+    /// only has to recognise a dialog and therefore degrades by letting an unfamiliar composer
+    /// through rather than by refusing every one of them.
+    ///
+    /// **`.unknown` means nothing has reported yet, and it takes exactly the path it took
+    /// before any of this existed.** A session restored from an older build's snapshot, one
+    /// whose plugin failed to load, one in a folder claude does not trust — each falls back to
+    /// `hasComposerBox`, the full-grammar check. That is the migration guarantee: the new path
+    /// is only ever reached by a tab that positively said something.
+    ///
+    /// **And `.live` is not sticky, because neither agent reliably announces its own death.**
+    /// `applyRegistry` resets a tab to `.unknown` when it loses its status-registry anchor —
+    /// see the comment there — which is what stops a dead tab's bare shell from being treated
+    /// as a live composer the veto has nothing to say about.
+    ///
+    /// **Presence, not activity, on either path.** A rename used to be held to a stricter,
     /// idle-only rule than a prompt on the theory that its effect is something the user is
-    /// watching for. That theory did not survive `hasComposerBox` replacing activity here:
+    /// watching for. That theory did not survive the screen replacing activity here:
     /// there is no longer an idle/busy distinction available to hold a rename to, and codex's
     /// own `submitRename` was already written activity-agnostic — its composer reads the same
     /// mid-turn as idle, by design (see `CodexTextChannel`'s header). Gating the rename tighter
@@ -5462,23 +5490,65 @@ final class SessionStore: ObservableObject {
     /// job, and the two must not be conflated.
     ///
     /// **The channel handed back is the `textChannel`, even on the rename path**, and that is
-    /// deliberate. The only thing this gate needs a channel FOR is `hasComposerBox`, which
-    /// lives on `AgentTextChannel`; codex has both channels, so asking for that one costs
-    /// the rename path nothing. An agent declaring `renameTyping` but no `textChannel` is
-    /// refused here — correct, since nothing could then say whether its composer was on screen.
+    /// deliberate. The only things this gate needs a channel FOR are `hasComposerBox` and
+    /// `isKnownNonComposer`, both of which live on `AgentTextChannel`; codex has both channels,
+    /// so asking for that one costs the rename path nothing. An agent declaring `renameTyping`
+    /// but no `textChannel` is refused here — correct, since nothing could then say whether its
+    /// composer was on screen.
     private func injectionGate(
         _ id: UUID
     ) -> (channel: AgentTextChannel, injector: TextInjecting)? {
         guard let channel = session(for: id)?.agent.textChannel,
-              let injector = injector(for: id),
-              channel.hasComposerBox(injector)
+              let injector = injector(for: id)
         else { return nil }
+
+        switch composerReadiness(for: id) {
+        case .absent:
+            return nil
+        case .live:
+            // **A readable screen is a precondition on this path, not merely an input to the
+            // veto below.** `isKnownNonComposer` fails OPEN on a screen it cannot read, and
+            // must: a predicate that only fires on a positively-recognised dialog has to
+            // answer "unsure" as "no veto", or a transient read failure looks exactly like a
+            // dialog and silently drops the message. That direction was safe only while the
+            // legacy path stood in front of it — `hasComposerBox` independently fails CLOSED
+            // on nil — and `.live` is precisely the path that no longer calls it. Without this
+            // line a live session whose surface cannot be read would have NO screen gate at
+            // all and would be typed into blind.
+            //
+            // Asked here rather than by teaching the veto to answer `true` on nil, so the veto
+            // keeps the fail-open contract its own doc comment prescribes for its own purpose.
+            // The second `readViewport()` below is not a second screen grab: both are served
+            // from the 500 ms cache `TextInjecting.readViewport()` documents.
+            //
+            // Every channel's `submit` also refuses a screen it cannot read, so today this
+            // changes no outcome that a test could see from outside — which is exactly why it
+            // is written as a rule of the gate rather than left to the channel. A gate whose
+            // safety is really somebody else's loses it the day that somebody changes. See
+            // `injectionGateAdmitsForTesting`, which is how the suite watches this line.
+            guard injector.readViewport() != nil else { return nil }
+            if channel.isKnownNonComposer(injector) { return nil }
+        case .unknown:
+            if !channel.hasComposerBox(injector) { return nil }
+        }
         // See `injecting`'s doc comment: this is the one place every caller funnels through,
         // so it is the one place that can refuse a second injection for a tab that already
         // has one resolving.
         guard !injecting.contains(id) else { return nil }
         return (channel, injector)
     }
+
+    /// Whether the gate above would admit a typing attempt for this tab right now — its
+    /// verdict alone, with nothing typed and nothing marked.
+    ///
+    /// **A seam, because one of the gate's own rules is deliberately invisible from outside.**
+    /// Every channel's `submit` ALSO refuses a screen it cannot read, so an unreadable
+    /// viewport produces an identical transcript — nothing typed — whether or not this gate
+    /// checks for one itself. Relying on that is exactly what the readable-viewport rule above
+    /// forbids: a gate whose safety is really the channel's loses it the day a channel
+    /// changes. This is how a test can tell the two apart. Same idiom as `stuckCheckForTesting`
+    /// and `stuckEpisodeForTesting`.
+    func injectionGateAdmitsForTesting(_ id: UUID) -> Bool { injectionGate(id) != nil }
 
     /// Types a rename through an agent's two-stage modal, or defers. Codex's leg; claude
     /// declares no `renameTyping` and never arrives here. See `AgentRenameTyping`.
@@ -5903,6 +5973,38 @@ final class SessionStore: ObservableObject {
         // `claude` is writing (the transcript always follows it) and which project the tab
         // is filed under (it moves only into a project that is already open).
         for (tab, resolution) in resolutions {
+            // **A tab whose `claude` is gone stops reading `.live`.** Neither agent reliably
+            // announces its own death — `SessionReaper`'s `SIGHUP → SIGTERM → SIGKILL`
+            // escalation means the `SessionEnd` hook usually never fires, and codex has no
+            // session-end rollout record at all — so without this a dead tab would keep the
+            // last readiness its lifecycle reported, for the life of the process. That is
+            // harmless only until `.live` starts bypassing `hasComposerBox`, which is exactly
+            // what `injectionGate` now does: the bare shell a dead agent leaves behind carries
+            // no dialog markers, so `isKnownNonComposer` cannot veto it, and the text would be
+            // RUN as a command instead of sent to anybody. `.unknown` is the right target
+            // rather than `.absent` — it routes the tab back to the legacy screen check, which
+            // is precisely what protects a bare shell today.
+            //
+            // **The signal is the anchor, and the trigger is its EDGE.**
+            // `SessionStatusWatcher` drops rows whose pid is dead and serves the last good
+            // value through a torn read, so an anchor that goes is a process that went.
+            // Edge-triggered and not level, because a tab that was never anchored has lost
+            // nothing: the `SessionStart` hook can land before `claude` has written its status
+            // file, and a level rule would erase the `.live` it had just reported on the tick
+            // in between, stranding the tab on the legacy path until some later hook event
+            // happened to arrive.
+            //
+            // Only claude tabs reach here — `pinResolutions` filters on `hasStatusRegistry` —
+            // which is why a codex tab keeps whatever its rollout last reported. Codex needs no
+            // equivalent today for a reason worth stating rather than rediscovering:
+            // `CodexTextChannel.submit` and `submitRename` both refuse outright unless
+            // `composer(_:)` finds codex's `›` marker AND its `model · mode · cwd` footer
+            // directly beneath, so a codex tab at a bare shell types nothing whatever this gate
+            // says. Claude has no such second line — `InputBar.read` locks onto a shell's own
+            // `❯` perfectly happily — which is what makes this reset load-bearing there.
+            if anchors[tab] != nil, resolution.anchor == nil {
+                composerReadinessByTab.removeValue(forKey: tab)
+            }
             anchors[tab] = resolution.anchor
             guard let session = session(for: tab) else { continue }
             // Safe on every tick: it is the tab's own transcript directory echoed back when

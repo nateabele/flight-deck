@@ -267,8 +267,9 @@ protocol AgentOpenPromptReader {
 protocol AgentTextChannel {
     /// Whether this agent's input box is on screen AND empty right now.
     ///
-    /// **Diagnostic only — nothing gates typing on this.** Injection is gated on
-    /// `hasComposerBox` (presence), and `submit()` decides empty-vs-draft by killing and
+    /// **Diagnostic only — nothing gates typing on this.** Injection is gated on presence
+    /// (`hasComposerBox`, or `isKnownNonComposer` once the agent has reported itself live —
+    /// see `SessionStore.injectionGate`), and `submit()` decides empty-vs-draft by killing and
     /// comparing, so this member no longer sits on the typing path. Its sole caller is the
     /// `composer=` field of `promptTypingComposerState`'s log string. It answers `false` for a
     /// box that cannot be read or that holds anything other than the queued-messages hint.
@@ -277,12 +278,21 @@ protocol AgentTextChannel {
     /// Whether this agent's own composer is genuinely on screen right now — as opposed to a
     /// dialog, a bare shell, or a screen this build cannot read.
     ///
-    /// **This is the gate `SessionStore.inject` asks, in place of the status-file activity it
-    /// used to consult.** Activity said nothing about what was actually on screen: `.busy` and
-    /// `.idle` both draw the composer, a `.waiting` dialog draws something that only looks
-    /// like it, and a pre-boot bare shell draws neither. Each agent answers this from its own
-    /// screen grammar — see `ClaudeTextChannel`'s rule-sandwich and `CodexTextChannel`'s
-    /// footer check — so the gate stays correct without `SessionStore` knowing either one.
+    /// **This is what `SessionStore.injectionGate` asks of a tab whose agent has not reported
+    /// its lifecycle** — `ComposerReadiness.unknown`: a session restored from an older build,
+    /// one whose hook plugin never loaded, one in a folder claude does not trust. It replaced
+    /// the status-file activity check, which said nothing about what was actually on screen:
+    /// `.busy` and `.idle` both draw the composer, a `.waiting` dialog draws something that
+    /// only looks like it, and a pre-boot bare shell draws neither. Each agent answers this
+    /// from its own screen grammar — see `ClaudeTextChannel`'s rule-sandwich and
+    /// `CodexTextChannel`'s footer check — so the gate stays correct without `SessionStore`
+    /// knowing either one.
+    ///
+    /// A tab that HAS reported `.live` is gated on `isKnownNonComposer` below instead, because
+    /// this predicate's failure direction is the wrong one to stand alone on: it must
+    /// recognise a composer, so an agent that restyles one stops accepting injection
+    /// altogether. This stays the fallback precisely because "unsure" answering `false` is the
+    /// safe reading when nothing else has vouched for the session.
     ///
     /// Presence only, never emptiness: a box that is on screen but holds a draft still answers
     /// `true` here, because `submit`'s kill-and-compare is what decides whether that draft can

@@ -136,10 +136,14 @@ struct ClaudeTextChannel: AgentTextChannel {
     }
 
     /// Unreadable screen means *no veto*, not a veto — the fail-open direction
-    /// `AgentTextChannel.isKnownNonComposer` documents. A screen that cannot be read is also
-    /// a screen `hasComposerBox` cannot confirm, so the caller's own gate still stands in
-    /// front of the injection; answering true here would instead make a transient read
-    /// failure look exactly like a dialog and drop the message.
+    /// `AgentTextChannel.isKnownNonComposer` documents. Answering true here would make a
+    /// transient read failure look exactly like a dialog and drop the message.
+    ///
+    /// **The caller does not rely on that nil passing through, and must not start.**
+    /// `SessionStore.injectionGate` reads the viewport itself before asking this on the
+    /// `.live` path, precisely because this answer is "unsure", not "clear" — see the comment
+    /// there. The `.unknown` path is covered by `hasComposerBox`, which fails closed on nil
+    /// under its own rule.
     func isKnownNonComposer(_ injector: TextInjecting) -> Bool {
         guard let viewport = injector.readViewport() else { return false }
         return Self.isKnownNonComposer(viewport)
