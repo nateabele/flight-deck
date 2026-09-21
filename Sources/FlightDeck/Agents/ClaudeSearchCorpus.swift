@@ -10,37 +10,32 @@ struct ClaudeSearchCorpus: AgentSearchCorpus {
     /// type's own directory listing — both are "what files exist at this path", so one
     /// injected seam covers both without a test needing to fake two identical closures.
     var listing: @Sendable (String) -> [String] = { SearchCorpus.defaultListing($0) }
-    /// Injected so a test can assert which candidate directories were rejected without
-    /// touching a filesystem.
+    /// Passed straight through to `SearchCorpus.directories`, which is where
+    /// `SearchCorpusTests` drives it with fakes to assert which candidate directories are
+    /// rejected; this type's own default reaches the real filesystem.
     var exists: @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
 
     func transcripts(
         forProjects projects: [String], accounts: [AgentAccount]
     ) -> [TranscriptRef] {
-        var seen: Set<URL> = []
-        var refs: [TranscriptRef] = []
-        for account in accounts where account.agent == .claude {
+        // `SearchCorpus.directories` is the one implementation of "which encoded directories
+        // belong to these projects" — its exact-match-not-prefix and dedup-by-resolved-
+        // directory rules are exactly the ones this walk needs too, and are guarded by
+        // `SearchCorpusTests`. A second, hand-rolled copy here would leave that suite
+        // watching code nothing at runtime actually calls.
+        accounts.filter { $0.agent == .claude }.flatMap { account -> [TranscriptRef] in
             let root = account.home.appendingPathComponent("projects", isDirectory: true)
-            for project in projects {
-                // The candidate directories are the project and its worktrees — the literal
-                // paths. Kept alongside their encoded names rather than discarded, because
-                // the encoding is one-way: nothing downstream can turn `-w-flight-deck` back
-                // into a path, which is why `workingDirectory` has to be captured here.
-                for workingDirectory in SearchCorpus.candidateWorkingDirectories(
-                    forProjectAt: project, listing: listing
-                ) {
-                    let name = ClaudeSession.encodedProjectDirName(for: workingDirectory)
-                    let directory = root.appendingPathComponent(name, isDirectory: true)
-                    guard exists(directory.path), seen.insert(directory).inserted else { continue }
-                    refs += Self.transcripts(
-                        in: directory, project: project,
-                        workingDirectory: workingDirectory, accountHome: account.home,
-                        listing: listing
-                    )
-                }
+            let entries = SearchCorpus.directories(
+                forProjects: projects, projectsRoot: root, listing: listing, exists: exists
+            )
+            return entries.flatMap { entry in
+                Self.transcripts(
+                    in: entry.directory, project: entry.projectPath,
+                    workingDirectory: entry.workingDirectory, accountHome: account.home,
+                    listing: listing
+                )
             }
         }
-        return refs
     }
 
     func indexedMessages(
