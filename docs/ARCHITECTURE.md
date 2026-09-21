@@ -253,6 +253,73 @@ Full field shapes, the decompiled status derivation, and accepted limitations ar
 `activity`/`unread` fields and the auto-resume prompt built on top of them are in
 `docs/superpowers/plans/2026-08-15-auto-resume.md`.
 
+## Composer readiness and the injection gate
+
+Everything Flight Deck types into a live agent — a phone's prompt, `/rename`, `/login`, a
+restore's "Keep going" — funnels through `SessionStore.inject` / `injectRename`, and both stand
+behind one `injectionGate`. The gate used to be pure screen grammar: parse the viewport for the
+composer's box-drawing characters and refuse anything else. That broke silently whenever an
+agent changed its TUI. Since 2026-09-19 the durable half comes from each agent's own lifecycle
+and the screen is consulted only to veto a dialog.
+
+```
+  claude                                          codex
+  ──────                                          ─────
+  Resources/ClaudePlugin  (bundled, loaded per    <rollout>.jsonl
+    .claude-plugin/        session via              │
+    hooks/hooks.json       --plugin-dir)            │  CodexRolloutWatcher
+    scripts/record.sh                               │   (evidence of a live TUI)
+        │ one JSON line per lifecycle event         │
+        v                                           │
+  ~/Library/Application Support/Flight Deck/        │
+    hook-events-<debug|release>/events.ndjson       │
+        │  HookEventWatcher (ONE for the app,       │
+        │   shared WatchClock, tail-with-offset)    │
+        v                                           v
+        ╰──────────> AgentEvent.lifecycle(ComposerReadiness) ──> SessionStore
+                                                                composerReadinessByTab
+```
+
+- **The plugin is data in the app bundle** (`Resources/ClaudePlugin`, a *folder reference* in
+  `project.yml` — a plain group would flatten `.claude-plugin/` and `hooks/`).
+  `ClaudePluginLocation.applying(to:bundle:)` appends it to whatever `--plugin-dir` flags the
+  user already set, idempotently, so a resume does not accumulate duplicates.
+- **`FLIGHT_DECK_EVENT_DIR` is what switches the feed on.** `record.sh`'s first line exits when
+  it is unset, so a session launched without it reports nothing and stays `.unknown` for the
+  life of the process. It reaches the pty through `AgentAdapter.launchEnvironment`, merged over
+  `PreferencesStore.sessionEnvironment` by `SessionStore.launchEnvironment(for:adapter:orphaned:)`
+  at both surface-config sites — *not* through `AgentAdapter.environment(for:)`, whose only
+  production consumer is the Tools menu. Deliberately not keyed on having an account: a tab
+  whose login was deleted launches with no account variable and must still report.
+  `AccountLaunchTests` pins that the directory a tab is told to write to is the one
+  `HookEventWatcher` tails.
+- **Every hook command in `hooks.json` quotes `${CLAUDE_PLUGIN_ROOT}`**, because in production
+  it expands to `/Applications/Flight Deck.app/…` and Claude Code runs hook commands through a
+  shell.
+- **`ComposerReadiness` is `.unknown` / `.live` / `.absent`, and nothing else.** Busy-vs-idle is
+  absent because mid-turn injection is fine and activity already has an owner
+  (`ClaudeStatusFile`). A dialog state is absent because denying a permission prompt with Esc
+  fires no hook at all, so a `.dialog` would have no observable clear.
+- **The gate**: `.live` → the viewport must be readable, and inject unless
+  `AgentTextChannel.isKnownNonComposer` recognises a dialog on it; `.unknown` → the legacy
+  `hasComposerBox` grammar, exactly what every tab did before this existed, which is the
+  migration guarantee; `.absent` → refuse.
+- **The dialog veto recognises a dialog, never a composer**, and so fails *open* on an
+  unfamiliar screen. Per agent it is the footer token (`Esc to cancel`, plus codex's
+  `esc to go back`) **or** a marker line (`❯` / `›`) followed by numbered ` N. ` rows.
+- **`.live` is not sticky.** Neither agent reliably announces its own death — `SessionReaper`
+  escalates to SIGKILL, so `SessionEnd` usually never fires, and codex has no session-end
+  record at all. `applyRegistry` resets a claude tab to `.unknown` on any tick where no
+  registry row names its conversation, and clears the hook watcher's per-session memory at the
+  same time so the reset is re-armable rather than one-way. Between ticks, `injectableReadiness`
+  re-probes the anchor's pid at the instant of injection, which is what covers `submitPrompt`
+  and `rename` — the two callers that inject inline rather than from the tick.
+
+Design and execution record: `docs/superpowers/specs/2026-09-19-hook-fed-composer-state-design.md`,
+`docs/superpowers/plans/2026-09-19-hook-fed-composer-state.md`, and the ledger
+`.superpowers/sdd/2026-09-19-hook-fed-composer-state/progress.md` — which is authoritative where
+the spec and plan disagree with it.
+
 ## Tab navigation
 
 ⌘⇧[ / ⌘⇧] move the selection along `repos.flatMap(\.sessions)` — the sidebar's session order
