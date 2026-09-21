@@ -50,7 +50,7 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         try append(indexLine(id, "renamed"), to: index)
         runtime.drainForTesting()
 
-        XCTAssertEqual(seen, [.activity(.busy), .title("renamed")])
+        XCTAssertEqual(seen, [.lifecycle(.live), .activity(.busy), .title("renamed")])
     }
 
     func testEachTabOnlySeesItsOwnThread() throws {
@@ -68,7 +68,7 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         try append(indexLine(theirs, "theirs renamed"), to: index)
         runtime.drainForTesting()
 
-        XCTAssertEqual(mineSeen, [.activity(.busy)])
+        XCTAssertEqual(mineSeen, [.lifecycle(.live), .activity(.busy)])
         XCTAssertEqual(theirsSeen, [.title("theirs renamed")])
     }
 

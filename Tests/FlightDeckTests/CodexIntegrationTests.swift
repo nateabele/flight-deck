@@ -419,7 +419,7 @@ final class CodexIntegrationTests: XCTestCase {
         XCTAssertEqual(codex.terminationStatus, 0, "codex exec resume failed")
 
         watcher.drain()
-        XCTAssertEqual(seen, [.activity(.busy), .activity(.idle), .turnEnded],
+        XCTAssertEqual(seen, [.lifecycle(.live), .activity(.busy), .activity(.idle), .turnEnded],
                        "a turn run by a process our app-server does not own must still append "
                        + "task_started then task_complete to the rollout it named; if this "
                        + "fails, every codex tab has silently stopped moving")

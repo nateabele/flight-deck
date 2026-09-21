@@ -67,6 +67,24 @@ final class CodexRolloutWatcher {
     private func apply(_ read: TailRead) {
         hasChosenStart = read.hasChosenStart
         offset = read.offset
+
+        // Any appended line at all — regardless of whether `CodexEventMapper` recognises it —
+        // is positive evidence codex's TUI is up and writing to this file: the codex analogue
+        // of claude's `SessionStart` hook, which is why this stands apart from the per-line
+        // fold below rather than living inside it. `CodexEventMapper` decides which lines are
+        // turn boundaries; this decides only whether the process is alive, and a line it does
+        // not recognise still proves that.
+        //
+        // Gated on `read.lines` being genuinely non-empty, never on merely being called: a
+        // poll of a file that already existed before this watcher started reads no lines on
+        // its first pass (`TailReader` seeks straight to EOF), so a tab attached to a thread
+        // whose codex process has not booted yet stays `.unknown` — exactly the boot window
+        // the legacy screen gate exists to cover, and the same stale-`.live` hazard already
+        // fixed once for claude's watcher.
+        if !read.lines.isEmpty {
+            onEvent(.lifecycle(.live))
+        }
+
         // Emitted in file order and not folded: unlike claude's sub-agent counting, nothing
         // here needs remembering — a turn boundary is complete in one record.
         for line in read.lines {
