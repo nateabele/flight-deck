@@ -3248,6 +3248,11 @@ final class SessionStore: ObservableObject {
         // Read before the removal below: codex teardown is per account, and once the row is
         // gone there is nothing left to ask which account this tab was running as.
         let closed = instance(for: repos[repoIndex].sessions[sessionIndex])
+        // Read here for the same reason, and used below by `resetComposerReadiness`: the hook
+        // watcher keys by conversation, and once the row is gone there is nothing left to ask
+        // which conversation this tab held. Reopening reuses this exact id, so a watcher left
+        // remembering `.live` for it would swallow the rebuilt tab's `SessionStart`.
+        let closedConversation = repos[repoIndex].sessions[sessionIndex].pinnedConversationID
         // Recorded before the removal, for the same reason and from the same row. The whole
         // `Session` value goes in, not a copy of its fields: reopening reuses its `id` and
         // `pinnedConversationID`, which is what makes the rebuilt tab resume this
@@ -3297,7 +3302,7 @@ final class SessionStore: ObservableObject {
         stopStatusWatchingIfUnused(account: closed.account)
         statuses.removeValue(forKey: id)
         subagentCounts.removeValue(forKey: id)
-        composerReadinessByTab.removeValue(forKey: id)
+        resetComposerReadiness(for: id, conversation: closedConversation)
         // A queued prompt for a tab that no longer exists is the most literal case of "text
         // that will never be typed", and its tokens go with it: `acceptedPromptTokens` is
         // keyed by tab, so a reopened tab reusing this id starts with a clean dedupe window
@@ -5471,9 +5476,11 @@ final class SessionStore: ObservableObject {
     /// is only ever reached by a tab that positively said something.
     ///
     /// **And `.live` is not sticky, because neither agent reliably announces its own death.**
-    /// `applyRegistry` resets a tab to `.unknown` when it loses its status-registry anchor —
-    /// see the comment there — which is what stops a dead tab's bare shell from being treated
-    /// as a live composer the veto has nothing to say about.
+    /// `applyRegistry` resets a tab to `.unknown` on any tick where no registry row names its
+    /// conversation — see the comment there — which is what stops a dead tab's bare shell from
+    /// being treated as a live composer the veto has nothing to say about. The reset is
+    /// re-armable rather than terminal: it clears the hook watcher's memory too, so the next
+    /// event from a resumed agent is reported as news instead of swallowed as unchanged.
     ///
     /// **Presence, not activity, on either path.** A rename used to be held to a stricter,
     /// idle-only rule than a prompt on the theory that its effect is something the user is
@@ -5819,6 +5826,25 @@ final class SessionStore: ObservableObject {
         composerReadinessByTab[tabID] ?? .unknown
     }
 
+    /// Forgets everything this build believes about a tab's composer lifecycle — **both**
+    /// halves of it, which is the whole reason this is a method rather than two lines.
+    ///
+    /// `composerReadinessByTab` is what `injectionGate` reads, but it is not the only memory
+    /// in the system: `HookEventWatcher` keeps its own fold per session and emits only on a
+    /// change, so a store-side reset that left that map holding `.live` would be one-way. The
+    /// next `SessionStart` for the same conversation — and claude reuses the id across a
+    /// resume — would fold to `.live`, compare equal, and never be emitted, leaving the tab on
+    /// the legacy path for the rest of the process's life. See `HookEventWatcher.forget`.
+    ///
+    /// - Parameter conversation: the claude `session_id` the watcher keys by, which for a
+    ///   Flight Deck tab is its `pinnedConversationID` — the same UUID passed as
+    ///   `--session-id`. A codex tab has no entry in that map, so passing its thread id is
+    ///   harmless and keeps this caller-agnostic.
+    private func resetComposerReadiness(for tabID: UUID, conversation: UUID) {
+        composerReadinessByTab.removeValue(forKey: tabID)
+        hookEventWatcher?.forget(conversation)
+    }
+
     /// The tab's terminal screen, or nil when there is no surface or it cannot be read.
     ///
     /// A read and only a read: it changes no fleet state and adds no mutation site for
@@ -5973,11 +5999,13 @@ final class SessionStore: ObservableObject {
         // `claude` is writing (the transcript always follows it) and which project the tab
         // is filed under (it moves only into a project that is already open).
         for (tab, resolution) in resolutions {
-            // **A tab whose `claude` is gone stops reading `.live`.** Neither agent reliably
-            // announces its own death — `SessionReaper`'s `SIGHUP → SIGTERM → SIGKILL`
-            // escalation means the `SessionEnd` hook usually never fires, and codex has no
-            // session-end rollout record at all — so without this a dead tab would keep the
-            // last readiness its lifecycle reported, for the life of the process. That is
+            anchors[tab] = resolution.anchor
+            guard let session = session(for: tab) else { continue }
+            // **A tab with no live `claude` behind it stops reading `.live`.** Neither agent
+            // reliably announces its own death — `SessionReaper`'s `SIGHUP → SIGTERM →
+            // SIGKILL` escalation means the `SessionEnd` hook usually never fires, and codex
+            // has no session-end rollout record at all — so without this a dead tab would keep
+            // the last readiness its lifecycle reported, for the life of the process. That is
             // harmless only until `.live` starts bypassing `hasComposerBox`, which is exactly
             // what `injectionGate` now does: the bare shell a dead agent leaves behind carries
             // no dialog markers, so `isKnownNonComposer` cannot veto it, and the text would be
@@ -5985,14 +6013,32 @@ final class SessionStore: ObservableObject {
             // rather than `.absent` — it routes the tab back to the legacy screen check, which
             // is precisely what protects a bare shell today.
             //
-            // **The signal is the anchor, and the trigger is its EDGE.**
+            // **The signal is the anchor, and the test is LEVEL, not its falling edge.**
             // `SessionStatusWatcher` drops rows whose pid is dead and serves the last good
-            // value through a torn read, so an anchor that goes is a process that went.
-            // Edge-triggered and not level, because a tab that was never anchored has lost
-            // nothing: the `SessionStart` hook can land before `claude` has written its status
-            // file, and a level rule would erase the `.live` it had just reported on the tick
-            // in between, stranding the tab on the legacy path until some later hook event
-            // happened to arrive.
+            // value through a torn read, so "no row names this conversation" means no process
+            // does. An earlier cut fired only on `had one, then lost it`, to protect the boot
+            // window where `SessionStart` can be logged before `claude` has written its status
+            // file. That was the wrong trade in both directions: it also could not fire AFTER,
+            // so a `claude` that died before ever writing that file — the same sub-second
+            // window, entered from the other side — left the tab reading `.live` permanently,
+            // at a bare shell, where `ClaudeTextChannel.submit`'s only screen precondition is
+            // `InputBar.read` finding one `❯` row, which a shell prompt satisfies. Unbounded
+            // once entered, and a sidebar rename would then run `/rename foo` as a command.
+            //
+            // A level test closes that, and the boot window it costs is no longer sticky:
+            // `resetComposerReadiness` also clears the hook watcher's memory of the session,
+            // so the very next hook event re-reports `.live` instead of being swallowed as
+            // unchanged. A tab in that window therefore spends it on the legacy screen
+            // grammar — which is exactly what it did before any of this existed — rather than
+            // being stranded there.
+            //
+            // **One tick of latency is inherent and accepted.** This is a polled signal at
+            // `WatchClock.foregroundInterval` (500 ms, longer when Flight Deck is not
+            // frontmost), so a death is seen up to one tick after it happens. Nothing typed
+            // inside that window is protected by this reset; what covers it is that the
+            // injection paths are themselves driven from this same tick — see the `defer`
+            // above, which runs the three flushes at function exit, i.e. AFTER this reset has
+            // already been applied in the body.
             //
             // Only claude tabs reach here — `pinResolutions` filters on `hasStatusRegistry` —
             // which is why a codex tab keeps whatever its rollout last reported. Codex needs no
@@ -6002,11 +6048,10 @@ final class SessionStore: ObservableObject {
             // directly beneath, so a codex tab at a bare shell types nothing whatever this gate
             // says. Claude has no such second line — `InputBar.read` locks onto a shell's own
             // `❯` perfectly happily — which is what makes this reset load-bearing there.
-            if anchors[tab] != nil, resolution.anchor == nil {
-                composerReadinessByTab.removeValue(forKey: tab)
+            // `SessionStoreInjectionGateTests` pins both halves, claude's and codex's.
+            if resolution.anchor == nil {
+                resetComposerReadiness(for: tab, conversation: session.pinnedConversationID)
             }
-            anchors[tab] = resolution.anchor
-            guard let session = session(for: tab) else { continue }
             // Safe on every tick: it is the tab's own transcript directory echoed back when
             // no row named one, so the two branches below simply find nothing to do.
             let cwd = resolution.transcriptDirectory
