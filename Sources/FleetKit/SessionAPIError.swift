@@ -26,11 +26,26 @@ public struct SessionAPIError: Equatable, Sendable, Codable {
     /// permanent one in the UI today. It is here because it is free at parse time and
     /// impossible to recover later — the record is long gone by the time anyone wants it.
     public var isTransient: Bool
+    /// Which auto-retry attempt is pending, 1-based, or `nil` when no retry is armed.
+    ///
+    /// Retry state lives inside this struct rather than in a `FleetEvent` case of its own,
+    /// and that is a compatibility decision, not a tidiness one: a new `FleetEventTag` raw
+    /// value throws in an older phone's decoder and tears down the socket, while an unknown
+    /// *field* is simply skipped by the `decodeIfPresent` below. It also keeps
+    /// `SessionStore.setAPIError` the single writer, which is what the replicator's drift
+    /// assertion depends on.
+    public var retryAttempt: Int?
+    /// When the next attempt is due — absolute, never a remaining duration. A countdown
+    /// value would change every second and emit an event per tick; a timestamp changes once
+    /// per attempt and the client does the arithmetic, as `WirePlanGate.startedAt` does.
+    public var nextRetryAt: Date?
 
-    public init(status: Int? = nil, kind: String? = nil, isTransient: Bool = false) {
+    public init(status: Int? = nil, kind: String? = nil, isTransient: Bool = false, retryAttempt: Int? = nil, nextRetryAt: Date? = nil) {
         self.status = status
         self.kind = kind
         self.isTransient = isTransient
+        self.retryAttempt = retryAttempt
+        self.nextRetryAt = nextRetryAt
     }
 
     /// The tooltip, the accessibility label, and the phone's VoiceOver string — one function
@@ -39,11 +54,12 @@ public struct SessionAPIError: Equatable, Sendable, Codable {
         var out = "Stopped — API error"
         if let status { out += " \(status)" }
         if let kind, !kind.isEmpty { out += " (\(kind))" }
+        if let retryAttempt { out += " · retrying, attempt \(retryAttempt)" }
         return out
     }
 
     enum CodingKeys: String, CodingKey {
-        case status, kind, isTransient
+        case status, kind, isTransient, retryAttempt, nextRetryAt
     }
 
     /// Hand-written rather than synthesized, because `isTransient` is the field written by the
@@ -60,5 +76,7 @@ public struct SessionAPIError: Equatable, Sendable, Codable {
         status = try c.decodeIfPresent(Int.self, forKey: .status)
         kind = try c.decodeIfPresent(String.self, forKey: .kind)
         isTransient = try c.decodeIfPresent(Bool.self, forKey: .isTransient) ?? false
+        retryAttempt = try c.decodeIfPresent(Int.self, forKey: .retryAttempt)
+        nextRetryAt = try c.decodeIfPresent(Date.self, forKey: .nextRetryAt)
     }
 }
