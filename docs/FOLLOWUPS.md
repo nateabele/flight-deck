@@ -1189,9 +1189,13 @@ backoff ladder, riding the existing `pendingPrompts` queue rather than a second 
   row is a flat `HStack` with no subtitle slot, and `SessionSidebar.swift`'s
   `PhonePresenceBadge` doc comment already states the reason no row here gets a
   `TimelineView`: it would re-render the whole row on a display-linked schedule for state
-  that is usually absent. An `NSToolTip` does not re-read while the pointer just sits there,
-  so a per-second tooltip would look frozen anyway — it would need to be dismissed and
-  re-shown to update, which is worse than a static attempt number. Deliberate non-fix; the
+  that is usually absent. A tooltip is also expected to be the wrong vehicle regardless: the
+  standard `NSToolTip`/`.help(_:)` mechanism is not documented to re-read its string while the
+  pointer just sits there, so a per-second countdown would likely need to be dismissed and
+  re-shown to update — worse than a static attempt number. Not verified against AppKit source
+  or measured on this build; recorded as expected platform behavior, not a confirmed fact.
+  Deliberate non-fix regardless, since the flat `HStack` and the `TimelineView` rejection above
+  hold on their own; the
   phone's banner (`SessionTimelineScreen`) is the one place this actually counts down,
   because it can afford a `TimelineView` scoped to a banner that is usually absent.
 
