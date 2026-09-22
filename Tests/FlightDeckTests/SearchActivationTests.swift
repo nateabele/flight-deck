@@ -8,12 +8,14 @@ import FleetKit
 /// job, deciding is this type's.
 final class SearchActivationTests: XCTestCase {
     private func result(
-        kind: SearchResultKind, conversation: String? = nil, project: String = "/w/fd"
+        kind: SearchResultKind, conversation: String? = nil, project: String = "/w/fd",
+        agent: String = "claude", workingDirectory: String = "", transcriptPath: String = ""
     ) -> SearchResult {
         SearchResult(
             id: "r", kind: kind, title: "t", projectName: "fd", projectPath: project,
             tier: .exact, recency: .distantPast, highlightedRanges: [], snippet: nil,
-            conversationID: conversation
+            conversationID: conversation, agent: agent, workingDirectory: workingDirectory,
+            transcriptPath: transcriptPath
         )
     }
 
@@ -75,7 +77,8 @@ final class SearchActivationTests: XCTestCase {
         )
 
         XCTAssertEqual(activation, .resume(
-            conversationID: "c1", projectPath: "/w/fd", title: "t", transcriptDirectory: "/w/fd"
+            conversationID: "c1", projectPath: "/w/fd", title: "t", agent: .claude,
+            workingDirectory: "", transcriptPath: ""
         ))
     }
 
@@ -88,33 +91,62 @@ final class SearchActivationTests: XCTestCase {
         )
 
         XCTAssertEqual(activation, .addProjectThenResume(
-            projectPath: "/w/gone", conversationID: "c1", title: "t", transcriptDirectory: "/w/gone"
+            projectPath: "/w/gone", conversationID: "c1", title: "t", agent: .claude,
+            workingDirectory: "", transcriptPath: ""
         ))
     }
 
-    /// `plan` passes `transcriptDirectory` straight through when given one; it is not, on
-    /// its own, proof that a worktree conversation resumes correctly in production, since
-    /// production wiring has no way to compute this value and always leaves it `nil` — see
-    /// `SessionStore`'s `resolvedTranscriptDirectory`, which is where the real answer comes
-    /// from. This only pins the pass-through shape `plan` promises to a caller that does
-    /// have one, e.g. a test.
-    func testAKnownTranscriptDirectoryPassesThroughUnchanged() {
-        var worktree = result(kind: .conversation("c1"), conversation: "c1")
-        worktree = SearchResult(
-            id: worktree.id, kind: worktree.kind, title: worktree.title,
-            projectName: worktree.projectName, projectPath: "/w/fd",
-            tier: worktree.tier, recency: worktree.recency,
-            highlightedRanges: [], snippet: nil, conversationID: "c1"
+    /// A result's own `workingDirectory` and `transcriptPath` pass through unchanged — `plan`
+    /// decides only which of `.select`/`.resume`/`.addProjectThenResume` applies, never what
+    /// either field means. `SessionStore.openConversation` is what decides an empty
+    /// `workingDirectory` falls back to the project root, not this pure step.
+    func testAKnownWorkingDirectoryAndTranscriptPathPassThroughUnchanged() {
+        let worktree = result(
+            kind: .conversation("c1"), conversation: "c1",
+            workingDirectory: "/w/fd/.claude/worktrees/fleet-pairing",
+            transcriptPath: "/Users/me/.codex/sessions/2026/09/21/rollout-abc.jsonl"
         )
 
+        let activation = SearchActivation.plan(for: worktree, openSessions: [], projects: ["/w/fd"])
+
+        XCTAssertEqual(activation, .resume(
+            conversationID: "c1", projectPath: "/w/fd", title: "t", agent: .claude,
+            workingDirectory: "/w/fd/.claude/worktrees/fleet-pairing",
+            transcriptPath: "/Users/me/.codex/sessions/2026/09/21/rollout-abc.jsonl"
+        ))
+    }
+
+    /// The whole point of this task: a codex result must plan to resume as codex, not
+    /// silently launch claude instead.
+    func testACodexHitPlansAsCodex() {
         let activation = SearchActivation.plan(
-            for: worktree, openSessions: [], projects: ["/w/fd"],
-            transcriptDirectory: "/w/fd/.claude/worktrees/fleet-pairing"
+            for: result(
+                kind: .conversation("c1"), conversation: "c1", agent: "codex",
+                workingDirectory: "/w/fd/.claude/worktrees/feature",
+                transcriptPath: "/Users/me/.codex/sessions/2026/09/21/rollout-abc.jsonl"
+            ),
+            openSessions: [], projects: ["/w/fd"]
         )
 
         XCTAssertEqual(activation, .resume(
-            conversationID: "c1", projectPath: "/w/fd", title: "t",
-            transcriptDirectory: "/w/fd/.claude/worktrees/fleet-pairing"
+            conversationID: "c1", projectPath: "/w/fd", title: "t", agent: .codex,
+            workingDirectory: "/w/fd/.claude/worktrees/feature",
+            transcriptPath: "/Users/me/.codex/sessions/2026/09/21/rollout-abc.jsonl"
+        ))
+    }
+
+    /// An agent string this build does not recognise must still resume as *something* rather
+    /// than crash the search panel — degrading to claude, the same fallback
+    /// `TranscriptHit.agent`'s own doc comment specifies for the wire decode.
+    func testAnUnrecognisedAgentStringDegradesToClaude() {
+        let activation = SearchActivation.plan(
+            for: result(kind: .conversation("c1"), conversation: "c1", agent: "some-future-agent"),
+            openSessions: [], projects: ["/w/fd"]
+        )
+
+        XCTAssertEqual(activation, .resume(
+            conversationID: "c1", projectPath: "/w/fd", title: "t", agent: .claude,
+            workingDirectory: "", transcriptPath: ""
         ))
     }
 
