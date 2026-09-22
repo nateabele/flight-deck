@@ -368,6 +368,7 @@ final class SQLiteSearchIndexTests: XCTestCase {
         let location = try XCTUnwrap(index.transcriptLocation(forConversation: "c1"))
         XCTAssertEqual(location.workingDirectory, "/w/fd/.claude/worktrees/hunt")
         XCTAssertEqual(location.transcriptPath, source("rollout.jsonl").path)
+        XCTAssertEqual(location.agent, "codex")
     }
 
     /// A message row is written before its source row's offset is committed at the end of
@@ -382,10 +383,32 @@ final class SQLiteSearchIndexTests: XCTestCase {
         let location = try XCTUnwrap(index.transcriptLocation(forConversation: "c1"))
         XCTAssertEqual(location.workingDirectory, "", "no source row yet means unknown, not a guess")
         XCTAssertEqual(location.transcriptPath, source("rollout.jsonl").path)
+        XCTAssertEqual(
+            location.agent, "claude", "no source row yet defaults agent the same way search() does"
+        )
     }
 
     func testTranscriptLocationReturnsNilForAConversationWithNoMessages() throws {
         XCTAssertNil(try index.transcriptLocation(forConversation: "never-indexed"))
+    }
+
+    /// The divergence `FleetService.openConversation` has to avoid: a naming pass leaves the
+    /// `conversation` table unwritten for a conversation it could not name (an
+    /// `exec`-provenance codex rollout, say), but `source` — what this lookup reads — is
+    /// written for every ingested message regardless of whether naming succeeded.
+    func testTranscriptLocationReturnsTheCodexAgentForAConversationTheNamingPassNeverNamed() throws {
+        try index.ingest(
+            [message("reticulating splines", conversation: "c1")],
+            for: ref(source("rollout.jsonl"), projectPath: "/w/fd", agent: .codex),
+            offset: 99
+        )
+
+        let location = try XCTUnwrap(index.transcriptLocation(forConversation: "c1"))
+        XCTAssertEqual(location.agent, "codex")
+        XCTAssertTrue(
+            try index.conversationNames().isEmpty,
+            "sanity: this conversation really was never named"
+        )
     }
 
     /// The v2 file on disk is discarded rather than migrated — the index is derived data and

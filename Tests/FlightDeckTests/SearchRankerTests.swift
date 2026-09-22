@@ -244,10 +244,10 @@ final class SearchRankerTests: XCTestCase {
         XCTAssertEqual(first.map(\.title), second.map(\.title))
     }
 
-    /// The pipeline this task depends on: `TranscriptHit`'s agent, working directory and
-    /// transcript path must survive the trip into the `SearchResult` an activator actually
-    /// reads. `rank()` used to build that row from the hit's other fields and silently drop
-    /// these three — an activator reading `result.agent` saw only the struct's default.
+    /// `TranscriptHit`'s agent, working directory and transcript path must survive the trip
+    /// into the `SearchResult` an activator actually reads. `rank()` used to build that row
+    /// from the hit's other fields and silently drop these three — an activator reading
+    /// `result.agent` saw only the struct's default.
     func testACodexHitCarriesItsAgentAndPathsThroughRank() {
         let results = SearchRanker.rank(
             names: [],

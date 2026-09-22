@@ -116,8 +116,7 @@ final class SearchActivationTests: XCTestCase {
         ))
     }
 
-    /// The whole point of this task: a codex result must plan to resume as codex, not
-    /// silently launch claude instead.
+    /// A codex result must plan to resume as codex, not silently launch claude instead.
     func testACodexHitPlansAsCodex() {
         let activation = SearchActivation.plan(
             for: result(

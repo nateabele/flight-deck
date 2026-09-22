@@ -173,7 +173,7 @@ final class SearchIndexBuilderTests: XCTestCase {
 
         func transcriptLocation(
             forConversation id: String
-        ) throws -> (workingDirectory: String, transcriptPath: String)? {
+        ) throws -> (workingDirectory: String, transcriptPath: String, agent: String)? {
             try wrapped.transcriptLocation(forConversation: id)
         }
     }
