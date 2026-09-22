@@ -354,8 +354,21 @@ struct SessionTimelineScreen: View {
         // anything is happening. `session?.planGate` is the one signal that survives that gap,
         // and this banner is what "replaces a spinner that says nothing" (spec's own words).
         .safeAreaInset(edge: .top) {
-            if let gate = session?.planGate {
-                planGateBanner(gate)
+            VStack(spacing: 0) {
+                if let gate = session?.planGate { planGateBanner(gate) }
+                // Scoped to the banner, and gated on retry state being present: a
+                // `TimelineView` over anything larger — this whole inset, or the screen — would
+                // re-render on a display-linked 1s schedule for a strip that is absent almost
+                // always. `SessionSidebar.swift` on the Mac makes the identical argument for
+                // refusing one over its rows; the cost there is the same shape as it would be
+                // here, just paid on the phone instead.
+                if session?.apiError?.nextRetryAt != nil {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        if let text = Self.retryBannerText(for: session, at: context.date) {
+                            retryBanner(text)
+                        }
+                    }
+                }
             }
         }
         // The event trigger. `activity` and the title change live on the fleet socket, and a
@@ -993,6 +1006,62 @@ struct SessionTimelineScreen: View {
             .background(Color(.secondarySystemBackground))
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: The retry banner
+
+    /// "Retrying — attempt 2, next in 1m 30s", or `nil` when no retry is armed.
+    ///
+    /// `at` is a parameter rather than `Date()` read inside — that is the whole reason this
+    /// is testable, and it is also what the `TimelineView(.periodic(...))` driving the banner
+    /// hands in every tick, so production and the test call the identical pure function.
+    ///
+    /// Both `retryAttempt` and `nextRetryAt` are required, not just `nextRetryAt`: an
+    /// `apiError` with no retry fields at all (a permanent failure, or one no ladder has
+    /// touched yet) must draw nothing here, and the wording below names the attempt, so a
+    /// missing attempt number would leave nothing sensible to say.
+    ///
+    /// `nextRetryAt` is an absolute deadline (see `SessionAPIError.nextRetryAt`'s own
+    /// comment), so the remaining time is `nextRetryAt - at` computed fresh on every call —
+    /// never a duration carried across ticks, which would drift from whatever the Mac
+    /// actually scheduled. A tick landing after the deadline (ladder jitter, or just this
+    /// call's own 1s granularity) yields a negative remainder, and "next in -3s" is not a
+    /// sentence a reader should see — "any moment now" stays true for however long the real
+    /// retry actually takes to land.
+    static func retryBannerText(for session: WireSession?, at date: Date) -> String? {
+        guard let apiError = session?.apiError,
+              let attempt = apiError.retryAttempt,
+              let nextRetryAt = apiError.nextRetryAt
+        else { return nil }
+        let remaining = nextRetryAt.timeIntervalSince(date)
+        let countdown = remaining > 0
+            ? "next in " + TaskNotificationFormat.duration(milliseconds: Int(remaining * 1_000))
+            : "any moment now"
+        return "Retrying — attempt \(attempt), \(countdown)"
+    }
+
+    /// The retry strip: same padding, frame and background as `planGateBanner` so the two
+    /// line up when both are stacked in the top inset, but not a `Button` and no chevron — a
+    /// retry is not a dialog the reader answers, it is a status ticking down on its own.
+    ///
+    /// `arrow.clockwise` — unused elsewhere in this file — rather than reusing the fleet
+    /// list's `exclamationmark.triangle.fill` error glyph: this file's own rule is that state
+    /// must read apart from more than the orange tint alone (see the plan gate's
+    /// `doc.text.magnifyingglass` next to the same color), and a retry already succeeding on
+    /// its own is a materially different claim than the unresolved failure that glyph makes.
+    private func retryBanner(_ text: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.clockwise")
+                .font(.title3)
+                .foregroundStyle(.orange)
+            Text(text)
+                .font(.subheadline.weight(.semibold))
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemBackground))
     }
 
     /// "Started 5 minutes ago" from the gate's own `startedAt`, or `nil` when the timestamp

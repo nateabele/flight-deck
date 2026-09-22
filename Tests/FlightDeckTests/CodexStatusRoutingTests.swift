@@ -23,6 +23,7 @@ final class CodexStatusRoutingTests: XCTestCase {
         static let textChannel: AgentTextChannel? = nil
         static let renameTyping: AgentRenameTyping? = nil
         static let dialogDriver: AgentDialogDriver? = nil
+        static let turnRecovery: AgentTurnRecovery? = CodexAdapter.turnRecovery
         static let negotiatesIdentity = true
         static let needsRuntimeStart = true
         static let hasStatusRegistry = false

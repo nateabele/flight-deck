@@ -52,6 +52,7 @@ final class AgentLocationTests: XCTestCase {
         static let textChannel: AgentTextChannel? = ClaudeTextChannel()
         static let renameTyping: AgentRenameTyping? = nil
         static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
+        static let turnRecovery: AgentTurnRecovery? = ClaudeTurnRecovery()
         static let negotiatesIdentity = false
         static let needsRuntimeStart = false
         static let hasStatusRegistry = true

@@ -28,4 +28,35 @@ final class SessionAPIErrorTests: XCTestCase {
         let data = try JSONEncoder().encode(e)
         XCTAssertEqual(try JSONDecoder().decode(SessionAPIError.self, from: data), e)
     }
+
+    func testLabelIsUnchangedWhenNoRetryIsArmed() {
+        let e = SessionAPIError(status: 529, kind: "overloaded", isTransient: true)
+        XCTAssertEqual(e.label, "Stopped — API error 529 (overloaded)")
+    }
+
+    func testLabelNamesTheAttemptWhenArmed() {
+        let e = SessionAPIError(
+            status: 529, kind: "overloaded", isTransient: true,
+            retryAttempt: 2, nextRetryAt: Date(timeIntervalSince1970: 1_000))
+        XCTAssertEqual(e.label, "Stopped — API error 529 (overloaded) · retrying, attempt 2")
+    }
+
+    func testRetryFieldsRoundTrip() throws {
+        let e = SessionAPIError(
+            status: 429, kind: "rate_limit", isTransient: true,
+            retryAttempt: 3, nextRetryAt: Date(timeIntervalSince1970: 1_700_000_000))
+        let back = try JSONDecoder().decode(
+            SessionAPIError.self, from: JSONEncoder().encode(e))
+        XCTAssertEqual(back, e)
+    }
+
+    /// The old-client guarantee: a payload written before these fields existed must decode,
+    /// not throw. A throw here propagates out of `WireSession.init(from:)` and kills the socket.
+    func testAPayloadWithoutRetryFieldsDecodes() throws {
+        let legacy = Data(#"{"status":529,"kind":"overloaded","isTransient":true}"#.utf8)
+        let back = try JSONDecoder().decode(SessionAPIError.self, from: legacy)
+        XCTAssertNil(back.retryAttempt)
+        XCTAssertNil(back.nextRetryAt)
+        XCTAssertEqual(back.status, 529)
+    }
 }

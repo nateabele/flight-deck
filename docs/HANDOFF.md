@@ -72,6 +72,8 @@ The **walking skeleton is done**: the app renders a **live terminal running a re
 
 That was deliberately the smallest self-contained slice that also retired the biggest unknown — *can we actually reuse Ghostty to render a terminal inside our own app?* Answer: **yes.** Everything else in the design (adapter, index, context engine, sidebar) is still ahead, each its own spec→plan→build cycle.
 
+Also landed: a session whose turn died on a transient API error (rate limit, overload) can now nudge itself back to life on a backoff ladder, up to 15 minutes between tries, for as long as the outage lasts — gated by the **Retry after API errors** toggle in Shell & Environment → Recovery, off by default because it types into the session on the user's behalf.
+
 ## Quickstart (this host)
 
 ```bash

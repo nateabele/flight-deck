@@ -134,6 +134,19 @@ protocol AgentAdapter {
     /// Read through `AgentID.dialogDriver` below.
     static var dialogDriver: AgentDialogDriver? { get }
 
+    /// **How a turn this agent lost to an API failure is revived — or `nil`, the refusal.**
+    ///
+    /// A capability rather than a flag on the error, because the vocabulary is each agent's
+    /// own: claude ships a transience predicate in its transcript record, codex ships a
+    /// `codex_error_info` variant name and nothing else. Both answers are allowlists here —
+    /// an unrecognised kind never retries — so an agent growing a new error kind cannot
+    /// start typing into a terminal unattended. A `nil` is the refusal, exactly as it is for
+    /// `textChannel`: an agent added later retries nothing until someone builds and tests
+    /// its classifier against captured records.
+    ///
+    /// Read through `AgentID.turnRecovery` below.
+    static var turnRecovery: AgentTurnRecovery? { get }
+
     /// **Whether this agent's conversation identity is a round trip that can fail, rather
     /// than a local mint.**
     ///
@@ -463,6 +476,14 @@ protocol AgentDialogDriver {
     func deny(_ injector: TextInjecting)
 }
 
+/// Whether a failed turn is worth retrying, and what revives it. See
+/// `AgentAdapter.turnRecovery`.
+@MainActor
+protocol AgentTurnRecovery {
+    func retries(_ error: SessionAPIError) -> Bool
+    var resumeText: String { get }
+}
+
 extension AgentAdapter {
     /// Nothing to settle for an agent whose resume command already carries its own fallback.
     /// Being the default rather than a per-agent override is the point: an agent has to opt
@@ -535,6 +556,15 @@ extension AgentID {
         switch self {
         case .claude: ClaudeAdapter.dialogDriver
         case .codex: CodexAdapter.dialogDriver
+        }
+    }
+
+    /// See `AgentAdapter.turnRecovery`. Consulted by `SessionStore`'s arming gate alone, so
+    /// the retry loop never learns an agent's name.
+    var turnRecovery: AgentTurnRecovery? {
+        switch self {
+        case .claude: ClaudeAdapter.turnRecovery
+        case .codex: CodexAdapter.turnRecovery
         }
     }
 
