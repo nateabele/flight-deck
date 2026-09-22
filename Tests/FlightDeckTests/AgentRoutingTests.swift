@@ -353,6 +353,7 @@ final class AgentRoutingTests: XCTestCase {
         static let textChannel: AgentTextChannel? = ClaudeTextChannel()
         static let renameTyping: AgentRenameTyping? = nil
         static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
+        static let turnRecovery: AgentTurnRecovery? = ClaudeTurnRecovery()
         static let negotiatesIdentity = false
         static let needsRuntimeStart = false
         static let hasStatusRegistry = true
@@ -414,6 +415,7 @@ final class AgentRoutingTests: XCTestCase {
         static var textChannel: (any AgentTextChannel)? { ClaudeAdapter.textChannel }
         static var renameTyping: (any AgentRenameTyping)? { ClaudeAdapter.renameTyping }
         static var dialogDriver: (any AgentDialogDriver)? { ClaudeAdapter.dialogDriver }
+        static var turnRecovery: (any AgentTurnRecovery)? { ClaudeAdapter.turnRecovery }
         static var negotiatesIdentity: Bool { ClaudeAdapter.negotiatesIdentity }
         static var needsRuntimeStart: Bool { ClaudeAdapter.needsRuntimeStart }
         static var hasStatusRegistry: Bool { ClaudeAdapter.hasStatusRegistry }
