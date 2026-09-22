@@ -292,6 +292,33 @@ final class PreferencesStoreTests: XCTestCase {
         XCTAssertNil(decoded.sleepIdleThresholdSeconds)
     }
 
+    // MARK: Auto-retry API errors
+
+    func testAutoRetryDefaultsOff() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        XCTAssertFalse(store.autoRetriesAPIErrors)
+    }
+
+    func testAutoRetryRoundTripsThroughPersistence() {
+        let persistence = MemoryPersistence()
+        let store = PreferencesStore(persistence: persistence)
+        store.autoRetriesAPIErrors = true
+        XCTAssertTrue(PreferencesStore(persistence: persistence).autoRetriesAPIErrors)
+    }
+
+    /// A `"shell": {...}` blob written before this field existed must still decode. Without the
+    /// optional, `load()`'s `try?` returns nil and every preference the user has is silently reset.
+    func testAShellBlobPredatingTheFieldStillDecodes() throws {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(Preferences())) as? [String: Any])
+        var shell = try XCTUnwrap(object["shell"] as? [String: Any])
+        shell.removeValue(forKey: "autoRetryAPIErrors")
+        object["shell"] = shell
+        let data = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(Preferences.self, from: data)
+        XCTAssertNil(decoded.shell.autoRetryAPIErrors)
+    }
+
     // MARK: Auto-resume
 
     func testAutoResumeDefaultsOff() {
