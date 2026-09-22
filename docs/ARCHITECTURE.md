@@ -336,6 +336,23 @@ replaced it and what shipped instead, so the two are safe to read — but **this
 authority**, because the ledger those notes cite
 (`.superpowers/sdd/2026-09-19-hook-fed-composer-state/progress.md`) is git-ignored and exists
 only on the machine the work was done on.
+## Agents
+
+`Sources/FlightDeck/Agents/` is the per-harness adapter protocol referenced from "Session
+status pipeline" above — `AgentAdapter`, with two implementations today, `ClaudeAdapter` and
+`CodexAdapter`, dispatched through the `AgentID` switch rather than held as an existentially
+typed value. Each supplies its own runtime, dialog driver, turn recovery and timeline mapper.
+
+**Adapter capabilities are optional statics, `nil` is the refusal.** `textChannel` (how a
+message is typed into the agent's live terminal), `dialogDriver` (how a select-list dialog
+the agent raised is driven) and `turnRecovery` (how a turn lost to an API failure is
+revived) are all declared the same way on `AgentAdapter`: a static property an agent either
+answers or leaves `nil`, dispatched through the `AgentID` switch rather than asked of an
+instance. A `nil` is not a missing feature to fill in later — it **is** the refusal, so an
+agent that cannot support a capability is refused it at one site instead of scattering a
+predicate that could disagree with the implementation. `turnRecovery` additionally decides,
+per agent, which of its own error vocabulary is worth retrying — see "API-error auto-retry"
+in [FOLLOWUPS.md](FOLLOWUPS.md) for the codex allowlist and its fail-closed default.
 
 ## Tab navigation
 
@@ -866,8 +883,8 @@ implements either, and no file below `Sources/` mentions them.
 
 Two items that used to be on this list are not any more, and are described above instead:
 **harness adapters** (`Sources/FlightDeck/Agents/`, a protocol with two implementations —
-`ClaudeAdapter` and `CodexAdapter`, each with its own runtime, dialog driver and timeline
-mapper) and **the sidebar** ("Sidebar structure").
+`ClaudeAdapter` and `CodexAdapter`, each with its own runtime, dialog driver, turn recovery
+and timeline mapper — see "Agents") and **the sidebar** ("Sidebar structure").
 
 Also designed and deliberately deferred rather than unbuilt: encapsulating `SessionStore`'s
 fleet state behind a type whose every mutator records its own event

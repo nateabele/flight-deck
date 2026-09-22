@@ -29,9 +29,13 @@ final class CodexRolloutWatcherTests: XCTestCase {
         try (started + completed).data(using: .utf8)!.write(to: url)
         watcher.drain()
 
+        // Both ends of this array are load-bearing and were added by separate changes:
+        // `.lifecycle(.live)` leads because a line landing at all is boot evidence, ahead of
+        // whatever it decodes to; `.apiError(nil)` trails because a clean completion also
+        // clears any standing error.
         XCTAssertEqual(
             seen,
-            [.lifecycle(.live), .activity(.busy), .activity(.idle), .turnEnded],
+            [.lifecycle(.live), .activity(.busy), .activity(.idle), .turnEnded, .apiError(nil)],
             "a line landing at all is boot evidence, ahead of whatever it decodes to"
         )
     }
@@ -130,7 +134,9 @@ final class CodexRolloutWatcherTests: XCTestCase {
 
         XCTAssertEqual(
             seen,
-            [.lifecycle(.live), .activity(.busy), .activity(.idle), .turnEnded],
+            // `.apiError(nil)` trails because `completed` carries no `error` field, and a
+            // clean `task_complete` clears any standing error.
+            [.lifecycle(.live), .activity(.busy), .activity(.idle), .turnEnded, .apiError(nil)],
             "the file's first-ever content is read from byte 0 once it appears, unlike the "
             + "pre-existing-file case, and must gate .live exactly once, leading the events "
             + "it introduces"

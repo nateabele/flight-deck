@@ -277,6 +277,61 @@ final class SessionTimelineScreenTests: XCTestCase {
         )
     }
 
+    // MARK: The retry banner
+
+    /// The banner names both halves of the retry state: which attempt this is, and how long
+    /// until the next one — `nextRetryAt` is absolute (see `SessionAPIError`'s own comment on
+    /// why), so the function does the subtraction against the clock it is handed rather than
+    /// against `Date()`, which is what makes it testable at all.
+    func testRetryBannerNamesTheAttemptAndTheCountdown() {
+        let at = Date(timeIntervalSince1970: 1_000)
+        let error = SessionAPIError(
+            status: 529, kind: "overloaded", isTransient: true,
+            retryAttempt: 2, nextRetryAt: at.addingTimeInterval(90)
+        )
+        XCTAssertEqual(
+            SessionTimelineScreen.retryBannerText(
+                for: session(activity: "idle", apiError: error), at: at
+            ),
+            "Retrying — attempt 2, next in 1m 30s"
+        )
+    }
+
+    /// No `nextRetryAt` means no retry is armed — a session can carry an `apiError` forever
+    /// (it is only ever replaced or cleared, never expired), so the banner's presence has to
+    /// key on the retry fields themselves rather than on the error existing at all.
+    func testNoBannerWithoutRetryState() {
+        let error = SessionAPIError(status: 529, kind: "overloaded")
+        XCTAssertNil(
+            SessionTimelineScreen.retryBannerText(
+                for: session(activity: "idle", apiError: error), at: Date()
+            )
+        )
+    }
+
+    /// A `TimelineView(.periodic(...))` tick can land a hair after the due time — the ladder's
+    /// own scheduling jitter, or just the 1s granularity — and the countdown must not surface
+    /// that as "next in -3s". Read as "any moment now" instead, which stays true for however
+    /// long the actual retry takes to fire.
+    func testAnOverdueAttemptReadsAsImminent() {
+        let at = Date(timeIntervalSince1970: 1_000)
+        let error = SessionAPIError(
+            status: 529, kind: "overloaded", isTransient: true,
+            retryAttempt: 3, nextRetryAt: at.addingTimeInterval(-5)
+        )
+        XCTAssertEqual(
+            SessionTimelineScreen.retryBannerText(
+                for: session(activity: "idle", apiError: error), at: at
+            ),
+            "Retrying — attempt 3, any moment now"
+        )
+    }
+
+    /// `nil` session — the fleet no longer lists it — must not crash or synthesize a banner.
+    func testNoBannerWithoutASession() {
+        XCTAssertNil(SessionTimelineScreen.retryBannerText(for: nil, at: Date()))
+    }
+
     // MARK: One row per thing that happened
 
     /// **A command and its output are one thing, and the feed carries them as two records.**
