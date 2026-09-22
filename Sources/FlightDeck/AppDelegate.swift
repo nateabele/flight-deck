@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import FleetKit
 import OSLog
 import UserNotifications
 
@@ -252,6 +253,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Fills in a name match's working directory and transcript path from the index, the same
+    /// lookup `FleetService.openConversation` already does for the phone.
+    ///
+    /// `SearchCandidates.build` has no filesystem-cheap way to know either field for a
+    /// conversation found by name rather than by transcript content — see its own
+    /// `lastActivity` comment for why a stat-per-candidate is off the table — so both arrive
+    /// here empty. Left empty, `SearchActivation.plan` passes them straight through:
+    /// `CodexAdapter` sees no rollout and types a bare `codex`, starting an unrelated thread
+    /// while the tab stays pinned to the conversation that was searched for, and a claude
+    /// conversation that ran in a worktree resumes at the project root instead. `location`
+    /// is the one index lookup that answers both, so a name match resumes exactly where a
+    /// transcript hit on the same conversation already does.
+    ///
+    /// Only fills gaps: a transcript hit already carries both fields from the corpus walk
+    /// itself, so this leaves those untouched rather than re-deriving them from a possibly
+    /// stale index read.
+    static func enrichedForActivation(
+        _ result: SearchResult,
+        location: (String) -> (workingDirectory: String, transcriptPath: String, agent: String)?
+    ) -> SearchResult {
+        guard let conversationID = result.conversationID,
+              result.workingDirectory.isEmpty || result.transcriptPath.isEmpty,
+              let found = location(conversationID)
+        else { return result }
+        return SearchResult(
+            id: result.id, kind: result.kind, title: result.title, projectName: result.projectName,
+            projectPath: result.projectPath, tier: result.tier, recency: result.recency,
+            highlightedRanges: result.highlightedRanges, snippet: result.snippet,
+            conversationID: result.conversationID, isContinuation: result.isContinuation,
+            offset: result.offset, agent: result.agent,
+            workingDirectory: found.workingDirectory, transcriptPath: found.transcriptPath
+        )
+    }
+
     /// Unlike `installToolsMenu`, not naturally idempotent: it opens a file handle, builds a
     /// panel, and registers a `.flightDeckOpenSearch` observer, none of which tolerate being
     /// done twice. The `searchIndex == nil` guard is therefore load-bearing rather than
@@ -274,8 +309,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     id: $0.id, conversationID: $0.pinnedConversationID
                 )
             }
+            let activated = Self.enrichedForActivation(result) {
+                try? index.transcriptLocation(forConversation: $0)
+            }
             store.openConversation(SearchActivation.plan(
-                for: result, openSessions: open, projects: store.repos.map(\.url.path)
+                for: activated, openSessions: open, projects: store.repos.map(\.url.path)
             ))
         }
 

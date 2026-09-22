@@ -342,10 +342,14 @@ final class OpenConversationTests: XCTestCase {
                        "the sidebar project stays the project root even when the agent works in a worktree")
     }
 
-    /// The other half: a result that never learned a working directory — a name match, or an
-    /// index built before the field existed — falls back to the project root rather than
-    /// filing a tab with an empty `transcriptDirectory`, which `resumeExisting`'s
-    /// `directoryExists` guard would otherwise have to fail on before recovering.
+    /// The other half: a plan whose working directory is genuinely unknown — the index has no
+    /// row for that conversation at all, on either the desk's or the phone's path to this
+    /// method — falls back to the project root rather than filing a tab with an empty
+    /// `transcriptDirectory`, which `resumeExisting`'s `directoryExists` guard would otherwise
+    /// have to fail on before recovering. This is a last resort, not the normal outcome for a
+    /// name match: `AppDelegate.enrichedForActivation` and `FleetService.openConversation` each
+    /// look the conversation up in the index and fill its real working directory and transcript
+    /// path into the plan before this method ever sees it, whenever the index can locate it.
     func testResumeFallsBackToTheProjectRootWhenTheResultsWorkingDirectoryIsUnknown() {
         let store = makeStore()
         let conversation = UUID()
