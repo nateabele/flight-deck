@@ -253,4 +253,34 @@ final class CodexSearchCorpusDiscoveryTests: XCTestCase {
         let unnamed = try XCTUnwrap(refs.first { $0.conversationID == "conv-unnamed" })
         XCTAssertNil(unnamed.indexedName)
     }
+
+    /// `CodexNameWatcher` reads the same file through `UUID(uuidString:)`, which is
+    /// case-insensitive, so a live rename matches its listener regardless of which case codex
+    /// wrote the hex in. The lookup here must agree, or two files disagreeing on hex case —
+    /// codex is not documented to guarantee one — silently degrades naming to the
+    /// first-user-message fallback everywhere.
+    func testMatchesTheIndexedNameRegardlessOfHexCase() throws {
+        let root = makeRoot()
+        let home = root.appendingPathComponent(".codex", isDirectory: true)
+        let project = root.appendingPathComponent("proj", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+
+        let id = "5A1B2C3D-4E5F-6789-ABCD-EF0123456789"
+        try writeRollout(
+            at: rolloutURL(under: home, name: "rollout-named.jsonl"), id: id, cwd: project.path
+        )
+
+        let indexLine = #"{"id":"\#(id.lowercased())","thread_name":"Fix the sidebar","updated_at":"2026-09-16T00:00:00Z"}"#
+        try (indexLine + "\n").write(
+            to: home.appendingPathComponent("session_index.jsonl"), atomically: true, encoding: .utf8
+        )
+
+        let refs = corpus.transcripts(
+            forProjects: [project.path],
+            accounts: [AgentAccount(agent: .codex, displayName: "Default", home: home)]
+        )
+
+        let named = try XCTUnwrap(refs.first { $0.conversationID == id })
+        XCTAssertEqual(named.indexedName, "Fix the sidebar")
+    }
 }

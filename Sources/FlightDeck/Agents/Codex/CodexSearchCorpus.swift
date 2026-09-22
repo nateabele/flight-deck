@@ -59,7 +59,8 @@ struct CodexSearchCorpus: AgentSearchCorpus {
                 return TranscriptRef(
                     url: url, projectPath: candidate.projectPath, accountHome: account.home,
                     workingDirectory: meta.cwd, conversationID: meta.id, agent: .codex,
-                    provenance: meta.source, indexedName: indexedNames[meta.id], modified: modified
+                    provenance: meta.source, indexedName: indexedNames[meta.id.lowercased()],
+                    modified: modified
                 )
             }
         }
@@ -234,8 +235,16 @@ struct CodexSearchCorpus: AgentSearchCorpus {
         }
     }
 
-    /// `session_index.jsonl`, keyed by conversation id. Missing or unreadable is the common
-    /// case for an account that has never renamed anything, not an error.
+    /// `session_index.jsonl`, keyed by conversation id, lowercased. Missing or unreadable is
+    /// the common case for an account that has never renamed anything, not an error.
+    ///
+    /// Lowercased rather than compared as written: `CodexNameWatcher` reads this same file
+    /// through `UUID(uuidString:)`, which normalises hex case, so a live rename already
+    /// matches its listener regardless of which case codex wrote. The lookup here compares
+    /// the raw strings instead — hardcoded lowercasing, not `UUID` parsing, since a
+    /// conversation id is not guaranteed to be a UUID and a parse that rejected a non-UUID id
+    /// would drop it instead of degrading to no name, which is what the field already treats
+    /// as normal (see this method's own doc comment).
     private static func indexedNames(atHome home: URL) -> [String: String] {
         let url = CodexNameWatcher.indexURL(forHome: home)
         guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return [:] }
@@ -246,7 +255,7 @@ struct CodexSearchCorpus: AgentSearchCorpus {
                   let id = object["id"] as? String,
                   let name = object["thread_name"] as? String
             else { continue }
-            names[id] = name
+            names[id.lowercased()] = name
         }
         return names
     }
