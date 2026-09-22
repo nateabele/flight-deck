@@ -306,17 +306,30 @@ final class PreferencesStoreTests: XCTestCase {
         XCTAssertTrue(PreferencesStore(persistence: persistence).autoRetriesAPIErrors)
     }
 
-    /// A `"shell": {...}` blob written before this field existed must still decode. Without the
-    /// optional, `load()`'s `try?` returns nil and every preference the user has is silently reset.
-    func testAShellBlobPredatingTheFieldStillDecodes() throws {
-        var object = try XCTUnwrap(JSONSerialization.jsonObject(
-            with: try JSONEncoder().encode(Preferences())) as? [String: Any])
-        var shell = try XCTUnwrap(object["shell"] as? [String: Any])
-        shell.removeValue(forKey: "autoRetryAPIErrors")
-        object["shell"] = shell
-        let data = try JSONSerialization.data(withJSONObject: object)
-        let decoded = try JSONDecoder().decode(Preferences.self, from: data)
-        XCTAssertNil(decoded.shell.autoRetryAPIErrors)
+    /// Same trap `testShellPreferencesWithoutTheScrollbackBudgetKeyStillDecode` guards, for
+    /// this field: a `"shell": {...}` blob written before it existed must still decode a
+    /// `ShellPreferences`, with the other shell fields intact and the new one nil.
+    func testAShellBlobPredatingTheAutoRetryFieldStillDecodes() throws {
+        let original = ShellPreferences(
+            shellOverride: "/bin/fish", environment: ["FOO": "bar"], clearChildSessionMarker: false,
+            autoRetryAPIErrors: true
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(original))
+                as? [String: Any]
+        )
+        // Confirm the key is genuinely present before removing it — a no-op against an absent
+        // key would never detect a regression where the field becomes non-optional.
+        XCTAssertTrue(object.keys.contains("autoRetryAPIErrors"))
+        object.removeValue(forKey: "autoRetryAPIErrors")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(ShellPreferences.self, from: legacy)
+
+        XCTAssertNil(decoded.autoRetryAPIErrors)
+        XCTAssertEqual(decoded.shellOverride, "/bin/fish")
+        XCTAssertEqual(decoded.environment, ["FOO": "bar"])
+        XCTAssertFalse(decoded.clearChildSessionMarker)
     }
 
     // MARK: Auto-resume
