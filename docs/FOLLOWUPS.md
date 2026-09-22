@@ -344,13 +344,15 @@ completes.
 
 - **Two ticks inside one settle window could double-inject — FIXED.** `inject` now marks a
   tab in-flight (a private `injecting: Set<UUID>`) the moment its `sendKillLine()` goes out
-  and clears it only when the settle work finishes, on every path out of that closure. The
-  original writeup here reasoned about same-caller re-entry only — the registry tick's
-  ~500ms poll against a 120ms settle — and judged it safe. That reasoning did not cover the
-  other caller: `rename()` runs off a direct keystroke with no interval to race against, so
-  a rename landing inside a queued prompt's settle window (or vice versa) could still send a
-  second Ctrl+U into a viewport the first settle was mid-comparison against. The guard now
-  lives inside `inject` itself, so it covers both callers instead of being restated in each.
+  and releases it unconditionally in `onFinished`, `submit`'s own one-shot completion signal —
+  not tied to any single `settle` call, since a drive may now settle more than once (codex's
+  Return needs a hop of its own; see `CodexTextChannel.submit`). The original writeup here
+  reasoned about same-caller re-entry only — the registry tick's ~500ms poll against a 120ms
+  settle — and judged it safe. That reasoning did not cover the other caller: `rename()` runs
+  off a direct keystroke with no interval to race against, so a rename landing inside a queued
+  prompt's settle window (or vice versa) could still send a second Ctrl+U into a viewport the
+  first settle was mid-comparison against. The guard now lives inside `inject` itself, so it
+  covers both callers instead of being restated in each.
 
 - **`restore()` blanks the activity it just read.** The `persist()` at the end of `restore()`
   runs while `statuses` is still empty, so every entry's recorded `activity` is immediately
@@ -1359,3 +1361,55 @@ Plan: [superpowers/plans/2026-09-21-multi-agent-search.md](superpowers/plans/202
   is an unused placeholder value (see `SearchCandidates.build`), never a real one worth
   drawing either. Widening the glyph's scope needs the `PhoneSearchCandidates` fix first, or
   it ships a glyph that lies on exactly the platform it was added for.
+
+## From the rename-injection fix wave (2026-09-22)
+
+Whole-branch review of the two fixes that landed `f0399b6` (release the injection mark on
+every path, not only when text was sent) and `46c2402` (admit the two-row composer claude
+draws right after a submit). No Critical or Important findings; these are the Minor residue,
+recorded rather than fixed in this pass.
+
+- **`killedADraft` is a guaranteed false positive on the screen `46c2402` newly admits, and
+  the compensating `sendYank()` can paste stale kill-ring content into the user's composer.**
+  On `busy-echo-only` the `❯` row holds the echo of the just-submitted prompt, not a draft —
+  the input buffer is empty. Proof from the corpus: when a real draft coexists with the echo,
+  the capture is `busy-draft-below-echo`, which `InputBar.read` returns as TWO rows, so
+  `submit`'s `bar.rows.count == 1` guard refuses it — so at `rows.count == 1` on an echo
+  screen, `before` is provably not a draft. Ctrl+U therefore kills nothing, but ~120ms later
+  claude has usually scrolled the echo into the transcript, so `after` = "" ≠ `before` →
+  `killedADraft = true` → `sendYank()` fires at `ClaudeTextChannel.swift:212` after the
+  Return, replaying the PREVIOUS kill — typically the user's own already-submitted draft,
+  which reappears in the box.
+
+  Not urgent: the yank is after `sendReturn()`, so it can never submit anything; the rename
+  lands correctly; the text is one undo away. And it is NOT a regression from this branch —
+  post-`worktree-hook-composer-state` the `.live` arm never consults `hasComposerBox`, so
+  echo screens were already admitted there; `46c2402` only extends the exposure to the
+  `.unknown` arm.
+
+- **Claude's rename leg retires its pending entry without the identity re-check codex's leg
+  has.** `SessionStore.swift:5768`'s `onSent: { self?.pendingRenames[id] = nil }` is
+  unguarded, whereas `injectRename`'s `onFinished` (`SessionStore.swift:5800`) guards
+  `pendingRenames[id] == name`. Safe today: `ClaudeTextChannel.submit` checks `stillWanted()`
+  and calls `onFinished(true)` in the same synchronous MainActor block
+  (`ClaudeTextChannel.swift:205-213`), so nothing can replace the entry in between. But the
+  protocol `f0399b6` wrote now explicitly permits multi-hop settles, and
+  `CodexTextChannel.submit` demonstrates the gap — it checks `stillWanted()` at
+  `CodexTextChannel.swift:179` and calls `onFinished(true)` at `CodexTextChannel.swift:195`
+  across a real 120ms hop. If claude's channel ever grows a second hop, the unguarded clear
+  silently drops a replacement rename. One-line hardening when someone touches that path.
+
+- **`CodexTextChannel.submitRename`'s cancellation path still loses the user's draft, and the
+  justification in `restoreDraft`'s doc comment (`CodexTextChannel.swift:235-266`) is weaker
+  than it reads.** That exit is at the SAME point in the drive as `submit`'s superseded exit
+  that `f0399b6` just fixed: the kill has gone out and the post-kill screen is still readable.
+  `restoreDraft`'s doc argues that by the time "either exit path calls it" the screen has
+  moved through `/rename` — true of the two exits that DO call `restoreDraft`, false of this
+  one, which simply never reads. So the fix is three lines (read
+  `composer(injector)?.content`, same confirmed-change condition as
+  `CodexTextChannel.swift:178`), not the structural impossibility the paragraph implies.
+
+  Parity note worth recording: for the same user-facing gesture — a sidebar rename preserving
+  an in-progress draft — claude restores and codex does not, because they travel different
+  channels. AGENTS.md's "a feature shipped for one adapter is a defect" rule applies, but the
+  window is two renames in flight inside ~600ms, and it predates this branch.
