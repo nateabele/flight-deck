@@ -8,12 +8,15 @@ private final class StubSearchIndex: SearchIndex {
     var hits: [TranscriptHit] = []
     private(set) var queries: [String] = []
 
-    func ingest(_: [IndexedMessage], from: URL, projectPath: String, offset: UInt64?) throws {}
+    func ingest(_: [IndexedMessage], for: TranscriptRef, offset: UInt64?) throws {}
     func readOffset(for: URL) -> UInt64 { 0 }
     func conversationNames() throws -> [String: IndexedConversation] { [:] }
-    func setConversationName(_: String, projectPath: String, for: String) throws {}
+    func setConversationName(_: String, projectPath: String, agent: String, for: String) throws {}
     func prune(keepingSources: Set<URL>, projects: Set<String>) throws {}
     func messageCount(forConversation: String) throws -> Int { 0 }
+    func transcriptLocation(
+        forConversation: String
+    ) throws -> (workingDirectory: String, transcriptPath: String, agent: String)? { nil }
 
     func search(_ query: String, projects: [String], limit: Int) throws -> [TranscriptHit] {
         queries.append(query)

@@ -626,17 +626,57 @@ distinction matters here more than anywhere else in the codebase.
 ## Search (`⌘K`, `Sources/FlightDeck/Search/`)
 
 `⌘K` opens a floating overlay (`SearchPanel`, an `NSPanel` added as a child window over the
-deck) that ranks open sessions, open projects, and past conversations against one query.
-Full design: [specs/2026-08-26-smart-search-design.md](superpowers/specs/2026-08-26-smart-search-design.md).
+deck) that ranks open sessions, open projects, and past conversations — across every agent,
+not just claude — against one query. Original design:
+[specs/2026-08-26-smart-search-design.md](superpowers/specs/2026-08-26-smart-search-design.md).
+Multi-agent design, discovery details and the ranking correction below:
+[specs/2026-09-21-multi-agent-search-design.md](superpowers/specs/2026-09-21-multi-agent-search-design.md).
 
-**The corpus (spec §5): the sidebar's projects, plus their worktrees — nothing else.**
-`SearchCorpus` enumerates each open project's own `.claude/worktrees` and
-`.superpowers/worktrees` children, encodes each real path with
-`ClaudeSession.encodedProjectDirName`, and accepts only an exact match against a directory
-name under `~/.claude/projects`. Never a prefix match: the encoding is lossy (every
+**`AgentSearchCorpus` is the fourth capability object on `AgentAdapter`**, beside
+`textChannel`, `dialogDriver` and `openPromptReader` — but `Sendable` and `nonisolated`
+rather than `@MainActor`, because its sole production caller, `SearchIndexBuilder`, calls it
+directly from inside its own `actor`, off the main actor, precisely so parsing hundreds of
+megabytes of transcript cannot stall an agent running in the same process. It answers three
+questions for one agent: which transcripts belong to which sidebar projects
+(`transcripts(forProjects:accounts:)`), what one transcript line means as indexable messages
+(`indexedMessages(inLine:conversationID:at:)`), and what a conversation is called
+(`conversationName(inLines:for:)`). Like its three siblings it is reached through a
+hand-written, non-optional switch — `extension AgentID { var searchCorpus }` — rather than
+off an adapter instance, because its caller, `AppDelegate.startSearch`'s backfill kickoff,
+holds no adapter at all, only the `AgentID` each `TranscriptRef` carries. **That switch is
+what actually makes a third agent searchable by conforming rather than by editing the search
+subsystem**: it is exhaustive over `AgentID`, a `CaseIterable` enum, so a third case added
+there **fails to compile** until it answers `searchCorpus` too — the same gate `textChannel`,
+`dialogDriver` and `openPromptReader` already stand behind, and the thing a future maintainer
+most needs to know about this seam.
+
+**Discovery is per-agent, and per-account within each agent.** `ClaudeSearchCorpus` is
+claude's own implementation — one of two conformers today, not "the" corpus — and keeps the
+original encoding rule: enumerate each open project's own `.claude/worktrees` and
+`.superpowers/worktrees` children, encode each real path with
+`ClaudeSession.encodedProjectDirName`, and accept only an exact match against a directory
+name under `<account>/projects`. Never a prefix match: the encoding is lossy (every
 non-alphanumeric run collapses to `-`), so `/w/flight-deck` and `/w/flight-deck-legacy` produce
 one encoded name that is a genuine prefix of the other — a prefix rule would fold a
-neighbouring project's whole history into this one's results.
+neighbouring project's whole history into this one's results. `CodexSearchCorpus` has no
+such directory to encode: codex's rollouts live in a date tree and record their cwd only
+inside the file, so it walks `<account>/sessions/**`, reads each rollout's first line
+(`session_meta`), and attributes it by an *exact, normalised* match of that `cwd` against the
+same worktree-aware candidate set claude uses — `/private/var` vs `/var` is the case that
+makes normalisation load-bearing rather than defensive. `archived_sessions/` is never walked:
+`thread/archive` puts a rollout there on purpose, and resurfacing it in ⌘K would undo that.
+Both conformers are per-account, which is also what fixed ⌘K being blind to a second claude
+login — reading one hardcoded `~/.claude/projects` root was the bug.
+
+**Extraction and naming are agent-specific too, behind the same protocol.** Codex indexes
+only the `event_msg` family (`user_message`, `agent_message`) — the same reasoning
+`TranscriptExtractor` already applies to claude's tool blocks: the `response_item` family is
+the model transcript, carrying a second copy of the prose plus an assembled-prompt blob per
+turn, and indexing it would double every reply. Naming prefers a real
+`session_index.jsonl` name over a first user message, unless that name is a `"session N"`
+placeholder Flight Deck itself wrote via `thread/name/set` — see `docs/FOLLOWUPS.md` for why
+that placeholder exists at all and why the fallback has to stay even after it is fixed at the
+source.
 
 **What gets indexed, and why the measurement decided the architecture.** Only conversation
 text — user and assistant text blocks, never tool input/output, envelope fields, or images.
@@ -649,12 +689,12 @@ The real corpus confirmed it — 362 transcripts, 361 MB read, 14.5 MB of conver
 concurrent walk was the planned fallback if that number came back too slow; it wasn't needed
 and isn't built.
 
-**Two clocks, not one.** Live sessions need no separate mechanism: `ClaudeRuntime` already
-runs one `TranscriptWatcher` per attached tab on the shared `WatchClock` (for titles and
-sub-agent counts), and that watcher's `onMessages` hook now also extracts conversation text
-and calls `SearchIndex.ingest(_:from:projectPath:offset: nil)` — the `nil` offset marks a
-live-ingest row rather than a backfill read position, since the watcher tails from
-end-of-file and has no notion of "how much of this file's history is indexed." Everything
+**Two clocks, not one.** Live sessions need no separate mechanism: `ClaudeRuntime` and
+`CodexRuntime` each already run one watcher per attached tab on the shared `WatchClock` (for
+titles and sub-agent counts, or turn boundaries), and that watcher's `onMessages` hook also
+extracts conversation text and calls `SearchIndex.ingest(_:for:offset: nil)` — the `nil`
+offset marks a live-ingest row rather than a backfill read position, since the watcher tails
+from end-of-file and has no notion of "how much of this file's history is indexed." Everything
 that watcher does not cover — every conversation's history up to the moment the app
 launched — is `SearchIndexBuilder`'s job: an `actor`, off the main actor, walking transcripts
 newest-first (the conversation you want is overwhelmingly a recent one, so search becomes
@@ -662,7 +702,9 @@ useful long before the walk finishes), yielding between files, committing each f
 offset before starting the next so a killed build only ever loses the file it was mid-read
 on. It starts 3 seconds after launch, deliberately after `SessionStore` has restored and
 resumed every session, so a hundreds-of-megabytes parse never competes with the deck coming
-back up.
+back up. One build pass runs over the union of every agent's refs, never one pass per agent —
+`build` opens with a prune that drops any source outside the set it is handed, so a per-agent
+pass would delete the other agent's rows on every run.
 
 **The index is a disposable cache, never a source of truth.** `SQLiteSearchIndex` lives
 beside `sessions.json` (`search-index.sqlite` in Application Support, honouring
@@ -670,17 +712,53 @@ beside `sessions.json` (`search-index.sqlite` in Application Support, honouring
 into a real deck's index) and holds nothing that is not re-derivable from transcripts on
 disk. A `schemaVersion` mismatch, or a file that fails to open at all (corrupt, truncated,
 from an older build), is handled the same way: delete it and rebuild from scratch. Losing it
-costs one backfill, never data.
+costs one backfill, never data. Schema v3 added `agent`, `provenance` and `working_directory`
+to the **`source`** table (one row per transcript file), not to `message`: a transcript has
+exactly one of each, so putting them on `message` would repeat them across every one of that
+file's rows to answer a question that is per-file. `provenance` (codex's `session_meta.source`
+— `"exec"`, `"cli"`, `"vscode"`) drives the ranking tier below; `working_directory` is what
+lets a result resume into the worktree it actually ran in, without re-deriving it —
+`SessionStore.resolvedTranscriptDirectory`, which used to re-derive it by probing candidate
+directories for a matching filename, is gone.
 
 **Ranking is tiers, not a blended score.** `SearchRanker` orders by match-quality tier first
-(exact / prefix / fuzzy name match, then FTS5 transcript hit), and only breaks ties within a
-tier by recency — deliberately not a single score, since BM25 (transcript relevance) and the
-fuzzy-subsequence score (name matching) are not on a common scale, and any constant that
-mixed them would be undefendable. Transcript hits are always the last tier: BM25 still
-governs which 200 candidate hits FTS5 returns (`LIMIT 200 ORDER BY bm25(...)`), but within
-the overlay they are ordered by recency and drawn only below every name match. That ordering
-is what lets the debounced transcript query's slower results append below an already-visible,
-already-selected row instead of reordering the list out from under the user's finger.
+(exact / prefix / fuzzy name match, then FTS5 transcript hit, then an `.automated` tier below
+that), and only breaks ties within a tier by recency — deliberately not a single score, since
+BM25 (transcript relevance) and the fuzzy-subsequence score (name matching) are not on a
+common scale, and any constant that mixed them would be undefendable. Transcript hits are
+always the last tiers: BM25 still governs which 200 candidate hits FTS5 returns (`LIMIT 200
+ORDER BY bm25(...)`), but within the overlay they are ordered by recency and drawn only below
+every name match. That ordering is what lets the debounced transcript query's slower results
+append below an already-visible, already-selected row instead of reordering the list out from
+under the user's finger. `.automated` exists because 86% of rollouts on a working machine are
+headless `codex exec` runs, concentrated in one repo — sharing the `.transcript` tier with
+real conversations would let one project's automation bury its own history. **The tier alone
+does not move a grouped row**, and assuming it does is the trap: `SearchRanker.rank` appends
+the grouped transcript block whole after the sort, so a row's tier never reaches the
+comparator once it is inside a group. The `.automated` ordering is therefore applied to the
+**group sort** (whether a group's first hit is an `exec` run), which is also what keeps a
+conversation's continuation rows adjacent to their heading rather than split across the tier
+boundary.
+
+**Activation resumes the result's own agent, into the directory the walk recorded.**
+`SearchActivation.plan` carries `agent` and `workingDirectory` through to
+`SessionStore.openConversation`, which resolves `launchAccount(for: result.agent, …)` instead
+of assuming claude, and sets `Session.transcriptDirectory` from the stored value rather than
+probing for it. A codex result whose rollout no longer exists still resumes, through the same
+`rolloutExists` check a restored tab takes, onto a fresh thread rather than failing.
+
+A transcript hit already carries `workingDirectory` and `transcriptPath` from the corpus walk
+itself (see the `source`-table paragraph above). A **name match** — a result that matched on
+title rather than content, which is what `SearchCandidates.build` produces for every
+conversation with no open tab — carries neither: naming a conversation and locating its
+transcript are two different reads, and the name pass has no cheap way to do the second
+without stat-ing every historical transcript on every keystroke. `AppDelegate`'s ⌘K
+`onSelect` and `FleetService.openConversation` (the phone's `search.open` handler) each close
+this gap the same way, independently: before calling `SearchActivation.plan`, they look the
+conversation up with `SearchIndex.transcriptLocation(forConversation:)` — the same index row a
+transcript hit's `source` fields come from — and fill it in. Only a conversation the index has
+no row for at all reaches `SessionStore.openConversation` still empty, which is what its own
+project-root fallback is for.
 
 **⌘K had to be taken back from Ghostty first**, the same problem `⌘⇧T` (Tab navigation,
 above) already had to solve. libghostty binds `super+k` to `clear_screen` on macOS and marks

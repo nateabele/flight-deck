@@ -402,7 +402,9 @@ final class CodexIntegrationTests: XCTestCase {
         transport.stop()
 
         var seen: [AgentEvent] = []
-        let watcher = CodexRolloutWatcher(url: rollout) { seen.append($0) }
+        let watcher = try CodexRolloutWatcher(url: rollout, conversationID: XCTUnwrap(UUID(uuidString: id))) {
+            seen.append($0)
+        }
         watcher.drain() // prime past the session_meta header
 
         let codex = Process()

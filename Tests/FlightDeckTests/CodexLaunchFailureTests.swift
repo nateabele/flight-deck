@@ -98,6 +98,7 @@ final class CodexLaunchFailureTests: XCTestCase {
             CodexAdapter.identity(fromHomeData: data)
         }
         static let openPromptReader: AgentOpenPromptReader? = CodexAdapter.openPromptReader
+        static let searchCorpus: AgentSearchCorpus? = CodexAdapter.searchCorpus
         private var resume: CheckedContinuation<Void, Never>?
         private var entered: CheckedContinuation<Void, Never>?
         private var hasEntered = false

@@ -217,7 +217,8 @@ final class FleetService: ObservableObject {
         let conversations = known
             .filter { open.contains($0.value.projectPath) }
             .map { WireConversation(
-                id: $0.key, name: $0.value.name, projectPath: $0.value.projectPath
+                id: $0.key, name: $0.value.name, projectPath: $0.value.projectPath,
+                agent: $0.value.agent
             ) }
             .sorted { $0.id < $1.id }
         let sessionActivity = Dictionary(
@@ -255,8 +256,10 @@ final class FleetService: ObservableObject {
     /// Resumes — or selects — conversation `conversationID` from project `projectPath`, over
     /// the same seam the desktop's ⌘K Return and the search panel's `onSelect` already use:
     /// build a `SearchResult`, hand it to `SearchActivation.plan` for the select-vs-resume
-    /// decision, then let `SessionStore.openConversation` re-resolve the real transcript
-    /// directory and act. Nothing about select-vs-resume is reimplemented here.
+    /// decision, then let `SessionStore.openConversation` act on the plan. Nothing about
+    /// select-vs-resume, or which agent and directory to resume into, is reimplemented here —
+    /// `conversationNames()` and `transcriptLocation(forConversation:)` are the same corpus
+    /// walk the desk's own search reads, so a conversation resumes identically from either.
     ///
     /// Reads `SessionStore.openConversation`'s return value directly rather than
     /// `store.selectedSessionID` afterward — the earlier shape here read that property, and on
@@ -273,6 +276,10 @@ final class FleetService: ObservableObject {
         guard UUID(uuidString: conversationID) != nil else { return .failure(.unknownConversation) }
         let known = (try? store.searchIndex?.conversationNames()) ?? [:]
         let title = known[conversationID]?.name ?? conversationID
+        // Empty means unknown, the same rule `SessionStore.openConversation` already applies
+        // for the desk — one fallback rule for both callers, not a second one invented here
+        // for the phone.
+        let location = try? store.searchIndex?.transcriptLocation(forConversation: conversationID)
         let result = SearchResult(
             id: "conversation:\(conversationID)",
             kind: .conversation(conversationID),
@@ -283,7 +290,16 @@ final class FleetService: ObservableObject {
             recency: .distantPast,
             highlightedRanges: [],
             snippet: nil,
-            conversationID: conversationID
+            conversationID: conversationID,
+            // From `transcriptLocation`, not `conversationNames()`: a naming pass leaves the
+            // `conversation` table unwritten for a conversation it could not name (an
+            // `exec`-provenance codex rollout, say), while `transcriptLocation`'s `source` row
+            // is written for every ingested message regardless — reading `agent` off the
+            // table that can be silently absent would let the phone resume claude on a
+            // conversation the desk resumes as codex.
+            agent: location?.agent ?? known[conversationID]?.agent ?? "claude",
+            workingDirectory: location?.workingDirectory ?? "",
+            transcriptPath: location?.transcriptPath ?? ""
         )
         let open = store.repos.flatMap(\.sessions).map {
             SearchActivation.ActiveSession(id: $0.id, conversationID: $0.pinnedConversationID)
