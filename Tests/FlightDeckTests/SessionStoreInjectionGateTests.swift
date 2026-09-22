@@ -272,6 +272,44 @@ final class SessionStoreInjectionGateTests: XCTestCase {
         XCTAssertEqual(spy.events, [], "so a rename defers instead of running as a command")
     }
 
+    /// **The liveness conjunct, which is the whole difference between a safe `.absent` and a
+    /// broken app — and which nothing else in this file exercises.**
+    ///
+    /// `demoteComposerReadiness` demotes to `.absent` on `if let priorAnchor,
+    /// !isAlive(priorAnchor.pid)`. Every other test here reaches that line with a dead pid, or
+    /// with no prior anchor at all, or never reaches it because a row was present — so dropping
+    /// the `!isAlive(…)` half and demoting on a lost anchor alone passes the entire suite. This
+    /// is the case that fails it.
+    ///
+    /// **It is not a hypothetical.** Registry rows arrive per account and are merged, so while
+    /// only one account's watcher has scanned, every tab of a second account resolves
+    /// `anchor == nil` on every tick with a perfectly live `claude` behind it — see
+    /// `docs/FOLLOWUPS.md`, "Multi-account amplification". Demoting those to `.absent` would
+    /// refuse injection into healthy tabs for as long as the other account took to start, and
+    /// `.absent` does not lapse on its own: it clears only on a hook event or on a row
+    /// appearing. The probe is what keeps that harmless, by answering "alive" for them.
+    ///
+    /// The same line also covers the rarer torn read and the recycled pid, where a row exists
+    /// under our pid but with a different `procStart` — `ConversationPin.resolve` drops the
+    /// anchor, and the pid still answers because a *different* process now holds it.
+    func testARowlessTickWhoseProcessIsStillAliveDemotesOnlyAsFarAsUnknown() throws {
+        let (store, spy, id, _) = makeStore()
+        store.apply(.lifecycle(.live), to: id)
+
+        // The row is gone from this tick's merge; the process it named is not gone.
+        store.statusIsAlive = { _ in true }
+        store.applyRegistry([:])
+
+        XCTAssertEqual(store.composerReadiness(for: id), .unknown,
+                       "a missing row is not a death — only a syscall may say that")
+
+        // And the consequence that matters, because `.unknown` is a working path and `.absent`
+        // is a refusal: the healthy tab still takes text.
+        spy.viewportOverride = try screen("idle-empty-box")
+        XCTAssertTrue(store.injectionGateAdmitsForTesting(id),
+                      "a live agent whose account has not been scanned yet must not be refused")
+    }
+
     /// **`.absent` is a refusal, not a tombstone: the tab has to come back.**
     ///
     /// The mark is set by the store, so nothing the *agent* does clears it by itself.
@@ -367,12 +405,16 @@ final class SessionStoreInjectionGateTests: XCTestCase {
 
     /// **The boot window the level test costs, and the reason it is affordable.** A
     /// `SessionStart` logged before claude has written its status file is erased by the very
-    /// next tick — which is safe (the tab falls back to the legacy screen grammar, exactly
-    /// what it did before any of this existed) but would be permanent if the reset were
-    /// one-way. `HookEventWatcher` emits only on a change and never forgets on its own, so
-    /// without `resetComposerReadiness` clearing its memory too, the resumed agent's next
-    /// event would fold to `.live`, compare equal to what the watcher still remembered, and
-    /// never reach the store at all.
+    /// next tick — **affordable**, because the tab falls back to the legacy screen grammar and
+    /// a claude that is coming up draws a composer the grammar reads correctly. Not *safe*, as
+    /// this said while the P0 was live: the same grammar accepts a dead claude's leftover
+    /// composer just as readily, so the fallback is a working path for a live agent and no
+    /// protection at all against a dead one. What it costs here would be permanent if the
+    /// demotion were one-way. `HookEventWatcher` emits only on a change and never forgets on its own, so
+    /// without `demoteComposerReadiness` clearing its memory too (`applyRegistry`'s tick, not
+    /// `resetComposerReadiness`'s `closeSession` path), the resumed agent's next event would
+    /// fold to `.live`, compare equal to what the watcher still remembered, and never reach
+    /// the store at all.
     func testAResetAlsoClearsTheHookWatchersMemoryOfTheSession() throws {
         let hookDirectory = projectsRoot.appendingPathComponent("hook-events", isDirectory: true)
         try FileManager.default.createDirectory(at: hookDirectory, withIntermediateDirectories: true)
@@ -564,17 +606,23 @@ final class SessionStoreInjectionGateTests: XCTestCase {
 
     // MARK: - The codex half of the asymmetry
 
-    /// **Codex is the adapter with no liveness reset, so the invariant that makes that safe
+    /// **Codex is the adapter with no liveness demotion, so the invariant that makes that safe
     /// must be pinned rather than argued in a comment.**
     ///
     /// `pinResolutions` filters on `hasStatusRegistry`, so a codex tab never enters the loop
-    /// that resets readiness — it keeps whatever its rollout last reported, `.live` included,
+    /// that demotes readiness — it keeps whatever its rollout last reported, `.live` included,
     /// long after its TUI has gone. What protects it is a second line claude does not have:
     /// `CodexTextChannel.submit` opens with `guard let bar = composer(injector)`, and
     /// `composer(_:)` requires codex's `›` marker AND a `model · mode · cwd` footer within
-    /// three rows beneath it — which no shell draws. The existing codex bare-shell tests
+    /// three rows beneath it. This test only pins that a bare shell — claude's `❯` glyph,
+    /// which is what a codex tab fallen back to a shell actually shows — draws neither and so
+    /// is refused; it does NOT pin the P0's actual failure mode, a corpse rather than a shell.
+    /// That rests instead on a pty measurement (`SessionStore.injectableReadiness`'s doc
+    /// comment, `docs/FOLLOWUPS.md` "Hook-fed composer state"): a dead codex removes its `›`
+    /// marker on exit, unlike claude, which leaves its box drawn — no fixture captures a dead
+    /// codex screen to assert against here. The existing codex bare-shell tests
     /// (`PhonePromptDispatchTests`, `AgentTextChannelTests`) all run at `.unknown`, so they
-    /// exercise the legacy arm and say nothing about this one.
+    /// exercise the legacy arm and say nothing about this one either.
     ///
     /// The screen is claude's `❯`, which is what a codex tab fallen back to a bare shell
     /// actually shows, and which `CodexTextChannel` must refuse for a second reason too: it is

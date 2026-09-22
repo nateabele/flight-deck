@@ -67,11 +67,14 @@ final class HookEventWatcher {
     /// reported as news rather than swallowed as unchanged.
     ///
     /// **Without this, the change-only emission in `drain()` below makes a reset one-way, and
-    /// the feature switches itself off.** `SessionStore` demotes a tab out of `.live` when it
+    /// the feature switches itself off.** `SessionStore` demotes a tab's readiness when it
     /// loses its status-registry anchor — to `.absent` when a syscall confirms the process it
-    /// was following is gone, to `.unknown` otherwise — because neither agent reliably
-    /// announces its own death, and the deaths that demotion exists for are exactly the ones
-    /// that log no `SessionEnd`, so this map is still holding `.live` when it happens. A claude
+    /// was following is gone, to `.unknown` otherwise — regardless of what this map last held
+    /// for it, `.live` included but not required: a tab whose hook feed never reported
+    /// anything, only ever anchored through a registry row, is demoted the same way on that
+    /// row's pid dying. Neither agent reliably announces its own death, and the deaths this
+    /// demotion exists for are exactly the ones that log no `SessionEnd`, so for a tab this map
+    /// DOES hold `.live` for, it is still holding it when the demotion happens. A claude
     /// resumed in that tab reuses the same `session_id` (see the type doc above), so its
     /// `SessionStart` folds to `.live`, compares equal to what is remembered here, and is never
     /// emitted: the store keeps whatever the demotion left it on for the rest of the process's

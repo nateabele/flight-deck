@@ -1211,11 +1211,30 @@ rather than fixed alongside the daemon wiring.
   the opposite.** "The tab falls back to the legacy screen grammar" is a fallback, not a
   protection. `hasComposerBox` accepts the composer a dead claude leaves on screen (pty probe,
   2026-09-21), so `.unknown` refuses nothing that matters. A death is caught by demoting to
-  `.absent` instead — but that needs an anchor to probe, so the one case still decided by the
-  screen is a `claude` that died having *never* written its status file. Reaching it with a
-  composer on screen would mean an agent that drew its input box and yet never wrote the file
-  it writes at startup; if that turns out to be reachable, the fix is a second liveness source
-  for unanchored tabs (the tab's own surface process tree), not a wider `.absent`.
+  `.absent` instead — but that needs an anchor to probe, so any tab that reaches a corpse
+  without one is still decided by the screen, and typing a rename there runs it as a shell
+  command.
+
+  **The reachable path is a Flight Deck restart, not an exotic claude.** An earlier draft of
+  this entry argued the residual away as "an agent that drew its input box and yet never wrote
+  the file it writes at startup" — implausible, and beside the point, because the tab does not
+  have to be the one that lost the race. `composerReadinessByTab` and `anchors` are both
+  in-memory only, and detach persistence (`SessionDaemon`; see `SessionStore.reapAll`'s note on
+  never terminating the daemon) is built precisely so a session survives an app quit and the
+  next launch reattaches to it. So: claude dies at some point, Flight Deck is quit and
+  relaunched, and the reattached tab comes up with no anchor, no readiness and a corpse on
+  screen. No registry row will ever name it, no hook event is coming, and it reads `.unknown`
+  for the life of the process. The agent *did* write its status file; Flight Deck forgot it
+  across the restart.
+
+  **Not a regression, and deliberately not fixed in that round.** The behaviour is identical to
+  what shipped before the `.absent` work, and the same-run repro that was filed (quit with
+  Ctrl-D, rename from the sidebar) really is fixed. The fix for this one is the second liveness
+  source already proposed below: a live `claude` under the tab's own surface
+  (`processRegistry.process(for:)` + `processInspector.descendants(of:)`) answers "is anything
+  alive here" without an anchor, without a hook feed and without anything surviving a relaunch,
+  which is exactly what this path lacks. A wider `.absent` cannot reach it — there is no
+  evidence in the store to widen.
 
 - **Multi-account amplification of that same reset.** While only one account has scanned,
   tabs belonging to an account whose watcher has not yet run resolve `anchor == nil` and reset
@@ -1230,3 +1249,60 @@ rather than fixed alongside the daemon wiring.
 - **`closeSession`'s route through `resetComposerReadiness` is untested**, and two tabs sharing
   a `pinnedConversationID` make closing one `forget` the conversation the survivor still holds.
   The cost is one redundant re-emission of an already-correct value.
+
+- **The codex exemption from liveness demotion rests on a measured-but-unpinned teardown
+  behaviour, not a fixture.** `injectableReadiness` and `applyRegistry` (`SessionStore.swift`)
+  both now justify skipping the demotion with a real finding: a `codex` quit under a pty
+  (Ctrl-C/Ctrl-D, codex-cli 0.155.1, 2026-09-21) REMOVES its `›` marker on exit, so
+  `CodexTextChannel.composer(_:)` finds nothing and `submit`/`submitRename` refuse on their own
+  opening guard — unlike claude, which leaves its `❯` box drawn and needed the P0 fix. That
+  replaces an earlier, false justification ("a shell draws neither codex's `›` marker nor its
+  footer") which was true of a shell and beside the point — the failure mode is a corpse, not a
+  shell. No fixture captures a dead-codex screen (`Tests/FlightDeckTests/Fixtures/Codex/` has
+  none), so `CodexTextChannel.composer(_:) == nil` on a dead codex is asserted nowhere; the
+  existing codex bare-shell tests exercise a live-but-elsewhere screen, not this one. Capturing
+  one (verbatim, with `.captured.provenance.json` provenance, per the convention
+  `Tests/FlightDeckTests/Fixtures/Claude/dialogs.captured.provenance.json` documents) and
+  asserting against it would close this; deferred as disproportionate to a docs-only follow-up
+  pass. It is also, like the rest of this section, a property of the CLI's own teardown that
+  could change under a future codex release with no signal here — see
+  `docs/codex-behaviour-claims-expire` in memory for the general pattern.
+
+- **The `.absent` strand: a plain `claude` typed into the shell after Ctrl-D never recovers.**
+  Both recovery paths in `demoteComposerReadiness` key off the tab's `pinnedConversationID`: a
+  resumed claude reuses that session id, so its `SessionStart` clears the mark, and a fresh
+  registry row for that same conversation frees it too. A user who instead types plain `claude`
+  (no `--resume`) gets a brand-new session id — no registry row ever matches the tab's pinned
+  conversation again, no hook event routes to it, and the tab stays `.absent` for the life of
+  that process. Blast radius is small: `composerReadiness(for:)` has exactly one consumer, so
+  only a `/rename` typed *into the conversation* is lost — the sidebar title still updates and
+  persists (it does not go through the gate). Cheap mitigation, not implemented: a tab whose
+  surface has a live claude descendant is provably not the dead one `.absent` was written for —
+  `processRegistry.process(for:)` + `processInspector.descendants(of:)` already answer exactly
+  that question two screens away, in `pinResolutions` — so "a live claude process under this
+  tab's surface" could free `.absent` on its own, independent of `pinnedConversationID`, closing
+  both this residual and the never-anchored one above in one mechanism.
+
+- **The status file is a single point of failure for this whole safety gate.**
+  `~/.claude/sessions/<pid>.json` (`ClaudeStatusFile.swift:3-9`) is Claude Code's own
+  undocumented, unversioned file — nothing in this design owns its format or its continued
+  existence. If a future claude release stops writing it, `SessionStatusWatcher` never anchors
+  any tab, every demotion in `demoteComposerReadiness` lands in the weak `.unknown` branch (no
+  `priorAnchor` to prove dead), and this P0 returns in full — a dead claude's composer stays on
+  screen and `hasComposerBox` accepts it — while the hook feed keeps reporting `.live` right up
+  to the moment of death, same as before this fix. This is the strongest argument for the
+  `.absent` strand's mitigation above: a surface-process check does not depend on Claude Code
+  choosing to keep writing a file Flight Deck has no contract for.
+
+- **`./scripts/test-unit.sh` fails before running a single test when launched from inside a
+  Flight Deck that was itself started by a UI-test runner.** The app inherits the runner's
+  `XCTestSessionIdentifier` / `XCTestBundleInjectPath` / related env vars and passes them down
+  the pty; `xctest` sees `XCTestSessionIdentifier`, tries to attach to an IDE session that died
+  long ago, and exits with "Failed to establish connection to the IDE: Timed out while
+  preparing IDE session." — after the build has already succeeded, so it reads like a harness
+  crash rather than a polluted environment. Reproduces in the foreground; backgrounding is not
+  the cause. Workaround: strip the vars before invoking `xctest`
+  (`env -u XCTestSessionIdentifier -u XCTestConfigurationFilePath -u XCTestBundlePath -u
+  XCTestBundleInjectPath -u XCODE_TEST_PLAN_NAME -u XCODE_SCHEME_NAME -u
+  __XPC_DYLD_FRAMEWORK_PATH`). Folding that into `scripts/test-unit.sh` itself is a separate,
+  deliberate change — not done here.

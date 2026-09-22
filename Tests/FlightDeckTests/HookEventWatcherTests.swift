@@ -60,12 +60,16 @@ final class HookEventWatcherTests: XCTestCase {
     }
 
     /// **The escape hatch that keeps `testOnlyReportsChanges` above from making a reset
-    /// one-way.** `SessionStore` demotes a tab out of `.live` when no registry row names its
-    /// conversation, and the deaths that reset exists for are exactly the ones that log no
-    /// `SessionEnd` — so this map is still holding `.live` when it happens. A claude resumed
-    /// in that tab reuses the same `session_id`, so its `SessionStart` would fold to `.live`,
-    /// compare equal, and never be emitted: the store would stay `.unknown` for the rest of
-    /// the process's life. Safe, and silently the feature switching itself off.
+    /// one-way.** `SessionStore` demotes a tab's readiness when no registry row names its
+    /// conversation — to `.absent` on a confirmed death, `.unknown` on weaker evidence,
+    /// regardless of what this map last held for it — and the deaths that demotion exists for
+    /// are exactly the ones that log no `SessionEnd`, so for a tab this map DOES hold `.live`
+    /// for, it is still holding it when the demotion happens. A claude resumed in that tab
+    /// reuses the same `session_id`, so its `SessionStart` would fold to `.live`, compare
+    /// equal, and never be emitted: the store would stay wherever the demotion left it — the
+    /// legacy screen grammar after `.unknown`, or refusing every injection after `.absent` —
+    /// for the rest of the process's life. Safe, and silently the feature switching itself
+    /// off.
     func testForgettingASessionMakesItsNextEventNewsAgain() throws {
         var batches: [[UUID: ComposerReadiness]] = []
         let watcher = HookEventWatcher(directory: dir, clock: nil) { batches.append($0) }
