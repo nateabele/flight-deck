@@ -325,8 +325,10 @@ final class SearchIndexBuilderTests: XCTestCase {
     }
 
     /// A minimal codex stand-in — real `IndexedMessage`s from a bare line of text, wired
-    /// through the builder's injected lookup rather than `CodexAdapter.searchCorpus`, which
-    /// stays nil until codex ships its own conformer.
+    /// through the builder's injected `corpus` lookup rather than `AgentID.searchCorpus`
+    /// directly. Same reason that seam exists at all: this test drives a second agent's
+    /// transcripts through the builder without depending on which adapters happen to be
+    /// searchable yet.
     private struct StubCodexCorpus: AgentSearchCorpus {
         func transcripts(
             forProjects projects: [String], accounts: [AgentAccount]
