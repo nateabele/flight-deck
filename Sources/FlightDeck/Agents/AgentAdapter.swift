@@ -358,28 +358,37 @@ protocol AgentTextChannel {
 
     /// Type `text` and submit it, preserving whatever draft was there — or refuse.
     ///
+    /// Returns false having sent nothing. Returns true and then runs `onFinished` EXACTLY ONCE
+    /// — on every path, including a request superseded mid-repaint. `onFinished(true)` means
+    /// the text was submitted; `onFinished(false)` means it never was, and the conformer has
+    /// unwound cleanly instead, putting back any draft its probe killed.
+    ///
     /// **`settle` may be called more than once — once per repaint the conformer must wait
-    /// through — and it is `onSent` that carries the one-shot guarantee the caller's
-    /// bookkeeping depends on, exactly as `onFinished` does for `AgentRenameTyping
-    /// .submitRename`.** A single settle was once the whole contract, and `ClaudeTextChannel`
-    /// still only ever needs the one; `CodexTextChannel` needs a second, later hop so its
-    /// Return is never issued in the same settle as the text before it — codex paste-detects
-    /// that burst and inserts a newline instead of submitting (see `CodexTextChannel.submit`'s
-    /// doc comment). `SessionStore` marks the tab mid-injection before calling and clears the
-    /// mark inside the `onSent` it supplies, so a channel that returned `true` without ever
-    /// running `onSent` would leave the tab refusing every later injection for the life of the
-    /// process — same failure mode `AgentRenameTyping`'s doc comment describes for
-    /// `onFinished`, now shared rather than reinvented per protocol.
+    /// through — and it is `onFinished` that carries that one-shot guarantee, exactly as it
+    /// does for `AgentRenameTyping.submitRename`.** A single settle was once the whole
+    /// contract, and `ClaudeTextChannel` still only ever needs the one; `CodexTextChannel`
+    /// needs a second, later hop so its Return is never issued in the same settle as the text
+    /// before it — codex paste-detects that burst and inserts a newline instead of submitting
+    /// (see `CodexTextChannel.submit`'s doc comment).
+    ///
+    /// **The `Bool` is not decoration, and the two halves of what the caller does with it are
+    /// not the same condition.** `SessionStore` marks the tab mid-injection before calling and
+    /// releases that mark in `onFinished` regardless of the outcome, because a channel that
+    /// returned `true` and then finished without saying so would leave the tab refusing every
+    /// later injection — renames and phone prompts alike — for the life of the process. That
+    /// was a live defect on both conformers' superseded paths, not a hypothetical. But the
+    /// caller's *pending entry* may only be retired on `true`: when a rename is superseded,
+    /// the entry already holds the NEWER name, so retiring it would silently drop the
+    /// replacement. Release is unconditional; retirement is not.
     ///
     /// `stillWanted` is re-checked after the first settle delay, because the request can be
-    /// replaced or cancelled while the agent repaints. `onSent` runs once the text has been
-    /// submitted, and is where the caller retires its pending entry.
+    /// replaced or cancelled while the agent repaints.
     func submit(
         _ text: String,
         into injector: TextInjecting,
         settle: @escaping (@escaping () -> Void) -> Void,
         stillWanted: @escaping @MainActor () -> Bool,
-        onSent: @escaping @MainActor () -> Void
+        onFinished: @escaping @MainActor (Bool) -> Void
     ) -> Bool
 }
 

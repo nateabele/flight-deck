@@ -144,9 +144,9 @@ reader doesn't re-derive them.
   text, but instead of submitting... it just inserts a newline." Fixed in `CodexTextChannel
   .submit`/`.submitRename` by giving `sendReturn()` its own `settle` hop, separate from the
   text's — see that file's doc comments. `AgentTextChannel.submit`'s protocol contract changed
-  to allow `settle` more than once as part of the fix, with `onSent` (not settle) now carrying
-  the one-shot completion guarantee `SessionStore.inject` depends on, mirroring
-  `AgentRenameTyping.onFinished`. Do **not** "fix" a future case like this by putting the
+  to allow `settle` more than once as part of the fix, with `onFinished` (not settle) now
+  carrying the one-shot completion guarantee `SessionStore.inject` depends on — the same
+  `onFinished(Bool)` shape `AgentRenameTyping` uses, and for the same reason. Do **not** "fix" a future case like this by putting the
   terminator back inside the text, which is the bug that `TextInjecting.sendReturn()` exists
   to avoid.
 - **`CLAUDE_CODE_CHILD_SESSION` in the inherited environment turns transcript saving off**,
