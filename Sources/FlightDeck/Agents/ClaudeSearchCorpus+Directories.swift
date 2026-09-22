@@ -1,6 +1,9 @@
 import Foundation
 
-/// Which `~/.claude/projects` directories belong to the projects open in the sidebar.
+/// Which of a claude account's `projects` directories belong to the projects open in the
+/// sidebar. `projectsRoot` is a parameter, not a hardcoded `~/.claude/projects`, because
+/// discovery is per-account: each of a user's claude logins gets its own walk against its own
+/// root.
 ///
 /// **Why this is not a prefix match.** `ClaudeSession.encodedProjectDirName` replaces every
 /// non-ASCII-alphanumeric UTF-16 code unit with `-`, which is lossy: nothing can turn
@@ -16,10 +19,17 @@ import Foundation
 /// Pure. `listing` and `exists` are injected so the rules above are testable without a
 /// filesystem.
 enum SearchCorpus {
-    /// A transcript directory and the sidebar project that owns it.
+    /// A transcript directory, the sidebar project that owns it, and the literal path that
+    /// was encoded to reach it.
     struct Entry: Equatable {
         let projectPath: String
         let directory: URL
+        /// The project itself, or one of its worktrees — whichever `candidateWorkingDirectories`
+        /// entry `directory`'s name is `ClaudeSession.encodedProjectDirName` of. Carried
+        /// because the encoding is one-way (see this type's doc comment): a caller that needs
+        /// the literal path back, not just the fact that some name matched, has no other way
+        /// to get it.
+        let workingDirectory: String
     }
 
     /// Where a project's own agents put worktrees. Both are real: `EnterWorktree` uses
@@ -71,10 +81,16 @@ enum SearchCorpus {
         var entries: [Entry] = []
 
         for path in paths {
-            for name in transcriptDirectoryNames(forProjectAt: path, listing: listing) {
+            // Walked via `candidateWorkingDirectories` directly, not `transcriptDirectoryNames`,
+            // so each encoded name stays paired with the literal path it came from — the pairing
+            // `transcriptDirectoryNames` itself throws away.
+            for workingDirectory in candidateWorkingDirectories(forProjectAt: path, listing: listing) {
+                let name = ClaudeSession.encodedProjectDirName(for: workingDirectory)
                 let directory = projectsRoot.appendingPathComponent(name, isDirectory: true)
                 guard exists(directory.path), seen.insert(directory).inserted else { continue }
-                entries.append(Entry(projectPath: path, directory: directory))
+                entries.append(Entry(
+                    projectPath: path, directory: directory, workingDirectory: workingDirectory
+                ))
             }
         }
         return entries

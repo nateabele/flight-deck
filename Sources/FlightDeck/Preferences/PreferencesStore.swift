@@ -296,6 +296,14 @@ final class PreferencesStore: ObservableObject {
     /// `flywheel`, if present, is applied last, after everything above — a session running
     /// under a flywheel identity must see its own `AGENT_NAME`/`AGENT_MAIL_*` regardless of
     /// what the account or shell prefs set.
+    ///
+    /// **This is not the whole launch environment, and nothing agent-specific belongs here.**
+    /// What an *agent* needs of its host — claude's `FLIGHT_DECK_EVENT_DIR`, say — comes from
+    /// `AgentAdapter.launchEnvironment` and is merged over this by
+    /// `SessionStore.launchEnvironment(for:adapter:orphaned:)`, which is the one place the two
+    /// meet. Adding such a variable here instead would put a second, adapter-blind expression
+    /// of it in the codebase: exactly the duplication that left the hook feed switched off in
+    /// production while both halves' unit tests passed.
     func sessionEnvironment(
         for account: AgentAccount? = nil,
         flywheel: FlywheelIdentity? = nil,
@@ -350,6 +358,17 @@ final class PreferencesStore: ObservableObject {
         set {
             var shell = preferences.shell
             shell.sleepIdleThresholdSeconds = newValue
+            preferences.shell = shell
+        }
+    }
+
+    /// Whether transient API failures are retried automatically. Defaults OFF — unlike the
+    /// other shell toggles, this one acts on the user's behalf by typing.
+    var autoRetriesAPIErrors: Bool {
+        get { preferences.shell.autoRetryAPIErrors ?? false }
+        set {
+            var shell = preferences.shell
+            shell.autoRetryAPIErrors = newValue
             preferences.shell = shell
         }
     }

@@ -351,7 +351,9 @@ final class AgentRoutingTests: XCTestCase {
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.
         static let textChannel: AgentTextChannel? = ClaudeTextChannel()
+        static let renameTyping: AgentRenameTyping? = nil
         static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
+        static let turnRecovery: AgentTurnRecovery? = ClaudeTurnRecovery()
         static let negotiatesIdentity = false
         static let needsRuntimeStart = false
         static let hasStatusRegistry = true
@@ -369,6 +371,7 @@ final class AgentRoutingTests: XCTestCase {
             ClaudeAdapter.identity(fromHomeData: data)
         }
         static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
+        static let searchCorpus: AgentSearchCorpus? = ClaudeAdapter.searchCorpus
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)
@@ -411,11 +414,14 @@ final class AgentRoutingTests: XCTestCase {
         // once, when the protocol grew and it did not. Delegating means the next requirement
         // added costs nothing here.
         static var textChannel: (any AgentTextChannel)? { ClaudeAdapter.textChannel }
+        static var renameTyping: (any AgentRenameTyping)? { ClaudeAdapter.renameTyping }
         static var dialogDriver: (any AgentDialogDriver)? { ClaudeAdapter.dialogDriver }
+        static var turnRecovery: (any AgentTurnRecovery)? { ClaudeAdapter.turnRecovery }
         static var negotiatesIdentity: Bool { ClaudeAdapter.negotiatesIdentity }
         static var needsRuntimeStart: Bool { ClaudeAdapter.needsRuntimeStart }
         static var hasStatusRegistry: Bool { ClaudeAdapter.hasStatusRegistry }
         static var openPromptReader: (any AgentOpenPromptReader)? { ClaudeAdapter.openPromptReader }
+        static var searchCorpus: (any AgentSearchCorpus)? { ClaudeAdapter.searchCorpus }
         nonisolated static var homeMarkerFile: String { ClaudeAdapter.homeMarkerFile }
 
         nonisolated static func sanitizedTitle(_ raw: String) -> String? {

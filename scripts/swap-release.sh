@@ -12,7 +12,10 @@
 
 set -uo pipefail
 
-NEW_APP="/Users/nate/Projects/Protos-n-Tools/flight-deck/DerivedData/Build/Products/Release/Flight Deck.app"
+# FD_SWAP_NEW_APP overrides which bundle gets installed. Exists so the flavor guard below
+# can be exercised against a known-debug bundle without editing the script — see
+# FD_SWAP_CHECK_ONLY and FD_SWAP_ALLOW_DEBUG a few lines down.
+NEW_APP="${FD_SWAP_NEW_APP:-/Users/nate/Projects/Protos-n-Tools/flight-deck/DerivedData/Build/Products/Release/Flight Deck.app}"
 INSTALLED="/Applications/Flight Deck.app"
 STAGING="/Applications/.Flight Deck.app.incoming"
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -20,7 +23,11 @@ BACKUP_DIR="/Users/nate/Library/Application Support/Flight Deck/backups/$TS"
 LOG="/Users/nate/Library/Logs/flight-deck-swap.log"
 DELAY="${1:-30}"
 
-mkdir -p "$(dirname "$LOG")" "$BACKUP_DIR"
+# BACKUP_DIR is created lazily, at its first use in step 3 — not here. FD_SWAP_CHECK_ONLY is
+# meant to be run casually as a pre-flight, and a refused/check-only run never gets that far;
+# creating it unconditionally here littered an empty timestamped directory under
+# ~/Library/Application Support/Flight Deck/backups/ on every such run.
+mkdir -p "$(dirname "$LOG")"
 
 log() { echo "[$(date '+%H:%M:%S')] $*" >>"$LOG"; }
 
@@ -39,6 +46,65 @@ find_pids() {
       sub(/^[ \t]*[0-9]+[ \t]+/, "")
       if ($0 ~ /\/Flight Deck\.app\/Contents\/MacOS\/Flight Deck$/) print pid
     }'
+}
+
+# Classifies a bundle as debug/release/unknown without ever launching it — see the
+# 2026-09-22 incident below. Info.plist and the get-task-allow entitlement were both checked
+# against a real Debug/Release pair and are byte-identical, so neither can discriminate;
+# executable size is a heuristic, not a signal, and is deliberately not used. Two static
+# signals are: Debug links `@rpath/Flight Deck.debug.dylib` where Release links only
+# `@rpath/FleetKit.framework/…`, and Debug ships the XCTest runner under Contents/PlugIns
+# where Release has none. Either firing means debug — fail closed toward refusing.
+#
+# `release` is returned ONLY on positive evidence (otool ran, showed no .debug.dylib, AND
+# PlugIns is absent). If otool is missing from PATH, or otool -L fails on a bundle that
+# already passed the executable check above, that is "cannot tell" — not "release". Folding
+# that case into `release` would have waved through the exact culprit bundle from the
+# 2026-09-22 incident (caught by the otool signal alone) the moment otool was unavailable.
+#
+# otool -L exits 0 and prints "is not an object file" to STDOUT for a non-Mach-O input, so a
+# zero exit status alone is not evidence otool actually read anything — require at least one
+# real library-reference line (.dylib or .framework) before trusting the absence of
+# .debug.dylib. Every macOS binary links libSystem, so a genuine Mach-O always has one.
+bundle_flavor() {
+  local bundle="$1"
+  if ! command -v otool >/dev/null 2>&1; then
+    echo unknown
+    return
+  fi
+  local otool_out
+  if ! otool_out="$(otool -L "$bundle/Contents/MacOS/Flight Deck" 2>/dev/null)"; then
+    echo unknown
+    return
+  fi
+  if grep -q '\.debug\.dylib' <<<"$otool_out"; then
+    echo debug
+    return
+  fi
+  if [ -d "$bundle/Contents/PlugIns" ]; then
+    echo debug
+    return
+  fi
+  if ! grep -Eq '\.(dylib|framework)' <<<"$otool_out"; then
+    echo unknown
+    return
+  fi
+  echo release
+}
+
+# The script always runs detached (nohup … >/dev/null 2>&1 &), so a log line alone is
+# invisible — the operator just sees nothing happen. Used for both a refusal AND an
+# FD_SWAP_ALLOW_DEBUG override that proceeds anyway, so the title is always passed in
+# explicitly ($2) rather than assumed — a hardcoded "refused" title on the override path
+# would read as "nothing happened" while a Debug bundle installs anyway, which is worse than
+# no notification. This is best-effort: a failing osascript (no GUI session, notifications
+# disabled, etc.) is logged and swallowed, never allowed to turn either path into a crash.
+# Notifications are not the safety mechanism — the exit before staging is, on the refusal
+# path — this just makes the outcome audible either way.
+notify() {
+  if ! osascript -e "display notification \"$1\" with title \"$2\"" >>"$LOG" 2>&1; then
+    log "warning: osascript notification failed, see above — the underlying decision still stands"
+  fi
 }
 
 # Post-order walk: children are printed before their parent, so signalling in order
@@ -78,6 +144,56 @@ if ! codesign --verify --strict "$NEW_APP" >>"$LOG" 2>&1; then
   log "FATAL: new bundle fails codesign --verify — aborting, nothing changed."
   exit 1
 fi
+# 2026-09-22 incident: a Debug bundle got swapped into /Applications. Debug and Release key
+# their fd-abduco daemon root differently (/tmp/flight-deck-debug-501 vs /tmp/flight-deck-501)
+# while sessions.json is shared, so the Debug app restored all 55 sessions and attached each
+# one to stale debug-root daemon leftovers — every conversation looked like it had lost its
+# last several turns. The executable/Info.plist/codesign checks above all passed; none of them
+# can tell Debug from Release. This is what bundle_flavor() exists to catch.
+FLAVOR="$(bundle_flavor "$NEW_APP")"
+case "$FLAVOR" in
+  release) FLAVOR_DISPLAY="Release" ;;
+  debug) FLAVOR_DISPLAY="Debug" ;;
+  unknown) FLAVOR_DISPLAY="unknown" ;;
+  # bundle_flavor() only returns the three cases above today; this exists so a future fourth
+  # value degrades to showing itself instead of leaving FLAVOR_DISPLAY unbound under set -u.
+  *) FLAVOR_DISPLAY="$FLAVOR" ;;
+esac
+log "flavor:      $FLAVOR_DISPLAY (verified statically, not executed)"
+
+# unknown (otool missing, or otool -L failed) is refused exactly like debug, via the same
+# FD_SWAP_ALLOW_DEBUG escape hatch — a second override variable would just be a second way
+# to get this wrong. It gets its own wording throughout: calling an undetermined bundle
+# "Debug" would be its own kind of wrong and would send the next person down the wrong path.
+if [ "$FLAVOR" != "release" ] && [ "${FD_SWAP_ALLOW_DEBUG:-}" != "1" ]; then
+  if [ "$FLAVOR" = "unknown" ]; then
+    log "FATAL: could not determine build flavor (otool unavailable or unreadable) — refusing, nothing changed."
+    notify "Refused to install a bundle of unknown flavor — nothing changed" "Flight Deck swap refused"
+  else
+    log "FATAL: new bundle is $FLAVOR_DISPLAY, not Release — aborting, nothing changed."
+    notify "Refused to install a $FLAVOR_DISPLAY bundle — nothing changed" "Flight Deck swap refused"
+  fi
+  exit 1
+fi
+if [ "$FLAVOR" != "release" ]; then
+  if [ "$FLAVOR" = "unknown" ]; then
+    log "FD_SWAP_ALLOW_DEBUG=1 — installing a bundle of unknown flavor anyway, override recorded"
+    notify "Installing a bundle of unknown flavor — FD_SWAP_ALLOW_DEBUG override in effect" "Flight Deck swap proceeding (override)"
+  else
+    log "FD_SWAP_ALLOW_DEBUG=1 — installing a $FLAVOR_DISPLAY bundle anyway, override recorded"
+    notify "Installing a $FLAVOR_DISPLAY bundle — FD_SWAP_ALLOW_DEBUG override in effect" "Flight Deck swap proceeding (override)"
+  fi
+fi
+
+# Safe test harness for the guard above and a real operator pre-flight: runs every check in
+# this block and stops before anything is touched. The accept path can't otherwise be
+# exercised by actually running the script — a completed run quits Flight Deck and drops
+# every live agent session on the machine — which is exactly why this mode exists.
+if [ "${FD_SWAP_CHECK_ONLY:-}" = "1" ]; then
+  log "FD_SWAP_CHECK_ONLY=1 — bundle accepted, exiting before staging (nothing changed)"
+  exit 0
+fi
+
 log "new bundle verified (executable + Info.plist + codesign), without launching it"
 
 sleep "$DELAY"
@@ -158,6 +274,7 @@ fi
 log "app is down"
 
 # --- 3. Swap ---------------------------------------------------------------------------
+mkdir -p "$BACKUP_DIR"
 if [ -d "$INSTALLED" ]; then
   if mv "$INSTALLED" "$BACKUP_DIR/Flight Deck.app"; then
     log "backed up previous build → $BACKUP_DIR/Flight Deck.app"

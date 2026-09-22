@@ -143,7 +143,7 @@ final class SessionStoreAbortTests: XCTestCase {
         store.openPromptProbe = { _ in nil }
         XCTAssertEqual(store.abortPrompt(in: id, token: token), .promptNameable)
 
-        store.openPromptProbe = { _ in "prompt_changed" }
+        store.openPromptProbe = { _ in .failure("prompt_changed") }
         XCTAssertEqual(
             store.abortPrompt(in: id, token: token), .dispatched,
             "the token was never remembered, so the retry is a first attempt, not a replay"
@@ -166,7 +166,7 @@ final class SessionStoreAbortTests: XCTestCase {
     /// feature exists for, and it must still dispatch.
     func testAnUnnameableDialogStillDispatches() {
         let (store, spy, id) = makeStore(activity: .waiting)
-        store.openPromptProbe = { _ in "prompt_changed" }
+        store.openPromptProbe = { _ in .failure("prompt_changed") }
 
         XCTAssertEqual(store.abortPrompt(in: id, token: UUID()), .dispatched)
         XCTAssertEqual(spy.events, [.escape])

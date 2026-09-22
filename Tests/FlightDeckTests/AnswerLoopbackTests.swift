@@ -76,7 +76,7 @@ final class AnswerLoopbackTests: XCTestCase {
     /// transcript tail substituted — the same seam `PromptServiceTests` substitutes, reached
     /// here through `FleetService` because the service it belongs to is private to it.
     private func standUp(
-        tail: @escaping @Sendable (URL, Int) -> [SourceLine]
+        tail: @escaping @Sendable (URL, Int) -> (lines: [SourceLine], hasMore: Bool)
     ) async throws -> (SpyInjector, FleetClient, FrameLog, UUID) {
         let harness = FleetTestHarness()
         self.harness = harness
@@ -139,7 +139,7 @@ final class AnswerLoopbackTests: XCTestCase {
 
     func testAPhoneAnswersAQuestionAndTheTerminalMoves() async throws {
         let lines = [SourceLine(offset: 0, text: askLine("toolu_A"))]
-        let (spy, client, log, id) = try await standUp(tail: { _, _ in lines })
+        let (spy, client, log, id) = try await standUp(tail: { _, _ in (lines, false) })
         spy.showOptions(Self.options, selected: 0)
 
         let cid = client.send(.answerPrompt(
@@ -167,7 +167,7 @@ final class AnswerLoopbackTests: XCTestCase {
     /// parse.
     func testAPhoneDeniesADialogWithOneEscape() async throws {
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_BASH"))]
-        let (spy, client, log, id) = try await standUp(tail: { _, _ in lines })
+        let (spy, client, log, id) = try await standUp(tail: { _, _ in (lines, false) })
         spy.showOptions(["Yes", "No"], selected: 0)
 
         let cid = client.send(
@@ -196,7 +196,7 @@ final class AnswerLoopbackTests: XCTestCase {
     /// Mac that refused everything could not pass both halves.
     func testAStaleAnswerIsRefusedAndTheSocketStaysUsable() async throws {
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_BASH"))]
-        let (spy, client, log, id) = try await standUp(tail: { _, _ in lines })
+        let (spy, client, log, id) = try await standUp(tail: { _, _ in (lines, false) })
         // The dialog IS up, and it is readable. The refusal below therefore has to come from
         // the re-derivation refusing a call that is not the open one — a build that dropped
         // the comparison would find a screen it can drive perfectly well and press Return.

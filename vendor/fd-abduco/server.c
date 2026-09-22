@@ -156,6 +156,29 @@ static bool server_send_packet(Client *c, Packet *pkt) {
 	return false;
 }
 
+/* Flight Deck fork (mode preamble): send `len` bytes of `buf` to client `c`
+ * as one or more MSG_CONTENT packets, chunked to fit Packet.u.msg. Used both
+ * for the synthesized mode-preamble and (Flight Deck fork, DRY) the
+ * pre-existing outlog history replay right after it, which used to open-code
+ * this identical chunking loop. Bails out on the first failed send rather
+ * than continuing to write chunks to what server_send_packet() has already
+ * marked STATE_DISCONNECTED. */
+static void server_send_content(Client *c, const char *buf, size_t len) {
+	for (size_t off = 0; off < len; ) {
+		Packet rp;
+		memset(&rp, 0, sizeof rp);
+		size_t chunk = len - off;
+		if (chunk > sizeof(rp.u.msg))
+			chunk = sizeof(rp.u.msg);
+		rp.type = MSG_CONTENT;
+		rp.len = chunk;
+		memcpy(rp.u.msg, buf + off, chunk);
+		if (!server_send_packet(c, &rp))
+			return;
+		off += chunk;
+	}
+}
+
 static void server_pty_died_handler(int sig) {
 	int errsv = errno;
 	pid_t pid;
@@ -289,18 +312,25 @@ static void server_mainloop(void) {
 					if (c->state != STATE_ATTACHED) {
 						c->state = STATE_ATTACHED;
 						fd_outlog_trim(&server.outlog);
-						for (size_t off = 0; off < server.outlog.len; ) {
-							Packet rp;
-							memset(&rp, 0, sizeof rp);
-							size_t chunk = server.outlog.len - off;
-							if (chunk > sizeof(rp.u.msg))
-								chunk = sizeof(rp.u.msg);
-							rp.type = MSG_CONTENT;
-							rp.len = chunk;
-							memcpy(rp.u.msg, server.outlog.data + off, chunk);
-							server_send_packet(c, &rp);
-							off += chunk;
+						/* Flight Deck fork (mode preamble): unconditionally
+						 * re-assert every tracked DEC private mode's current
+						 * value before the history replay below. Idempotent --
+						 * if the mode's own set/reset bytes are still inside
+						 * the replay window, re-asserting it here is a
+						 * harmless duplicate; once they've aged out of the
+						 * trimmed ring, this is what restores the mode on a
+						 * brand-new terminal surface. See fd_outlog_preamble()
+						 * in fd_outlog.c. */
+						size_t preamble_len = fd_outlog_preamble_size(&server.outlog);
+						if (preamble_len > 0) {
+							char *preamble = malloc(preamble_len);
+							if (preamble) {
+								fd_outlog_preamble(&server.outlog, preamble);
+								server_send_content(c, preamble, preamble_len);
+								free(preamble);
+							}
 						}
+						server_send_content(c, server.outlog.data, server.outlog.len);
 					} else {
 						c->state = STATE_ATTACHED;
 					}

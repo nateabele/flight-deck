@@ -89,10 +89,70 @@ struct ClaudeTextChannel: AgentTextChannel {
         return Self.isComposerBox(viewport)
     }
 
+    /// Every ordinary claude dialog carries this footer token, and a composer never does: a
+    /// permission prompt shows `Esc to cancel · Tab to amend`, an `AskUserQuestion`
+    /// `Esc to cancel`, the unprompted auto-mode nudge `Enter to confirm · Esc to cancel`.
+    /// Matching user-facing copy with a fixed meaning is markedly more stable than matching
+    /// box-drawing geometry. Fourteen of the fifteen dialog captures in `Fixtures/Claude/`
+    /// carry it — every one but `question-two-review`.
+    ///
+    /// **Matched whole, never shortened to an `Esc to ` prefix.** A running turn's interrupt
+    /// hint begins with those same words, and injection must stay allowed mid-turn because
+    /// claude queues what it receives. `CodexTextChannel.dialogFooterTokens` states the same
+    /// constraint, where it is a live collision with codex's captured `esc to interrupt`.
+    ///
+    /// The casing is claude's own, as printed, but **nothing rests on the comparison being
+    /// case-sensitive and no test pins it**: no composer capture in `Fixtures/Claude` carries
+    /// this phrase in any casing — the fourteen dialog footers are its only occurrences — and
+    /// `esc to interrupt` cannot contain `esc to cancel` at any casing anyway. Said plainly
+    /// because the reverse was claimed here before and was not true.
+    static let dialogFooterToken = "Esc to cancel"
+
+    /// **The one dialog shape in the corpus that carries no `Esc to cancel` footer at all:**
+    /// `question-two-review`'s confirmation step — `Ready to submit your answers?` closed by
+    /// `❯ 1. Submit answers` / `  2. Cancel` — is a plain confirmation, not a cancellable
+    /// prompt, so it never prints that token.
+    ///
+    /// What it shares with most other dialogs, and with nothing a composer draws, is the
+    /// marker-plus-number shape `ChoiceDialog.hasNumberedRowAtMarker` recognises.
+    ///
+    /// The converse also holds, which is why neither rule may be dropped for the other:
+    /// `question-checkbox-submit-focused` puts the marker on the UNNUMBERED action row
+    /// (`❯    Submit`), so no numbered row sits at its marker and only `Esc to cancel`
+    /// catches it.
+    ///
+    /// `❯` is stated here rather than defaulted there for the reason
+    /// `ChoiceDialog.focusedRow` gives: codex draws `›`, and an agent that inherited claude's
+    /// glyph would be reading claude's screen grammar off somebody else's screen.
+    static func hasNumberedMarkerRow(_ viewport: String) -> Bool {
+        ChoiceDialog.hasNumberedRowAtMarker(inViewport: viewport, marker: ChoiceDialog.claudeMarker)
+    }
+
+    /// Either recognised dialog shape is enough. The two are independent on purpose: the
+    /// footer is copy claude can reword in any release, the row shape is layout it can restyle,
+    /// and a screen only has to trip one of them to be refused.
+    static func isKnownNonComposer(_ viewport: String) -> Bool {
+        viewport.contains(dialogFooterToken) || hasNumberedMarkerRow(viewport)
+    }
+
+    /// Unreadable screen means *no veto*, not a veto — the fail-open direction
+    /// `AgentTextChannel.isKnownNonComposer` documents. Answering true here would make a
+    /// transient read failure look exactly like a dialog and drop the message.
+    ///
+    /// **The caller does not rely on that nil passing through, and must not start.**
+    /// `SessionStore.injectionGate` reads the viewport itself before asking this on the
+    /// `.live` path, precisely because this answer is "unsure", not "clear" — see the comment
+    /// there. The `.unknown` path is covered by `hasComposerBox`, which fails closed on nil
+    /// under its own rule.
+    func isKnownNonComposer(_ injector: TextInjecting) -> Bool {
+        guard let viewport = injector.readViewport() else { return false }
+        return Self.isKnownNonComposer(viewport)
+    }
+
     func submit(
         _ text: String,
         into injector: TextInjecting,
-        settle: (@escaping () -> Void) -> Void,
+        settle: @escaping (@escaping () -> Void) -> Void,
         stillWanted: @escaping @MainActor () -> Bool,
         onSent: @escaping @MainActor () -> Void
     ) -> Bool {

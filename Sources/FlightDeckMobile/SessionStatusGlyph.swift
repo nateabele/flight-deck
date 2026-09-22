@@ -138,7 +138,10 @@ struct SessionStatusGlyph: View {
             guard let summary = session.subagentSummary else { return "Working" }
             return "Working — \(summary)"
         case "waiting":
-            // `SessionStatus.tooltip`'s `.waiting` branch: the reason, when `claude` gave one.
+            // `SessionStatus.tooltip`'s `.waiting` branch: `answerless` wins over the reason
+            // either way, for the same reason it does there — it is this Mac's own verdict
+            // that nothing is open, which is truer than whatever string `claude` gave.
+            guard !session.answerless else { return "Still working (no response needed)" }
             guard let waitingFor = session.waitingFor, !waitingFor.isEmpty else {
                 return "Waiting for you"
             }
@@ -147,6 +150,22 @@ struct SessionStatusGlyph: View {
             // An activity this build does not know about, matching `body`'s own fallback.
             return "Unrecognized status"
         }
+    }
+
+    /// `FleetListScreen`'s own short caption beneath a waiting tab's title — the bare reason
+    /// (`"input needed"`) `claude` gave, unchanged from before `answerless` existed, or
+    /// `answerless`'s replacement sentence once this Mac has confirmed there is nothing to give
+    /// a reason for.
+    ///
+    /// Reuses `baseLabel`'s own `"waiting"` branch for the `answerless` case rather than
+    /// repeating `"Still working (no response needed)"` a third time in this file — that
+    /// literal already lives in exactly one place here. Closes the gap a review caught: this
+    /// caption used to be rendered directly from `WireSession.waitingFor` in `FleetListScreen`,
+    /// bypassing `answerless` (and this whole file) entirely, so VoiceOver announced the new
+    /// sentence while the visible orange caption still said "input needed".
+    static func waitingCaption(for session: WireSession) -> String? {
+        guard session.waitingFor != nil else { return nil }
+        return session.answerless ? baseLabel(for: session) : session.waitingFor
     }
 
     /// Appends `SessionStatus.tooltip(unread:backgroundWork:)`'s background clause, verbatim

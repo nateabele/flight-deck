@@ -1,5 +1,6 @@
 import XCTest
 import FleetKit
+import SQLite3
 @testable import FlightDeck
 
 /// The index against a real SQLite file in a temp directory.
@@ -36,10 +37,24 @@ final class SQLiteSearchIndexTests: XCTestCase {
         )
     }
 
+    /// A claude-in-the-project-root ref, matching what every test here assumed implicitly
+    /// before `ingest` took one — most of these tests are about the message/offset machinery,
+    /// not about agent attribution, so their `ref` is deliberately the boring default.
+    private func ref(
+        _ url: URL, projectPath: String, agent: AgentID = .claude, provenance: String? = nil,
+        workingDirectory: String? = nil
+    ) -> TranscriptRef {
+        TranscriptRef(
+            url: url, projectPath: projectPath, accountHome: directory,
+            workingDirectory: workingDirectory ?? projectPath, conversationID: "c1",
+            agent: agent, provenance: provenance, indexedName: nil, modified: Date()
+        )
+    }
+
     func testAnIngestedMessageIsFoundByAWordInIt() throws {
         try index.ingest(
             [message("don't fire a rename when the session already has the name")],
-            from: source("a.jsonl"), projectPath: "/w/fd", offset: 100
+            for: ref(source("a.jsonl"), projectPath: "/w/fd"), offset: 100
         )
 
         let hits = try index.search(#""rename"*"#, projects: ["/w/fd"], limit: 10)
@@ -55,7 +70,7 @@ final class SQLiteSearchIndexTests: XCTestCase {
     func testTheSnippetMarksTheMatchedTermWithSentinels() throws {
         try index.ingest(
             [message("don't fire a rename when the session already has the given name")],
-            from: source("a.jsonl"), projectPath: "/w/fd", offset: 1
+            for: ref(source("a.jsonl"), projectPath: "/w/fd"), offset: 1
         )
 
         let snippet = try XCTUnwrap(
@@ -72,7 +87,7 @@ final class SQLiteSearchIndexTests: XCTestCase {
     /// Prefix matching is what makes results narrow while a word is still being typed.
     func testAPrefixQueryMatchesAPartialWord() throws {
         try index.ingest(
-            [message("the rename bug")], from: source("a.jsonl"), projectPath: "/w/fd", offset: 1
+            [message("the rename bug")], for: ref(source("a.jsonl"), projectPath: "/w/fd"), offset: 1
         )
 
         XCTAssertEqual(try index.search(#""renam"*"#, projects: ["/w/fd"], limit: 10).count, 1)
@@ -89,12 +104,12 @@ final class SQLiteSearchIndexTests: XCTestCase {
         for n in 0...limit {
             try index.ingest(
                 [message("rename", conversation: "out-\(n)")],
-                from: source("out-\(n).jsonl"), projectPath: "/w/other", offset: 1
+                for: ref(source("out-\(n).jsonl"), projectPath: "/w/other"), offset: 1
             )
         }
         try index.ingest(
             [message("rename", conversation: "c1")],
-            from: source("a.jsonl"), projectPath: "/w/fd", offset: 1
+            for: ref(source("a.jsonl"), projectPath: "/w/fd"), offset: 1
         )
 
         let hits = try index.search(#""rename"*"#, projects: ["/w/fd"], limit: limit)
@@ -105,7 +120,7 @@ final class SQLiteSearchIndexTests: XCTestCase {
     /// The builder resumes from this. It must survive the process going away, which is what
     /// makes a cancelled backfill cost nothing on the next launch.
     func testTheReadOffsetRoundTripsAndSurvivesReopening() throws {
-        try index.ingest([message("hi")], from: source("a.jsonl"), projectPath: "/w/fd", offset: 4096)
+        try index.ingest([message("hi")], for: ref(source("a.jsonl"), projectPath: "/w/fd"), offset: 4096)
         XCTAssertEqual(index.readOffset(for: source("a.jsonl")), 4096)
 
         let url = directory.appendingPathComponent("index.sqlite")
@@ -125,11 +140,11 @@ final class SQLiteSearchIndexTests: XCTestCase {
     func testPruningDropsSourcesAndProjectsThatAreNoLongerInScope() throws {
         try index.ingest(
             [message("rename", conversation: "c1")],
-            from: source("keep.jsonl"), projectPath: "/w/fd", offset: 1
+            for: ref(source("keep.jsonl"), projectPath: "/w/fd"), offset: 1
         )
         try index.ingest(
             [message("rename", conversation: "c2")],
-            from: source("drop.jsonl"), projectPath: "/w/gone", offset: 1
+            for: ref(source("drop.jsonl"), projectPath: "/w/gone"), offset: 1
         )
 
         try index.prune(keepingSources: [source("keep.jsonl")], projects: ["/w/fd"])
@@ -149,7 +164,7 @@ final class SQLiteSearchIndexTests: XCTestCase {
     func testDeletingASourceDoesNotLeakItsFreedRowidToAnUnrelatedMessage() throws {
         try index.ingest(
             [message("alpha-unique term", conversation: "cA")],
-            from: source("a.jsonl"), projectPath: "/w/fd", offset: 1
+            for: ref(source("a.jsonl"), projectPath: "/w/fd"), offset: 1
         )
 
         // Drops source A's row entirely, freeing its rowid for reuse.
@@ -159,7 +174,7 @@ final class SQLiteSearchIndexTests: XCTestCase {
         // after the table went empty lands on the freed rowid.
         try index.ingest(
             [message("totally different content", conversation: "cB")],
-            from: source("b.jsonl"), projectPath: "/w/fd", offset: 1
+            for: ref(source("b.jsonl"), projectPath: "/w/fd"), offset: 1
         )
 
         XCTAssertEqual(try index.search(#""alpha"*"#, projects: ["/w/fd"], limit: 10), [])
@@ -170,8 +185,8 @@ final class SQLiteSearchIndexTests: XCTestCase {
     /// rather than double every message in it.
     func testReingestingFromZeroReplacesRatherThanDuplicates() throws {
         let file = source("a.jsonl")
-        try index.ingest([message("rename")], from: file, projectPath: "/w/fd", offset: 50)
-        try index.ingest([message("rename")], from: file, projectPath: "/w/fd", offset: 0)
+        try index.ingest([message("rename")], for: ref(file, projectPath: "/w/fd"), offset: 50)
+        try index.ingest([message("rename")], for: ref(file, projectPath: "/w/fd"), offset: 0)
 
         XCTAssertEqual(try index.search(#""rename"*"#, projects: ["/w/fd"], limit: 10).count, 1)
     }
@@ -180,7 +195,7 @@ final class SQLiteSearchIndexTests: XCTestCase {
     /// intact rather than being approximated by insertion order.
     func testTimestampsRoundTrip() throws {
         try index.ingest(
-            [message("rename", at: 1234)], from: source("a.jsonl"), projectPath: "/w/fd", offset: 1
+            [message("rename", at: 1234)], for: ref(source("a.jsonl"), projectPath: "/w/fd"), offset: 1
         )
 
         let hit = try XCTUnwrap(index.search(#""rename"*"#, projects: ["/w/fd"], limit: 10).first)
@@ -204,8 +219,8 @@ final class SQLiteSearchIndexTests: XCTestCase {
     /// message in it.
     func testIngestingTheSameMessageTwiceYieldsOneHit() throws {
         let message = message("the rename bug")
-        try index.ingest([message], from: source("a.jsonl"), projectPath: "/w/fd", offset: nil)
-        try index.ingest([message], from: source("a.jsonl"), projectPath: "/w/fd", offset: nil)
+        try index.ingest([message], for: ref(source("a.jsonl"), projectPath: "/w/fd"), offset: nil)
+        try index.ingest([message], for: ref(source("a.jsonl"), projectPath: "/w/fd"), offset: nil)
 
         XCTAssertEqual(try index.search(#""rename"*"#, projects: ["/w/fd"], limit: 10).count, 1)
     }
@@ -223,7 +238,7 @@ final class SQLiteSearchIndexTests: XCTestCase {
                 message("alpha shared-term", conversation: "c1"),
                 message("beta shared-term", conversation: "c1"),
             ],
-            from: source("a.jsonl"), projectPath: "/w/fd", offset: 1
+            for: ref(source("a.jsonl"), projectPath: "/w/fd"), offset: 1
         )
 
         let hits = try index.search(#""shared"*"#, projects: ["/w/fd"], limit: 10)
@@ -239,19 +254,19 @@ final class SQLiteSearchIndexTests: XCTestCase {
     /// A live ingest must not move the read position, or the backfill would resume from it and
     /// skip everything before — which for an open session is its entire history.
     func testLiveIngestDoesNotAdvanceTheReadOffset() throws {
-        try index.ingest([message("hi")], from: source("a.jsonl"), projectPath: "/w/fd", offset: 4096)
-        try index.ingest([message("later")], from: source("a.jsonl"), projectPath: "/w/fd", offset: nil)
+        try index.ingest([message("hi")], for: ref(source("a.jsonl"), projectPath: "/w/fd"), offset: 4096)
+        try index.ingest([message("later")], for: ref(source("a.jsonl"), projectPath: "/w/fd"), offset: nil)
 
         XCTAssertEqual(index.readOffset(for: source("a.jsonl")), 4096)
     }
 
-    /// Two writers reach this index in the real app: `SearchIndexBuilder` backfilling from
-    /// its own actor, and `ClaudeRuntime`'s live `onMessages` hook ingesting from the main
-    /// actor as a session streams. Without `transactionLock`, one writer's `BEGIN IMMEDIATE`
-    /// landing while the other's transaction is still open fails with "cannot start a
-    /// transaction within a transaction" — silently, because both `ingest` call sites use
-    /// `try?` — and the failed writer's entire batch is lost, not partially written, because
-    /// the failure is at `BEGIN` itself, before any row is inserted.
+    /// Three writers reach this index in the real app: `SearchIndexBuilder` backfilling from
+    /// its own actor, and `ClaudeRuntime` and `CodexRuntime`'s live `onMessages` hooks
+    /// ingesting from the main actor as a session streams. Without `transactionLock`, one
+    /// writer's `BEGIN IMMEDIATE` landing while another's transaction is still open fails with
+    /// "cannot start a transaction within a transaction" — silently, because every `ingest`
+    /// call site uses `try?` — and the failed writer's entire batch is lost, not partially
+    /// written, because the failure is at `BEGIN` itself, before any row is inserted.
     ///
     /// One writer runs detached, the other on the calling thread, each pushing a batch large
     /// enough (many separate prepare/step/reset calls per row) that its transaction stays
@@ -264,10 +279,11 @@ final class SQLiteSearchIndexTests: XCTestCase {
 
         async let detached: Void = Task.detached {
             try? index.ingest(
-                detachedBatch, from: self.source("a.jsonl"), projectPath: "/w/fd", offset: nil
+                detachedBatch, for: self.ref(self.source("a.jsonl"), projectPath: "/w/fd"),
+                offset: nil
             )
         }.value
-        try? index.ingest(callerBatch, from: source("b.jsonl"), projectPath: "/w/fd", offset: nil)
+        try? index.ingest(callerBatch, for: ref(source("b.jsonl"), projectPath: "/w/fd"), offset: nil)
         await detached
 
         XCTAssertEqual(try index.messageCount(forConversation: "cA"), count)
@@ -280,7 +296,7 @@ final class SQLiteSearchIndexTests: XCTestCase {
     func testSearchReturnsTheOffsetItIngested() throws {
         try index.ingest(
             [message("the rename path", offset: 8192)],
-            from: source("conv.jsonl"), projectPath: "/w/fd", offset: nil
+            for: ref(source("conv.jsonl"), projectPath: "/w/fd"), offset: nil
         )
 
         let hits = try index.search("\"rename\"*", projects: ["/w/fd"], limit: 10)
@@ -294,13 +310,223 @@ final class SQLiteSearchIndexTests: XCTestCase {
     /// the scoping actually happens — `FleetService` just passes `openProjectPaths()` through.
     func testSearchIsScopedToOpenProjects() throws {
         try index.ingest(
-            [message("the rename path")], from: source("c.jsonl"), projectPath: "/closed",
+            [message("the rename path")], for: ref(source("c.jsonl"), projectPath: "/closed"),
             offset: nil
         )
 
         XCTAssertTrue(try index.search("\"rename\"*", projects: ["/open"], limit: 10).isEmpty)
         XCTAssertEqual(
             try index.search("\"rename\"*", projects: ["/closed"], limit: 10).count, 1
+        )
+    }
+
+    /// A hit must carry enough to resume the RIGHT agent in the RIGHT directory. Before this,
+    /// every hit was implicitly claude-in-the-project-root.
+    func testSearchReturnsAgentProvenanceAndWorkingDirectory() throws {
+        let ref = TranscriptRef(
+            url: URL(fileURLWithPath: "/tmp/rollout.jsonl"),
+            projectPath: "/w/fd",
+            accountHome: URL(fileURLWithPath: "/home/.codex"),
+            workingDirectory: "/w/fd/.claude/worktrees/hunt",
+            conversationID: "c1",
+            agent: .codex,
+            provenance: "exec",
+            indexedName: nil,
+            modified: Date(timeIntervalSince1970: 0)
+        )
+        try index.ingest(
+            [IndexedMessage(
+                conversationID: "c1", role: .user, text: "reticulating splines",
+                timestamp: Date(timeIntervalSince1970: 10), offset: 0
+            )],
+            for: ref, offset: 99
+        )
+
+        let hits = try index.search("splines", projects: ["/w/fd"], limit: 10)
+        XCTAssertEqual(hits.count, 1)
+        XCTAssertEqual(hits[0].agent, "codex")
+        XCTAssertEqual(hits[0].provenance, "exec")
+        XCTAssertEqual(hits[0].workingDirectory, "/w/fd/.claude/worktrees/hunt")
+        // The value `CodexAdapter.binding(for:)` reads to find the thread's rollout file.
+        // Without it, pressing Return on this hit would start a fresh, empty thread instead
+        // of resuming the one that was searched for.
+        XCTAssertEqual(hits[0].transcriptPath, "/tmp/rollout.jsonl")
+    }
+
+    /// `FleetService.openConversation` holds only a conversation id, never a `TranscriptHit` —
+    /// this is the lookup that gives it somewhere to resume a codex conversation into.
+    func testTranscriptLocationReturnsTheWorkingDirectoryAndTranscriptPathForAKnownConversation() throws {
+        try index.ingest(
+            [message("reticulating splines", conversation: "c1")],
+            for: ref(
+                source("rollout.jsonl"), projectPath: "/w/fd", agent: .codex,
+                workingDirectory: "/w/fd/.claude/worktrees/hunt"
+            ),
+            offset: 99
+        )
+
+        let location = try XCTUnwrap(index.transcriptLocation(forConversation: "c1"))
+        XCTAssertEqual(location.workingDirectory, "/w/fd/.claude/worktrees/hunt")
+        XCTAssertEqual(location.transcriptPath, source("rollout.jsonl").path)
+        XCTAssertEqual(location.agent, "codex")
+    }
+
+    /// A conversation known only from live ingest (no offset to report — the normal case for
+    /// a codex thread started since the last backfill) used to leave its source row unwritten
+    /// until a backfill eventually reached the same file, so this lookup answered "unknown"
+    /// for a conversation whose real directory and agent were known the moment it was ingested.
+    /// `ingest` now writes source metadata in the same call as the message rows regardless of
+    /// offset, so a live-ingest-only conversation resolves to its real values immediately.
+    func testTranscriptLocationReturnsTheRealAgentAndDirectoryForALiveIngestOnlyConversation() throws {
+        try index.ingest(
+            [message("reticulating splines", conversation: "c1")],
+            for: ref(
+                source("rollout.jsonl"), projectPath: "/w/fd", agent: .codex,
+                workingDirectory: "/w/fd/.claude/worktrees/hunt"
+            ),
+            offset: nil
+        )
+
+        let location = try XCTUnwrap(index.transcriptLocation(forConversation: "c1"))
+        XCTAssertEqual(location.workingDirectory, "/w/fd/.claude/worktrees/hunt")
+        XCTAssertEqual(location.transcriptPath, source("rollout.jsonl").path)
+        XCTAssertEqual(location.agent, "codex")
+    }
+
+    /// `search()` hits the same source row `transcriptLocation` does, over the same LEFT
+    /// JOIN — the other half of the fix above, proved the way the codex tab this bug actually
+    /// affected would surface it: through search results, not the resume lookup.
+    func testSearchReturnsTheRealAgentAndDirectoryForALiveIngestOnlyConversation() throws {
+        let ref = TranscriptRef(
+            url: URL(fileURLWithPath: "/tmp/rollout.jsonl"),
+            projectPath: "/w/fd",
+            accountHome: URL(fileURLWithPath: "/home/.codex"),
+            workingDirectory: "/w/fd/.claude/worktrees/hunt",
+            conversationID: "c1",
+            agent: .codex,
+            provenance: nil,
+            indexedName: nil,
+            modified: Date(timeIntervalSince1970: 0)
+        )
+        try index.ingest(
+            [IndexedMessage(
+                conversationID: "c1", role: .user, text: "reticulating splines",
+                timestamp: Date(timeIntervalSince1970: 10), offset: 0
+            )],
+            for: ref, offset: nil
+        )
+
+        let hits = try index.search("splines", projects: ["/w/fd"], limit: 10)
+        XCTAssertEqual(hits.count, 1)
+        XCTAssertEqual(hits[0].agent, "codex")
+        XCTAssertEqual(hits[0].workingDirectory, "/w/fd/.claude/worktrees/hunt")
+    }
+
+    /// The nil-offset branch above must not disturb the offset-bearing path's own overwrite
+    /// contract: a re-walk with changed provenance (a thread first seen live, later seen by
+    /// the backfill as a stale `exec` run) still replaces the row wholesale, offset included —
+    /// not merged column-by-column the way the nil-offset branch updates metadata in place.
+    func testARewalkWithAnOffsetStillReplacesProvenanceAndOffsetTogether() throws {
+        try index.ingest(
+            [message("hi", conversation: "c1")],
+            for: ref(source("a.jsonl"), projectPath: "/w/fd", provenance: nil), offset: nil
+        )
+        try index.ingest(
+            [message("later", conversation: "c1")],
+            for: ref(source("a.jsonl"), projectPath: "/w/fd", provenance: "exec"), offset: 4096
+        )
+
+        XCTAssertEqual(index.readOffset(for: source("a.jsonl")), 4096)
+        let hits = try index.search("later", projects: ["/w/fd"], limit: 10)
+        XCTAssertEqual(hits.first?.provenance, "exec")
+    }
+
+    /// Every other test that reaches the nil-offset `DO UPDATE` arm asserts only `offset` or
+    /// only a hit count, never a metadata column by value — so a swapped column in that arm's
+    /// `SET` list (`working_directory = excluded.agent`, say) would pass the whole suite. The
+    /// ordinary live case this arm exists for is exactly this shape: a thread the backfill
+    /// already indexed (an offset-bearing row already on disk) that is now streaming live
+    /// (a nil-offset ingest arrives after it).
+    func testLiveIngestOverABackfilledRowUpdatesMetadataWithoutDisturbingTheOffset() throws {
+        try index.ingest(
+            [message("hi", conversation: "c1")],
+            for: ref(source("a.jsonl"), projectPath: "/w/fd", agent: .claude, workingDirectory: "/a"),
+            offset: 4096
+        )
+        try index.ingest(
+            [message("later", conversation: "c1")],
+            for: ref(source("a.jsonl"), projectPath: "/w/fd", agent: .codex, workingDirectory: "/b"),
+            offset: nil
+        )
+
+        let location = try XCTUnwrap(index.transcriptLocation(forConversation: "c1"))
+        XCTAssertEqual(location.agent, "codex")
+        XCTAssertEqual(location.workingDirectory, "/b")
+        XCTAssertEqual(index.readOffset(for: source("a.jsonl")), 4096)
+    }
+
+    func testTranscriptLocationReturnsNilForAConversationWithNoMessages() throws {
+        XCTAssertNil(try index.transcriptLocation(forConversation: "never-indexed"))
+    }
+
+    /// The divergence `FleetService.openConversation` has to avoid: a naming pass leaves the
+    /// `conversation` table unwritten for a conversation it could not name (an
+    /// `exec`-provenance codex rollout, say), but `source` — what this lookup reads — is
+    /// written for every ingested message regardless of whether naming succeeded.
+    func testTranscriptLocationReturnsTheCodexAgentForAConversationTheNamingPassNeverNamed() throws {
+        try index.ingest(
+            [message("reticulating splines", conversation: "c1")],
+            for: ref(source("rollout.jsonl"), projectPath: "/w/fd", agent: .codex),
+            offset: 99
+        )
+
+        let location = try XCTUnwrap(index.transcriptLocation(forConversation: "c1"))
+        XCTAssertEqual(location.agent, "codex")
+        XCTAssertTrue(
+            try index.conversationNames().isEmpty,
+            "sanity: this conversation really was never named"
+        )
+    }
+
+    /// The v2 file on disk is discarded rather than migrated — the index is derived data and
+    /// its whole migration story is "delete it and rebuild". Built as a REAL v2 file (an
+    /// actual index, downgraded on disk afterward) rather than two fresh opens of the same
+    /// path: two fresh opens exercise no v2 file at all and would pass even if the rebuild
+    /// path were completely broken.
+    func testOpeningAVersionTwoIndexRebuildsIt() throws {
+        let url = directory.appendingPathComponent("legacy.sqlite")
+        var first: SQLiteSearchIndex? = try SQLiteSearchIndex(at: url)
+        try first!.ingest(
+            [message("rename")], for: ref(source("a.jsonl"), projectPath: "/w/fd"), offset: 1
+        )
+        XCTAssertEqual(try first!.search(#""rename"*"#, projects: ["/w/fd"], limit: 10).count, 1)
+        // Closed before the raw connection below opens the same file: WAL mode gives the two
+        // connections separate views of it, and the raw one otherwise hits "disk I/O error"
+        // trying to write through the still-open handle's memory-mapped WAL region.
+        first = nil
+
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        XCTAssertEqual(
+            sqlite3_exec(db, "UPDATE meta SET value = '2' WHERE key = 'schema_version'", nil, nil, nil),
+            SQLITE_OK
+        )
+        sqlite3_close(db)
+
+        let reopened = try SQLiteSearchIndex(at: url)
+
+        // The v2 rows are gone — the file was discarded and recreated, not migrated in place.
+        XCTAssertEqual(try reopened.conversationNames().count, 0)
+        XCTAssertEqual(
+            try reopened.search(#""rename"*"#, projects: ["/w/fd"], limit: 10).count, 0
+        )
+
+        // And the recreated file is a real, usable v3 index, not merely an empty one.
+        try reopened.ingest(
+            [message("rebuilt")], for: ref(source("b.jsonl"), projectPath: "/w/fd"), offset: 1
+        )
+        XCTAssertEqual(
+            try reopened.search(#""rebuilt"*"#, projects: ["/w/fd"], limit: 10).count, 1
         )
     }
 }

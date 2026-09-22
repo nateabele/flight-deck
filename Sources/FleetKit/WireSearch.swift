@@ -19,11 +19,28 @@ public struct WireConversation: Codable, Equatable, Sendable, Identifiable {
     public let id: String
     public let name: String
     public let projectPath: String
+    /// `AgentID.rawValue`. See `TranscriptHit.agent` for why this crosses as a raw string
+    /// rather than an `AgentID` — `FleetKit` compiles for iOS and has no adapters to name.
+    public let agent: String
 
-    public init(id: String, name: String, projectPath: String) {
+    public init(id: String, name: String, projectPath: String, agent: String = "claude") {
         self.id = id
         self.name = name
         self.projectPath = projectPath
+        self.agent = agent
+    }
+
+    /// Hand-written so a payload from a build that predates this field decodes as "claude"
+    /// rather than throwing — the same reasoning as `TranscriptHit.init(from:)`.
+    /// `WireConversationCatalogue` decodes its whole `conversations` array in one shot, so an
+    /// old-shaped element failing here would otherwise drop every conversation in the reply,
+    /// not just the one missing the field.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        projectPath = try c.decode(String.self, forKey: .projectPath)
+        agent = try c.decodeIfPresent(String.self, forKey: .agent) ?? "claude"
     }
 }
 

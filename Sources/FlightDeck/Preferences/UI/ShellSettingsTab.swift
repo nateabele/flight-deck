@@ -146,6 +146,20 @@ struct ShellSettingsTab: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Recovery") {
+                Toggle(
+                    "Retry after API errors",
+                    isOn: Binding(
+                        get: { preferences.autoRetriesAPIErrors },
+                        set: { preferences.autoRetriesAPIErrors = $0 }
+                    )
+                )
+                .accessibilityIdentifier("prefs-auto-retry-api-errors")
+                Text("When a turn stops because the API was overloaded or rate-limited, Flight Deck waits and then types \"\(SessionStore.resumePrompt)\" into the session, backing off up to 15 minutes between tries until it succeeds. Only failures the agent reports as temporary are retried, and anything you type cancels it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 Text("Applies to new sessions. Running sessions keep the environment they started with.")
                     .font(.caption)

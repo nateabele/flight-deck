@@ -67,6 +67,12 @@ targets:
           copyFiles:
             destination: resources
             subpath: ""
+      # A folder reference, not a plain group — a plain group flattens subdirectories,
+      # which would destroy `.claude-plugin/` and `hooks/`. This is the Claude Code
+      # plugin Flight Deck loads into its own sessions to receive lifecycle hooks.
+      - path: Resources/ClaudePlugin
+        type: folder
+        buildPhase: resources
     dependencies:
       - framework: vendor/ghostty-artifacts/GhosttyKit.xcframework
         embed: false
@@ -137,6 +143,12 @@ targets:
       # "Flight Deck.app". Without this entry the resource lookup fails and the test asserts
       # nothing, which would defeat its entire purpose.
       - path: Sources/FlightDeck/GhosttyDefaults.conf
+        buildPhase: resources
+      # Same reason as GhosttyDefaults.conf above: `Bundle(for: Self.self)` under `xctest`
+      # is this test bundle, not "Flight Deck.app", so ClaudePluginPayloadTests needs its
+      # own copy of the folder reference rather than reaching the app target's.
+      - path: Resources/ClaudePlugin
+        type: folder
         buildPhase: resources
     dependencies:
       - target: FlightDeck

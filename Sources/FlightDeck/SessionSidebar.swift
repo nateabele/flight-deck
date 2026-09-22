@@ -307,6 +307,9 @@ private struct SessionRow: View {
     ///
     /// Selecting first is deliberate: renaming a row should also make it the active one.
     private func beginRename() {
+        #if DEBUG
+        store.tagNextSelectionChange("beginRename()")
+        #endif
         store.selectedSessionID = session.id
         draft = session.title
         isEditing = true
@@ -374,7 +377,27 @@ struct SessionSidebar: View {
     var body: some View {
         let conflicted = store.conflictedSessionIDs
         let mismatched = store.accountMismatchedSessionIDs
-        return List(selection: $store.selectedSessionID) {
+        // TEMPORARY DIAGNOSTIC INSTRUMENTATION — double-click session-swap investigation
+        // (`.superpowers/sdd/quiet-foraging-babbage/task-2-brief.md`). In Debug, wraps the
+        // plain `$store.selectedSessionID` binding just to tag the write with a reason before
+        // it lands, since `SessionStore.selectionChangeReason` is private. In Release this
+        // whole `#if` compiles out and `selectionBinding` is exactly `$store.selectedSessionID`
+        // — no new code in the shipped path. Revert to `$store.selectedSessionID` directly
+        // once the real fix lands — see the full removal checklist on `SessionStore.swift`'s
+        // `selectedSessionID` `didSet` comment, which also covers `beginRename()`'s
+        // `tagNextSelectionChange` call just above in this file.
+        #if DEBUG
+        let selectionBinding = Binding<UUID?>(
+            get: { store.selectedSessionID },
+            set: { newValue in
+                store.tagNextSelectionChange("List(selection:) binding")
+                store.selectedSessionID = newValue
+            }
+        )
+        #else
+        let selectionBinding = $store.selectedSessionID
+        #endif
+        return List(selection: selectionBinding) {
             // One flat ForEach rather than a Section per project: `.onMove` is not supported
             // on a ForEach that yields Sections, and this is what lets one gesture reorder
             // both projects and sessions. See `SidebarRow`.
@@ -455,6 +478,23 @@ struct SessionSidebar: View {
                 else { return false }
                 store.renameRequest = selected
                 return true
+            },
+            // Click-to-collapse. The monitor reports every row it saw a click on, project header
+            // or not, so the `case .project` guard is load-bearing rather than defensive:
+            // `SidebarRow.projectID` is total across all three cases, and without the guard a
+            // click on a *session* row would collapse its parent out from under itself.
+            toggleRow: { index in
+                guard index >= 0, index < store.sidebarRows.count else { return }
+                guard case .project(let id) = store.sidebarRows[index] else { return }
+                store.setCollapsed(!(store.repos.first { $0.id == id }?.isCollapsed ?? false),
+                                   forProjectAt: id)
+            },
+            // How the monitor proves the row it decides about is the row that was pressed. A
+            // session closing in another project removes a row, and every index below it shifts;
+            // `SidebarRow.id` does not move.
+            rowIdentity: { index in
+                guard index >= 0, index < store.sidebarRows.count else { return nil }
+                return store.sidebarRows[index].id
             }
         )
         .dropDestination(for: URL.self) { urls, _ in

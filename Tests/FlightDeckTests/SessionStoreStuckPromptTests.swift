@@ -85,7 +85,7 @@ final class SessionStoreStuckPromptTests: XCTestCase {
         harness.store.now = { [weak self] in self?.clock ?? Date() }
         let transcript = Transcript()
         self.transcript = transcript
-        harness.service.promptTailForTesting = { _, _ in transcript.lines }
+        harness.service.promptTailForTesting = { _, _ in (transcript.lines, false) }
 
         let session = harness.store.newSession(in: tmp)
         harness.store.applyRegistryForTesting([session.id: SessionStatus(activity: .waiting)])
@@ -339,7 +339,10 @@ final class SessionStoreStuckPromptTests: XCTestCase {
     func testTheProbeReturnsTheRawWireCodeNotAStructDump() throws {
         let (store, tab) = openFixtureSession()
 
-        XCTAssertEqual(store.openPromptProbe?(tab), "prompt_changed")
+        guard case .failure(let code) = try XCTUnwrap(store.openPromptProbe?(tab)) else {
+            return XCTFail("expected a refusal — the fixture's transcript starts empty")
+        }
+        XCTAssertEqual(code.code, "prompt_changed")
     }
 
     // MARK: - pathMatches and expectedTranscriptURL

@@ -38,7 +38,7 @@ final class PromptIdentityWireTests: XCTestCase {
     private struct Fixture {
         let store: SessionStore
         let replicator: FleetReplicator
-        /// Held, not merely built. `openPromptCallReader` captures this weakly — `FleetService`
+        /// Held, not merely built. `openPromptProbe` captures this weakly — `FleetService`
         /// owns the one real instance and a strong capture there would be a cycle through the
         /// store — so a fixture that let it go out of scope would silently report no dialogs
         /// and every assertion below would pass for the wrong reason.
@@ -110,12 +110,10 @@ final class PromptIdentityWireTests: XCTestCase {
         prompts.lifecycleSink = { _ in }
         prompts.tail = { _, _ in
             transcript.reads += 1
-            return transcript.lines
+            return (transcript.lines, false)
         }
-        store.openPromptCallReader = { [weak prompts] session in
-            guard case .success(let open) = prompts?.pushedOpenPrompt(inSession: session)
-            else { return nil }
-            return open.callID
+        store.openPromptProbe = { [weak prompts] session in
+            prompts?.pushedOpenPrompt(inSession: session).map(\.callID)
         }
         let session = store.newSession(in: tmp)
         let replicator = attachedReplicator(to: store)

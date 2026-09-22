@@ -94,7 +94,7 @@ final class AnswerTriggerTests: XCTestCase {
 
     private func show(_ trigger: AnswerTrigger, _ line: String) {
         let lines = [SourceLine(offset: 0, text: line)]
-        trigger.prompts.tail = { _, _ in lines }
+        trigger.prompts.tail = { _, _ in (lines, false) }
     }
 
     /// The reply, as a dictionary, because the caller is a script reading JSON and that is

@@ -21,6 +21,17 @@ struct ClaudeAdapter: AgentAdapter {
     static let textChannel: AgentTextChannel? = ClaudeTextChannel()
     static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
 
+    /// Claude's own transience predicate, carried on the transcript record — see
+    /// `ClaudeTurnRecovery`.
+    static let turnRecovery: AgentTurnRecovery? = ClaudeTurnRecovery()
+
+    /// **`nil`, and that is an answer, not a gap.** Claude's rename is one line typed through
+    /// `textChannel` — `/rename <name>`⏎, submitted in a single shot — so it never has a
+    /// second stage for `AgentRenameTyping` to drive; see `CodexAdapter.renameTyping` for the
+    /// agent that does. Do not touch claude's rename path to "support" this protocol — it is
+    /// the path the 54769a4 regression came from, and it already works unchanged.
+    static let renameTyping: AgentRenameTyping? = nil
+
     /// Claude mints its own conversation id — Flight Deck has always chosen the tab's own —
     /// so there is nothing to negotiate and nothing that can come back different.
     static let negotiatesIdentity = false
@@ -61,6 +72,9 @@ struct ClaudeAdapter: AgentAdapter {
     /// `ClaudeOpenCall`, which exists so there is exactly one implementation of the
     /// call/result pairing rather than two that can disagree about which dialog is up.
     static let openPromptReader: AgentOpenPromptReader? = ClaudeOpenPromptReader()
+
+    static let searchCorpus: AgentSearchCorpus? = ClaudeSearchCorpus()
+
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
         category: String(describing: ClaudeAdapter.self)
@@ -142,6 +156,25 @@ struct ClaudeAdapter: AgentAdapter {
     /// unlike codex's one-shot `codex login`.
     func loginInvocation(for account: AgentAccount) -> LoginInvocation {
         LoginInvocation(command: "claude", inject: "/login")
+    }
+
+    /// Where the bundled plugin's `record.sh` appends, and the only thing that switches the
+    /// hook feed on: the script's first line is `[ -n "${FLIGHT_DECK_EVENT_DIR:-}" ] || exit 0`,
+    /// so a session launched without this reports nothing at all and stays `.unknown` for the
+    /// life of the process.
+    ///
+    /// On `launchEnvironment` rather than on `environment(for:)` because a tab whose login was
+    /// deleted launches with no account — see `AgentAdapter.launchEnvironment`. The default
+    /// implementation there folds this into `environment(for:)`, so the Tools-menu path keeps
+    /// receiving it too.
+    ///
+    /// Creating the directory here rather than at launch keeps the hook script's single
+    /// append from ever hitting a missing directory — it has no `mkdir` of its own, by design:
+    /// a hook that fails blocks the agent.
+    var launchEnvironment: [String: String] {
+        let events = ClaudePluginLocation.eventDirectory
+        try? FileManager.default.createDirectory(at: events, withIntermediateDirectories: true)
+        return ["FLIGHT_DECK_EVENT_DIR": events.path]
     }
 
     /// A codex payload here is a programming error, not a runtime condition: the store picks

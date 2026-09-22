@@ -79,7 +79,9 @@ final class CodexLaunchFailureTests: XCTestCase {
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.
         static let textChannel: AgentTextChannel? = nil
+        static let renameTyping: AgentRenameTyping? = nil
         static let dialogDriver: AgentDialogDriver? = nil
+        static let turnRecovery: AgentTurnRecovery? = CodexAdapter.turnRecovery
         static let negotiatesIdentity = true
         static let needsRuntimeStart = true
         static let hasStatusRegistry = false
@@ -97,6 +99,7 @@ final class CodexLaunchFailureTests: XCTestCase {
             CodexAdapter.identity(fromHomeData: data)
         }
         static let openPromptReader: AgentOpenPromptReader? = CodexAdapter.openPromptReader
+        static let searchCorpus: AgentSearchCorpus? = CodexAdapter.searchCorpus
         private var resume: CheckedContinuation<Void, Never>?
         private var entered: CheckedContinuation<Void, Never>?
         private var hasEntered = false

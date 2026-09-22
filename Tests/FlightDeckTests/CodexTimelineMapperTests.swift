@@ -110,6 +110,120 @@ final class CodexTimelineMapperTests: XCTestCase {
         XCTAssertEqual(items[0].body.truncatedBytes, 0)
     }
 
+    /// codex-cli ≥0.151's single envelope for a self-originated thread — a `UserMessage`
+    /// item's content entries carry `"type":"text"` (lowercase) and a `text_elements` field,
+    /// exactly as the TUI writes it. Same field-pinning discipline as the old-format user
+    /// turn test above.
+    func testAnItemCompletedUserMessageIsAUserTurnAndNothingMore() {
+        let items = items("""
+            {"timestamp":"2026-09-09T19:50:11.639Z","type":"event_msg","payload":\
+            {"type":"item_completed","thread_id":"01a0878d-3172-7c60-ac84-2a9805894a60",\
+            "turn_id":"01a087b8-819c-79c0-9035-ba7c627ace07","item":{"type":"UserMessage",\
+            "id":"01a087b8-83b7-7780-a008-f43c3ba4c4cd","content":[{"type":"text",\
+            "text":"Review this plan","text_elements":[]}]},\
+            "started_at_ms":1788983411639,"completed_at_ms":1788983411639}}
+            """, at: 640)
+        XCTAssertEqual(items.map(\.kind), [.userTurn])
+        XCTAssertEqual(items[0].id, "640#0",
+                       "the row id is still the line's byte offset, not item[\"id\"] — "
+                       + "TimelineReader pages on the offset")
+        XCTAssertEqual(items[0].at, "2026-09-09T19:50:11.639Z",
+                       "at is still record[\"timestamp\"], not started_at_ms/completed_at_ms")
+        XCTAssertEqual(items[0].status, .complete)
+        XCTAssertEqual(items[0].body.text, "Review this plan")
+        XCTAssertNil(items[0].body.summary)
+        XCTAssertNil(items[0].body.tool)
+        XCTAssertNil(items[0].body.callID)
+        XCTAssertFalse(items[0].body.isError)
+        XCTAssertEqual(items[0].body.truncatedBytes, 0)
+    }
+
+    /// The same envelope's `AgentMessage` item spells its content entries' `type` with a
+    /// capital `"Text"` — the opposite case from `UserMessage`'s — which is exactly why the
+    /// mapper must not branch on that field at all.
+    func testAnItemCompletedAgentMessageWithCommentaryPhaseIsAssistantTextAndNothingMore() {
+        let items = items("""
+            {"timestamp":"2026-09-09T19:50:15.190Z","type":"event_msg","payload":\
+            {"type":"item_completed","thread_id":"01a0878d-3172-7c60-ac84-2a9805894a60",\
+            "turn_id":"01a087b8-819c-79c0-9035-ba7c627ace07","item":{"type":"AgentMessage",\
+            "id":"msg_05cc3cb7d26c1d38016aa1b875efd087d09e9bf3b0d58c1b31",\
+            "content":[{"type":"Text","text":"I will review the plan"}],\
+            "phase":"commentary"},\
+            "started_at_ms":1788983413929,"completed_at_ms":1788983415190}}
+            """, at: 1280)
+        XCTAssertEqual(items.map(\.kind), [.assistantText])
+        XCTAssertEqual(items[0].id, "1280#0")
+        XCTAssertEqual(items[0].at, "2026-09-09T19:50:15.190Z")
+        XCTAssertEqual(items[0].status, .complete)
+        XCTAssertEqual(items[0].body.text, "I will review the plan")
+        XCTAssertNil(items[0].body.summary)
+        XCTAssertNil(items[0].body.tool)
+        XCTAssertNil(items[0].body.callID)
+        XCTAssertFalse(items[0].body.isError)
+        XCTAssertEqual(items[0].body.truncatedBytes, 0)
+    }
+
+    /// `phase` is `"commentary"` OR `"final_answer"` — this proves the mapper does not filter
+    /// on it. A mapper that only handled `"commentary"` would pass every test above while
+    /// silently dropping every final reply.
+    func testAnItemCompletedAgentMessageWithFinalAnswerPhaseIsAlsoAssistantText() {
+        let items = items("""
+            {"timestamp":"2026-09-03T20:46:05.000Z","type":"event_msg","payload":\
+            {"type":"item_completed","thread_id":"01a06905-661b-77a0-b20b-7c63ff291615",\
+            "turn_id":"01a06905-6670-7501-85ca-05ea852e6b88","item":{"type":"AgentMessage",\
+            "id":"msg_05dd4aba166795b8016a99dc8879e087d1aa98cd58a904ede2",\
+            "content":[{"type":"Text","text":"Findings are ready"}],\
+            "phase":"final_answer"},\
+            "started_at_ms":1788468365000,"completed_at_ms":1788468365100}}
+            """)
+        XCTAssertEqual(items.map(\.kind), [.assistantText])
+        XCTAssertEqual(items[0].body.text, "Findings are ready")
+    }
+
+    /// Body text is every content entry's text concatenated in order, not just the first.
+    func testAnItemCompletedMultiEntryContentIsConcatenatedInOrder() {
+        let items = items("""
+            {"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage",\
+            "content":[{"type":"Text","text":"Hello "},{"type":"Text","text":"world"}],\
+            "phase":"commentary"}}}
+            """)
+        XCTAssertEqual(items[0].body.text, "Hello world")
+    }
+
+    /// Empty content, and content whose entries carry no usable text, both degrade to "no
+    /// text" — matching every existing prose arm's `!text.isEmpty` guard — rather than
+    /// emitting a blank row.
+    func testAnItemCompletedWithNoUsableTextEmitsNothing() {
+        XCTAssertTrue(items("""
+            {"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage",\
+            "content":[]}}}
+            """).isEmpty, "empty content array")
+        XCTAssertTrue(items("""
+            {"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage",\
+            "content":[{"type":"Text","text":""}],"phase":"commentary"}}}
+            """).isEmpty, "an entry with empty text")
+    }
+
+    /// The five item types deliberately NOT mapped, so a later "finish the job" addition trips
+    /// a test instead of silently doubling the timeline:
+    /// - `Reasoning` — `summary_text`/`raw_content` are empty in every surveyed record; there
+    ///   is no source left to map, a measured loss rather than an oversight.
+    /// - `CommandExecution` / `McpToolCall` / `FileChange` — a finer-grained decomposition of
+    ///   operations `response_item` already supplies as `toolCall`/`toolResult` rows; mapping
+    ///   both would show every operation twice.
+    /// - `ContextCompaction` — bookkeeping, like `token_count` and `turn_context`.
+    func testAnItemCompletedOfAnyDeliberatelyUnmappedTypeEmitsNothing() {
+        for line in [
+            #"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","id":"rs_1","summary_text":[],"raw_content":[]}}}"#,
+            #"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"exec_1","command":["pwd"],"status":"completed"}}}"#,
+            #"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"McpToolCall","id":"exec_2","server":"qartez","tool":"qartez_map","status":"completed"}}}"#,
+            #"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","id":"exec_3","changes":{}}}}"#,
+            #"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"ContextCompaction","id":"01a087c7"}}}"#,
+        ] {
+            XCTAssertTrue(items(line).isEmpty, "\(line.prefix(60)) should map to nothing")
+        }
+    }
+
     /// **`response_item` / `reasoning` is `agent_reasoning` again, with ciphertext attached.**
     /// Its `summary` repeats the event's text word for word — 1268 `agent_reasoning` records
     /// and 1268 non-empty `reasoning` summaries in a survey of 494 rollouts on the build

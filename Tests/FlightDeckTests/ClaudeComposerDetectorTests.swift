@@ -51,6 +51,24 @@ final class ClaudeComposerDetectorTests: XCTestCase {
         XCTAssertTrue(ClaudeTextChannel.isComposerBox(try captured("busy-queued-message.captured")))
     }
 
+    /// **A titled top border is still a composer.** Live production capture, 2026-09-17: a
+    /// Claude Code build newer than every pinned fixture here (banner read "Update installed
+    /// · Restart to update") draws the tab's own title into the rule directly above the
+    /// marker — `──…── New Phone Sessions ─` instead of a bare run of `─` — which made
+    /// `hasComposerBox` reject a screen that was a completely ordinary, empty, present
+    /// composer. Authored from `idle-empty-box.captured` with only that one line changed, the
+    /// same way `testTheLastUnruledRowOfADialogListIsNotAComposer` derives its authored shape.
+    func testATitledTopBorderIsStillAComposer() throws {
+        // Line-indexed, not `replacingOccurrences`: the fixture's two rules are byte-identical,
+        // and only the one directly above the marker (index 5, the sixth line) gets a title —
+        // the closing rule below stays plain, matching the real capture exactly.
+        var lines = try captured("idle-empty-box.captured").components(separatedBy: "\n")
+        let plainRule = lines[5]
+        XCTAssertTrue(InputBar.isRule(plainRule), "fixture line 6 must be the top rule")
+        lines[5] = String(plainRule.dropLast(" New Phone Sessions ─".count)) + " New Phone Sessions ─"
+        XCTAssertTrue(ClaudeTextChannel.isComposerBox(lines.joined(separator: "\n")))
+    }
+
     // MARK: - The moment after submitting, before output arrives
 
     /// **The one mid-turn window the gate does refuse, and correctly.** The box holds the
