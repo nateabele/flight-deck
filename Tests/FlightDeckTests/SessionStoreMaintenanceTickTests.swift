@@ -110,4 +110,16 @@ final class SessionStoreMaintenanceTickTests: XCTestCase {
         XCTAssertEqual(spy.events.last, .ret, "Return must arrive after the paste closes")
         XCTAssertNil(store.promptQueue[id], "typed, so retired")
     }
+
+    /// The wiring that makes the fix above real in production, mirroring
+    /// `DisplayWakeTests.testTheRealWakerIsWiredIn`: that test proves a *stored property*
+    /// survives `convenience init`; this proves a *registration* does, for a line with no
+    /// property to inspect. Deleting `clock.add(self) { ... }` from `convenience init` is
+    /// otherwise undetectable by this file — `testACodexOnlyFleetStillTypesAQueuedPrompt`
+    /// above drives `maintenanceTick()` through the `maintenanceTickForTesting()` seam, which
+    /// bypasses that line entirely, so every other test here would stay green.
+    func testTheMaintenanceTickIsRegisteredOnTheRealClock() {
+        let store = SessionStore(ghostty: nil, persistence: nil)
+        XCTAssertTrue(store.isRegisteredForMaintenanceTickTesting)
+    }
 }
