@@ -14,11 +14,20 @@ import FleetKit
 /// | Not transient | `testAPermanentErrorDoesNotArm` |
 /// | Agent has no classifier | `testNothingArmsForAnAgentWithNoTurnRecovery` |
 /// | The session started working | `testGoingBusyCancelsTheQueuedNudge` |
+/// | The session was ALREADY working | `testNothingQueuesIntoASessionThatWasAlreadyBusy`,
+///   and `testACodexTabIsRetriedAndIsRefusedWhileItIsBusy` for the agent it bites hardest |
 /// | Progress clears the error | `testProgressClearsTheErrorAndDisarms` |
 /// | Tab closed | `testClosingTheTabClearsRetryState` |
 /// | Preference off | `testNothingArmsWhenThePreferenceIsOff`, and
 ///   `testTurningThePreferenceOffMidBackoffStopsIt` for the mid-outage toggle |
 /// | Nothing types twice | `testOneTickInsideASettleWindowTypesOnce` |
+///
+/// **And the stop that is not a stop: the backoff itself.** The nudge is a user record, so
+/// typing it produces progress, and progress clears the error the rung lives in. Without the
+/// episode memory the ladder would be destroyed by the very nudge it scheduled and a long
+/// outage would be ridden at roughly a nudge every 45 seconds, forever.
+/// `testTheLadderClimbsAcrossTheNudgeThatClearsTheError` is the round trip that proves it;
+/// every other rung assertion here is reachable without ever making that trip.
 ///
 /// **Time is driven by assignment, never by sleeping.** `SessionStore.now` is the existing
 /// test seam and every deadline in the scheduler is read through it, so a test reaches a
@@ -43,6 +52,26 @@ final class SessionStoreAPIRetryTests: XCTestCase {
     private struct SilentReporter: AgentLaunchFailureReporting {
         func report(_ error: AgentLaunchError) {}
     }
+
+    /// Enough of an app-server to create and settle a codex thread with no `codex` process
+    /// ever spawned — same shape as `SessionStoreMaintenanceTickTests.ScriptedTransport`.
+    private final class ScriptedTransport: CodexTransport {
+        var onLine: ((String) -> Void)?
+        func send(_ line: String) {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8))
+                    as? [String: Any],
+                  let method = obj["method"] as? String, let id = obj["id"] as? Int else { return }
+            switch method {
+            case "thread/start":
+                onLine?(#"{"id":\#(id),"result":{"thread":{"id":"\#(Self.thread)","cwd":"/w/a","path":"/r/x.jsonl"}}}"#)
+            default:
+                onLine?(#"{"id":\#(id),"result":{}}"#)
+            }
+        }
+        static let thread = "01a018c3-4f2e-7c11-9d3a-2b6e5c04af71"
+    }
+
+    private struct CodexTabUnavailable: Error {}
 
     /// A hand-driven clock. A reference type because `SessionStore.now` is an escaping
     /// closure and the closure must see later assignments — and because capturing the box
@@ -115,12 +144,79 @@ final class SessionStoreAPIRetryTests: XCTestCase {
         return Harness(store: store, preferences: preferences, tab: tab, spy: spy, clock: clock)
     }
 
+    /// Codex's real idle composer shape — one row, the placeholder, and the status-line footer
+    /// `CodexTextChannel.hasFooter` requires directly beneath it.
+    private static let codexComposerViewport =
+        "› Ask Codex to do anything\n\n  gpt-5.6-sol default · /tmp/work"
+
+    /// One live codex tab, with **no `applyRegistryForTesting` call anywhere** — codex has no
+    /// status registry, and the whole point of the codex half of this file is what its status
+    /// is without one. See `testACodexTabIsRetriedAndIsRefusedWhileItIsBusy`.
+    private func makeCodexHarness(autoRetry: Bool = true) async throws -> Harness {
+        let preferences = PreferencesStore(persistence: MemoryPreferences())
+        preferences.autoRetriesAPIErrors = autoRetry
+        let store = SessionStore(
+            provider: StubProvider(), persistence: nil, preferences: preferences
+        )
+        store.transcriptsRootOverride = projectsRoot
+        store.statusRootOverride = projectsRoot
+        // Never the user's real `~/.codex/session_index.jsonl`: this creates a codex tab.
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
+        store.launchFailureReporter = SilentReporter()
+        let spy = SpyInjector()
+        spy.viewportOverride = Self.codexComposerViewport
+        store.injectorOverride = spy
+        store.injectionSettle = { $0() }
+        let clock = Clock()
+        store.now = { clock.time }
+        // Filed under the account the tab will actually resolve to. This store HAS
+        // preferences, so the accounts migration seeds a built-in account per agent and the
+        // key is that account's id, not nil — an override filed under nil would silently not
+        // be found, and for codex "not found" means spawning a real `codex app-server`.
+        store.overrideAdapter(
+            CodexAdapter(rpc: CodexRPC(transport: ScriptedTransport()), rolloutExists: { _ in true }),
+            for: .codex, account: preferences.resolvedAccountID(for: .codex, in: nil)
+        )
+        guard case .success(let tab) = await store.createSession(agent: .codex, in: tmp.path) else {
+            XCTFail("codex tab creation must succeed against a scripted transport")
+            throw CodexTabUnavailable()
+        }
+        spy.events.removeAll()
+        return Harness(store: store, preferences: preferences, tab: tab, spy: spy, clock: clock)
+    }
+
+    /// The nudge text an agent's own recovery asks for.
+    ///
+    /// Asserting against this rather than against `SessionStore.resumePrompt` is what pins the
+    /// per-agent path: the two strings are equal today, so a `resumePrompt` assertion would
+    /// stay green even if the scheduler ignored the capability and typed the constant. Returns
+    /// non-optionally so a missing recovery fails loudly instead of matching a nil expectation.
+    private func resumeText(for agent: AgentID,
+                            file: StaticString = #filePath, line: UInt = #line) -> String {
+        guard let text = agent.turnRecovery?.resumeText else {
+            XCTFail("\(agent) has no turn recovery, so there is no nudge text to assert against",
+                    file: file, line: line)
+            return "<no recovery>"
+        }
+        return text
+    }
+
     /// The failure this whole feature exists for — claude's own record for an overloaded API.
     /// Carries no retry state, because an agent's report never does: that is the store's to
     /// add, which is what keeps `setAPIError` the single writer.
     private static let transient = SessionAPIError(status: 529, kind: "overloaded", isTransient: true)
     /// The failure that must never be retried. Retrying a malformed request just re-sends it.
     private static let permanent = SessionAPIError(status: 400, kind: "invalid_request", isTransient: false)
+    /// Codex's own vocabulary for a capacity failure — the rollout's snake_case spelling,
+    /// captured by the probe and matched by `CodexTurnRecovery`'s allowlist.
+    ///
+    /// **Deliberately not `Self.transient`.** Claude's `"overloaded"` is not on codex's list,
+    /// and the first draft of the codex test below used the shared fixture and failed to arm —
+    /// which is the classifier being genuinely consulted per agent rather than the scheduler
+    /// deciding transience for itself. `isTransient` is set as `CodexEventMapper` would set
+    /// it; `CodexTurnRecovery` ignores the flag and reads `kind`, so it is not a backdoor.
+    private static let codexTransient = SessionAPIError(
+        status: 429, kind: "response_too_many_failed_attempts", isTransient: true)
 
     /// `nextRetryAt` carries ±10% jitter by design, so it is asserted as a window rather than
     /// a value. The windows of two adjacent rungs never overlap — rung 1 tops out at 33s and
@@ -157,6 +253,13 @@ final class SessionStoreAPIRetryTests: XCTestCase {
             SessionStore.retryDelay(forAttempt: SessionStore.retryBackoff.count + 1, jitter: 0),
             SessionStore.retryBackoffFloor,
             "the floor must begin exactly one rung past the ladder's last entry")
+        // `retryBackoff[attempt - 1]` TRAPS on a zero attempt, and the bounds check above it
+        // (`attempt <= count`) waves zero straight through — so an off-by-one in a *computed*
+        // attempt, which is how `restore` selects the floor, would crash the app rather than
+        // pick a wrong delay.
+        XCTAssertEqual(SessionStore.retryDelay(forAttempt: 0, jitter: 0), 30,
+                       "a zero attempt must clamp to the first rung, never trap")
+        XCTAssertEqual(SessionStore.retryDelay(forAttempt: -3, jitter: 0), 30)
     }
 
     func testJitterStaysWithinTenPercent() {
@@ -261,7 +364,7 @@ final class SessionStoreAPIRetryTests: XCTestCase {
         harness.time = due
         harness.store.maintenanceTickForTesting()
 
-        XCTAssertEqual(harness.store.pendingPrompts[harness.tab]?.text, SessionStore.resumePrompt,
+        XCTAssertEqual(harness.store.pendingPrompts[harness.tab]?.text, resumeText(for: .claude),
                        "the nudge goes through the queue that already cancels on busy")
         XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt, 2)
         assertDue(harness.store.apiErrors[harness.tab]?.nextRetryAt, rung: 60, from: due,
@@ -269,7 +372,7 @@ final class SessionStoreAPIRetryTests: XCTestCase {
 
         harness.store.maintenanceTickForTesting()
 
-        XCTAssertEqual(harness.spy.sent, [SessionStore.resumePrompt])
+        XCTAssertEqual(harness.spy.sent, [resumeText(for: .claude)])
         XCTAssertEqual(harness.spy.events.last, .ret, "Return must arrive after the paste closes")
         XCTAssertNil(harness.store.pendingPrompts[harness.tab], "typed, so retired")
     }
@@ -365,9 +468,14 @@ final class SessionStoreAPIRetryTests: XCTestCase {
         harness.store.apply(.apiError(Self.transient), to: harness.tab)
         XCTAssertNotNil(harness.store.apiErrors[harness.tab]?.retryAttempt, "armed to begin with")
 
+        XCTAssertEqual(harness.store.retryEpisodeCountForTesting, 1, "and remembered")
+
         harness.store.closeSession(harness.tab)
 
         XCTAssertNil(harness.store.apiErrors[harness.tab], "the entry goes with the tab")
+        XCTAssertEqual(harness.store.retryEpisodeCountForTesting, 0,
+                       "and so does the ladder memory, which deliberately outlives the entry — "
+                       + "a reopened tab reusing this id must start at rung 1")
         harness.time += 3600
         harness.store.maintenanceTickForTesting()
         XCTAssertNil(harness.store.pendingPrompts[harness.tab])
@@ -402,7 +510,7 @@ final class SessionStoreAPIRetryTests: XCTestCase {
         XCTAssertEqual(pending.count, 1, "and no second drive was started")
 
         while !pending.isEmpty { pending.removeFirst()() }
-        XCTAssertEqual(harness.spy.sent, [SessionStore.resumePrompt], "typed exactly once")
+        XCTAssertEqual(harness.spy.sent, [resumeText(for: .claude)], "typed exactly once")
         XCTAssertNil(harness.store.pendingPrompts[harness.tab], "typed, so retired")
     }
 
@@ -443,5 +551,236 @@ final class SessionStoreAPIRetryTests: XCTestCase {
                        "a different failure IS news and must still land")
         XCTAssertNil(harness.store.apiErrors[harness.tab]?.retryAttempt,
                      "and is re-judged on its own merits, not left on the old schedule")
+    }
+
+    // MARK: - Already working when the rung came due
+
+    /// **`cancelSupersededPrompts` cannot cover this, and that is the defect.** It fires on a
+    /// `StatusTransition` INTO busy, and it runs inside `applyRegistry` above the
+    /// `defer { maintenanceTick() }` — so a session that was *already* busy when the rung came
+    /// due produces no edge at all and nothing cancels the nudge. `inject` is no help either:
+    /// its idle/busy gate was deliberately removed in favour of composer presence.
+    ///
+    /// The tab is put busy BEFORE the clock reaches the rung and left there, so no transition
+    /// into busy ever happens inside the window this test measures.
+    func testNothingQueuesIntoASessionThatWasAlreadyBusy() {
+        let harness = makeHarness()
+        harness.store.apply(.apiError(Self.transient), to: harness.tab)
+        guard let due = harness.store.apiErrors[harness.tab]?.nextRetryAt else {
+            return XCTFail("nothing was armed, so there is no rung to come due")
+        }
+        harness.store.applyRegistryForTesting([harness.tab: SessionStatus(activity: .busy)])
+
+        harness.time = due
+        harness.store.maintenanceTickForTesting()
+
+        XCTAssertNil(harness.store.pendingPrompts[harness.tab],
+                     "the user is working in there; the resume text would land in their turn")
+        XCTAssertTrue(harness.spy.events.isEmpty, "not one keystroke")
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt, 1,
+                       "deferred, not consumed — no rung is spent on a nudge nobody sent")
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.nextRetryAt, due,
+                       "and the schedule stands, so it goes out as soon as the tab is free")
+
+        // `waiting` is refused on the same footing: a permission dialog is the user's turn.
+        harness.store.applyRegistryForTesting([harness.tab: SessionStatus(activity: .waiting)])
+        harness.store.maintenanceTickForTesting()
+        XCTAssertNil(harness.store.pendingPrompts[harness.tab], "a dialog is someone's turn too")
+
+        // The turn ends, still failed. Now — and only now — the nudge is allowed.
+        harness.store.applyRegistryForTesting([harness.tab: SessionStatus(activity: .idle)])
+        harness.store.maintenanceTickForTesting()
+        XCTAssertEqual(harness.store.pendingPrompts[harness.tab]?.text, resumeText(for: .claude),
+                       "the deferral is a wait, not a loss")
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt, 2)
+    }
+
+    /// **The codex half, and the reason the activity guard could not simply be `== .idle`.**
+    ///
+    /// Codex has no status registry, so `applyRegistry` never writes its status and this
+    /// harness never calls `applyRegistryForTesting`. The first assertion establishes what
+    /// `statuses[id]` therefore actually holds, rather than assuming it: `.idle`, seeded at
+    /// attachment by the `!hasStatusRegistry` branch in `startWatching` and written by
+    /// `applyActivity` from `CodexEventMapper` thereafter. Had it been nil, a guard spelled
+    /// `statuses[id]?.activity == .idle` would have disabled retry for codex outright —
+    /// silently re-creating the claude-only failure Task 5 exists to prevent.
+    ///
+    /// Codex is also where the busy case stops being a race: `CodexEventMapper` emits
+    /// `.apiError(nil)` only on `task_complete`, so a tab whose last turn failed and whose
+    /// user then retried by hand stays armed for the whole of that new turn — and rung 1 is
+    /// thirty seconds.
+    func testACodexTabIsRetriedAndIsRefusedWhileItIsBusy() async throws {
+        let harness = try await makeCodexHarness()
+
+        XCTAssertEqual(harness.store.statuses[harness.tab]?.activity, .idle,
+                       "a codex tab has a real status with no registry tick ever having run")
+
+        harness.store.apply(.apiError(Self.codexTransient), to: harness.tab)
+        guard let due = harness.store.apiErrors[harness.tab]?.nextRetryAt else {
+            return XCTFail("codex must arm like claude — the loop never learns an agent's name")
+        }
+
+        // The user retried by hand. The error is still standing: codex clears it only at
+        // `task_complete`.
+        harness.store.apply(.activity(.busy), to: harness.tab)
+        harness.time = due
+        harness.store.maintenanceTickForTesting()
+
+        XCTAssertNil(harness.store.pendingPrompts[harness.tab],
+                     "thirty seconds into the user's own turn is exactly when this bites")
+        XCTAssertTrue(harness.spy.events.isEmpty, "not one keystroke into codex's composer")
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt, 1, "deferred, not spent")
+
+        // That turn ends without clearing the failure.
+        harness.store.apply(.activity(.idle), to: harness.tab)
+        harness.store.maintenanceTickForTesting()
+        XCTAssertEqual(harness.store.pendingPrompts[harness.tab]?.text, resumeText(for: .codex),
+                       "and codex is nudged with its OWN recovery's text")
+
+        harness.store.maintenanceTickForTesting()
+        XCTAssertEqual(harness.spy.sent, [resumeText(for: .codex)],
+                       "typed into codex's real composer, through the one existing queue")
+    }
+
+    // MARK: - The ladder across a round trip
+
+    /// **The regression the episode memory exists for, and the one shape every other rung
+    /// assertion in this file misses.** They all check the rung inside a single unbroken
+    /// error entry. Production never stays there: the nudge is itself a user record, so
+    /// typing it produces progress, progress reports `.apiError(nil)`, and that removes the
+    /// entry — rung and all. The retry fails again seconds later and a fresh error arrives.
+    ///
+    /// Without a memory outside the entry that fresh error arms at rung 1 every time, and a
+    /// week-long outage is ridden at a nudge every ~45s forever rather than one per fifteen
+    /// minutes. The full round trip is run twice, so a fix that merely remembered "not the
+    /// first failure" and stuck at rung 2 fails too.
+    func testTheLadderClimbsAcrossTheNudgeThatClearsTheError() {
+        let harness = makeHarness()
+        harness.store.apply(.apiError(Self.transient), to: harness.tab)
+        guard let firstDue = harness.store.apiErrors[harness.tab]?.nextRetryAt else {
+            return XCTFail("nothing was armed, so there is no ladder to climb")
+        }
+        assertDue(firstDue, rung: 30, from: harness.time)
+
+        harness.time = firstDue
+        harness.store.maintenanceTickForTesting()   // queues the nudge
+        harness.store.maintenanceTickForTesting()   // and types it
+        XCTAssertEqual(harness.spy.sent, [resumeText(for: .claude)])
+        XCTAssertNil(harness.store.pendingPrompts[harness.tab], "typed, so retired")
+
+        // What typing it does in production: a user record lands, the transcript reports
+        // progress, and progress clears the entry the rung was living in.
+        harness.store.apply(.apiError(nil), to: harness.tab)
+        XCTAssertNil(harness.store.apiErrors[harness.tab])
+
+        // The revived turn dies on the same outage moments later.
+        harness.time = firstDue.addingTimeInterval(15)
+        harness.store.apply(.apiError(Self.transient), to: harness.tab)
+
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt, 2,
+                       "the ladder must survive the very event it scheduled")
+        assertDue(harness.store.apiErrors[harness.tab]?.nextRetryAt, rung: 60, from: harness.time,
+                  "a second rung 1 here IS the nudge-every-45-seconds bug")
+
+        // Round two, to prove it keeps climbing rather than parking on rung 2.
+        guard let secondDue = harness.store.apiErrors[harness.tab]?.nextRetryAt else {
+            return XCTFail("the second rung must be armed")
+        }
+        harness.time = secondDue
+        harness.store.maintenanceTickForTesting()
+        harness.store.maintenanceTickForTesting()
+        harness.store.apply(.apiError(nil), to: harness.tab)
+        harness.time = secondDue.addingTimeInterval(15)
+        harness.store.apply(.apiError(Self.transient), to: harness.tab)
+
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt, 3)
+        assertDue(harness.store.apiErrors[harness.tab]?.nextRetryAt, rung: 120, from: harness.time)
+    }
+
+    /// The other half of the decay ruling, and it is correct behaviour rather than a
+    /// concession: a session that genuinely recovers, runs clean for longer than the floor,
+    /// and only then fails again is a NEW outage and must start at thirty seconds. Decay is
+    /// by elapsed time precisely so nothing has to work out who caused the progress.
+    func testAnEpisodeDecaysSoAMuchLaterFailureStartsOver() {
+        let harness = makeHarness()
+        harness.store.apply(.apiError(Self.transient), to: harness.tab)
+        guard let due = harness.store.apiErrors[harness.tab]?.nextRetryAt else {
+            return XCTFail("nothing was armed, so there is no episode to decay")
+        }
+        harness.time = due
+        harness.store.maintenanceTickForTesting()
+        harness.store.maintenanceTickForTesting()
+        harness.store.apply(.apiError(nil), to: harness.tab)
+        XCTAssertEqual(harness.store.retryEpisodeCountForTesting, 1,
+                       "the ladder is remembered across the cleared error")
+
+        // Clean for longer than the floor.
+        harness.time = due.addingTimeInterval(SessionStore.retryBackoffFloor + 1)
+        harness.store.maintenanceTickForTesting()
+        XCTAssertEqual(harness.store.retryEpisodeCountForTesting, 0,
+                       "a decayed episode is dropped rather than leaked for the process's life")
+
+        harness.store.apply(.apiError(Self.transient), to: harness.tab)
+
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt, 1,
+                       "a new outage, not a continuation of the old one")
+        assertDue(harness.store.apiErrors[harness.tab]?.nextRetryAt, rung: 30, from: harness.time)
+    }
+
+    /// The preference toggle is symmetric: off stops the loop on the next tick, on picks it
+    /// back up. Before the re-arm pass, an error disarmed mid-outage stayed dead — nothing
+    /// re-armed it, because the only other arming site is a *new* failure report.
+    func testTurningThePreferenceBackOnResumesTheLoop() {
+        let harness = makeHarness()
+        harness.store.apply(.apiError(Self.transient), to: harness.tab)
+        harness.preferences.autoRetriesAPIErrors = false
+        harness.store.maintenanceTickForTesting()
+        XCTAssertNil(harness.store.apiErrors[harness.tab]?.retryAttempt, "disarmed, as before")
+
+        harness.preferences.autoRetriesAPIErrors = true
+        harness.store.maintenanceTickForTesting()
+
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt, 1,
+                       "an error still standing when the toggle comes back on is re-armed")
+        assertDue(harness.store.apiErrors[harness.tab]?.nextRetryAt, rung: 30, from: harness.time)
+
+        // And the re-arm pass judges each failure on its own merits rather than arming
+        // whatever it finds — otherwise it would be a way around the allowlist.
+        harness.store.apply(.apiError(Self.permanent), to: harness.tab)
+        harness.store.maintenanceTickForTesting()
+        XCTAssertNil(harness.store.apiErrors[harness.tab]?.retryAttempt,
+                     "a permanent failure stays unarmed however many ticks pass over it")
+    }
+
+    /// The `pendingPrompts[id] == nil` guard. A nudge that is queued but not yet typed —
+    /// waiting on a composer that has not appeared — must not be overwritten by the next rung
+    /// coming due, and that rung must not be spent on typing that never happened.
+    ///
+    /// The tab is held mid-injection, which is the state a nudge waiting on a busy `inject`
+    /// is genuinely in, so `flushPendingPrompts` cannot retire the entry.
+    func testADueRungDoesNotOverwriteANudgeStillWaitingToBeTyped() {
+        let harness = makeHarness()
+        harness.store.apply(.apiError(Self.transient), to: harness.tab)
+        guard let due = harness.store.apiErrors[harness.tab]?.nextRetryAt else {
+            return XCTFail("nothing was armed, so there is no nudge to strand")
+        }
+        harness.store.holdInjectionForTesting(harness.tab)
+
+        harness.time = due
+        harness.store.maintenanceTickForTesting()
+        XCTAssertEqual(harness.store.pendingPrompts[harness.tab]?.text, resumeText(for: .claude))
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt, 2)
+        guard let second = harness.store.apiErrors[harness.tab]?.nextRetryAt else {
+            return XCTFail("the second rung must be armed")
+        }
+
+        harness.time = second
+        harness.store.maintenanceTickForTesting()
+
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt, 2,
+                       "no rung is spent while the previous nudge is still unsent")
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.nextRetryAt, second,
+                       "and its schedule is not re-rolled either")
+        XCTAssertTrue(harness.spy.events.isEmpty, "nothing was typed, which is the premise")
     }
 }
