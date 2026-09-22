@@ -145,15 +145,37 @@ this section:
 
 ### 4.4 Mechanism: a tick-evaluated timer that feeds the existing queue
 
-No new timer and no new typing path. On the registry tick the store asks, per armed tab,
-whether `now >= nextRetryAt`; if so it drops a `DeferredPrompt(text: resumeText)` into
-`pendingPrompts` and advances the rung. The existing `flushPendingPrompts` then does the
-work it already does — wait for a composer, defer behind a pending rename, cancel if the
-session started on its own, drop on its 120s deadline (a miss is harmless: the next rung
-tries again).
+No new typing path. When the tick finds `now >= nextRetryAt` for an armed tab it drops a
+`DeferredPrompt(text: resumeText)` into `pendingPrompts` and advances the rung. The existing
+`flushPendingPrompts` then does the work it already does — wait for a composer, defer behind
+a pending rename, cancel if the session started on its own, drop on its 120s deadline (a
+miss is harmless: the next rung tries again).
 
 This buys the cancel-on-busy semantics, the rename interlock, and the re-entrancy guard for
 free, and adds no second way to type into a terminal.
+
+**Amended 2026-09-21, before implementation: the tick cannot be the registry scan.**
+The first draft of this section said "on the registry tick", meaning `applyRegistry`'s
+`defer` block, where `flushPendingPrompts` already lives. That is wrong, and wrong in the
+way this project has a standing rule against: `applyRegistry` is driven only by
+`SessionStatusWatcher`, which is built per account **only for agents with a status
+registry** (`SessionStore.startStatusWatching`, `startWatching(tabID:)`, both gated on
+`session.agent.hasStatusRegistry` — true for claude, false for codex). A fleet with no
+claude tab never ticks, so a retry armed on a codex tab would wait forever. Shipping that
+would make an all-agents feature claude-only in practice while looking correct in review.
+
+Instead: extract that `defer` body into a `maintenanceTick()` — `flushPendingRenames`,
+`flushPendingPrompts`, `flushPromptQueue`, plus the new `flushRetryBackoff` — and call it
+from two places: `applyRegistry`'s `defer` (unchanged for claude) and a new registration on
+the shared `WatchClock`, using the `clock.add(owner) { … }` idiom the sleep controller
+already uses at `SessionStore.swift:1658`. All four flushes are idempotent and
+deadline-guarded, and `inject` is re-entrancy-guarded, so running them from two sources in
+the same instant is safe.
+
+**This incidentally fixes a pre-existing gap and must be tested as such, not slipped in:**
+phone-sent prompts (`promptQueue`) and deferred renames on a codex-only fleet have the same
+starvation today. A test must assert a codex tab's queued prompt is typed with no claude tab
+anywhere in the store.
 
 ### 4.5 Wire and UI: extend the existing field, add no event case
 
