@@ -4733,18 +4733,17 @@ final class SessionStore: ObservableObject {
 
     /// One tab's turn at the input box.
     ///
-    /// **The head only, never the whole queue.** `inject` submits with a Return, so a second
-    /// entry in the same pass would be typed into a bar that has just started a turn. Right
-    /// after the submit the screen is an echo of the sent message, not a composer box, so on a
-    /// tab taking the legacy path `hasComposerBox` refuses the second entry (see
-    /// `ClaudeComposerDetectorTests.testTheEchoOnlyScreenRightAfterSubmittingIsNotAComposer`) —
-    /// but only after the settle, by which point the entry looks flushed to everything
-    /// upstream. **This loop's own rule is what makes that safe, and it no longer has that
-    /// backstop everywhere:** a tab whose agent has reported `.live` is gated on the dialog
-    /// veto, and an echo-only screen trips neither of its rules, so the head-only rule is now
-    /// the only thing standing between two queued prompts and one pass. One per pass, and the
-    /// next pass is a registry tick away — by which point the screen has moved on and the
-    /// second prompt is typed mid-turn, which claude queues, which is the point.
+    /// **The head only, never the whole queue, and nothing else enforces it any more.** `inject`
+    /// submits with a Return, so a second entry in the same pass would be typed into a bar that
+    /// has just started a turn. The screen right after a submit — the echo, `busy-echo-only` —
+    /// used to be refused by `hasComposerBox`, which gave the legacy path an accidental backstop
+    /// behind this rule. Both halves of that are gone: a tab reporting `.live` is gated on the
+    /// dialog veto, which an echo-only screen trips neither rule of, and `hasComposerBox` now
+    /// **accepts** that screen too, because it is a real composer and refusing it lost renames
+    /// (see `ClaudeComposerDetectorTests.testTheEchoOnlyScreenRightAfterSubmittingIsAComposer`).
+    /// So the head-only rule is the only thing standing between two queued prompts and one pass.
+    /// One per pass, and the next pass is a registry tick away — by which point the screen has
+    /// moved on and the second prompt is typed mid-turn, which claude queues, which is the point.
     private func flushPromptQueue(_ id: UUID) {
         // Expiry first, and it runs whether or not this tab can be typed into: a queue that
         // is never drained because its tab lost its surface must still empty itself.
