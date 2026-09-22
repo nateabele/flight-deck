@@ -61,6 +61,11 @@ find_pids() {
 # already passed the executable check above, that is "cannot tell" — not "release". Folding
 # that case into `release` would have waved through the exact culprit bundle from the
 # 2026-09-22 incident (caught by the otool signal alone) the moment otool was unavailable.
+#
+# otool -L exits 0 and prints "is not an object file" to STDOUT for a non-Mach-O input, so a
+# zero exit status alone is not evidence otool actually read anything — require at least one
+# real library-reference line (.dylib or .framework) before trusting the absence of
+# .debug.dylib. Every macOS binary links libSystem, so a genuine Mach-O always has one.
 bundle_flavor() {
   local bundle="$1"
   if ! command -v otool >/dev/null 2>&1; then
@@ -80,17 +85,25 @@ bundle_flavor() {
     echo debug
     return
   fi
+  if ! grep -Eq '\.(dylib|framework)' <<<"$otool_out"; then
+    echo unknown
+    return
+  fi
   echo release
 }
 
 # The script always runs detached (nohup … >/dev/null 2>&1 &), so a log line alone is
-# invisible — the operator just sees nothing happen. This is best-effort: a failing
-# osascript (no GUI session, notifications disabled, etc.) is logged and swallowed, never
-# allowed to turn a refusal into a crash. Notifications are not the safety mechanism —
-# the exit before staging is — this just makes the refusal audible.
+# invisible — the operator just sees nothing happen. Used for both a refusal AND an
+# FD_SWAP_ALLOW_DEBUG override that proceeds anyway, so the title is always passed in
+# explicitly ($2) rather than assumed — a hardcoded "refused" title on the override path
+# would read as "nothing happened" while a Debug bundle installs anyway, which is worse than
+# no notification. This is best-effort: a failing osascript (no GUI session, notifications
+# disabled, etc.) is logged and swallowed, never allowed to turn either path into a crash.
+# Notifications are not the safety mechanism — the exit before staging is, on the refusal
+# path — this just makes the outcome audible either way.
 notify() {
-  if ! osascript -e "display notification \"$1\" with title \"Flight Deck swap refused\"" >>"$LOG" 2>&1; then
-    log "warning: osascript notification failed, see above — refusal itself still stands"
+  if ! osascript -e "display notification \"$1\" with title \"$2\"" >>"$LOG" 2>&1; then
+    log "warning: osascript notification failed, see above — the underlying decision still stands"
   fi
 }
 
@@ -142,6 +155,9 @@ case "$FLAVOR" in
   release) FLAVOR_DISPLAY="Release" ;;
   debug) FLAVOR_DISPLAY="Debug" ;;
   unknown) FLAVOR_DISPLAY="unknown" ;;
+  # bundle_flavor() only returns the three cases above today; this exists so a future fourth
+  # value degrades to showing itself instead of leaving FLAVOR_DISPLAY unbound under set -u.
+  *) FLAVOR_DISPLAY="$FLAVOR" ;;
 esac
 log "flavor:      $FLAVOR_DISPLAY (verified statically, not executed)"
 
@@ -152,20 +168,20 @@ log "flavor:      $FLAVOR_DISPLAY (verified statically, not executed)"
 if [ "$FLAVOR" != "release" ] && [ "${FD_SWAP_ALLOW_DEBUG:-}" != "1" ]; then
   if [ "$FLAVOR" = "unknown" ]; then
     log "FATAL: could not determine build flavor (otool unavailable or unreadable) — refusing, nothing changed."
-    notify "Refused to install a bundle of unknown flavor — nothing changed"
+    notify "Refused to install a bundle of unknown flavor — nothing changed" "Flight Deck swap refused"
   else
     log "FATAL: new bundle is $FLAVOR_DISPLAY, not Release — aborting, nothing changed."
-    notify "Refused to install a $FLAVOR_DISPLAY bundle — nothing changed"
+    notify "Refused to install a $FLAVOR_DISPLAY bundle — nothing changed" "Flight Deck swap refused"
   fi
   exit 1
 fi
 if [ "$FLAVOR" != "release" ]; then
   if [ "$FLAVOR" = "unknown" ]; then
     log "FD_SWAP_ALLOW_DEBUG=1 — installing a bundle of unknown flavor anyway, override recorded"
-    notify "Installing a bundle of unknown flavor — FD_SWAP_ALLOW_DEBUG override in effect"
+    notify "Installing a bundle of unknown flavor — FD_SWAP_ALLOW_DEBUG override in effect" "Flight Deck swap proceeding (override)"
   else
     log "FD_SWAP_ALLOW_DEBUG=1 — installing a $FLAVOR_DISPLAY bundle anyway, override recorded"
-    notify "Installing a $FLAVOR_DISPLAY bundle — FD_SWAP_ALLOW_DEBUG override in effect"
+    notify "Installing a $FLAVOR_DISPLAY bundle — FD_SWAP_ALLOW_DEBUG override in effect" "Flight Deck swap proceeding (override)"
   fi
 fi
 
