@@ -2541,7 +2541,29 @@ final class SessionStore: ObservableObject {
             // `backgroundWorkSessions` insert above is: this runs inside `SessionStore.init`,
             // before `FleetService` attaches the replicator, so an emit here would go nowhere.
             // Moving it after that wiring would require it to emit.
-            if let error = entry.apiError { apiErrors[entry.id] = error }
+            //
+            // Re-armed through `armed(_:for:attempt:)` rather than carried over verbatim: the
+            // persisted schedule is stale by definition (its `nextRetryAt` is a timestamp from
+            // the previous run, almost always already past), so keeping it would fire every
+            // restored tab's nudge on the very first maintenance tick. `armed` overwrites both
+            // `retryAttempt` and `nextRetryAt` on every path — including the refusal path,
+            // where it strips them — so there is no need to clear them by hand first.
+            //
+            // `attempt: retryBackoff.count + 1` re-arms at the FLOOR, not rung 1: a relaunch is
+            // not evidence the API recovered, and rung 1 would burst-type a resume into every
+            // restored tab ~30s after launch. `Self.retryBackoff.count + 1` is exactly the
+            // attempt `retryDelay` maps to the floor — see `retryDelay`'s own clamp — so if
+            // that ladder ever grows a rung, this stays pinned to the floor without editing.
+            //
+            // `armed` calls `session(for: id)` and refuses when the session cannot be located.
+            // That resolves here because `insertSession` a few lines up already appended this
+            // exact `entry.id` to `repos` earlier in this same loop iteration — confirmed by
+            // reading `insertSession` (it unconditionally appends before returning) and by a
+            // restart test below that fails with an unarmed error if this call is ever moved
+            // ahead of `insertSession`.
+            if let error = entry.apiError {
+                apiErrors[entry.id] = armed(error, for: entry.id, attempt: Self.retryBackoff.count + 1)
+            }
 
             // `!orphaned`: offering to continue a tab that cannot be launched at all would
             // put the wrong-login resume one click behind a prompt the app raised itself.
