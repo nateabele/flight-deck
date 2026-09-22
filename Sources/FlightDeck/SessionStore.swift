@@ -5905,7 +5905,9 @@ final class SessionStore: ObservableObject {
                 // it. Arming here is what makes the toggle symmetric — off stops the loop on
                 // the next tick, on resumes it — and `armed` re-judges the failure on its own
                 // merits, so a permanent one stays unarmed at the cost of one refused call
-                // per tick.
+                // per tick. Exception: a tab latched in `retryInterrupted` stays unarmed
+                // across the cycle too, because nothing in this preference path touches that
+                // set — a per-tab user interrupt outranks the global toggle, deliberately.
                 setAPIError(id, armed(error, for: id))
                 continue
             }

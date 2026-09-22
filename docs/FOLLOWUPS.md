@@ -1252,7 +1252,11 @@ backoff ladder, riding the existing `pendingPrompts` queue rather than a second 
   is lifted by a turn that completes with no error, which is the only evidence the outage is
   actually over, and dropped with the tab in `closeSession`. A re-report of the same failure
   does **not** lift it: the user stopped this loop by hand and a repeat of the error they
-  stopped it over is not new information.
+  stopped it over is not new information. Nor does toggling the preference off and back on:
+  nothing in that path touches `retryInterrupted`, so a tab the user interrupted by hand stays
+  latched across the cycle and does not resume — a per-tab interrupt outranking the global
+  toggle, which is the right precedence, just not the symmetric one the re-arm branch's own
+  comment used to claim.
 
 - **The rung advances at queue time, not send time.** `flushRetryBackoff` calls
   `armed(_, attempt: attempt + 1)` in the same pass that queues the `DeferredPrompt` — before

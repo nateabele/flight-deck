@@ -263,8 +263,15 @@ TDD throughout; every test written to fail against the current code first.
 - **No double-typing** — a tick inside an in-flight settle window types once.
 - **Wire** — round-trip with and without the new fields; a payload lacking them decodes
   (the old-client guarantee).
-- **Drift** — the existing `FleetReplicator` assertion must stay green, which is the real
-  test that `setAPIError` remained the only writer.
+- **Drift** — `FleetReplicator.checkForDrift()` only runs from `record(_:)`, and
+  `SnapshotApplication` folds `.apiErrorChanged` as a whole-value overwrite
+  (`mutate(id) { $0.apiError = error }`), so an unrecorded write to `apiErrors[id]` is erased
+  by the next `apiErrorChanged` for that same tab before any `record` runs — drift alone
+  cannot catch a same-tab series of mutations. What actually proves `setAPIError` remained the
+  only writer is the per-change emission counts in
+  `testAPIErrorEmitsOncePerChangeAcrossAFullRetryLifecycle`, which interleaves an unrelated
+  `markUnread` emission to force the drift check to run while a wrong value would still be
+  standing.
 - **Phone** — banner presence/absence and label text in `FlightDeckMobileTests`. Runs under
   `./scripts/test-ios.sh`, not `test-unit.sh`; both suites must pass.
 
