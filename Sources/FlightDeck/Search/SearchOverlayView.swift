@@ -123,6 +123,11 @@ private struct SearchResultRow: View {
                     HStack(spacing: 7) {
                         Text(highlightedTitle).font(.system(size: 13, weight: .semibold))
                         Text(result.projectName).font(.system(size: 11)).foregroundStyle(.secondary)
+                        if let agentSymbolName {
+                            Image(systemName: agentSymbolName)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
                 Text(detail)
@@ -148,6 +153,15 @@ private struct SearchResultRow: View {
         case .project: return "folder"
         case .conversation: return "text.alignleft"
         }
+    }
+
+    /// Only `.conversation` — a transcript hit or a past conversation matched by name — is
+    /// what mixing agents makes ambiguous. A `.session` row is a tab already open in the
+    /// sidebar, identifiable there the way it always has been; a `.project`'s `agent` is an
+    /// unused placeholder (see `SearchCandidates.build`), not a real value worth drawing.
+    private var agentSymbolName: String? {
+        guard case .conversation = result.kind else { return nil }
+        return AgentGlyph.symbolName(for: result.agent)
     }
 
     /// The two lines. A transcript hit shows its snippet; a name match shows where it lives,

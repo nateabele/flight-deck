@@ -10,6 +10,25 @@ public enum SearchResultKind: Equatable, Sendable {
     case conversation(String)
 }
 
+/// The SF Symbol drawn for a row's agent, kept here rather than duplicated as a switch in
+/// both the desk overlay and the phone — the two draw from different modules, and a mapping
+/// declared twice is two things that must agree and eventually will not, the same reason
+/// `TranscriptHit.automatedProvenance` lives beside the field it names instead of at each
+/// comparison site.
+public enum AgentGlyph {
+    /// `nil` for an agent string neither end recognises — a value from an adapter this build
+    /// predates, or simply spelled wrong. A row then draws no glyph rather than a wrong one:
+    /// an absent glyph says nothing, but a wrong one asserts an agent identity that is not
+    /// there, which is worse than the silence it would replace.
+    public static func symbolName(for agent: String) -> String? {
+        switch agent {
+        case "claude": return "sparkle"
+        case "codex": return "chevron.left.forwardslash.chevron.right"
+        default: return nil
+        }
+    }
+}
+
 /// One match found inside a conversation, straight out of the index.
 ///
 /// `snippet` arrives with the sentinel markers FTS5 was asked for; the view turns those into
