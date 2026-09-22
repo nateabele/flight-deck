@@ -1744,11 +1744,30 @@ final class SessionStore: ObservableObject {
         }
         startStatusWatching()
         // Same idiom `SessionStatusWatcher`/`TranscriptWatcher` use to register themselves,
-        // and the same lifecycle point as `startStatusWatching()` above: only the production
-        // convenience init reaches here, so a store built by a test never arms sleep. `add`
-        // replaces rather than duplicates a registration for the same owner, and `sleepController`
-        // itself is the weak owner — held alive by this store's `lazy var` for the run.
+        // and the same lifecycle point as `startStatusWatching()` above. This IS reachable
+        // from a test: `DisplayWakeTests.swift:170,180`, `DisplayDrawableGuardTests.swift:70`
+        // and `SessionPersistenceTests.swift:241` all construct a store through this
+        // initializer directly, so both registrations below arm for them too — verified by
+        // `rg -n "SessionStore\(ghostty" Tests/`, not assumed from this comment's old claim
+        // that only `FlightDeckApp` gets here (it also lives at `FlightDeckApp.swift:207`).
+        // That is harmless for `maintenanceTick`: none of those four tests call `rename`,
+        // `submitPrompt`, or anything else that populates `pendingRenames`/`pendingPrompts`/
+        // `promptQueue`, so a tick firing there flushes only empty dictionaries. Whether it is
+        // equally harmless for `sleepController.tick()` specifically was not re-verified here —
+        // that registration's own behavior is unchanged by this comment fix. `add` replaces
+        // rather than duplicates a registration for the same owner, and `sleepController`
+        // itself is the weak owner — held alive by this store's `lazy var` for the run, and
+        // `WatchClock` holds every owner weakly (`Subscriber.owner`), so a store or controller
+        // deallocated between tests takes its entry with it rather than leaking a stale tick.
         clock.add(sleepController) { [weak self] in self?.sleepController.tick() }
+        // The agent-independent half of the tick. `sleepController` registers the same way
+        // one line up, including its reachability from those same four tests; see
+        // `maintenanceTick` for why the registry scan cannot be the only driver. Both
+        // `SessionStore` and `WatchClock` are `@MainActor`, so a tick landing here from the
+        // clock and one landing via `applyRegistry`'s `defer` are sequential main-queue calls,
+        // never a race — see `maintenanceTick`'s doc comment for why running twice is safe
+        // anyway.
+        clock.add(self) { [weak self] in self?.maintenanceTick() }
         if let previousRun {
             Task { [weak self] in await self?.sweepOrphans(from: previousRun) }
         }
@@ -2616,7 +2635,29 @@ final class SessionStore: ObservableObject {
             // `backgroundWorkSessions` insert above is: this runs inside `SessionStore.init`,
             // before `FleetService` attaches the replicator, so an emit here would go nowhere.
             // Moving it after that wiring would require it to emit.
-            if let error = entry.apiError { apiErrors[entry.id] = error }
+            //
+            // Re-armed through `armed(_:for:attempt:)` rather than carried over verbatim: the
+            // persisted schedule is stale by definition (its `nextRetryAt` is a timestamp from
+            // the previous run, almost always already past), so keeping it would fire every
+            // restored tab's nudge on the very first maintenance tick. `armed` overwrites both
+            // `retryAttempt` and `nextRetryAt` on every path — including the refusal path,
+            // where it strips them — so there is no need to clear them by hand first.
+            //
+            // `attempt: retryBackoff.count + 1` re-arms at the FLOOR, not rung 1: a relaunch is
+            // not evidence the API recovered, and rung 1 would burst-type a resume into every
+            // restored tab ~30s after launch. `Self.retryBackoff.count + 1` is exactly the
+            // attempt `retryDelay` maps to the floor — see `retryDelay`'s own clamp — so if
+            // that ladder ever grows a rung, this stays pinned to the floor without editing.
+            //
+            // `armed` calls `session(for: id)` and refuses when the session cannot be located.
+            // That resolves here because `insertSession` a few lines up already appended this
+            // exact `entry.id` to `repos` earlier in this same loop iteration — confirmed by
+            // reading `insertSession` (it unconditionally appends before returning) and by a
+            // restart test below that fails with an unarmed error if this call is ever moved
+            // ahead of `insertSession`.
+            if let error = entry.apiError {
+                apiErrors[entry.id] = armed(error, for: entry.id, attempt: Self.retryBackoff.count + 1)
+            }
 
             // `!orphaned`: offering to continue a tab that cannot be launched at all would
             // put the wrong-login resume one click behind a prompt the app raised itself.
@@ -3381,6 +3422,15 @@ final class SessionStore: ObservableObject {
         // removes its id from `repos` entirely, so no future transcript record will ever
         // clear this entry, and it would sit in `apiErrors` for the life of the process.
         setAPIError(id, nil)
+        // The retry ladder's memory, which deliberately OUTLIVES the error entry above (see
+        // `RetryEpisode`) and so is the one piece of retry state `setAPIError(id, nil)` does
+        // not take with it. Same argument as `acceptedPromptTokens` a few lines up: it is
+        // keyed by tab, so a reopened tab reusing this id must start at rung 1 rather than
+        // inherit a ladder position from a session that is over.
+        retryEpisodes.removeValue(forKey: id)
+        // Same argument, for the same reason: keyed by tab, so a reopened tab reusing this id
+        // must not inherit a refusal earned by a session that is over.
+        retryInterrupted.remove(id)
         // Closing the row is the most literal case of "a prompt that will never resolve",
         // and applyRegistry cannot observe the waiting -> gone edge here because both its
         // before and after snapshots already lack this id.
@@ -3573,6 +3623,35 @@ final class SessionStore: ObservableObject {
     /// an entry that never met its gates would sit in the queue and fire hours later, into a
     /// session the user has long since been working in.
     static let resumePromptWindow: TimeInterval = 120
+
+    /// Waits between auto-retries, in seconds, then `retryBackoffFloor` forever.
+    ///
+    /// A literal ladder rather than a computed curve, matching `stuckPromptReportLadder`.
+    /// It starts at 30s rather than immediately because this is a SECOND-order retry: both
+    /// shipped agents run their own retry loop and have already exhausted it by the time a
+    /// failure reaches us — claude's record means "the retry loop gave up", and codex's
+    /// `response_too_many_failed_attempts` says so in the name.
+    static let retryBackoff: [TimeInterval] = [30, 60, 120, 300, 480]
+    /// The cadence a long outage is ridden at once the ladder is spent. There is no attempt
+    /// cap: the stops that make that safe are the allowlist, the composer gate, and every
+    /// path that clears the error. See the design doc §4.3.
+    static let retryBackoffFloor: TimeInterval = 900
+
+    /// `jitter` is a fraction in -0.1...0.1, injected rather than drawn here so the ladder is
+    /// testable. Jitter at all so a fleet of tabs that all died on the same 529 does not
+    /// re-nudge in lockstep and re-create the thundering herd that caused it.
+    static func retryDelay(forAttempt attempt: Int, jitter: Double) -> TimeInterval {
+        // Clamped rather than trusted, because the failure is a crash and not a wrong delay:
+        // the ladder is 1-based, so `retryBackoff[attempt - 1]` TRAPS on zero or negative —
+        // and `attempt <= retryBackoff.count` is true for zero, so the bounds check above it
+        // waves that straight through. `restore` picks the floor with a *computed* attempt
+        // (`retryBackoff.count + 1`), which is exactly the shape an off-by-one arrives in.
+        let rung = max(1, attempt)
+        let base = rung <= retryBackoff.count
+            ? retryBackoff[rung - 1]
+            : retryBackoffFloor
+        return base * (1 + jitter)
+    }
 
     /// Whether a restored tab was working when we went away.
     ///
@@ -4245,6 +4324,19 @@ final class SessionStore: ObservableObject {
     /// registry scan says so here.
     func flushPromptQueueForTesting() { flushPromptQueue() }
 
+    /// Test seam, in the style of `flushPromptQueueForTesting`. Drives BOTH call sites'
+    /// shared body at once, which is the point: a codex-only fleet has no `applyRegistry`
+    /// tick to fall back on, so this is the only way to advance its clock in a test.
+    func maintenanceTickForTesting() { maintenanceTick() }
+
+    /// Test seam, mirroring `DisplayWakeTests.testTheRealWakerIsWiredIn`'s job for a
+    /// registration instead of a stored property: proves the `clock.add(self) { ... }` line
+    /// in `convenience init` actually ran. `maintenanceTickForTesting()` above drives
+    /// `maintenanceTick()` directly and so cannot detect that line being deleted — this checks
+    /// registration only, not behavior; `SessionStoreMaintenanceTickTests` already covers
+    /// `maintenanceTick`'s effects using the seam above.
+    var isRegisteredForMaintenanceTickTesting: Bool { clock.isRegistered(self) }
+
     /// Test seam. Production marks come from `applyReadState` and from restore; a test that
     /// only cares about how a mark is *pruned* should not have to script an edge to create it.
     func markUnreadForTesting(_ ids: Set<UUID>) {
@@ -4253,6 +4345,33 @@ final class SessionStore: ObservableObject {
 
     /// Test seam. Production leaves this nil and injection goes to the live surface.
     var injectorOverride: TextInjecting?
+
+    /// Test seam, in the style of `injectorOverride`. Production leaves this nil and
+    /// `turnRecovery(for:)` reads the agent's own answer.
+    ///
+    /// It exists for one arm that has no reachable fixture: `AgentID.turnRecovery` is a
+    /// static switch and both shipped agents answer it non-nil, so the `nil` refusal — which
+    /// is what keeps an agent added later from typing into a terminal before anyone has
+    /// written and tested its classifier — could not otherwise be exercised at all. Without
+    /// this the fail-closed branch would ship unproven and read as dead code to the next
+    /// person over it.
+    var turnRecoveryOverride: ((AgentID) -> AgentTurnRecovery?)?
+
+    /// Test seam, in the style of `adapterCountForTesting`. `RetryEpisode` is private and
+    /// projected nowhere by design, so "the episode was forgotten" — what `closeSession` and
+    /// `reapDecayedRetryEpisodes` promise — has no other observable.
+    var retryEpisodeCountForTesting: Int { retryEpisodes.count }
+
+    /// The one place the retry loop asks whether an agent has a classifier, so the arming
+    /// gate and the due-attempt loop cannot come to different answers about the same tab.
+    ///
+    /// `if let` rather than `?? agent.turnRecovery`: the override's whole purpose is to
+    /// answer `nil`, and a coalesce would fall straight back to the real agent and make the
+    /// seam silently inert.
+    private func turnRecovery(for agent: AgentID) -> AgentTurnRecovery? {
+        if let turnRecoveryOverride { return turnRecoveryOverride(agent) }
+        return agent.turnRecovery
+    }
 
     /// Test seam. The default reads the resumed conversation's transcript off the main
     /// actor and calls back on it; tests substitute a synchronous closure so they need no
@@ -5850,6 +5969,251 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// One unbroken run of API failures on a tab, outliving the `apiErrors` entry itself.
+    ///
+    /// **This exists because the nudge destroys its own schedule.** The resume text is a user
+    /// record in the transcript, so typing it produces progress, progress reports
+    /// `.apiError(nil)`, and that removes the entry — rung and all. The retry then fails again
+    /// seconds later, a fresh error arrives, and without a memory outside the entry it would
+    /// arm at rung 1 every single time: a long outage ridden at a nudge every ~45s forever
+    /// instead of the design's one per fifteen minutes. The ladder has to survive the very
+    /// event it schedules.
+    ///
+    /// Modelled on `StuckEpisode` — a private per-tab record whose ladder position survives
+    /// the state changes around it — and kept deliberately out of fleet state: nothing
+    /// projects, emits or persists it (`FleetProjection.project` is handed `apiErrors` and
+    /// never reads the store), so it cannot become a drift-assertion problem the way a second
+    /// writer of `apiErrors` would.
+    private struct RetryEpisode {
+        /// The rung the tab is currently on. Set by `armed`, advanced only by the queueing
+        /// site in `flushRetryBackoff` — so the ladder climbs once per NUDGE, not once per
+        /// failure report. A session the user keeps retrying by hand does not ratchet.
+        var attempt: Int
+        /// When this episode was last touched — a failure report, or the tick that advanced
+        /// its rung. Either is evidence the outage is still going. See `resumedRung`.
+        var lastArmed: Date
+    }
+    private var retryEpisodes: [UUID: RetryEpisode] = [:]
+
+    /// Tabs whose user interrupted a turn while a failure was standing — `armed`'s refusal
+    /// for "the user got there first", in its strongest form.
+    ///
+    /// **Stripping the schedule is not enough on its own, which is the whole reason this
+    /// exists.** `flushRetryBackoff`'s unarmed branch re-arms any retryable error it finds on
+    /// the very next tick, deliberately, so that flipping the preference back on resumes the
+    /// loop. An abort that only cleared `nextRetryAt` would therefore be undone within one
+    /// tick — and at rung 1, because clearing the episode resets the ladder, so the user
+    /// pressing Esc would make the typing arrive *sooner*.
+    ///
+    /// One entry per tab at most, and only for a tab that had a standing failure when it was
+    /// interrupted. Lifted when a turn completes cleanly (`.apiError(nil)` is the evidence the
+    /// outage is actually over) and dropped with the tab in `closeSession`. Not lifted by a
+    /// re-report of the same failure: the user stopped this loop by hand and a repeat of the
+    /// error they stopped it over is not new information.
+    private var retryInterrupted: Set<UUID> = []
+
+    /// Where a fresh failure picks the ladder up.
+    ///
+    /// Decay is by time, not by trying to work out who caused the progress that cleared the
+    /// error. That is the point rather than a compromise: a session that genuinely recovers,
+    /// runs clean for the floor duration and only then fails again is a NEW outage and should
+    /// start at thirty seconds. Only a failure inside the floor window is the same one.
+    private func resumedRung(for id: UUID, at time: Date) -> Int {
+        guard let episode = retryEpisodes[id],
+              time.timeIntervalSince(episode.lastArmed) < Self.retryBackoffFloor
+        else { return 1 }
+        return episode.attempt
+    }
+
+    /// Whether a tab is mid-turn *right now*.
+    ///
+    /// Asked with exactly the partition `cancelSupersededPrompts` switches on, deliberately:
+    /// that function drops a nudge when a session STARTS working, and this asks the same
+    /// question of a session that was ALREADY working when a rung came due — which produces
+    /// no `StatusTransition` at all, so nothing else in the system would ever ask it. Two
+    /// different ideas of "already working" is precisely the drift worth designing out.
+    ///
+    /// **`nil` is not working, and that is load-bearing for codex.** A `== .idle` test would
+    /// refuse every statusless tab, and for an agent with no status registry that would have
+    /// been an invisible way to make this feature claude-only again — the failure Task 5
+    /// exists to prevent. As it happens codex's status is never nil once it can fail (it is
+    /// seeded `.idle` at attachment and written by `applyActivity` thereafter), but the guard
+    /// does not depend on that holding.
+    ///
+    /// `inject` is no help here: its own idle/busy gate was deliberately removed in favour of
+    /// composer PRESENCE (see `injectionGate`), and codex's composer reads identical mid-turn
+    /// by design. The composer check would let the nudge straight through.
+    private func isAlreadyWorking(_ id: UUID) -> Bool {
+        switch statuses[id]?.activity {
+        case .busy, .waiting: return true
+        case .idle, nil: return false
+        }
+    }
+
+    /// Returns `error` with retry state attached, or with any retry state stripped when this
+    /// failure must not be retried.
+    ///
+    /// Pure apart from the clock and the jitter draw, and applied BEFORE `setAPIError` — so
+    /// arming costs no second event and `setAPIError` stays the single writer the
+    /// replicator's drift assertion depends on. Arming in a write of its own would emit twice
+    /// per failure and be the exact shape that assertion exists to catch.
+    ///
+    /// **Refusing DISARMS rather than merely declining to arm**, and that is not tidiness:
+    /// `flushRetryBackoff` re-arms through here with the tab's own current error, so a
+    /// refusal that handed it back untouched would leave a now-past `nextRetryAt` in place
+    /// and re-queue the nudge on every tick for as long as the tab lived. For an agent's own
+    /// report — which never carries retry state — stripping is a no-op.
+    /// `attempt` nil means "wherever this tab's episode left the ladder" — the ordinary case,
+    /// used by every new failure report. The two callers that pass one explicitly are the
+    /// queueing site below, which advances the rung it already holds, and `restore`, which
+    /// starts a relaunched fleet at the floor.
+    private func armed(_ error: SessionAPIError?, for id: UUID, attempt: Int? = nil) -> SessionAPIError? {
+        guard var error else { return nil }
+        guard preferences?.autoRetriesAPIErrors == true,
+              // The user interrupted this tab by hand; see `retryInterrupted`.
+              !retryInterrupted.contains(id),
+              let session = session(for: id),
+              // Nothing to nudge with: `inject` would refuse this tab forever anyway, and an
+              // armed schedule nothing can ever act on is just a wrong badge.
+              session.agent.textChannel != nil,
+              let recovery = turnRecovery(for: session.agent),
+              recovery.retries(error)
+        else {
+            error.retryAttempt = nil
+            error.nextRetryAt = nil
+            return error
+        }
+        let currentTime = now()
+        let rung = attempt ?? resumedRung(for: id, at: currentTime)
+        error.retryAttempt = rung
+        error.nextRetryAt = currentTime.addingTimeInterval(
+            Self.retryDelay(forAttempt: rung, jitter: Double.random(in: -0.1...0.1)))
+        // Stamped here rather than at the call sites because this is the one place that knows
+        // which rung was chosen. Writing a *private* dictionary, never `apiErrors` — the
+        // single-writer rule the drift assertion rests on is untouched.
+        retryEpisodes[id] = RetryEpisode(attempt: rung, lastArmed: currentTime)
+        return error
+    }
+
+    /// Queues the nudge for every tab whose next attempt has come due.
+    ///
+    /// Feeds `pendingPrompts` rather than calling `inject` directly, which is the whole
+    /// reason this is small: that queue already waits for a composer, defers behind a
+    /// rename, and is cancelled by `cancelSupersededPrompts` the moment the session starts
+    /// working on its own. Its 120s deadline dropping an unsent nudge is harmless here —
+    /// unlike a restore's one-shot prompt, the next rung tries again.
+    private func flushRetryBackoff() {
+        let currentTime = now()
+        // Above the preference guard, not below it. `reapDecayedRetryEpisodes` is the only
+        // thing that ever drops an episode short of the tab closing, and the short-circuit
+        // below returns before reaching anything — so an episode created before a toggle-off
+        // used to linger for the life of the process, which is precisely the leak that
+        // function's own comment promises it prevents. Cheap here: it returns immediately on
+        // an empty dictionary.
+        reapDecayedRetryEpisodes(at: currentTime)
+        guard preferences?.autoRetriesAPIErrors == true else { return disarmAllRetries() }
+        // Iterating `apiErrors` while `setAPIError` writes it is safe, and is left explicit
+        // here because it reads like a bug: a Swift dictionary is a value type, so this walks
+        // a copy taken when the loop began, and the writes below land on the property rather
+        // than on that copy. What makes the divergence harmless is not the guard — the guard
+        // reads the snapshot's fields, so it would NOT skip an entry a write had removed —
+        // it is that nothing in this body ever touches another tab's entry: each iteration
+        // writes only `id`, after every read of `id` it is going to make.
+        for (id, error) in apiErrors {
+            guard let attempt = error.retryAttempt, let due = error.nextRetryAt else {
+                // Not armed, with the preference ON: either the failure arrived while the
+                // preference was off, or the toggle went off and `disarmAllRetries` stripped
+                // it. Arming here is what makes the toggle symmetric — off stops the loop on
+                // the next tick, on resumes it — and `armed` re-judges the failure on its own
+                // merits, so a permanent one stays unarmed at the cost of one refused call
+                // per tick. Exception: a tab latched in `retryInterrupted` stays unarmed
+                // across the cycle too, because nothing in this preference path touches that
+                // set — a per-tab user interrupt outranks the global toggle, deliberately.
+                setAPIError(id, armed(error, for: id))
+                continue
+            }
+            guard currentTime >= due,
+                  // One nudge in flight per tab. Without this a rung that comes due while the
+                  // previous nudge is still waiting on a composer would overwrite it and
+                  // advance the ladder for typing that never happened.
+                  pendingPrompts[id] == nil,
+                  // **The session is already working.** `cancelSupersededPrompts` cannot cover
+                  // this: it fires on a transition INTO busy, and it runs inside
+                  // `applyRegistry` above the `defer { maintenanceTick() }` — so a tab that
+                  // was already busy when the rung came due produces no edge and nothing
+                  // cancels the nudge. On codex that is not even a race: `.apiError(nil)`
+                  // arrives only on `task_complete`, so a tab whose last turn failed and
+                  // whose user then retried by hand stays armed for the whole new turn, and
+                  // rung 1 is thirty seconds. See `isAlreadyWorking`.
+                  !isAlreadyWorking(id),
+                  let recovery = session(for: id).flatMap({ turnRecovery(for: $0.agent) })
+            else { continue }
+            pendingPrompts[id] = DeferredPrompt(
+                text: recovery.resumeText,
+                deadline: currentTime.addingTimeInterval(Self.resumePromptWindow))
+            setAPIError(id, armed(error, for: id, attempt: attempt + 1))
+        }
+    }
+
+    /// Drops episodes that can no longer answer anything an absent episode would not.
+    ///
+    /// Once an episode is older than the floor, `resumedRung` returns 1 for it — the same
+    /// answer it gives when there is no episode at all — so keeping it only leaks one entry
+    /// per tab that has ever failed, for the life of the process. An episode whose error is
+    /// still armed is never reaped regardless of age: the floor rung plus its +10% jitter can
+    /// outlast the decay window, and reaping mid-wait would silently reset that tab's ladder.
+    ///
+    /// Runs on every tick whatever the preference says — see the call site. An episode is
+    /// per-tab bookkeeping, not part of the loop, so switching the loop off is not a reason to
+    /// stop collecting them.
+    private func reapDecayedRetryEpisodes(at currentTime: Date) {
+        guard !retryEpisodes.isEmpty else { return }
+        retryEpisodes = retryEpisodes.filter { id, episode in
+            apiErrors[id]?.retryAttempt != nil
+                || currentTime.timeIntervalSince(episode.lastArmed) < Self.retryBackoffFloor
+        }
+    }
+
+    /// The user interrupted this tab's turn, so the retry loop stops — the badge does not.
+    ///
+    /// **Why the badge stays.** The turn that failed really did fail and nothing has changed
+    /// that; an abort is evidence about what the *user* wants, not about the API. Only the
+    /// schedule and the ladder go.
+    ///
+    /// **Why the episode goes with it.** `RetryEpisode` exists to carry a rung across the
+    /// nudge that clears its own error, i.e. across our own typing. An explicit interrupt ends
+    /// the run rather than punctuating it, so there is no position left to remember — and
+    /// leaving one would put the next genuine outage at whatever rung this one reached.
+    ///
+    /// Written through `armed` rather than by clearing the two fields here, so the strip
+    /// happens in the one place that owns it and still lands via `setAPIError`, the single
+    /// writer the replicator's drift assertion depends on.
+    private func applyTurnAborted(to id: UUID) {
+        // Nothing standing means nothing to stop: an interrupt on a healthy tab is ordinary
+        // and must not leave a latch behind that refuses a genuine failure hours later.
+        guard let error = apiErrors[id] else { return }
+        retryEpisodes.removeValue(forKey: id)
+        retryInterrupted.insert(id)
+        setAPIError(id, armed(error, for: id))
+    }
+
+    /// Strips retry state from every tab, without disturbing the errors themselves — the
+    /// badge is still true, only the loop stops. Reached when the preference goes off
+    /// mid-backoff, which is the one stop a user expects to be instant.
+    ///
+    /// Runs on every tick while the preference is off, and that is cheap by construction:
+    /// only the FIRST tick after the toggle has anything to clear, because nothing can arm
+    /// while the preference is off. Every tick after it walks `apiErrors` — one entry per
+    /// *failed* tab, not per tab — matches no `where` clause, and emits nothing.
+    private func disarmAllRetries() {
+        for (id, error) in apiErrors where error.retryAttempt != nil {
+            var cleared = error
+            cleared.retryAttempt = nil
+            cleared.nextRetryAt = nil
+            setAPIError(id, cleared)
+        }
+    }
+
     /// Claude → sidebar. Applied from the transcript watcher; never injects.
     /// The equality check is the loop guard: a `custom-title` line caused by our own
     /// `rename` matches the title we already set and stops here.
@@ -6137,6 +6501,36 @@ final class SessionStore: ObservableObject {
         })
     }
 
+    /// Everything that must run on a timer regardless of which agents are open.
+    ///
+    /// **Called from two places on purpose.** `applyRegistry`'s `defer` keeps claude's
+    /// cadence exactly as it was; the `WatchClock` registration in `init` is what covers a
+    /// fleet with no claude tab in it. Registry scans exist only for agents that declare
+    /// `hasStatusRegistry` — codex does not — so before this split a codex-only fleet never
+    /// flushed a deferred rename, a phone prompt, or anything else parked here.
+    ///
+    /// Safe to run twice in one instant: every flush below is idempotent and
+    /// deadline-guarded, and `inject` refuses re-entry for a tab already mid-settle.
+    private func maintenanceTick() {
+        // This is the retry tick for deferred renames: a rename usually waits on something
+        // that never shows up in `statuses` at all — the user clearing their half-typed
+        // draft moves no status, so gating the retry on a status change would strand it.
+        flushPendingRenames()
+        // Same reason as the line above: this is the retry tick, and a prompt usually
+        // waits on a `claude` that has not finished booting — which is not a status
+        // change, so gating the retry on one would strand it.
+        flushPendingPrompts()
+        // And the phone's queue, for the same reason and one more: what a phone-sent
+        // prompt waits on is usually a turn ENDING, and the tick is where that is seen.
+        flushPromptQueue()
+        // Last, because what it produces is an entry in `pendingPrompts` above: a nudge
+        // queued here is typed by the NEXT tick rather than this one. That ordering is
+        // deliberate — the tick runs far more often than the 30s shortest rung, so the cost
+        // is invisible, and the extra pass gives `cancelSupersededPrompts` one more chance to
+        // drop a nudge for a session that started working in the meantime.
+        flushRetryBackoff()
+    }
+
     /// Rebuilds `statuses` from a registry scan and keeps each tab's anchor current.
     /// Entries for processes Flight Deck does not own are dropped: the registry lists
     /// every `claude` on the machine.
@@ -6145,20 +6539,9 @@ final class SessionStore: ObservableObject {
         // registry, not a real one — returning before even the `defer` below runs is
         // deliberate, so nothing clears a mark or persists over the state auto-resume wants.
         guard !isTerminating else { return }
-        // The scan is also the retry tick for deferred renames. `defer` because this method
-        // returns early when nothing changed, and a rename usually waits on something that
-        // never shows up in `statuses` at all — the user clearing their half-typed draft
-        // moves no status, so gating the retry on a status change would strand it.
-        defer {
-            flushPendingRenames()
-            // Same reason as the line above: this is the retry tick, and a prompt usually
-            // waits on a `claude` that has not finished booting — which is not a status
-            // change, so gating the retry on one would strand it.
-            flushPendingPrompts()
-            // And the phone's queue, for the same reason and one more: what a phone-sent
-            // prompt waits on is usually a turn ENDING, and the tick is where that is seen.
-            flushPromptQueue()
-        }
+        // `defer` because this method returns early when nothing changed, and the
+        // timer-driven work below must still run regardless — see `maintenanceTick`.
+        defer { maintenanceTick() }
 
         // Resolve against a snapshot of the list before touching anything. Later tasks
         // apply repins and project moves here, and those mutate `repos` — iterating it
@@ -7323,12 +7706,29 @@ final class SessionStore: ObservableObject {
         case .activity(let activity): applyActivity(activity, to: tabID)
         case .subagentCount(let count): applySubagentCount(tabID, count)
         case .turnEnded: applyTurnEnded(to: tabID)
+        case .turnAborted: applyTurnAborted(to: tabID)
         // Persisted only when it actually changed. The watcher already suppresses an unchanged
         // report (`TranscriptWatcher.lastAPIError`), so this guard is the second line: it also
         // covers a restore-seeded error re-reported identically by the first live scan, which
         // would otherwise rewrite sessions.json for no change.
         case .apiError(let error):
-            if setAPIError(tabID, error) { persist() }
+            // A turn that completed with no error is the one piece of evidence that the outage
+            // is over, so it is what lifts an earlier interrupt's refusal — placed above the
+            // equality guard below, which returns early when there was nothing standing.
+            if error == nil { retryInterrupted.remove(tabID) }
+            // Compared against the stored error with its retry state removed, because the
+            // retry state is the store's and an agent's report never carries one. Without
+            // that removal a re-report of the SAME failure would look like news — `armed`
+            // draws a fresh `nextRetryAt` every time it runs — and would reset the ladder to
+            // rung 1 and rewrite sessions.json — the restore-seeded case the comment above
+            // names, now with a worse consequence than a needless save. Re-arming is
+            // `flushRetryBackoff`'s job, not a re-report's.
+            var stored = apiErrors[tabID]
+            stored?.retryAttempt = nil
+            stored?.nextRetryAt = nil
+            guard error != stored else { return }
+            // Armed before the write, never after — see `armed`.
+            if setAPIError(tabID, armed(error, for: tabID)) { persist() }
         // In-memory only — see `composerReadinessByTab`'s doc comment. No `persist()` call
         // here, deliberately: this is the one case in this switch that must never reach
         // `sessions.json`.

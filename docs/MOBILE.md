@@ -500,7 +500,12 @@ page.
 71. **Kill a session mid-turn with an API failure (or seed `apiError` in `sessions.json` and
     relaunch)** — a red `exclamationmark.triangle.fill` appears at the LEADING edge of that row
     on both devices, VoiceOver reads "Stopped — API error 529 (overloaded)" identically on
-    both, and it survives with `activity == nil`.
+    both, and it survives with `activity == nil`. Do this with **"Retry after API errors" off**
+    (Settings → Shell & Environment → Recovery, which is also the default), or that string is not what you
+    will hear: an armed retry appends its own clause and the label becomes "Stopped — API error
+    529 (overloaded) · retrying, attempt 2". Both devices build it from the same
+    `SessionAPIError.label`, so they still have to agree — it is the expected text that moves,
+    not the identity.
 72. **Send from the phone mid-turn, then background the app or navigate back to the fleet
     list before the turn ends.** Return once it has — the outbox row is gone on its own, with
     no reopen needed to force it. This is `chaseDelivery`'s reason to exist, beside items 33-38's
@@ -508,6 +513,24 @@ page.
     change, the busy-poll, the reconnect refresh — is scoped to the screen being on top, so
     before this fix a reader who looked away mid-turn could come back to "Queued to your
     agent" that nothing but leaving and re-entering the session would clear.
+73. **Arm a retry and watch the session screen.** Turn **"Retry after API errors"** on (Settings → Shell &
+    Environment → Recovery), give a session a transient API failure, and open it on the phone.
+    An orange `arrow.clockwise` strip appears above the timeline reading "Retrying — attempt 1,
+    next in 28s", and the seconds must tick DOWN once a second without the list beneath
+    flickering or losing its scroll position — the `TimelineView` is deliberately wrapped around
+    the strip alone, and a jumping list is the symptom of it having been hoisted. Let it reach
+    zero: the text becomes "any moment now" and stays readable rather than counting into
+    negatives. Then check the three shapes the unit suite structurally cannot reach, because it
+    only covers the pure `retryBannerText`:
+    - **Stacked.** Have the same session raise a plan gate while the retry is armed. Both strips
+      show, the plan gate ABOVE the retry strip, edges flush and no gap between them — they are
+      two children of one `VStack(spacing: 0)` in the top inset.
+    - **Neither.** Open an ordinary session with no gate and no retry. The timeline must start
+      hard against the navigation bar. That `VStack` is now always present where an `if let`
+      used to be, so a stray `Spacer`, padding or minimum height in it shows up here as a band
+      of dead space at the top of every session on the phone.
+    - **Gone.** Let the retry succeed, or interrupt the agent's turn on the Mac. The strip
+      disappears on its own, with no reopen needed.
 
 ## A second checklist: the iOS plumbing
 

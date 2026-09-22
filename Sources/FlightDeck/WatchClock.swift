@@ -103,6 +103,13 @@ final class WatchClock {
         reschedule()
     }
 
+    /// Test seam: is `owner` currently subscribed? Lets a caller-side test prove an `add(...)`
+    /// call actually ran — the way `fire()` below lets one drive a beat — without waiting for
+    /// a real timer tick or exposing `subscribers` itself.
+    func isRegistered(_ owner: AnyObject) -> Bool {
+        subscribers.contains { $0.id == ObjectIdentifier(owner) }
+    }
+
     func remove(_ owner: AnyObject) {
         let id = ObjectIdentifier(owner)
         subscribers.removeAll { $0.id == id }

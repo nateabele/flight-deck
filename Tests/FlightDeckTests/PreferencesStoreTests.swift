@@ -292,6 +292,46 @@ final class PreferencesStoreTests: XCTestCase {
         XCTAssertNil(decoded.sleepIdleThresholdSeconds)
     }
 
+    // MARK: Auto-retry API errors
+
+    func testAutoRetryDefaultsOff() {
+        let store = PreferencesStore(persistence: MemoryPersistence())
+        XCTAssertFalse(store.autoRetriesAPIErrors)
+    }
+
+    func testAutoRetryRoundTripsThroughPersistence() {
+        let persistence = MemoryPersistence()
+        let store = PreferencesStore(persistence: persistence)
+        store.autoRetriesAPIErrors = true
+        XCTAssertTrue(PreferencesStore(persistence: persistence).autoRetriesAPIErrors)
+    }
+
+    /// Same trap `testShellPreferencesWithoutTheScrollbackBudgetKeyStillDecode` guards, for
+    /// this field: a `"shell": {...}` blob written before it existed must still decode a
+    /// `ShellPreferences`, with the other shell fields intact and the new one nil.
+    func testAShellBlobPredatingTheAutoRetryFieldStillDecodes() throws {
+        let original = ShellPreferences(
+            shellOverride: "/bin/fish", environment: ["FOO": "bar"], clearChildSessionMarker: false,
+            autoRetryAPIErrors: true
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(original))
+                as? [String: Any]
+        )
+        // Confirm the key is genuinely present before removing it — a no-op against an absent
+        // key would never detect a regression where the field becomes non-optional.
+        XCTAssertTrue(object.keys.contains("autoRetryAPIErrors"))
+        object.removeValue(forKey: "autoRetryAPIErrors")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(ShellPreferences.self, from: legacy)
+
+        XCTAssertNil(decoded.autoRetryAPIErrors)
+        XCTAssertEqual(decoded.shellOverride, "/bin/fish")
+        XCTAssertEqual(decoded.environment, ["FOO": "bar"])
+        XCTAssertFalse(decoded.clearChildSessionMarker)
+    }
+
     // MARK: Auto-resume
 
     func testAutoResumeDefaultsOff() {

@@ -1359,3 +1359,113 @@ Plan: [superpowers/plans/2026-09-21-multi-agent-search.md](superpowers/plans/202
   is an unused placeholder value (see `SearchCandidates.build`), never a real one worth
   drawing either. Widening the glyph's scope needs the `PhoneSearchCandidates` fix first, or
   it ships a glyph that lies on exactly the platform it was added for.
+## API-error auto-retry (2026-09-22)
+
+Spec: [superpowers/specs/2026-09-21-api-error-auto-retry-design.md](superpowers/specs/2026-09-21-api-error-auto-retry-design.md).
+An opt-in loop (**Retry after API errors**, off by default, in Shell & Environment →
+Recovery) that nudges an agent whose turn died on a transient API failure back to life on a
+backoff ladder, riding the existing `pendingPrompts` queue rather than a second typing path.
+
+- **The Mac shows the attempt number but no live countdown; the phone counts down.**
+  `SessionAPIError.label` renders `"… · retrying, attempt 2"` and stops there. The sidebar
+  row is a flat `HStack` with no subtitle slot, and `SessionSidebar.swift`'s
+  `PhonePresenceBadge` doc comment already states the reason no row here gets a
+  `TimelineView`: it would re-render the whole row on a display-linked schedule for state
+  that is usually absent. A tooltip is also expected to be the wrong vehicle regardless: the
+  standard `NSToolTip`/`.help(_:)` mechanism is not documented to re-read its string while the
+  pointer just sits there, so a per-second countdown would likely need to be dismissed and
+  re-shown to update — worse than a static attempt number. Not verified against AppKit source
+  or measured on this build; recorded as expected platform behavior, not a confirmed fact.
+  Deliberate non-fix regardless, since the flat `HStack` and the `TimelineView` rejection above
+  hold on their own; the
+  phone's banner (`SessionTimelineScreen`) is the one place this actually counts down,
+  because it can afford a `TimelineView` scoped to a banner that is usually absent.
+
+- **`SessionAPIError.kind` is now matched against an allowlist for policy, while still being
+  rendered verbatim for display.** `CodexTurnRecovery.transientKinds` (`rate_limit_exceeded`,
+  `server_overloaded`, `internal_server_error`, `response_too_many_failed_attempts`,
+  `response_stream_connection_failed`, `response_stream_disconnected`,
+  `http_connection_failed`) is the one place that vocabulary is judged; `kind` itself stays
+  free text everywhere else, per the field's own "never matched against an enum" rule for
+  *display*. The consequence: codex's error vocabulary is not ours and will grow, so a
+  codex-cli upgrade can add a new transient kind the allowlist does not know about, and the
+  loop will silently not retry it — fail-closed is the deliberate trade (a denylist would
+  fail open onto a terminal error being retried forever instead). The allowlist was derived
+  by driving a real codex TUI against a local upstream returning 429 (codex-cli 0.155.1,
+  2026-09-21); only `response_too_many_failed_attempts` was captured verbatim that way (the
+  fixture is `Tests/FlightDeckTests/CodexRolloutMapperTests.swift`), and the rest were
+  converted from the app-server's camelCase schema to the rollout's snake_case by rule, not
+  observed. Re-probing the same way — a real `codex` TUI against an upstream that returns
+  each status the allowlist claims to cover, reading the resulting `task_complete.error`
+  record straight off the rollout `.jsonl` — is how this gets checked after an upgrade; the
+  probe rig itself was scratchpad-only and was never added to the repo, so there is no script
+  to just re-run.
+
+- **Task 5 fixed a pre-existing starvation that was never filed as a bug.** `applyRegistry`
+  is driven only by `SessionStatusWatcher`, which exists only for agents answering
+  `hasStatusRegistry` — true for claude, false for codex (`SessionStore.startStatusWatching`,
+  `startWatching(tabID:)`). So on a codex-only fleet, `flushPendingPrompts` (phone-sent
+  prompts and the auto-resume nudge) and `flushPendingRenames` never flushed at all — nothing
+  drove them. This auto-retry feature would have reproduced the identical gap for its own
+  nudge on day one had it been built on the same tick, so the fix landed underneath it
+  instead: the registry-tick `defer` body was pulled into `maintenanceTick()`
+  (`flushPendingRenames`, `flushPendingPrompts`, `flushPromptQueue`, plus the new
+  `flushRetryBackoff`), called both from `applyRegistry`'s `defer` (unchanged for claude) and
+  from a new registration on the shared `WatchClock`, which ticks every agent regardless of
+  status registry. All four flushes are idempotent and deadline-guarded and `inject` is
+  re-entrancy-guarded, so the two call sites landing in the same instant is safe.
+
+- **A per-tab "stop retrying" cannot work by clearing `retryAttempt`, and now does not.**
+  `flushRetryBackoff`'s "not armed, preference on" branch re-judges any tab whose
+  `retryAttempt` is `nil` on every tick it sees one, and re-arms it at `resumedRung` if the
+  failure is still transient — so clearing the field is undone on the very next tick, and at
+  rung 1 if the episode went too, which makes the typing arrive *sooner*. The suppression
+  signal this entry predicted would be needed is `SessionStore.retryInterrupted`, added for
+  the interrupt stop below; a future user-facing cancel control should set that rather than
+  clear state.
+
+- **Pressing Esc stops the loop on codex, and needs no equivalent on claude.** `turn_aborted`
+  now also maps to `AgentEvent.turnAborted`, which strips the tab's schedule, forgets its
+  `RetryEpisode` and latches `retryInterrupted` so the re-arm branch above cannot undo it —
+  while leaving the error badge standing, because the last turn really did fail. Claude has no
+  abort signal to map and needs none: every `"type":"user"` transcript record emits
+  `.progressed` (`ClaudeSession.events(inObject:)`), and `.progressed` clears `apiError`
+  outright, schedule included — so a claude interrupt stops the loop by clearing it. The latch
+  is lifted by a turn that completes with no error, which is the only evidence the outage is
+  actually over, and dropped with the tab in `closeSession`. A re-report of the same failure
+  does **not** lift it: the user stopped this loop by hand and a repeat of the error they
+  stopped it over is not new information. Nor does toggling the preference off and back on:
+  nothing in that path touches `retryInterrupted`, so a tab the user interrupted by hand stays
+  latched across the cycle and does not resume — a per-tab interrupt outranking the global
+  toggle, which is the right precedence, just not the symmetric one the re-arm branch's own
+  comment used to claim.
+
+- **The rung advances at queue time, not send time.** `flushRetryBackoff` calls
+  `armed(_, attempt: attempt + 1)` in the same pass that queues the `DeferredPrompt` — before
+  `flushPendingPrompts` has actually typed anything. So a nudge that `cancelSupersededPrompts`
+  drops (the session went busy on its own) or that misses the 120s `resumePromptWindow`
+  deadline (`SessionStore.resumePromptWindow`) still spends a rung, even though nothing was
+  typed. This is pre-existing shape from the scheduler's first cut, narrowed since by the
+  "one nudge in flight per tab" and "already working" guards in the same function; recorded
+  rather than fixed, since a rung spent on a no-op nudge just makes the next real one wait
+  proportionally longer, never shorter.
+
+- **Two pre-existing test faults were observed while building this feature, in code it never
+  touches, and neither was chased — the "isolate, don't loop" rule.** A malloc abort in
+  `QuitReapTests`, seen twice across separate runs during this work — a memory fault, not an
+  assertion, so it will not present as an ordinary flaky test — and Fleet/Pairing networking
+  flakiness (sockets/TLS/async timeouts), seen in 2 of 4 runs across one task. Task 9's own
+  two-suite gate run was clean on both suites, first try, with neither fault recurring — see
+  the commit that lands alongside this entry for the tail output.
+
+Two smaller things worth recording alongside the above, found reading `CodexEventMapper`
+rather than by design:
+
+- An `error` present on a `task_complete` record with `codex_error_info` absent or `{}`
+  yields a **kind-less** `SessionAPIError` (`kind: nil`, `isTransient: false`) rather than
+  `nil` — the badge still raises, just with no kind to show or retry on. Defensible default
+  (a failure with no parseable info is still a failure worth surfacing), currently untested.
+- `CodexEventMapper.apiError(fromTurnError:)` reads the single key of a `codex_error_info`
+  object with `object.keys.first`. `Dictionary.Keys` has no defined ordering in Swift, so a
+  malformed multi-key payload — not in the published schema today, but nothing parses it away
+  — would pick a `kind` non-deterministically rather than failing loudly.
