@@ -60,7 +60,8 @@ enum PhoneSearchCandidates {
                 // desktop declines to do for the same reason. Sorting last within a tier is
                 // the right default: anything with a live tab is likelier to be wanted.
                 lastActivity: .distantPast,
-                conversationID: conversation.id
+                conversationID: conversation.id,
+                agent: conversation.agent
             ))
         }
         return candidates

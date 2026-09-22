@@ -217,7 +217,8 @@ final class FleetService: ObservableObject {
         let conversations = known
             .filter { open.contains($0.value.projectPath) }
             .map { WireConversation(
-                id: $0.key, name: $0.value.name, projectPath: $0.value.projectPath
+                id: $0.key, name: $0.value.name, projectPath: $0.value.projectPath,
+                agent: $0.value.agent
             ) }
             .sorted { $0.id < $1.id }
         let sessionActivity = Dictionary(
