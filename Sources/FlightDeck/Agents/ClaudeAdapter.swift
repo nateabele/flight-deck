@@ -21,6 +21,10 @@ struct ClaudeAdapter: AgentAdapter {
     static let textChannel: AgentTextChannel? = ClaudeTextChannel()
     static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
 
+    /// Claude's own transience predicate, carried on the transcript record — see
+    /// `ClaudeTurnRecovery`.
+    static let turnRecovery: AgentTurnRecovery? = ClaudeTurnRecovery()
+
     /// **`nil`, and that is an answer, not a gap.** Claude's rename is one line typed through
     /// `textChannel` — `/rename <name>`⏎, submitted in a single shot — so it never has a
     /// second stage for `AgentRenameTyping` to drive; see `CodexAdapter.renameTyping` for the

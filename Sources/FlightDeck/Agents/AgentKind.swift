@@ -53,13 +53,32 @@ enum AgentEvent: Equatable, Sendable {
     /// This tab's last turn died on an API error, or `nil` because a newer record cleared it.
     ///
     /// Like `.subagentCount` and unlike `.activity`, this is folded from transcript records
-    /// before it reaches here — the store never learns which channel carried it. Only the claude
-    /// runtime raises it today; codex's failure shape is a separate probe.
+    /// before it reaches here — the store never learns which channel carried it. Claude reads
+    /// this from its transcript's `isApiErrorMessage`; codex reads it from a `codex_error_info`
+    /// field on its rollout's `task_complete` record — different shapes, same event.
     case apiError(SessionAPIError?)
     /// What this tab's agent lifecycle says about whether its input box is there to type
     /// into. Unlike `.activity`, which reports what the agent is *doing*, this reports
     /// whether there is anything to talk to at all. See `ComposerReadiness`.
     case lifecycle(ComposerReadiness)
+    /// The user interrupted this tab's turn. Accompanies `.turnEnded`, never replaces it — an
+    /// aborted turn is still a turn that ended, and a tab left spinning because nothing said
+    /// "over" is the worse failure.
+    ///
+    /// Distinct from `.turnEnded` because the two answer different questions: `.turnEnded`
+    /// asks whether the tab is free, this asks *who stopped it*. The auto-retry loop is the
+    /// only reader, and the reason it needs one is that pressing Esc is the most natural way a
+    /// person stops Flight Deck typing into their terminal — without this, the abort produced
+    /// only `.activity(.idle)`, the schedule stayed armed, and the next rung typed again.
+    ///
+    /// **Codex-only in practice, and deliberately not invented for claude.** Claude's
+    /// transcript makes an interrupt indistinguishable from any other user record: every
+    /// `"type":"user"` record emits `.progressed` (`ClaudeSession.events(inObject:)`), and
+    /// `.progressed` already clears `apiError` outright — schedule and all. So claude has no
+    /// abort signal to map, and needs none: its loop is stopped by the clearing that its own
+    /// interrupt record performs. Codex is the asymmetric case because its rollout reports
+    /// `turn_aborted` as a record type of its own and clears no error.
+    case turnAborted
 }
 
 /// Per-agent settings payload.
