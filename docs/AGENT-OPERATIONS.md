@@ -50,8 +50,65 @@ What the script guarantees, and why each guarantee exists:
 | Stages via `ditto`, backs the old bundle up to `…/Flight Deck/backups/<ts>/`, restores on failure | A half-swapped `/Applications` with no working app. |
 | Post-order signal walk (leaves → app), SIGTERM then SIGKILL | Children reparented to `launchd` become unkillable orphans. |
 | Uses `ps -A`, not `pgrep -f` | `pgrep -f` matches nothing for this app in this environment; a silent no-match would swap the bundle out from under a live app. |
+| Classifies the new bundle **Release / Debug / unknown** by static `otool -L` signals (`.debug.dylib` linkage, `Contents/PlugIns`) — never launches it — and refuses anything but a positively-confirmed Release build unless `FD_SWAP_ALLOW_DEBUG=1` | A Debug bundle installed at `/Applications`: it forks the fleet across two daemon roots (see below) so every restored conversation looks like it lost its last several turns, even though nothing is actually lost. |
 
 Log: `~/Library/Logs/flight-deck-swap.log`. Rollback is printed at the end of every run.
+
+### Debug bundles fork the fleet — the daemon-root split
+
+`bundle_flavor()` returns one of three outcomes, each refused with its own wording unless
+`FD_SWAP_ALLOW_DEBUG=1` is set:
+
+| Flavor | Log | Notification |
+|---|---|---|
+| `debug` | `FATAL: new bundle is Debug, not Release — aborting, nothing changed.` | "Refused to install a Debug bundle — nothing changed" |
+| `unknown` (`otool` missing, or `otool -L` failed) | `FATAL: could not determine build flavor (otool unavailable or unreadable) — refusing, nothing changed.` | "Refused to install a bundle of unknown flavor — nothing changed" |
+| `release` | (proceeds) | — |
+
+`unknown` gets its own wording rather than being folded into `debug` — calling an undetermined
+bundle "Debug" would send the next person down the wrong path. The notification is best-effort:
+a successful `osascript` call means the AppleScript ran, not that Notification Center rendered a
+banner — delivery depends on the calling binary's notification permission. The log at
+`~/Library/Logs/flight-deck-swap.log` is the reliable channel; the notification is the
+convenience.
+
+Why this refusal exists: `SessionDaemon.defaultDirectory()`
+(`Sources/FlightDeck/SessionDaemon.swift:56`) keys the fd-abduco socket root on build flavor —
+Release `/tmp/flight-deck-<uid>`, Debug `/tmp/flight-deck-debug-<uid>` — deliberately, so a
+locally launched Debug build never reaps a released build's daemons. But `sessions.json` is
+shared by both flavors: a Debug bundle installed at `/Applications` restores the same sessions
+and attaches them to whatever is sitting in the *debug* root — typically stale leftovers from an
+earlier debug run. Every conversation looks like it lost its last several turns. Nothing is
+actually lost: the live daemons keep running in the release root, and reinstalling a genuine
+Release bundle restores them.
+
+This doesn't conflict with the `-FlightDeckStateDir` guidance below: that flag redirects
+`sessions.json` only, not the daemon root, so a Debug build launched in place with a scratch
+state dir stays safe. The hazard above is specifically a Debug bundle *installed at*
+`/Applications`, not one launched from `DerivedData/`.
+
+Diagnose in one step:
+
+```bash
+rg -N 'new bundle:|flavor:' ~/Library/Logs/flight-deck-swap.log | tail
+```
+
+Recover by re-running the swap with a genuine Release bundle — the release-root daemons were
+never touched, so nothing needs restoring beyond that.
+
+**Operator env vars:**
+
+| Var | Purpose |
+|---|---|
+| `FD_SWAP_NEW_APP` | Overrides which bundle path gets installed. Exists so the flavor guard can be exercised against a known-debug bundle without editing the script. |
+| `FD_SWAP_CHECK_ONLY=1` | Runs every pre-swap check (executable, `Info.plist`, `codesign --verify`, flavor) and exits before staging — nothing touched. This is the pre-flight. |
+| `FD_SWAP_ALLOW_DEBUG=1` | Escape hatch: installs a Debug or unknown-flavor bundle anyway, logging `FD_SWAP_ALLOW_DEBUG=1 — installing a Debug bundle anyway, override recorded` (or the unknown-flavor equivalent). Essentially never use it — it is exactly what forks the fleet across daemon roots, above. |
+
+Pre-flight, before arming a swap:
+
+```bash
+FD_SWAP_CHECK_ONLY=1 ./scripts/swap-release.sh
+```
 
 **Rule: never launch a `DerivedData/` bundle against the real state directory.** The danger
 was never the bundle's location — it is two live apps sharing
