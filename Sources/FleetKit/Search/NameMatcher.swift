@@ -10,6 +10,11 @@ public enum MatchTier: Int, Comparable, Sendable {
     case prefix = 1
     case fuzzy = 2
     case transcript = 3
+    /// A transcript hit from an automated run — a `codex exec`. Indexed, but below every
+    /// conversation. The rank itself is not what places these rows: `SearchRanker` partitions
+    /// the transcript groups directly, since a grouped row's tier never reaches a comparator
+    /// (see `SearchRanker.rank`). This case exists so the row's own label is honest.
+    case automated = 4
 
     public static func < (lhs: MatchTier, rhs: MatchTier) -> Bool { lhs.rawValue < rhs.rawValue }
 }

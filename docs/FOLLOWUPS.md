@@ -1306,3 +1306,56 @@ rather than fixed alongside the daemon wiring.
   XCTestBundleInjectPath -u XCODE_TEST_PLAN_NAME -u XCODE_SCHEME_NAME -u
   __XPC_DYLD_FRAMEWORK_PATH`). Folding that into `scripts/test-unit.sh` itself is a separate,
   deliberate change — not done here.
+## From multi-agent ⌘K search (2026-09-21)
+
+Full design: [superpowers/specs/2026-09-21-multi-agent-search-design.md](superpowers/specs/2026-09-21-multi-agent-search-design.md).
+Plan: [superpowers/plans/2026-09-21-multi-agent-search.md](superpowers/plans/2026-09-21-multi-agent-search.md).
+
+- **Flight Deck pollutes codex's own naming source, and `CodexSearchCorpus` has to work around
+  it rather than fix it.** Every tab Flight Deck creates pushes its default title —
+  `session N` — to codex via `thread/name/set`, so `session_index.jsonl` ends up full of
+  names this app wrote, not the user. That is why codex naming needs a placeholder rule at
+  all (`^session \d+$`, preferring a real first user message over it): without it, claude's
+  "a rename always beats the first user message" rule would port straight across and ⌘K rows
+  would read `session 206` for a conversation that actually opens on something else entirely.
+  Fixing it at the source — not pushing a placeholder title to codex in the first place —
+  would let claude's simpler rule port cleanly, but it is a change to `SessionStore`'s rename
+  path, not to search, and the roughly 30 placeholders already written to existing users'
+  `session_index.jsonl` files would still need the fallback regardless. Left as a rename-path
+  fix for its own branch.
+
+- **`~/.codex/archived_sessions/` is deliberately not searched.** `thread/archive` moves a
+  rollout there as part of releasing it (`CodexAdapter` documents the RPC), so resurrecting an
+  archived thread in ⌘K results would undo an explicit put-away rather than surface something
+  merely old. If this ever needs revisiting, it is a product decision (should an archived
+  thread be findable at all?), not a bug.
+
+- **No per-agent ⌘K filter (`agent:codex …`).** YAGNI until a mixed result list is actually
+  confusing in practice — codex is one additional agent today, and the `.automated` ranking
+  tier already keeps its noisiest source (`codex exec`) out of the way. Add the filter syntax
+  only once a real session shows it is needed, not ahead of that.
+
+- **`PhoneSearchCandidates.build` never passes the real `agent` for a `.session` candidate**,
+  so every open tab the phone contributes to name matching reads as `.claude` regardless of
+  which agent it actually runs — unlike the desk's `SearchCandidates.build`, which does carry
+  the real value. Inert today: `search.open` sends only a conversation id and a project path
+  over the wire, so nothing on either end reads a `.session` candidate's `agent` field. Still
+  a wrong value sitting in a field, and worth fixing before anything ever does read it.
+
+- **`CodexRuntime.attach`'s live-ingest `TranscriptRef` carries the built-in codex home
+  (`AgentID.codex.builtInHome`) as `accountHome`, not the tab's actual account**, even though
+  discovery is per-account. Inert because `SearchIndex.ingest` never reads `accountHome` off
+  a ref — it exists for codex naming during the backfill walk, which live ingest does not do
+  — and the same shortcut mirrors what `ClaudeRuntime.attach` already does. Worth widening
+  only if `accountHome` ever grows a second live-ingest reader.
+
+- **The agent glyph draws only on a `.conversation` row, never on `.session` or `.project`,
+  and that scope is load-bearing rather than incidental.** A `.session` row is a tab already
+  open in the sidebar (or the phone's fleet list) and identifiable there the way it always
+  has been, so a glyph would be redundant on the desk — but on the phone it would also
+  currently be **wrong**: the `PhoneSearchCandidates` gap above means every `.session`
+  candidate's `agent` reads `.claude` regardless of truth, so drawing a glyph from it would
+  assert a false identity instead of adding a redundant true one. A `.project` row's `agent`
+  is an unused placeholder value (see `SearchCandidates.build`), never a real one worth
+  drawing either. Widening the glyph's scope needs the `PhoneSearchCandidates` fix first, or
+  it ships a glyph that lies on exactly the platform it was added for.

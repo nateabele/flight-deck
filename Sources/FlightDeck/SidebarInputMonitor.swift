@@ -108,9 +108,12 @@ import SwiftUI
 /// mid-press with the button still down, and every drag would toggle.
 ///
 /// `SidebarClickIntent` holds the decision itself, over plain numbers, so it is testable without
-/// a window. Its travel threshold is belt and braces rather than the load-bearing check: a real
-/// drag both exceeds it *and* usually ends with the pointer on another row entirely. The
-/// threshold catches what is left — a press that wobbles a point or two and never drags at all.
+/// a window. **Travel is what rejects a drag**, and the identity check does not help there: in
+/// an `.onMove` reorder the dragged block follows the pointer, so the row under it at release is
+/// often the dragged project's own header or one of its sessions — identity matches, and travel
+/// is the only thing left saying no. Identity earns its keep against the opposite case, a row
+/// removed or inserted under a pointer that never moved. (Which row is under the pointer at the
+/// end of a real reorder drag was not measured; it is read off how `.onMove` moves the block.)
 ///
 /// # Excluding the close button, by its own frame
 ///
@@ -148,6 +151,15 @@ import SwiftUI
 ///
 /// When it is absent nothing is excluded, which is correct: a button that is not in the tree is
 /// not on screen and cannot have been the target.
+///
+/// **The case this exclusion exists for is the confirmation sheet.** Press the X on a project
+/// that closes outright and the row is gone by the time the decision runs, so the identity
+/// comparison vetoes the toggle on its own and `pressedRowControl` changes nothing. But a
+/// project with more than one session asks first (`ProjectCloseCoordinator.requestClose`), and
+/// `NSAlert.beginSheetModal` returns immediately: the run loop reaches `.default` with the sheet
+/// open, the pointer exactly where it was pressed, and the row still there. Without this
+/// exclusion that press collapses the project behind the sheet — and then closes it, or does
+/// not, depending on which button the user picks. It is the one path where nothing else says no.
 ///
 /// # Scoping: this monitor is app-wide, so it must prove which table it is looking at
 ///
@@ -231,6 +243,14 @@ final class SidebarInputMonitor {
         // Scope check first: Settings ▸ Projects and `NSOpenPanel` are table-backed too.
         // `hitView` answers nil for both, so nothing below can act on their rows.
         guard let window = event.window, let hit = SessionWindow.hitView(for: event) else { return }
+        // This guard is also what keeps a control-click out of click-to-collapse, which is worth
+        // knowing because nothing below filters modifiers the way `handleKeyDown` does. Probed on
+        // a replica of this list — a plain press and a control-press at the same point in the
+        // same run — the plain one resolved a row and scheduled, and the control-press resolved
+        // NO row (`rowResolved=false`) and got no further than here, while the context menu
+        // opened normally. So the sequence control-click → Escape leaves the row untouched. Not
+        // driven in the real app: `AXIsProcessTrusted()` is false on this machine, so no
+        // synthetic control-click can be delivered to it.
         guard let (table, rowView, rowIndex) = Self.sidebarRow(under: hit) else { return }
 
         if event.clickCount == 2 {
@@ -246,16 +266,25 @@ final class SidebarInputMonitor {
         guard !(window.firstResponder is NSText) else { return }
 
         // Ask to be called back once this click is over, so it can be told apart from a drag.
-        // Deliberately *after* the field-editor guard above — so a click inside an open rename
-        // field can never collapse a project — and deliberately *before* the selected-row guard
-        // below, which returns early on every row but one.
         //
-        // `clickCount == 1` is the only value that reaches the scheduler, so a real double-click
-        // resolves like this: the first down (cc=1) schedules, and toggles once when the button
-        // comes up; the second (cc=2) goes to `renameRow` above, which guards `case .session`
-        // and no-ops on a project header. Net effect, one toggle — which is the right answer,
-        // but nobody should have to derive it. The rule keeps its own `clickCount` guard anyway,
-        // because a pure rule should be total over its inputs rather than rely on this call site.
+        // Deliberately *after* the field-editor guard above, which is broader than "a click
+        // inside the field": while a rename is open it suppresses the toggle for a click
+        // ANYWHERE in the sidebar, including on some other project's header. That is the right
+        // behaviour and it is what the user sees — the first click commits the rename, the
+        // second one toggles — but it is worth saying, because it is not what "never collapse a
+        // project from inside a rename field" implies.
+        //
+        // Deliberately *before* the selected-row guard below, which returns early on every row
+        // but one.
+        //
+        // `clickCount == 1` is the only value that reaches the scheduler, so **clicking a header
+        // repeatedly and fast toggles it exactly once, however many clicks land**: the first
+        // (cc=1) schedules and toggles, the second (cc=2) goes to `renameRow` above, which
+        // guards `case .session` and no-ops on a header, and the third and beyond (cc>=3) match
+        // nothing here at all. That is the intended behaviour and not flakiness — a double-click
+        // that toggled twice would look like it had done nothing — but nobody should have to
+        // derive it from the guards. The rule keeps its own `clickCount` guard anyway, because a
+        // pure rule should be total over its inputs rather than rely on this call site.
         if event.clickCount == 1 {
             scheduleToggleDecision(
                 window: window, rowView: rowView, rowIndex: rowIndex,
@@ -423,9 +452,9 @@ final class SidebarInputMonitor {
 enum SidebarClickIntent {
     /// How far the mouse may travel between press and release and still count as a click.
     ///
-    /// Belt and braces, not the load-bearing check: a real reorder drag both exceeds this *and*
-    /// usually ends over a different row, which is rejected on its own. This catches what is
-    /// left — a press that wobbles a point or two without ever starting a drag.
+    /// This is the check that rejects a reorder drag. The identity comparison below does not: a
+    /// dragged block follows the pointer, so at release the row under it is frequently the one
+    /// that was dragged. See the file's doc comment.
     static let dragThreshold: CGFloat = 4.0
 
     /// Whether a press/release pair should toggle the row it landed on.
