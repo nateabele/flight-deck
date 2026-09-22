@@ -1656,6 +1656,10 @@ final class SessionStore: ObservableObject {
         // replaces rather than duplicates a registration for the same owner, and `sleepController`
         // itself is the weak owner — held alive by this store's `lazy var` for the run.
         clock.add(sleepController) { [weak self] in self?.sleepController.tick() }
+        // The agent-independent half of the tick. `sleepController` registers the same way
+        // one line up; see `maintenanceTick` for why the registry scan cannot be the only
+        // driver.
+        clock.add(self) { [weak self] in self?.maintenanceTick() }
         if let previousRun {
             Task { [weak self] in await self?.sweepOrphans(from: previousRun) }
         }
@@ -4167,6 +4171,11 @@ final class SessionStore: ObservableObject {
     /// registry scan says so here.
     func flushPromptQueueForTesting() { flushPromptQueue() }
 
+    /// Test seam, in the style of `flushPromptQueueForTesting`. Drives BOTH call sites'
+    /// shared body at once, which is the point: a codex-only fleet has no `applyRegistry`
+    /// tick to fall back on, so this is the only way to advance its clock in a test.
+    func maintenanceTickForTesting() { maintenanceTick() }
+
     /// Test seam. Production marks come from `applyReadState` and from restore; a test that
     /// only cares about how a mark is *pruned* should not have to script an edge to create it.
     func markUnreadForTesting(_ ids: Set<UUID>) {
@@ -5783,6 +5792,30 @@ final class SessionStore: ObservableObject {
         })
     }
 
+    /// Everything that must run on a timer regardless of which agents are open.
+    ///
+    /// **Called from two places on purpose.** `applyRegistry`'s `defer` keeps claude's
+    /// cadence exactly as it was; the `WatchClock` registration in `init` is what covers a
+    /// fleet with no claude tab in it. Registry scans exist only for agents that declare
+    /// `hasStatusRegistry` — codex does not — so before this split a codex-only fleet never
+    /// flushed a deferred rename, a phone prompt, or anything else parked here.
+    ///
+    /// Safe to run twice in one instant: every flush below is idempotent and
+    /// deadline-guarded, and `inject` refuses re-entry for a tab already mid-settle.
+    private func maintenanceTick() {
+        // This is the retry tick for deferred renames: a rename usually waits on something
+        // that never shows up in `statuses` at all — the user clearing their half-typed
+        // draft moves no status, so gating the retry on a status change would strand it.
+        flushPendingRenames()
+        // Same reason as the line above: this is the retry tick, and a prompt usually
+        // waits on a `claude` that has not finished booting — which is not a status
+        // change, so gating the retry on one would strand it.
+        flushPendingPrompts()
+        // And the phone's queue, for the same reason and one more: what a phone-sent
+        // prompt waits on is usually a turn ENDING, and the tick is where that is seen.
+        flushPromptQueue()
+    }
+
     /// Rebuilds `statuses` from a registry scan and keeps each tab's anchor current.
     /// Entries for processes Flight Deck does not own are dropped: the registry lists
     /// every `claude` on the machine.
@@ -5791,20 +5824,9 @@ final class SessionStore: ObservableObject {
         // registry, not a real one — returning before even the `defer` below runs is
         // deliberate, so nothing clears a mark or persists over the state auto-resume wants.
         guard !isTerminating else { return }
-        // The scan is also the retry tick for deferred renames. `defer` because this method
-        // returns early when nothing changed, and a rename usually waits on something that
-        // never shows up in `statuses` at all — the user clearing their half-typed draft
-        // moves no status, so gating the retry on a status change would strand it.
-        defer {
-            flushPendingRenames()
-            // Same reason as the line above: this is the retry tick, and a prompt usually
-            // waits on a `claude` that has not finished booting — which is not a status
-            // change, so gating the retry on one would strand it.
-            flushPendingPrompts()
-            // And the phone's queue, for the same reason and one more: what a phone-sent
-            // prompt waits on is usually a turn ENDING, and the tick is where that is seen.
-            flushPromptQueue()
-        }
+        // `defer` because this method returns early when nothing changed, and the
+        // timer-driven work below must still run regardless — see `maintenanceTick`.
+        defer { maintenanceTick() }
 
         // Resolve against a snapshot of the list before touching anything. Later tasks
         // apply repins and project moves here, and those mutate `repos` — iterating it
