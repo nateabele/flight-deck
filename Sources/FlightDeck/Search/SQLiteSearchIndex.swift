@@ -39,17 +39,18 @@ final class SQLiteSearchIndex: SearchIndex {
     /// the next `prune` pass. Widening the lock to cover them would be solving a problem
     /// that does not exist; if a future write here stops self-healing, it needs the lock too.
     ///
-    /// Two writers reach this class now: `SearchIndexBuilder`, backfilling from its own
-    /// actor, and `ClaudeRuntime`'s live `onMessages` hook, ingesting from the main actor as
-    /// a session streams. `SQLITE_OPEN_FULLMUTEX` (see `open`) makes any *one* sqlite3 API
-    /// call safe to issue from either thread, but `BEGIN IMMEDIATE ... COMMIT` below is many
-    /// calls treated as one unit — without this lock, one writer's `BEGIN IMMEDIATE` landing
-    /// while the other's transaction is still open fails with "cannot start a transaction
-    /// within a transaction", which the `try?` at both call sites swallows. That is silent
-    /// loss, not corruption: SQLite still has exactly one open transaction on the handle,
-    /// belonging to whichever writer got there first, and the failed writer's entire batch —
-    /// none of it, since the failure is at `BEGIN` itself, before any row is written — never
-    /// lands. See `testConcurrentIngestsDoNotLoseEachOthersMessages`.
+    /// Three writers reach this class now: `SearchIndexBuilder`, backfilling from its own
+    /// actor, and `ClaudeRuntime` and `CodexRuntime`'s live `onMessages` hooks, both ingesting
+    /// from the main actor as a session streams. `SQLITE_OPEN_FULLMUTEX` (see `open`) makes
+    /// any *one* sqlite3 API call safe to issue from any of those threads, but `BEGIN
+    /// IMMEDIATE ... COMMIT` below is many calls treated as one unit — without this lock, one
+    /// writer's `BEGIN IMMEDIATE` landing while another's transaction is still open fails with
+    /// "cannot start a transaction within a transaction", which the `try?` at every call site
+    /// swallows. That is silent loss, not corruption: SQLite still has exactly one open
+    /// transaction on the handle, belonging to whichever writer got there first, and the
+    /// failed writer's entire batch — none of it, since the failure is at `BEGIN` itself,
+    /// before any row is written — never lands. See
+    /// `testConcurrentIngestsDoNotLoseEachOthersMessages`.
     private let transactionLock = NSLock()
 
     struct Failure: Error { let message: String }
@@ -151,6 +152,52 @@ final class SQLiteSearchIndex: SearchIndex {
                 }
                 bind(source_, 5, ref.workingDirectory)
                 guard sqlite3_step(source_) == SQLITE_DONE else { throw failure() }
+            } else {
+                // A nil offset means "no read position to report", not "no metadata to
+                // report" — `ref.agent`, `ref.provenance` and `ref.workingDirectory` are
+                // known the moment a tab attaches, regardless of how far its watcher has
+                // read. Leaving this row unwritten until a backfill eventually reaches the
+                // same file is what let a conversation known only from live ingest — the
+                // normal case for a codex thread started since the last backfill — answer
+                // every `LEFT JOIN` against it with NULL, which both `search()` and
+                // `transcriptLocation` default to "claude": the conversation the user just
+                // had resumed as the wrong agent.
+                //
+                // `0` binds only into the row this INSERT creates; an existing row keeps
+                // whatever `readOffset(for:)` already reports, because `ON CONFLICT DO
+                // UPDATE` here names every column except `offset`. Writing 0 unconditionally
+                // (an `INSERT OR REPLACE`, say) would reset a backfilled file's read position
+                // and send the next pass back to reading it from the top.
+                //
+                // The columns this DOES name are overwritten every time, on an existing row
+                // as much as a new one — deliberately, not just as a side effect of reusing
+                // one statement for both. This reaches every shipped agent, not only codex: a
+                // session the backfill already indexed, now streaming live, has its
+                // `working_directory` overwritten on every batch, because the live tab's own
+                // value is a first-hand answer to "where is this conversation right now" and
+                // the backfill's is not — a session moved into a worktree since the last walk
+                // should read as being there, not where it used to be. The same overwrite
+                // nulls `provenance` for a codex thread the backfill had recorded as `exec`:
+                // once it is a live `codex resume` TUI, `exec` is no longer true, and this
+                // runtime's own `ingest` call (see `CodexRuntime.attach`) never claims
+                // otherwise.
+                let source_ = try prepare("""
+                    INSERT INTO source(path, offset, agent, provenance, working_directory)
+                    VALUES (?, 0, ?, ?, ?)
+                    ON CONFLICT(path) DO UPDATE SET
+                      agent = excluded.agent, provenance = excluded.provenance,
+                      working_directory = excluded.working_directory
+                    """)
+                defer { sqlite3_finalize(source_) }
+                bind(source_, 1, ref.url.path)
+                bind(source_, 2, ref.agent.rawValue)
+                if let provenance = ref.provenance {
+                    bind(source_, 3, provenance)
+                } else {
+                    sqlite3_bind_null(source_, 3)
+                }
+                bind(source_, 4, ref.workingDirectory)
+                guard sqlite3_step(source_) == SQLITE_DONE else { throw failure() }
             }
 
             try exec("COMMIT")
@@ -185,9 +232,12 @@ final class SQLiteSearchIndex: SearchIndex {
                    s.agent, s.provenance, s.working_directory
             FROM message_fts
             JOIN message m ON m.id = message_fts.rowid
-            -- LEFT JOIN, not JOIN: a message row is written before its source row's offset is
-            -- committed at the end of the file's pass, so an inner join would make every hit
-            -- from the file currently being indexed invisible until that pass finished.
+            -- LEFT JOIN, not JOIN: `ingest` now writes a source row's metadata in the same
+            -- commit as every message row it inserts, offset-bearing or not (see its
+            -- offset-less branch), so this protects only an index written before that was
+            -- true — a message row that really did outlive its source row. An inner join
+            -- would make such an old row's hits vanish outright instead of falling back to
+            -- the NULL defaults below.
             LEFT JOIN source s ON s.path = m.source
             WHERE message_fts MATCH ? AND m.project_path IN (\(placeholders))
             ORDER BY bm25(message_fts)
@@ -215,17 +265,18 @@ final class SQLiteSearchIndex: SearchIndex {
                 snippet: text(statement, 6),
                 timestamp: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
                 offset: Int(sqlite3_column_int64(statement, 4)),
-                // Defaults to "claude" when NULL: a message row can outlive its `source` row
-                // being written (see the LEFT JOIN above), and every source predating this
-                // column really was claude.
+                // Defaults to "claude" when NULL: `ingest` now writes a source row alongside
+                // every message row it inserts (see the LEFT JOIN above), so NULL here means
+                // only a row written before that was true, and every one of those really was
+                // claude.
                 agent: optionalText(statement, 7) ?? "claude",
                 provenance: optionalText(statement, 8),
                 workingDirectory: text(statement, 9),
                 // `m.source`, not `s.path`: `s.path` comes through the LEFT JOIN and is NULL
-                // for a file still mid-index, which would make `CodexAdapter.resumeCommand`
-                // treat an in-progress hit as having no transcript and start a fresh, empty
-                // thread instead of resuming the one that was searched for. `m.source` is on
-                // the inner-joined row and is never NULL.
+                // whenever a hit's source row is missing (see that LEFT JOIN's own comment),
+                // which would make `CodexAdapter.resumeCommand` treat the hit as having no
+                // transcript and start a fresh, empty thread instead of resuming the one that
+                // was searched for. `m.source` is on the inner-joined row and is never NULL.
                 transcriptPath: text(statement, 5)
             ))
         }
@@ -273,13 +324,13 @@ final class SQLiteSearchIndex: SearchIndex {
     func transcriptLocation(
         forConversation id: String
     ) throws -> (workingDirectory: String, transcriptPath: String, agent: String)? {
-        // LEFT JOIN, not JOIN: `s.working_directory` and `s.agent` may not exist yet for a
-        // file still mid-index (see `search`'s own LEFT JOIN above), and an absent one means
-        // "unknown" here rather than "no such conversation" — `m.source` alone is enough to
-        // answer that. `LIMIT 1` rests on how the corpus walk writes rows, not on a schema
-        // constraint: every message a given ingest pass files carries the source path it was
-        // read from, so one conversation never straddles two sources in practice, and the
-        // first row is the whole answer.
+        // LEFT JOIN, not JOIN: `s.working_directory` and `s.agent` may still be missing for a
+        // message written before `ingest` grew its offset-less metadata write (see `search`'s
+        // own LEFT JOIN above), and an absent one means "unknown" here rather than "no such
+        // conversation" — `m.source` alone is enough to answer that. `LIMIT 1` rests on how
+        // the corpus walk writes rows, not on a schema constraint: every message a given
+        // ingest pass files carries the source path it was read from, so one conversation
+        // never straddles two sources in practice, and the first row is the whole answer.
         let statement = try prepare("""
             SELECT m.source, s.working_directory, s.agent
             FROM message m

@@ -18,19 +18,24 @@ struct IndexedConversation: Equatable, Sendable {
 /// talks to SQLite. Everything here is synchronous and throwing; callers run it off the main
 /// actor.
 protocol SearchIndex: AnyObject {
-    /// Adds `messages`, and — when `offset` is non-nil — records that `ref.url` has been read
-    /// through that byte position.
+    /// Adds `messages`, records `ref`'s agent, provenance and working directory against its
+    /// source row regardless of `offset`, and — only when `offset` is non-nil — also records
+    /// that `ref.url` has been read through that byte position.
     ///
     /// Takes the whole `TranscriptRef` rather than a URL plus a project path because the
     /// index now files four facts about a transcript (project, agent, provenance, working
     /// directory) and passing them as loose parameters is how three of them get forgotten at
     /// one of the two call sites.
     ///
-    /// `nil` means live ingest: add the rows, do NOT touch this source's read position. The
-    /// live watcher starts at end-of-file, so its byte position is the wrong number to record
-    /// as indexing progress — recording it would make the backfill start there and silently
-    /// never index that conversation's history, which is exactly the history ⌘K exists to
-    /// search. An `offset` of 0 means the file restarted and this source's rows are replaced.
+    /// `nil` means live ingest: add the rows and refresh this source's metadata, but do NOT
+    /// touch its read position. The live watcher starts at end-of-file, so its byte position
+    /// is the wrong number to record as indexing progress — recording it would make the
+    /// backfill start there and silently never index that conversation's history, which is
+    /// exactly the history ⌘K exists to search. Metadata has no equivalent hazard: a live tab
+    /// knows its own agent and working directory the moment it attaches, so recording them
+    /// immediately is correct rather than merely convenient — see `SQLiteSearchIndex.ingest`'s
+    /// own comment for how a live ingest and a later backfill of the same file reconcile.
+    /// An `offset` of 0 means the file restarted and this source's rows are replaced.
     func ingest(_ messages: [IndexedMessage], for ref: TranscriptRef, offset: UInt64?) throws
 
     /// Where reading `source` should resume. 0 for a file never seen.
