@@ -1,6 +1,9 @@
 import Foundation
 
-/// Which `~/.claude/projects` directories belong to the projects open in the sidebar.
+/// Which of a claude account's `projects` directories belong to the projects open in the
+/// sidebar. `projectsRoot` is a parameter, not a hardcoded `~/.claude/projects`, because
+/// discovery is per-account: each of a user's claude logins gets its own walk against its own
+/// root.
 ///
 /// **Why this is not a prefix match.** `ClaudeSession.encodedProjectDirName` replaces every
 /// non-ASCII-alphanumeric UTF-16 code unit with `-`, which is lossy: nothing can turn

@@ -634,21 +634,21 @@ Multi-agent design, discovery details and the ranking correction below:
 
 **`AgentSearchCorpus` is the fourth capability object on `AgentAdapter`**, beside
 `textChannel`, `dialogDriver` and `openPromptReader` — but `Sendable` and `nonisolated`
-rather than `@MainActor`, because its callers are the `SearchIndexBuilder` actor and a
-`Task.detached` inside it, off the main actor precisely so parsing hundreds of megabytes of
-transcript cannot stall an agent running in the same process. It answers three questions for
-one agent: which transcripts belong to which sidebar projects (`transcripts(forProjects:
-accounts:)`), what one transcript line means as indexable messages
+rather than `@MainActor`, because its sole production caller, `SearchIndexBuilder`, calls it
+directly from inside its own `actor`, off the main actor, precisely so parsing hundreds of
+megabytes of transcript cannot stall an agent running in the same process. It answers three
+questions for one agent: which transcripts belong to which sidebar projects
+(`transcripts(forProjects:accounts:)`), what one transcript line means as indexable messages
 (`indexedMessages(inLine:conversationID:at:)`), and what a conversation is called
 (`conversationName(inLines:for:)`). Like its three siblings it is reached through a
 hand-written, non-optional switch — `extension AgentID { var searchCorpus }` — rather than
-off an adapter instance, because its callers (`AppDelegate.startSearch`'s backfill,
-`SessionStore.openConversation`) hold only an agent id, never a live adapter. **That switch
-is what actually makes a third agent searchable by conforming rather than by editing the
-search subsystem**: it is exhaustive over `AgentID`, a `CaseIterable` enum, so a third case
-added there **fails to compile** until it answers `searchCorpus` too — the same gate
-`textChannel`, `dialogDriver` and `openPromptReader` already stand behind, and the thing a
-future maintainer most needs to know about this seam.
+off an adapter instance, because its caller, `AppDelegate.startSearch`'s backfill kickoff,
+holds no adapter at all, only the `AgentID` each `TranscriptRef` carries. **That switch is
+what actually makes a third agent searchable by conforming rather than by editing the search
+subsystem**: it is exhaustive over `AgentID`, a `CaseIterable` enum, so a third case added
+there **fails to compile** until it answers `searchCorpus` too — the same gate `textChannel`,
+`dialogDriver` and `openPromptReader` already stand behind, and the thing a future maintainer
+most needs to know about this seam.
 
 **Discovery is per-agent, and per-account within each agent.** `ClaudeSearchCorpus` is
 claude's own implementation — one of two conformers today, not "the" corpus — and keeps the

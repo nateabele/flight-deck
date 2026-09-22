@@ -475,12 +475,12 @@ extension AgentID {
         }
     }
 
-    /// See `AgentAdapter.searchCorpus`. Consulted by `AppDelegate.startSearch`'s backfill and
-    /// by `SessionStore.openConversation`, neither of which holds an adapter — which is the
-    /// whole reason the capability hangs off the agent rather than off an instance.
+    /// See `AgentAdapter.searchCorpus`. Consulted by `SearchIndexBuilder`, reached through
+    /// `AppDelegate.startSearch`'s backfill kickoff, which holds no adapter at all — which is
+    /// the whole reason the capability hangs off the agent rather than off an instance.
     ///
-    /// `nonisolated` unlike its siblings here: the backfill calls it from an actor, and the
-    /// object it returns is `Sendable`.
+    /// `nonisolated` unlike its siblings here: `SearchIndexBuilder` calls it directly from
+    /// inside its own actor, off the main actor, and the object it returns is `Sendable`.
     nonisolated var searchCorpus: AgentSearchCorpus? {
         switch self {
         case .claude: ClaudeAdapter.searchCorpus
