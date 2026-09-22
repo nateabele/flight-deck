@@ -78,8 +78,21 @@ struct CodexSearchCorpus: AgentSearchCorpus {
         inLine line: String, conversationID: String, at offset: Int
     ) -> [IndexedMessage] {
         guard let data = line.data(using: .utf8),
-              let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let payload = record["payload"] as? [String: Any],
+              let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [] }
+        return Self.indexedMessages(inObject: record, conversationID: conversationID, at: offset)
+    }
+
+    /// The same rule against an already-decoded record.
+    ///
+    /// `CodexRolloutWatcher` decodes every line anyway to find turn boundaries
+    /// (`CodexEventMapper.events(inRecord:)`); handing back the already-parsed record here is
+    /// what keeps that second, expensive `JSONSerialization` pass from happening at all — the
+    /// same reasoning `TranscriptExtractor.messages(inObject:)` documents for claude.
+    static func indexedMessages(
+        inObject record: [String: Any], conversationID: String, at offset: Int
+    ) -> [IndexedMessage] {
+        guard let payload = record["payload"] as? [String: Any],
               let kind = payload["type"] as? String
         else { return [] }
 

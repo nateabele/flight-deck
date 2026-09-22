@@ -20,14 +20,36 @@ final class CodexRuntime: AgentRuntime {
     private var sources: [UUID: Source] = [:]
     private let clock: WatchClock?
     private let indexURL: URL
+    /// Where a conversation's text goes for ⌘K search. A closure rather than a stored
+    /// reference, and re-read on every message batch rather than once at `attach` time —
+    /// same reasoning as `ClaudeRuntime`'s own property: the index does not exist yet for the
+    /// first few seconds of a real launch, and is nil in every test, where nothing ever wires
+    /// it in at all.
+    private let searchIndex: () -> SearchIndex?
+    /// Which project a thread currently belongs to, for the same `ingest(_:for:offset:)`
+    /// call. Looked up live rather than captured at `attach` time so a tab moved to another
+    /// project mid-life keeps crediting the project it actually belongs to now.
+    private let projectPath: (UUID) -> String?
+    /// Where a thread's agent is working right now, for the same `ingest` call — the literal
+    /// directory, which follows the tab into a worktree while `projectPath` stays put. A
+    /// sibling closure rather than a stored value for the same reason as `projectPath`.
+    private let workingDirectory: (UUID) -> String?
 
     /// Built on first attach and dropped with the last one, so a user with no codex tabs
     /// never has a watcher ticking over codex's index.
     private var names: CodexNameWatcher?
 
-    init(clock: WatchClock? = nil, indexURL: URL = CodexNameWatcher.defaultIndexURL) {
+    init(
+        clock: WatchClock? = nil, indexURL: URL = CodexNameWatcher.defaultIndexURL,
+        searchIndex: @escaping () -> SearchIndex? = { nil },
+        projectPath: @escaping (UUID) -> String? = { _ in nil },
+        workingDirectory: @escaping (UUID) -> String? = { _ in nil }
+    ) {
         self.clock = clock
         self.indexURL = indexURL
+        self.searchIndex = searchIndex
+        self.projectPath = projectPath
+        self.workingDirectory = workingDirectory
     }
 
     /// Subscribes `tab` to `binding`'s thread, starting a watcher if this is the first
@@ -55,7 +77,47 @@ final class CodexRuntime: AgentRuntime {
 
         var watcher: CodexRolloutWatcher?
         if let url = binding.transcriptURL {
-            watcher = CodexRolloutWatcher(url: url, clock: clock) { subscribers.emit($0) }
+            watcher = CodexRolloutWatcher(
+                url: url, conversationID: id, clock: clock,
+                onEvent: { subscribers.emit($0) },
+                // `onMessages` is passed unconditionally, never `nil` — see `ClaudeRuntime
+                // .attach`'s own comment on this exact point. Deciding at attach time whether
+                // to omit this closure would need to know now whether `searchIndex()` will
+                // EVER return non-nil, which it cannot, and gating on today's answer would
+                // reintroduce the ordering dependency reading it live was meant to avoid: a
+                // thread attached before `AppDelegate.startSearch` runs would silently never
+                // become searchable, forever, not just late. The cost of leaving it open is
+                // bounded the same way, too — `CodexScan.read` decodes every line's JSON
+                // regardless (for turn boundaries), so `CodexSearchCorpus
+                // .indexedMessages(inObject:)` never re-parses.
+                onMessages: { [weak self] messages in
+                    guard let self, let index = self.searchIndex(),
+                          let path = self.projectPath(id),
+                          let workingDirectory = self.workingDirectory(id)
+                    else { return }
+                    let ref = TranscriptRef(
+                        url: url, projectPath: path, accountHome: AgentID.codex.builtInHome,
+                        workingDirectory: workingDirectory, conversationID: id.uuidString.lowercased(),
+                        agent: .codex,
+                        // `nil`, not a guess. A Flight-Deck-driven thread runs in a real
+                        // `codex resume` TUI, not `codex exec` — the one value `provenance`
+                        // exists to flag (see `SearchRanker`'s `.automated` tier) — but this
+                        // runtime never reads the rollout's `session_meta.payload.source`
+                        // itself, so claiming any specific string here would be a guess, not
+                        // an observation. `nil` is the honest answer, and it is also the
+                        // correct one: `SearchRanker` treats nil as `.transcript`, not
+                        // `.automated`, so the conversation the user is having right now
+                        // ranks above a `codex exec` run instead of below it.
+                        provenance: nil, indexedName: nil, modified: Date()
+                    )
+                    // `offset: nil` — see `SearchIndex.ingest`'s doc comment. This watcher
+                    // starts at end-of-file (it exists to catch turn boundaries, not
+                    // backlog), so its own read position is never the right number to record
+                    // as indexing progress: doing so would make the backfill resume from
+                    // there and silently never index this thread's history.
+                    try? index.ingest(messages, for: ref, offset: nil)
+                }
+            )
             watcher?.start()
         }
         sources[id] = Source(subscribers: subscribers, watcher: watcher)

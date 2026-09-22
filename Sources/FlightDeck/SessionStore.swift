@@ -401,11 +401,19 @@ final class SessionStore: ObservableObject {
         /// `home` and `indexURL` are two views of one account and must agree: the app-server
         /// spawned in that home is the process that *writes* the index the runtime tails, so
         /// a stack whose two halves named different homes would watch a file nothing writes.
-        init(clock: WatchClock?, home: URL, indexURL: URL) {
+        init(
+            clock: WatchClock?, home: URL, indexURL: URL,
+            searchIndex: @escaping () -> SearchIndex?,
+            projectPath: @escaping (UUID) -> String?,
+            workingDirectory: @escaping (UUID) -> String?
+        ) {
             transport = CodexProcessTransport(home: home)
             rpc = CodexRPC(transport: transport)
             adapter = CodexAdapter(rpc: rpc)
-            runtime = CodexRuntime(clock: clock, indexURL: indexURL)
+            runtime = CodexRuntime(
+                clock: clock, indexURL: indexURL, searchIndex: searchIndex,
+                projectPath: projectPath, workingDirectory: workingDirectory
+            )
             // The hook `CodexProcessTransport` exposes exists for exactly this. Without it a
             // mid-session app-server crash leaves every in-flight request suspended forever —
             // a tab waiting on a dead process is indistinguishable from a hung agent, which is
@@ -495,10 +503,24 @@ final class SessionStore: ObservableObject {
         // this login's `CODEX_HOME` indexes, which is the only place its renames appear. The
         // home goes with it, because the app-server this stack spawns has to be the process
         // writing that file — see `CodexStack.init`.
+        // `searchIndex`, `projectPath` and `workingDirectory` mirror the closures
+        // `runtime(for:)` builds for `ClaudeRuntime` below — re-read live rather than
+        // resolved once, for the same reason: a stack built before `AppDelegate` wires up
+        // search still gets live indexing the moment it is, and a tab moved to another
+        // project or followed into a worktree keeps crediting where it actually is now.
         let stack = CodexStack(
             clock: clock,
             home: home(ofAccount: account, agent: .codex),
-            indexURL: codexIndexURL(for: account)
+            indexURL: codexIndexURL(for: account),
+            searchIndex: { [weak self] in self?.searchIndex },
+            projectPath: { [weak self] conversationID in
+                self?.repos.flatMap(\.sessions)
+                    .first { $0.pinnedConversationID == conversationID }?.workingDirectory
+            },
+            workingDirectory: { [weak self] conversationID in
+                self?.repos.flatMap(\.sessions)
+                    .first { $0.pinnedConversationID == conversationID }?.transcriptDirectory
+            }
         )
         // Composed on top of the stack's own hook rather than replacing it: failing every
         // in-flight request is the stack's job, forgetting the stack is the store's, and both

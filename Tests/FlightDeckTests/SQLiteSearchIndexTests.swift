@@ -260,13 +260,13 @@ final class SQLiteSearchIndexTests: XCTestCase {
         XCTAssertEqual(index.readOffset(for: source("a.jsonl")), 4096)
     }
 
-    /// Two writers reach this index in the real app: `SearchIndexBuilder` backfilling from
-    /// its own actor, and `ClaudeRuntime`'s live `onMessages` hook ingesting from the main
-    /// actor as a session streams. Without `transactionLock`, one writer's `BEGIN IMMEDIATE`
-    /// landing while the other's transaction is still open fails with "cannot start a
-    /// transaction within a transaction" — silently, because both `ingest` call sites use
-    /// `try?` — and the failed writer's entire batch is lost, not partially written, because
-    /// the failure is at `BEGIN` itself, before any row is inserted.
+    /// Three writers reach this index in the real app: `SearchIndexBuilder` backfilling from
+    /// its own actor, and `ClaudeRuntime` and `CodexRuntime`'s live `onMessages` hooks
+    /// ingesting from the main actor as a session streams. Without `transactionLock`, one
+    /// writer's `BEGIN IMMEDIATE` landing while another's transaction is still open fails with
+    /// "cannot start a transaction within a transaction" — silently, because every `ingest`
+    /// call site uses `try?` — and the failed writer's entire batch is lost, not partially
+    /// written, because the failure is at `BEGIN` itself, before any row is inserted.
     ///
     /// One writer runs detached, the other on the calling thread, each pushing a batch large
     /// enough (many separate prepare/step/reset calls per row) that its transaction stays
@@ -371,21 +371,98 @@ final class SQLiteSearchIndexTests: XCTestCase {
         XCTAssertEqual(location.agent, "codex")
     }
 
-    /// A message row is written before its source row's offset is committed at the end of
-    /// the file's pass (the same ordering `search`'s LEFT JOIN comment explains) — a
-    /// conversation still mid-index must answer "unknown", not throw or crash the lookup.
-    func testTranscriptLocationReturnsAnUnknownWorkingDirectoryWhileStillMidIndex() throws {
+    /// A conversation known only from live ingest (no offset to report — the normal case for
+    /// a codex thread started since the last backfill) used to leave its source row unwritten
+    /// until a backfill eventually reached the same file, so this lookup answered "unknown"
+    /// for a conversation whose real directory and agent were known the moment it was ingested.
+    /// `ingest` now writes source metadata in the same call as the message rows regardless of
+    /// offset, so a live-ingest-only conversation resolves to its real values immediately.
+    func testTranscriptLocationReturnsTheRealAgentAndDirectoryForALiveIngestOnlyConversation() throws {
         try index.ingest(
             [message("reticulating splines", conversation: "c1")],
-            for: ref(source("rollout.jsonl"), projectPath: "/w/fd"), offset: nil
+            for: ref(
+                source("rollout.jsonl"), projectPath: "/w/fd", agent: .codex,
+                workingDirectory: "/w/fd/.claude/worktrees/hunt"
+            ),
+            offset: nil
         )
 
         let location = try XCTUnwrap(index.transcriptLocation(forConversation: "c1"))
-        XCTAssertEqual(location.workingDirectory, "", "no source row yet means unknown, not a guess")
+        XCTAssertEqual(location.workingDirectory, "/w/fd/.claude/worktrees/hunt")
         XCTAssertEqual(location.transcriptPath, source("rollout.jsonl").path)
-        XCTAssertEqual(
-            location.agent, "claude", "no source row yet defaults agent the same way search() does"
+        XCTAssertEqual(location.agent, "codex")
+    }
+
+    /// `search()` hits the same source row `transcriptLocation` does, over the same LEFT
+    /// JOIN — the other half of the fix above, proved the way the codex tab this bug actually
+    /// affected would surface it: through search results, not the resume lookup.
+    func testSearchReturnsTheRealAgentAndDirectoryForALiveIngestOnlyConversation() throws {
+        let ref = TranscriptRef(
+            url: URL(fileURLWithPath: "/tmp/rollout.jsonl"),
+            projectPath: "/w/fd",
+            accountHome: URL(fileURLWithPath: "/home/.codex"),
+            workingDirectory: "/w/fd/.claude/worktrees/hunt",
+            conversationID: "c1",
+            agent: .codex,
+            provenance: nil,
+            indexedName: nil,
+            modified: Date(timeIntervalSince1970: 0)
         )
+        try index.ingest(
+            [IndexedMessage(
+                conversationID: "c1", role: .user, text: "reticulating splines",
+                timestamp: Date(timeIntervalSince1970: 10), offset: 0
+            )],
+            for: ref, offset: nil
+        )
+
+        let hits = try index.search("splines", projects: ["/w/fd"], limit: 10)
+        XCTAssertEqual(hits.count, 1)
+        XCTAssertEqual(hits[0].agent, "codex")
+        XCTAssertEqual(hits[0].workingDirectory, "/w/fd/.claude/worktrees/hunt")
+    }
+
+    /// The nil-offset branch above must not disturb the offset-bearing path's own overwrite
+    /// contract: a re-walk with changed provenance (a thread first seen live, later seen by
+    /// the backfill as a stale `exec` run) still replaces the row wholesale, offset included —
+    /// not merged column-by-column the way the nil-offset branch updates metadata in place.
+    func testARewalkWithAnOffsetStillReplacesProvenanceAndOffsetTogether() throws {
+        try index.ingest(
+            [message("hi", conversation: "c1")],
+            for: ref(source("a.jsonl"), projectPath: "/w/fd", provenance: nil), offset: nil
+        )
+        try index.ingest(
+            [message("later", conversation: "c1")],
+            for: ref(source("a.jsonl"), projectPath: "/w/fd", provenance: "exec"), offset: 4096
+        )
+
+        XCTAssertEqual(index.readOffset(for: source("a.jsonl")), 4096)
+        let hits = try index.search("later", projects: ["/w/fd"], limit: 10)
+        XCTAssertEqual(hits.first?.provenance, "exec")
+    }
+
+    /// Every other test that reaches the nil-offset `DO UPDATE` arm asserts only `offset` or
+    /// only a hit count, never a metadata column by value — so a swapped column in that arm's
+    /// `SET` list (`working_directory = excluded.agent`, say) would pass the whole suite. The
+    /// ordinary live case this arm exists for is exactly this shape: a thread the backfill
+    /// already indexed (an offset-bearing row already on disk) that is now streaming live
+    /// (a nil-offset ingest arrives after it).
+    func testLiveIngestOverABackfilledRowUpdatesMetadataWithoutDisturbingTheOffset() throws {
+        try index.ingest(
+            [message("hi", conversation: "c1")],
+            for: ref(source("a.jsonl"), projectPath: "/w/fd", agent: .claude, workingDirectory: "/a"),
+            offset: 4096
+        )
+        try index.ingest(
+            [message("later", conversation: "c1")],
+            for: ref(source("a.jsonl"), projectPath: "/w/fd", agent: .codex, workingDirectory: "/b"),
+            offset: nil
+        )
+
+        let location = try XCTUnwrap(index.transcriptLocation(forConversation: "c1"))
+        XCTAssertEqual(location.agent, "codex")
+        XCTAssertEqual(location.workingDirectory, "/b")
+        XCTAssertEqual(index.readOffset(for: source("a.jsonl")), 4096)
     }
 
     func testTranscriptLocationReturnsNilForAConversationWithNoMessages() throws {
