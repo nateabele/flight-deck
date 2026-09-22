@@ -192,6 +192,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let mainMenu = NSApp.mainMenu { toolsMenu.install(in: mainMenu) }
     }
 
+    /// What one backfill pass should do, decided from what discovery found rather than why it
+    /// found it — the difference between an empty sidebar and a failed walk is the shape of
+    /// the inputs, not a reason attached to the empty list.
+    ///
+    /// `SearchIndexBuilder.build` opens with a prune derived from the refs it is handed, so
+    /// `build([])` deletes every already-indexed row. Asking every account of every agent
+    /// gives discovery new ways to come back empty for reasons that have nothing to do with
+    /// the user's history — an unreadable account home, an accounts list that is momentarily
+    /// empty at launch, a filesystem hiccup — and `.skip` is what stops one of those from
+    /// being read as "delete everything".
+    enum BackfillPlan: Equatable {
+        /// Build with these refs, empty included — correct only when the sidebar itself has
+        /// no projects, so there is genuinely nothing left to keep.
+        case build([TranscriptRef])
+        /// Discovery came back empty while the sidebar still has projects. Leave the index
+        /// alone; the next backfill gets another chance rather than pruning it to nothing.
+        case skip
+    }
+
+    static func backfillPlan(projects: [String], refs: [TranscriptRef]) -> BackfillPlan {
+        refs.isEmpty && !projects.isEmpty ? .skip : .build(refs)
+    }
+
+    /// The refs every agent contributes, as ONE list.
+    ///
+    /// One list, never one build per agent: `SearchIndexBuilder.build` opens with a prune
+    /// that drops every source outside the set it is handed, so per-agent passes would take
+    /// turns deleting each other's rows and leave an index that looks populated and is
+    /// missing half its corpus.
+    ///
+    /// `corpus` is injectable rather than always `\.searchCorpus`, for the same reason
+    /// `SearchIndexBuilder`'s own lookup is: a test proving an agent that answers nil is
+    /// skipped needs such an agent to exist, and both real corpora are non-nil today.
+    static func corpusRefs(
+        projects: [String], accounts: [AgentAccount],
+        corpus: (AgentID) -> AgentSearchCorpus? = { $0.searchCorpus }
+    ) -> [TranscriptRef] {
+        AgentID.allCases
+            .compactMap(corpus)
+            .flatMap { $0.transcripts(forProjects: projects, accounts: accounts) }
+            .sorted { $0.modified > $1.modified }
+    }
+
+    /// Fills in a built-in-home fallback for any agent `live` holds no account for.
+    ///
+    /// A gap here is not necessarily a user with nothing to search: a real accounts list can
+    /// also come back empty from a preferences-load race, or hold zero entries for an agent
+    /// whose only login the user removed. Falling back to that agent's built-in home rather
+    /// than asking nothing keeps the common single-login case working exactly as the
+    /// single synthesized account this replaces did — this only narrows "always synthesize"
+    /// down to "synthesize where `live` is silent".
+    static func resolvedAccounts(_ live: [AgentAccount]) -> [AgentAccount] {
+        AgentID.allCases.flatMap { agent -> [AgentAccount] in
+            let mine = live.filter { $0.agent == agent }
+            return mine.isEmpty
+                ? [AgentAccount(agent: agent, displayName: "Default", home: agent.builtInHome)]
+                : mine
+        }
+    }
+
     /// Unlike `installToolsMenu`, not naturally idempotent: it opens a file handle, builds a
     /// panel, and registers a `.flightDeckOpenSearch` observer, none of which tolerate being
     /// done twice. The `searchIndex == nil` guard is therefore load-bearing rather than
@@ -244,16 +304,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let builder = SearchIndexBuilder(index: index)
         searchBuildTask = Task { [weak model] in
             try? await Task.sleep(for: .seconds(3))
-            // Claude's built-in account only, for now — the same single root the backfill
-            // has always read. Asking every account of every searchable agent is the next
-            // change, still to come; this keeps today's scope exactly as it was while the
-            // builder itself becomes agent-blind.
-            let refs = ClaudeAdapter.searchCorpus?.transcripts(
-                forProjects: store.repos.map(\.url.path),
-                accounts: [AgentAccount(
-                    agent: .claude, displayName: "Default", home: AgentID.claude.builtInHome
-                )]
-            ) ?? []
+            let projects = store.repos.map(\.url.path)
+            let accounts = Self.resolvedAccounts(store.preferences?.preferences.liveAccounts ?? [])
+            let refs = Self.corpusRefs(projects: projects, accounts: accounts)
+            guard case .build(let refs) = Self.backfillPlan(projects: projects, refs: refs) else {
+                return
+            }
             await builder.build(refs) { progress in
                 Task { @MainActor in
                     model?.indexingProgressChanged(progress)
