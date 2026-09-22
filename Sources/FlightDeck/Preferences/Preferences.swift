@@ -30,6 +30,13 @@ struct ShellPreferences: Codable, Equatable {
     /// How long a session must sit idle before it is put to sleep. Optional for the same
     /// reason as `idleSleepEnabled`. `nil` reads as 600 (10 minutes).
     var sleepIdleThresholdSeconds: Int?
+    /// Whether a session whose turn died on a transient API error is automatically nudged
+    /// back to life on a backoff ladder. Applies to every agent that declares an
+    /// `AgentTurnRecovery`, which is why it lives here rather than under `claude`. Optional
+    /// for the same reason `idleSleepEnabled` is — a `"shell": {...}` blob already on disk
+    /// predates this field. `nil` reads as OFF: this feature types into a terminal, so it is
+    /// opt-in.
+    var autoRetryAPIErrors: Bool?
 
     init(
         shellOverride: String? = nil,
@@ -37,7 +44,8 @@ struct ShellPreferences: Codable, Equatable {
         clearChildSessionMarker: Bool = true,
         scrollbackBudgetBytes: Int? = nil,
         idleSleepEnabled: Bool? = nil,
-        sleepIdleThresholdSeconds: Int? = nil
+        sleepIdleThresholdSeconds: Int? = nil,
+        autoRetryAPIErrors: Bool? = nil
     ) {
         self.shellOverride = shellOverride
         self.environment = environment
@@ -45,6 +53,7 @@ struct ShellPreferences: Codable, Equatable {
         self.scrollbackBudgetBytes = scrollbackBudgetBytes
         self.idleSleepEnabled = idleSleepEnabled
         self.sleepIdleThresholdSeconds = sleepIdleThresholdSeconds
+        self.autoRetryAPIErrors = autoRetryAPIErrors
     }
 }
 

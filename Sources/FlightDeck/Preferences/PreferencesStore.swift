@@ -346,6 +346,17 @@ final class PreferencesStore: ObservableObject {
         }
     }
 
+    /// Whether transient API failures are retried automatically. Defaults OFF — unlike the
+    /// other shell toggles, this one acts on the user's behalf by typing.
+    var autoRetriesAPIErrors: Bool {
+        get { preferences.shell.autoRetryAPIErrors ?? false }
+        set {
+            var shell = preferences.shell
+            shell.autoRetryAPIErrors = newValue
+            preferences.shell = shell
+        }
+    }
+
     // MARK: Confirmations
 
     /// Whether closing a project with several sessions asks first. Phrased positively — the
