@@ -73,7 +73,7 @@ final class CodexRolloutWatcherTests: XCTestCase {
         FileManager.default.createFile(atPath: url.path, contents: Data())
 
         var seen: [AgentEvent] = []
-        let watcher = CodexRolloutWatcher(url: url) { seen.append($0) }
+        let watcher = CodexRolloutWatcher(url: url, conversationID: UUID(), onEvent: { seen.append($0) })
         watcher.drain() // prime while empty
 
         try "not json at all\n".data(using: .utf8)!.write(to: url)
@@ -91,7 +91,7 @@ final class CodexRolloutWatcherTests: XCTestCase {
         FileManager.default.createFile(atPath: url.path, contents: Data())
 
         var seen: [AgentEvent] = []
-        let watcher = CodexRolloutWatcher(url: url) { seen.append($0) }
+        let watcher = CodexRolloutWatcher(url: url, conversationID: UUID(), onEvent: { seen.append($0) })
         watcher.drain() // prime
         watcher.drain() // nothing appended since
 
@@ -115,7 +115,7 @@ final class CodexRolloutWatcherTests: XCTestCase {
         let url = dir.appendingPathComponent("rollout.jsonl") // never created before this
 
         var seen: [AgentEvent] = []
-        let watcher = CodexRolloutWatcher(url: url) { seen.append($0) }
+        let watcher = CodexRolloutWatcher(url: url, conversationID: UUID(), onEvent: { seen.append($0) })
         watcher.drain() // the file does not exist yet — must not read as .live
 
         XCTAssertEqual(
