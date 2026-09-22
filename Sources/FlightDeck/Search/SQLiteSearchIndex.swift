@@ -270,6 +270,27 @@ final class SQLiteSearchIndex: SearchIndex {
         return Int(sqlite3_column_int(statement, 0))
     }
 
+    func transcriptLocation(
+        forConversation id: String
+    ) throws -> (workingDirectory: String, transcriptPath: String)? {
+        // LEFT JOIN, not JOIN: `s.working_directory` may not exist yet for a file still
+        // mid-index (see `search`'s own LEFT JOIN above), and an absent one means "unknown"
+        // here rather than "no such conversation" — `m.source` alone is enough to answer that.
+        // `LIMIT 1`: every message in a conversation shares one source, so the first row is
+        // the whole answer.
+        let statement = try prepare("""
+            SELECT m.source, s.working_directory
+            FROM message m
+            LEFT JOIN source s ON s.path = m.source
+            WHERE m.conversation_id = ?
+            LIMIT 1
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(statement, 1, id)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return (workingDirectory: text(statement, 1), transcriptPath: text(statement, 0))
+    }
+
     // MARK: - Prune
 
     func prune(keepingSources: Set<URL>, projects: Set<String>) throws {

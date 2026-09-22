@@ -55,4 +55,14 @@ protocol SearchIndex: AnyObject {
 
     /// Shown in a name-match row when known. Cheap enough to call per visible row.
     func messageCount(forConversation id: String) throws -> Int
+
+    /// Where a conversation's transcript lives, for a caller that holds only a conversation id.
+    ///
+    /// Distinct from `conversationNames()` on purpose: that answers "what is this called",
+    /// which is a property of the conversation, while this answers "which file, and which
+    /// directory did it run in", which are properties of the transcript. Returns nil for a
+    /// conversation the index has no message rows for.
+    func transcriptLocation(
+        forConversation id: String
+    ) throws -> (workingDirectory: String, transcriptPath: String)?
 }
