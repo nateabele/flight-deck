@@ -23,7 +23,11 @@ BACKUP_DIR="$HOME/Library/Application Support/Flight Deck/backups/$TS"
 LOG="$HOME/Library/Logs/flight-deck-swap.log"
 DELAY="${1:-30}"
 
-mkdir -p "$(dirname "$LOG")" "$BACKUP_DIR"
+# BACKUP_DIR is created lazily, at its first use in step 3 — not here. FD_SWAP_CHECK_ONLY is
+# meant to be run casually as a pre-flight, and a refused/check-only run never gets that far;
+# creating it unconditionally here littered an empty timestamped directory under
+# ~/Library/Application Support/Flight Deck/backups/ on every such run.
+mkdir -p "$(dirname "$LOG")"
 
 log() { echo "[$(date '+%H:%M:%S')] $*" >>"$LOG"; }
 
@@ -44,16 +48,31 @@ find_pids() {
     }'
 }
 
-# Classifies a bundle as debug/release without ever launching it — see the 2026-09-22
-# incident below. Info.plist and the get-task-allow entitlement were both checked against
-# a real Debug/Release pair and are byte-identical, so neither can discriminate; executable
-# size is a heuristic, not a signal, and is deliberately not used. Two static signals are:
-# Debug links `@rpath/Flight Deck.debug.dylib` where Release links only
+# Classifies a bundle as debug/release/unknown without ever launching it — see the
+# 2026-09-22 incident below. Info.plist and the get-task-allow entitlement were both checked
+# against a real Debug/Release pair and are byte-identical, so neither can discriminate;
+# executable size is a heuristic, not a signal, and is deliberately not used. Two static
+# signals are: Debug links `@rpath/Flight Deck.debug.dylib` where Release links only
 # `@rpath/FleetKit.framework/…`, and Debug ships the XCTest runner under Contents/PlugIns
 # where Release has none. Either firing means debug — fail closed toward refusing.
+#
+# `release` is returned ONLY on positive evidence (otool ran, showed no .debug.dylib, AND
+# PlugIns is absent). If otool is missing from PATH, or otool -L fails on a bundle that
+# already passed the executable check above, that is "cannot tell" — not "release". Folding
+# that case into `release` would have waved through the exact culprit bundle from the
+# 2026-09-22 incident (caught by the otool signal alone) the moment otool was unavailable.
 bundle_flavor() {
   local bundle="$1"
-  if otool -L "$bundle/Contents/MacOS/Flight Deck" 2>/dev/null | grep -q '\.debug\.dylib'; then
+  if ! command -v otool >/dev/null 2>&1; then
+    echo unknown
+    return
+  fi
+  local otool_out
+  if ! otool_out="$(otool -L "$bundle/Contents/MacOS/Flight Deck" 2>/dev/null)"; then
+    echo unknown
+    return
+  fi
+  if grep -q '\.debug\.dylib' <<<"$otool_out"; then
     echo debug
     return
   fi
@@ -122,17 +141,32 @@ FLAVOR="$(bundle_flavor "$NEW_APP")"
 case "$FLAVOR" in
   release) FLAVOR_DISPLAY="Release" ;;
   debug) FLAVOR_DISPLAY="Debug" ;;
+  unknown) FLAVOR_DISPLAY="unknown" ;;
 esac
 log "flavor:      $FLAVOR_DISPLAY (verified statically, not executed)"
 
+# unknown (otool missing, or otool -L failed) is refused exactly like debug, via the same
+# FD_SWAP_ALLOW_DEBUG escape hatch — a second override variable would just be a second way
+# to get this wrong. It gets its own wording throughout: calling an undetermined bundle
+# "Debug" would be its own kind of wrong and would send the next person down the wrong path.
 if [ "$FLAVOR" != "release" ] && [ "${FD_SWAP_ALLOW_DEBUG:-}" != "1" ]; then
-  log "FATAL: new bundle is $FLAVOR_DISPLAY, not Release — aborting, nothing changed."
-  notify "Refused to install a $FLAVOR_DISPLAY bundle — nothing changed"
+  if [ "$FLAVOR" = "unknown" ]; then
+    log "FATAL: could not determine build flavor (otool unavailable or unreadable) — refusing, nothing changed."
+    notify "Refused to install a bundle of unknown flavor — nothing changed"
+  else
+    log "FATAL: new bundle is $FLAVOR_DISPLAY, not Release — aborting, nothing changed."
+    notify "Refused to install a $FLAVOR_DISPLAY bundle — nothing changed"
+  fi
   exit 1
 fi
 if [ "$FLAVOR" != "release" ]; then
-  log "FD_SWAP_ALLOW_DEBUG=1 — installing a $FLAVOR_DISPLAY bundle anyway, override recorded"
-  notify "Installing a $FLAVOR_DISPLAY bundle — FD_SWAP_ALLOW_DEBUG override in effect"
+  if [ "$FLAVOR" = "unknown" ]; then
+    log "FD_SWAP_ALLOW_DEBUG=1 — installing a bundle of unknown flavor anyway, override recorded"
+    notify "Installing a bundle of unknown flavor — FD_SWAP_ALLOW_DEBUG override in effect"
+  else
+    log "FD_SWAP_ALLOW_DEBUG=1 — installing a $FLAVOR_DISPLAY bundle anyway, override recorded"
+    notify "Installing a $FLAVOR_DISPLAY bundle — FD_SWAP_ALLOW_DEBUG override in effect"
+  fi
 fi
 
 # Safe test harness for the guard above (a real swap can't be re-run to check it — see the
@@ -223,6 +257,7 @@ fi
 log "app is down"
 
 # --- 3. Swap ---------------------------------------------------------------------------
+mkdir -p "$BACKUP_DIR"
 if [ -d "$INSTALLED" ]; then
   if mv "$INSTALLED" "$BACKUP_DIR/Flight Deck.app"; then
     log "backed up previous build → $BACKUP_DIR/Flight Deck.app"
