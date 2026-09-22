@@ -12,7 +12,10 @@
 
 set -uo pipefail
 
-NEW_APP="/Users/nate/Projects/Protos-n-Tools/flight-deck/DerivedData/Build/Products/Release/Flight Deck.app"
+# FD_SWAP_NEW_APP overrides which bundle gets installed. Exists so the flavor guard below
+# can be exercised against a known-debug bundle without editing the script — see
+# FD_SWAP_CHECK_ONLY and FD_SWAP_ALLOW_DEBUG a few lines down.
+NEW_APP="${FD_SWAP_NEW_APP:-/Users/nate/Projects/Protos-n-Tools/flight-deck/DerivedData/Build/Products/Release/Flight Deck.app}"
 INSTALLED="/Applications/Flight Deck.app"
 STAGING="/Applications/.Flight Deck.app.incoming"
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -39,6 +42,37 @@ find_pids() {
       sub(/^[ \t]*[0-9]+[ \t]+/, "")
       if ($0 ~ /\/Flight Deck\.app\/Contents\/MacOS\/Flight Deck$/) print pid
     }'
+}
+
+# Classifies a bundle as debug/release without ever launching it — see the 2026-09-22
+# incident below. Info.plist and the get-task-allow entitlement were both checked against
+# a real Debug/Release pair and are byte-identical, so neither can discriminate; executable
+# size is a heuristic, not a signal, and is deliberately not used. Two static signals are:
+# Debug links `@rpath/Flight Deck.debug.dylib` where Release links only
+# `@rpath/FleetKit.framework/…`, and Debug ships the XCTest runner under Contents/PlugIns
+# where Release has none. Either firing means debug — fail closed toward refusing.
+bundle_flavor() {
+  local bundle="$1"
+  if otool -L "$bundle/Contents/MacOS/Flight Deck" 2>/dev/null | grep -q '\.debug\.dylib'; then
+    echo debug
+    return
+  fi
+  if [ -d "$bundle/Contents/PlugIns" ]; then
+    echo debug
+    return
+  fi
+  echo release
+}
+
+# The script always runs detached (nohup … >/dev/null 2>&1 &), so a log line alone is
+# invisible — the operator just sees nothing happen. This is best-effort: a failing
+# osascript (no GUI session, notifications disabled, etc.) is logged and swallowed, never
+# allowed to turn a refusal into a crash. Notifications are not the safety mechanism —
+# the exit before staging is — this just makes the refusal audible.
+notify() {
+  if ! osascript -e "display notification \"$1\" with title \"Flight Deck swap refused\"" >>"$LOG" 2>&1; then
+    log "warning: osascript notification failed, see above — refusal itself still stands"
+  fi
 }
 
 # Post-order walk: children are printed before their parent, so signalling in order
@@ -78,6 +112,37 @@ if ! codesign --verify --strict "$NEW_APP" >>"$LOG" 2>&1; then
   log "FATAL: new bundle fails codesign --verify — aborting, nothing changed."
   exit 1
 fi
+# 2026-09-22 incident: a Debug bundle got swapped into /Applications. Debug and Release key
+# their fd-abduco daemon root differently (/tmp/flight-deck-debug-501 vs /tmp/flight-deck-501)
+# while sessions.json is shared, so the Debug app restored all 55 sessions and attached each
+# one to stale debug-root daemon leftovers — every conversation looked like it had lost its
+# last several turns. The executable/Info.plist/codesign checks above all passed; none of them
+# can tell Debug from Release. This is what bundle_flavor() exists to catch.
+FLAVOR="$(bundle_flavor "$NEW_APP")"
+case "$FLAVOR" in
+  release) FLAVOR_DISPLAY="Release" ;;
+  debug) FLAVOR_DISPLAY="Debug" ;;
+esac
+log "flavor:      $FLAVOR_DISPLAY (verified statically, not executed)"
+
+if [ "$FLAVOR" != "release" ] && [ "${FD_SWAP_ALLOW_DEBUG:-}" != "1" ]; then
+  log "FATAL: new bundle is $FLAVOR_DISPLAY, not Release — aborting, nothing changed."
+  notify "Refused to install a $FLAVOR_DISPLAY bundle — nothing changed"
+  exit 1
+fi
+if [ "$FLAVOR" != "release" ]; then
+  log "FD_SWAP_ALLOW_DEBUG=1 — installing a $FLAVOR_DISPLAY bundle anyway, override recorded"
+  notify "Installing a $FLAVOR_DISPLAY bundle — FD_SWAP_ALLOW_DEBUG override in effect"
+fi
+
+# Safe test harness for the guard above (a real swap can't be re-run to check it — see the
+# hard safety constraints in the task brief) and a real operator pre-flight: runs every check
+# in this block and stops before anything is touched.
+if [ "${FD_SWAP_CHECK_ONLY:-}" = "1" ]; then
+  log "FD_SWAP_CHECK_ONLY=1 — bundle accepted, exiting before staging (nothing changed)"
+  exit 0
+fi
+
 log "new bundle verified (executable + Info.plist + codesign), without launching it"
 
 sleep "$DELAY"
