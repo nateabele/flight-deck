@@ -5882,9 +5882,15 @@ final class SessionStore: ObservableObject {
     /// working on its own. Its 120s deadline dropping an unsent nudge is harmless here —
     /// unlike a restore's one-shot prompt, the next rung tries again.
     private func flushRetryBackoff() {
-        guard preferences?.autoRetriesAPIErrors == true else { return disarmAllRetries() }
         let currentTime = now()
+        // Above the preference guard, not below it. `reapDecayedRetryEpisodes` is the only
+        // thing that ever drops an episode short of the tab closing, and the short-circuit
+        // below returns before reaching anything — so an episode created before a toggle-off
+        // used to linger for the life of the process, which is precisely the leak that
+        // function's own comment promises it prevents. Cheap here: it returns immediately on
+        // an empty dictionary.
         reapDecayedRetryEpisodes(at: currentTime)
+        guard preferences?.autoRetriesAPIErrors == true else { return disarmAllRetries() }
         // Iterating `apiErrors` while `setAPIError` writes it is safe, and is left explicit
         // here because it reads like a bug: a Swift dictionary is a value type, so this walks
         // a copy taken when the loop began, and the writes below land on the property rather
@@ -5933,6 +5939,10 @@ final class SessionStore: ObservableObject {
     /// per tab that has ever failed, for the life of the process. An episode whose error is
     /// still armed is never reaped regardless of age: the floor rung plus its +10% jitter can
     /// outlast the decay window, and reaping mid-wait would silently reset that tab's ladder.
+    ///
+    /// Runs on every tick whatever the preference says — see the call site. An episode is
+    /// per-tab bookkeeping, not part of the loop, so switching the loop off is not a reason to
+    /// stop collecting them.
     private func reapDecayedRetryEpisodes(at currentTime: Date) {
         guard !retryEpisodes.isEmpty else { return }
         retryEpisodes = retryEpisodes.filter { id, episode in

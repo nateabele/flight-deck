@@ -896,6 +896,30 @@ final class SessionStoreAPIRetryTests: XCTestCase {
         assertDue(harness.store.apiErrors[harness.tab]?.nextRetryAt, rung: 30, from: harness.time)
     }
 
+    /// The reap has to run while the preference is OFF too, which is the one path that used
+    /// to skip it: `flushRetryBackoff` short-circuited to `disarmAllRetries()` before ever
+    /// reaching the reap, so an episode created before a toggle-off lingered for the life of
+    /// the process. Bounded and harmless, but the reap's own doc comment promises exactly the
+    /// leak prevention that path skipped.
+    ///
+    /// Two ticks, not one, and that is the mechanism rather than padding: on the first tick
+    /// the error is still armed, and the reap deliberately never drops an armed episode. The
+    /// same tick's `disarmAllRetries` strips the schedule, so the second tick judges it on age
+    /// alone.
+    func testAnEpisodeIsReapedEvenWhileThePreferenceIsOff() {
+        let harness = makeHarness()
+        harness.store.apply(.apiError(Self.transient), to: harness.tab)
+        XCTAssertEqual(harness.store.retryEpisodeCountForTesting, 1, "an episode to leak")
+
+        harness.preferences.autoRetriesAPIErrors = false
+        harness.time += SessionStore.retryBackoffFloor + 1
+        harness.store.maintenanceTickForTesting()
+        harness.store.maintenanceTickForTesting()
+
+        XCTAssertEqual(harness.store.retryEpisodeCountForTesting, 0,
+                       "the preference being off is not a reason to keep a decayed episode")
+    }
+
     /// The preference toggle is symmetric: off stops the loop on the next tick, on picks it
     /// back up. Before the re-arm pass, an error disarmed mid-outage stayed dead — nothing
     /// re-armed it, because the only other arming site is a *new* failure report.
