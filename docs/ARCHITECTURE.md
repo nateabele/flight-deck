@@ -747,6 +747,19 @@ of assuming claude, and sets `Session.transcriptDirectory` from the stored value
 probing for it. A codex result whose rollout no longer exists still resumes, through the same
 `rolloutExists` check a restored tab takes, onto a fresh thread rather than failing.
 
+A transcript hit already carries `workingDirectory` and `transcriptPath` from the corpus walk
+itself (see the `source`-table paragraph above). A **name match** — a result that matched on
+title rather than content, which is what `SearchCandidates.build` produces for every
+conversation with no open tab — carries neither: naming a conversation and locating its
+transcript are two different reads, and the name pass has no cheap way to do the second
+without stat-ing every historical transcript on every keystroke. `AppDelegate`'s ⌘K
+`onSelect` and `FleetService.openConversation` (the phone's `search.open` handler) each close
+this gap the same way, independently: before calling `SearchActivation.plan`, they look the
+conversation up with `SearchIndex.transcriptLocation(forConversation:)` — the same index row a
+transcript hit's `source` fields come from — and fill it in. Only a conversation the index has
+no row for at all reaches `SessionStore.openConversation` still empty, which is what its own
+project-root fallback is for.
+
 **⌘K had to be taken back from Ghostty first**, the same problem `⌘⇧T` (Tab navigation,
 above) already had to solve. libghostty binds `super+k` to `clear_screen` on macOS and marks
 it `performable`, and `MenuKeyEquivalents.shouldOfferToMenu` deliberately withholds
