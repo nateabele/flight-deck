@@ -169,9 +169,10 @@ if [ "$FLAVOR" != "release" ]; then
   fi
 fi
 
-# Safe test harness for the guard above (a real swap can't be re-run to check it — see the
-# hard safety constraints in the task brief) and a real operator pre-flight: runs every check
-# in this block and stops before anything is touched.
+# Safe test harness for the guard above and a real operator pre-flight: runs every check in
+# this block and stops before anything is touched. The accept path can't otherwise be
+# exercised by actually running the script — a completed run quits Flight Deck and drops
+# every live agent session on the machine — which is exactly why this mode exists.
 if [ "${FD_SWAP_CHECK_ONLY:-}" = "1" ]; then
   log "FD_SWAP_CHECK_ONLY=1 — bundle accepted, exiting before staging (nothing changed)"
   exit 0
