@@ -16,7 +16,7 @@ private final class StubSearchIndex: SearchIndex {
     func messageCount(forConversation: String) throws -> Int { 0 }
     func transcriptLocation(
         forConversation: String
-    ) throws -> (workingDirectory: String, transcriptPath: String)? { nil }
+    ) throws -> (workingDirectory: String, transcriptPath: String, agent: String)? { nil }
 
     func search(_ query: String, projects: [String], limit: Int) throws -> [TranscriptHit] {
         queries.append(query)

@@ -275,9 +275,9 @@ final class FleetService: ObservableObject {
         guard UUID(uuidString: conversationID) != nil else { return .failure(.unknownConversation) }
         let known = (try? store.searchIndex?.conversationNames()) ?? [:]
         let title = known[conversationID]?.name ?? conversationID
-        // Empty means unknown, the same rule `SearchActivation.plan` and
-        // `SessionStore.openConversation` already apply for the desk — one fallback rule for
-        // both callers, not a second one invented here for the phone.
+        // Empty means unknown, the same rule `SessionStore.openConversation` already applies
+        // for the desk — one fallback rule for both callers, not a second one invented here
+        // for the phone.
         let location = try? store.searchIndex?.transcriptLocation(forConversation: conversationID)
         let result = SearchResult(
             id: "conversation:\(conversationID)",
@@ -290,7 +290,13 @@ final class FleetService: ObservableObject {
             highlightedRanges: [],
             snippet: nil,
             conversationID: conversationID,
-            agent: known[conversationID]?.agent ?? "claude",
+            // From `transcriptLocation`, not `conversationNames()`: a naming pass leaves the
+            // `conversation` table unwritten for a conversation it could not name (an
+            // `exec`-provenance codex rollout, say), while `transcriptLocation`'s `source` row
+            // is written for every ingested message regardless — reading `agent` off the
+            // table that can be silently absent would let the phone resume claude on a
+            // conversation the desk resumes as codex.
+            agent: location?.agent ?? known[conversationID]?.agent ?? "claude",
             workingDirectory: location?.workingDirectory ?? "",
             transcriptPath: location?.transcriptPath ?? ""
         )

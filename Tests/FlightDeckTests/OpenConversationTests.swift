@@ -440,8 +440,7 @@ final class OpenConversationTests: XCTestCase {
     }
 
     /// The account resolved for a resume must be the result's own agent's account, not
-    /// claude's unconditionally — the bug this task exists to fix, one layer up from the
-    /// title and the transcript directory.
+    /// claude's unconditionally — one layer up from the title and the transcript directory.
     func testOpenConversationResolvesTheCodexAccountNotTheClaudeOne() {
         let chosen = AgentAccount(agent: .codex, displayName: "codex-work", home: AgentID.codex.builtInHome)
         let preferences = PreferencesStore(persistence: nil)

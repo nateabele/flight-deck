@@ -2653,11 +2653,11 @@ final class SessionStore: ObservableObject {
     ///   process existed — true from `restore`, which reads them back off disk. Only then is
     ///   stage 2 a repair: a reopen (⌘⇧T, the phone's `reopenClosedSession`) resurrects a pin
     ///   the user chose seconds ago, and reconciling it would override that choice rather than
-    ///   correct a stale one. ⌘K's `openConversation` also passes false, but as an answer held
-    ///   ready rather than one in use: it is claude-only in practice and never defers into this
-    ///   method (see `CodexPinReconciler.lastPass`'s doc comment). Passed explicitly at all
-    ///   three call sites rather than defaulted, so a fourth caller has to answer the question
-    ///   instead of inheriting an answer.
+    ///   correct a stale one. ⌘K's `openConversation` passes false for the same reason on a
+    ///   third path: a codex result resumes through here now, and its pin is the exact
+    ///   conversation the user searched for and selected, not a stale directory default a pass
+    ///   would be repairing. Passed explicitly at all three call sites rather than defaulted,
+    ///   so a fourth caller has to answer the question instead of inheriting an answer.
     private func resumeRestoredCodex(_ tabIDs: [UUID], pinsPredateThisRun: Bool) async {
         // One prepare per account, not per tab. `startCodex` already memoizes the handshake,
         // so a second ask would not spawn a second app-server — but it would count as a
