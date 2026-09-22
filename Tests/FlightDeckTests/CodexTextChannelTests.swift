@@ -262,15 +262,28 @@ final class CodexTextChannelTests: XCTestCase {
     /// do not know whether anything was there, and typing a remembered string into a composer
     /// that may never have held it is worse than leaving it gone. Unchanged from the submitted
     /// path's rule — stated here because the superseded path now shares it.
-    func testASupersededRequestRestoresNothingWhenTheKillChangedNothing() throws {
-        let injector = FakeInjector(viewport: try viewport("tui-idle.captured"))
+    ///
+    /// Pins `after != nil` specifically. `before` is a real draft here, exactly as in
+    /// `testASupersededRequestFinishesFalseExactlyOnceAndPutsTheDraftBack` above — a restore
+    /// would be the right call if the post-kill screen were readable — so what suppresses it
+    /// is `viewportUnreadableAfterKill`, not the placeholder clause that does the suppressing
+    /// in `testACancelledRequestTypesNothingAfterTheKill` below.
+    func testASupersededRequestRestoresNothingWhenTheScreenIsUnreadableAfterTheKill() throws {
+        let injector = FakeInjector(viewport: """
+        › half-written thought
+
+          gpt-5.6-sol default · /tmp/work
+        """)
+        injector.viewportUnreadableAfterKill = true
+
         var outcomes: [Bool] = []
         XCTAssertTrue(channel.submit("ship it", into: injector,
                                      settle: { $0() }, stillWanted: { false },
                                      onFinished: { outcomes.append($0) }))
         XCTAssertEqual(outcomes, [false])
         XCTAssertEqual(injector.actions, [.killLine],
-                       "the placeholder is not a draft; there is nothing to put back")
+                       "a screen this build cannot read back after the kill is not proof the "
+                           + "draft is gone; nothing is put back")
     }
 
     // MARK: - submitRename
@@ -479,8 +492,13 @@ final class CodexTextChannelTests: XCTestCase {
             case killLine, yank, `return`, text(String), arrowDown, arrowUp, escape
         }
 
-        private var viewport: String
+        private var viewport: String?
         var viewportAfterKill: String?
+        /// Makes `readViewport()` return nil once `sendKillLine()` has run, so a test can pin
+        /// `submit`'s "an unreadable screen means we do not know" clause without a fixture
+        /// that could also be read as an ordinary content change. Checked before
+        /// `viewportAfterKill`, since the two describe mutually exclusive scenarios.
+        var viewportUnreadableAfterKill = false
         private(set) var actions: [Action] = []
 
         /// A verbatim screen sequence that advances on `sendReturn()`, modelling `codex
@@ -514,7 +532,8 @@ final class CodexTextChannelTests: XCTestCase {
         }
         func sendKillLine() {
             actions.append(.killLine)
-            if let after = viewportAfterKill { viewport = after }
+            if viewportUnreadableAfterKill { viewport = nil }
+            else if let after = viewportAfterKill { viewport = after }
         }
         func sendYank() { actions.append(.yank) }
         func sendArrowDown() { actions.append(.arrowDown) }

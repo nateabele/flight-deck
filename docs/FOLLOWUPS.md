@@ -146,9 +146,9 @@ reader doesn't re-derive them.
   text's — see that file's doc comments. `AgentTextChannel.submit`'s protocol contract changed
   to allow `settle` more than once as part of the fix, with `onFinished` (not settle) now
   carrying the one-shot completion guarantee `SessionStore.inject` depends on — the same
-  `onFinished(Bool)` shape `AgentRenameTyping` uses, and for the same reason. Do **not** "fix" a future case like this by putting the
-  terminator back inside the text, which is the bug that `TextInjecting.sendReturn()` exists
-  to avoid.
+  `onFinished(Bool)` shape `AgentRenameTyping` uses, and for the same reason. Do **not** "fix"
+  a future case like this by putting the terminator back inside the text, which is the bug
+  that `TextInjecting.sendReturn()` exists to avoid.
 - **`CLAUDE_CODE_CHILD_SESSION` in the inherited environment turns transcript saving off**,
   which silently kills inbound rename sync — the watcher tails a file that is never written.
   Claude Code sets this marker for nested sessions; a `claude` inheriting it prints
