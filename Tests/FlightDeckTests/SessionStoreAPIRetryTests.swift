@@ -99,14 +99,23 @@ final class SessionStoreAPIRetryTests: XCTestCase {
         let preferences: PreferencesStore
         let tab: UUID
         let spy: SpyInjector
+        /// Attached by every builder below, and the reason is `FleetReplicator`'s own doc
+        /// comment: the drift assertion only fires in a test that installs one, so "a feature
+        /// landing new mutation sites has to bring the check to them". This feature lands
+        /// three — `flushRetryBackoff`'s due branch, its re-arm branch, and `disarmAllRetries`
+        /// — and before this was attached not one line of them ever ran under the assertion,
+        /// which is the entire compatibility argument for riding retry state inside
+        /// `SessionAPIError` instead of adding a `FleetEvent` case.
+        let replicator: FleetReplicator
         private let clock: Clock
 
         init(store: SessionStore, preferences: PreferencesStore, tab: UUID,
-             spy: SpyInjector, clock: Clock) {
+             spy: SpyInjector, replicator: FleetReplicator, clock: Clock) {
             self.store = store
             self.preferences = preferences
             self.tab = tab
             self.spy = spy
+            self.replicator = replicator
             self.clock = clock
         }
 
@@ -114,6 +123,17 @@ final class SessionStoreAPIRetryTests: XCTestCase {
         var time: Date {
             get { clock.time }
             set { clock.time = newValue }
+        }
+
+        /// How many `.apiErrorChanged` events have been recorded so far. Counted rather than
+        /// matched on payload, in `FleetFieldEmissionTests`' style: the point is emit-once,
+        /// and `setAPIError`'s inequality guard is what delivers it.
+        /// `@MainActor` because a type nested in one does not inherit its isolation, and
+        /// `FleetReplicator.recorded` is main-actor state.
+        @MainActor func apiErrorEmissions() -> Int {
+            replicator.recorded.filter {
+                if case .apiErrorChanged = $0 { return true } else { return false }
+            }.count
         }
     }
 
@@ -149,7 +169,11 @@ final class SessionStoreAPIRetryTests: XCTestCase {
         store.applyRegistryForTesting([tab: SessionStatus(activity: .idle)])
         // The tab's own creation may have typed; this file only ever asserts about the nudge.
         spy.events.removeAll()
-        return Harness(store: store, preferences: preferences, tab: tab, spy: spy, clock: clock)
+        // Attached after setup, not before: the drift check is about this feature's mutation
+        // sites, and a replicator installed before `newSession` would additionally be counting
+        // tab-creation events that `FleetStructureEmissionTests` already owns.
+        return Harness(store: store, preferences: preferences, tab: tab, spy: spy,
+                       replicator: attachedReplicator(to: store), clock: clock)
     }
 
     /// Codex's real idle composer shape — one row, the placeholder, and the status-line footer
@@ -190,7 +214,8 @@ final class SessionStoreAPIRetryTests: XCTestCase {
             throw CodexTabUnavailable()
         }
         spy.events.removeAll()
-        return Harness(store: store, preferences: preferences, tab: tab, spy: spy, clock: clock)
+        return Harness(store: store, preferences: preferences, tab: tab, spy: spy,
+                       replicator: attachedReplicator(to: store), clock: clock)
     }
 
     /// Builds a store that `restore()`s one claude tab out of a persisted snapshot carrying
@@ -227,7 +252,13 @@ final class SessionStoreAPIRetryTests: XCTestCase {
         XCTAssertTrue(store.restore(directoryExists: { _ in true }),
                       "the fixture snapshot must actually restore, or these tests prove nothing")
         spy.events.removeAll()
-        return Harness(store: store, preferences: preferences, tab: tab, spy: spy, clock: clock)
+        // After `restore()` deliberately: restore writes `apiErrors` directly rather than
+        // through `setAPIError` and says why (it runs inside init, before any replicator
+        // exists, so an emit there would go nowhere). Attaching first would turn that
+        // documented non-emission into a drift failure for a path this fix is not about;
+        // every tick, toggle and close AFTER restore still runs under the check.
+        return Harness(store: store, preferences: preferences, tab: tab, spy: spy,
+                       replicator: attachedReplicator(to: store), clock: clock)
     }
 
     /// The nudge text an agent's own recovery asks for.
@@ -940,5 +971,73 @@ final class SessionStoreAPIRetryTests: XCTestCase {
 
         XCTAssertNil(harness.store.apiErrors[harness.tab]?.retryAttempt)
         XCTAssertTrue(harness.spy.events.isEmpty, "not one keystroke while the preference is off")
+    }
+
+    // MARK: - Emission
+
+    /// **The proof behind the "no new `FleetEvent` case" decision.** Riding retry state inside
+    /// `SessionAPIError` is only compatible because `setAPIError` stays the single writer of
+    /// `apiErrors` — so every retry mutation is already paired with its `apiErrorChanged`, and
+    /// `FleetReplicator`'s drift assertion is what proves it rather than a reviewer's reading.
+    /// That assertion is installed by every harness in this file (see `Harness.replicator`);
+    /// this test is the one that walks a whole retry lifecycle under it and also counts.
+    ///
+    /// One event per actual change, and nothing for a tick that changed nothing. The second
+    /// half is not decoration: `armed` draws a fresh `nextRetryAt` every time it runs, so a
+    /// scheduler that re-armed on an early tick would emit once per tick for the whole outage
+    /// — a change no user could see, on the wire, to every attached phone.
+    func testAPIErrorEmitsOncePerChangeAcrossAFullRetryLifecycle() {
+        let harness = makeHarness()
+        XCTAssertEqual(harness.apiErrorEmissions(), 0, "the harness starts with a clean log")
+
+        // Arm.
+        harness.store.apply(.apiError(Self.transient), to: harness.tab)
+        guard let due = harness.store.apiErrors[harness.tab]?.nextRetryAt else {
+            return XCTFail("nothing armed, so there is no lifecycle to count")
+        }
+        XCTAssertEqual(harness.apiErrorEmissions(), 1, "arming rides on the failure's own event")
+
+        // A tick before the rung is due.
+        harness.time = due.addingTimeInterval(-1)
+        harness.store.maintenanceTickForTesting()
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.nextRetryAt, due,
+                       "an early tick must not re-roll the schedule")
+        XCTAssertEqual(harness.apiErrorEmissions(), 1, "a tick that changed nothing emits nothing")
+
+        // The due tick advances the rung.
+        harness.time = due
+        harness.store.maintenanceTickForTesting()
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt, 2)
+        XCTAssertEqual(harness.apiErrorEmissions(), 2, "one event for the rung advance")
+
+        // An unrelated emission, here for the drift assertion rather than for its own sake.
+        // Measured, not assumed: with the rung advance written straight into `apiErrors`
+        // instead of through `setAPIError`, the drift the replicator exists to catch is real
+        // the instant the tick returns — but `checkForDrift` only runs inside `record`, and
+        // the next thing to record is the DISARM's own `apiErrorChanged`, which re-mirrors
+        // the field last-write-wins and hides the gap. Any event at all, on any field, is
+        // enough to make the check fire while the wrong value is still standing; `markUnread`
+        // is the cheapest one that cannot perturb the retry state around it.
+        harness.store.markUnread(harness.tab)
+
+        // The toggle goes off mid-backoff and the next tick disarms.
+        harness.preferences.autoRetriesAPIErrors = false
+        harness.store.maintenanceTickForTesting()
+        XCTAssertNil(harness.store.apiErrors[harness.tab]?.retryAttempt, "disarmed")
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.status, 529, "badge intact")
+        XCTAssertEqual(harness.apiErrorEmissions(), 3, "one event for the disarm")
+
+        // Every later tick walks the same already-disarmed entry and must stay silent.
+        harness.time += 3600
+        harness.store.maintenanceTickForTesting()
+        harness.store.maintenanceTickForTesting()
+        XCTAssertEqual(harness.apiErrorEmissions(), 3,
+                       "`disarmAllRetries` runs on every tick while the preference is off; "
+                       + "it must have nothing left to say after the first")
+
+        // And the tab closes.
+        harness.store.closeSession(harness.tab)
+        XCTAssertNil(harness.store.apiErrors[harness.tab])
+        XCTAssertEqual(harness.apiErrorEmissions(), 4, "clearing the entry is a change too")
     }
 }
