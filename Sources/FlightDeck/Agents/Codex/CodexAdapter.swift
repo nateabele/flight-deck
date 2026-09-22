@@ -75,6 +75,10 @@ struct CodexAdapter: AgentAdapter {
     /// rather than hidden inside a name check.
     static let dialogDriver: AgentDialogDriver? = CodexDialogDriver()
 
+    /// Codex's own error-kind allowlist, since the rollout carries no transience flag — see
+    /// `CodexTurnRecovery`.
+    static let turnRecovery: AgentTurnRecovery? = CodexTurnRecovery()
+
     /// Codex assigns thread ids itself, so identity is *returned* rather than minted — and
     /// the round trip can come back saying the thread is gone, which is why a restored codex
     /// tab has its resume text deferred until `rebind` has settled it.
