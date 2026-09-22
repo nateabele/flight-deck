@@ -75,6 +75,12 @@ final class SessionStoreMaintenanceTickTests: XCTestCase {
         }
         store.applyRegistryForTesting([id: SessionStatus(activity: .idle)])
         spy.events.removeAll()
+        // `maintenanceTick` is where this feature's new `apiErrors` writes happen, so the
+        // store that drives it runs under `FleetReplicator`'s drift assertion too — see that
+        // class's comment on why a new mutation site has to bring the check with it. The
+        // returned replicator is unused here on purpose: no test in this file asserts on
+        // emissions, it is the assertion itself that is wanted.
+        _ = attachedReplicator(to: store)
         return (store, id, spy)
     }
 
