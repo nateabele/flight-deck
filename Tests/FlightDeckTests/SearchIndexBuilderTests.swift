@@ -170,6 +170,12 @@ final class SearchIndexBuilderTests: XCTestCase {
         func messageCount(forConversation id: String) throws -> Int {
             try wrapped.messageCount(forConversation: id)
         }
+
+        func transcriptLocation(
+            forConversation id: String
+        ) throws -> (workingDirectory: String, transcriptPath: String)? {
+            try wrapped.transcriptLocation(forConversation: id)
+        }
     }
 
     /// The primary scenario the whole task exists for: a first backfill of a transcript
