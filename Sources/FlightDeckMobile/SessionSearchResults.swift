@@ -144,9 +144,16 @@ struct SessionSearchResults: View {
                     .frame(width: 20)
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(result.title)
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundStyle(.primary)
+                    HStack(spacing: 6) {
+                        Text(result.title)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.primary)
+                        if let agentSymbolName = Self.agentSymbolName(for: result) {
+                            Image(systemName: agentSymbolName)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     Text("\(result.projectName) · \(Self.relative(result.recency))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -162,6 +169,16 @@ struct SessionSearchResults: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// Only a `.conversation` row is one agent's own transcript or past conversation — a
+    /// mixed fleet makes exactly that ambiguous. A `.session` row is a tab already open in
+    /// the fleet list, identifiable there the way it always has been, and a `.project`'s
+    /// `agent` is an unused placeholder (see `SearchCandidates.build` on the desk side),
+    /// not a value worth drawing.
+    static func agentSymbolName(for result: SearchResult) -> String? {
+        guard case .conversation = result.kind else { return nil }
+        return AgentGlyph.symbolName(for: result.agent)
     }
 
     /// The second or third match from the SAME conversation: indented, and headless — the
