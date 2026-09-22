@@ -111,6 +111,12 @@ final class FleetService: ObservableObject {
                 guard let store,
                       case .file(.claude, let url) = store.timelineSource(of: session)
                 else { return nil }
+                // A single fixed-size read, with the same exposure `PromptService.openPrompt`
+                // had before its widen-retry fix: a run of non-conversational bookkeeping lines
+                // could crowd a real open `ExitPlanMode` out of this window too. Left
+                // unwidened here deliberately — out of scope for that fix — so this is not
+                // fully closed everywhere; widening this probe is a separate task if it is ever
+                // needed.
                 let lines = TranscriptPager.page(
                     url: url, anchor: .latest, limit: PromptService.tailRecords
                 )?.lines ?? []
@@ -139,36 +145,21 @@ final class FleetService: ObservableObject {
         // open dialog and what it *refuses an answer against* are now one object reading one
         // transcript. Two would be two opinions, and a phone told one thing and judged by
         // another is the failure this field exists to close.
-        store.openPromptCallReader = { [weak prompts] session in
-            guard case .success(let open) = prompts?.pushedOpenPrompt(inSession: session)
-            else { return nil }
-            return open.callID
-        }
-        // `pushedOpenPrompt`, exactly as `openPromptCallReader` above, and for the reason that
-        // method's own doc states as a rule rather than a preference: **a caller on a schedule
-        // must not resolve a transcript**, because that resolution builds and memoizes the
-        // agent's adapter — for codex a whole `CodexStack`, with a runtime and an index watcher
-        // in it. This probe runs from `checkStuckPrompts` on every registry tick, which is a
-        // schedule by any reading; `PromptLifecycleObserver` cites the same rule for the same
-        // reason. It was `openPrompt` and was safe only by accident: `checkStuckPrompts` filters
-        // on `hasStatusRegistry`, a different predicate that happens to select claude alone
-        // today. The two return identically for a claude tab, so this costs nothing and stops
-        // the invariant resting on that coincidence.
+        //
+        // **One closure, not the two this used to be** (`openPromptCallReader` for the call id,
+        // `openPromptProbe` for `checkStuckPrompts`'s refusal code) — see `openPromptProbe`'s
+        // own doc on `SessionStore` for why splitting them cost every `waiting` tab a second
+        // transcript-tail read a tick. `.map(\.callID)` is the only shaping this needs:
+        // `derivedOpenPromptCalls` reads the `Result` itself for the refusal code, over the
+        // exact same `PromptService.pushedOpenPrompt` call `pushedOpenPrompt`'s own doc
+        // requires of a caller on a schedule — never `openPrompt`, which resolves and memoizes
+        // the agent's adapter (a whole `CodexStack`, for codex) on every poll rather than once.
         //
         // `[weak prompts]` is required for the same reason `PlanGateService`'s closures above
         // capture `store` weakly: `FleetService` already holds `prompts` strongly, and a strong
         // capture here would be the second half of a cycle back through `store`.
         store.openPromptProbe = { [weak prompts] id in
-            guard let prompts else { return nil }
-            if case .failure(let code) = prompts.pushedOpenPrompt(inSession: id) {
-                // `.code`, not `String(describing:)`: `TimelineErrorCode` has no
-                // `CustomStringConvertible`, so `describing` would render the struct dump
-                // `TimelineErrorCode(code: "prompt_changed")` into the `.stuck` record's
-                // `code=` field instead of the bare wire string every other reader of this
-                // code expects — defeating the one thing that field exists to say.
-                return code.code
-            }
-            return nil
+            prompts?.pushedOpenPrompt(inSession: id).map(\.callID)
         }
         wireHandlers()
         Self.current = self
@@ -226,7 +217,8 @@ final class FleetService: ObservableObject {
         let conversations = known
             .filter { open.contains($0.value.projectPath) }
             .map { WireConversation(
-                id: $0.key, name: $0.value.name, projectPath: $0.value.projectPath
+                id: $0.key, name: $0.value.name, projectPath: $0.value.projectPath,
+                agent: $0.value.agent
             ) }
             .sorted { $0.id < $1.id }
         let sessionActivity = Dictionary(
@@ -264,8 +256,10 @@ final class FleetService: ObservableObject {
     /// Resumes — or selects — conversation `conversationID` from project `projectPath`, over
     /// the same seam the desktop's ⌘K Return and the search panel's `onSelect` already use:
     /// build a `SearchResult`, hand it to `SearchActivation.plan` for the select-vs-resume
-    /// decision, then let `SessionStore.openConversation` re-resolve the real transcript
-    /// directory and act. Nothing about select-vs-resume is reimplemented here.
+    /// decision, then let `SessionStore.openConversation` act on the plan. Nothing about
+    /// select-vs-resume, or which agent and directory to resume into, is reimplemented here —
+    /// `conversationNames()` and `transcriptLocation(forConversation:)` are the same corpus
+    /// walk the desk's own search reads, so a conversation resumes identically from either.
     ///
     /// Reads `SessionStore.openConversation`'s return value directly rather than
     /// `store.selectedSessionID` afterward — the earlier shape here read that property, and on
@@ -282,6 +276,10 @@ final class FleetService: ObservableObject {
         guard UUID(uuidString: conversationID) != nil else { return .failure(.unknownConversation) }
         let known = (try? store.searchIndex?.conversationNames()) ?? [:]
         let title = known[conversationID]?.name ?? conversationID
+        // Empty means unknown, the same rule `SessionStore.openConversation` already applies
+        // for the desk — one fallback rule for both callers, not a second one invented here
+        // for the phone.
+        let location = try? store.searchIndex?.transcriptLocation(forConversation: conversationID)
         let result = SearchResult(
             id: "conversation:\(conversationID)",
             kind: .conversation(conversationID),
@@ -292,7 +290,16 @@ final class FleetService: ObservableObject {
             recency: .distantPast,
             highlightedRanges: [],
             snippet: nil,
-            conversationID: conversationID
+            conversationID: conversationID,
+            // From `transcriptLocation`, not `conversationNames()`: a naming pass leaves the
+            // `conversation` table unwritten for a conversation it could not name (an
+            // `exec`-provenance codex rollout, say), while `transcriptLocation`'s `source` row
+            // is written for every ingested message regardless — reading `agent` off the
+            // table that can be silently absent would let the phone resume claude on a
+            // conversation the desk resumes as codex.
+            agent: location?.agent ?? known[conversationID]?.agent ?? "claude",
+            workingDirectory: location?.workingDirectory ?? "",
+            transcriptPath: location?.transcriptPath ?? ""
         )
         let open = store.repos.flatMap(\.sessions).map {
             SearchActivation.ActiveSession(id: $0.id, conversationID: $0.pinnedConversationID)
@@ -856,7 +863,7 @@ final class FleetService: ObservableObject {
     /// Test seam, forwarding to `PromptService.tail` — the same seam `PromptServiceTests`
     /// substitutes, reached through here because `prompts` is private and a loopback test has
     /// no other way to put a transcript in front of it. No production caller.
-    var promptTailForTesting: @Sendable (URL, Int) -> [SourceLine] {
+    var promptTailForTesting: @Sendable (URL, Int) -> (lines: [SourceLine], hasMore: Bool) {
         get { prompts.tail }
         set { prompts.tail = newValue }
     }

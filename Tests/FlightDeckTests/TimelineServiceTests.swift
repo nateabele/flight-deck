@@ -32,7 +32,9 @@ final class TimelineServiceTests: XCTestCase {
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.
         static let textChannel: AgentTextChannel? = ClaudeTextChannel()
+        static let renameTyping: AgentRenameTyping? = nil
         static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
+        static let turnRecovery: AgentTurnRecovery? = ClaudeTurnRecovery()
         static let negotiatesIdentity = false
         static let needsRuntimeStart = false
         static let hasStatusRegistry = true
@@ -50,6 +52,7 @@ final class TimelineServiceTests: XCTestCase {
             ClaudeAdapter.identity(fromHomeData: data)
         }
         static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
+        static let searchCorpus: AgentSearchCorpus? = ClaudeAdapter.searchCorpus
         let url: URL?
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

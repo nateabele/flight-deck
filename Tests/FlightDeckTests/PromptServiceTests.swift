@@ -155,10 +155,21 @@ final class PromptServiceTests: XCTestCase {
         """
     }
 
+    /// A Claude Code bookkeeping record — `last-prompt`, `custom-title`, `mode`, and the like —
+    /// interleaved into the same transcript file as the conversation. `ClaudeTimelineMapper`
+    /// maps every one of these to no items (its `switch` on `type` only produces items for
+    /// `"user"`/`"assistant"`), which is exactly what lets a run of them crowd a real dialog out
+    /// of a small fixed-size tail. The type name itself does not matter to the widen loop —
+    /// that is the whole point of noticing "nothing found" rather than naming suspect types —
+    /// so one fixed name stands in for the whole family here.
+    private func bookkeepingLine(_ type: String = "custom-title") -> String {
+        #"{"type":"\#(type)"}"#
+    }
+
     func testAnsweringTheOpenQuestionDrivesTheTerminal() {
         let (service, _, spy, id) = makeService(activity: .waiting)
         let lines = [SourceLine(offset: 0, text: askLine("toolu_A"))]
-        service.tail = { _, _ in lines }
+        service.tail = { _, _ in (lines, false) }
         spy.showOptions(["Yes", "No"], selected: 0)
         XCTAssertNil(
             code(service.answer(session: id, call: "toolu_A",
@@ -177,7 +188,7 @@ final class PromptServiceTests: XCTestCase {
             SourceLine(offset: 0, text: askLine("toolu_A")),
             SourceLine(offset: 100, text: resultLine("toolu_A")),
         ]
-        service.tail = { _, _ in lines }
+        service.tail = { _, _ in (lines, false) }
         spy.showOptions(["Yes", "No"], selected: 0)
         XCTAssertEqual(
             code(service.answer(session: id, call: "toolu_A",
@@ -207,7 +218,7 @@ final class PromptServiceTests: XCTestCase {
             SourceLine(offset: 100, text: resultLine("toolu_ONE")),
             SourceLine(offset: 200, text: bashLine("toolu_TWO")),
         ]
-        service.tail = { _, _ in lines }
+        service.tail = { _, _ in (lines, false) }
         spy.showOptions(["Yes", "No"], selected: 0)
         XCTAssertEqual(
             code(service.answer(session: id, call: "toolu_ONE", answer: .allow, token: UUID())),
@@ -232,13 +243,13 @@ final class PromptServiceTests: XCTestCase {
         ]
         spy.showOptions(["Yes", "No"], selected: 0)
 
-        service.tail = { _, _ in one }
+        service.tail = { _, _ in (one, false) }
         XCTAssertNil(code(service.answer(session: id, call: "toolu_ONE", answer: .allow,
                                          token: UUID())))
         XCTAssertEqual(spy.events, [.ret], "the first tap is the one that lands")
 
         spy.events.removeAll()
-        service.tail = { _, _ in two }
+        service.tail = { _, _ in (two, false) }
         XCTAssertEqual(
             code(service.answer(session: id, call: "toolu_ONE", answer: .allow, token: UUID())),
             "prompt_changed"
@@ -253,7 +264,7 @@ final class PromptServiceTests: XCTestCase {
     func testAnAnswerWhileNothingIsOpenIsRefused() {
         let (service, _, spy, id) = makeService(activity: .idle)
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_A"))]
-        service.tail = { _, _ in lines }
+        service.tail = { _, _ in (lines, false) }
         XCTAssertEqual(
             code(service.answer(session: id, call: "toolu_A", answer: .deny, token: UUID())),
             "not_waiting"
@@ -279,7 +290,7 @@ final class PromptServiceTests: XCTestCase {
         let reads = ReadCount()
         service.tail = { _, _ in
             reads.value += 1
-            return lines
+            return (lines, false)
         }
         XCTAssertNil(code(service.answer(session: id, call: "toolu_A", answer: .deny,
                                          token: UUID())))
@@ -297,7 +308,7 @@ final class PromptServiceTests: XCTestCase {
     func testARefusalFromTheStoreKeepsItsOwnCode() {
         let (service, _, spy, id) = makeService(activity: .waiting)
         let lines = [SourceLine(offset: 0, text: askLine("toolu_A", multiSelect: true))]
-        service.tail = { _, _ in lines }
+        service.tail = { _, _ in (lines, false) }
         spy.showOptions(["Yes", "No"], selected: 0)
         XCTAssertEqual(
             code(service.answer(session: id, call: "toolu_A",
@@ -314,7 +325,7 @@ final class PromptServiceTests: XCTestCase {
     func testARetryOfAnAnswerThatLandedIsNotAnError() {
         let (service, _, spy, id) = makeService(activity: .waiting)
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_A"))]
-        service.tail = { _, _ in lines }
+        service.tail = { _, _ in (lines, false) }
         let token = UUID()
         XCTAssertNil(code(service.answer(session: id, call: "toolu_A", answer: .deny,
                                          token: token)))
@@ -347,7 +358,7 @@ final class PromptServiceTests: XCTestCase {
     func testACodexTabIsRefusedAsUnsupportedRatherThanAsChanged() async throws {
         let (service, _, spy, id) = try await makeCodexService(activity: .waiting)
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_A"))]
-        service.tail = { _, _ in lines }
+        service.tail = { _, _ in (lines, false) }
         XCTAssertEqual(
             code(service.answer(session: id, call: "toolu_A", answer: .deny, token: UUID())),
             "unsupported_agent"
@@ -406,13 +417,119 @@ final class PromptServiceTests: XCTestCase {
         // saved by an empty tail — the distinction `prompt_changed` would otherwise hide.
         // Built out here rather than inside the `@Sendable` seam, which cannot reach `self`.
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_A"))]
-        service.tail = { _, _ in lines }
+        service.tail = { _, _ in (lines, false) }
 
         XCTAssertEqual(
             code(service.answer(session: session.id, call: "toolu_A", answer: .deny, token: UUID())),
             "unsupported_agent"
         )
         XCTAssertTrue(spy.events.isEmpty, "no Escape into a codex TUI this build cannot read")
+    }
+
+    // MARK: Widen-retry — the "Scroll Text" regression
+
+    /// **The exact reported shape.** A small tail lands entirely on Claude Code's own
+    /// bookkeeping lines and finds nothing, but `hasMore` says real history still precedes it —
+    /// the live transcript's last 8 raw lines were 8 bookkeeping records with the actual
+    /// `AskUserQuestion` sitting one line further back. `openPrompt(inSession:)` must widen
+    /// rather than give up on that first empty read.
+    func testOpenPromptWidensPastARunOfBookkeepingLinesToFindTheRealQuestion() {
+        let (service, _, _, id) = makeService(activity: .waiting)
+        let small = [Int](repeating: 0, count: 8).map { _ in
+            SourceLine(offset: 0, text: bookkeepingLine())
+        }
+        let widened = small + [SourceLine(offset: 800, text: askLine("toolu_REAL"))]
+        let firstLimit = PromptService.tailRecords
+        service.tail = { _, limit in
+            limit == firstLimit ? (small, true) : (widened, true)
+        }
+        guard case .success(let open) = service.openPrompt(inSession: id) else {
+            return XCTFail("the widened read holds the real question")
+        }
+        XCTAssertEqual(open.callID, "toolu_REAL")
+    }
+
+    /// **The give-up path, unchanged from today.** `hasMore` false at the very first, smallest
+    /// read means there is nothing further back to look at — exactly the ordinary "nothing is
+    /// open" case — so this must still answer `"prompt_changed"` on the first read, not widen
+    /// into a read that can only repeat the same empty answer.
+    func testOpenPromptGivesUpOnTheFirstReadWhenNoMoreHistoryExists() {
+        let (service, _, _, id) = makeService(activity: .waiting)
+        let reads = ReadCount()
+        let lines = [SourceLine(offset: 0, text: bookkeepingLine())]
+        service.tail = { _, _ in
+            reads.value += 1
+            return (lines, false)
+        }
+        XCTAssertEqual(code(service.answer(session: id, call: "toolu_A", answer: .deny,
+                                           token: UUID())), "prompt_changed")
+        XCTAssertEqual(reads.value, 1, "no history above the first read means no reason to widen")
+    }
+
+    /// **The ceiling is a hard stop, not a suggestion, and the growth factor is exactly ×8.**
+    /// A transcript that is bookkeeping all the way up — or a stub that lies and always claims
+    /// more history — must not spin forever; the loop starting at `Self.tailRecords` and
+    /// multiplying by 8 reaches `Self.maxTailRecords` in exactly four reads (8, 64, 512, 4096),
+    /// and the fourth must be the last one performed. The line count is made to grow with
+    /// `limit` (rather than being fixed, as the other tests here use) specifically so the
+    /// progress guard added alongside the ceiling never trips first — this test pins the
+    /// *record-count* ceiling; `testOpenPromptWidenLoopStopsEarlyWhenAWiderReadFindsNoMoreLines`
+    /// below pins the progress guard.
+    func testOpenPromptWidenLoopStopsAtTheCeilingRatherThanSpinning() {
+        let (service, _, _, id) = makeService(activity: .waiting)
+        var limitsSeen: [Int] = []
+        let bookkeeping = bookkeepingLine()
+        service.tail = { _, limit in
+            limitsSeen.append(limit)
+            let lines = (0..<limit).map { _ in SourceLine(offset: 0, text: bookkeeping) }
+            return (lines, true)
+        }
+        XCTAssertEqual(code(service.answer(session: id, call: "toolu_A", answer: .deny,
+                                           token: UUID())), "prompt_changed")
+        XCTAssertEqual(limitsSeen, [8, 64, 512, 4096],
+                       "8, 64, 512, 4096 — ×8 each step, and the loop must stop there, not spin")
+    }
+
+    /// **A hit short-circuits immediately, even when `hasMore` says there is more to read.**
+    /// `hasMore` is only ever consulted after a miss — every other test above that finds
+    /// something uses `hasMore: false`, which would still pass a regression that checked
+    /// `hasMore` before attempting the find at all. This is the one that catches it.
+    func testOpenPromptStopsWideningTheInstantItFindsSomethingEvenWhenHasMoreIsTrue() {
+        let (service, _, _, id) = makeService(activity: .waiting)
+        let reads = ReadCount()
+        let lines = [SourceLine(offset: 0, text: askLine("toolu_A"))]
+        service.tail = { _, _ in
+            reads.value += 1
+            return (lines, true)
+        }
+        guard case .success(let open) = service.openPrompt(inSession: id) else {
+            return XCTFail("a found call must short-circuit regardless of hasMore")
+        }
+        XCTAssertEqual(open.callID, "toolu_A")
+        XCTAssertEqual(reads.value, 1, "a hit never triggers a widen, no matter what hasMore says")
+    }
+
+    /// **The progress guard is what actually protects a real, multi-hour `answerless` episode.**
+    /// `TranscriptPager` only ever extends backwards from the same anchor, so a wider read that
+    /// comes back with the exact same line count as the last one means the file ran out before
+    /// the requested count did — `TranscriptPager`'s own byte-scan ceiling (`maxScan`), not this
+    /// loop's record ceiling, is what is actually limiting it (see `maxTailRecords`'s own doc
+    /// comment). Widening again in that state cannot find more, only pay for a repeat scan of
+    /// the same bytes — exactly the cost that must not recur on every ~500ms registry tick for
+    /// as long as an episode lasts. So `hasMore: true` alone must not be enough to keep going:
+    /// a second read with no more lines than the first must stop, well short of the ceiling.
+    func testOpenPromptWidenLoopStopsEarlyWhenAWiderReadFindsNoMoreLines() {
+        let (service, _, _, id) = makeService(activity: .waiting)
+        let reads = ReadCount()
+        let lines = [SourceLine(offset: 0, text: bookkeepingLine())]
+        service.tail = { _, _ in
+            reads.value += 1
+            return (lines, true) // same count every time, despite `hasMore` staying true
+        }
+        XCTAssertEqual(code(service.answer(session: id, call: "toolu_A", answer: .deny,
+                                           token: UUID())), "prompt_changed")
+        XCTAssertEqual(reads.value, 2,
+                       "no growth after the first widen attempt means stop, not spin to the ceiling")
     }
 
 }

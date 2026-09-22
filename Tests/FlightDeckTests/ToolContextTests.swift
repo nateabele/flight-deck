@@ -78,7 +78,29 @@ final class ToolContextTests: XCTestCase {
 
         XCTAssertEqual(context?.accountName, "Work")
         XCTAssertEqual(context?.accountHome, home.path)
-        XCTAssertEqual(context?.accountEnvironment, ["CLAUDE_CONFIG_DIR": home.path])
+        // FLIGHT_DECK_EVENT_DIR rides along here too, via the `launchEnvironment` that
+        // `AgentAdapter.environment(for:)` folds in.
+        //
+        // **A launched session does NOT get its environment from here**, and believing it did
+        // is what shipped the hook feature dead: `environment(for:)`'s only production caller
+        // is `SessionStore.toolContext()` → `ToolRunner`, the Tools-menu path. The pty's
+        // environment is built by `SessionStore.launchEnvironment(for:adapter:orphaned:)`,
+        // and `AccountLaunchTests` is what pins that the two agree.
+        //
+        // Built from a hand-written literal, not `ClaudePluginLocation.eventDirectory` itself
+        // — see the matching comment in `AgentAccountEnvironmentTests`.
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let expectedEventDir = base
+            .appendingPathComponent("Flight Deck", isDirectory: true)
+            .appendingPathComponent("hook-events-debug", isDirectory: true)
+            .path
+        XCTAssertEqual(
+            context?.accountEnvironment,
+            [
+                "CLAUDE_CONFIG_DIR": home.path,
+                "FLIGHT_DECK_EVENT_DIR": expectedEventDir,
+            ]
+        )
     }
 
     /// A tool is not a session: a tab whose stored account has been deleted must still hand
@@ -103,7 +125,9 @@ final class ToolContextTests: XCTestCase {
         /// capabilities off `AgentID`, so a stub that disagreed would describe an agent that
         /// does not exist.
         static let textChannel: AgentTextChannel? = ClaudeTextChannel()
+        static let renameTyping: AgentRenameTyping? = nil
         static let dialogDriver: AgentDialogDriver? = ClaudeDialogDriver()
+        static let turnRecovery: AgentTurnRecovery? = ClaudeTurnRecovery()
         static let negotiatesIdentity = false
         static let needsRuntimeStart = false
         static let hasStatusRegistry = true
@@ -121,6 +145,7 @@ final class ToolContextTests: XCTestCase {
             ClaudeAdapter.identity(fromHomeData: data)
         }
         static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
+        static let searchCorpus: AgentSearchCorpus? = ClaudeAdapter.searchCorpus
         static let pinned = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

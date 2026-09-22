@@ -24,7 +24,7 @@ than a bug. Read §2 before touching anything.
 |---|---|
 | `AgentID` | `.claude` / `.codex`; raw values are a storage format (they land in `sessions.json`) |
 | `AgentBinding` | `{conversationID, transcriptURL?}` — what a prepared session is bound to |
-| `AgentEvent` | `.title` / `.activity` / `.subagentCount` / `.turnEnded` — the only vocabulary `SessionStore` speaks |
+| `AgentEvent` | `.title` / `.activity` / `.subagentCount` / `.turnEnded` / `.apiError` / `.turnAborted` — the only vocabulary `SessionStore` speaks |
 | `AgentOptions` | `.claude(FlagSet)` / `.codex(CodexThreadOptions)` — a union, so neither agent's shape leaks into the other |
 | `AgentAdapter` | identity + launch text + rename. `prepare` (async, negotiated), `binding(for:)` (sync, already-settled identity only), `rebind` (restore, defaults to `binding(for:)`) |
 | `AgentRuntime` | observation. Per **(agent, account)**, not per session — one status registry per claude account, one app-server `CodexStack` per codex account, N tabs each. The 2026-08-19 accounts work (`docs/superpowers/specs/2026-08-19-agent-accounts-design.md`) rekeyed both from app-wide to per-account; see `SessionStore.adapters`/`.runtimes`/`.codexStacks`, all keyed by `AgentInstance` |
@@ -105,8 +105,11 @@ partial trailing line so a read landing mid-write can't split a record.
 | `CodexNameWatcher` | one per codex account | `<codex home>/session_index.jsonl` | `.title`, routed by thread id |
 
 `CodexEventMapper.events(inRolloutLine:)` maps `event_msg` records: `task_started` →
-`.activity(.busy)`; `task_complete` / `turn_aborted` → `.activity(.idle)`, `.turnEnded`;
-everything else is ignored. `session_index.jsonl` carries one `{id, thread_name, updated_at}`
+`.activity(.busy)`; `task_complete` and `turn_aborted` → `.activity(.idle)`, `.turnEnded`,
+plus one event each that is theirs alone — `task_complete` carries `.apiError` (set from its
+`error` field, cleared when it has none) and `turn_aborted` carries `.turnAborted`, which is
+how the auto-retry loop learns the user pressed Esc on a nudge it typed. Everything else is
+ignored. `session_index.jsonl` carries one `{id, thread_name, updated_at}`
 line per rename, from either `thread/name/set` or the TUI's own `/rename`; the name watcher
 routes each line by `id` to whichever tab holds that conversation and drops ids no tab holds.
 

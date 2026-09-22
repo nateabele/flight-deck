@@ -76,7 +76,7 @@ final class AbortPromptLoopbackTests: XCTestCase {
         harness.store.injectorOverride = spy
         harness.store.injectionSettle = { $0() }
         let lines = nameable ? [SourceLine(offset: 0, text: bashLine("toolu_BASH"))] : []
-        harness.service.promptTailForTesting = { _, _ in lines }
+        harness.service.promptTailForTesting = { _, _ in (lines, false) }
         // Two routes write a `.aborted` record — `FleetService`'s own early gate, through
         // `prompts.lifecycleSink`, and `SessionStore.abortPrompt`, through `promptLifecycleSink`
         // — because the gate refuses before the store is ever reached and so cannot leave the

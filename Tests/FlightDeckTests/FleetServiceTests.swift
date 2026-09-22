@@ -626,6 +626,123 @@ final class FleetServiceTests: XCTestCase {
                        "a client's search.open must not move the desk's selection off elsewhere, even onto a tab already open")
     }
 
+    /// **The phone half of resuming as the right agent.** `FleetService.openConversation`
+    /// builds its own `SearchResult` from `conversationNames()` and
+    /// `transcriptLocation(forConversation:)` rather than reading one out of a completed
+    /// search — before this, neither call site populated agent, working directory or
+    /// transcript path, so a phone's `search.open` for a codex conversation resumed as claude
+    /// in the project root exactly as if that agent had never run. Overriding the codex
+    /// adapter/runtime keeps this test from ever asking a real codex app-server anything —
+    /// `resumeExisting` defers codex identity negotiation to a background task (see
+    /// `SessionStore.openConversation`), which reaches this stub instead of a live process.
+    func testASearchOpenForACodexConversationResumesItAsCodexInItsOwnDirectory() async throws {
+        let (store, key, port) = try await standUp()
+        store.overrideAdapter(StubCodexAdapter(thread: UUID()), for: .codex, account: nil)
+        store.overrideRuntime(FakeAgentRuntime(), for: .codex, account: nil)
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+
+        // A real directory, not a synthetic path under `/w` like every other fixture here:
+        // `SessionStore.openConversation`'s default `directoryExists` is a live filesystem
+        // check, and a worktree that "went away" falls back to the project root by design —
+        // exactly the fallback this test must NOT trigger while proving the pass-through.
+        let worktree = FileManager.default.temporaryDirectory
+            .appendingPathComponent("flightdeck-fleet-service-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: worktree) }
+
+        let index = StubSearchIndex()
+        let conversation = UUID().uuidString.lowercased()
+        index.conversations[conversation] = IndexedConversation(
+            name: "worktree session", projectPath: "/w/alpha", agent: "codex"
+        )
+        index.transcriptLocations[conversation] = (
+            workingDirectory: worktree.path,
+            transcriptPath: "/Users/me/.codex/sessions/2026/09/21/rollout-abc.jsonl",
+            agent: "codex"
+        )
+        store.searchIndex = index
+
+        let opened = expectation(description: "session")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.openConversation(
+                    conversationID: conversation, projectPath: "/w/alpha"
+                ))
+            }
+            if case .err = frame { XCTFail("this launch must succeed") }
+            if case .session = frame { opened.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [opened], timeout: 10)
+
+        let resumed = try XCTUnwrap(
+            store.repos.first { $0.url.path == "/w/alpha" }?.sessions.first {
+                $0.pinnedConversationID.uuidString.lowercased() == conversation
+            },
+            "the phone's search.open really resumed the codex conversation into a tab"
+        )
+        XCTAssertEqual(resumed.agent, .codex)
+        XCTAssertEqual(resumed.transcriptDirectory, worktree.path)
+        XCTAssertEqual(
+            resumed.transcriptPath, "/Users/me/.codex/sessions/2026/09/21/rollout-abc.jsonl"
+        )
+    }
+
+    /// **Agent comes from `transcriptLocation`, not `conversationNames()`.** A naming pass
+    /// leaves the `conversation` table unwritten for a conversation it could not name — an
+    /// `exec`-provenance codex rollout, say — while `source`, which `transcriptLocation`
+    /// reads, is written for every ingested message regardless. Reading `agent` off
+    /// `conversationNames()` here would resume this conversation as claude on the phone while
+    /// the desk, which reads the same `source` row, resumes it as codex — a divergence rather
+    /// than a shared fallback. `index.conversations` is left empty on purpose, so the only way
+    /// this test can pass claude-by-default is by consulting the row that IS populated.
+    func testASearchOpenPrefersTheSourceRowsAgentOverAnUnnamedConversation() async throws {
+        let (store, key, port) = try await standUp()
+        store.overrideAdapter(StubCodexAdapter(thread: UUID()), for: .codex, account: nil)
+        store.overrideRuntime(FakeAgentRuntime(), for: .codex, account: nil)
+        _ = store.newSession(in: URL(fileURLWithPath: "/w/alpha"))
+
+        let worktree = FileManager.default.temporaryDirectory
+            .appendingPathComponent("flightdeck-fleet-service-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: worktree) }
+
+        let index = StubSearchIndex()
+        let conversation = UUID().uuidString.lowercased()
+        // No `index.conversations[conversation]` entry — the naming pass never named this one.
+        index.transcriptLocations[conversation] = (
+            workingDirectory: worktree.path,
+            transcriptPath: "/Users/me/.codex/sessions/2026/09/21/rollout-exec.jsonl",
+            agent: "codex"
+        )
+        store.searchIndex = index
+
+        let opened = expectation(description: "session")
+        let client = FleetClient(key: key)
+        self.client = client
+        client.onFrame = { frame in
+            if case .snapshot = frame {
+                _ = client.send(.openConversation(
+                    conversationID: conversation, projectPath: "/w/alpha"
+                ))
+            }
+            if case .err = frame { XCTFail("this launch must succeed") }
+            if case .session = frame { opened.fulfill() }
+        }
+        client.connect(to: .hostPort(host: "127.0.0.1", port: port), lastSeq: 0)
+        await fulfillment(of: [opened], timeout: 10)
+
+        let resumed = try XCTUnwrap(
+            store.repos.first { $0.url.path == "/w/alpha" }?.sessions.first {
+                $0.pinnedConversationID.uuidString.lowercased() == conversation
+            },
+            "the phone's search.open really resumed the unnamed conversation into a tab"
+        )
+        XCTAssertEqual(resumed.agent, .codex, "an unnamed conversation must not default to claude")
+    }
+
     /// **The judgement call, pinned so it cannot be simplified away.** With nothing selected on
     /// the Mac, there is no focus for a client action to steal, and the alternative is a sidebar
     /// showing tabs over an empty pane — so a client action selects anyway, exactly as a desk
@@ -920,11 +1037,13 @@ final class FleetServiceTests: XCTestCase {
 private final class StubSearchIndex: SearchIndex {
     var hits: [TranscriptHit] = []
     var conversations: [String: IndexedConversation] = [:]
+    var transcriptLocations:
+        [String: (workingDirectory: String, transcriptPath: String, agent: String)] = [:]
     var shouldThrow = false
 
-    func ingest(_: [IndexedMessage], from: URL, projectPath: String, offset: UInt64?) throws {}
+    func ingest(_: [IndexedMessage], for: TranscriptRef, offset: UInt64?) throws {}
     func readOffset(for: URL) -> UInt64 { 0 }
-    func setConversationName(_: String, projectPath: String, for: String) throws {}
+    func setConversationName(_: String, projectPath: String, agent: String, for: String) throws {}
     func prune(keepingSources: Set<URL>, projects: Set<String>) throws {}
     func messageCount(forConversation: String) throws -> Int { 0 }
 
@@ -937,6 +1056,59 @@ private final class StubSearchIndex: SearchIndex {
         if shouldThrow { throw StubSearchIndexError.boom }
         return conversations
     }
+
+    func transcriptLocation(
+        forConversation id: String
+    ) throws -> (workingDirectory: String, transcriptPath: String, agent: String)? {
+        if shouldThrow { throw StubSearchIndexError.boom }
+        return transcriptLocations[id]
+    }
 }
 
 private enum StubSearchIndexError: Error { case boom }
+
+/// A codex adapter that never touches a real app-server, mirroring
+/// `OpenConversationTests`'s own stub — duplicated rather than shared, the same call this
+/// file already makes for `StubSearchIndex`.
+private struct StubCodexAdapter: AgentAdapter {
+    static let id: AgentID = .codex
+    static let textChannel: AgentTextChannel? = nil
+    static let renameTyping: AgentRenameTyping? = nil
+    static let dialogDriver: AgentDialogDriver? = nil
+    static let negotiatesIdentity = true
+    static let needsRuntimeStart = true
+    static let hasStatusRegistry = false
+    nonisolated static func sanitizedTitle(_ raw: String) -> String? {
+        CodexAdapter.sanitizedTitle(raw)
+    }
+    nonisolated static func title(fromTranscriptAt url: URL) -> String? {
+        CodexAdapter.title(fromTranscriptAt: url)
+    }
+    nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+        CodexAdapter.timelineItems(inLine: line, at: offset)
+    }
+    nonisolated static let homeMarkerFile = CodexAdapter.homeMarkerFile
+    nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
+        CodexAdapter.identity(fromHomeData: data)
+    }
+    static let openPromptReader: AgentOpenPromptReader? = CodexAdapter.openPromptReader
+    static let searchCorpus: AgentSearchCorpus? = CodexAdapter.searchCorpus
+    static let turnRecovery: AgentTurnRecovery? = CodexAdapter.turnRecovery
+    let thread: UUID
+
+    func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
+        AgentBinding(conversationID: thread, transcriptURL: nil)
+    }
+    func binding(for session: Session) -> AgentBinding {
+        AgentBinding(conversationID: session.pinnedConversationID, transcriptURL: nil)
+    }
+    func location(for session: Session) -> AgentLocation {
+        AgentLocation(workingDirectory: session.transcriptDirectory, binding: binding(for: session))
+    }
+    func launchCommand(_ b: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
+    func resumeCommand(_ b: AgentBinding, _ s: Session, _ o: AgentOptions) -> String { "" }
+    func rename(_: AgentBinding, to: String) async throws {}
+    func loginInvocation(for account: AgentAccount) -> LoginInvocation {
+        LoginInvocation(command: "", inject: nil)
+    }
+}

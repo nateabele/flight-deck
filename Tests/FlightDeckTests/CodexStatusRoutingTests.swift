@@ -21,7 +21,9 @@ final class CodexStatusRoutingTests: XCTestCase {
         /// capabilities off `AgentID`, not off the injected adapter, so a stub that said
         /// otherwise would be describing an agent that does not exist.
         static let textChannel: AgentTextChannel? = nil
+        static let renameTyping: AgentRenameTyping? = nil
         static let dialogDriver: AgentDialogDriver? = nil
+        static let turnRecovery: AgentTurnRecovery? = CodexAdapter.turnRecovery
         static let negotiatesIdentity = true
         static let needsRuntimeStart = true
         static let hasStatusRegistry = false
@@ -39,6 +41,7 @@ final class CodexStatusRoutingTests: XCTestCase {
             CodexAdapter.identity(fromHomeData: data)
         }
         static let openPromptReader: AgentOpenPromptReader? = CodexAdapter.openPromptReader
+        static let searchCorpus: AgentSearchCorpus? = CodexAdapter.searchCorpus
         let thread: UUID
 
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {

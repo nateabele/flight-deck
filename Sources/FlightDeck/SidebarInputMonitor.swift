@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// Sidebar mouse/keyboard affordances that SwiftUI cannot express here: double-click-to-rename,
-/// click-to-focus, and Return-to-rename.
+/// click-to-focus, click-to-collapse, and Return-to-rename.
 ///
 /// # Four mechanisms were measured. Three are dead. Read this before "simplifying".
 ///
@@ -54,9 +54,112 @@ import SwiftUI
 /// - **Return with the sidebar table as first responder** → rename the selected row, consuming
 ///   the key. Gated on the first responder, so Return still reaches the terminal and still
 ///   commits an open rename field.
+/// - **mouse-down, `clickCount == 1`, that turns out not to have been a drag** → toggle that
+///   project header's collapse state. The "turns out" is the whole trick; see below.
 ///
 /// Mouse events are always returned unchanged, so row hit-testing and list dragging cannot
 /// change. A drag begins with a `clickCount == 1` down, so dragging never renames.
+///
+/// # Click-to-collapse: why there is no mouse-up handler
+///
+/// The whole project-header row toggles on a click and reorders on a drag. Both begin with the
+/// same mouse-down, and nothing here may consume it, so the two can only be told apart *after
+/// the fact*. The obvious way to do that — widen the monitor's mask to `.leftMouseUp` and
+/// compare the two points — **does not work, and was measured not to work**:
+///
+///     [plain SwiftUI view]                       DOWN seen, UP seen
+///     [List row, press resolved to a row]        DOWN seen, UP NEVER SEEN
+///
+/// `NSTableView` runs a nested tracking loop from inside its `mouseDown:`, pulling events
+/// straight off the queue with `nextEventMatchingMask:` until the button comes up. Local
+/// monitors are invoked from `NSApplication.sendEvent`, which that loop bypasses entirely, so
+/// the up is consumed where no monitor can see it.
+///
+/// **The loop is not something the sidebar opts into, and nothing here can opt out of it.**
+/// `.onMove` does not cause it (measured with and without: identical, both swallow the up), and
+/// `.selectionDisabled()` — which every project header carries — does not avoid it either. So
+/// dropping reorder, or selection, would not bring the mouse-up back; there is nothing to trade
+/// away here.
+///
+/// An earlier version of this table claimed a third row — that a window which never becomes key
+/// *does* deliver the up — and it was wrong in a way worth recording, because the raw line it
+/// came from is true. Those runs do see the up. They also log `rowResolved=false`: with the app
+/// inactive there was no List row under the pointer to press, so the press landed on the table's
+/// background and was never the configuration the line described. Across every run gathered,
+/// `rowResolved` and key/active moved together perfectly, so the two cannot be told apart here:
+/// what is measured is that **a press landing on a row is never followed by an up**, and that
+/// every press that did see an up had not landed on a row. Whether an unfocused window would
+/// swallow the up if a row were under the pointer is simply not known — activation could not be
+/// forced on a machine in use, so that case was never produced.
+///
+/// What *is* observable is the loop **ending**: a block scheduled for `NSDefaultRunLoopMode`
+/// only cannot run until the run loop leaves `NSEventTrackingRunLoopMode`. Measured against a
+/// press held 100ms on a `.selectionDisabled()` row, key and active, with the release marked:
+///
+///       0.0ms [kCFRunLoopDefaultMode] window isKey=true app active=true
+///       0.7ms [-]                     monitor DOWN cc=1 rowResolved=true
+///       1.7ms [NSEventTrackingRunLoopMode]   DispatchQueue.main.async ran  ← during, useless
+///     104.3ms [NSEventTrackingRunLoopMode] RELEASING (posting the up now)
+///     107.8ms [kCFRunLoopDefaultMode]   RunLoop.perform(inModes:) ran      ← after the release
+///
+/// So the down records where the press started and asks to be called back once it is over; the
+/// callback reads `NSEvent.mouseLocation` for where it ended. `DispatchQueue.main.async` is
+/// **not** interchangeable here: `NSEventTrackingRunLoopMode` is a common mode, so it runs
+/// mid-press with the button still down, and every drag would toggle.
+///
+/// `SidebarClickIntent` holds the decision itself, over plain numbers, so it is testable without
+/// a window. **Travel is what rejects a drag**, and the identity check does not help there: in
+/// an `.onMove` reorder the dragged block follows the pointer, so the row under it at release is
+/// often the dragged project's own header or one of its sessions — identity matches, and travel
+/// is the only thing left saying no. Identity earns its keep against the opposite case, a row
+/// removed or inserted under a pointer that never moved. (Which row is under the pointer at the
+/// end of a real reorder drag was not measured; it is read off how `.onMove` moves the block.)
+///
+/// # Excluding the close button, by its own frame
+///
+/// A hit-test walk UP from the event cannot tell the hover-revealed X from the project name:
+/// SwiftUI backs the row with one `NSHostingView`, and its `hitTest` returns *itself* even at
+/// the button's exact center (probed). That is why this one decision departs from the idiom in
+/// `sidebarRow(under:)` and `ToolOverlayInputMonitor.isOverTerminal`.
+///
+/// Walking DOWN does work, and needs no geometry plumbed out of SwiftUI and no reserved strip of
+/// guessed width. The button is a real `NSView` in the row's subtree with a real frame, and
+/// SwiftUI backs it with an `NSButton`. So the exclusion is that control's actual frame: exact,
+/// and still right if a project header ever gains a second control.
+///
+/// **In a project-header row that button is the only `NSControl`** — everything else there, the
+/// chevron, the name, the collapsed session count, the status icon and the background-work
+/// badge, is drawn by SwiftUI, and a collapsed header's busy spinner is an `NSProgressIndicator`,
+/// an `NSView` and not an `NSControl`. That is not true of the sidebar's other rows, and
+/// `pressedControl` is asked about every row this monitor sees: a **session** row carries its own
+/// borderless close button, and a `TextField` while it is being renamed, both `NSControl`
+/// subclasses. Neither can cause a wrong toggle, but for reasons outside this function —
+/// `SessionSidebar`'s `toggleRow` drops anything that is not `case .project`, and an open rename
+/// field never reaches the scheduler at all, because the first-responder guard in
+/// `handleMouseDown` returns before it. The false positive is real; it is simply always caught
+/// downstream.
+///
+/// `.accessibilityIdentifier("close-project")` would have been the more pointed match and was
+/// tried first: it does not reach the `NSView`. SwiftUI serves accessibility from its own element
+/// tree, and every `accessibilityIdentifier()` under a row reads empty.
+///
+/// The button is in the tree only while the row is hovered, which is exactly when it can be
+/// clicked. Counted directly — `NSControl`s under one row across the three states — it is
+/// **removed and not merely hidden**, so there is no permanent dead strip to filter for:
+///
+///     never hovered: 0, hovered: 1, un-hovered again: 0
+///
+/// When it is absent nothing is excluded, which is correct: a button that is not in the tree is
+/// not on screen and cannot have been the target.
+///
+/// **The case this exclusion exists for is the confirmation sheet.** Press the X on a project
+/// that closes outright and the row is gone by the time the decision runs, so the identity
+/// comparison vetoes the toggle on its own and `pressedRowControl` changes nothing. But a
+/// project with more than one session asks first (`ProjectCloseCoordinator.requestClose`), and
+/// `NSAlert.beginSheetModal` returns immediately: the run loop reaches `.default` with the sheet
+/// open, the pointer exactly where it was pressed, and the row still there. Without this
+/// exclusion that press collapses the project behind the sheet — and then closes it, or does
+/// not, depending on which button the user picks. It is the one path where nothing else says no.
 ///
 /// # Scoping: this monitor is app-wide, so it must prove which table it is looking at
 ///
@@ -87,6 +190,16 @@ final class SidebarInputMonitor {
     /// Rename whatever session is currently selected. Returns true if it acted, so the monitor
     /// knows whether to consume the key.
     var renameSelected: (() -> Bool)?
+    /// Toggle the collapse state of the row at this table row index. Every row is reported, not
+    /// just project headers — this monitor has no model of what a row is — so the caller is what
+    /// makes a click on a session row a no-op. See `SessionSidebar`.
+    var toggleRow: ((Int) -> Void)?
+    /// The identity of the row at this table index — `SidebarRow.id`, supplied by the caller for
+    /// the same reason as above. Click-to-collapse decides a press-duration after it began, and
+    /// a bare index does not survive that: sessions come and go asynchronously here, so a row
+    /// removed above the pointer shifts everything below it up one, and the index pressed would
+    /// then name a different project. Identity is what is compared instead.
+    var rowIdentity: ((Int) -> String?)?
 
     /// `kVK_Return`. Hard-coded rather than importing Carbon for one constant.
     private static let returnKeyCode: UInt16 = 36
@@ -130,7 +243,15 @@ final class SidebarInputMonitor {
         // Scope check first: Settings ▸ Projects and `NSOpenPanel` are table-backed too.
         // `hitView` answers nil for both, so nothing below can act on their rows.
         guard let window = event.window, let hit = SessionWindow.hitView(for: event) else { return }
-        guard let (table, rowIndex) = Self.sidebarRow(under: hit) else { return }
+        // This guard is also what keeps a control-click out of click-to-collapse, which is worth
+        // knowing because nothing below filters modifiers the way `handleKeyDown` does. Probed on
+        // a replica of this list — a plain press and a control-press at the same point in the
+        // same run — the plain one resolved a row and scheduled, and the control-press resolved
+        // NO row (`rowResolved=false`) and got no further than here, while the context menu
+        // opened normally. So the sequence control-click → Escape leaves the row untouched. Not
+        // driven in the real app: `AXIsProcessTrusted()` is false on this machine, so no
+        // synthetic control-click can be delivered to it.
+        guard let (table, rowView, rowIndex) = Self.sidebarRow(under: hit) else { return }
 
         if event.clickCount == 2 {
             renameRow?(rowIndex)
@@ -144,10 +265,151 @@ final class SidebarInputMonitor {
         // inside the field you are editing. `NSTextView` (the field editor) is an `NSText`.
         guard !(window.firstResponder is NSText) else { return }
 
+        // Ask to be called back once this click is over, so it can be told apart from a drag.
+        //
+        // Deliberately *after* the field-editor guard above, which is broader than "a click
+        // inside the field": while a rename is open it suppresses the toggle for a click
+        // ANYWHERE in the sidebar, including on some other project's header. That is the right
+        // behaviour and it is what the user sees — the first click commits the rename, the
+        // second one toggles — but it is worth saying, because it is not what "never collapse a
+        // project from inside a rename field" implies.
+        //
+        // Deliberately *before* the selected-row guard below, which returns early on every row
+        // but one.
+        //
+        // `clickCount == 1` is the only value that reaches the scheduler, so **clicking a header
+        // repeatedly and fast toggles it exactly once, however many clicks land**: the first
+        // (cc=1) schedules and toggles, the second (cc=2) goes to `renameRow` above, which
+        // guards `case .session` and no-ops on a header, and the third and beyond (cc>=3) match
+        // nothing here at all. That is the intended behaviour and not flakiness — a double-click
+        // that toggled twice would look like it had done nothing — but nobody should have to
+        // derive it from the guards. The rule keeps its own `clickCount` guard anyway, because a
+        // pure rule should be total over its inputs rather than rely on this call site.
+        if event.clickCount == 1 {
+            scheduleToggleDecision(
+                window: window, rowView: rowView, rowIndex: rowIndex,
+                downPoint: event.locationInWindow, clickCount: event.clickCount
+            )
+        }
+
         // Single click on the already-selected row: take keyboard focus, so Return means
         // something here. See the doc comment for why this is not done on every click.
         guard table.selectedRow == rowIndex else { return }
         if window.firstResponder !== table { window.makeFirstResponder(table) }
+    }
+
+    /// The second half of click-to-collapse, scheduled for after the table's drag-tracking loop
+    /// returns — which is the earliest moment this monitor can know a click was not a drag. See
+    /// the doc comment for the measurements behind both halves.
+    ///
+    /// Everything the decision needs is resolved here, while the press's own view tree is still
+    /// the one under the pointer: by the time the block runs the list may have scrolled,
+    /// reordered, or lost the window entirely.
+    private func scheduleToggleDecision(
+        window: NSWindow,
+        rowView: NSTableRowView,
+        rowIndex: Int,
+        downPoint: NSPoint,
+        clickCount: Int
+    ) {
+        // A row the caller cannot identify cannot be proved to be the same row later, so it is
+        // never scheduled at all.
+        guard let identity = rowIdentity?(rowIndex) else { return }
+        // Screen coordinates, because that is the space the answer arrives in: the block reads
+        // `NSEvent.mouseLocation`, and a reorder can slide the rows under the pointer in between.
+        let downOnScreen = window.convertPoint(toScreen: downPoint)
+        let pressedRowControl = Self.pressedControl(in: rowView, at: downPoint)
+
+        // `.default` ONLY. A block that also listed `.eventTracking` — or a
+        // `DispatchQueue.main.async`, which effectively does, since event tracking is a common
+        // mode — runs mid-press with the button still down, and every drag would toggle.
+        RunLoop.main.perform(inModes: [.default]) { [weak self] in
+            MainActor.assumeIsolated {
+                self?.finishToggleDecision(
+                    downOnScreen: downOnScreen, downIdentity: identity,
+                    pressedRowControl: pressedRowControl, clickCount: clickCount
+                )
+            }
+        }
+    }
+
+    private func finishToggleDecision(
+        downOnScreen: NSPoint,
+        downIdentity: String,
+        pressedRowControl: Bool,
+        clickCount: Int
+    ) {
+        // The press is not over, so this is not yet a click — and it may never be one.
+        //
+        // This is reachable, and the measurements do not pin down when. The block is scheduled
+        // from `handleMouseDown`, and `SessionWindow.hitView(for:)` requires neither a key window
+        // nor an active app, so a press can arrive here with no tracking loop to wait behind —
+        // and the decision then happens immediately, while the button is still down.
+        //
+        // That was seen exactly once, in one run of one probe variant (`upprobe3 --noselect`,
+        // window not key): no tracking loop ran at all and the block fired ~3ms into a 100ms
+        // press. It has not been reproduced since. Later probing of a never-key window — seven
+        // runs of a differently-built probe, so not a rerun of that one — always found a
+        // tracking loop and always decided after the release. Nothing was found that predicts
+        // which way it goes, and that is the argument FOR this guard rather than against it: an
+        // unpredictable early fire is exactly what turns a drag into a toggle.
+        //
+        // Two limits on all of the above, because the value of this comment is that it separates
+        // what was run from what was reasoned:
+        //
+        //   - `AXIsProcessTrusted()` is false on the machine this was probed on, so no synthetic
+        //     press can make `NSEvent.pressedMouseButtons` non-zero. What was verified is the
+        //     ORDERING this guard keys on — decision before release. That the guard then returns
+        //     early under a real finger is inference from the API, not an observation.
+        //   - The consequence for a click that activates an unfocused Flight Deck — that click
+        //     not collapsing a project, and the next one doing so, which is how macOS apps are
+        //     meant to behave — has not been driven in the real app either.
+        //
+        // Declining costs a toggle on a press still in progress and nothing else.
+        guard NSEvent.pressedMouseButtons & 1 == 0 else { return }
+
+        // Resolved again rather than captured, the same rule the rest of this file follows: the
+        // window may have closed while the button was held. `NSEvent.mouseLocation` is where the
+        // pointer is *now*, which — the tracking loop having just returned — is where it was
+        // released.
+        guard let window = SessionWindow.main else { return }
+        let upOnScreen = NSEvent.mouseLocation
+        guard let hit = SessionWindow.hitView(
+            inWindow: window, at: window.convertPoint(fromScreen: upOnScreen)
+        ), let (_, _, rowIndex) = Self.sidebarRow(under: hit) else { return }
+
+        guard SidebarClickIntent.togglesCollapse(
+            downPoint: downOnScreen,
+            upPoint: upOnScreen,
+            downRow: downIdentity,
+            upRow: rowIdentity?(rowIndex),
+            clickCount: clickCount,
+            pressedRowControl: pressedRowControl
+        ) else { return }
+        // The index resolved NOW, not the one pressed: the rule has just proved the two name the
+        // same row, and it is today's index that indexes today's `sidebarRows`.
+        toggleRow?(rowIndex)
+    }
+
+    /// Whether a press landed on a real AppKit control inside the row — in a project header, the
+    /// hover-revealed close button, which is the only `NSControl` there.
+    ///
+    /// Answers for any row, including ones where a control is not the close button: a session
+    /// row has its own close button and, mid-rename, a text field. See the file's doc comment for
+    /// why that cannot produce a wrong toggle, and why this walks DOWN rather than up from the
+    /// hit view.
+    ///
+    /// Not private so the walk itself can be tested; the rule it feeds is pure, but this half is
+    /// the half that has to be right about AppKit.
+    static func pressedControl(in rowView: NSTableRowView, at pointInWindow: NSPoint) -> Bool {
+        let pointInRow = rowView.convert(pointInWindow, from: nil)
+        func covers(_ view: NSView) -> Bool {
+            if view is NSControl, view.convert(view.bounds, to: rowView).contains(pointInRow) {
+                return true
+            }
+            return view.subviews.contains(where: covers)
+        }
+        return rowView.subviews.contains(where: covers)
     }
 
     /// Returns true if the event was handled and should be consumed.
@@ -163,9 +425,11 @@ final class SidebarInputMonitor {
         return renameSelected?() ?? false
     }
 
-    /// Resolves a hit view to its table and the row index under it. Read-only: nothing is
-    /// attached, replaced, or reconfigured.
-    private static func sidebarRow(under view: NSView) -> (NSTableView, Int)? {
+    /// Resolves a hit view to its table, the row view, and the row index under it. Read-only:
+    /// nothing is attached, replaced, or reconfigured. The row view comes back so that
+    /// `pressedControl(in:at:)` has a subtree to walk — it is the root of the only geometry the
+    /// click rule needs, and it is AppKit's, not SwiftUI's.
+    private static func sidebarRow(under view: NSView) -> (NSTableView, NSTableRowView, Int)? {
         var candidate: NSView? = view
         while let current = candidate, !(current is NSTableRowView) { candidate = current.superview }
         guard let rowView = candidate as? NSTableRowView else { return nil }
@@ -176,7 +440,43 @@ final class SidebarInputMonitor {
 
         let index = table.row(for: rowView)
         guard index >= 0 else { return nil }
-        return (table, index)
+        return (table, rowView, index)
+    }
+}
+
+/// Click, or drag? The whole rule, over plain numbers — no `NSEvent`, no view, no window — so it
+/// can be exercised by `scripts/test-unit.sh`, which runs the `xctest` binary with no GUI host.
+///
+/// `SidebarInputMonitor` owns the two events this decides between; see its doc comment for why
+/// the decision has to be made after the fact rather than by consuming the mouse-down.
+enum SidebarClickIntent {
+    /// How far the mouse may travel between press and release and still count as a click.
+    ///
+    /// This is the check that rejects a reorder drag. The identity comparison below does not: a
+    /// dragged block follows the pointer, so at release the row under it is frequently the one
+    /// that was dragged. See the file's doc comment.
+    static let dragThreshold: CGFloat = 4.0
+
+    /// Whether a press/release pair should toggle the row it landed on.
+    ///
+    /// The two points only have to share a coordinate space — the caller passes screen points.
+    /// The two row identities are `SidebarRow.id`, not indices: the release is decided a whole
+    /// press later, and an index can come to mean a different row in that time.
+    ///
+    /// `pressedRowControl` is whether the press landed on an AppKit control inside the row —
+    /// the close button. There is no exclusion *width* here to get wrong: the caller measures
+    /// the control's own frame. See `SidebarInputMonitor.pressedControl(in:at:)`.
+    static func togglesCollapse(
+        downPoint: CGPoint,
+        upPoint: CGPoint,
+        downRow: String?,
+        upRow: String?,
+        clickCount: Int,
+        pressedRowControl: Bool
+    ) -> Bool {
+        guard clickCount == 1, !pressedRowControl else { return false }
+        guard let downRow, downRow == upRow else { return false }
+        return hypot(upPoint.x - downPoint.x, upPoint.y - downPoint.y) < dragThreshold
     }
 }
 
@@ -187,12 +487,16 @@ extension View {
     func sidebarInputMonitor(
         _ monitor: SidebarInputMonitor,
         renameRow: @escaping (Int) -> Void,
-        renameSelected: @escaping () -> Bool
+        renameSelected: @escaping () -> Bool,
+        toggleRow: @escaping (Int) -> Void,
+        rowIdentity: @escaping (Int) -> String?
     ) -> some View {
         self
             .onAppear {
                 monitor.renameRow = renameRow
                 monitor.renameSelected = renameSelected
+                monitor.toggleRow = toggleRow
+                monitor.rowIdentity = rowIdentity
                 monitor.start()
             }
             .onDisappear { monitor.stop() }

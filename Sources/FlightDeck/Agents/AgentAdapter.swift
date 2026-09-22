@@ -59,7 +59,28 @@ protocol AgentAdapter {
 
     /// The environment that binds a process to this account. Claude answers `CLAUDE_CONFIG_DIR`,
     /// codex `CODEX_HOME`; a third agent answers its own, and no caller ever learns which.
+    ///
+    /// Composed of `launchEnvironment` plus the account's own variable, so a caller that has
+    /// an account gets both without having to know there are two halves.
     func environment(for account: AgentAccount) -> [String: String]
+
+    /// **What every process of this agent needs regardless of which login it runs as — or of
+    /// whether it has one at all.**
+    ///
+    /// Separate from `environment(for:)` because that one takes a non-optional account, and
+    /// the launch path has tabs with none: a login deleted between runs launches its shell
+    /// with no account variable at all (see `SessionStore.insertSession`). Claude's
+    /// hook-event directory belongs here rather than there for exactly that reason — it is
+    /// how the agent reports its composer lifecycle, and a tab that reported nothing is a tab
+    /// stuck on the legacy screen grammar forever.
+    ///
+    /// **This is the single expression of those variables, and it must stay single.** The
+    /// event directory first shipped set only inside `environment(for:)`, whose sole
+    /// production consumer is `ToolRunner` — so no launched session ever received it,
+    /// `record.sh` exited on its first line, and the claude half of the hook feature was dead
+    /// while every unit test around it passed. `AccountLaunchTests` now asserts this reaches
+    /// `Ghostty.SurfaceConfiguration.environmentVariables`.
+    var launchEnvironment: [String: String] { get }
 
     /// What to run, and what to type once it is up, to sign this account in.
     ///
@@ -88,6 +109,19 @@ protocol AgentAdapter {
     /// Read through `AgentID.textChannel` below, which is what the store consults.
     static var textChannel: AgentTextChannel? { get }
 
+    /// **How this agent's two-stage rename modal is driven at the pty — or `nil`, the
+    /// refusal `ClaudeAdapter` states because it has no second stage to drive.**
+    ///
+    /// A separate capability from `textChannel` rather than a case inside `submit`, because
+    /// codex's `/rename` is a MODAL with two submissions and `AgentTextChannel.submit`'s
+    /// whole contract — settle exactly once iff this returns `true` — cannot carry that: the
+    /// caller releases its `injecting` mark inside that one settle, so a second stage that
+    /// needed a second settle would either leak the mark early or never fire at all. See
+    /// `AgentRenameTyping`'s doc comment for the rest of that reasoning.
+    ///
+    /// Read through `AgentID.renameTyping` below, which is what the store consults.
+    static var renameTyping: AgentRenameTyping? { get }
+
     /// **How a select-list dialog this agent has raised is driven — or `nil`, the refusal.**
     ///
     /// Split from `textChannel` because the two are genuinely different channels and an
@@ -99,6 +133,19 @@ protocol AgentAdapter {
     ///
     /// Read through `AgentID.dialogDriver` below.
     static var dialogDriver: AgentDialogDriver? { get }
+
+    /// **How a turn this agent lost to an API failure is revived — or `nil`, the refusal.**
+    ///
+    /// A capability rather than a flag on the error, because the vocabulary is each agent's
+    /// own: claude ships a transience predicate in its transcript record, codex ships a
+    /// `codex_error_info` variant name and nothing else. Both answers are allowlists here —
+    /// an unrecognised kind never retries — so an agent growing a new error kind cannot
+    /// start typing into a terminal unattended. A `nil` is the refusal, exactly as it is for
+    /// `textChannel`: an agent added later retries nothing until someone builds and tests
+    /// its classifier against captured records.
+    ///
+    /// Read through `AgentID.turnRecovery` below.
+    static var turnRecovery: AgentTurnRecovery? { get }
 
     /// **Whether this agent's conversation identity is a round trip that can fail, rather
     /// than a local mint.**
@@ -164,8 +211,18 @@ protocol AgentAdapter {
     /// **A legal conversation name for THIS agent's rename channel.**
     ///
     /// Claude strips shell metacharacters, because its rename is typed at a pty that may be a
-    /// bare shell. Codex does not, because `thread/name/set` is JSON-RPC and touches no
-    /// shell — see `AgentTitle`, which holds the half both agents share.
+    /// bare shell. Codex does not — even though `CodexAdapter.renameTyping` now ALSO types at
+    /// a pty, `thread/name/set` is still the call that actually commits the name, and it is
+    /// JSON-RPC, not shell. What lands in the modal is `AgentTitle.sanitized`'s output, not a
+    /// second, differently-sanitized string, so there is nothing extra a shell strip could be
+    /// protecting there either.
+    ///
+    /// Control characters are stripped for EVERY agent — `AgentTitle.sanitized`, which holds
+    /// the half both agents share — so a newline still cannot be smuggled into codex's modal.
+    /// That is why codex's rule does not need to grow a shell-metacharacter strip to match:
+    /// the hazard a strip like that guards against (a name reaching a shell prompt) does not
+    /// exist here, and the hazard that does exist (a control character reaching the modal) is
+    /// already covered. Do not "fix" this by copying claude's strip.
     nonisolated static func sanitizedTitle(_ raw: String) -> String?
 
     /// **A conversation's own name, read out of its transcript** — for a tab that repointed
@@ -207,14 +264,33 @@ protocol AgentAdapter {
     /// derivation", and those are different sentences on a phone — `prompt_changed` versus
     /// `unsupported_agent`. It also lets `PromptService` refuse before reading the file.
     static var openPromptReader: AgentOpenPromptReader? { get }
+
+    /// **How this agent's history becomes searchable — or `nil`, the refusal.**
+    ///
+    /// The fourth capability object, and the only one that is not `@MainActor` — see
+    /// `AgentSearchCorpus`'s own doc comment for why. `nil` means this agent contributes
+    /// nothing to ⌘K, which is an answer the overlay can state rather than a gap that reads
+    /// as "you have no conversations here".
+    ///
+    /// Deliberately has NO default implementation. The defaults in this file exist for
+    /// members with a genuine majority answer (`rebind`, `environment`); this has none, and a
+    /// silent default is how a third agent would ship looking searchable and finding nothing.
+    static var searchCorpus: AgentSearchCorpus? { get }
 }
 
 /// Deriving what an agent is blocked on from a window of its transcript.
 ///
 /// A window rather than the whole file because an agent cannot proceed past a dialog, so the
-/// open call is always among the last records; a few rather than one so that a result for an
-/// *earlier* call is inside the window and cannot make an already-answered call look open —
-/// the only way this can be wrong in the dangerous direction.
+/// open call is always among the last *conversational* records; a few rather than one so that
+/// a result for an *earlier* call is inside the window and cannot make an already-answered call
+/// look open — the only way this can be wrong in the dangerous direction. **A conformer must
+/// not treat "nothing found in this window" as proof there is no open call**, though — an agent
+/// can interleave non-conversational bookkeeping records into the same transcript file (Claude
+/// Code does; see `ClaudeOpenCall`'s own doc comment), and a run of those can crowd a real
+/// dialog out of a small window even though the transcript holds more history above it. The
+/// caller (`PromptService.openPrompt(inSession:)`) is what widens the window when that happens;
+/// this protocol's `openPrompt(inTranscriptTail:activity:)` stays a pure, single-window
+/// derivation and returns `nil` for "not in this window", not "does not exist".
 @MainActor
 protocol AgentOpenPromptReader {
     func openPrompt(inTranscriptTail lines: [SourceLine], activity: SessionActivity?) -> OpenPrompt?
@@ -237,8 +313,9 @@ protocol AgentOpenPromptReader {
 protocol AgentTextChannel {
     /// Whether this agent's input box is on screen AND empty right now.
     ///
-    /// **Diagnostic only — nothing gates typing on this.** Injection is gated on
-    /// `hasComposerBox` (presence), and `submit()` decides empty-vs-draft by killing and
+    /// **Diagnostic only — nothing gates typing on this.** Injection is gated on presence
+    /// (`hasComposerBox`, or `isKnownNonComposer` once the agent has reported itself live —
+    /// see `SessionStore.injectionGate`), and `submit()` decides empty-vs-draft by killing and
     /// comparing, so this member no longer sits on the typing path. Its sole caller is the
     /// `composer=` field of `promptTypingComposerState`'s log string. It answers `false` for a
     /// box that cannot be read or that holds anything other than the queued-messages hint.
@@ -247,35 +324,118 @@ protocol AgentTextChannel {
     /// Whether this agent's own composer is genuinely on screen right now — as opposed to a
     /// dialog, a bare shell, or a screen this build cannot read.
     ///
-    /// **This is the gate `SessionStore.inject` asks, in place of the status-file activity it
-    /// used to consult.** Activity said nothing about what was actually on screen: `.busy` and
-    /// `.idle` both draw the composer, a `.waiting` dialog draws something that only looks
-    /// like it, and a pre-boot bare shell draws neither. Each agent answers this from its own
-    /// screen grammar — see `ClaudeTextChannel`'s rule-sandwich and `CodexTextChannel`'s
-    /// footer check — so the gate stays correct without `SessionStore` knowing either one.
+    /// **This is what `SessionStore.injectionGate` asks of a tab whose agent has not reported
+    /// its lifecycle** — `ComposerReadiness.unknown`: a session restored from an older build,
+    /// one whose hook plugin never loaded, one in a folder claude does not trust. It replaced
+    /// the status-file activity check, which said nothing about what was actually on screen:
+    /// `.busy` and `.idle` both draw the composer, a `.waiting` dialog draws something that
+    /// only looks like it, and a pre-boot bare shell draws neither. Each agent answers this
+    /// from its own screen grammar — see `ClaudeTextChannel`'s rule-sandwich and
+    /// `CodexTextChannel`'s footer check — so the gate stays correct without `SessionStore`
+    /// knowing either one.
+    ///
+    /// A tab that HAS reported `.live` is gated on `isKnownNonComposer` below instead, because
+    /// this predicate's failure direction is the wrong one to stand alone on: it must
+    /// recognise a composer, so an agent that restyles one stops accepting injection
+    /// altogether. This stays the fallback precisely because "unsure" answering `false` is the
+    /// safe reading when nothing else has vouched for the session.
     ///
     /// Presence only, never emptiness: a box that is on screen but holds a draft still answers
     /// `true` here, because `submit`'s kill-and-compare is what decides whether that draft can
     /// be preserved.
     func hasComposerBox(_ injector: TextInjecting) -> Bool
 
+    /// Whether the screen positively shows a dialog covering this agent's composer.
+    ///
+    /// **The inversion of `hasComposerBox`, and that is the point.** A predicate that must
+    /// recognise a *composer* fails closed when the rendering drifts: injection stops
+    /// working on a claude or codex update, silently, in production. A predicate that only
+    /// fires on a positively-recognised *dialog* fails open instead — an unfamiliar
+    /// composer variant still gets typed into. So **unsure answers `false`**, including when
+    /// the screen cannot be read at all.
+    ///
+    /// It is nevertheless load-bearing rather than a backstop, and it is the ONLY defence
+    /// against a dialog: hook lifecycle events answer "is this session booted and alive", not
+    /// "what is on screen". Probing established that denying a permission prompt with Esc
+    /// fires no hook whatsoever, and that claude raises select-list dialogs of its own right
+    /// after `Stop` — so the event stream cannot cover either case, and a dialog this misses
+    /// is a dialog Flight Deck types into.
+    ///
+    /// **No protocol-extension default, for the reason `allowRow` gives below.** A defaulted
+    /// `false` reads as "this agent never raises a dialog", which is true of no agent; a new
+    /// conformer would inherit it and ship with the veto silently disabled. Every conformer
+    /// states its own rule, proved against that agent's own captured screens — see
+    /// `ClaudeDialogVetoTests` and `CodexDialogVetoTests` — and the compiler catches one that
+    /// forgets.
+    func isKnownNonComposer(_ injector: TextInjecting) -> Bool
+
     /// Type `text` and submit it, preserving whatever draft was there — or refuse.
     ///
-    /// **The contract the caller's bookkeeping depends on: `settle` is called exactly once
-    /// iff this returns `true`.** `SessionStore` marks the tab mid-injection before calling
-    /// and clears the mark inside the `settle` it supplies, so a channel that returned `true`
-    /// without settling would leave the tab refusing every later injection for the life of
-    /// the process.
+    /// **`settle` may be called more than once — once per repaint the conformer must wait
+    /// through — and it is `onSent` that carries the one-shot guarantee the caller's
+    /// bookkeeping depends on, exactly as `onFinished` does for `AgentRenameTyping
+    /// .submitRename`.** A single settle was once the whole contract, and `ClaudeTextChannel`
+    /// still only ever needs the one; `CodexTextChannel` needs a second, later hop so its
+    /// Return is never issued in the same settle as the text before it — codex paste-detects
+    /// that burst and inserts a newline instead of submitting (see `CodexTextChannel.submit`'s
+    /// doc comment). `SessionStore` marks the tab mid-injection before calling and clears the
+    /// mark inside the `onSent` it supplies, so a channel that returned `true` without ever
+    /// running `onSent` would leave the tab refusing every later injection for the life of the
+    /// process — same failure mode `AgentRenameTyping`'s doc comment describes for
+    /// `onFinished`, now shared rather than reinvented per protocol.
     ///
-    /// `stillWanted` is re-checked after the settle delay, because the request can be
+    /// `stillWanted` is re-checked after the first settle delay, because the request can be
     /// replaced or cancelled while the agent repaints. `onSent` runs once the text has been
     /// submitted, and is where the caller retires its pending entry.
     func submit(
         _ text: String,
         into injector: TextInjecting,
-        settle: (@escaping () -> Void) -> Void,
+        settle: @escaping (@escaping () -> Void) -> Void,
         stillWanted: @escaping @MainActor () -> Bool,
         onSent: @escaping @MainActor () -> Void
+    ) -> Bool
+}
+
+/// **The second stage of a rename that cannot be said in one shot.**
+///
+/// `AgentTextChannel.submit` types one message and submits it, and its whole contract turns
+/// on a SINGLE settle: `SessionStore` marks a tab mid-injection before calling and clears
+/// that mark inside the one `settle` it is handed, so "returns `true`" and "settles" have to
+/// name the same moment or the mark either leaks (never cleared) or is cleared too early
+/// (cleared before the work it was guarding is done). That works for `submit` because typing
+/// a message is one repaint away from submitted.
+///
+/// Codex's `/rename` is not: it is a MODAL with two submissions — `/rename`⏎ opens it,
+/// `<name>`⏎ commits it — so there are two screen repaints to wait through, and therefore
+/// two points where the caller needs to be told "the terminal has caught up, keep going."
+/// Reusing `submit`'s contract here would force a choice between two wrong answers: settle
+/// once after the first repaint and the caller's `injecting` mark is released while the
+/// modal is still open and unnamed, leaving the tab open to a second, concurrent rename
+/// mid-flight; or settle once after the second and the caller has no way to learn that the
+/// modal actually opened, which it needs to know before it can safely type the name.
+///
+/// So this protocol splits the two: `settle` may be called any number of times — once per
+/// stage that needs the terminal to catch up — and it is **`onFinished`** that carries the
+/// one-shot guarantee instead, firing exactly once on every path (success, a refused modal,
+/// or cancellation), which is the caller's cue that it may finally release its mark.
+@MainActor
+protocol AgentRenameTyping {
+    /// Returns false having sent nothing. Returns true and then runs `onFinished` EXACTLY ONCE —
+    /// on every path, including cancellation and a refused modal. `settle` may be called any
+    /// number of times. `onFinished(true)` means the name was submitted.
+    ///
+    /// The exactly-once guarantee is the conformer's to keep, but it is conditional on the
+    /// caller: it holds only if `settle`'s own closure argument is invoked exactly once per
+    /// call. A `settle` that drops a call leaves `onFinished` unfired and the caller's mark
+    /// held forever; a `settle` that fires twice can run a later stage's work twice. Callers
+    /// implementing `settle` — most likely once, for the app — must honor that contract for
+    /// this guarantee to mean anything.
+    func submitRename(
+        _ name: String,
+        into injector: TextInjecting,
+        settle: @escaping (@escaping () -> Void) -> Void,
+        stillWanted: @escaping @MainActor () -> Bool,
+        onFinished: @escaping @MainActor (Bool) -> Void
     ) -> Bool
 }
 
@@ -310,6 +470,14 @@ protocol AgentDialogDriver {
     func deny(_ injector: TextInjecting)
 }
 
+/// Whether a failed turn is worth retrying, and what revives it. See
+/// `AgentAdapter.turnRecovery`.
+@MainActor
+protocol AgentTurnRecovery {
+    func retries(_ error: SessionAPIError) -> Bool
+    var resumeText: String { get }
+}
+
 extension AgentAdapter {
     /// Nothing to settle for an agent whose resume command already carries its own fallback.
     /// Being the default rather than a per-agent override is the point: an agent has to opt
@@ -322,9 +490,20 @@ extension AgentAdapter {
     /// The variable's name is the only agent-specific part, and `AgentID` already knows it —
     /// so this default is correct for every agent whose home is selected by one variable, and
     /// an agent that needs more can still override.
+    ///
+    /// The agent's own `launchEnvironment` is folded in here rather than left to each caller
+    /// to remember, and the account wins any collision: the account variable is the one thing
+    /// nothing else may repoint (see `PreferencesStore.sessionEnvironment`).
     func environment(for account: AgentAccount) -> [String: String] {
-        [account.agent.homeEnvironmentKey: account.home.path]
+        var environment = launchEnvironment
+        environment[account.agent.homeEnvironmentKey] = account.home.path
+        return environment
     }
+
+    /// Nothing beyond the account binding, for an agent that reports no lifecycle of its own.
+    /// Codex takes this default: its readiness comes from rollout evidence on disk, which
+    /// needs no variable in the child's environment.
+    var launchEnvironment: [String: String] { [:] }
 }
 
 /// The capability questions the store asks about an agent it is holding by name.
@@ -354,6 +533,16 @@ extension AgentID {
         }
     }
 
+    /// See `AgentAdapter.renameTyping`. Consulted by `SessionStore.flushPendingRename`,
+    /// alongside `rename`'s `thread/name/set` — which it does not wait for — to type the same
+    /// name at the pty that call cannot reach.
+    var renameTyping: AgentRenameTyping? {
+        switch self {
+        case .claude: ClaudeAdapter.renameTyping
+        case .codex: CodexAdapter.renameTyping
+        }
+    }
+
     /// See `AgentAdapter.dialogDriver`. Consulted by `SessionStore.answerPrompt` and by
     /// `PromptService`, which is the split that stops those two drifting — the property
     /// `PromptService`'s own comment claims and used to fail at.
@@ -364,12 +553,34 @@ extension AgentID {
         }
     }
 
+    /// See `AgentAdapter.turnRecovery`. Consulted by `SessionStore`'s arming gate alone, so
+    /// the retry loop never learns an agent's name.
+    var turnRecovery: AgentTurnRecovery? {
+        switch self {
+        case .claude: ClaudeAdapter.turnRecovery
+        case .codex: CodexAdapter.turnRecovery
+        }
+    }
+
     /// See `AgentAdapter.openPromptReader`. Consulted by `PromptService` alone — the store is
     /// handed the derived `OpenPrompt` and never derives one itself.
     var openPromptReader: AgentOpenPromptReader? {
         switch self {
         case .claude: ClaudeAdapter.openPromptReader
         case .codex: CodexAdapter.openPromptReader
+        }
+    }
+
+    /// See `AgentAdapter.searchCorpus`. Consulted by `SearchIndexBuilder`, reached through
+    /// `AppDelegate.startSearch`'s backfill kickoff, which holds no adapter at all — which is
+    /// the whole reason the capability hangs off the agent rather than off an instance.
+    ///
+    /// `nonisolated` unlike its siblings here: `SearchIndexBuilder` calls it directly from
+    /// inside its own actor, off the main actor, and the object it returns is `Sendable`.
+    nonisolated var searchCorpus: AgentSearchCorpus? {
+        switch self {
+        case .claude: ClaudeAdapter.searchCorpus
+        case .codex: CodexAdapter.searchCorpus
         }
     }
 

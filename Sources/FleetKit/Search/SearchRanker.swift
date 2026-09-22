@@ -57,13 +57,19 @@ public enum SearchRanker {
             byConversation[hit.conversationID, default: []].append(hit)
         }
 
-        // Groups are ordered by their best hit under the same rules a name match gets: recency
-        // decides, with the id as the total-order tiebreak so identical keystrokes cannot
-        // reshuffle the list.
+        // Automated groups last. This is done HERE, in the group ordering, and not by leaning
+        // on `MatchTier`'s `<`: the grouped block is appended whole below the sorted name
+        // matches (see the return statement), so the tier a grouped row carries never reaches
+        // a comparator. Partitioning the groups is what actually moves them, and doing it at
+        // group granularity is what keeps a conversation's continuation rows adjacent to the
+        // heading row they belong to.
         let groups: [[TranscriptHit]] = order
             .compactMap { byConversation[$0] }
             .sorted { lhs, rhs in
                 guard let a = lhs.first, let b = rhs.first else { return false }
+                let aAutomated = a.provenance == TranscriptHit.automatedProvenance
+                let bAutomated = b.provenance == TranscriptHit.automatedProvenance
+                if aAutomated != bAutomated { return !aAutomated }
                 if a.timestamp != b.timestamp { return a.timestamp > b.timestamp }
                 return a.conversationID < b.conversationID
             }
@@ -84,13 +90,17 @@ public enum SearchRanker {
                     title: hit.conversationName,
                     projectName: URL(fileURLWithPath: hit.projectPath).lastPathComponent,
                     projectPath: hit.projectPath,
-                    tier: .transcript,
+                    // The row's own label must be honest about what it is, even though the
+                    // comparator above is not what placed it — see the group-sort comment.
+                    tier: hit.provenance == TranscriptHit.automatedProvenance ? .automated : .transcript,
                     recency: hit.timestamp,
                     highlightedRanges: [],
                     snippet: hit.snippet,
                     conversationID: hit.conversationID,
                     isContinuation: position > 0,
-                    offset: hit.offset
+                    offset: hit.offset,
+                    agent: hit.agent, workingDirectory: hit.workingDirectory,
+                    transcriptPath: hit.transcriptPath
                 ))
             }
         }
@@ -133,7 +143,8 @@ private extension SearchResult {
             id: candidate.id, kind: candidate.kind, title: candidate.name,
             projectName: candidate.projectName, projectPath: candidate.projectPath,
             tier: tier, recency: candidate.lastActivity, highlightedRanges: ranges,
-            snippet: nil, conversationID: candidate.conversationID
+            snippet: nil, conversationID: candidate.conversationID,
+            agent: candidate.agent, transcriptPath: candidate.transcriptPath
         )
     }
 

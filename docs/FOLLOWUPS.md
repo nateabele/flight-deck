@@ -132,14 +132,23 @@ reader doesn't re-derive them.
   smoke suite cannot enter the broken state and never could have caught this. Any future
   monitor that captures a window at startup will reintroduce it silently — verify such changes
   by relaunching the real app in the background, not by a green suite.
-- **If a sidebar rename ever intermittently fails to submit, add a small delay before the
-  Return.** `SessionStore.rename` sends the command text (a paste, via `sendText`) and then
-  Return (a key event, via `sendReturn`) back to back. Ordering is preserved through
-  libghostty's IO queue, so no delay is needed today and none is shipped — but the two travel
-  different paths, and a program that debounces paste input could in principle still be
-  assembling the paste when the keypress lands. A ~50 ms gap before `sendReturn()` is the
-  first thing to try; do **not** "fix" it by putting the terminator back inside the text,
-  which is the bug that `TextInjecting.sendReturn()` exists to avoid.
+- **A small delay before Return, if typing ever fails to submit — RESOLVED for codex, and
+  it was real, not merely hypothetical.** This entry originally flagged the risk for claude's
+  `SessionStore.rename`, which sends the command text (a paste, via `sendText`) then Return (a
+  key event, via `sendReturn`) back to back, and speculated that "a program that debounces
+  paste input could in principle still be assembling the paste when the keypress lands."
+  claude has never shown that failure and still calls `settle` once. codex does show it:
+  live-isolated against codex-cli 0.153.4 (`scripts/adapterprobe/ptyscreen.py`'s `submit()`),
+  a Return arriving in the same burst as the text before it is folded into that paste and
+  inserted as a literal newline instead of submitting — reported by a user as "it types the
+  text, but instead of submitting... it just inserts a newline." Fixed in `CodexTextChannel
+  .submit`/`.submitRename` by giving `sendReturn()` its own `settle` hop, separate from the
+  text's — see that file's doc comments. `AgentTextChannel.submit`'s protocol contract changed
+  to allow `settle` more than once as part of the fix, with `onSent` (not settle) now carrying
+  the one-shot completion guarantee `SessionStore.inject` depends on, mirroring
+  `AgentRenameTyping.onFinished`. Do **not** "fix" a future case like this by putting the
+  terminator back inside the text, which is the bug that `TextInjecting.sendReturn()` exists
+  to avoid.
 - **`CLAUDE_CODE_CHILD_SESSION` in the inherited environment turns transcript saving off**,
   which silently kills inbound rename sync — the watcher tails a file that is never written.
   Claude Code sets this marker for nested sessions; a `claude` inheriting it prints
@@ -1167,3 +1176,296 @@ rather than fixed alongside the daemon wiring.
   something this feature introduced, and it only bites when the phone build is older than the
   Mac's — the ordinary direction of skew during a staged rollout, not the common case day to
   day.
+
+## Hook-fed composer state (2026-09-19)
+
+- **`events.ndjson` grows without bound, and faster than "log file" suggests.** Nothing ever
+  removes or rotates it. Launch-time truncation was considered and rejected on its merits
+  (ledger Ruling E): a shrink under a concurrently-running second instance would make that
+  instance's `HookEventWatcher` resume at the new end and miss everything in between, so
+  truncation trades a disk-space problem for a correctness one. What the ruling underweighted
+  is the rate. `PreToolUse` and `PostToolUse` payloads carry `tool_input` and `tool_response`
+  verbatim, and `record.sh` writes the whole payload, so a busy fleet writes **megabytes per
+  minute** — not the kilobytes-per-day a lifecycle log sounds like. Two candidate answers, both
+  deferred: size-triggered rotation (the watcher's `TailTruncationPolicy.resumeAtEnd` already
+  survives a shrink correctly, so this is mostly a question of who rotates and when), or
+  trimming the payload in `record.sh` to the two fields the decoder actually reads
+  (`session_id`, `hook_event_name`) — cheaper, and it shrinks the line rather than the file.
+  Trimming at the writer is probably the better first move: `HookEventRecord.decode` reads
+  nothing else, and it also removes tool arguments and tool output from a file that currently
+  accumulates them in plain text.
+
+- **`HookEventWatcher.drain()` decodes that delta synchronously on `@MainActor`, every
+  500 ms.** Harmless at today's line sizes and directly compounded by the entry above: the
+  bigger the per-tick delta, the more JSON parsing happens on the main thread. Trimming the
+  payload addresses both at once.
+
+- **A never-anchored claude tab sits at `.unknown` until its next turn, not "one beat".**
+  `applyRegistry` demotes readiness whenever no status-registry row names a tab's conversation,
+  and it clears the watcher's fold for that session — but not the tail offset, so the tab is
+  re-reported only when the agent emits its *next* hook event. For a freshly booted, genuinely
+  idle claude that is its first prompt. Accepted: the level trigger's protection against a
+  stale `.live` is worth strictly more than the boot window it costs.
+
+  **What is NOT safe about it, stated plainly, because an earlier version of this entry said
+  the opposite.** "The tab falls back to the legacy screen grammar" is a fallback, not a
+  protection. `hasComposerBox` accepts the composer a dead claude leaves on screen (pty probe,
+  2026-09-21), so `.unknown` refuses nothing that matters. A death is caught by demoting to
+  `.absent` instead — but that needs an anchor to probe, so any tab that reaches a corpse
+  without one is still decided by the screen, and typing a rename there runs it as a shell
+  command.
+
+  **The reachable path is a Flight Deck restart, not an exotic claude.** An earlier draft of
+  this entry argued the residual away as "an agent that drew its input box and yet never wrote
+  the file it writes at startup" — implausible, and beside the point, because the tab does not
+  have to be the one that lost the race. `composerReadinessByTab` and `anchors` are both
+  in-memory only, and detach persistence (`SessionDaemon`; see `SessionStore.reapAll`'s note on
+  never terminating the daemon) is built precisely so a session survives an app quit and the
+  next launch reattaches to it. So: claude dies at some point, Flight Deck is quit and
+  relaunched, and the reattached tab comes up with no anchor, no readiness and a corpse on
+  screen. No registry row will ever name it, no hook event is coming, and it reads `.unknown`
+  for the life of the process. The agent *did* write its status file; Flight Deck forgot it
+  across the restart.
+
+  **Not a regression, and deliberately not fixed in that round.** The behaviour is identical to
+  what shipped before the `.absent` work, and the same-run repro that was filed (quit with
+  Ctrl-D, rename from the sidebar) really is fixed. The fix for this one is the second liveness
+  source already proposed below: a live `claude` under the tab's own surface
+  (`processRegistry.process(for:)` + `processInspector.descendants(of:)`) answers "is anything
+  alive here" without an anchor, without a hook feed and without anything surviving a relaunch,
+  which is exactly what this path lacks. A wider `.absent` cannot reach it — there is no
+  evidence in the store to widen.
+
+- **Multi-account amplification of that same reset.** While only one account has scanned,
+  tabs belonging to an account whose watcher has not yet run resolve `anchor == nil` and reset
+  on each such tick. Bounded by the second account's first scan, and in the safe direction.
+
+- **Live in-app verification is a hand-off checklist, not a test** (ledger Ruling L). The
+  end-to-end path — phone prompt idle and mid-turn, open a permission prompt and **deny** it,
+  then inject; sidebar rename — needs a GUI session and a paired phone. The deny-then-inject
+  case is the one that must not be skipped: it is the deadlock the design was reworked around,
+  and the only thing standing behind it is the dialog veto's fail-open contract.
+
+- **`closeSession`'s route through `resetComposerReadiness` is untested**, and two tabs sharing
+  a `pinnedConversationID` make closing one `forget` the conversation the survivor still holds.
+  The cost is one redundant re-emission of an already-correct value.
+
+- **The codex exemption from liveness demotion rests on a measured-but-unpinned teardown
+  behaviour, not a fixture.** `injectableReadiness` and `applyRegistry` (`SessionStore.swift`)
+  both now justify skipping the demotion with a real finding: a `codex` quit under a pty
+  (Ctrl-C/Ctrl-D, codex-cli 0.155.1, 2026-09-21) REMOVES its `›` marker on exit, so
+  `CodexTextChannel.composer(_:)` finds nothing and `submit`/`submitRename` refuse on their own
+  opening guard — unlike claude, which leaves its `❯` box drawn and needed the P0 fix. That
+  replaces an earlier, false justification ("a shell draws neither codex's `›` marker nor its
+  footer") which was true of a shell and beside the point — the failure mode is a corpse, not a
+  shell. No fixture captures a dead-codex screen (`Tests/FlightDeckTests/Fixtures/Codex/` has
+  none), so `CodexTextChannel.composer(_:) == nil` on a dead codex is asserted nowhere; the
+  existing codex bare-shell tests exercise a live-but-elsewhere screen, not this one. Capturing
+  one (verbatim, with `.captured.provenance.json` provenance, per the convention
+  `Tests/FlightDeckTests/Fixtures/Claude/dialogs.captured.provenance.json` documents) and
+  asserting against it would close this; deferred as disproportionate to a docs-only follow-up
+  pass. It is also, like the rest of this section, a property of the CLI's own teardown that
+  could change under a future codex release with no signal here — see
+  `docs/codex-behaviour-claims-expire` in memory for the general pattern.
+
+- **The `.absent` strand: a plain `claude` typed into the shell after Ctrl-D never recovers.**
+  Both recovery paths in `demoteComposerReadiness` key off the tab's `pinnedConversationID`: a
+  resumed claude reuses that session id, so its `SessionStart` clears the mark, and a fresh
+  registry row for that same conversation frees it too. A user who instead types plain `claude`
+  (no `--resume`) gets a brand-new session id — no registry row ever matches the tab's pinned
+  conversation again, no hook event routes to it, and the tab stays `.absent` for the life of
+  that process. Blast radius is small: `composerReadiness(for:)` has exactly one consumer, so
+  only a `/rename` typed *into the conversation* is lost — the sidebar title still updates and
+  persists (it does not go through the gate). Cheap mitigation, not implemented: a tab whose
+  surface has a live claude descendant is provably not the dead one `.absent` was written for —
+  `processRegistry.process(for:)` + `processInspector.descendants(of:)` already answer exactly
+  that question two screens away, in `pinResolutions` — so "a live claude process under this
+  tab's surface" could free `.absent` on its own, independent of `pinnedConversationID`, closing
+  both this residual and the never-anchored one above in one mechanism.
+
+- **The status file is a single point of failure for this whole safety gate.**
+  `~/.claude/sessions/<pid>.json` (`ClaudeStatusFile.swift:3-9`) is Claude Code's own
+  undocumented, unversioned file — nothing in this design owns its format or its continued
+  existence. If a future claude release stops writing it, `SessionStatusWatcher` never anchors
+  any tab, every demotion in `demoteComposerReadiness` lands in the weak `.unknown` branch (no
+  `priorAnchor` to prove dead), and this P0 returns in full — a dead claude's composer stays on
+  screen and `hasComposerBox` accepts it — while the hook feed keeps reporting `.live` right up
+  to the moment of death, same as before this fix. This is the strongest argument for the
+  `.absent` strand's mitigation above: a surface-process check does not depend on Claude Code
+  choosing to keep writing a file Flight Deck has no contract for.
+
+- **`./scripts/test-unit.sh` fails before running a single test when launched from inside a
+  Flight Deck that was itself started by a UI-test runner.** The app inherits the runner's
+  `XCTestSessionIdentifier` / `XCTestBundleInjectPath` / related env vars and passes them down
+  the pty; `xctest` sees `XCTestSessionIdentifier`, tries to attach to an IDE session that died
+  long ago, and exits with "Failed to establish connection to the IDE: Timed out while
+  preparing IDE session." — after the build has already succeeded, so it reads like a harness
+  crash rather than a polluted environment. Reproduces in the foreground; backgrounding is not
+  the cause. Workaround: strip the vars before invoking `xctest`
+  (`env -u XCTestSessionIdentifier -u XCTestConfigurationFilePath -u XCTestBundlePath -u
+  XCTestBundleInjectPath -u XCODE_TEST_PLAN_NAME -u XCODE_SCHEME_NAME -u
+  __XPC_DYLD_FRAMEWORK_PATH`). Folding that into `scripts/test-unit.sh` itself is a separate,
+  deliberate change — not done here.
+## From multi-agent ⌘K search (2026-09-21)
+
+Full design: [superpowers/specs/2026-09-21-multi-agent-search-design.md](superpowers/specs/2026-09-21-multi-agent-search-design.md).
+Plan: [superpowers/plans/2026-09-21-multi-agent-search.md](superpowers/plans/2026-09-21-multi-agent-search.md).
+
+- **Flight Deck pollutes codex's own naming source, and `CodexSearchCorpus` has to work around
+  it rather than fix it.** Every tab Flight Deck creates pushes its default title —
+  `session N` — to codex via `thread/name/set`, so `session_index.jsonl` ends up full of
+  names this app wrote, not the user. That is why codex naming needs a placeholder rule at
+  all (`^session \d+$`, preferring a real first user message over it): without it, claude's
+  "a rename always beats the first user message" rule would port straight across and ⌘K rows
+  would read `session 206` for a conversation that actually opens on something else entirely.
+  Fixing it at the source — not pushing a placeholder title to codex in the first place —
+  would let claude's simpler rule port cleanly, but it is a change to `SessionStore`'s rename
+  path, not to search, and the roughly 30 placeholders already written to existing users'
+  `session_index.jsonl` files would still need the fallback regardless. Left as a rename-path
+  fix for its own branch.
+
+- **`~/.codex/archived_sessions/` is deliberately not searched.** `thread/archive` moves a
+  rollout there as part of releasing it (`CodexAdapter` documents the RPC), so resurrecting an
+  archived thread in ⌘K results would undo an explicit put-away rather than surface something
+  merely old. If this ever needs revisiting, it is a product decision (should an archived
+  thread be findable at all?), not a bug.
+
+- **No per-agent ⌘K filter (`agent:codex …`).** YAGNI until a mixed result list is actually
+  confusing in practice — codex is one additional agent today, and the `.automated` ranking
+  tier already keeps its noisiest source (`codex exec`) out of the way. Add the filter syntax
+  only once a real session shows it is needed, not ahead of that.
+
+- **`PhoneSearchCandidates.build` never passes the real `agent` for a `.session` candidate**,
+  so every open tab the phone contributes to name matching reads as `.claude` regardless of
+  which agent it actually runs — unlike the desk's `SearchCandidates.build`, which does carry
+  the real value. Inert today: `search.open` sends only a conversation id and a project path
+  over the wire, so nothing on either end reads a `.session` candidate's `agent` field. Still
+  a wrong value sitting in a field, and worth fixing before anything ever does read it.
+
+- **`CodexRuntime.attach`'s live-ingest `TranscriptRef` carries the built-in codex home
+  (`AgentID.codex.builtInHome`) as `accountHome`, not the tab's actual account**, even though
+  discovery is per-account. Inert because `SearchIndex.ingest` never reads `accountHome` off
+  a ref — it exists for codex naming during the backfill walk, which live ingest does not do
+  — and the same shortcut mirrors what `ClaudeRuntime.attach` already does. Worth widening
+  only if `accountHome` ever grows a second live-ingest reader.
+
+- **The agent glyph draws only on a `.conversation` row, never on `.session` or `.project`,
+  and that scope is load-bearing rather than incidental.** A `.session` row is a tab already
+  open in the sidebar (or the phone's fleet list) and identifiable there the way it always
+  has been, so a glyph would be redundant on the desk — but on the phone it would also
+  currently be **wrong**: the `PhoneSearchCandidates` gap above means every `.session`
+  candidate's `agent` reads `.claude` regardless of truth, so drawing a glyph from it would
+  assert a false identity instead of adding a redundant true one. A `.project` row's `agent`
+  is an unused placeholder value (see `SearchCandidates.build`), never a real one worth
+  drawing either. Widening the glyph's scope needs the `PhoneSearchCandidates` fix first, or
+  it ships a glyph that lies on exactly the platform it was added for.
+## API-error auto-retry (2026-09-22)
+
+Spec: [superpowers/specs/2026-09-21-api-error-auto-retry-design.md](superpowers/specs/2026-09-21-api-error-auto-retry-design.md).
+An opt-in loop (**Retry after API errors**, off by default, in Shell & Environment →
+Recovery) that nudges an agent whose turn died on a transient API failure back to life on a
+backoff ladder, riding the existing `pendingPrompts` queue rather than a second typing path.
+
+- **The Mac shows the attempt number but no live countdown; the phone counts down.**
+  `SessionAPIError.label` renders `"… · retrying, attempt 2"` and stops there. The sidebar
+  row is a flat `HStack` with no subtitle slot, and `SessionSidebar.swift`'s
+  `PhonePresenceBadge` doc comment already states the reason no row here gets a
+  `TimelineView`: it would re-render the whole row on a display-linked schedule for state
+  that is usually absent. A tooltip is also expected to be the wrong vehicle regardless: the
+  standard `NSToolTip`/`.help(_:)` mechanism is not documented to re-read its string while the
+  pointer just sits there, so a per-second countdown would likely need to be dismissed and
+  re-shown to update — worse than a static attempt number. Not verified against AppKit source
+  or measured on this build; recorded as expected platform behavior, not a confirmed fact.
+  Deliberate non-fix regardless, since the flat `HStack` and the `TimelineView` rejection above
+  hold on their own; the
+  phone's banner (`SessionTimelineScreen`) is the one place this actually counts down,
+  because it can afford a `TimelineView` scoped to a banner that is usually absent.
+
+- **`SessionAPIError.kind` is now matched against an allowlist for policy, while still being
+  rendered verbatim for display.** `CodexTurnRecovery.transientKinds` (`rate_limit_exceeded`,
+  `server_overloaded`, `internal_server_error`, `response_too_many_failed_attempts`,
+  `response_stream_connection_failed`, `response_stream_disconnected`,
+  `http_connection_failed`) is the one place that vocabulary is judged; `kind` itself stays
+  free text everywhere else, per the field's own "never matched against an enum" rule for
+  *display*. The consequence: codex's error vocabulary is not ours and will grow, so a
+  codex-cli upgrade can add a new transient kind the allowlist does not know about, and the
+  loop will silently not retry it — fail-closed is the deliberate trade (a denylist would
+  fail open onto a terminal error being retried forever instead). The allowlist was derived
+  by driving a real codex TUI against a local upstream returning 429 (codex-cli 0.155.1,
+  2026-09-21); only `response_too_many_failed_attempts` was captured verbatim that way (the
+  fixture is `Tests/FlightDeckTests/CodexRolloutMapperTests.swift`), and the rest were
+  converted from the app-server's camelCase schema to the rollout's snake_case by rule, not
+  observed. Re-probing the same way — a real `codex` TUI against an upstream that returns
+  each status the allowlist claims to cover, reading the resulting `task_complete.error`
+  record straight off the rollout `.jsonl` — is how this gets checked after an upgrade; the
+  probe rig itself was scratchpad-only and was never added to the repo, so there is no script
+  to just re-run.
+
+- **Task 5 fixed a pre-existing starvation that was never filed as a bug.** `applyRegistry`
+  is driven only by `SessionStatusWatcher`, which exists only for agents answering
+  `hasStatusRegistry` — true for claude, false for codex (`SessionStore.startStatusWatching`,
+  `startWatching(tabID:)`). So on a codex-only fleet, `flushPendingPrompts` (phone-sent
+  prompts and the auto-resume nudge) and `flushPendingRenames` never flushed at all — nothing
+  drove them. This auto-retry feature would have reproduced the identical gap for its own
+  nudge on day one had it been built on the same tick, so the fix landed underneath it
+  instead: the registry-tick `defer` body was pulled into `maintenanceTick()`
+  (`flushPendingRenames`, `flushPendingPrompts`, `flushPromptQueue`, plus the new
+  `flushRetryBackoff`), called both from `applyRegistry`'s `defer` (unchanged for claude) and
+  from a new registration on the shared `WatchClock`, which ticks every agent regardless of
+  status registry. All four flushes are idempotent and deadline-guarded and `inject` is
+  re-entrancy-guarded, so the two call sites landing in the same instant is safe.
+
+- **A per-tab "stop retrying" cannot work by clearing `retryAttempt`, and now does not.**
+  `flushRetryBackoff`'s "not armed, preference on" branch re-judges any tab whose
+  `retryAttempt` is `nil` on every tick it sees one, and re-arms it at `resumedRung` if the
+  failure is still transient — so clearing the field is undone on the very next tick, and at
+  rung 1 if the episode went too, which makes the typing arrive *sooner*. The suppression
+  signal this entry predicted would be needed is `SessionStore.retryInterrupted`, added for
+  the interrupt stop below; a future user-facing cancel control should set that rather than
+  clear state.
+
+- **Pressing Esc stops the loop on codex, and needs no equivalent on claude.** `turn_aborted`
+  now also maps to `AgentEvent.turnAborted`, which strips the tab's schedule, forgets its
+  `RetryEpisode` and latches `retryInterrupted` so the re-arm branch above cannot undo it —
+  while leaving the error badge standing, because the last turn really did fail. Claude has no
+  abort signal to map and needs none: every `"type":"user"` transcript record emits
+  `.progressed` (`ClaudeSession.events(inObject:)`), and `.progressed` clears `apiError`
+  outright, schedule included — so a claude interrupt stops the loop by clearing it. The latch
+  is lifted by a turn that completes with no error, which is the only evidence the outage is
+  actually over, and dropped with the tab in `closeSession`. A re-report of the same failure
+  does **not** lift it: the user stopped this loop by hand and a repeat of the error they
+  stopped it over is not new information. Nor does toggling the preference off and back on:
+  nothing in that path touches `retryInterrupted`, so a tab the user interrupted by hand stays
+  latched across the cycle and does not resume — a per-tab interrupt outranking the global
+  toggle, which is the right precedence, just not the symmetric one the re-arm branch's own
+  comment used to claim.
+
+- **The rung advances at queue time, not send time.** `flushRetryBackoff` calls
+  `armed(_, attempt: attempt + 1)` in the same pass that queues the `DeferredPrompt` — before
+  `flushPendingPrompts` has actually typed anything. So a nudge that `cancelSupersededPrompts`
+  drops (the session went busy on its own) or that misses the 120s `resumePromptWindow`
+  deadline (`SessionStore.resumePromptWindow`) still spends a rung, even though nothing was
+  typed. This is pre-existing shape from the scheduler's first cut, narrowed since by the
+  "one nudge in flight per tab" and "already working" guards in the same function; recorded
+  rather than fixed, since a rung spent on a no-op nudge just makes the next real one wait
+  proportionally longer, never shorter.
+
+- **Two pre-existing test faults were observed while building this feature, in code it never
+  touches, and neither was chased — the "isolate, don't loop" rule.** A malloc abort in
+  `QuitReapTests`, seen twice across separate runs during this work — a memory fault, not an
+  assertion, so it will not present as an ordinary flaky test — and Fleet/Pairing networking
+  flakiness (sockets/TLS/async timeouts), seen in 2 of 4 runs across one task. Task 9's own
+  two-suite gate run was clean on both suites, first try, with neither fault recurring — see
+  the commit that lands alongside this entry for the tail output.
+
+Two smaller things worth recording alongside the above, found reading `CodexEventMapper`
+rather than by design:
+
+- An `error` present on a `task_complete` record with `codex_error_info` absent or `{}`
+  yields a **kind-less** `SessionAPIError` (`kind: nil`, `isTransient: false`) rather than
+  `nil` — the badge still raises, just with no kind to show or retry on. Defensible default
+  (a failure with no parseable info is still a failure worth surfacing), currently untested.
+- `CodexEventMapper.apiError(fromTurnError:)` reads the single key of a `codex_error_info`
+  object with `object.keys.first`. `Dictionary.Keys` has no defined ordering in Swift, so a
+  malformed multi-key payload — not in the published schema today, but nothing parses it away
+  — would pick a `kind` non-deterministically rather than failing loudly.

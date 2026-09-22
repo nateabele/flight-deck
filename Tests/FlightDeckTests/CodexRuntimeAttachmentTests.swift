@@ -50,7 +50,7 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         try append(indexLine(id, "renamed"), to: index)
         runtime.drainForTesting()
 
-        XCTAssertEqual(seen, [.activity(.busy), .title("renamed")])
+        XCTAssertEqual(seen, [.lifecycle(.live), .activity(.busy), .title("renamed")])
     }
 
     func testEachTabOnlySeesItsOwnThread() throws {
@@ -68,7 +68,7 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         try append(indexLine(theirs, "theirs renamed"), to: index)
         runtime.drainForTesting()
 
-        XCTAssertEqual(mineSeen, [.activity(.busy)])
+        XCTAssertEqual(mineSeen, [.lifecycle(.live), .activity(.busy)])
         XCTAssertEqual(theirsSeen, [.title("theirs renamed")])
     }
 
@@ -173,5 +173,42 @@ final class CodexRuntimeAttachmentTests: XCTestCase {
         runtime.drainForTesting()
 
         XCTAssertTrue(seen.isEmpty, "no subscriber remains, so nothing may be delivered")
+    }
+
+    /// `offset: nil`, always. This watcher starts at end-of-file, so recording its read
+    /// position as indexing progress would make the backfill resume from there and silently
+    /// never index that thread's history — exactly the history ⌘K exists to search. Proved
+    /// end to end, through the real `onMessages` wiring in `attach`, against a real
+    /// `SQLiteSearchIndex` — a fake would only prove the wiring calls `ingest`, not that the
+    /// argument it calls it with is the one that keeps the backfill's resume point alone.
+    func testLiveIngestNeverRecordsAReadPosition() throws {
+        let id = UUID()
+        let url = try rollout(named: "a.jsonl")
+        let searchIndex = try SQLiteSearchIndex(at: dir.appendingPathComponent("search.sqlite"))
+        let runtime = CodexRuntime(
+            indexURL: index,
+            searchIndex: { searchIndex },
+            projectPath: { _ in "/w/fd" },
+            workingDirectory: { _ in "/w/fd" }
+        )
+
+        _ = runtime.attach(AgentBinding(conversationID: id, transcriptURL: url), for: UUID()) { _ in }
+        runtime.drainForTesting() // establishes the start position on the empty file
+
+        let prose = #"{"type":"event_msg","payload":{"type":"user_message","message":"the rename bug"}}"# + "\n"
+        try append(prose, to: url)
+        runtime.drainForTesting()
+
+        let hits = try searchIndex.search("rename", projects: ["/w/fd"], limit: 10)
+        XCTAssertEqual(hits.count, 1)
+        // Not just a count: `readOffset == 0` alone cannot tell a source row that landed
+        // through this wiring apart from one that was never written at all (an absent row
+        // reports 0 too), so asserting the agent is what actually proves the real `ingest`
+        // call ran, rather than proving only that the file was polled.
+        XCTAssertEqual(hits[0].agent, "codex")
+        XCTAssertEqual(
+            searchIndex.readOffset(for: url), 0,
+            "a live ingest must never advance the backfill's resume point for this file"
+        )
     }
 }

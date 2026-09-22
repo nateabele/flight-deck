@@ -37,8 +37,21 @@ final class SearchIndexBuilderTests: XCTestCase {
         #"{"type":"user","timestamp":"2026-08-26T21:57:19.490Z","message":{"content":"\#(text)"}}"#
     }
 
-    private func entries(_ folder: URL, project: String = "/w/fd") -> [SearchCorpus.Entry] {
-        [SearchCorpus.Entry(projectPath: project, directory: folder)]
+    /// Every `.jsonl` under `folder`, re-listed on each call so a test that appends or
+    /// removes a file between two `build` calls sees the change — matching how the real
+    /// walk re-discovers refs from disk on every pass rather than caching them.
+    private func refs(_ folder: URL, project: String = "/w/fd") -> [TranscriptRef] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        return names.filter { $0.hasSuffix(".jsonl") }.map { name in
+            let url = folder.appendingPathComponent(name)
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            return TranscriptRef(
+                url: url, projectPath: project, accountHome: AgentID.claude.builtInHome,
+                workingDirectory: project, conversationID: String(name.dropLast(".jsonl".count)),
+                agent: .claude, provenance: nil, indexedName: nil, modified: modified
+            )
+        }
     }
 
     func testEveryTranscriptInScopeIsIndexed() async throws {
@@ -47,7 +60,7 @@ final class SearchIndexBuilderTests: XCTestCase {
         try write([userLine("something else")], conversation: "c2", in: folder)
 
         let builder = SearchIndexBuilder(index: index)
-        await builder.build(entries(folder), progress: { _ in })
+        await builder.build(refs(folder), progress: { _ in })
 
         XCTAssertEqual(try index.search(#""rename"*"#, projects: ["/w/fd"], limit: 10).count, 1)
         XCTAssertEqual(try index.search(#""something"*"#, projects: ["/w/fd"], limit: 10).count, 1)
@@ -60,8 +73,8 @@ final class SearchIndexBuilderTests: XCTestCase {
         try write([userLine("the rename bug")], conversation: "c1", in: folder)
 
         let builder = SearchIndexBuilder(index: index)
-        await builder.build(entries(folder), progress: { _ in })
-        await builder.build(entries(folder), progress: { _ in })
+        await builder.build(refs(folder), progress: { _ in })
+        await builder.build(refs(folder), progress: { _ in })
 
         XCTAssertEqual(try index.search(#""rename"*"#, projects: ["/w/fd"], limit: 10).count, 1)
     }
@@ -73,14 +86,14 @@ final class SearchIndexBuilderTests: XCTestCase {
         let url = try write([userLine("first message")], conversation: "c1", in: folder)
 
         let builder = SearchIndexBuilder(index: index)
-        await builder.build(entries(folder), progress: { _ in })
+        await builder.build(refs(folder), progress: { _ in })
 
         let handle = try FileHandle(forWritingTo: url)
         try handle.seekToEnd()
         try handle.write(contentsOf: Data((userLine("second message") + "\n").utf8))
         try handle.close()
 
-        await builder.build(entries(folder), progress: { _ in })
+        await builder.build(refs(folder), progress: { _ in })
 
         XCTAssertEqual(try index.search(#""first"*"#, projects: ["/w/fd"], limit: 10).count, 1)
         XCTAssertEqual(try index.search(#""second"*"#, projects: ["/w/fd"], limit: 10).count, 1)
@@ -101,7 +114,7 @@ final class SearchIndexBuilderTests: XCTestCase {
 
         let cancelling = CancellingIndex(wrapping: index)
         let builder = SearchIndexBuilder(index: cancelling)
-        let task = Task { await builder.build(entries(folder), progress: { _ in }) }
+        let task = Task { await builder.build(refs(folder), progress: { _ in }) }
         cancelling.setCancelTarget(task)
         await task.value
 
@@ -110,7 +123,7 @@ final class SearchIndexBuilderTests: XCTestCase {
         XCTAssertEqual(try index.search(#""rename"*"#, projects: ["/w/fd"], limit: 100).count, 1)
 
         // Resuming with an uncancelled build completes exactly the rest.
-        await builder.build(entries(folder), progress: { _ in })
+        await builder.build(refs(folder), progress: { _ in })
         XCTAssertEqual(try index.search(#""rename"*"#, projects: ["/w/fd"], limit: 100).count, 5)
     }
 
@@ -126,10 +139,8 @@ final class SearchIndexBuilderTests: XCTestCase {
 
         func setCancelTarget(_ task: Task<Void, Never>) { target = task }
 
-        func ingest(
-            _ messages: [IndexedMessage], from source: URL, projectPath: String, offset: UInt64?
-        ) throws {
-            try wrapped.ingest(messages, from: source, projectPath: projectPath, offset: offset)
+        func ingest(_ messages: [IndexedMessage], for ref: TranscriptRef, offset: UInt64?) throws {
+            try wrapped.ingest(messages, for: ref, offset: offset)
             if !hasCancelled {
                 hasCancelled = true
                 target?.cancel()
@@ -146,8 +157,10 @@ final class SearchIndexBuilderTests: XCTestCase {
             try wrapped.conversationNames()
         }
 
-        func setConversationName(_ name: String, projectPath: String, for id: String) throws {
-            try wrapped.setConversationName(name, projectPath: projectPath, for: id)
+        func setConversationName(
+            _ name: String, projectPath: String, agent: String, for id: String
+        ) throws {
+            try wrapped.setConversationName(name, projectPath: projectPath, agent: agent, for: id)
         }
 
         func prune(keepingSources: Set<URL>, projects: Set<String>) throws {
@@ -157,11 +170,17 @@ final class SearchIndexBuilderTests: XCTestCase {
         func messageCount(forConversation id: String) throws -> Int {
             try wrapped.messageCount(forConversation: id)
         }
+
+        func transcriptLocation(
+            forConversation id: String
+        ) throws -> (workingDirectory: String, transcriptPath: String, agent: String)? {
+            try wrapped.transcriptLocation(forConversation: id)
+        }
     }
 
-    /// The primary scenario the whole task exists for: a first backfill of a transcript
-    /// large enough to span several intra-loop batch commits (`batchSize` is 500, so this
-    /// writes 1200 lines — three commits: two full batches and a remainder).
+    /// Pins the intra-loop batch-commit bug directly: a first backfill of a transcript large
+    /// enough to span several intra-loop batch commits (`batchSize` is 500, so this writes
+    /// 1200 lines — three commits: two full batches and a remainder).
     ///
     /// Every intra-loop commit before this fix passed `offset: 0`, which `SQLiteSearchIndex`
     /// treats as "this source restarted, delete its rows" — so each batch silently deleted
@@ -174,7 +193,7 @@ final class SearchIndexBuilderTests: XCTestCase {
         try write(lines, conversation: "c1", in: folder)
 
         let builder = SearchIndexBuilder(index: index)
-        await builder.build(entries(folder), progress: { _ in })
+        await builder.build(refs(folder), progress: { _ in })
 
         XCTAssertEqual(try index.messageCount(forConversation: "c1"), 1200)
     }
@@ -191,14 +210,14 @@ final class SearchIndexBuilderTests: XCTestCase {
         )
 
         let builder = SearchIndexBuilder(index: index)
-        await builder.build(entries(folder), progress: { _ in })
+        await builder.build(refs(folder), progress: { _ in })
 
         let handle = try FileHandle(forWritingTo: url)
         try handle.seekToEnd()
         try handle.write(contentsOf: Data((userLine("a later message, no rename here") + "\n").utf8))
         try handle.close()
 
-        await builder.build(entries(folder), progress: { _ in })
+        await builder.build(refs(folder), progress: { _ in })
 
         XCTAssertEqual(try index.conversationNames()["c1"]?.name, "rename-break")
     }
@@ -211,7 +230,7 @@ final class SearchIndexBuilderTests: XCTestCase {
 
         var seen: [SearchIndexBuilder.Progress] = []
         let builder = SearchIndexBuilder(index: index)
-        await builder.build(entries(folder), progress: { seen.append($0) })
+        await builder.build(refs(folder), progress: { seen.append($0) })
 
         XCTAssertEqual(seen.last, SearchIndexBuilder.Progress(indexed: 3, total: 3))
         XCTAssertTrue(seen.allSatisfy { $0.total == 3 })
@@ -226,9 +245,9 @@ final class SearchIndexBuilderTests: XCTestCase {
         try write([userLine("rename survivor")], conversation: "c2", in: folder)
 
         let builder = SearchIndexBuilder(index: index)
-        await builder.build(entries(folder), progress: { _ in })
+        await builder.build(refs(folder), progress: { _ in })
         try FileManager.default.removeItem(at: doomed)
-        await builder.build(entries(folder), progress: { _ in })
+        await builder.build(refs(folder), progress: { _ in })
 
         let hits = try index.search(#""rename"*"#, projects: ["/w/fd"], limit: 10)
         XCTAssertEqual(hits.map(\.conversationID), ["c2"])
@@ -247,7 +266,7 @@ final class SearchIndexBuilderTests: XCTestCase {
         let expectedOffset = first.utf8.count + 1 + 1
 
         let builder = SearchIndexBuilder(index: index)
-        await builder.build(entries(folder), progress: { _ in })
+        await builder.build(refs(folder), progress: { _ in })
 
         let hits = try index.search(#""beta"*"#, projects: ["/w/fd"], limit: 10)
         XCTAssertEqual(hits.count, 1)
@@ -264,8 +283,68 @@ final class SearchIndexBuilderTests: XCTestCase {
         )
 
         let builder = SearchIndexBuilder(index: index)
-        await builder.build(entries(folder), progress: { _ in })
+        await builder.build(refs(folder), progress: { _ in })
 
         XCTAssertEqual(try index.conversationNames()["c1"]?.name, "rename-break")
+    }
+
+    /// **The trap this whole design is most likely to fall into.** `build` opens with
+    /// `prune(keepingSources:projects:)`, which drops every source outside the set it is
+    /// handed. One pass per agent would therefore delete the other agent's rows on every
+    /// run, and the two would take turns wiping each other — producing an index that looks
+    /// populated and is missing half its corpus.
+    ///
+    /// The codex ref here is driven through the builder's injected `corpus` lookup rather
+    /// than the real agent registry, so this test asserts the union-prune behavior without
+    /// depending on which agents happen to have a searchable corpus wired up.
+    func testOneBuildOverBothAgentsPrunesNeither() async throws {
+        let claudeFolder = directory.appendingPathComponent("claude-proj", isDirectory: true)
+        try write([userLine("alpha-claude-text")], conversation: "c1", in: claudeFolder)
+        let claudeRef = try XCTUnwrap(refs(claudeFolder).first)
+
+        let codexFolder = directory.appendingPathComponent("codex-proj", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexFolder, withIntermediateDirectories: true)
+        let codexURL = codexFolder.appendingPathComponent("rollout.jsonl")
+        try "beta-codex-text\n".write(to: codexURL, atomically: true, encoding: .utf8)
+        let codexRef = TranscriptRef(
+            url: codexURL, projectPath: "/w/fd", accountHome: AgentID.codex.builtInHome,
+            workingDirectory: "/w/fd", conversationID: "codex1", agent: .codex,
+            provenance: nil, indexedName: nil, modified: Date()
+        )
+
+        let builder = SearchIndexBuilder(index: index) { agent in
+            agent == .codex ? StubCodexCorpus() : agent.searchCorpus
+        }
+        await builder.build([claudeRef, codexRef], progress: { _ in })
+
+        let claudeHits = try index.search(#""alpha-claude-text"*"#, projects: ["/w/fd"], limit: 10)
+        XCTAssertEqual(claudeHits.map(\.conversationID), ["c1"])
+
+        let codexHits = try index.search(#""beta-codex-text"*"#, projects: ["/w/fd"], limit: 10)
+        XCTAssertEqual(codexHits.map(\.conversationID), ["codex1"])
+    }
+
+    /// A minimal codex stand-in — real `IndexedMessage`s from a bare line of text, wired
+    /// through the builder's injected `corpus` lookup rather than `AgentID.searchCorpus`
+    /// directly. Same reason that seam exists at all: this test drives a second agent's
+    /// transcripts through the builder without depending on which adapters happen to be
+    /// searchable yet.
+    private struct StubCodexCorpus: AgentSearchCorpus {
+        func transcripts(
+            forProjects projects: [String], accounts: [AgentAccount]
+        ) -> [TranscriptRef] { [] }
+
+        func indexedMessages(
+            inLine line: String, conversationID: String, at offset: Int
+        ) -> [IndexedMessage] {
+            [IndexedMessage(
+                conversationID: conversationID, role: .user, text: line, timestamp: nil,
+                offset: offset
+            )]
+        }
+
+        func conversationName(inLines lines: [String], for ref: TranscriptRef) -> ConversationNaming {
+            .unknown
+        }
     }
 }

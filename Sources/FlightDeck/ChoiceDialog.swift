@@ -134,6 +134,54 @@ enum ChoiceDialog {
         return list[index].reads(normalized(label))
     }
 
+    /// Whether the **last** `marker` line on screen is itself a numbered row. The shape that
+    /// tells a dialog apart from a composer, for `AgentTextChannel.isKnownNonComposer`.
+    ///
+    /// The discriminator is marker **plus a number**, never the marker alone, because both
+    /// agents draw their marker on an ordinary composer too: claude echoes the user's own
+    /// prompt as `❯ Run this exact bash command …`, and codex's idle placeholder hint is
+    /// literally `› Ask Codex to do anything`. Both are prose after the marker; a dialog puts
+    /// ` N. ` there. Keying on the marker alone would veto every idle tab of both agents and
+    /// stop injection entirely.
+    ///
+    /// **Only the marker's own line is read, and the line under it deliberately is not.** Every
+    /// dialog capture in `Fixtures/Claude` and `Fixtures/Codex` that this rule catches is
+    /// caught on the marker line itself; not one is caught by the line below, so widening to a
+    /// second row would buy nothing measured — and it would cost something real. A multi-row
+    /// composer draft puts its *second* row directly under the marker, so a person writing
+    /// `❯ Here are my picks` / `  1. foo` would have their own draft read as a dialog and their
+    /// message silently refused.
+    ///
+    /// **The residual cost of the rule, stated rather than hidden:** a single-row draft that
+    /// begins `1. ` is indistinguishable from a focused option and will be vetoed. That is a
+    /// refused injection, which the caller logs, versus typing into a live permission prompt —
+    /// and `question-two-review` (claude) and `workspace-trust` (codex) carry no footer token
+    /// at all, so nothing else catches them.
+    ///
+    /// **Deliberately looser than `list(inViewport:marker:)`, and it must stay that way.**
+    /// That parser requires a run of at least two contiguously numbered rows because it is an
+    /// interlock in front of an irreversible keypress, where "I am not certain" must mean
+    /// refuse. This is the opposite duty: it decides whether Flight Deck may *type into* the
+    /// screen, so the cost of being too strict is an injection landing inside a dialog. A
+    /// future single-row prompt, or one whose second row scrolls off a short viewport, would
+    /// be a list of one — invisible to `list`, and still a dialog. Tightening this into
+    /// agreement with `list` would silently make that dialog typeable.
+    ///
+    /// `parse` is nevertheless shared with `list`, since what counts as a numbered *row* — the
+    /// marker-then-space, the `N.`, the optional checkbox, the non-empty label — is the same
+    /// grammar in both duties, and a second copy of it would drift.
+    static func hasNumberedRowAtMarker(inViewport viewport: String, marker: Character) -> Bool {
+        let lines = viewport.components(separatedBy: "\n")
+        // The two steps disagree slightly about what leading whitespace is: this trims all of
+        // Unicode's, `parse` drops only spaces. A line indented with a tab or an NBSP would
+        // therefore be found here and rejected there — no veto. That is the fail-open
+        // direction and no capture exhibits it, since a terminal pads with spaces.
+        guard let markerLine = lines.last(where: {
+            $0.trimmingCharacters(in: .whitespaces).first == marker
+        }) else { return false }
+        return parse(markerLine, marker: marker) != nil
+    }
+
     // MARK: - Reading the screen
 
     /// One row of a select list.

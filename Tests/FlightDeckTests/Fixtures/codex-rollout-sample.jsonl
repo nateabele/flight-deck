@@ -1,0 +1,9 @@
+{"timestamp":"2026-09-16T16:25:49.001Z","type":"session_meta","payload":{"session_id":"conv-sample","cwd":"/w/fd","source":"exec"}}
+{"timestamp":"2026-09-16T16:25:50.870Z","type":"response_item","payload":{"type":"message","id":"msg_prompt","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>\nHere is a list of plugins that are available but not installed.\n</recommended_plugins>"}]}}
+{"timestamp":"2026-09-16T16:25:50.889Z","type":"event_msg","payload":{"type":"user_message","message":"Index the Claude Code conversations for this directory.","images":[],"local_images":[],"audio":[],"local_audio":[],"text_elements":[]}}
+{"timestamp":"2026-09-16T16:25:51.500Z","type":"event_msg","payload":{"type":"agent_reasoning","text":"Planning the index walk."}}
+{"timestamp":"2026-09-16T16:25:51.500Z","type":"response_item","payload":{"type":"reasoning","id":"rs_sample","summary":[{"type":"summary_text","text":"Planning the index walk."}],"encrypted_content":"gAAAAABsample0encrypted0content0blob"}}
+{"timestamp":"2026-09-16T16:25:52.100Z","type":"event_msg","payload":{"type":"agent_message","message":"Sure, I'll index them now.","phase":"commentary","memory_citation":null}}
+{"timestamp":"2026-09-16T16:25:52.110Z","type":"response_item","payload":{"type":"message","id":"msg_reply_dup","role":"assistant","content":[{"type":"output_text","text":"Sure, I'll index them now."}],"phase":"commentary"}}
+{"timestamp":"2026-09-16T16:25:55.250Z","type":"event_msg","payload":{"type":"user_message","message":"Run the shell command: echo hi. Then reply with exactly the word: done","images":[],"local_images":[],"audio":[],"local_audio":[],"text_elements":[]}}
+{"timestamp":"2026-09-16T16:25:56.400Z","type":"event_msg","payload":{"type":"agent_message","message":"done","phase":"final_answer","memory_citation":null}}

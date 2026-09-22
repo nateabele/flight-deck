@@ -4,6 +4,18 @@
 
 Start here if you're picking up Flight Deck fresh. This is the map; the linked docs have the detail.
 
+> **▶ Multi-agent ⌘K search (2026-09-21) — built, on branch `worktree-multi-agent-search`, not yet merged to `master`.**
+> ⌘K now searches every agent's history, not just claude's. A codex thread is discovered,
+> indexed and resumed the same way a claude conversation is, through one capability object —
+> `AgentSearchCorpus` — reached beside `textChannel`, `dialogDriver` and `openPromptReader`.
+> Discovery is per-account now too, which also fixed ⌘K being blind to a second claude login.
+> `codex exec` runs are indexed but ranked below real conversations, and Return resumes a
+> result into its own agent and the working directory the walk recorded — for a name match
+> as well as a transcript hit, both now filled from the same index lookup. The 18-commit
+> branch passed its whole-branch review and the fix wave that followed; merge to `master` is
+> still pending.
+> - **Spec:** [superpowers/specs/2026-09-21-multi-agent-search-design.md](superpowers/specs/2026-09-21-multi-agent-search-design.md) · **Plan:** [superpowers/plans/2026-09-21-multi-agent-search.md](superpowers/plans/2026-09-21-multi-agent-search.md) · **Details:** [ARCHITECTURE.md](ARCHITECTURE.md), "Search" section.
+
 > **✅ ⌘K Search (2026-08-27) — merged.**
 > `⌘K` opens a fleet-wide search overlay: type a session or project name to jump straight to
 > it, or a phrase you remember saying to search full transcript history — ranked by match
@@ -59,6 +71,8 @@ Full vision and the locked design decisions: **[design spec](superpowers/specs/2
 The **walking skeleton is done**: the app renders a **live terminal running a real login shell**, drawing through a reused-Ghostty surface. Verified via screenshot (`me@mac ~ %` prompt), process tree (`FlightDeck → login → zsh`), and green unit + smoke tests.
 
 That was deliberately the smallest self-contained slice that also retired the biggest unknown — *can we actually reuse Ghostty to render a terminal inside our own app?* Answer: **yes.** Everything else in the design (adapter, index, context engine, sidebar) is still ahead, each its own spec→plan→build cycle.
+
+Also landed: a session whose turn died on a transient API error (rate limit, overload) can now nudge itself back to life on a backoff ladder, up to 15 minutes between tries, for as long as the outage lasts — gated by the **Retry after API errors** toggle in Shell & Environment → Recovery, off by default because it types into the session on the user's behalf.
 
 ## Quickstart (this host)
 

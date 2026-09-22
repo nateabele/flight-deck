@@ -129,7 +129,7 @@ final class PromptLifecycleTests: XCTestCase {
         let transcript = Transcript()
         harness.service.promptTailForTesting = { _, _ in
             transcript.reads += 1
-            return transcript.lines
+            return (transcript.lines, false)
         }
         let session = harness.store.newSession(in: tmp)
         // The tab's own creation must say nothing: a session that has never been `waiting` has
@@ -324,7 +324,7 @@ final class PromptLifecycleTests: XCTestCase {
         transcript.lines = [SourceLine(offset: 0, text: askLine("toolu_A"))]
         harness.service.promptTailForTesting = { _, _ in
             transcript.reads += 1
-            return transcript.lines
+            return (transcript.lines, false)
         }
         guard case .success(let id) = await store.createSession(agent: .codex, in: tmp.path) else {
             XCTFail("codex tab creation must succeed against a scripted transport")
@@ -370,7 +370,7 @@ final class PromptLifecycleTests: XCTestCase {
     func testARefusedAnswerRecordsTheCallSentBesideTheCallOpen() throws {
         let (service, recorder, spy, id) = makeService(activity: .waiting)
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_OPEN"))]
-        service.tail = { _, _ in lines }
+        service.tail = { _, _ in (lines, false) }
         // A live dialog on screen, so the refusal comes from the comparison rather than from a
         // screen nothing could read — the trap `PromptServiceTests` documents at length.
         spy.showOptions(["Yes", "No"], selected: 0)
@@ -400,7 +400,7 @@ final class PromptLifecycleTests: XCTestCase {
     func testAnAcceptedAnswerRecordsTheMatchingCallWithNoCode() throws {
         let (service, recorder, spy, id) = makeService(activity: .waiting)
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_BASH"))]
-        service.tail = { _, _ in lines }
+        service.tail = { _, _ in (lines, false) }
         spy.showOptions(["Yes", "No"], selected: 0)
 
         _ = service.answer(session: id, call: "toolu_BASH", answer: .allow, token: UUID())
@@ -417,7 +417,7 @@ final class PromptLifecycleTests: XCTestCase {
     func testAStoreRefusalAfterAMatchingCallIsRecordedWithItsOwnCode() throws {
         let (service, recorder, spy, id) = makeService(activity: .waiting)
         let lines = [SourceLine(offset: 0, text: bashLine("toolu_BASH"))]
-        service.tail = { _, _ in lines }
+        service.tail = { _, _ in (lines, false) }
         // The screen cannot be read at all, so the store refuses after the call ids matched.
         spy.viewportIsReadable = false
 
