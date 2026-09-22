@@ -1809,18 +1809,14 @@ final class SessionStore: ObservableObject {
     /// How long `bootFlywheelIdentityIfNeeded` waits for `am macros start-session` before
     /// giving up. A generous budget — `am` shells out to its own store on first run.
     ///
-    /// This is a FAILURE bound, not a wall-clock one: `SystemFlywheelProcessRunner.run` drains
-    /// `am`'s output with a synchronous, non-cancellable `readDataToEndOfFile()` +
-    /// `waitUntilExit()`, and structured concurrency awaits that child task to completion before
-    /// `bootFlywheelIdentityIfNeeded` can return — cancelling it at the timeout only marks it
-    /// cancelled, which a blocking `Process` call never checks. So a *slow* `am` still turns into
-    /// a timeout failure only once `am` itself finishes (no time actually saved), and a *truly
-    /// hung* `am` wedges that one tab spawn until something kills the process — this bound does
-    /// not reach it. What it does buy: the spawn runs off the main actor (`group.addTask`'s
-    /// child tasks are unstructured, not main-actor-isolated), so neither case freezes the UI,
-    /// and flywheel is opt-in per project, so this is scoped to projects that turned it on. A
-    /// real wall-clock cap needs a cancellation-aware runner that terminates the `Process` itself
-    /// — deferred follow-up, tracked in the SDD ledger, not implemented here.
+    /// This is a real wall-clock bound, including against a truly hung `am`: the race below
+    /// cancels the boot child task on timeout, and `SystemFlywheelProcessRunner.run` is
+    /// cancellation-aware (`withTaskCancellationHandler` calls `process.terminate()`), so a
+    /// blocked `readDataToEndOfFile()`/`waitUntilExit()` pair is interrupted promptly instead of
+    /// waiting the child out. The spawn also runs off the main actor (`group.addTask`'s child
+    /// tasks are unstructured, not main-actor-isolated), so neither a slow nor a hung `am`
+    /// freezes the UI, and flywheel is opt-in per project, so this is scoped to projects that
+    /// turned it on.
     static let flywheelBootTimeout: TimeInterval = 20
 
     /// Thrown by `bootFlywheelIdentityIfNeeded` once `am` finishes after `flywheelBootTimeout`
@@ -1838,9 +1834,9 @@ final class SessionStore: ObservableObject {
     /// tab — see both `createSession` branches above.
     ///
     /// Raced against `flywheelBootTimeout` with a `withThrowingTaskGroup`, the same shape
-    /// `CodexAdapter.read` uses for its own app-server round trip — but see that property's doc
-    /// comment: against this runner the race classifies a slow `am` as a failure rather than
-    /// actually cutting the wait short, and cannot reach a truly hung one at all.
+    /// `CodexAdapter.read` uses for its own app-server round trip — see that property's doc
+    /// comment for how `group.cancelAll()` on timeout reaches all the way into a hung `am` via
+    /// `SystemFlywheelProcessRunner.run`'s cancellation handling.
     func bootFlywheelIdentityIfNeeded(
         agent: AgentID, project: String, name: String? = nil
     ) async throws -> FlywheelIdentity? {

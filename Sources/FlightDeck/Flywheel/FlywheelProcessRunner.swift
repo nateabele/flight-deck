@@ -27,13 +27,35 @@ struct SystemFlywheelProcessRunner: FlywheelProcessRunner {
 
         try process.run()
 
-        // Read before waiting: a child that writes more than the pipe buffer holds
-        // (64KB on macOS) blocks on write() until someone drains it, so waiting first
-        // would deadlock. `LoginShellPath.defaultRun` documents the same ordering.
-        let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+        // `readDataToEndOfFile()` + `waitUntilExit()` below are synchronous and never poll
+        // `Task.isCancelled` — a caller (e.g. `SessionStore.bootFlywheelIdentityIfNeeded`'s
+        // timeout race calling `group.cancelAll()`) cancelling this task would otherwise do
+        // nothing until the child exits on its own. `withTaskCancellationHandler`'s `onCancel`
+        // fires out-of-band the instant cancellation happens, so it can `terminate()` the
+        // process directly: that closes its stdout, `readDataToEndOfFile()` sees EOF, and
+        // `waitUntilExit()` returns right after — turning cancellation into a real wall-clock
+        // bound instead of an ignored flag.
+        let (data, terminationStatus, terminatedBySignal) = await withTaskCancellationHandler {
+            // Read before waiting: a child that writes more than the pipe buffer holds
+            // (64KB on macOS) blocks on write() until someone drains it, so waiting first
+            // would deadlock. `LoginShellPath.defaultRun` documents the same ordering.
+            let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return (data, process.terminationStatus, process.terminationReason == .uncaughtSignal)
+        } onCancel: {
+            process.terminate()
+        }
+
+        // A process we killed via `terminate()`, or a task cancelled after the process
+        // happened to finish on its own, both mean the caller stopped waiting for a real
+        // result — surface that as cancellation rather than the exit code/stdout of a run
+        // nobody asked for, so `bootFlywheelIdentityIfNeeded` classifies it as the failure
+        // it is instead of a bogus success.
+        if terminatedBySignal || Task.isCancelled {
+            throw CancellationError()
+        }
 
         let stdout = String(data: data, encoding: .utf8) ?? ""
-        return (stdout, process.terminationStatus)
+        return (stdout, terminationStatus)
     }
 }
