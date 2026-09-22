@@ -63,8 +63,18 @@ enum CodexEventMapper {
         // turn that ended (the user interrupted it, and a tab left spinning because nothing
         // said "over" is the worse failure), but it is a user interrupt, not an API failure —
         // it must neither raise an error nor clear one that is standing.
+        //
+        // It does, however, have to be *reported* as an interrupt, which is what `.turnAborted`
+        // is for: the auto-retry loop types into this tab unattended, and pressing Esc is how a
+        // person stops that. Idle alone cannot carry it — an ordinary turn ending is idle too.
+        //
+        // `reason` is deliberately not read. The only value ever captured here is
+        // `"interrupted"` (see `Fixtures/Codex/turn-aborted.captured.jsonl`), and this parser
+        // has the same fail-safe direction as `CodexTurnRecovery`'s allowlist but pointed the
+        // other way: treating an unfamiliar reason as an interrupt STOPS unattended typing,
+        // where reading the field and not recognising a new value would keep it going.
         case "turn_aborted":
-            return [.activity(.idle), .turnEnded]
+            return [.activity(.idle), .turnEnded, .turnAborted]
 
         default:
             return []

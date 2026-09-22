@@ -3328,6 +3328,9 @@ final class SessionStore: ObservableObject {
         // keyed by tab, so a reopened tab reusing this id must start at rung 1 rather than
         // inherit a ladder position from a session that is over.
         retryEpisodes.removeValue(forKey: id)
+        // Same argument, for the same reason: keyed by tab, so a reopened tab reusing this id
+        // must not inherit a refusal earned by a session that is over.
+        retryInterrupted.remove(id)
         // Closing the row is the most literal case of "a prompt that will never resolve",
         // and applyRegistry cannot observe the waiting -> gone edge here because both its
         // before and after snapshots already lack this id.
@@ -5771,6 +5774,23 @@ final class SessionStore: ObservableObject {
     }
     private var retryEpisodes: [UUID: RetryEpisode] = [:]
 
+    /// Tabs whose user interrupted a turn while a failure was standing — `armed`'s refusal
+    /// for "the user got there first", in its strongest form.
+    ///
+    /// **Stripping the schedule is not enough on its own, which is the whole reason this
+    /// exists.** `flushRetryBackoff`'s unarmed branch re-arms any retryable error it finds on
+    /// the very next tick, deliberately, so that flipping the preference back on resumes the
+    /// loop. An abort that only cleared `nextRetryAt` would therefore be undone within one
+    /// tick — and at rung 1, because clearing the episode resets the ladder, so the user
+    /// pressing Esc would make the typing arrive *sooner*.
+    ///
+    /// One entry per tab at most, and only for a tab that had a standing failure when it was
+    /// interrupted. Lifted when a turn completes cleanly (`.apiError(nil)` is the evidence the
+    /// outage is actually over) and dropped with the tab in `closeSession`. Not lifted by a
+    /// re-report of the same failure: the user stopped this loop by hand and a repeat of the
+    /// error they stopped it over is not new information.
+    private var retryInterrupted: Set<UUID> = []
+
     /// Where a fresh failure picks the ladder up.
     ///
     /// Decay is by time, not by trying to work out who caused the progress that cleared the
@@ -5829,6 +5849,8 @@ final class SessionStore: ObservableObject {
     private func armed(_ error: SessionAPIError?, for id: UUID, attempt: Int? = nil) -> SessionAPIError? {
         guard var error else { return nil }
         guard preferences?.autoRetriesAPIErrors == true,
+              // The user interrupted this tab by hand; see `retryInterrupted`.
+              !retryInterrupted.contains(id),
               let session = session(for: id),
               // Nothing to nudge with: `inject` would refuse this tab forever anyway, and an
               // armed schedule nothing can ever act on is just a wrong badge.
@@ -5917,6 +5939,29 @@ final class SessionStore: ObservableObject {
             apiErrors[id]?.retryAttempt != nil
                 || currentTime.timeIntervalSince(episode.lastArmed) < Self.retryBackoffFloor
         }
+    }
+
+    /// The user interrupted this tab's turn, so the retry loop stops — the badge does not.
+    ///
+    /// **Why the badge stays.** The turn that failed really did fail and nothing has changed
+    /// that; an abort is evidence about what the *user* wants, not about the API. Only the
+    /// schedule and the ladder go.
+    ///
+    /// **Why the episode goes with it.** `RetryEpisode` exists to carry a rung across the
+    /// nudge that clears its own error, i.e. across our own typing. An explicit interrupt ends
+    /// the run rather than punctuating it, so there is no position left to remember — and
+    /// leaving one would put the next genuine outage at whatever rung this one reached.
+    ///
+    /// Written through `armed` rather than by clearing the two fields here, so the strip
+    /// happens in the one place that owns it and still lands via `setAPIError`, the single
+    /// writer the replicator's drift assertion depends on.
+    private func applyTurnAborted(to id: UUID) {
+        // Nothing standing means nothing to stop: an interrupt on a healthy tab is ordinary
+        // and must not leave a latch behind that refuses a genuine failure hours later.
+        guard let error = apiErrors[id] else { return }
+        retryEpisodes.removeValue(forKey: id)
+        retryInterrupted.insert(id)
+        setAPIError(id, armed(error, for: id))
     }
 
     /// Strips retry state from every tab, without disturbing the errors themselves — the
@@ -7207,11 +7252,16 @@ final class SessionStore: ObservableObject {
         case .activity(let activity): applyActivity(activity, to: tabID)
         case .subagentCount(let count): applySubagentCount(tabID, count)
         case .turnEnded: applyTurnEnded(to: tabID)
+        case .turnAborted: applyTurnAborted(to: tabID)
         // Persisted only when it actually changed. The watcher already suppresses an unchanged
         // report (`TranscriptWatcher.lastAPIError`), so this guard is the second line: it also
         // covers a restore-seeded error re-reported identically by the first live scan, which
         // would otherwise rewrite sessions.json for no change.
         case .apiError(let error):
+            // A turn that completed with no error is the one piece of evidence that the outage
+            // is over, so it is what lifts an earlier interrupt's refusal — placed above the
+            // equality guard below, which returns early when there was nothing standing.
+            if error == nil { retryInterrupted.remove(tabID) }
             // Compared against the stored error with its retry state removed, because the
             // retry state is the store's and an agent's report never carries one. Without
             // that removal a re-report of the SAME failure would look like news — `armed`

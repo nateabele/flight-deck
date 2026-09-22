@@ -14,6 +14,7 @@ import FleetKit
 /// | Not transient | `testAPermanentErrorDoesNotArm` |
 /// | Agent has no classifier | `testNothingArmsForAnAgentWithNoTurnRecovery` |
 /// | The session started working | `testGoingBusyCancelsTheQueuedNudge` |
+/// | The user interrupted the nudge | `testAnInterruptedNudgeStopsTheLoopAndLeavesTheBadgeStanding` |
 /// | The session was ALREADY working | `testNothingQueuesIntoASessionThatWasAlreadyBusy`,
 ///   and `testACodexTabIsRetriedAndIsRefusedWhileItIsBusy` for the agent it bites hardest |
 /// | Progress clears the error | `testProgressClearsTheErrorAndDisarms` |
@@ -727,6 +728,87 @@ final class SessionStoreAPIRetryTests: XCTestCase {
         harness.store.maintenanceTickForTesting()
         XCTAssertEqual(harness.spy.sent, [resumeText(for: .codex)],
                        "typed into codex's real composer, through the one existing queue")
+    }
+
+    // MARK: - The user interrupts the nudge
+
+    /// **The most natural way a person stops an app typing into their terminal.**
+    ///
+    /// A rung comes due, Flight Deck types "Keep going", codex goes busy — and the user, who
+    /// is watching their own terminal, presses Esc. Before `.turnAborted` existed that abort
+    /// produced only `.activity(.idle)` and `.turnEnded`, both of which leave `apiError`
+    /// deliberately untouched, so the schedule stayed armed and the next rung typed again.
+    /// Their only remedies were a turn that completed cleanly or the global preference.
+    ///
+    /// Claude never reaches this state and this test is codex-only for that reason: claude's
+    /// interrupt is a `"type":"user"` transcript record like any other, so it emits
+    /// `.progressed`, which clears `apiError` outright — schedule included. See
+    /// `AgentEvent.turnAborted` for the asymmetry written down.
+    ///
+    /// The badge is asserted to SURVIVE, which is the half that is easy to get wrong: the
+    /// last turn genuinely did fail and that is still true. Only the loop stops.
+    func testAnInterruptedNudgeStopsTheLoopAndLeavesTheBadgeStanding() async throws {
+        let harness = try await makeCodexHarness()
+        harness.store.apply(.apiError(Self.codexTransient), to: harness.tab)
+        guard let due = harness.store.apiErrors[harness.tab]?.nextRetryAt else {
+            return XCTFail("nothing armed, so there is no nudge to interrupt")
+        }
+
+        harness.time = due
+        harness.store.maintenanceTickForTesting()   // queues the nudge
+        harness.store.maintenanceTickForTesting()   // and the queue types it
+        XCTAssertEqual(harness.spy.sent, [resumeText(for: .codex)], "the nudge really was typed")
+        XCTAssertEqual(harness.store.retryEpisodeCountForTesting, 1, "and the ladder is climbing")
+
+        // Codex picks the nudge up, and the user hits Esc. Applied as the three events the
+        // rollout's `task_started` then `turn_aborted` records actually map to, in order.
+        harness.store.apply(.activity(.busy), to: harness.tab)
+        harness.store.apply(.activity(.idle), to: harness.tab)
+        harness.store.apply(.turnEnded, to: harness.tab)
+        harness.store.apply(.turnAborted, to: harness.tab)
+
+        XCTAssertNil(harness.store.apiErrors[harness.tab]?.retryAttempt, "the schedule is gone")
+        XCTAssertNil(harness.store.apiErrors[harness.tab]?.nextRetryAt)
+        XCTAssertEqual(harness.store.retryEpisodeCountForTesting, 0,
+                       "and so is the ladder memory — the user intervened explicitly, so this "
+                       + "is not a pause in an episode, it is the end of one")
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.status, 429,
+                       "the badge stands: the last turn really did fail")
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.kind,
+                       "response_too_many_failed_attempts")
+
+        // And it stays stopped. This is the assertion that a bare strip would fail:
+        // `flushRetryBackoff`'s unarmed branch re-arms any retryable error it finds, which is
+        // what makes the preference toggle symmetric — so stopping the loop takes more than
+        // clearing the schedule, it takes refusing to arm this tab again.
+        harness.spy.events.removeAll()
+        for _ in 0..<3 {
+            harness.time += 3600
+            harness.store.maintenanceTickForTesting()
+        }
+        XCTAssertNil(harness.store.apiErrors[harness.tab]?.retryAttempt,
+                     "an hour of ticks must not re-arm what the user switched off by hand")
+        XCTAssertNil(harness.store.pendingPrompts[harness.tab])
+        XCTAssertTrue(harness.spy.events.isEmpty, "not one keystroke after the interrupt")
+    }
+
+    /// An interrupt stops the loop for the failure that was standing; it does not make the tab
+    /// permanently unretryable. A turn that completes cleanly clears the error — which is the
+    /// evidence the outage is over — and a failure after that is a new one, armed from rung 1.
+    func testAFailureAfterACleanTurnArmsAgainDespiteAnEarlierInterrupt() async throws {
+        let harness = try await makeCodexHarness()
+        harness.store.apply(.apiError(Self.codexTransient), to: harness.tab)
+        harness.store.apply(.turnAborted, to: harness.tab)
+        XCTAssertNil(harness.store.apiErrors[harness.tab]?.retryAttempt, "stopped, to begin with")
+
+        // A later turn completes cleanly — `task_complete` with no error.
+        harness.store.apply(.apiError(nil), to: harness.tab)
+        XCTAssertNil(harness.store.apiErrors[harness.tab], "the badge goes with the clean turn")
+
+        harness.store.apply(.apiError(Self.codexTransient), to: harness.tab)
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt, 1,
+                       "a fresh outage after a recovery is not the one the user interrupted")
+        assertDue(harness.store.apiErrors[harness.tab]?.nextRetryAt, rung: 30, from: harness.time)
     }
 
     // MARK: - The ladder across a round trip

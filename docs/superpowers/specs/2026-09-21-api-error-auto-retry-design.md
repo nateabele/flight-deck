@@ -62,8 +62,16 @@ Established by driving a real `codex` TUI against a local upstream returning `42
 
 `CodexEventMapper.events(inRolloutLine:)` gains an `.apiError` emission on its existing
 `task_complete` arm — set when `payload["error"]` is present, cleared (`.apiError(nil)`)
-when a `task_complete` carries none. `turn_aborted` is left alone: a user interrupt is not
-an API failure.
+when a `task_complete` carries none. `turn_aborted` raises and clears no error either: a user
+interrupt is not an API failure.
+
+**Amended 2026-09-22, in final review: `turn_aborted` is not left entirely alone.** It gains
+`AgentEvent.turnAborted`, and it does so to *complete* §4.3's "the user got there first" stop
+rather than to extend the design. An explicit interrupt is the strongest form of that row, and
+without the event it was the one form the table did not honour: a nudge the user stopped with
+Esc produced only `.activity(.idle)`, the schedule stayed armed, and the next rung typed into
+their terminal again. The error itself is still untouched by the abort — the badge stands,
+only the loop stops — so the sentence above still holds for `apiError`.
 
 Mapping into the existing struct: `http_status_code` → `status`; the `codex_error_info`
 variant name → `kind` (verbatim, honouring that field's "never matched against an enum"
@@ -139,6 +147,7 @@ this section:
 | Agent can't be typed into | `textChannel == nil` / `turnRecovery == nil` |
 | The session started working | `.progressed` clears `apiError`; `cancelSupersededPrompts` drops an in-flight nudge on `busy`/`waiting` |
 | The user got there first | same path — their typing makes it busy |
+| The user interrupted the nudge | codex's `turn_aborted` → `.turnAborted` → `retryInterrupted` (§4.1's amendment); on claude the interrupt record is itself `.progressed`, which clears the error |
 | Tab closed | state cleared with the tab, as `acceptedPromptTokens` is |
 | Preference off | checked at arm time *and* at each tick, so a mid-outage toggle stops it |
 | Agent process gone | `inject`'s composer gate defers forever and types nothing |
@@ -244,7 +253,8 @@ Caption must say what it does in plain terms, including that it types into the s
 TDD throughout; every test written to fail against the current code first.
 
 - **Codex parser** — fixture is the real `task_complete` record captured by the probe, plus
-  a clean `task_complete` (clears) and a `turn_aborted` (no-op).
+  a clean `task_complete` (clears) and a `turn_aborted` (ends the turn and reports the
+  interrupt, raising and clearing no error).
 - **Classifier** — every allowlisted codex kind retries; every permanent one does not; an
   invented unknown kind does not (the fail-closed assertion).
 - **Ladder** — rung progression, floor saturation, jitter within bounds.

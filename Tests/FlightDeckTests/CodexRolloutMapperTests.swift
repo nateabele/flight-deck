@@ -42,7 +42,7 @@ final class CodexRolloutMapperTests: XCTestCase {
     func testAnAbortedTurnEndsTheTurnJustLikeACompletedOne() throws {
         let line = try XCTUnwrap(CodexRolloutFixtureTests.lines("turn-aborted.captured").first)
         XCTAssertEqual(CodexEventMapper.events(inRolloutLine: line),
-                       [.activity(.idle), .turnEnded])
+                       [.activity(.idle), .turnEnded, .turnAborted])
     }
 
     /// Captured driving a real codex TUI at an upstream returning 429 (codex-cli 0.155.1).
@@ -68,12 +68,17 @@ final class CodexRolloutMapperTests: XCTestCase {
         XCTAssertTrue(CodexEventMapper.events(inRolloutLine: line).contains(.apiError(nil)))
     }
 
-    /// A user interrupt is not an API failure, and must not clear or set one.
-    func testTurnAbortedTouchesTheErrorNotAtAll() {
+    /// A user interrupt is not an API failure, and must not clear or set one — the last turn
+    /// really did fail and the badge is still true. It is reported as an interrupt instead,
+    /// which is what stops the retry loop without touching the badge.
+    func testTurnAbortedTouchesTheErrorNotAtAllAndReportsTheInterrupt() {
         let line = #"{"type":"event_msg","payload":{"type":"turn_aborted"}}"#
         let events = CodexEventMapper.events(inRolloutLine: line)
         XCTAssertFalse(events.contains { if case .apiError = $0 { return true } else { return false } })
         XCTAssertTrue(events.contains(.turnEnded))
+        XCTAssertTrue(events.contains(.turnAborted),
+                      "without this the user pressing Esc on a nudge stops nothing: the "
+                      + "schedule stays armed and the next rung types again")
     }
 
     /// A permanent failure is still reported — the badge is right — it simply will not retry.
