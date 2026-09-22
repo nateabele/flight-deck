@@ -31,8 +31,19 @@ enum CodexEventMapper {
     ///   there is no ground truth to map it from. Deliberately never emitted for codex.
     static func events(inRolloutLine line: String) -> [AgentEvent] {
         guard let raw = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
-              let record = raw as? [String: Any],
-              record["type"] as? String == "event_msg",
+              let record = raw as? [String: Any]
+        else { return [] }
+        return events(inRecord: record)
+    }
+
+    /// The same rule against an already-decoded record.
+    ///
+    /// `CodexRolloutWatcher` decodes every line anyway to reach this far; handing back the
+    /// already-parsed record here — rather than this function re-parsing the line itself —
+    /// is what lets the watcher's own indexing extraction reuse that same parse instead of
+    /// paying for a second `JSONSerialization` pass over lines that are already in hand.
+    static func events(inRecord record: [String: Any]) -> [AgentEvent] {
+        guard record["type"] as? String == "event_msg",
               let payload = record["payload"] as? [String: Any],
               let kind = payload["type"] as? String
         else { return [] }

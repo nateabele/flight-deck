@@ -87,6 +87,7 @@ Releases go through `scripts/swap-release.sh`, run detached — see
 | Path | What |
 |---|---|
 | `Sources/FlightDeck/` | The app. `SessionStore` is the single source of truth (`@MainActor`). |
+| `Sources/FlightDeck/Agents/` | The `AgentAdapter` protocol and both conformers, `ClaudeAdapter` and `CodexAdapter` (the latter under `Agents/Codex/`) — identity, the text/dialog/rename channels, and now `AgentSearchCorpus`, the capability that makes an agent's history searchable. |
 | `Sources/FlightDeck/GhosttyEmbed/` | **Adapt-copied Ghostty** (MIT, provenance-marked). Vendored-ish — prefer re-pulling upstream to hand-editing. |
 | `Sources/FlightDeck/Preferences/` | Pure flag catalog/parser/serializer/merge + SwiftUI shell. |
 | `Sources/FleetKit/` | Wire types, event fold, pairing payload, and both socket halves — plus both platforms' pairing stores. Swift 6, `Foundation`, `Network`, and `Security` only — compiled for iOS too, which is what enforces that. |

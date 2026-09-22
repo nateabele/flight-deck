@@ -69,6 +69,7 @@ final class AgentLocationTests: XCTestCase {
             ClaudeAdapter.identity(fromHomeData: data)
         }
         static let openPromptReader: AgentOpenPromptReader? = ClaudeAdapter.openPromptReader
+        static let searchCorpus: AgentSearchCorpus? = ClaudeAdapter.searchCorpus
         func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
             binding(for: session)
         }

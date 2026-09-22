@@ -23,7 +23,7 @@ final class CodexRolloutWatcherTests: XCTestCase {
         FileManager.default.createFile(atPath: url.path, contents: Data())
 
         var seen: [AgentEvent] = []
-        let watcher = CodexRolloutWatcher(url: url) { seen.append($0) }
+        let watcher = CodexRolloutWatcher(url: url, conversationID: UUID(), onEvent: { seen.append($0) })
         watcher.drain() // prime while empty
 
         try (started + completed).data(using: .utf8)!.write(to: url)
@@ -45,7 +45,7 @@ final class CodexRolloutWatcherTests: XCTestCase {
         try (header + started + completed).data(using: .utf8)!.write(to: url)
 
         var seen: [AgentEvent] = []
-        let watcher = CodexRolloutWatcher(url: url) { seen.append($0) }
+        let watcher = CodexRolloutWatcher(url: url, conversationID: UUID(), onEvent: { seen.append($0) })
         watcher.drain()
 
         XCTAssertEqual(
@@ -135,5 +135,28 @@ final class CodexRolloutWatcherTests: XCTestCase {
             + "pre-existing-file case, and must gate .live exactly once, leading the events "
             + "it introduces"
         )
+    }
+
+    /// Mirrors `TranscriptWatcherIndexingTests
+    /// .testAppendedConversationTextIsReportedToTheIndexingHook`: this watcher decodes every
+    /// line anyway to find turn boundaries, so the same pass reports conversation text to the
+    /// search index rather than paying for a second read.
+    func testAppendedProseReachesTheIndex() throws {
+        let url = dir.appendingPathComponent("rollout.jsonl")
+        FileManager.default.createFile(atPath: url.path, contents: Data())
+        let id = UUID()
+
+        var indexed: [IndexedMessage] = []
+        let watcher = CodexRolloutWatcher(
+            url: url, conversationID: id, onEvent: { _ in }, onMessages: { indexed += $0 }
+        )
+        watcher.drain() // establishes the start position on the empty file
+
+        let prose = #"{"type":"event_msg","payload":{"type":"user_message","message":"the rename bug"}}"# + "\n"
+        try prose.data(using: .utf8)!.write(to: url)
+        watcher.drain()
+
+        XCTAssertEqual(indexed.map(\.text), ["the rename bug"])
+        XCTAssertEqual(indexed.first?.conversationID, id.uuidString.lowercased())
     }
 }

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import FleetKit
 import OSLog
 import UserNotifications
 
@@ -192,6 +193,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let mainMenu = NSApp.mainMenu { toolsMenu.install(in: mainMenu) }
     }
 
+    /// What one backfill pass should do, decided from what discovery found rather than why it
+    /// found it — the difference between an empty sidebar and a failed walk is the shape of
+    /// the inputs, not a reason attached to the empty list.
+    ///
+    /// `SearchIndexBuilder.build` opens with a prune derived from the refs it is handed, so
+    /// `build([])` deletes every already-indexed row. Asking every account of every agent
+    /// gives discovery new ways to come back empty for reasons that have nothing to do with
+    /// the user's history — an unreadable account home, an accounts list that is momentarily
+    /// empty at launch, a filesystem hiccup — and `.skip` is what stops one of those from
+    /// being read as "delete everything".
+    enum BackfillPlan: Equatable {
+        /// Build with these refs, empty included — correct only when the sidebar itself has
+        /// no projects, so there is genuinely nothing left to keep.
+        case build([TranscriptRef])
+        /// Discovery came back empty while the sidebar still has projects. Leave the index
+        /// alone; the next backfill gets another chance rather than pruning it to nothing.
+        case skip
+    }
+
+    static func backfillPlan(projects: [String], refs: [TranscriptRef]) -> BackfillPlan {
+        refs.isEmpty && !projects.isEmpty ? .skip : .build(refs)
+    }
+
+    /// The refs every agent contributes, as ONE list.
+    ///
+    /// One list, never one build per agent: `SearchIndexBuilder.build` opens with a prune
+    /// that drops every source outside the set it is handed, so per-agent passes would take
+    /// turns deleting each other's rows and leave an index that looks populated and is
+    /// missing half its corpus.
+    ///
+    /// `corpus` is injectable rather than always `\.searchCorpus`, for the same reason
+    /// `SearchIndexBuilder`'s own lookup is: a test proving an agent that answers nil is
+    /// skipped needs such an agent to exist, and both real corpora are non-nil today.
+    static func corpusRefs(
+        projects: [String], accounts: [AgentAccount],
+        corpus: (AgentID) -> AgentSearchCorpus? = { $0.searchCorpus }
+    ) -> [TranscriptRef] {
+        AgentID.allCases
+            .compactMap(corpus)
+            .flatMap { $0.transcripts(forProjects: projects, accounts: accounts) }
+            .sorted { $0.modified > $1.modified }
+    }
+
+    /// Fills in a built-in-home fallback for any agent `live` holds no account for.
+    ///
+    /// A gap here is not necessarily a user with nothing to search: a real accounts list can
+    /// also come back empty from a preferences-load race, or hold zero entries for an agent
+    /// whose only login the user removed. Falling back to that agent's built-in home rather
+    /// than asking nothing keeps the common single-login case working exactly as the
+    /// single synthesized account this replaces did — this only narrows "always synthesize"
+    /// down to "synthesize where `live` is silent".
+    static func resolvedAccounts(_ live: [AgentAccount]) -> [AgentAccount] {
+        AgentID.allCases.flatMap { agent -> [AgentAccount] in
+            let mine = live.filter { $0.agent == agent }
+            return mine.isEmpty
+                ? [AgentAccount(agent: agent, displayName: "Default", home: agent.builtInHome)]
+                : mine
+        }
+    }
+
+    /// Fills in a name match's working directory and transcript path from the index, the same
+    /// lookup `FleetService.openConversation` already does for the phone.
+    ///
+    /// `SearchCandidates.build` has no filesystem-cheap way to know either field for a
+    /// conversation found by name rather than by transcript content — see its own
+    /// `lastActivity` comment for why a stat-per-candidate is off the table — so both arrive
+    /// here empty. Left empty, `SearchActivation.plan` passes them straight through:
+    /// `CodexAdapter` sees no rollout and types a bare `codex`, starting an unrelated thread
+    /// while the tab stays pinned to the conversation that was searched for, and a claude
+    /// conversation that ran in a worktree resumes at the project root instead. `location`
+    /// is the one index lookup that answers both, so a name match resumes exactly where a
+    /// transcript hit on the same conversation already does.
+    ///
+    /// Only fills gaps: a transcript hit already carries both fields from the corpus walk
+    /// itself, so this leaves those untouched rather than re-deriving them from a possibly
+    /// stale index read.
+    static func enrichedForActivation(
+        _ result: SearchResult,
+        location: (String) -> (workingDirectory: String, transcriptPath: String, agent: String)?
+    ) -> SearchResult {
+        guard let conversationID = result.conversationID,
+              result.workingDirectory.isEmpty || result.transcriptPath.isEmpty,
+              let found = location(conversationID)
+        else { return result }
+        return SearchResult(
+            id: result.id, kind: result.kind, title: result.title, projectName: result.projectName,
+            projectPath: result.projectPath, tier: result.tier, recency: result.recency,
+            highlightedRanges: result.highlightedRanges, snippet: result.snippet,
+            conversationID: result.conversationID, isContinuation: result.isContinuation,
+            offset: result.offset, agent: result.agent,
+            workingDirectory: found.workingDirectory, transcriptPath: found.transcriptPath
+        )
+    }
+
     /// Unlike `installToolsMenu`, not naturally idempotent: it opens a file handle, builds a
     /// panel, and registers a `.flightDeckOpenSearch` observer, none of which tolerate being
     /// done twice. The `searchIndex == nil` guard is therefore load-bearing rather than
@@ -214,8 +309,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     id: $0.id, conversationID: $0.pinnedConversationID
                 )
             }
+            let activated = Self.enrichedForActivation(result) {
+                try? index.transcriptLocation(forConversation: $0)
+            }
             store.openConversation(SearchActivation.plan(
-                for: result, openSessions: open, projects: store.repos.map(\.url.path)
+                for: activated, openSessions: open, projects: store.repos.map(\.url.path)
             ))
         }
 
@@ -244,13 +342,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let builder = SearchIndexBuilder(index: index)
         searchBuildTask = Task { [weak model] in
             try? await Task.sleep(for: .seconds(3))
-            let entries = SearchCorpus.directories(
-                forProjects: store.repos.map(\.url.path),
-                projectsRoot: ClaudeSession.defaultProjectsRoot,
-                listing: SearchCorpus.defaultListing,
-                exists: { FileManager.default.fileExists(atPath: $0) }
-            )
-            await builder.build(entries) { progress in
+            let projects = store.repos.map(\.url.path)
+            let accounts = Self.resolvedAccounts(store.preferences?.preferences.liveAccounts ?? [])
+            let refs = Self.corpusRefs(projects: projects, accounts: accounts)
+            guard case .build(let refs) = Self.backfillPlan(projects: projects, refs: refs) else {
+                return
+            }
+            await builder.build(refs) { progress in
                 Task { @MainActor in
                     model?.indexingProgressChanged(progress)
                     // Mirrors the same progress into `FleetService`, so a phone searching

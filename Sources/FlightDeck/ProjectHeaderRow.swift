@@ -22,9 +22,11 @@ struct ProjectHeaderRow: View {
             // a tap gesture, or an `NSViewRepresentable`, or a recognizer on the table —
             // consumes the mouse-down that `List`'s `.onMove` needs to begin a drag, so a
             // toggle placed here kills reordering everywhere it reaches. The chevron alone was
-            // once small enough to dodge that (a ~5×9pt glyph, and `.rotationEffect` turns
-            // hit-testing with it, so expanded it was a 9×5 sliver) but it took repeated tries
-            // to hit, and widening it to cover the name took the whole row's drag with it.
+            // once small enough to dodge that — measured at 8×11pt, `.imageScale(.small)` — but
+            // it took repeated tries to hit, and widening it to cover the name took the whole
+            // row's drag with it. (An older note here blamed `.rotationEffect` for making the
+            // expanded chevron a worse target. Rotating a rect transposes it, so the area is
+            // identical; the glyph was simply small.)
             //
             // The toggle is `SidebarInputMonitor`'s instead. It watches mouse-DOWN passively —
             // observing it and returning it unchanged, which is what leaves the drag intact —
@@ -35,9 +37,18 @@ struct ProjectHeaderRow: View {
             // to reorder. Finder and the Xcode navigator toggle from the whole label too, so
             // this is also the conventional behaviour.
             //
-            // Nothing is lost to VoiceOver by there being no button: the one that used to be
-            // here was `.accessibilityHidden(true)`, so it was never actuatable. The context
-            // menu's Expand/Collapse is, and remains, the accessible route.
+            // For VoiceOver this row is not actuatable, and the context menu's Expand/Collapse
+            // is the accessible route to collapsing a project.
+            //
+            // An earlier version of this comment justified that with "the button that used to be
+            // here was `.accessibilityHidden(true)`, so it was never actuatable". That described
+            // the chevron-only button from BEFORE this branch; the one actually removed here
+            // spanned the chevron and the name and carried no hidden flag, so `children:
+            // .combine` may well have unioned an activate action from it. Nobody checked with
+            // Accessibility Inspector, and the claim is deleted rather than restated: measured
+            // against where this branch started, the row had no actuatable control then either,
+            // so there is nothing here that regressed — but that is a reading of two diffs, not
+            // an observation of VoiceOver.
             Image(systemName: "chevron.right")
                 .imageScale(.small)
                 .foregroundStyle(.secondary)

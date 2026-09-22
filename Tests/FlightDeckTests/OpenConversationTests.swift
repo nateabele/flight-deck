@@ -1,5 +1,6 @@
 // Tests/FlightDeckTests/OpenConversationTests.swift
 import XCTest
+import FleetKit
 @testable import FlightDeck
 
 /// ⌘K's Return key: `SessionStore.openConversation`, the effectful half of
@@ -45,16 +46,6 @@ final class OpenConversationTests: XCTestCase {
         return AgentAccount(agent: .claude, displayName: name, home: home)
     }
 
-    /// A fresh scratch directory, torn down after the test — for the two `resolvedTranscriptDirectory`
-    /// fixtures below, which write real transcript files rather than merely asserting on paths.
-    private func makeTempDir() throws -> URL {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("OpenConversationTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        return root
-    }
-
     // MARK: - Item 5: the in-store already-open guard
 
     /// The guard `openConversation` keeps for itself, not only the one inside
@@ -67,7 +58,7 @@ final class OpenConversationTests: XCTestCase {
 
         store.openConversation(.resume(
             conversationID: session.pinnedConversationID.uuidString, projectPath: projectA.path,
-            title: "ignored", transcriptDirectory: projectA.path
+            title: "ignored", agent: .claude, workingDirectory: projectA.path, transcriptPath: ""
         ), directoryExists: { _ in true })
 
         XCTAssertEqual(store.repos.flatMap(\.sessions).map(\.id), [session.id],
@@ -93,7 +84,7 @@ final class OpenConversationTests: XCTestCase {
 
         let opened = store.openConversation(.resume(
             conversationID: session.pinnedConversationID.uuidString, projectPath: projectA.path,
-            title: "ignored", transcriptDirectory: projectA.path
+            title: "ignored", agent: .claude, workingDirectory: projectA.path, transcriptPath: ""
         ), directoryExists: { _ in true }, selecting: false)
 
         XCTAssertEqual(opened, session.id, "the caller still needs the live tab's id")
@@ -147,7 +138,7 @@ final class OpenConversationTests: XCTestCase {
 
         store.openConversation(.resume(
             conversationID: conversation.uuidString, projectPath: projectA.path,
-            title: "Resumed", transcriptDirectory: projectA.path
+            title: "Resumed", agent: .claude, workingDirectory: projectA.path, transcriptPath: ""
         ), directoryExists: { _ in true })
 
         XCTAssertEqual(store.repos.first?.isCollapsed, false)
@@ -161,7 +152,7 @@ final class OpenConversationTests: XCTestCase {
 
         store.openConversation(.addProjectThenResume(
             projectPath: projectB.path, conversationID: conversation.uuidString,
-            title: "New chat", transcriptDirectory: projectB.path
+            title: "New chat", agent: .claude, workingDirectory: projectB.path, transcriptPath: ""
         ), directoryExists: { _ in true })
 
         let repo = store.repos.first { $0.url.path == projectB.path }
@@ -180,7 +171,7 @@ final class OpenConversationTests: XCTestCase {
         let before = store.repos.flatMap(\.sessions).map(\.id)
 
         store.openConversation(.addProjectThenResume(
-            projectPath: projectA.path, conversationID: "", title: "fd", transcriptDirectory: projectA.path
+            projectPath: projectA.path, conversationID: "", title: "fd", agent: .claude, workingDirectory: projectA.path, transcriptPath: ""
         ), directoryExists: { _ in true })
 
         XCTAssertEqual(store.repos.flatMap(\.sessions).map(\.id), before,
@@ -194,7 +185,7 @@ final class OpenConversationTests: XCTestCase {
         let store = makeStore()
 
         store.openConversation(.addProjectThenResume(
-            projectPath: projectB.path, conversationID: "", title: "fd", transcriptDirectory: projectB.path
+            projectPath: projectB.path, conversationID: "", title: "fd", agent: .claude, workingDirectory: projectB.path, transcriptPath: ""
         ), directoryExists: { _ in true })
 
         let repo = store.repos.first { $0.url.path == projectB.path }
@@ -214,7 +205,7 @@ final class OpenConversationTests: XCTestCase {
         let elsewhere = store.newSession(in: projectA)
 
         let opened = store.openConversation(.addProjectThenResume(
-            projectPath: projectB.path, conversationID: "", title: "fd", transcriptDirectory: projectB.path
+            projectPath: projectB.path, conversationID: "", title: "fd", agent: .claude, workingDirectory: projectB.path, transcriptPath: ""
         ), directoryExists: { _ in true }, selecting: false)
 
         let repo = store.repos.first { $0.url.path == projectB.path }
@@ -238,7 +229,7 @@ final class OpenConversationTests: XCTestCase {
 
         store.openConversation(.resume(
             conversationID: conversation.uuidString, projectPath: projectA.path,
-            title: "Chat", transcriptDirectory: projectA.path
+            title: "Chat", agent: .claude, workingDirectory: projectA.path, transcriptPath: ""
         ), directoryExists: { _ in true })
 
         XCTAssertEqual(
@@ -262,7 +253,7 @@ final class OpenConversationTests: XCTestCase {
 
         let opened = store.openConversation(.resume(
             conversationID: conversation.uuidString, projectPath: projectA.path,
-            title: "Chat", transcriptDirectory: projectA.path
+            title: "Chat", agent: .claude, workingDirectory: projectA.path, transcriptPath: ""
         ), directoryExists: { _ in true })
 
         XCTAssertTrue(store.repos.flatMap(\.sessions).isEmpty,
@@ -293,7 +284,7 @@ final class OpenConversationTests: XCTestCase {
 
         let opened = store.openConversation(.resume(
             conversationID: conversation.uuidString, projectPath: projectA.path,
-            title: "Chat", transcriptDirectory: projectA.path
+            title: "Chat", agent: .claude, workingDirectory: projectA.path, transcriptPath: ""
         ), directoryExists: { _ in true })
 
         XCTAssertNil(opened, "a refused launch must not be reported as the previously-selected tab")
@@ -309,7 +300,7 @@ final class OpenConversationTests: XCTestCase {
 
         store.openConversation(.resume(
             conversationID: conversation.uuidString, projectPath: projectA.path,
-            title: "Fix the flaky test", transcriptDirectory: projectA.path
+            title: "Fix the flaky test", agent: .claude, workingDirectory: projectA.path, transcriptPath: ""
         ), directoryExists: { _ in true })
 
         XCTAssertEqual(store.repos.first?.sessions.first?.title, "Fix the flaky test")
@@ -323,95 +314,157 @@ final class OpenConversationTests: XCTestCase {
 
         store.openConversation(.resume(
             conversationID: conversation.uuidString, projectPath: projectA.path,
-            title: "   ", transcriptDirectory: projectA.path
+            title: "   ", agent: .claude, workingDirectory: projectA.path, transcriptPath: ""
         ), directoryExists: { _ in true })
 
         XCTAssertEqual(store.repos.first?.sessions.first?.title, conversation.uuidString)
     }
 
-    // MARK: - Item 3: worktree transcript-directory resolution
+    // MARK: - The result's own working directory and transcript path
 
-    /// The wiring, not the algorithm: with fixture paths like `projectA` that exist nowhere on
-    /// disk, `resolvedTranscriptDirectory`'s real default always degenerates to its
-    /// single-candidate fallback — so a regression that dropped the closure's result on the
-    /// floor and hardcoded `transcriptDirectory: projectPath` would pass every other test in
-    /// this file. Injecting a sentinel here is what would catch that: it can only appear on the
-    /// filed session if `openConversation` actually plumbs the closure's return value through.
-    /// Capturing the arguments the closure is called with is what would catch a *different*
-    /// regression — the same wiring silently reading `openConversation`'s own `projectPath`
-    /// against, say, the tab's `id` instead of `pinned`.
-    func testOpeningWiresTheResolvedTranscriptDirectoryThroughToTheSession() {
+    /// The corpus walk records the literal directory a conversation ran in on the
+    /// `TranscriptHit` itself now, rather than `openConversation` re-deriving it from the
+    /// project alone — so a resume must land the *result's* directory on the tab, not
+    /// silently collapse a worktree conversation back onto its project root.
+    func testResumeCarriesTheStoredWorkingDirectoryNotTheProjectRoot() {
         let store = makeStore()
         let conversation = UUID()
-        let sentinel = "/sentinel/worktree"
-        var seenArguments: (projectPath: String, conversationID: UUID)?
+        let worktree = (projectA.path as NSString).appendingPathComponent(".claude/worktrees/feature")
 
         store.openConversation(.resume(
             conversationID: conversation.uuidString, projectPath: projectA.path,
-            title: "Chat", transcriptDirectory: projectA.path
-        ), directoryExists: { _ in true }, resolveTranscriptDirectory: { projectPath, conversationID in
-            seenArguments = (projectPath, conversationID)
-            return sentinel
-        })
+            title: "Chat", agent: .claude, workingDirectory: worktree, transcriptPath: ""
+        ), directoryExists: { _ in true })
 
-        XCTAssertEqual(store.repos.first?.sessions.first?.transcriptDirectory, sentinel)
-        XCTAssertEqual(seenArguments?.projectPath, projectA.path)
-        XCTAssertEqual(seenArguments?.conversationID, conversation)
+        let session = store.repos.first?.sessions.first
+        XCTAssertEqual(session?.transcriptDirectory, worktree)
+        XCTAssertEqual(session?.workingDirectory, projectA.path,
+                       "the sidebar project stays the project root even when the agent works in a worktree")
     }
 
-    /// The algorithm itself, against a real `~/.claude/projects`-shaped fixture built through
-    /// the same `ClaudeSession` functions production uses — never a hand-written encoded path,
-    /// which could drift silently from the encoding this test exists to exercise.
-    func testResolvedTranscriptDirectoryFindsTheWorktreeThatOwnsTheConversation() throws {
-        let root = try makeTempDir()
-        let projectsRoot = root.appendingPathComponent("claude-projects", isDirectory: true)
-        let projectPath = root.appendingPathComponent("proj", isDirectory: true).path
-        let worktreePath = (projectPath as NSString)
-            .appendingPathComponent(".claude/worktrees/feature")
-        try FileManager.default.createDirectory(
-            atPath: worktreePath, withIntermediateDirectories: true
-        )
+    /// The other half: a plan whose working directory is genuinely unknown — the index has no
+    /// row for that conversation at all, on either the desk's or the phone's path to this
+    /// method — falls back to the project root rather than filing a tab with an empty
+    /// `transcriptDirectory`, which `resumeExisting`'s `directoryExists` guard would otherwise
+    /// have to fail on before recovering. This is a last resort, not the normal outcome for a
+    /// name match: `AppDelegate.enrichedForActivation` and `FleetService.openConversation` each
+    /// look the conversation up in the index and fill its real working directory and transcript
+    /// path into the plan before this method ever sees it, whenever the index can locate it.
+    func testResumeFallsBackToTheProjectRootWhenTheResultsWorkingDirectoryIsUnknown() {
+        let store = makeStore()
         let conversation = UUID()
-        try write(conversation, workingDirectory: worktreePath, under: projectsRoot)
 
-        let resolved = SessionStore.resolvedTranscriptDirectory(
-            projectPath: projectPath, conversationID: conversation, projectsRoot: projectsRoot
-        )
+        store.openConversation(.resume(
+            conversationID: conversation.uuidString, projectPath: projectA.path,
+            title: "Chat", agent: .claude, workingDirectory: "", transcriptPath: ""
+        ), directoryExists: { _ in true })
 
-        XCTAssertEqual(resolved, worktreePath)
+        XCTAssertEqual(store.repos.first?.sessions.first?.transcriptDirectory, projectA.path)
     }
 
-    /// The negative case: a conversation that ran in the project itself, not any worktree, must
-    /// resolve to the project path even when a worktree directory exists alongside it.
-    func testResolvedTranscriptDirectoryPrefersTheProjectWhenThatIsWhereTheConversationRan() throws {
-        let root = try makeTempDir()
-        let projectsRoot = root.appendingPathComponent("claude-projects", isDirectory: true)
-        let projectPath = root.appendingPathComponent("proj", isDirectory: true).path
-        let worktreePath = (projectPath as NSString)
-            .appendingPathComponent(".claude/worktrees/feature")
-        try FileManager.default.createDirectory(
-            atPath: worktreePath, withIntermediateDirectories: true
-        )
+    // MARK: - Codex results resolve as codex, not claude
+
+    /// Codex's shape with the transport removed, so a resume through this method never spawns
+    /// or hangs waiting on a real app-server. Mirrors `CodexStatusRoutingTests`' stub —
+    /// duplicated rather than shared, the same way `CapturingProvider` is duplicated across
+    /// every store test file here, so no test file depends on another's fixtures.
+    private struct StubCodexAdapter: AgentAdapter {
+        static let id: AgentID = .codex
+        static let textChannel: AgentTextChannel? = nil
+        static let renameTyping: AgentRenameTyping? = nil
+        static let dialogDriver: AgentDialogDriver? = nil
+        static let negotiatesIdentity = true
+        static let needsRuntimeStart = true
+        static let hasStatusRegistry = false
+        nonisolated static func sanitizedTitle(_ raw: String) -> String? {
+            CodexAdapter.sanitizedTitle(raw)
+        }
+        nonisolated static func title(fromTranscriptAt url: URL) -> String? {
+            CodexAdapter.title(fromTranscriptAt: url)
+        }
+        nonisolated static func timelineItems(inLine line: String, at offset: Int) -> [TimelineItem] {
+            CodexAdapter.timelineItems(inLine: line, at: offset)
+        }
+        nonisolated static let homeMarkerFile = CodexAdapter.homeMarkerFile
+        nonisolated static func identity(fromHomeData data: Data) -> AccountIdentity? {
+            CodexAdapter.identity(fromHomeData: data)
+        }
+        static let openPromptReader: AgentOpenPromptReader? = CodexAdapter.openPromptReader
+        static let searchCorpus: AgentSearchCorpus? = CodexAdapter.searchCorpus
+        let thread: UUID
+
+        func prepare(for session: Session, options: AgentOptions) async throws -> AgentBinding {
+            AgentBinding(conversationID: thread, transcriptURL: nil)
+        }
+        func binding(for session: Session) -> AgentBinding {
+            AgentBinding(conversationID: session.pinnedConversationID, transcriptURL: nil)
+        }
+        func location(for session: Session) -> AgentLocation {
+            AgentLocation(workingDirectory: session.transcriptDirectory, binding: binding(for: session))
+        }
+        func launchCommand(_ b: AgentBinding, _: Session, _: AgentOptions) -> String { "" }
+        func resumeCommand(_ b: AgentBinding, _ s: Session, _ o: AgentOptions) -> String { "" }
+        func rename(_: AgentBinding, to: String) async throws {}
+        func loginInvocation(for account: AgentAccount) -> LoginInvocation {
+            LoginInvocation(command: "", inject: nil)
+        }
+    }
+
+    /// A live codex tab, built the same way `CodexStatusRoutingTests.makeCodexTab` does: through
+    /// the real `createSession` negotiation, against a stubbed adapter and runtime rather than a
+    /// hand-assembled `Session` — so its `pinnedConversationID` is genuinely the thread the
+    /// stub's `prepare` names, the same value the already-open guard below has to match.
+    private func makeCodexTab(in store: SessionStore, thread: UUID) async throws -> UUID {
+        store.overrideAdapter(StubCodexAdapter(thread: thread), for: .codex, account: nil)
+        store.overrideRuntime(FakeAgentRuntime(), for: .codex, account: nil)
+        let result = await store.createSession(agent: .codex, in: projectA.path)
+        guard case .success(let id) = result else {
+            throw XCTSkip("createSession failed: \(result)")
+        }
+        return id
+    }
+
+    /// The already-open guard `openConversation` keeps for itself must catch a codex tab too,
+    /// not only claude's — codex refuses a second writer on one thread outright rather than
+    /// merely tolerating it badly, so filing a second tab here is not just wasteful, it is a
+    /// resume that never lands.
+    func testALiveCodexTabIsSelectedRatherThanResumedTwice() async throws {
+        let store = makeStore()
+        let thread = UUID()
+        let tab = try await makeCodexTab(in: store, thread: thread)
+
+        store.openConversation(.resume(
+            conversationID: thread.uuidString, projectPath: projectA.path,
+            title: "ignored", agent: .codex, workingDirectory: projectA.path, transcriptPath: ""
+        ), directoryExists: { _ in true })
+
+        XCTAssertEqual(store.repos.flatMap(\.sessions).map(\.id), [tab],
+                       "no second tab may be filed for a codex thread already open")
+        XCTAssertEqual(store.selectedSessionID, tab)
+    }
+
+    /// The account resolved for a resume must be the result's own agent's account, not
+    /// claude's unconditionally — one layer up from the title and the transcript directory.
+    func testOpenConversationResolvesTheCodexAccountNotTheClaudeOne() {
+        let chosen = AgentAccount(agent: .codex, displayName: "codex-work", home: AgentID.codex.builtInHome)
+        let preferences = PreferencesStore(persistence: nil)
+        preferences.preferences.storedAccounts = [chosen]
+        preferences.preferences.storedProjectSettings = [
+            projectA.path: ProjectSettings(accounts: [.codex: chosen.id])
+        ]
+        let store = makeStore(preferences: preferences)
+        store.overrideAdapter(StubCodexAdapter(thread: UUID()), for: .codex, account: chosen.id)
+        store.overrideRuntime(FakeAgentRuntime(), for: .codex, account: chosen.id)
         let conversation = UUID()
-        try write(conversation, workingDirectory: projectPath, under: projectsRoot)
 
-        let resolved = SessionStore.resolvedTranscriptDirectory(
-            projectPath: projectPath, conversationID: conversation, projectsRoot: projectsRoot
-        )
+        store.openConversation(.resume(
+            conversationID: conversation.uuidString, projectPath: projectA.path,
+            title: "Chat", agent: .codex, workingDirectory: projectA.path, transcriptPath: ""
+        ), directoryExists: { _ in true })
 
-        XCTAssertEqual(resolved, projectPath)
-    }
-
-    /// Writes an empty transcript at exactly the path `ClaudeSession.transcriptURL` derives for
-    /// `workingDirectory` — the same function `resolvedTranscriptDirectory` itself calls — so
-    /// the fixture cannot drift from the encoding rule it is meant to exercise.
-    private func write(_ conversation: UUID, workingDirectory: String, under projectsRoot: URL) throws {
-        let url = ClaudeSession.transcriptURL(
-            sessionID: conversation, workingDirectory: workingDirectory, projectsRoot: projectsRoot
+        XCTAssertEqual(
+            store.repos.first?.sessions.first(where: { $0.pinnedConversationID == conversation })?.accountID,
+            chosen.id
         )
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        try Data().write(to: url)
     }
 }

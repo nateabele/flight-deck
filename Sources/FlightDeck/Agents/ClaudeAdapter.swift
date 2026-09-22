@@ -68,6 +68,9 @@ struct ClaudeAdapter: AgentAdapter {
     /// `ClaudeOpenCall`, which exists so there is exactly one implementation of the
     /// call/result pairing rather than two that can disagree about which dialog is up.
     static let openPromptReader: AgentOpenPromptReader? = ClaudeOpenPromptReader()
+
+    static let searchCorpus: AgentSearchCorpus? = ClaudeSearchCorpus()
+
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "dev.flightdeck.FlightDeck",
         category: String(describing: ClaudeAdapter.self)
