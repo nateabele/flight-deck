@@ -46,6 +46,11 @@ public struct TranscriptHit: Codable, Equatable, Sendable {
     /// codex: `session_meta.payload.source` — "exec", "cli", "vscode". nil for claude.
     /// The only consumer is `SearchRanker`'s `.automated` tier.
     public let provenance: String?
+
+    /// The `provenance` value codex writes for a `codex exec` run. Named here, beside the
+    /// field it describes, so `SearchRanker` and the phone's row rendering compare against
+    /// one spelling instead of two string literals that have to independently agree.
+    public static let automatedProvenance = "exec"
     /// The literal directory this conversation ran in — the project, or one of its worktrees.
     /// Empty when the index predates this field; `SessionStore.openConversation` falls back
     /// to `projectPath` in that case.

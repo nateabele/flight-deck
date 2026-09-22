@@ -30,11 +30,13 @@ final class SearchRankerTests: XCTestCase {
     }
 
     private func hit(
-        _ conversation: String, snippet: String, activity: TimeInterval, rowID: Int64 = 1
+        _ conversation: String, snippet: String, activity: TimeInterval, rowID: Int64 = 1,
+        provenance: String? = nil
     ) -> TranscriptHit {
         TranscriptHit(
             rowID: rowID, conversationID: conversation, projectPath: "/w/flight-deck",
-            conversationName: conversation, snippet: snippet, timestamp: ago(activity), offset: 0
+            conversationName: conversation, snippet: snippet, timestamp: ago(activity), offset: 0,
+            provenance: provenance
         )
     }
 
@@ -133,6 +135,67 @@ final class SearchRankerTests: XCTestCase {
         XCTAssertEqual(results.map(\.snippet), ["best", "second", "third", "elsewhere"])
         // Only the group leader carries a heading; the rest draw indented and headless.
         XCTAssertEqual(results.map(\.isContinuation), [false, true, true, false])
+    }
+
+    /// 86% of rollouts on a working machine are `codex exec` runs, and on the machine this
+    /// was measured on 485 of 487 were in ONE repo. Sharing the transcript tier lets that
+    /// project's automation bury its conversations.
+    func testExecHitsSortBelowEveryInteractiveHit() {
+        let results = SearchRanker.rank(
+            names: [],
+            query: "rename",
+            transcripts: [
+                // The exec hit is the more recent of the two — recency alone would put it
+                // first — but automation must still sort last regardless of timestamp.
+                hit("ci-runner", snippet: "rename in ci", activity: 1, provenance: "exec"),
+                hit("mobile-ui", snippet: "rename bug", activity: 60),
+            ]
+        )
+
+        XCTAssertEqual(results.map(\.title), ["mobile-ui", "ci-runner"])
+        XCTAssertEqual(results.map(\.tier), [.transcript, .automated])
+    }
+
+    /// The invariant the two-clock design depends on: transcript results are appended whole,
+    /// below the sorted name matches, so a late batch can only append BELOW what is drawn and
+    /// cannot shove the highlighted row out from under someone reaching for Return.
+    func testAutomatedTierStillAppendsBelowNameMatches() {
+        let results = SearchRanker.rank(
+            names: [session("re-name-me", activity: 60 * 60 * 24 * 365)],  // fuzzy, a year old
+            query: "rename",
+            transcripts: [hit("ci-runner", snippet: "the rename bug", activity: 1, provenance: "exec")]
+        )
+
+        XCTAssertEqual(results.first?.title, "re-name-me")
+        XCTAssertEqual(results.last?.kind, .conversation("ci-runner"))
+        XCTAssertEqual(results.last?.tier, .automated)
+    }
+
+    /// Grouping must survive the partition — a conversation's continuation rows stay adjacent
+    /// to their heading row rather than being split across the tier boundary.
+    func testAnExecConversationKeepsItsRowsAdjacent() {
+        let results = SearchRanker.rank(
+            names: [],
+            query: "rename",
+            transcripts: [
+                // Both exec hits are more recent than either interactive hit, so a partition
+                // done row-by-row rather than group-by-group would interleave them.
+                hit("ci-runner", snippet: "exec best", activity: 1, provenance: "exec"),
+                hit("ci-runner", snippet: "exec second", activity: 2, provenance: "exec"),
+                hit("mobile-ui", snippet: "interactive best", activity: 10),
+                hit("mobile-ui", snippet: "interactive second", activity: 11),
+            ]
+        )
+
+        XCTAssertEqual(
+            results.map(\.title), ["mobile-ui", "mobile-ui", "ci-runner", "ci-runner"]
+        )
+        XCTAssertEqual(
+            results.map(\.snippet),
+            ["interactive best", "interactive second", "exec best", "exec second"]
+        )
+        XCTAssertEqual(results.map(\.tier), [.transcript, .transcript, .automated, .automated])
+        XCTAssertEqual(results.map(\.isContinuation), [false, true, false, true])
     }
 
     func testNamesThatDoNotMatchAreExcluded() {
