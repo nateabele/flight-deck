@@ -134,7 +134,9 @@ final class CodexRolloutWatcherTests: XCTestCase {
 
         XCTAssertEqual(
             seen,
-            [.lifecycle(.live), .activity(.busy), .activity(.idle), .turnEnded],
+            // `.apiError(nil)` trails because `completed` carries no `error` field, and a
+            // clean `task_complete` clears any standing error.
+            [.lifecycle(.live), .activity(.busy), .activity(.idle), .turnEnded, .apiError(nil)],
             "the file's first-ever content is read from byte 0 once it appears, unlike the "
             + "pre-existing-file case, and must gate .live exactly once, leading the events "
             + "it introduces"
