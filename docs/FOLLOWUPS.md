@@ -1233,13 +1233,26 @@ backoff ladder, riding the existing `pendingPrompts` queue rather than a second 
   status registry. All four flushes are idempotent and deadline-guarded and `inject` is
   re-entrancy-guarded, so the two call sites landing in the same instant is safe.
 
-- **A future per-tab "stop retrying" control cannot work by clearing `retryAttempt`.**
+- **A per-tab "stop retrying" cannot work by clearing `retryAttempt`, and now does not.**
   `flushRetryBackoff`'s "not armed, preference on" branch re-judges any tab whose
   `retryAttempt` is `nil` on every tick it sees one, and re-arms it at `resumedRung` if the
-  failure is still transient — so clearing the field is undone on the very next tick, not a
-  real cancel. There is no live defect today, since nothing in this build ever clears it; a
-  cancel control would need its own suppression signal (an explicit "don't retry this one"
-  flag), not a state clear.
+  failure is still transient — so clearing the field is undone on the very next tick, and at
+  rung 1 if the episode went too, which makes the typing arrive *sooner*. The suppression
+  signal this entry predicted would be needed is `SessionStore.retryInterrupted`, added for
+  the interrupt stop below; a future user-facing cancel control should set that rather than
+  clear state.
+
+- **Pressing Esc stops the loop on codex, and needs no equivalent on claude.** `turn_aborted`
+  now also maps to `AgentEvent.turnAborted`, which strips the tab's schedule, forgets its
+  `RetryEpisode` and latches `retryInterrupted` so the re-arm branch above cannot undo it —
+  while leaving the error badge standing, because the last turn really did fail. Claude has no
+  abort signal to map and needs none: every `"type":"user"` transcript record emits
+  `.progressed` (`ClaudeSession.events(inObject:)`), and `.progressed` clears `apiError`
+  outright, schedule included — so a claude interrupt stops the loop by clearing it. The latch
+  is lifted by a turn that completes with no error, which is the only evidence the outage is
+  actually over, and dropped with the tab in `closeSession`. A re-report of the same failure
+  does **not** lift it: the user stopped this loop by hand and a repeat of the error they
+  stopped it over is not new information.
 
 - **The rung advances at queue time, not send time.** `flushRetryBackoff` calls
   `armed(_, attempt: attempt + 1)` in the same pass that queues the `DeferredPrompt` — before
