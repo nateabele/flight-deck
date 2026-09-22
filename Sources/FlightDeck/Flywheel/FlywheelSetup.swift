@@ -37,21 +37,18 @@ struct FlywheelSetup {
         return steps
     }
 
-    /// Chains onto whatever `am guard install` may have created/relocated in step 1
-    /// rather than clobbering it: appends the `br sync` line to an existing
-    /// `pre-commit` hook (guarding against double-append), or creates a fresh one.
+    /// Installs beads-sync as its own script under `hooks.d/pre-commit/` — the directory
+    /// `am guard install`'s Python chain-runner dispatches every executable in — rather
+    /// than appending shell lines to the `pre-commit` file itself. That file is the
+    /// chain-runner (`#!/usr/bin/env python3 ... sys.exit(first_failure)`); appending shell
+    /// to it is a `SyntaxError` that fails every commit. Never touch `pre-commit`.
     private func installBeadsSyncHook(repo: URL) throws {
-        let hookURL = repo.appendingPathComponent(".git/hooks/pre-commit")
-        let beadsSyncLines = "br sync --flush-only\ngit add -A .beads\n"
+        let hooksDDir = repo.appendingPathComponent(".git/hooks/hooks.d/pre-commit")
+        try FileManager.default.createDirectory(at: hooksDDir, withIntermediateDirectories: true)
 
-        if let existing = try? String(contentsOf: hookURL, encoding: .utf8) {
-            guard !existing.contains("br sync") else { return }
-            let updated = existing.hasSuffix("\n") ? existing + beadsSyncLines : existing + "\n" + beadsSyncLines
-            try updated.write(to: hookURL, atomically: true, encoding: .utf8)
-        } else {
-            let contents = "#!/bin/sh\n" + beadsSyncLines
-            try contents.write(to: hookURL, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookURL.path)
-        }
+        let scriptURL = hooksDDir.appendingPathComponent("60-beads-sync.sh")
+        let contents = "#!/bin/sh\nbr sync --flush-only\ngit add -A .beads\n"
+        try contents.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
     }
 }

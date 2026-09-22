@@ -38,13 +38,33 @@ final class FlywheelProjectProbeTests: XCTestCase {
             try mkdir(dir.appendingPathComponent(".beads"))
             let hooks = dir.appendingPathComponent(".git/hooks")
             try mkdir(hooks)
-            try "run hooks.d/pre-commit/50-agent-mail.py; br sync --flush-only\n"
+            try "run hooks.d/pre-commit/50-agent-mail.py\n"
                 .write(to: hooks.appendingPathComponent("pre-commit"), atomically: true, encoding: .utf8)
+            let hooksD = hooks.appendingPathComponent("hooks.d/pre-commit")
+            try mkdir(hooksD)
+            try "#!/bin/sh\nbr sync --flush-only\ngit add -A .beads\n"
+                .write(to: hooksD.appendingPathComponent("60-beads-sync.sh"), atomically: true, encoding: .utf8)
         }
         let s = FlywheelProjectProbe.status(of: repo)
         XCTAssertTrue(s.guardInstalled)
         XCTAssertTrue(s.beadsSyncHooksInstalled)
         XCTAssertFalse(s.needsSetup) // fully set up
+    }
+
+    func testBeadsSyncHooksDirAbsentIsNotInstalled() throws {
+        let repo = try tempRepo { dir in
+            try mkdir(dir.appendingPathComponent(".beads"))
+            try mkdir(dir.appendingPathComponent(".git/hooks"))
+        }
+        XCTAssertFalse(FlywheelProjectProbe.status(of: repo).beadsSyncHooksInstalled)
+    }
+
+    func testBeadsSyncHooksDirEmptyIsNotInstalled() throws {
+        let repo = try tempRepo { dir in
+            try mkdir(dir.appendingPathComponent(".beads"))
+            try mkdir(dir.appendingPathComponent(".git/hooks/hooks.d/pre-commit"))
+        }
+        XCTAssertFalse(FlywheelProjectProbe.status(of: repo).beadsSyncHooksInstalled)
     }
 
     func testBeadsFileNotDirIsNotBeads() throws {

@@ -24,7 +24,9 @@ enum FlywheelProjectProbe {
 
         let hookContents = contents(of: repo.appendingPathComponent(".git/hooks/pre-commit"), fileManager: fileManager)
         let guardInstalled = hookContents.map { contents in guardMarkers.contains { contents.contains($0) } } ?? false
-        let beadsSyncHooksInstalled = hookContents.map { $0.contains(beadsSyncMarker) } ?? false
+        let beadsSyncHooksInstalled = beadsSyncScriptInstalled(
+            repo.appendingPathComponent(".git/hooks/hooks.d/pre-commit"), fileManager: fileManager
+        )
 
         return FlywheelStatus(
             hasBeads: hasBeads,
@@ -49,5 +51,18 @@ enum FlywheelProjectProbe {
     private static func contents(of url: URL, fileManager: FileManager) -> String? {
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         return try? String(contentsOf: url, encoding: .utf8)
+    }
+
+    /// Beads-sync lives as its own script under `hooks.d/pre-commit/` (dispatched by `am`'s
+    /// Python chain-runner), never appended to `pre-commit` itself — see `FlywheelSetup`.
+    /// Scans the directory for any file containing the marker rather than requiring the
+    /// canonical filename, so a manually-renamed install still counts.
+    private static func beadsSyncScriptInstalled(_ hooksDDir: URL, fileManager: FileManager) -> Bool {
+        guard let entries = try? fileManager.contentsOfDirectory(at: hooksDDir, includingPropertiesForKeys: nil) else {
+            return false
+        }
+        return entries.contains { entry in
+            contents(of: entry, fileManager: fileManager)?.contains(beadsSyncMarker) ?? false
+        }
     }
 }
