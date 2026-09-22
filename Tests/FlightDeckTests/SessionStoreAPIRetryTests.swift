@@ -53,6 +53,14 @@ final class SessionStoreAPIRetryTests: XCTestCase {
         func report(_ error: AgentLaunchError) {}
     }
 
+    /// In-memory stand-in for `sessions.json`, so a restart test can hand `SessionStore` a
+    /// snapshot without touching disk — same shape as `SessionPersistenceTests.FakePersistence`.
+    private final class FakeSessionPersistence: SessionPersisting {
+        var stored: SessionSnapshot?
+        func load() -> SessionSnapshot? { stored }
+        func save(_ snapshot: SessionSnapshot) { stored = snapshot }
+    }
+
     /// Enough of an app-server to create and settle a codex thread with no `codex` process
     /// ever spawned — same shape as `SessionStoreMaintenanceTickTests.ScriptedTransport`.
     private final class ScriptedTransport: CodexTransport {
@@ -185,6 +193,43 @@ final class SessionStoreAPIRetryTests: XCTestCase {
         return Harness(store: store, preferences: preferences, tab: tab, spy: spy, clock: clock)
     }
 
+    /// Builds a store that `restore()`s one claude tab out of a persisted snapshot carrying
+    /// `apiError`, rather than `makeHarness`'s freshly-created tab — the restart path none of
+    /// this file's other fixtures exercise. `store.now` is assigned before `restore()` runs
+    /// (it stamps `promptDeadline`, and any re-arm would stamp `nextRetryAt` too), and the
+    /// plain `SessionStore(provider:persistence:preferences:)` initializer is used rather than
+    /// `convenience init(ghostty:...)` specifically because it does NOT call `restore()` for
+    /// you — see `SessionPersistenceTests`, which relies on the same thing so it can set up
+    /// overrides first and call `restore()` itself.
+    private func makeRestoredHarness(apiError: SessionAPIError?, autoRetry: Bool = true) -> Harness {
+        let tab = UUID()
+        let persistence = FakeSessionPersistence()
+        persistence.stored = SessionSnapshot(
+            sessions: [.init(
+                id: tab, title: "restored", workingDirectory: tmp.path, apiError: apiError
+            )],
+            selectedSessionID: tab,
+            sessionCounter: 1
+        )
+        let preferences = PreferencesStore(persistence: MemoryPreferences())
+        preferences.autoRetriesAPIErrors = autoRetry
+        let store = SessionStore(
+            provider: StubProvider(), persistence: persistence, preferences: preferences
+        )
+        store.transcriptsRootOverride = projectsRoot
+        store.statusRootOverride = projectsRoot
+        store.launchFailureReporter = SilentReporter()
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { $0() }
+        let clock = Clock()
+        store.now = { clock.time }
+        XCTAssertTrue(store.restore(directoryExists: { _ in true }),
+                      "the fixture snapshot must actually restore, or these tests prove nothing")
+        spy.events.removeAll()
+        return Harness(store: store, preferences: preferences, tab: tab, spy: spy, clock: clock)
+    }
+
     /// The nudge text an agent's own recovery asks for.
     ///
     /// Asserting against this rather than against `SessionStore.resumePrompt` is what pins the
@@ -217,6 +262,17 @@ final class SessionStoreAPIRetryTests: XCTestCase {
     /// it; `CodexTurnRecovery` ignores the flag and reads `kind`, so it is not a backdoor.
     private static let codexTransient = SessionAPIError(
         status: 429, kind: "response_too_many_failed_attempts", isTransient: true)
+
+    /// A `SessionAPIError` already mid-ladder, exactly the shape `restore()` reads off disk:
+    /// `retryAttempt`/`nextRetryAt` from whatever rung the previous run last wrote. Its
+    /// `nextRetryAt` is always in the past relative to any harness clock (which starts at
+    /// `Date(timeIntervalSince1970: 1_700_000_000)`) — restore-time persisted schedules always
+    /// are, which is the whole reason they cannot be carried over.
+    private static func midBackoffError(retryAttempt: Int, isTransient: Bool = true) -> SessionAPIError {
+        SessionAPIError(
+            status: 529, kind: "overloaded", isTransient: isTransient,
+            retryAttempt: retryAttempt, nextRetryAt: Date(timeIntervalSince1970: 0))
+    }
 
     /// `nextRetryAt` carries ±10% jitter by design, so it is asserted as a window rather than
     /// a value. The windows of two adjacent rungs never overlap — rung 1 tops out at 33s and
@@ -782,5 +838,107 @@ final class SessionStoreAPIRetryTests: XCTestCase {
         XCTAssertEqual(harness.store.apiErrors[harness.tab]?.nextRetryAt, second,
                        "and its schedule is not re-rolled either")
         XCTAssertTrue(harness.spy.events.isEmpty, "nothing was typed, which is the premise")
+    }
+
+    // MARK: - Restart behaviour
+
+    /// **The reason this feature cannot just carry the persisted schedule forward.** A
+    /// `nextRetryAt` on disk is a timestamp from the previous run, and by the time the app is
+    /// relaunched it is almost always already in the past — so keeping it would fire every
+    /// restored tab's nudge on the very first maintenance tick, all at once.
+    func testARestoredErrorDoesNotInheritItsOldSchedule() {
+        let harness = makeRestoredHarness(apiError: Self.midBackoffError(retryAttempt: 4))
+
+        guard let restored = harness.store.apiErrors[harness.tab] else {
+            return XCTFail("restore must not drop the badge")
+        }
+        XCTAssertNotEqual(restored.nextRetryAt, Date(timeIntervalSince1970: 0),
+                          "the persisted, already-past schedule must never survive a restore")
+        XCTAssertNotEqual(restored.retryAttempt, 4, "nor the persisted rung")
+    }
+
+    /// **The floor, not rung 1.** A relaunch is not evidence the API recovered, and arming a
+    /// whole restored fleet at thirty seconds is a burst of typing into every tab at once —
+    /// exactly the failure mode the stale-schedule test above exists for, arriving by a
+    /// different route if restore armed at rung 1 instead of skipping straight to the floor.
+    /// `SessionStore.retryBackoff.count + 1` is the attempt number `retryDelay` maps to the
+    /// floor (see `testTheLadderRampsThenSaturatesAtTheFloor`), so this asserts the
+    /// relationship rather than the literal attempt number, and cannot drift from it.
+    func testARestoredTransientErrorReArmsAtTheFloor() {
+        let harness = makeRestoredHarness(apiError: Self.midBackoffError(retryAttempt: 1))
+
+        guard let restored = harness.store.apiErrors[harness.tab] else {
+            return XCTFail("a retryable restored error must still come out armed")
+        }
+        XCTAssertEqual(restored.retryAttempt, SessionStore.retryBackoff.count + 1,
+                       "re-armed at the floor rung, never rung 1")
+        assertDue(restored.nextRetryAt, rung: SessionStore.retryBackoffFloor, from: harness.time)
+        XCTAssertEqual(harness.store.retryEpisodeCountForTesting, 1,
+                       "a floor re-arm creates an episode too, at that rung — not just a "
+                       + "`nextRetryAt` value with no memory behind it")
+    }
+
+    /// **The acceptance condition Trap 2 sharpens.** Task 6's `flushRetryBackoff` re-arms ANY
+    /// unarmed retryable error it finds, at rung 1 — that branch exists so toggling the
+    /// preference back on mid-outage resumes the loop. If a restored error reached the first
+    /// tick still unarmed, that same branch would catch it and nudge it thirty seconds after
+    /// launch: the exact launch-time burst this task exists to prevent, arriving by a
+    /// different route than the stale-schedule bug. So the bar is not "not armed at rung 1
+    /// after a tick" — it is "already armed at the floor before the first tick ever runs."
+    func testARestoredErrorIsAlreadyArmedAtTheFloorBeforeTheFirstMaintenanceTick() {
+        let harness = makeRestoredHarness(apiError: Self.midBackoffError(retryAttempt: 1))
+
+        // Already at the floor, with no tick having run yet.
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt,
+                       SessionStore.retryBackoff.count + 1,
+                       "must be armed at the floor immediately on restore, before any tick")
+        let dueBeforeTick = harness.store.apiErrors[harness.tab]?.nextRetryAt
+
+        harness.store.maintenanceTickForTesting()
+
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.retryAttempt,
+                       SessionStore.retryBackoff.count + 1,
+                       "a tick over an already-armed error must not re-arm it at rung 1")
+        XCTAssertEqual(harness.store.apiErrors[harness.tab]?.nextRetryAt, dueBeforeTick,
+                       "and must not re-roll the schedule either")
+    }
+
+    /// A restored failure that was never retryable to begin with must stay that way — arming
+    /// on restore still has to consult the agent's own classifier, not just "was there an
+    /// error." Checked across a tick too, since Trap 2's re-arm branch runs on every one.
+    func testARestoredPermanentErrorDoesNotArm() {
+        let harness = makeRestoredHarness(
+            apiError: Self.midBackoffError(retryAttempt: 1, isTransient: false))
+
+        XCTAssertNotNil(harness.store.apiErrors[harness.tab], "the badge must survive restore")
+        XCTAssertNil(harness.store.apiErrors[harness.tab]?.retryAttempt,
+                     "a permanent failure must never arm, restored or not")
+        XCTAssertNil(harness.store.apiErrors[harness.tab]?.nextRetryAt)
+
+        harness.time += 3600
+        harness.store.maintenanceTickForTesting()
+
+        XCTAssertNil(harness.store.apiErrors[harness.tab]?.retryAttempt,
+                     "still unarmed after a tick — `armed` re-judges it every time, not once")
+        XCTAssertTrue(harness.spy.events.isEmpty, "not one keystroke")
+    }
+
+    /// The preference gate applies at restore too — off is the default, and this feature
+    /// types into a terminal, so a fleet restored with the preference off must come back
+    /// exactly as inert as one that never had a retryable failure at all.
+    func testNoReArmWhenThePreferenceIsOff() {
+        let harness = makeRestoredHarness(
+            apiError: Self.midBackoffError(retryAttempt: 3), autoRetry: false)
+
+        XCTAssertNotNil(harness.store.apiErrors[harness.tab], "the badge is unconditional")
+        XCTAssertNil(harness.store.apiErrors[harness.tab]?.retryAttempt,
+                     "the preference is off; nothing must arm on restore")
+        XCTAssertNil(harness.store.apiErrors[harness.tab]?.nextRetryAt)
+
+        harness.time += 3600
+        harness.store.maintenanceTickForTesting()
+
+        XCTAssertNil(harness.store.apiErrors[harness.tab]?.retryAttempt)
+        XCTAssertTrue(harness.spy.events.isEmpty, "not one keystroke while the preference is off")
     }
 }
