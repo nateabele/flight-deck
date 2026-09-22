@@ -176,7 +176,11 @@ final class CodexSearchCorpusDiscoveryTests: XCTestCase {
         let project = root.appendingPathComponent("proj", isDirectory: true)
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
 
-        XCTAssertTrue(project.path.hasPrefix("/var/"), "fixture depends on a /var temp root")
+        // Skip rather than fail on a host whose `TMPDIR` is not under `/var` — the test's
+        // intent is "private/var normalises against var", not "this machine's temp root is
+        // where macOS puts it", and asserting the latter would hard-fail the suite on a host
+        // this test was never meant to constrain.
+        try XCTSkipUnless(project.path.hasPrefix("/var/"), "fixture does not sit under /var")
         let viaPrivate = "/private" + project.path
 
         try writeRollout(
