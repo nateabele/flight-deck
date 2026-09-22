@@ -1651,14 +1651,29 @@ final class SessionStore: ObservableObject {
         }
         startStatusWatching()
         // Same idiom `SessionStatusWatcher`/`TranscriptWatcher` use to register themselves,
-        // and the same lifecycle point as `startStatusWatching()` above: only the production
-        // convenience init reaches here, so a store built by a test never arms sleep. `add`
-        // replaces rather than duplicates a registration for the same owner, and `sleepController`
-        // itself is the weak owner — held alive by this store's `lazy var` for the run.
+        // and the same lifecycle point as `startStatusWatching()` above. This IS reachable
+        // from a test: `DisplayWakeTests.swift:170,180`, `DisplayDrawableGuardTests.swift:70`
+        // and `SessionPersistenceTests.swift:241` all construct a store through this
+        // initializer directly, so both registrations below arm for them too — verified by
+        // `rg -n "SessionStore\(ghostty" Tests/`, not assumed from this comment's old claim
+        // that only `FlightDeckApp` gets here (it also lives at `FlightDeckApp.swift:207`).
+        // That is harmless for `maintenanceTick`: none of those four tests call `rename`,
+        // `submitPrompt`, or anything else that populates `pendingRenames`/`pendingPrompts`/
+        // `promptQueue`, so a tick firing there flushes only empty dictionaries. Whether it is
+        // equally harmless for `sleepController.tick()` specifically was not re-verified here —
+        // that registration's own behavior is unchanged by this comment fix. `add` replaces
+        // rather than duplicates a registration for the same owner, and `sleepController`
+        // itself is the weak owner — held alive by this store's `lazy var` for the run, and
+        // `WatchClock` holds every owner weakly (`Subscriber.owner`), so a store or controller
+        // deallocated between tests takes its entry with it rather than leaking a stale tick.
         clock.add(sleepController) { [weak self] in self?.sleepController.tick() }
         // The agent-independent half of the tick. `sleepController` registers the same way
-        // one line up; see `maintenanceTick` for why the registry scan cannot be the only
-        // driver.
+        // one line up, including its reachability from those same four tests; see
+        // `maintenanceTick` for why the registry scan cannot be the only driver. Both
+        // `SessionStore` and `WatchClock` are `@MainActor`, so a tick landing here from the
+        // clock and one landing via `applyRegistry`'s `defer` are sequential main-queue calls,
+        // never a race — see `maintenanceTick`'s doc comment for why running twice is safe
+        // anyway.
         clock.add(self) { [weak self] in self?.maintenanceTick() }
         if let previousRun {
             Task { [weak self] in await self?.sweepOrphans(from: previousRun) }
@@ -4175,6 +4190,14 @@ final class SessionStore: ObservableObject {
     /// shared body at once, which is the point: a codex-only fleet has no `applyRegistry`
     /// tick to fall back on, so this is the only way to advance its clock in a test.
     func maintenanceTickForTesting() { maintenanceTick() }
+
+    /// Test seam, mirroring `DisplayWakeTests.testTheRealWakerIsWiredIn`'s job for a
+    /// registration instead of a stored property: proves the `clock.add(self) { ... }` line
+    /// in `convenience init` actually ran. `maintenanceTickForTesting()` above drives
+    /// `maintenanceTick()` directly and so cannot detect that line being deleted — this checks
+    /// registration only, not behavior; `SessionStoreMaintenanceTickTests` already covers
+    /// `maintenanceTick`'s effects using the seam above.
+    var isRegisteredForMaintenanceTickTesting: Bool { clock.isRegistered(self) }
 
     /// Test seam. Production marks come from `applyReadState` and from restore; a test that
     /// only cares about how a mark is *pruned* should not have to script an edge to create it.
