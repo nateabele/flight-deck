@@ -5445,8 +5445,9 @@ final class SessionStore: ObservableObject {
     /// each step is shaped the way it is live with it in `ClaudeTextChannel`.
     ///
     /// `stillWanted` is re-checked after the first settle delay, because the request can be
-    /// replaced or cancelled while the agent repaints. `onSent` runs once the text has been
-    /// submitted, and is where the caller retires its pending entry.
+    /// replaced or cancelled while the agent repaints. `onSent` runs once the text has really
+    /// been submitted — and only then — and is where the caller retires its pending entry. A
+    /// drive that unwinds instead never reaches it, which is deliberate; see the wrapper below.
     @discardableResult
     private func inject(
         _ text: String,
@@ -5457,13 +5458,13 @@ final class SessionStore: ObservableObject {
         guard let gate = injectionGate(id) else { return false }
 
         // Marked before the channel is asked, and cleared again if it refuses: released in the
-        // wrapped `onSent` below, not tied to any one `settle` call — `AgentTextChannel.submit`
-        // now allows `settle` to fire more than once per drive (codex's Return needs a hop of
-        // its own, separate from its text; see `CodexTextChannel.submit`), so a mark released
-        // inside settle's own defer, as a single-settle contract once allowed, would reopen the
-        // tab mid-drive, between that text and its Return. `onSent` is `submit`'s one
-        // guaranteed-once signal instead, exactly as `onFinished` is `submitRename`'s below —
-        // this is that same pattern, not a new one.
+        // wrapped `onFinished` below, not tied to any one `settle` call —
+        // `AgentTextChannel.submit` now allows `settle` to fire more than once per drive
+        // (codex's Return needs a hop of its own, separate from its text; see
+        // `CodexTextChannel.submit`), so a mark released inside settle's own defer, as a
+        // single-settle contract once allowed, would reopen the tab mid-drive, between that
+        // text and its Return. `onFinished` is `submit`'s one guaranteed-once signal instead,
+        // exactly as it is `submitRename`'s below — this is that same pattern, not a new one.
         injecting.insert(id)
         let started = gate.channel.submit(
             text, into: gate.injector,
@@ -5477,9 +5478,19 @@ final class SessionStore: ObservableObject {
                 self.injectionSettle(work)
             },
             stillWanted: stillWanted,
-            onSent: { [weak self] in
+            onFinished: { [weak self] sent in
+                // **Two jobs, and only one of them is unconditional.** The mark comes off on
+                // every outcome: it exists to keep a second driver out of a half-typed box,
+                // and a drive that unwound is not typing into anything — a release that
+                // depended on text having gone out left the tab refusing every later rename
+                // and phone prompt for the life of the process, which is the defect this
+                // split fixes.
                 self?.injecting.remove(id)
-                onSent()
+                // Retiring the caller's pending entry is NOT unconditional, and collapsing
+                // the two would trade that wedged tab for a lost rename: `stillWanted`
+                // reading false means `pendingRenames[id]` already holds a NEWER name, and
+                // `onSent` is exactly the closure that clears it.
+                if sent { onSent() }
             }
         )
         if !started { injecting.remove(id) }

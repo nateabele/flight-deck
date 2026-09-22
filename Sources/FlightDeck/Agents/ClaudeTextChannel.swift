@@ -154,7 +154,7 @@ struct ClaudeTextChannel: AgentTextChannel {
         into injector: TextInjecting,
         settle: @escaping (@escaping () -> Void) -> Void,
         stillWanted: @escaping @MainActor () -> Bool,
-        onSent: @escaping @MainActor () -> Void
+        onFinished: @escaping @MainActor (Bool) -> Void
     ) -> Bool {
         guard let viewport = injector.readViewport(),
               let bar = InputBar.read(fromViewport: viewport),
@@ -188,9 +188,17 @@ struct ClaudeTextChannel: AgentTextChannel {
                 // a placeholder this yanks whatever is in Claude's kill-ring — usually nothing,
                 // and harmless since nothing was submitted from it.
                 if killedADraft { injector.sendYank() }
-                onSent()
-            } else if killedADraft {
-                injector.sendYank()
+                onFinished(true)
+            } else {
+                if killedADraft { injector.sendYank() }
+                // **Reported, not merely returned from.** This method has already committed
+                // to `true`, so `SessionStore.inject` has marked the tab mid-injection and is
+                // waiting here to release it. Falling off the end of this branch — which is
+                // what this used to do — left that mark set with no path left to clear it,
+                // and the tab then refused every later rename and phone prompt for the life
+                // of the process. `false` because nothing was submitted, which is also what
+                // stops the caller retiring a pending entry that now holds a newer request.
+                onFinished(false)
             }
         }
         return true

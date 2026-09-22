@@ -249,6 +249,59 @@ final class AgentTextChannelTests: XCTestCase {
         XCTAssertNil(store.pendingPrompts[id], "typed, so retired")
     }
 
+    // MARK: - submit: onFinished fires exactly once, on every path
+
+    /// **Claude's half of the leak.** `submit` commits to `true` before it kills anything, so
+    /// `SessionStore.inject` has already marked the tab mid-injection by the time this settle
+    /// runs; the superseded branch used to yank the draft back and then simply fall off the
+    /// end of the closure. No completion meant no mark release and no remaining path to one,
+    /// so that tab refused every later rename and phone prompt for the life of the process.
+    ///
+    /// Asserted at the channel rather than through the store because it is the CHANNEL that
+    /// owes the guarantee — `AgentTextChannel.submit`'s doc comment has predicted this exact
+    /// failure in words since the protocol was written, and the store cannot make a channel
+    /// that never calls back keep its promise.
+    ///
+    /// `false`, not `true`: the store retires its caller's pending entry only on `true`, and a
+    /// superseded rename's entry already holds the NEWER name. Its twin is
+    /// `CodexTextChannelTests.testASupersededRequestFinishesFalseExactlyOnceAndPutsTheDraftBack`.
+    func testClaudesSupersededPathFinishesFalseExactlyOnceAndKeepsTheDraft() {
+        let spy = SpyInjector()
+        spy.typeDraft(["half-written thought"])
+        var outcomes: [Bool] = []
+
+        XCTAssertTrue(
+            ClaudeTextChannel().submit(
+                "/rename named", into: spy, settle: { $0() },
+                stillWanted: { false }, onFinished: { outcomes.append($0) }
+            )
+        )
+
+        XCTAssertEqual(outcomes, [false],
+                       "exactly once, and false -- the mark is released on every path, but "
+                           + "only a real submission retires the caller's pending entry")
+        XCTAssertEqual(spy.events, [.killLine, .yank],
+                       "the superseded text is never typed, and the probe's kill is undone")
+        XCTAssertEqual(spy.buffer, "half-written thought", "the draft survived the probe")
+    }
+
+    /// The twin that proves the fixture above could have typed, and that `true` still means
+    /// what every caller reads it as.
+    func testClaudesSubmittedPathStillFinishesTrueExactlyOnce() {
+        let spy = SpyInjector()
+        var outcomes: [Bool] = []
+
+        XCTAssertTrue(
+            ClaudeTextChannel().submit(
+                "/rename named", into: spy, settle: { $0() },
+                stillWanted: { true }, onFinished: { outcomes.append($0) }
+            )
+        )
+
+        XCTAssertEqual(outcomes, [true])
+        XCTAssertEqual(spy.events, [.killLine, .text("/rename named"), .ret])
+    }
+
     // MARK: - inject: the mark survives codex's two-hop submit
 
     /// **The regression `inject`'s mark-release rewrite guards against.** `CodexTextChannel
@@ -290,7 +343,7 @@ final class AgentTextChannelTests: XCTestCase {
         XCTAssertEqual(spy.events, [.killLine, .text("first")],
                        "not one keystroke of the second prompt while the first is still in flight")
 
-        pending.removeFirst()()   // hop 2: Return, then onSent releases the mark
+        pending.removeFirst()()   // hop 2: Return, then onFinished(true) releases the mark
         XCTAssertEqual(spy.events, [.killLine, .text("first"), .ret])
 
         // The queued second prompt gets its turn on the next tick, now that the mark is free
