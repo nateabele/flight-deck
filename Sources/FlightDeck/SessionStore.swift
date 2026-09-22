@@ -4733,17 +4733,22 @@ final class SessionStore: ObservableObject {
 
     /// One tab's turn at the input box.
     ///
-    /// **The head only, never the whole queue, and nothing else enforces it any more.** `inject`
-    /// submits with a Return, so a second entry in the same pass would be typed into a bar that
-    /// has just started a turn. The screen right after a submit — the echo, `busy-echo-only` —
-    /// used to be refused by `hasComposerBox`, which gave the legacy path an accidental backstop
-    /// behind this rule. Both halves of that are gone: a tab reporting `.live` is gated on the
-    /// dialog veto, which an echo-only screen trips neither rule of, and `hasComposerBox` now
-    /// **accepts** that screen too, because it is a real composer and refusing it lost renames
-    /// (see `ClaudeComposerDetectorTests.testTheEchoOnlyScreenRightAfterSubmittingIsAComposer`).
-    /// So the head-only rule is the only thing standing between two queued prompts and one pass.
-    /// One per pass, and the next pass is a registry tick away — by which point the screen has
-    /// moved on and the second prompt is typed mid-turn, which claude queues, which is the point.
+    /// **The head only, never the whole queue — this loop's own rule, not the only thing left
+    /// enforcing it.** `inject` submits with a Return, so a second entry in the same pass would
+    /// be typed into a bar that has just started a turn. The screen right after a submit — the
+    /// echo, `busy-echo-only` — used to be refused by `hasComposerBox`, which gave the legacy
+    /// path an accidental backstop behind this rule. Both halves of that are gone: a tab
+    /// reporting `.live` is gated on the dialog veto, which an echo-only screen trips neither
+    /// rule of, and `hasComposerBox` now **accepts** that screen too, because it is a real
+    /// composer and refusing it lost renames (see
+    /// `ClaudeComposerDetectorTests.testTheEchoOnlyScreenRightAfterSubmittingIsAComposer`).
+    /// `injectionGate`'s own `guard !injecting.contains(id)` is a second, independent guard
+    /// against exactly the case this rule protects: the mark set before `inject` calls out is
+    /// held across the settle, so a second `inject` in the same pass is refused there too. That
+    /// makes it a backstop, not a design assumption this loop is allowed to lean on — the
+    /// head-only rule is what this loop actually relies on. One per pass, and the next pass is
+    /// a registry tick away — by which point the screen has moved on and the second prompt is
+    /// typed mid-turn, which claude queues, which is the point.
     private func flushPromptQueue(_ id: UUID) {
         // Expiry first, and it runs whether or not this tab can be typed into: a queue that
         // is never drained because its tab lost its surface must still empty itself.
@@ -5675,11 +5680,11 @@ final class SessionStore: ObservableObject {
     /// Types a rename through an agent's two-stage modal, or defers. Codex's leg; claude
     /// declares no `renameTyping` and never arrives here. See `AgentRenameTyping`.
     ///
-    /// **The single difference from `inject` that matters is WHEN the `injecting` mark is
-    /// released, and it is the entire reason this method exists.** `inject` clears the mark
-    /// inside its settle wrapper, which is exactly right for a channel contracted to settle
-    /// once. `submitRename` settles three times on its success path — once per repaint it
-    /// must wait through — so clearing there would drop the mark while the modal was still
+    /// **The single difference from `inject` that matters is not WHEN the `injecting` mark is
+    /// released — both release it in `onFinished`, never inside a `settle` closure — but how
+    /// much has to happen before that fires.** `submitRename` nests five `settle` calls on its
+    /// success path, one per repaint across its two submissions, so the mark has to survive
+    /// every one of them: releasing it any earlier would drop it while the modal was still
     /// open and unnamed, and a rename arriving in that window would fire a second Ctrl+U into
     /// a half-driven modal. That is the race `injecting`'s own doc comment exists to close,
     /// reopened at a worse moment. So the mark is held across BOTH stages and released in

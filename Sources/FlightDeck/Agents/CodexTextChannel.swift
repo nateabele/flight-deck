@@ -271,10 +271,11 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
     ///
     /// Two submissions, two repaints to wait through, plus one more `settle` hop per
     /// submission for the Return alone — see `AgentRenameTyping`'s doc comment for why
-    /// multiple hops are legal here and are not for `submit`, and `submit`'s own doc comment
-    /// for why the Return needs a hop to itself at all: codex paste-detects a Return that
-    /// arrives in the same burst as the text before it and inserts a newline instead of
-    /// submitting, and that failure does not care which of these two submissions it lands in.
+    /// multiple hops are legal here, same as they now are for `submit` above, and `submit`'s
+    /// own doc comment for why the Return needs a hop to itself at all: codex paste-detects a
+    /// Return that arrives in the same burst as the text before it and inserts a newline
+    /// instead of submitting, and that failure does not care which of these two submissions
+    /// it lands in.
     /// `onFinished` is what carries the one-shot guarantee instead, firing exactly once
     /// whichever of the three ways this ends: the name committed, the modal never came up, or
     /// the request was cancelled while codex repainted.

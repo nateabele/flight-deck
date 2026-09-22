@@ -74,10 +74,10 @@ final class ClaudeComposerDetectorTests: XCTestCase {
     /// **This assertion used to read `XCTAssertFalse`, and its rationale was wrong about its own
     /// fixture.** It claimed the box was "closed by a blank line rather than a rule — the run
     /// scrolls straight into the transcript above it, with no footer rule beneath". Read the
-    /// capture: row 5 is the top rule, row 6 the `❯` line holding the echoed prompt, row 7 is
-    /// blank, **row 8 is the footer rule**, and rows 9-11 are the same three rows of status
-    /// chrome `idle-empty-box` carries. The two captures are structurally identical apart from
-    /// the box being two rows tall here, its second row empty because the echo occupies the
+    /// capture: index 5 is the top rule, index 6 the `❯` line holding the echoed prompt, index 7
+    /// is blank, **index 8 is the footer rule**, and indices 9-11 are the same three rows of
+    /// status chrome `idle-empty-box` carries. The two captures are structurally identical apart
+    /// from the box being two rows tall here, its second row empty because the echo occupies the
     /// first. Retracted rather than quietly deleted, because the claim is what kept the screen
     /// refused for three releases.
     ///
@@ -89,6 +89,8 @@ final class ClaudeComposerDetectorTests: XCTestCase {
     func testTheEchoOnlyScreenRightAfterSubmittingIsAComposer() throws {
         XCTAssertTrue(ClaudeTextChannel.isComposerBox(try captured("busy-echo-only.captured")))
     }
+
+    // MARK: - Dialogs: draw one rule at most, never both
 
     /// **The corpus assertion that stops the blank-row admission from widening into a hole.**
     /// Admitting a blank row inside the box is safe only as long as no dialog reaches the loop
@@ -106,8 +108,6 @@ final class ClaudeComposerDetectorTests: XCTestCase {
             )
         }
     }
-
-    // MARK: - Dialogs: draw one rule at most, never both
 
     func testAPermissionPromptIsNotAComposer() throws {
         XCTAssertFalse(ClaudeTextChannel.isComposerBox(try captured("permission-bash.captured")))

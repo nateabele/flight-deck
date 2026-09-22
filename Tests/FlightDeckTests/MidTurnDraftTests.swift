@@ -79,9 +79,14 @@ final class MidTurnDraftTests: XCTestCase {
         }
     }
 
-    /// The one mid-turn window the gate really does refuse: between submitting and the first
-    /// output, the box holds the echo. It is brief, and `flushPromptQueue` retries on every
-    /// registry tick, so a prompt caught by it waits a tick rather than a turn.
+    /// The one mid-turn window `isComposerEmpty` really does refuse: between submitting and the
+    /// first output, the box holds the echo, so `content.isEmpty` reads false. **Scoped to that
+    /// one gate, deliberately** — `isComposerBox` no longer refuses this window; it now admits
+    /// `busy-echo-only` as a real composer (see
+    /// `ClaudeComposerDetectorTests.testTheEchoOnlyScreenRightAfterSubmittingIsAComposer`), so
+    /// this sentence must not be read against that predicate. It is brief regardless, and
+    /// `flushPromptQueue` retries on every registry tick, so a prompt caught by it waits a tick
+    /// rather than a turn.
     func testOnlyTheWindowBeforeOutputReadsAsBusy() throws {
         let echo = try XCTUnwrap(InputBar.read(fromViewport: screen("busy-echo-only")))
         XCTAssertFalse(echo.content.isEmpty, "refused, briefly")

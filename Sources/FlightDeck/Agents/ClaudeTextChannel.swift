@@ -54,9 +54,9 @@ struct ClaudeTextChannel: AgentTextChannel {
     /// Verified against every fixture in `Fixtures/Claude/`: idle, mid-turn streaming, the
     /// just-submitted echo, and the rotating placeholder hint all carry both rules — the echo's
     /// box simply holds a blank row between them, see below; every permission prompt and
-    /// `AskUserQuestion` dialog — including the
-    /// tricky case where the cursor has been arrowed down to the list's last, unruled row —
-    /// carries at most one, and a bare shell's own `❯`-drawing prompt carries neither.
+    /// `AskUserQuestion` dialog — including the tricky case where the cursor has been arrowed
+    /// down to the list's last, unruled row — carries at most one, and a bare shell's own
+    /// `❯`-drawing prompt carries neither.
     ///
     /// **Both rules, not one.** A dialog's own list is itself closed by a rule (`InputBar.read`
     /// relies on exactly that to end a reading), so checking only "closed by a rule" would pass
@@ -68,8 +68,9 @@ struct ClaudeTextChannel: AgentTextChannel {
     /// **A blank row inside the box does not close it.** The search for the closing rule skips
     /// blank rows rather than bailing on the first one, because claude's box grows a row the
     /// instant a prompt is submitted: the echoed prompt sits on the `❯` row and the row beneath
-    /// it is empty, then the footer rule. `busy-echo-only.captured` is that screen — row 5 rule,
-    /// row 6 echo, row 7 blank, row 8 rule, then the same status chrome `idle-empty-box` carries.
+    /// it is empty, then the footer rule. `busy-echo-only.captured` is that screen — index 5
+    /// rule, index 6 echo, index 7 blank, index 8 rule, then the same status chrome
+    /// `idle-empty-box` carries.
     /// Bailing on the blank row refused it, which lost a sidebar rename every time one landed
     /// while a submit was in flight, and put this gate at odds with `InputBar.read` (which reads
     /// the same capture as the one row `submit` requires) and with `isKnownNonComposer` (whose
