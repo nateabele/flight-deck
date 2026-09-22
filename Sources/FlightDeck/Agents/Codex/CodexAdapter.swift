@@ -2,7 +2,7 @@ import FleetKit
 import Foundation
 
 /// One entry from codex's `thread/list` — trimmed to exactly what `threads(inDirectory:)`'s
-/// caller (Task 4's reconciler) needs to tell whether a tab is still driving the thread its
+/// caller (`CodexPinReconciler`) needs to tell whether a tab is still driving the thread its
 /// session record is pinned to. Do not widen this "while you're here"; everything else in a
 /// `thread/list` entry (status, preview, gitInfo, turns, …) is deliberately left unmapped.
 struct CodexThreadSummary {
@@ -12,7 +12,7 @@ struct CodexThreadSummary {
     let updatedAt: Int
 }
 
-/// The cap `threads(inDirectory:)` passes as `thread/list`'s `limit`. Task 4's reconciler
+/// The cap `threads(inDirectory:)` passes as `thread/list`'s `limit`. `CodexPinReconciler`
 /// only ever looks at the newest few threads, so there is no reason to ask codex for more.
 private let codexThreadListLimit = 10
 
@@ -376,7 +376,7 @@ struct CodexAdapter: AgentAdapter {
     }
 
     /// Asks codex which threads have recently been active in `directory` — the producer half
-    /// of Task 4's reconciler, which re-pins a tab whose session record points at a thread
+    /// of `CodexPinReconciler`, which re-pins a tab whose session record points at a thread
     /// the user has since abandoned (typed `codex` fresh at the tab's prompt rather than
     /// letting Flight Deck resume the one it had pinned).
     ///
@@ -385,7 +385,7 @@ struct CodexAdapter: AgentAdapter {
     /// real cwd came back `data: []` with no error at all. A `/private` prefix, a resolved
     /// symlink, a trailing slash — any normalisation difference between what is passed here
     /// and what codex recorded as the thread's own cwd — is indistinguishable from "no
-    /// threads here". This is the failure mode most likely to make Task 4's reconciler look
+    /// threads here". This is the failure mode most likely to make `CodexPinReconciler` look
     /// like it simply does not work.
     ///
     /// `sourceKinds` deliberately excludes `exec`: the large majority of rollouts on a typical
@@ -396,8 +396,8 @@ struct CodexAdapter: AgentAdapter {
     ///
     /// Bounded by `readTimeout`, same shape and same reason as `read(_:)` above: `CodexRPC`
     /// has no deadline of its own, and an app-server that answers `initialize` and then goes
-    /// quiet would otherwise wedge whatever calls this — in Task 4, a clock tick on the main
-    /// actor.
+    /// quiet would otherwise wedge whatever calls this — for `CodexPinReconciler`, a clock
+    /// tick on the main actor.
     func threads(inDirectory directory: String) async throws -> [CodexThreadSummary] {
         let rpc = self.rpc
         let seconds = readTimeout

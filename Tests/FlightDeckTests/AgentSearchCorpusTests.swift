@@ -14,7 +14,9 @@ final class AgentSearchCorpusTests: XCTestCase {
         }
     }
 
-    /// Placeholder ids are a value type, so this pins the shape the rest of the plan builds on.
+    /// `TranscriptRef` is a value type every discovery/ranking/activation step downstream reads
+    /// fields off of, so this pins its shape and field values directly rather than leaving it to
+    /// whichever test first happens to construct one.
     func testTranscriptRefCarriesAttributionAndProvenance() {
         let ref = TranscriptRef(
             url: URL(fileURLWithPath: "/tmp/rollout.jsonl"),

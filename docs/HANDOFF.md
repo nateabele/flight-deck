@@ -4,6 +4,15 @@
 
 Start here if you're picking up Flight Deck fresh. This is the map; the linked docs have the detail.
 
+> **✅ Multi-agent ⌘K search (2026-09-21) — merged.**
+> ⌘K now searches every agent's history, not just claude's. A codex thread is discovered,
+> indexed and resumed the same way a claude conversation is, through one capability object —
+> `AgentSearchCorpus` — reached beside `textChannel`, `dialogDriver` and `openPromptReader`.
+> Discovery is per-account now too, which also fixed ⌘K being blind to a second claude login.
+> `codex exec` runs are indexed but ranked below real conversations, and Return resumes a
+> result into its own agent and the working directory the walk recorded.
+> - **Spec:** [superpowers/specs/2026-09-21-multi-agent-search-design.md](superpowers/specs/2026-09-21-multi-agent-search-design.md) · **Plan:** [superpowers/plans/2026-09-21-multi-agent-search.md](superpowers/plans/2026-09-21-multi-agent-search.md) · **Details:** [ARCHITECTURE.md](ARCHITECTURE.md), "Search" section.
+
 > **✅ ⌘K Search (2026-08-27) — merged.**
 > `⌘K` opens a fleet-wide search overlay: type a session or project name to jump straight to
 > it, or a phrase you remember saying to search full transcript history — ranked by match

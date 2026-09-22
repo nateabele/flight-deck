@@ -141,7 +141,9 @@ public struct NameCandidate: Equatable {
     /// Which agent this candidate belongs to, as `AgentID.rawValue`. See `TranscriptHit.agent`
     /// for why this is a raw string rather than an `AgentID`.
     public let agent: String
-    /// See `TranscriptHit.transcriptPath`. Carried here for the same later-task resume path.
+    /// See `TranscriptHit.transcriptPath` — the same reasoning applies here: a codex result
+    /// found by name match carries no `TranscriptHit` at all, so without a real path here,
+    /// resuming it opens a blank conversation instead of the one that was searched for.
     public let transcriptPath: String
 
     public init(
