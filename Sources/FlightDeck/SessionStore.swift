@@ -3738,11 +3738,10 @@ final class SessionStore: ObservableObject {
     /// the choice rather than repair anything — and would usually run into the writer lock of
     /// the TUI that made that thread newest.
     ///
-    /// Two of those callers actually arrive with a codex tab: ⌘⇧T and the phone's reopen. The
-    /// third, ⌘K's `openConversation`, is claude-only as things stand — it resolves a claude
-    /// login and builds a `Session` that defaults to `.claude`, and `deferred` below is
-    /// `negotiatesIdentity`, which claude answers false — so it has never once settled a codex
-    /// tab. Its `false` is a right answer held ready, not one being exercised.
+    /// All three callers can now arrive with a codex tab: ⌘⇧T, the phone's reopen, and ⌘K's
+    /// `openConversation`, which resolves whichever agent the searched result names and builds
+    /// a `Session` for it — so `deferred` below, `negotiatesIdentity`, can answer true from any
+    /// of the three.
     ///
     /// Returns true when it is a codex tab whose resume text still has to be settled.
     @discardableResult
@@ -3824,43 +3823,6 @@ final class SessionStore: ObservableObject {
         )
     }
 
-    /// The literal directory a past conversation should resume into: the project itself, or
-    /// one of its worktrees, whichever one's *encoded* `~/.claude/projects` directory
-    /// actually holds `<conversationID>.jsonl`.
-    ///
-    /// `SearchResult.projectPath` only ever names the sidebar project — nothing in a search
-    /// result identifies which literal worktree a conversation ran in, because
-    /// `SearchCorpus`'s encoding is one-way (see its doc comment) — so this re-derives the
-    /// answer independently rather than trusting anything upstream. Falls back to the
-    /// project path when no candidate's transcript exists: a conversation whose worktree was
-    /// deleted since it last ran resumes at the project root rather than not resuming at all,
-    /// same fallback shape as `resumeExisting`'s own "directory gone" rule below.
-    /// `nonisolated`, not merely `private`: it is called from `openConversation`'s default
-    /// argument, which is evaluated at the call site and is not itself actor-isolated even
-    /// though `SessionStore` is — and the function touches no actor state anyway, only its
-    /// own injected closures.
-    ///
-    /// Internal rather than `private` so `OpenConversationTests` can drive the resolution
-    /// algorithm directly against a real temp-directory fixture, independent of whether
-    /// `openConversation`'s default argument still calls it at all — that second question is
-    /// what the wiring test asserts instead.
-    nonisolated static func resolvedTranscriptDirectory(
-        projectPath: String,
-        conversationID: UUID,
-        listing: (String) -> [String] = SearchCorpus.defaultListing,
-        projectsRoot: URL = ClaudeSession.defaultProjectsRoot,
-        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
-    ) -> String {
-        let candidates = SearchCorpus.candidateWorkingDirectories(
-            forProjectAt: projectPath, listing: listing
-        )
-        return candidates.first {
-            exists(ClaudeSession.transcriptURL(
-                sessionID: conversationID, workingDirectory: $0, projectsRoot: projectsRoot
-            ).path)
-        } ?? projectPath
-    }
-
     /// ⌘K activation. Selects an open tab, or rebuilds one onto a past conversation.
     ///
     /// The project is added back when it has left the sidebar, and un-collapsed either way:
@@ -3894,14 +3856,14 @@ final class SessionStore: ObservableObject {
     func openConversation(
         _ activation: SearchActivation.Activation,
         directoryExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
-        resolveTranscriptDirectory: (String, UUID) -> String = {
-            SessionStore.resolvedTranscriptDirectory(projectPath: $0, conversationID: $1)
-        },
         selecting: Bool = true
     ) -> UUID? {
         let projectPath: String
         let conversationID: String
         let title: String
+        let agent: AgentID
+        let workingDirectory: String
+        let transcriptPath: String
 
         switch activation {
         case .select(let id):
@@ -3912,10 +3874,20 @@ final class SessionStore: ObservableObject {
             guard locate(id) != nil else { return nil }
             select(id, selecting: selecting)
             return id
-        case .resume(let conversation, let project, let resultTitle, _):
+        case .resume(
+            let conversation, let project, let resultTitle, let resultAgent,
+            let resultWorkingDirectory, let resultTranscriptPath
+        ):
             projectPath = project; conversationID = conversation; title = resultTitle
-        case .addProjectThenResume(let project, let conversation, let resultTitle, _):
+            agent = resultAgent; workingDirectory = resultWorkingDirectory
+            transcriptPath = resultTranscriptPath
+        case .addProjectThenResume(
+            let project, let conversation, let resultTitle, let resultAgent,
+            let resultWorkingDirectory, let resultTranscriptPath
+        ):
             projectPath = project; conversationID = conversation; title = resultTitle
+            agent = resultAgent; workingDirectory = resultWorkingDirectory
+            transcriptPath = resultTranscriptPath
         }
 
         let url = URL(fileURLWithPath: projectPath, isDirectory: true)
@@ -3957,7 +3929,7 @@ final class SessionStore: ObservableObject {
         // built-in home" forever, which is correct only until this project's login is set or
         // changes — the silent wrong-login substitution `newSession`'s own comment refuses.
         let account: AgentAccount?
-        switch launchAccount(for: .claude, project: projectPath) {
+        switch launchAccount(for: agent, project: projectPath) {
         case .success(let resolved): account = resolved
         case .failure(let error):
             launchFailureReporter.report(error)
@@ -3970,12 +3942,18 @@ final class SessionStore: ObservableObject {
             // called that name rather than a raw UUID nobody could self-heal: `TailReader`
             // starts at end-of-file, so the transcript's own `custom-title` record already
             // written is never re-read.
-            title: ClaudeSession.sanitizedName(title) ?? ClaudeSession.sanitizedName(conversationID)
-                ?? "session",
+            title: agent.sanitizedTitle(title) ?? agent.sanitizedTitle(conversationID) ?? "session",
             workingDirectory: projectPath,
-            transcriptDirectory: resolveTranscriptDirectory(projectPath, pinned),
+            // Empty means the corpus walk never recorded one — for a name match, which
+            // carries no `TranscriptHit` at all, or an index built before that field
+            // existed. Falling back to the project root mirrors `resumeExisting`'s own
+            // "directory gone" rule just below, for the same reason: a tab has to open
+            // *somewhere*, and the project is always a valid somewhere.
+            transcriptDirectory: workingDirectory.isEmpty ? projectPath : workingDirectory,
             pinnedConversationID: pinned,
-            accountID: account?.id
+            agent: agent,
+            accountID: account?.id,
+            transcriptPath: transcriptPath.isEmpty ? nil : transcriptPath
         )
         let deferred = resumeExisting(
             session, inProjectAt: projectPath, at: nil, directoryExists: directoryExists
@@ -3989,13 +3967,13 @@ final class SessionStore: ObservableObject {
 
         if deferred {
             codexRestoreTask = Task { [weak self] in
-                // No reconcile pass, for `settleReopen`'s reason at its sharpest: this pin
-                // would be the conversation the user searched for by name and selected, so a
-                // pass that followed the directory's newest thread would answer a different
-                // question than the one they asked. Conditional rather than live: search
-                // builds claude sessions only, so `deferred` is never true here today — the
-                // argument is spelled out anyway, because a default would decide this the
-                // wrong way round on the first day search learns about codex.
+                // No reconcile pass, for `settleReopen`'s reason at its sharpest: this pin is
+                // the conversation the user searched for by name and selected, so a pass that
+                // followed the directory's newest thread would answer a different question
+                // than the one they asked. `pinsPredateThisRun` is spelled out rather than
+                // defaulted for the same reason — a codex result resumes through here now, so
+                // `deferred` really can be true, and a default would decide this the wrong way
+                // round the first time it was.
                 await self?.resumeRestoredCodex([session.id], pinsPredateThisRun: false)
             }
         }

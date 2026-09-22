@@ -98,7 +98,9 @@ public enum SearchRanker {
                     snippet: hit.snippet,
                     conversationID: hit.conversationID,
                     isContinuation: position > 0,
-                    offset: hit.offset
+                    offset: hit.offset,
+                    agent: hit.agent, workingDirectory: hit.workingDirectory,
+                    transcriptPath: hit.transcriptPath
                 ))
             }
         }
@@ -141,7 +143,8 @@ private extension SearchResult {
             id: candidate.id, kind: candidate.kind, title: candidate.name,
             projectName: candidate.projectName, projectPath: candidate.projectPath,
             tier: tier, recency: candidate.lastActivity, highlightedRanges: ranges,
-            snippet: nil, conversationID: candidate.conversationID
+            snippet: nil, conversationID: candidate.conversationID,
+            agent: candidate.agent, transcriptPath: candidate.transcriptPath
         )
     }
 

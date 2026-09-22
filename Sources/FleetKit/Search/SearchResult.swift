@@ -169,12 +169,23 @@ public struct SearchResult: Identifiable, Equatable {
     /// carried through so an activator can ask `TimelineAnchor.around(offset)` for it. `nil`
     /// for a name match, which names no line in particular.
     public let offset: Int?
+    /// Which agent wrote this conversation, as `AgentID.rawValue` — see `TranscriptHit.agent`.
+    /// Defaulted to `"claude"` so every construction site that predates this field keeps
+    /// compiling; `SearchRanker` fills in the real value from the `TranscriptHit`/
+    /// `NameCandidate` it built this row from.
+    public let agent: String
+    /// See `TranscriptHit.workingDirectory`. Empty means unknown; the activator, not this
+    /// type, decides what an unknown working directory falls back to.
+    public let workingDirectory: String
+    /// See `TranscriptHit.transcriptPath`. Empty means unknown, for the same reason.
+    public let transcriptPath: String
 
     public init(
         id: String, kind: SearchResultKind, title: String, projectName: String,
         projectPath: String, tier: MatchTier, recency: Date,
         highlightedRanges: [Range<String.Index>], snippet: String?, conversationID: String?,
-        isContinuation: Bool = false, offset: Int? = nil
+        isContinuation: Bool = false, offset: Int? = nil,
+        agent: String = "claude", workingDirectory: String = "", transcriptPath: String = ""
     ) {
         self.id = id
         self.kind = kind
@@ -188,5 +199,8 @@ public struct SearchResult: Identifiable, Equatable {
         self.conversationID = conversationID
         self.isContinuation = isContinuation
         self.offset = offset
+        self.agent = agent
+        self.workingDirectory = workingDirectory
+        self.transcriptPath = transcriptPath
     }
 }

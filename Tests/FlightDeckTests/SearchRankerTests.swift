@@ -31,12 +31,14 @@ final class SearchRankerTests: XCTestCase {
 
     private func hit(
         _ conversation: String, snippet: String, activity: TimeInterval, rowID: Int64 = 1,
-        provenance: String? = nil
+        provenance: String? = nil, agent: String = "claude", workingDirectory: String = "",
+        transcriptPath: String = ""
     ) -> TranscriptHit {
         TranscriptHit(
             rowID: rowID, conversationID: conversation, projectPath: "/w/flight-deck",
             conversationName: conversation, snippet: snippet, timestamp: ago(activity), offset: 0,
-            provenance: provenance
+            agent: agent, provenance: provenance, workingDirectory: workingDirectory,
+            transcriptPath: transcriptPath
         )
     }
 
@@ -240,6 +242,34 @@ final class SearchRankerTests: XCTestCase {
         )
 
         XCTAssertEqual(first.map(\.title), second.map(\.title))
+    }
+
+    /// The pipeline this task depends on: `TranscriptHit`'s agent, working directory and
+    /// transcript path must survive the trip into the `SearchResult` an activator actually
+    /// reads. `rank()` used to build that row from the hit's other fields and silently drop
+    /// these three — an activator reading `result.agent` saw only the struct's default.
+    func testACodexHitCarriesItsAgentAndPathsThroughRank() {
+        let results = SearchRanker.rank(
+            names: [],
+            query: "rename",
+            transcripts: [
+                hit(
+                    "worktree-session", snippet: "renamed the field", activity: 1,
+                    agent: "codex",
+                    workingDirectory: "/w/flight-deck/.claude/worktrees/rename",
+                    transcriptPath: "/Users/nate/.codex/sessions/2026/09/21/rollout-abc.jsonl"
+                )
+            ]
+        )
+
+        XCTAssertEqual(results.map(\.agent), ["codex"])
+        XCTAssertEqual(
+            results.map(\.workingDirectory), ["/w/flight-deck/.claude/worktrees/rename"]
+        )
+        XCTAssertEqual(
+            results.map(\.transcriptPath),
+            ["/Users/nate/.codex/sessions/2026/09/21/rollout-abc.jsonl"]
+        )
     }
 }
 
