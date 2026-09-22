@@ -2742,12 +2742,12 @@ final class SessionStore: ObservableObject {
         // risk and becomes the common case. Reopens therefore skip this stage and behave
         // exactly as they did before it existed; stages 1 and 3 run for every caller.
         //
-        // ⌘K's `openConversation` passes `false` too, but that call site is claude-only in
-        // practice: it resolves its login with `launchAccount(for: .claude, …)` and builds its
-        // `Session` with no `agent:` argument, and `resumeExisting` defers only for an agent
-        // that `negotiatesIdentity` — which claude does not. So no codex tab reaches this
-        // method from search today; the argument is written out so the answer is already right
-        // the day one can, rather than defaulted into being wrong.
+        // ⌘K's `openConversation` passes `false` too, for the same reason on this now-live
+        // third path: it resolves `launchAccount(for: agent, …)` off the result's own agent
+        // and builds its `Session` with that `agent:`, so a searched codex result reaches
+        // `resumeExisting`'s deferred branch and lands here. Its pin is the exact conversation
+        // the user searched for and selected, not a stale directory default a reconcile pass
+        // would be repairing.
         //
         // It needs no state stage 1 produced beyond a started app-server: it reads `repos` and
         // resolves its own adapters through `adapter(for:)`. A group whose server never came up

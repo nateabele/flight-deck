@@ -178,9 +178,9 @@ final class SearchIndexBuilderTests: XCTestCase {
         }
     }
 
-    /// The primary scenario the whole task exists for: a first backfill of a transcript
-    /// large enough to span several intra-loop batch commits (`batchSize` is 500, so this
-    /// writes 1200 lines — three commits: two full batches and a remainder).
+    /// Pins the intra-loop batch-commit bug directly: a first backfill of a transcript large
+    /// enough to span several intra-loop batch commits (`batchSize` is 500, so this writes
+    /// 1200 lines — three commits: two full batches and a remainder).
     ///
     /// Every intra-loop commit before this fix passed `offset: 0`, which `SQLiteSearchIndex`
     /// treats as "this source restarted, delete its rows" — so each batch silently deleted
