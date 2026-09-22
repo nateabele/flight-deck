@@ -5506,11 +5506,15 @@ final class SessionStore: ObservableObject {
     /// is only ever reached by a tab that positively said something.
     ///
     /// **And `.live` is not sticky, because neither agent reliably announces its own death.**
-    /// `applyRegistry` resets a tab to `.unknown` on any tick where no registry row names its
-    /// conversation — see the comment there — which is what stops a dead tab's bare shell from
-    /// being treated as a live composer the veto has nothing to say about. The reset is
-    /// re-armable rather than terminal: it clears the hook watcher's memory too, so the next
-    /// event from a resumed agent is reported as news instead of swallowed as unchanged.
+    /// `applyRegistry` demotes a tab on any tick where no registry row names its conversation —
+    /// see the comment there — grading the evidence rather than resetting blind: `.absent` on
+    /// a confirmed death, `.unknown` on weaker evidence. `.unknown` alone does NOT stop a dead
+    /// tab's bare shell from being typed into — `hasComposerBox` accepts the composer a dead
+    /// claude leaves on screen exactly as readily as a live one's (pty probe, 2026-09-21), so
+    /// falling back to it protects nothing. `.absent` is what stops it, by refusing outright
+    /// without consulting the screen at all. The demotion is re-armable rather than terminal
+    /// either way: it clears the hook watcher's memory too, so the next event from a resumed
+    /// agent is reported as news instead of swallowed as unchanged.
     /// A poll is up to one tick behind, and two callers reach this gate between ticks, so
     /// `injectableReadiness` below re-probes the anchor's pid here as well — read as one rule
     /// in two places, not two rules.
@@ -5584,14 +5588,15 @@ final class SessionStore: ObservableObject {
     /// `applyRegistry` already demotes a claude tab on any tick where no registry row names
     /// its conversation — to `.absent` on a confirmed death, `.unknown` on weaker evidence —
     /// which is the durable half of this rule and stays where it is; it also clears the hook
-    /// watcher's memory, which a read like this one cannot do. What it cannot cover is the gap *between* ticks, and two callers land
-    /// squarely in it: `submitPrompt` runs `flushPromptQueue(id)` inline and `rename` runs
-    /// `flushPendingRename(id)` inline, both arriving from a phone or a sidebar click at
-    /// whatever moment the user chose. A claude that died a moment ago therefore had up to
-    /// one poll interval — 500 ms frontmost, 2 s backgrounded — of reading `.live` at a bare
-    /// shell, where the veto finds no dialog to catch and `ClaudeTextChannel.submit`'s only
-    /// screen precondition is `InputBar.read` finding one `❯`, which a shell prompt
-    /// satisfies. `/rename foo` would then be RUN as a command.
+    /// watcher's memory, which a read like this one cannot do. What it cannot cover is the gap
+    /// *between* ticks, and two callers land squarely in it: `submitPrompt` runs
+    /// `flushPromptQueue(id)` inline and `rename` runs `flushPendingRename(id)` inline, both
+    /// arriving from a phone or a sidebar click at whatever moment the user chose. A claude
+    /// that died a moment ago therefore had up to one poll interval — 500 ms frontmost, 2 s
+    /// backgrounded — of reading `.live` at a bare shell, where the veto finds no dialog to
+    /// catch and `ClaudeTextChannel.submit`'s only screen precondition is `InputBar.read`
+    /// finding one `❯`, which a shell prompt satisfies. `/rename foo` would then be RUN as a
+    /// command.
     ///
     /// **It demotes only on a positively dead anchor, never on a missing one.** A tab with no
     /// anchor is the boot window — `SessionStart` logged before claude has written its status
@@ -5626,8 +5631,16 @@ final class SessionStore: ObservableObject {
         let reported = composerReadiness(for: id)
         // Only claude is anchored: `pinResolutions` filters on `hasStatusRegistry`, so a codex
         // tab has no anchor to probe and must not be demoted for lacking one. What protects it
-        // instead is `CodexTextChannel.composer(_:)`, which requires codex's `›` marker AND its
-        // `model · mode · cwd` footer beneath — a shell draws neither.
+        // instead is `CodexTextChannel.composer(_:)`, which requires codex's `›` marker — and
+        // a real codex quit under a pty (Ctrl-C/Ctrl-D, codex-cli 0.155.1, 2026-09-21) showed
+        // why that is enough on its own: codex REMOVES its `›` marker on exit, where claude
+        // leaves its `❯` box drawn. `composer(_:)` finds no marker at all and returns nil, so
+        // `submit`/`submitRename`'s opening `guard let bar = composer(injector)` refuses — not
+        // because a shell draws no footer, which was never the operative fact, but because a
+        // dead codex draws no marker for the footer check to even run against. This is
+        // measured, not guaranteed: it is a property of codex's own teardown, which could
+        // change out from under this file with no signal here. See `docs/FOLLOWUPS.md`,
+        // "Hook-fed composer state".
         guard reported == .live, let anchor = anchors[id] else { return reported }
         let isAlive = statusIsAlive ?? SessionStatusWatcher.processIsAlive
         return isAlive(anchor.pid) ? .live : .absent
@@ -5945,6 +5958,15 @@ final class SessionStore: ObservableObject {
     /// indistinguishable from a claude coming up perfectly well, so it goes to `.unknown` and
     /// the legacy screen grammar, exactly as it did before any of this existed.
     ///
+    /// **The write is unconditional on what this map held before, not just on `.live`.** A tab
+    /// whose hook feed never reported anything — never anchored through a hook event at all,
+    /// only ever through a status-registry row — reads `.unknown` here the whole time it is
+    /// alive, exactly like a boot window that never resolves. Its `priorAnchor` dying is just
+    /// as certain a death as a `.live` tab's, so this still writes `.absent` over that
+    /// `.unknown`, not only over `.live`. That is deliberate: the certainty this branch acts on
+    /// comes from the syscall on `priorAnchor.pid`, which owes nothing to what the tab was
+    /// last reported as.
+    ///
     /// **It never promotes, which is what makes `.absent` survive the next tick.** Once a tab
     /// is `.absent` the anchor stays gone, so every later tick arrives with no prior anchor to
     /// probe and lands in the weak case. Clearing the entry there would put the tab back on the
@@ -6228,11 +6250,14 @@ final class SessionStore: ObservableObject {
             // which is why a codex tab keeps whatever its rollout last reported. Codex needs no
             // equivalent today for a reason worth stating rather than rediscovering:
             // `CodexTextChannel.submit` and `submitRename` both refuse outright unless
-            // `composer(_:)` finds codex's `›` marker AND its `model · mode · cwd` footer
-            // directly beneath, so a codex tab at a bare shell types nothing whatever this gate
-            // says. Claude has no such second line — `InputBar.read` locks onto a shell's own
-            // `❯` perfectly happily, and on the composer a dead claude leaves on screen even
-            // more happily — which is what makes this demotion load-bearing there.
+            // `composer(_:)` finds codex's `›` marker, and a real codex quit under a pty
+            // (codex-cli 0.155.1, 2026-09-21) showed that a dead codex draws no marker at all —
+            // unlike claude, which leaves its `❯` box drawn (see `injectableReadiness`'s doc
+            // comment for the measurement). Claude has no such second line — `InputBar.read`
+            // locks onto a shell's own `❯` perfectly happily, and on the composer a dead claude
+            // leaves on screen even more happily — which is what makes this demotion
+            // load-bearing there, and codex's teardown behavior only measured, not guaranteed
+            // (`docs/FOLLOWUPS.md`, "Hook-fed composer state").
             // `SessionStoreInjectionGateTests` pins both halves, claude's and codex's.
             demoteComposerReadiness(
                 for: tab,
