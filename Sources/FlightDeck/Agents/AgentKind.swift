@@ -53,8 +53,9 @@ enum AgentEvent: Equatable, Sendable {
     /// This tab's last turn died on an API error, or `nil` because a newer record cleared it.
     ///
     /// Like `.subagentCount` and unlike `.activity`, this is folded from transcript records
-    /// before it reaches here — the store never learns which channel carried it. Only the claude
-    /// runtime raises it today; codex's failure shape is a separate probe.
+    /// before it reaches here — the store never learns which channel carried it. Claude reads
+    /// this from its transcript's `isApiErrorMessage`; codex reads it from a `codex_error_info`
+    /// field on its rollout's `task_complete` record — different shapes, same event.
     case apiError(SessionAPIError?)
 }
 

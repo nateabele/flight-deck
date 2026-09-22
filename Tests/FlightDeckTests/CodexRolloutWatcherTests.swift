@@ -29,7 +29,8 @@ final class CodexRolloutWatcherTests: XCTestCase {
         try (started + completed).data(using: .utf8)!.write(to: url)
         watcher.drain()
 
-        XCTAssertEqual(seen, [.activity(.busy), .activity(.idle), .turnEnded])
+        // A clean completion also clears any standing error.
+        XCTAssertEqual(seen, [.activity(.busy), .activity(.idle), .turnEnded, .apiError(nil)])
     }
 
     /// The rollout exists, carrying an ~18 KB `session_meta` header, before any terminal
