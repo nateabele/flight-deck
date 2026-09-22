@@ -407,9 +407,8 @@ final class CodexTextChannelTests: XCTestCase {
         XCTAssertEqual(finished, false)
     }
 
-    /// `onFinished` is the one-shot guarantee `AgentRenameTyping` substitutes for `submit`'s
-    /// one-shot `settle` — it must fire exactly once on every one of the three ways this call
-    /// can end.
+    /// `onFinished` is what carries the one-shot guarantee instead of `settle` — it must fire
+    /// exactly once on every one of the three ways this call can end.
     func testOnFinishedRunsExactlyOnceOnSuccessAbortAndCancellation() throws {
         let success = FakeInjector(viewport: try viewport("tui-idle.captured"))
         success.script([try viewport("tui-idle.captured"), try viewport("tui-rename-modal.captured")])

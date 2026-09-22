@@ -168,6 +168,20 @@ final class SessionRenameTests: XCTestCase {
         XCTAssertTrue(spy.events.isEmpty)
     }
 
+    /// **The first half of the bug this branch exists to fix, reached from the store.**
+    /// `46c2402`'s coverage was entirely at the predicate (`ClaudeComposerDetectorTests`); this
+    /// asserts that a sidebar rename against the screen it newly admits actually reaches the
+    /// agent. This session's `composerReadiness` defaults to `.unknown` (see `makeStore`), so
+    /// `hasComposerBox` — not the `.live` hook feed — is the operative gate here, exactly the
+    /// arm `46c2402` fixed.
+    func testARenameIntoTheEchoOnlyScreenReachesTheAgent() throws {
+        let (store, spy, id) = makeStore()
+        spy.viewportOverride = try TimelineFixtureTests.text("busy-echo-only.captured", in: "Claude")
+        spy.events.removeAll()
+        store.rename(id, to: "echoed")
+        XCTAssertTrue(spy.sent.contains("/rename echoed"), "the rename reaches the agent")
+    }
+
     func testRenameDefersWhenTheScreenCannotBeRead() {
         let (store, spy, id) = makeStore()
         spy.viewportIsReadable = false
