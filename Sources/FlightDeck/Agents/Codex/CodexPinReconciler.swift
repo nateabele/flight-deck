@@ -75,16 +75,14 @@ final class CodexPinReconciler {
     /// pin was negotiated in some previous run, and the user may have abandoned that thread for
     /// another one at any point since.
     ///
-    /// Relaunch and no other path: `resumeRestoredCodex` takes the pass only under
-    /// `pinsPredateThisRun`, and its reopen callers — ⌘⇧T and the phone's
-    /// `reopenClosedSession`, both through `settleReopen` — pass false. Their pin is a thread
-    /// the user chose seconds ago, so it is current by construction; moving it to the
-    /// directory's newest thread would override the choice instead of repairing a stale one.
-    ///
-    /// ⌘K's `openConversation` passes false as well, but it is not a case that happens: it
-    /// resolves its login with `launchAccount(for: .claude, …)` and builds its `Session` with
-    /// no `agent:` argument, so nothing it makes ever defers into `resumeRestoredCodex`. That
-    /// argument is an answer held ready, not one in use.
+    /// Relaunch is the only path that takes the pass: `resumeRestoredCodex` requires
+    /// `pinsPredateThisRun`, and its other three callers all pass false. Its reopen callers —
+    /// ⌘⇧T and the phone's `reopenClosedSession`, both through `settleReopen` — pass false
+    /// because their pin is a thread the user chose seconds ago, so it is current by
+    /// construction; moving it to the directory's newest thread would override the choice
+    /// instead of repairing a stale one. ⌘K's `openConversation` passes false for the same
+    /// reason on a codex result: that pin is the exact conversation the user searched for and
+    /// selected, not a stale directory default a pass would be correcting.
     private var lastPass: ContinuousClock.Instant
 
     init(

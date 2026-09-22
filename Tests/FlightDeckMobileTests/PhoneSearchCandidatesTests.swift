@@ -91,6 +91,25 @@ final class PhoneSearchCandidatesTests: XCTestCase {
         XCTAssertEqual(candidate?.lastActivity, .distantPast)
     }
 
+    /// A codex conversation matched by name must carry codex's agent through to the
+    /// candidate, not the `NameCandidate` default of "claude" — otherwise the row draws
+    /// claude's glyph on a codex conversation, while the same conversation matched by
+    /// transcript content (which carries `TranscriptHit.agent`) draws codex's, leaving two
+    /// rows that contradict each other about what wrote the conversation.
+    func testAConversationCandidateCarriesTheCatalogueEntrysAgent() {
+        let candidates = PhoneSearchCandidates.build(
+            projects: [WireProject(id: UUID(), name: "flight-deck", path: "/proj")],
+            catalogue: WireConversationCatalogue(
+                conversations: [WireConversation(
+                    id: "abc123", name: "old chat", projectPath: "/proj", agent: "codex"
+                )],
+                sessionActivity: [:]
+            )
+        )
+
+        XCTAssertEqual(candidates.first { $0.name == "old chat" }?.agent, "codex")
+    }
+
     /// A project row carries its newest session's activity, not its first or its last in
     /// list order — so a project whose fresher session is listed FIRST still sorts as fresh.
     /// The fresher session is deliberately first here: were the implementation to regress

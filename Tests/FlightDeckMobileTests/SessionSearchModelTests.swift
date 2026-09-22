@@ -36,11 +36,14 @@ final class SessionSearchModelTests: XCTestCase {
         )
     }
 
-    private func hit(_ conversation: String) -> TranscriptHit {
+    private func hit(
+        _ conversation: String, agent: String = "claude", provenance: String? = nil
+    ) -> TranscriptHit {
         TranscriptHit(
             rowID: 1, conversationID: conversation, projectPath: "/proj",
             conversationName: conversation, snippet: "the rename path",
-            timestamp: Date(timeIntervalSince1970: 1), offset: 4096
+            timestamp: Date(timeIntervalSince1970: 1), offset: 4096,
+            agent: agent, provenance: provenance
         )
     }
 
@@ -186,5 +189,41 @@ final class SessionSearchModelTests: XCTestCase {
         transport.answer([], indexing: nil)
 
         XCTAssertEqual(model.footer, .empty)
+    }
+
+    /// A mixed result list is unreadable if the rows do not say which agent they came from.
+    func testAHitCarriesItsAgentToTheRow() async throws {
+        let transport = Transport()
+        let model = SessionSearchModel(transport: transport, macName: "Mac")
+
+        model.query = "rename"
+        try await letTheDebounceFire()
+        transport.answer([hit("conv", agent: "codex")])
+
+        guard let result = model.results.first else {
+            return XCTFail("expected the codex hit to produce a result")
+        }
+        XCTAssertEqual(result.agent, "codex")
+        XCTAssertEqual(
+            SessionSearchResults.agentSymbolName(for: result),
+            AgentGlyph.symbolName(for: "codex")
+        )
+        XCTAssertNotEqual(AgentGlyph.symbolName(for: "codex"), AgentGlyph.symbolName(for: "claude"))
+        XCTAssertNil(AgentGlyph.symbolName(for: "some-future-agent"), "an unknown agent draws no glyph")
+    }
+
+    /// The phone must order exactly as the desk does — same implementation, one rule.
+    func testExecHitsSortLastOnThePhoneToo() async throws {
+        let transport = Transport()
+        let model = SessionSearchModel(transport: transport, macName: "Mac")
+
+        model.query = "rename"
+        try await letTheDebounceFire()
+        transport.answer([
+            hit("automated", provenance: TranscriptHit.automatedProvenance),
+            hit("interactive"),
+        ])
+
+        XCTAssertEqual(model.results.map(\.conversationID), ["interactive", "automated"])
     }
 }
