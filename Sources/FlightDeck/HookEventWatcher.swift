@@ -67,18 +67,21 @@ final class HookEventWatcher {
     /// reported as news rather than swallowed as unchanged.
     ///
     /// **Without this, the change-only emission in `drain()` below makes a reset one-way, and
-    /// the feature switches itself off.** `SessionStore` resets a tab to `.unknown` when it
-    /// loses its status-registry anchor, because neither agent reliably announces its own
-    /// death — and the deaths that reset exists for are exactly the ones that log no
-    /// `SessionEnd`, so this map is still holding `.live` when it happens. A claude resumed in
-    /// that tab reuses the same `session_id` (see the type doc above), so its `SessionStart`
-    /// folds to `.live`, compares equal to what is remembered here, and is never emitted: the
-    /// store stays `.unknown` and the tab is stranded on the legacy screen grammar for the
-    /// rest of the process's life. The direction is safe, which is what makes it easy to miss.
+    /// the feature switches itself off.** `SessionStore` demotes a tab out of `.live` when it
+    /// loses its status-registry anchor — to `.absent` when a syscall confirms the process it
+    /// was following is gone, to `.unknown` otherwise — because neither agent reliably
+    /// announces its own death, and the deaths that demotion exists for are exactly the ones
+    /// that log no `SessionEnd`, so this map is still holding `.live` when it happens. A claude
+    /// resumed in that tab reuses the same `session_id` (see the type doc above), so its
+    /// `SessionStart` folds to `.live`, compares equal to what is remembered here, and is never
+    /// emitted: the store keeps whatever the demotion left it on for the rest of the process's
+    /// life — stranded on the legacy screen grammar after a `.unknown`, and refusing every
+    /// injection after an `.absent`, which is the worse of the two and the reason this is not
+    /// merely a nicety.
     ///
     /// The dedup itself stays — it is what keeps an idle log from re-announcing `.live` into
-    /// the store on every tick. Only the store's own resets punch through it, and they are the
-    /// one caller that positively knows this memory is stale.
+    /// the store on every tick. Only the store's own demotions punch through it, and they are
+    /// the one caller that positively knows this memory is stale.
     func forget(_ sessionID: UUID) {
         readiness.removeValue(forKey: sessionID)
     }

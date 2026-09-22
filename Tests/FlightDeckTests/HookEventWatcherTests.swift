@@ -60,7 +60,7 @@ final class HookEventWatcherTests: XCTestCase {
     }
 
     /// **The escape hatch that keeps `testOnlyReportsChanges` above from making a reset
-    /// one-way.** `SessionStore` resets a tab to `.unknown` when no registry row names its
+    /// one-way.** `SessionStore` demotes a tab out of `.live` when no registry row names its
     /// conversation, and the deaths that reset exists for are exactly the ones that log no
     /// `SessionEnd` — so this map is still holding `.live` when it happens. A claude resumed
     /// in that tab reuses the same `session_id`, so its `SessionStart` would fold to `.live`,

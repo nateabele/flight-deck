@@ -1201,13 +1201,21 @@ rather than fixed alongside the daemon wiring.
   payload addresses both at once.
 
 - **A never-anchored claude tab sits at `.unknown` until its next turn, not "one beat".**
-  `applyRegistry` resets readiness whenever no status-registry row names a tab's conversation,
-  and `resetComposerReadiness` clears the watcher's fold for that session — but not the tail
-  offset, so the tab is re-reported only when the agent emits its *next* hook event. For a
-  freshly booted, genuinely idle claude that is its first prompt. Safe (the tab falls back to
-  the legacy screen grammar, which is what every tab did before this existed) and accepted: the
-  level trigger's protection against a stale `.live` at a bare shell is worth strictly more
-  than the boot window it costs.
+  `applyRegistry` demotes readiness whenever no status-registry row names a tab's conversation,
+  and it clears the watcher's fold for that session — but not the tail offset, so the tab is
+  re-reported only when the agent emits its *next* hook event. For a freshly booted, genuinely
+  idle claude that is its first prompt. Accepted: the level trigger's protection against a
+  stale `.live` is worth strictly more than the boot window it costs.
+
+  **What is NOT safe about it, stated plainly, because an earlier version of this entry said
+  the opposite.** "The tab falls back to the legacy screen grammar" is a fallback, not a
+  protection. `hasComposerBox` accepts the composer a dead claude leaves on screen (pty probe,
+  2026-09-21), so `.unknown` refuses nothing that matters. A death is caught by demoting to
+  `.absent` instead — but that needs an anchor to probe, so the one case still decided by the
+  screen is a `claude` that died having *never* written its status file. Reaching it with a
+  composer on screen would mean an agent that drew its input box and yet never wrote the file
+  it writes at startup; if that turns out to be reachable, the fix is a second liveness source
+  for unanchored tabs (the tab's own surface process tree), not a wider `.absent`.
 
 - **Multi-account amplification of that same reset.** While only one account has scanned,
   tabs belonging to an account whose watcher has not yet run resolve `anchor == nil` and reset
