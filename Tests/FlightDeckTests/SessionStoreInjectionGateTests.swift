@@ -209,55 +209,140 @@ final class SessionStoreInjectionGateTests: XCTestCase {
 
     // MARK: - A dead agent must stop reading `.live`
 
-    /// **Neither agent reliably signals session death, so the store has to notice by itself.**
+    /// **Neither agent reliably signals session death, so the store has to notice by itself —
+    /// and the screen the dead one leaves behind cannot be asked.**
     ///
-    /// `SessionReaper`'s `SIGHUP → SIGTERM → SIGKILL` escalation means claude's `SessionEnd`
+    /// `SessionReaper`'s `SIGHUP -> SIGTERM -> SIGKILL` escalation means claude's `SessionEnd`
     /// hook often never fires, and codex has no session-end rollout record at all. A tab whose
-    /// agent has died would therefore keep reading `.live` forever — and `.live` plus "no
-    /// dialog recognised" would type into the bare shell left behind, which is strictly worse
-    /// than the behaviour this replaces, since a bare shell carries no dialog markers for the
-    /// veto to catch. The liveness signal is the status-registry anchor: `SessionStatusWatcher`
-    /// drops rows whose pid is dead, so a tick that names no row for this conversation is a
-    /// tick on which no live process is ours. The test below is the level form of the same
-    /// question — never anchored at all — and
-    /// `testAnInjectionBetweenTicksReprobesTheAnchorsProcess` is the one that covers the gap
-    /// between two ticks.
+    /// agent has died would therefore keep reading `.live` forever. The liveness signal is the
+    /// status-registry anchor: `SessionStatusWatcher` drops rows whose pid is dead, so a tick
+    /// that names no row for a conversation it was anchored to is a tick on which our process
+    /// is gone.
+    ///
+    /// **The screen below is the whole point of this test, and the synthetic bare shell it
+    /// used to carry is how the P0 shipped.** Claude Code does not clear the terminal on exit:
+    /// the composer box it drew — a rule, the `❯` marker, a rule — is still the last one in
+    /// the viewport after the process is gone. Probed live under a pty (2026-09-21),
+    /// `hasComposerBox` answered **true** on the dead claude's screen exactly as it had a
+    /// second earlier on the live one, while `isKnownNonComposer` answered false because there
+    /// really is no dialog. A test that fed a two-line bare shell was therefore measuring its
+    /// own fixture — `hasComposerBox` refuses that string whatever the gate believes — and
+    /// proved nothing about the screen a user actually has in front of them. So this runs
+    /// against a verbatim capture of a real composer, and asserts first that the capture is
+    /// one, otherwise the test could rot back into vacuity unnoticed.
+    ///
+    /// That is why a positively dead process demotes to `.absent` rather than `.unknown`:
+    /// `.unknown` hands the decision to the one predicate that provably cannot make it.
     ///
     /// **Driven through a rename rather than a phone prompt, deliberately.** `submitPrompt`
     /// refuses a tab with no status at all (`.notRunning`) before the gate is ever consulted,
     /// so a dead claude's queue never reaches `inject` down that path. A rename does: it is a
     /// direct user action on the sidebar, it consults no status, and it shares this exact gate
-    /// through `injectRename`. So the rename path — along with `pendingPrompts`' restore-time
-    /// "Keep going" — is where a stale `.live` would really have typed into a bare shell.
-    func testADeadAgentProcessResetsReadinessToUnknown() {
+    /// through `injectRename`. It is the path the live report came in on.
+    func testADeadAgentProcessMarksTheTabAbsentEvenWithItsComposerStillOnScreen() throws {
         let (store, spy, id, _) = makeStore()
         store.apply(.lifecycle(.live), to: id)
         XCTAssertEqual(store.composerReadiness(for: id), .live, "the premise")
 
-        // The claude process exits; its status file goes with it, so the next scan carries no
-        // row for this tab at all.
+        // Ctrl-D at the composer. The process is gone and its status file with it, so the next
+        // scan carries no row for this tab at all.
+        store.statusIsAlive = { _ in false }
         store.applyRegistry([:])
 
-        XCTAssertEqual(store.composerReadiness(for: id), .unknown,
-                       "a tab whose agent is gone falls back to the legacy screen check")
+        XCTAssertEqual(store.composerReadiness(for: id), .absent,
+                       "a tab whose process is provably gone refuses outright")
 
-        spy.viewportOverride = bareShell
+        // **And it stays absent.** Every later tick arrives with the anchor already gone, so
+        // there is no longer a pid to probe and the demotion lands in its weak case. A weak
+        // case that cleared the entry would put the tab back on the screen grammar one tick
+        // after refusing it — a one-tick fix for a permanent condition — and nothing else in
+        // this file runs a second dead tick to catch that.
+        store.applyRegistry([:])
+        XCTAssertEqual(store.composerReadiness(for: id), .absent,
+                       "the demotion may demote; it may never promote")
+
+        // What claude left on screen: its own composer, unredrawn and uncleared.
+        spy.viewportOverride = try screen("idle-empty-box")
+        XCTAssertTrue(ClaudeTextChannel().hasComposerBox(spy),
+                      "the premise this test exists for: the corpse still reads as a composer")
+
         XCTAssertFalse(store.injectionGateAdmitsForTesting(id),
-                       "and the legacy screen check refuses a bare shell")
-
+                       "so the refusal has to come from the lifecycle, never from the screen")
         XCTAssertTrue(store.rename(id, to: "typed at a dead tab"))
         XCTAssertEqual(spy.events, [], "so a rename defers instead of running as a command")
     }
 
-    /// **The same window, entered from the other side — and the reason the test is level
-    /// rather than the anchor's falling edge.** A `claude` whose `SessionStart` is logged and
-    /// which then dies before writing its status file is never anchored at all. An
-    /// edge-triggered reset ("had an anchor, lost it") cannot fire for it, so the tab would
-    /// keep `.live` permanently at a bare shell — and `ClaudeTextChannel.submit`'s only screen
-    /// precondition is `InputBar.read` finding one `❯` row, which a shell prompt satisfies. A
-    /// sidebar rename would then run `/rename foo` as a command. Sub-second to enter,
-    /// unbounded once entered.
-    func testADeathBeforeTheTabWasEverAnchoredIsAlsoCaught() {
+    /// **`.absent` is a refusal, not a tombstone: the tab has to come back.**
+    ///
+    /// The mark is set by the store, so nothing the *agent* does clears it by itself.
+    /// `HookEventWatcher` emits only on a change and is still holding `.live` from before the
+    /// death, so a resumed claude's `SessionStart` folds to `.live`, compares equal, and is
+    /// never emitted — the tab would refuse every injection for the rest of the process's
+    /// life, which is strictly worse than the bug the mark was introduced to fix. What
+    /// prevents it is that the demotion clears the watcher's memory in the same breath.
+    func testATabMarkedAbsentByADeathRecoversWhenTheAgentComesBack() throws {
+        let hookDirectory = projectsRoot.appendingPathComponent("hook-events", isDirectory: true)
+        try FileManager.default.createDirectory(at: hookDirectory, withIntermediateDirectories: true)
+
+        let store = SessionStore(provider: StubProvider(), persistence: nil)
+        store.transcriptsRootOverride = projectsRoot
+        store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
+        store.statusRootOverride = projectsRoot.appendingPathComponent("status", isDirectory: true)
+        store.hookEventDirectoryOverride = hookDirectory
+        let spy = SpyInjector()
+        store.injectorOverride = spy
+        store.injectionSettle = { $0() }
+        let session = store.newSession(in: tmp)
+
+        store.startStatusWatching()
+        let watcher = try XCTUnwrap(store.hookEventWatcherForTesting as? HookEventWatcher)
+        let log = hookDirectory.appendingPathComponent("events.ndjson")
+        let start = """
+            {"session_id":"\(session.pinnedConversationID.uuidString)","hook_event_name":"SessionStart"}
+
+            """
+        try start.write(to: log, atomically: true, encoding: .utf8)
+        watcher.drain()
+        store.applyRegistry([1: entry(session.pinnedConversationID, .idle, cwd: tmp.path)])
+        XCTAssertEqual(store.composerReadiness(for: session.id), .live,
+                       "the premise: up, anchored, and reported")
+
+        // It dies.
+        store.statusIsAlive = { _ in false }
+        store.applyRegistry([:])
+        XCTAssertEqual(store.composerReadiness(for: session.id), .absent, "and is marked so")
+
+        // The user resumes in the same tab. Claude reuses the conversation id, so this is the
+        // same `session_id` the watcher already folded to `.live` once.
+        try (start + start).write(to: log, atomically: true, encoding: .utf8)
+        watcher.drain()
+
+        XCTAssertEqual(store.composerReadiness(for: session.id), .live,
+                       "a resumed agent's SessionStart has to punch through the dedup")
+        spy.viewportOverride = try screen("idle-empty-box")
+        XCTAssertTrue(store.injectionGateAdmitsForTesting(session.id),
+                      "and the tab injects again - `.absent` strands nothing")
+    }
+
+    /// **The same window entered from the other side, and the ONE case that is still decided
+    /// by the screen — so read what this pins carefully.**
+    ///
+    /// A `claude` whose `SessionStart` is logged and which then dies before writing its status
+    /// file is never anchored at all. The demotion still fires — it is level-triggered, so it
+    /// does not need a falling edge — and it clears `.live`, which is what stops an unbounded
+    /// stale `.live` at a shell. But it demotes to `.unknown` here and not to `.absent`,
+    /// because a tab that was never anchored is indistinguishable from one in the boot window,
+    /// and `.absent` there would refuse a claude that is coming up perfectly well.
+    ///
+    /// **So this test's screen stays the synthetic bare shell, and the refusal below really is
+    /// the screen's and not the lifecycle's.** That is a weaker guarantee than
+    /// `testADeadAgentProcessMarksTheTabAbsentEvenWithItsComposerStillOnScreen` gets, and it is
+    /// deliberate rather than overlooked: reaching this branch with a *composer* on screen
+    /// would mean a claude that drew its input box and yet never wrote the status file it
+    /// writes at startup. The part that is pinned unconditionally is the readiness assertion —
+    /// `.live` does not survive a tick with no row — and that is the part that matters, since
+    /// `.live` is the state that bypasses the screen check altogether.
+    func testADeathBeforeTheTabWasEverAnchoredFallsBackToTheScreen() {
         let store = SessionStore(provider: StubProvider(), persistence: nil)
         store.transcriptsRootOverride = projectsRoot
         store.codexIndexURLOverride = projectsRoot.appendingPathComponent("session_index.jsonl")
@@ -321,6 +406,40 @@ final class SessionStoreInjectionGateTests: XCTestCase {
                      "a reset the watcher does not know about makes the reset one-way")
     }
 
+    /// **The recovery path for a tab with no hook feed at all, which is the other way
+    /// `.absent` could have become a tombstone.**
+    ///
+    /// The test above recovers through `SessionStart`, which is the ordinary case. A tab in an
+    /// untrusted folder, or one restored from a build that shipped no hook plugin, never emits
+    /// a lifecycle event — so nothing it does would ever clear a mark the *store* wrote, and a
+    /// resumed agent would be refused for the life of the process. A registry row naming this
+    /// conversation where none did is a live process's own file, which is evidence of a new
+    /// agent that owes nothing to hooks, so it returns the tab to the legacy grammar.
+    ///
+    /// Note what it is promoted TO: `.unknown`, never `.live`. Liveness stays the lifecycle's
+    /// word alone — the registry says a process exists, not that its composer is up.
+    func testATabMarkedAbsentIsFreedAgainWhenARegistryRowComesBack() throws {
+        let (store, spy, id, conversation) = makeStore()
+        store.apply(.lifecycle(.live), to: id)
+        store.statusIsAlive = { _ in false }
+        store.applyRegistry([:])
+        XCTAssertEqual(store.composerReadiness(for: id), .absent, "the premise: it died")
+
+        // A new claude, in the same tab, writing its own status file. No hook event: this tab
+        // has no hook feed — that is the case being covered.
+        store.statusIsAlive = { _ in true }
+        store.applyRegistry([2: .init(pid: 2, sessionID: conversation, activity: .idle,
+                                      waitingFor: nil, startedAt: 2, cwd: tmp.path,
+                                      procStart: "start-b")])
+
+        XCTAssertEqual(store.composerReadiness(for: id), .unknown,
+                       "a live row frees the tab, and frees it only as far as the screen check")
+
+        spy.viewportOverride = try screen("idle-empty-box")
+        XCTAssertTrue(store.injectionGateAdmitsForTesting(id),
+                      "so the tab is injectable again without a single hook event")
+    }
+
     /// A live tab is not reset by an ordinary tick. Without this, the test above would also
     /// pass against an implementation that never resets anything at all.
     func testAnAnchoredTabKeepsItsReadinessAcrossTicks() {
@@ -347,10 +466,19 @@ final class SessionStoreInjectionGateTests: XCTestCase {
     /// The anchor is left in place here, deliberately: that IS the between-ticks state. What
     /// changes is the answer to the only question a syscall can settle — is the process we are
     /// anchored to still there.
-    func testAnInjectionBetweenTicksReprobesTheAnchorsProcess() {
+    ///
+    /// **The screen is a real composer, and that is what makes this test mean anything.** It
+    /// used to be the synthetic bare shell, which `hasComposerBox` refuses on its own — so the
+    /// test passed against a re-probe that demoted to `.unknown` and then handed the verdict
+    /// straight back to the screen. A dead claude does not clear the terminal, so the screen it
+    /// leaves is the composer it last drew (probed under a pty, 2026-09-21), and the demotion
+    /// has to be to `.absent`: a verdict the screen is never consulted for.
+    func testAnInjectionBetweenTicksReprobesTheAnchorsProcess() throws {
         let (store, spy, id, _) = makeStore()
         store.apply(.lifecycle(.live), to: id)
-        spy.viewportOverride = bareShell
+        spy.viewportOverride = try screen("idle-empty-box")
+        XCTAssertTrue(ClaudeTextChannel().hasComposerBox(spy),
+                      "the premise: the screen left behind is one the legacy grammar accepts")
 
         // The process dies. No tick has run since, so both the anchor and the stored readiness
         // are exactly as the last one left them.
@@ -489,12 +617,17 @@ final class SessionStoreInjectionGateTests: XCTestCase {
 
     // MARK: - Ordering within a registry tick
 
-    /// **The reset runs in `applyRegistry`'s body; the three flushes run in its `defer`.** So
-    /// on the very tick that detects a death, the flushes already read `.unknown`. That
+    /// **The demotion runs in `applyRegistry`'s body; the three flushes run in its `defer`.**
+    /// So on the very tick that detects a death, the flushes already read `.absent`. That
     /// closes the window where a prompt queued while the agent was alive would be typed into
-    /// the bare shell it left behind — and nothing else pins it, so a refactor moving the
-    /// reset into the `defer` would pass every other test in this file while reopening it.
-    func testTheReadinessResetRunsBeforeTheTickFlushesTheQueue() throws {
+    /// the screen it left behind — and nothing else pins it, so a refactor moving the demotion
+    /// into the `defer` would pass every other test in this file while reopening it.
+    ///
+    /// The screen after the death is the dead agent's own composer, not a bare shell: the
+    /// dialog goes when the process does, and what is underneath it is the box claude drew and
+    /// never cleared. Pinned that way on purpose — with a bare shell here the refusal could be
+    /// coming from `hasComposerBox` rather than from the ordering this test is named for.
+    func testTheDeadReadinessMarkRunsBeforeTheTickFlushesTheQueue() throws {
         let (store, spy, id, _) = makeStore()
         store.apply(.lifecycle(.live), to: id)
 
@@ -504,12 +637,13 @@ final class SessionStoreInjectionGateTests: XCTestCase {
         XCTAssertEqual(store.submitPrompt("ship it", token: UUID(), to: id), .queued)
         XCTAssertTrue(spy.events.isEmpty, "the premise: held, not typed")
 
-        // The agent dies. Its dialog goes with it; what is left is the shell underneath.
-        spy.viewportOverride = bareShell
+        // The agent dies. Its dialog goes with it; the composer underneath stays on screen.
+        spy.viewportOverride = try screen("idle-empty-box")
+        store.statusIsAlive = { _ in false }
         store.applyRegistry([:])
 
         XCTAssertEqual(spy.events, [],
-                       "the flush in the defer must see .unknown, not the .live it replaced")
+                       "the flush in the defer must see .absent, not the .live it replaced")
         XCTAssertNotNil(store.promptQueue[id], "so the entry is still held, not run as a command")
     }
 

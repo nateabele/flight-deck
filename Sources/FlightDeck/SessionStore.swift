@@ -5581,10 +5581,10 @@ final class SessionStore: ObservableObject {
     /// **The tab's reported readiness, re-checked against the process at the instant of
     /// injection rather than as of the last poll.**
     ///
-    /// `applyRegistry` already demotes a claude tab to `.unknown` on any tick where no
-    /// registry row names its conversation, which is the durable half of this rule and stays
-    /// where it is — it also clears the hook watcher's memory, which a read like this one
-    /// cannot do. What it cannot cover is the gap *between* ticks, and two callers land
+    /// `applyRegistry` already demotes a claude tab on any tick where no registry row names
+    /// its conversation — to `.absent` on a confirmed death, `.unknown` on weaker evidence —
+    /// which is the durable half of this rule and stays where it is; it also clears the hook
+    /// watcher's memory, which a read like this one cannot do. What it cannot cover is the gap *between* ticks, and two callers land
     /// squarely in it: `submitPrompt` runs `flushPromptQueue(id)` inline and `rename` runs
     /// `flushPendingRename(id)` inline, both arriving from a phone or a sidebar click at
     /// whatever moment the user chose. A claude that died a moment ago therefore had up to
@@ -5596,15 +5596,32 @@ final class SessionStore: ObservableObject {
     /// **It demotes only on a positively dead anchor, never on a missing one.** A tab with no
     /// anchor is the boot window — `SessionStart` logged before claude has written its status
     /// file — and `applyRegistry` owns that case one tick later by design. Demoting here as
-    /// well would mean a claude whose status file is momentarily unreadable loses the new path
-    /// and falls back to the screen grammar this branch exists to stop depending on. The only
-    /// question asked is the one a syscall can answer for certain: the process we are anchored
-    /// to, is it still there.
+    /// well would refuse a `claude` that is coming up perfectly well, and would do it on the
+    /// absence of evidence rather than on evidence. The only question asked is the one a
+    /// syscall can answer for certain: the process we are anchored to, is it still there.
     ///
-    /// `.unknown` rather than `.absent`, matching the reset: the tab falls back to
-    /// `hasComposerBox`, which is precisely what refuses a bare shell today. And the probe is
-    /// the same one `SessionStatusWatcher` uses to decide a registry row is stale, through the
-    /// same injected seam, so a test can make a tab's process dead without killing anything.
+    /// **`.absent`, not `.unknown`, and the difference is the whole value of this design.**
+    /// An earlier cut demoted to `.unknown` on the argument that the tab would fall back to
+    /// `hasComposerBox`, "which is precisely what refuses a bare shell today". That argument
+    /// is false, and a live probe settled it: a real `claude` was run under a pty and its
+    /// screen rendered before and after it exited (2026-09-21).
+    ///
+    ///     WHILE ALIVE:   hasComposerBox: true   isKnownNonComposer: false
+    ///     AFTER EXIT:    hasComposerBox: true   isKnownNonComposer: false
+    ///
+    /// Claude Code does not clear the terminal on exit, so the composer it drew — rule, `❯`,
+    /// rule — is still the last one in the viewport with the process gone. `hasComposerBox`
+    /// cannot tell a composer from its corpse, and the dialog veto rightly finds no dialog
+    /// because there is none, so BOTH arms of `injectionGate` admitted and a sidebar rename was
+    /// typed at the bare shell underneath, where `zsh` ran it as a command. Demoting to
+    /// `.unknown` hands the decision to the one predicate that provably cannot make it;
+    /// `.absent` refuses without consulting the screen at all, which is the one thing this
+    /// design can do that the screen-only gate never could.
+    ///
+    /// The probe is the same one `SessionStatusWatcher` uses to decide a registry row is stale,
+    /// through the same injected seam, so a test can make a tab's process dead without killing
+    /// anything. A tab left `.absent` here is not stranded: this is a read, so it stores
+    /// nothing — the next call re-probes, and a resumed process answers alive again.
     private func injectableReadiness(for id: UUID) -> ComposerReadiness {
         let reported = composerReadiness(for: id)
         // Only claude is anchored: `pinResolutions` filters on `hasStatusRegistry`, so a codex
@@ -5613,7 +5630,7 @@ final class SessionStore: ObservableObject {
         // `model · mode · cwd` footer beneath — a shell draws neither.
         guard reported == .live, let anchor = anchors[id] else { return reported }
         let isAlive = statusIsAlive ?? SessionStatusWatcher.processIsAlive
-        return isAlive(anchor.pid) ? .live : .unknown
+        return isAlive(anchor.pid) ? .live : .absent
     }
 
     /// Whether the gate above would admit a typing attempt for this tab right now — its
@@ -5916,6 +5933,72 @@ final class SessionStore: ObservableObject {
         hookEventWatcher?.forget(conversation)
     }
 
+    /// The registry tick's half of the same rule, which is a *demotion* and not a reset: it
+    /// grades the evidence it has rather than clearing the slate.
+    ///
+    /// **`.absent` on a certain death, `.unknown` on a merely missing row.** The two are not
+    /// the same fact. A row that has gone where a row we were anchored to used to be, plus a
+    /// syscall saying that pid is gone, is proof the process died — and proof is what `.absent`
+    /// costs, because `.absent` refuses injection outright without consulting the screen. Every
+    /// weaker case keeps today's answer: a tab that was never anchored is the boot window
+    /// (`SessionStart` logged before claude has written its status file) and is
+    /// indistinguishable from a claude coming up perfectly well, so it goes to `.unknown` and
+    /// the legacy screen grammar, exactly as it did before any of this existed.
+    ///
+    /// **It never promotes, which is what makes `.absent` survive the next tick.** Once a tab
+    /// is `.absent` the anchor stays gone, so every later tick arrives with no prior anchor to
+    /// probe and lands in the weak case. Clearing the entry there would put the tab back on the
+    /// screen grammar a beat after refusing it — a one-tick fix for a permanent condition — so
+    /// the weak case drops `.live` and leaves `.absent` where it is.
+    ///
+    /// **And it promotes exactly once, on an anchor appearing where there was none, which is
+    /// what stops `.absent` becoming a tombstone.** The hook feed normally recovers a tab by
+    /// itself: the demotion clears `HookEventWatcher`'s memory of the session (see
+    /// `resetComposerReadiness`), so a resumed claude's `SessionStart` is reported as news
+    /// rather than swallowed as unchanged. But a tab with no working hook feed at all — an
+    /// untrusted folder, a session restored from an older build — has no such event coming, and
+    /// nothing else would ever clear a mark this method wrote. A registry row naming this
+    /// conversation where none did is a live process's own file, which is evidence of a new
+    /// agent independent of hooks, so it returns the tab to `.unknown` and lets the screen
+    /// grammar speak again. It cannot short-circuit a `SessionEnd`-driven `.absent` on a still
+    /// running process: that tab keeps its anchor throughout, so there is no such transition.
+    ///
+    /// - Parameter priorAnchor: what `anchors[tabID]` held before this tick overwrote it.
+    /// - Parameter anchor: what this tick resolved, i.e. what it now holds.
+    private func demoteComposerReadiness(
+        for tabID: UUID,
+        conversation: UUID,
+        priorAnchor: ConversationPin.Anchor?,
+        anchor: ConversationPin.Anchor?
+    ) {
+        guard anchor == nil else {
+            // A row where there was none. See the doc comment: the only state this may change
+            // is a mark left by a death, and only into the legacy path — never into `.live`,
+            // which remains the lifecycle's word alone.
+            if priorAnchor == nil, composerReadinessByTab[tabID] == .absent {
+                composerReadinessByTab.removeValue(forKey: tabID)
+            }
+            return
+        }
+        // The same seam and the same question as `injectableReadiness`'s probe, deliberately:
+        // one definition of "this process is gone" for both halves of the rule, so they cannot
+        // drift into disagreeing about a tab.
+        //
+        // **It is also what keeps the multi-account amplification harmless.** Rows arrive per
+        // account and are merged, so before a second account's watcher has ever scanned, every
+        // tab of that account resolves `anchor == nil` on every tick — with a live `claude`
+        // behind it. Demoting those to `.absent` would refuse injection into perfectly healthy
+        // tabs for as long as the other account took to start. The probe answers "alive" for
+        // them, so they take the weak branch and keep the behaviour they have always had.
+        let isAlive = statusIsAlive ?? SessionStatusWatcher.processIsAlive
+        if let priorAnchor, !isAlive(priorAnchor.pid) {
+            composerReadinessByTab[tabID] = .absent
+        } else if composerReadinessByTab[tabID] != .absent {
+            composerReadinessByTab.removeValue(forKey: tabID)
+        }
+        hookEventWatcher?.forget(conversation)
+    }
+
     /// The tab's terminal screen, or nil when there is no surface or it cannot be read.
     ///
     /// A read and only a read: it changes no fleet state and adds no mutation site for
@@ -6070,6 +6153,10 @@ final class SessionStore: ObservableObject {
         // `claude` is writing (the transcript always follows it) and which project the tab
         // is filed under (it moves only into a project that is already open).
         for (tab, resolution) in resolutions {
+            // Read before the line below overwrites it, because it is the evidence the
+            // demotion turns on: the pid we WERE following is the only thing a syscall can be
+            // asked about once the row naming it has gone.
+            let priorAnchor = anchors[tab]
             anchors[tab] = resolution.anchor
             guard let session = session(for: tab) else { continue }
             // **A tab with no live `claude` behind it stops reading `.live`.** Neither agent
@@ -6078,48 +6165,64 @@ final class SessionStore: ObservableObject {
             // has no session-end rollout record at all — so without this a dead tab would keep
             // the last readiness its lifecycle reported, for the life of the process. That is
             // harmless only until `.live` starts bypassing `hasComposerBox`, which is exactly
-            // what `injectionGate` now does: the bare shell a dead agent leaves behind carries
-            // no dialog markers, so `isKnownNonComposer` cannot veto it, and the text would be
-            // RUN as a command instead of sent to anybody. `.unknown` is the right target
-            // rather than `.absent` — it routes the tab back to the legacy screen check, which
-            // is precisely what protects a bare shell today.
+            // what `injectionGate` now does: the screen a dead agent leaves behind carries no
+            // dialog markers, so `isKnownNonComposer` cannot veto it, and the text would be RUN
+            // as a command instead of sent to anybody.
             //
-            // **The signal is the anchor, and the test is LEVEL, not its falling edge.**
-            // `SessionStatusWatcher` drops rows whose pid is dead and serves the last good
-            // value through a torn read, so "no row names this conversation" means no process
-            // does. An earlier cut fired only on `had one, then lost it`, to protect the boot
-            // window where `SessionStart` can be logged before `claude` has written its status
-            // file. That was the wrong trade in both directions: it also could not fire AFTER,
-            // so a `claude` that died before ever writing that file — the same sub-second
-            // window, entered from the other side — left the tab reading `.live` permanently,
-            // at a bare shell, where `ClaudeTextChannel.submit`'s only screen precondition is
-            // `InputBar.read` finding one `❯` row, which a shell prompt satisfies. Unbounded
-            // once entered, and a sidebar rename would then run `/rename foo` as a command.
+            // **And the screen cannot be fallen back to either, which is what a live probe
+            // settled and an earlier comment here got wrong.** Claude Code does not clear the
+            // terminal on exit: a real `claude` run under a pty answered `hasComposerBox: true`
+            // on its own screen AFTER exiting, exactly as it had while alive (2026-09-21),
+            // because the composer box it drew is still the last one in the viewport. So
+            // demoting to `.unknown` — "it routes the tab back to the legacy screen check,
+            // which is precisely what protects a bare shell today" — protects nothing: it hands
+            // the verdict to the one predicate that provably cannot give it. A death we are
+            // CERTAIN of therefore demotes to `.absent`, which refuses without asking the
+            // screen; see `demoteComposerReadiness` for what "certain" means here and for the
+            // weaker cases that still get `.unknown`.
             //
-            // A level test closes that, and it is re-armable rather than terminal:
-            // `resetComposerReadiness` also clears the hook watcher's memory of the session,
-            // so the session's next hook event re-reports `.live` instead of being swallowed
-            // as unchanged. Until that event arrives the tab is on the legacy screen grammar —
-            // exactly what it did before any of this existed — rather than stranded.
+            // **The signal is the anchor, the test is LEVEL rather than its falling edge, and
+            // the falling edge is what grades the answer.** `SessionStatusWatcher` drops rows
+            // whose pid is dead and serves the last good value through a torn read, so "no row
+            // names this conversation" means no process does. An earlier cut fired only on
+            // `had one, then lost it`, to protect the boot window where `SessionStart` can be
+            // logged before `claude` has written its status file. That could not fire AFTER
+            // either, so a `claude` that died before ever writing that file — the same
+            // sub-second window, entered from the other side — left the tab reading `.live`
+            // permanently, at a bare shell, where `ClaudeTextChannel.submit`'s only screen
+            // precondition is `InputBar.read` finding one `❯` row, which a shell prompt
+            // satisfies. Unbounded once entered, and a sidebar rename would then run
+            // `/rename foo` as a command.
+            //
+            // So the test stays level — every tab with no row is demoted, and `.live` never
+            // survives one — but the falling edge is not thrown away: it is exactly what tells
+            // a death from a boot, and `demoteComposerReadiness` spends it on the difference
+            // between `.absent` and `.unknown`.
+            //
+            // Either way the demotion is re-armable rather than terminal: it also clears the
+            // hook watcher's memory of the session, so the session's next hook event re-reports
+            // `.live` instead of being swallowed as unchanged.
             //
             // **That wait is a turn, not a beat, and it is the ordinary state of an idle
             // tab.** Hook events fire on lifecycle, not on a clock: a freshly booted claude
-            // that logs `SessionStart` before writing its status file is reset here, and then
+            // that logs `SessionStart` before writing its status file is demoted here, and then
             // emits nothing at all until somebody submits a prompt. So the honest cost of the
             // level test is "every not-yet-anchored tab reads `.unknown` until its next turn",
             // which is affordable only because `.unknown` is a working path, not because the
-            // window is short.
+            // window is short — and which is also why the boot window may not be answered with
+            // `.absent`, a path that works for nobody.
             //
             // **One tick of latency, and the two callers it does not cover.** This is a polled
             // signal at `WatchClock.foregroundInterval` (500 ms, 2 s when Flight Deck is not
             // frontmost), so a death is seen up to one tick after it happens. The three
-            // flushes in the `defer` above run AFTER this reset, so anything the *tick* drives
-            // is covered. Two paths are not driven from the tick: `submitPrompt` calls
+            // flushes in the `defer` above run AFTER this demotion, so anything the *tick*
+            // drives is covered. Two paths are not driven from the tick: `submitPrompt` calls
             // `flushPromptQueue(id)` inline and `rename` calls `flushPendingRename(id)` inline,
             // both arriving whenever a phone or a sidebar click says so. What covers those is
             // `injectableReadiness`, which re-probes the anchor's pid at the instant of
-            // injection — see its doc comment; this reset remains the durable half, because it
-            // is the half that can also clear the hook watcher's memory.
+            // injection and answers `.absent` on the same evidence — see its doc comment; this
+            // demotion remains the durable half, because it is the half that can also clear the
+            // hook watcher's memory and the half that outlives the anchor it probed.
             //
             // Only claude tabs reach here — `pinResolutions` filters on `hasStatusRegistry` —
             // which is why a codex tab keeps whatever its rollout last reported. Codex needs no
@@ -6128,11 +6231,15 @@ final class SessionStore: ObservableObject {
             // `composer(_:)` finds codex's `›` marker AND its `model · mode · cwd` footer
             // directly beneath, so a codex tab at a bare shell types nothing whatever this gate
             // says. Claude has no such second line — `InputBar.read` locks onto a shell's own
-            // `❯` perfectly happily — which is what makes this reset load-bearing there.
+            // `❯` perfectly happily, and on the composer a dead claude leaves on screen even
+            // more happily — which is what makes this demotion load-bearing there.
             // `SessionStoreInjectionGateTests` pins both halves, claude's and codex's.
-            if resolution.anchor == nil {
-                resetComposerReadiness(for: tab, conversation: session.pinnedConversationID)
-            }
+            demoteComposerReadiness(
+                for: tab,
+                conversation: session.pinnedConversationID,
+                priorAnchor: priorAnchor,
+                anchor: resolution.anchor
+            )
             // Safe on every tick: it is the tab's own transcript directory echoed back when
             // no row named one, so the two branches below simply find nothing to do.
             let cwd = resolution.transcriptDirectory

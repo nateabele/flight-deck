@@ -304,15 +304,29 @@ and the screen is consulted only to veto a dialog.
   `AgentTextChannel.isKnownNonComposer` recognises a dialog on it; `.unknown` → the legacy
   `hasComposerBox` grammar, exactly what every tab did before this existed, which is the
   migration guarantee; `.absent` → refuse.
+- **`hasComposerBox` cannot tell a composer from its corpse, so `.absent` is the only thing
+  that refuses a dead agent.** Claude Code does not clear the terminal on exit: the box it drew
+  is still the last one in the viewport with the process gone, and a live pty probe
+  (2026-09-21) had `hasComposerBox` answering `true` after the exit exactly as it had before
+  it, with no dialog for the veto to catch. So `.unknown` is a fallback for a tab nothing has
+  *reported* on, never a way to refuse one known to be dead.
 - **The dialog veto recognises a dialog, never a composer**, and so fails *open* on an
   unfamiliar screen. Per agent it is the footer token (`Esc to cancel`, plus codex's
   `esc to go back`) **or** a marker line (`❯` / `›`) followed by numbered ` N. ` rows.
-- **`.live` is not sticky.** Neither agent reliably announces its own death — `SessionReaper`
-  escalates to SIGKILL, so `SessionEnd` usually never fires, and codex has no session-end
-  record at all. `applyRegistry` resets a claude tab to `.unknown` on any tick where no
-  registry row names its conversation, and clears the hook watcher's per-session memory at the
-  same time so the reset is re-armable rather than one-way. Between ticks, `injectableReadiness`
-  re-probes the anchor's pid at the instant of injection, which is what covers `submitPrompt`
+- **`.live` is not sticky, and the demotion is graded by how certain the death is.** Neither
+  agent reliably announces its own death — `SessionReaper` escalates to SIGKILL, so
+  `SessionEnd` usually never fires, and codex has no session-end record at all. On any tick
+  where no registry row names a claude tab's conversation, `applyRegistry` demotes it: to
+  **`.absent`** when the tab had an anchor and a `kill(pid, 0)` says that pid is gone (a
+  certain death, refused without consulting the screen), and to **`.unknown`** otherwise — a
+  tab that was never anchored is indistinguishable from one in the boot window, and the
+  multi-account merge makes every tab of a not-yet-scanned account look unanchored while its
+  agent is perfectly alive. The demotion never promotes, so `.absent` survives later ticks; it
+  clears the hook watcher's per-session memory, so a resumed claude's `SessionStart` is
+  reported as news rather than swallowed as unchanged; and a registry row appearing where there
+  was none frees an `.absent` tab back to `.unknown`, which is what recovers a tab with no hook
+  feed at all. Between ticks, `injectableReadiness` re-probes the anchor's pid at the instant
+  of injection and answers `.absent` on the same evidence, which is what covers `submitPrompt`
   and `rename` — the two callers that inject inline rather than from the tick.
 
 Design record: `docs/superpowers/specs/2026-09-19-hook-fed-composer-state-design.md` and
