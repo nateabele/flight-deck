@@ -51,8 +51,14 @@ struct FlywheelSetup {
     /// `flywheel-new` itself, which also runs `git init` (wrong here — the project already is
     /// a repo), `ntm init` (NTM hooks this app doesn't use) and `cm init --repo` (unrelated
     /// repo memory) — none of which "Setup Flywheel…" asked for. Idempotent the same way
-    /// `enable` is: each step is gated on the probe status, so calling this twice (or once on
-    /// a repo that already has some of the markers) only runs what's still missing.
+    /// `enable` is, but NOT on one shared gate: `br init` is gated on `status.hasBeads`, `am
+    /// projects discovery-init` on `status.hasAgentMailMarker`, and `br agents --add` on its
+    /// OWN marker (`hasAgentsSection`, below) rather than reusing `hasBeads`. Sharing `hasBeads`
+    /// used to mean a `br init` that succeeded followed by a `br agents --add` that failed left
+    /// `.beads/` on disk, so a re-run saw `hasBeads == true` and skipped the agents step
+    /// forever — `AGENTS.md` never got its section. Each step is now independently gated, so
+    /// calling this twice (or once on a repo missing only some of the markers) runs exactly
+    /// what is still missing.
     @discardableResult
     func initialize(repo: URL) async throws -> [String] {
         var steps: [String] = []
@@ -67,7 +73,9 @@ struct FlywheelSetup {
                 throw FlywheelError.initializeStep(step: "br init", exitCode: exitCode, output: stdout)
             }
             steps.append("beads workspace (br init)")
+        }
 
+        if !Self.hasAgentsSection(repo: repo) {
             let (agentsOutput, agentsExitCode) = try await runner.run(
                 brPath, ["agents", "--add", "--force"], cwd: repo.path
             )
@@ -93,6 +101,24 @@ struct FlywheelSetup {
 
         steps.append(contentsOf: try await enable(repo: repo))
         return steps
+    }
+
+    /// The fence `br agents --add` wraps its appended section in. `FlywheelProjectProbe` has
+    /// no signal for it — that probe only reads git hooks and the two bootstrap markers — so
+    /// `hasAgentsSection` checks directly rather than growing `FlywheelStatus` for one caller.
+    private static let agentsSectionMarker = "<!-- br-agent-instructions-v1 -->"
+
+    /// Whether `AGENTS.md` already carries `br agents --add`'s fenced section — see the gate
+    /// on `initialize`'s `br agents --add` step for why this is checked on its own rather than
+    /// folded into `status.hasBeads`. `br agents --add --force` is non-destructive (it backs up
+    /// the file to `AGENTS.md.bak` and appends inside the fence, never overwriting
+    /// hand-authored content) and idempotently re-fences on every run, so calling it again when
+    /// the fence is already present would be harmless — this check exists to make a *missing*
+    /// section resumable, not to avoid a redundant call.
+    private static func hasAgentsSection(repo: URL) -> Bool {
+        let url = repo.appendingPathComponent("AGENTS.md")
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return false }
+        return contents.contains(agentsSectionMarker)
     }
 
     /// `br init --prefix` wants a short identifier, not a path — mirrors `flywheel-new`'s own
