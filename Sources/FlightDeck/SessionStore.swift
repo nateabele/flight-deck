@@ -2178,6 +2178,24 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// The "Setup Flywheel…" menu action's target — `enableFlywheel`'s sibling for a project
+    /// the probe found neither `.beads/` nor `.agent-mail.yaml` in. Bootstraps those markers
+    /// first (`FlywheelSetup.initialize`, which also runs `enable`'s own steps), then marks
+    /// the project flywheel-enabled on success. Same failure handling as `enableFlywheel`:
+    /// report and leave the flag unset — a repo that only got partway through `initialize`
+    /// stays un-enabled rather than being marked ready when it isn't.
+    @MainActor
+    func setupFlywheel(for repo: URL) async {
+        do {
+            _ = try await flywheelSetup.initialize(repo: repo)
+            var settings = preferences?.projectSettings(repo.path) ?? ProjectSettings()
+            settings.flywheelEnabled = true
+            preferences?.setProjectSettings(repo.path, settings)
+        } catch {
+            launchFailureReporter.report(launchError(from: error))
+        }
+    }
+
     /// The Accounts pane's "Sign In" / "Sign In Again" path: an ordinary tab, bound to a
     /// specific account the caller names outright rather than one `launchAccount` would
     /// resolve from project settings — a login is not the project's default agent, it is

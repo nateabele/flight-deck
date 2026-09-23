@@ -11,6 +11,11 @@ enum FlywheelError: Error, LocalizedError {
     /// `am guard install` (part of `FlywheelSetup.enable`) exited non-zero. `output`
     /// is its stdout, for surfacing to the user/logs.
     case guardInstall(exitCode: Int32, output: String)
+    /// One of `FlywheelSetup.initialize`'s bootstrap steps (`br init`, `br agents --add`,
+    /// `am projects discovery-init`) exited non-zero before `enable` ever ran. `step` names
+    /// which one, so a plain-repo "Setup Flywheel…" failure reads as specifically as an
+    /// already-flywheel project's `enable` failure does.
+    case initializeStep(step: String, exitCode: Int32, output: String)
 
     /// Read by `SessionStore.launchError(from:)`'s generic `default` branch — the one path
     /// that surfaces this to the user — so a boot failure reads as one clean sentence rather
@@ -23,6 +28,8 @@ enum FlywheelError: Error, LocalizedError {
             "Agent Mail start-session returned something unparseable: \(Self.firstLine(of: output))"
         case .guardInstall(let exitCode, let output):
             "Agent Mail guard install failed (exit \(exitCode)): \(Self.firstLine(of: output))"
+        case .initializeStep(let step, let exitCode, let output):
+            "Flywheel setup step `\(step)` failed (exit \(exitCode)): \(Self.firstLine(of: output))"
         }
     }
 
