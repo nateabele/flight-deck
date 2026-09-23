@@ -17,6 +17,9 @@ struct ProjectHeaderRow: View {
     @State private var isHovered = false
     @State private var showingFlywheelConfirmation = false
     @State private var showingFlywheelSetupConfirmation = false
+    // Populated once by `.onAppear` for a plain project with no cached suggestion — see
+    // `flywheelStatus`'s doc comment for why this exists at all.
+    @State private var probedFlywheelStatus: FlywheelStatus?
 
     var body: some View {
         HStack(spacing: 4) {
@@ -122,6 +125,11 @@ struct ProjectHeaderRow: View {
         .onHover { isHovered = $0 }
         .animation(.easeOut(duration: 0.12), value: isHovered)
         .animation(.easeOut(duration: 0.12), value: repo.isCollapsed)
+        // `.contextMenu`'s content closure is NOT menu-open-only — measured (a build counter
+        // inside the closure incremented on every `@Published` re-render, 11 builds for 1
+        // mount + 10 state changes with the menu never opened) — so `flywheelStatus`'s on-demand
+        // probe has to be memoized here rather than left to run on every render.
+        .onAppear { probeFlywheelStatusIfNeeded() }
         .contextMenu {
             Button("New Session") { store.newClaudeTab(in: repo.url) }
             Button(repo.isCollapsed ? "Expand" : "Collapse") { toggle() }
@@ -208,10 +216,29 @@ struct ProjectHeaderRow: View {
     /// project `insertSession` found to already be a flywheel project at add-time — a plain
     /// repo never gets an entry, since the cache exists to drive what to *suggest*, not to
     /// remember every non-hit. The context menu needs the detection either way to choose
-    /// between "Enable Flywheel…" and "Setup Flywheel…", so a miss falls back to a fresh,
-    /// on-demand probe — cheap FileManager checks, fine for a right-click menu.
+    /// between "Enable Flywheel…" and "Setup Flywheel…", so a miss falls back to
+    /// `probedFlywheelStatus` — this row's own memoized on-demand probe, populated once by
+    /// `.onAppear` (see `probeFlywheelStatusIfNeeded`) rather than re-run here. The live probe
+    /// is kept as a last-resort fallback for the brief window before that `.onAppear` fires
+    /// (SwiftUI's first `body` pass), not as the steady-state path.
     private var flywheelStatus: FlywheelStatus {
-        store.flywheelSuggestion(for: repo.url) ?? FlywheelProjectProbe.status(of: repo.url)
+        store.flywheelSuggestion(for: repo.url)
+            ?? probedFlywheelStatus
+            ?? FlywheelProjectProbe.status(of: repo.url)
+    }
+
+    /// Runs the FileManager-backed probe at most once per row mount, into `@State`, instead of
+    /// inline from `flywheelStatus`. `flywheelStatus` is read from `.contextMenu`'s content
+    /// closure, and that closure is NOT lazy / menu-open-only — SwiftUI rebuilds it on every
+    /// `body` evaluation, confirmed with a build counter (11 builds for 1 mount + 10
+    /// `@Published` re-renders, menu never opened) — so leaving the probe inline meant a
+    /// synchronous disk stat on every re-render of every plain project's row, e.g. once per
+    /// keystroke landing in any session under it. Skips the probe outright once the store
+    /// already has a cached suggestion, since that always wins over `probedFlywheelStatus` in
+    /// `flywheelStatus` anyway.
+    private func probeFlywheelStatusIfNeeded() {
+        guard probedFlywheelStatus == nil, store.flywheelSuggestion(for: repo.url) == nil else { return }
+        probedFlywheelStatus = FlywheelProjectProbe.status(of: repo.url)
     }
 
     /// What the confirmation dialog tells the user `enableFlywheel` is about to run — the
