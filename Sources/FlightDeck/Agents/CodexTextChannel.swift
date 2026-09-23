@@ -157,27 +157,42 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
         into injector: TextInjecting,
         settle: @escaping (@escaping () -> Void) -> Void,
         stillWanted: @escaping @MainActor () -> Bool,
-        onSent: @escaping @MainActor () -> Void
+        onFinished: @escaping @MainActor (Bool) -> Void
     ) -> Bool {
         guard let bar = composer(injector) else { return false }
 
         let before = bar.content
         injector.sendKillLine()
         settle {
-            guard stillWanted() else { return }
+            // Read BEFORE the supersession check, because both exits owe the draft back and
+            // both owe it on the same terms. It used to be read after, so the superseded path
+            // had nothing to restore from and destroyed the draft the kill above had already
+            // taken — claude's channel yanks its own back out of a ring, and codex has no ring
+            // to yank from (see this type's doc comment), so what it has instead is this read.
             let after = self.composer(injector)?.content
+            // Restore only on a CONFIRMED change, exactly as claude's channel does. An
+            // unreadable screen means we do not know, and typing a remembered string into
+            // a composer that may not have held it is worse than leaving the user one undo
+            // away. A kill that changed nothing means the line was empty — or held only the
+            // placeholder, which no kill can remove — so there is nothing to put back.
+            let killedADraft = after != nil && after != before && before != Self.placeholder
+            guard stillWanted() else {
+                if killedADraft { injector.sendText(before) }
+                // **Reported, not merely returned from.** This method has already committed
+                // to `true`, so `SessionStore.inject` has marked the tab mid-injection and is
+                // waiting here to release it. A bare `return` — which is what this used to be
+                // — left that mark set with no path left to clear it, and the tab then
+                // refused every later rename and phone prompt for the life of the process.
+                onFinished(false)
+                return
+            }
             injector.sendText(text)
             settle {
                 injector.sendReturn()
-                // Restore only on a CONFIRMED change, exactly as claude's channel does. An
-                // unreadable screen means we do not know, and typing a remembered string into
-                // a composer that may not have held it is worse than leaving the user one undo
-                // away. A kill that changed nothing means the line was empty — or held only the
-                // placeholder, which no kill can remove — so there is nothing to put back.
-                if let after, after != before, before != Self.placeholder {
-                    injector.sendText(before)
-                }
-                onSent()
+                // After the Return, so a wrong guess can only leave text sitting in the
+                // composer and never submit it.
+                if killedADraft { injector.sendText(before) }
+                onFinished(true)
             }
         }
         return true
@@ -226,11 +241,17 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
     /// the now-empty composer, so its own `before` is empty. Recorded here as known and
     /// intentional rather than left to look like an oversight.
     ///
-    /// `ClaudeTextChannel.submit` also skips its restore on cancellation, but the two are not
-    /// equally cheap, and the asymmetry is the part a reader needs. Claude leaves the draft one
-    /// Ctrl+Y away in its own kill ring; this function re-types instead precisely because codex
-    /// has never been shown to keep such a ring — see the doc above, which deliberately does
-    /// not depend on one. Reaching this case at all takes two renames in flight at once.
+    /// **That makes this the outlier, not the shared rule.** The sentence that used to sit
+    /// here said `ClaudeTextChannel.submit` skipped its restore on cancellation too, and that
+    /// was never true — it has yanked the killed draft back out of claude's ring on that path
+    /// since it was written — and `submit` above now re-types what it read on its own
+    /// superseded path, which it used to skip. Both of those hold an "after the kill" screen
+    /// to compare against; this method, by the time either caller reaches it, does not (see
+    /// below), and its cancellation path has never read one. Reaching that case at all takes
+    /// two renames in flight at once, which is what keeps it filed as a known gap rather than
+    /// a bug to chase. Claude leaves the draft one Ctrl+Y away in its own kill ring; this
+    /// function re-types instead precisely because codex has never been shown to keep such a
+    /// ring — see the doc above, which deliberately does not depend on one.
     ///
     /// **This is not `submit`'s guard.** `submit` restores only on a CONFIRMED change — it
     /// re-reads the composer after the kill and compares `after != before` before typing
@@ -250,10 +271,11 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
     ///
     /// Two submissions, two repaints to wait through, plus one more `settle` hop per
     /// submission for the Return alone — see `AgentRenameTyping`'s doc comment for why
-    /// multiple hops are legal here and are not for `submit`, and `submit`'s own doc comment
-    /// for why the Return needs a hop to itself at all: codex paste-detects a Return that
-    /// arrives in the same burst as the text before it and inserts a newline instead of
-    /// submitting, and that failure does not care which of these two submissions it lands in.
+    /// multiple hops are legal here, same as they now are for `submit` above, and `submit`'s
+    /// own doc comment for why the Return needs a hop to itself at all: codex paste-detects a
+    /// Return that arrives in the same burst as the text before it and inserts a newline
+    /// instead of submitting, and that failure does not care which of these two submissions
+    /// it lands in.
     /// `onFinished` is what carries the one-shot guarantee instead, firing exactly once
     /// whichever of the three ways this ends: the name committed, the modal never came up, or
     /// the request was cancelled while codex repainted.

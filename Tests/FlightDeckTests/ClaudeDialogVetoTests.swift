@@ -22,7 +22,12 @@ final class ClaudeDialogVetoTests: XCTestCase {
     /// Fourteen of these fifteen carry `Esc to cancel`. `question-two-review` does not — its
     /// footer is `❯ 1. Submit answers` / `  2. Cancel`, caught only by the
     /// marker-plus-numbered-row rule. See `ClaudeTextChannel.hasNumberedMarkerRow`.
-    private static let dialogs = [
+    ///
+    /// **Internal rather than private** so `ClaudeComposerDetectorTests` can hold the *other*
+    /// predicate to the same fifteen screens — see its `testEveryDialogCaptureIsRefused`. One
+    /// hand-written list, asserted twice: a dialog added here is covered by both gates at once,
+    /// which is the whole reason the list is shared instead of copied.
+    static let dialogs = [
         "permission-bash", "permission-write", "permission-write-60col", "permission-write-row2",
         "question-single", "question-single-247", "question-two", "question-two-answered",
         "question-two-review", "question-multi", "question-checkbox", "question-checkbox-toggled",

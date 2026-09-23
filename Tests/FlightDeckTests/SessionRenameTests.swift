@@ -168,6 +168,20 @@ final class SessionRenameTests: XCTestCase {
         XCTAssertTrue(spy.events.isEmpty)
     }
 
+    /// **The first half of the bug this branch exists to fix, reached from the store.**
+    /// `46c2402`'s coverage was entirely at the predicate (`ClaudeComposerDetectorTests`); this
+    /// asserts that a sidebar rename against the screen it newly admits actually reaches the
+    /// agent. This session's `composerReadiness` defaults to `.unknown` (see `makeStore`), so
+    /// `hasComposerBox` — not the `.live` hook feed — is the operative gate here, exactly the
+    /// arm `46c2402` fixed.
+    func testARenameIntoTheEchoOnlyScreenReachesTheAgent() throws {
+        let (store, spy, id) = makeStore()
+        spy.viewportOverride = try TimelineFixtureTests.text("busy-echo-only.captured", in: "Claude")
+        spy.events.removeAll()
+        store.rename(id, to: "echoed")
+        XCTAssertTrue(spy.sent.contains("/rename echoed"), "the rename reaches the agent")
+    }
+
     func testRenameDefersWhenTheScreenCannotBeRead() {
         let (store, spy, id) = makeStore()
         spy.viewportIsReadable = false
@@ -204,6 +218,56 @@ final class SessionRenameTests: XCTestCase {
 
         XCTAssertEqual(spy.sent, ["/rename second"])
         XCTAssertEqual(store.title(of: id), "second")
+    }
+
+    /// **The tab that used to wedge itself, and the replacement that must survive the wedge.**
+    ///
+    /// `inject` marks the tab mid-injection before the channel is asked and used to release
+    /// that mark only from inside the completion the channel ran when text really went out.
+    /// A rename superseded while claude repainted never reached that completion, so the mark
+    /// stayed set with no path left to clear it: `injectionGate` then refused every later
+    /// rename AND every phone prompt for that tab, for the life of the process. Nothing
+    /// surfaced — the sidebar kept accepting names, and none of them were ever typed.
+    ///
+    /// The second assertion is the split that fix must not collapse. Releasing the mark is
+    /// unconditional; retiring `pendingRenames[id]` is not, because by the time `stillWanted`
+    /// reads false that entry holds the NEWER name — retiring it here would silently drop the
+    /// replacement rename, trading a wedged tab for a lost one.
+    ///
+    /// Driven by holding `injectionSettle`'s continuation rather than running it inline,
+    /// which is the only way to genuinely suspend a drive mid-flight — the technique
+    /// `AgentTextChannelTests
+    /// .testASecondPromptArrivingBetweenCodexsTwoSettleHopsIsQueuedNotTyped` documents.
+    func testASupersededRenameReleasesTheMarkAndKeepsItsReplacement() {
+        let (store, spy, id) = makeStore()
+        var pending: [() -> Void] = []
+        store.injectionSettle = { pending.append($0) }
+
+        store.rename(id, to: "first")
+        XCTAssertEqual(pending.count, 1, "the kill is out; its settle has not run yet")
+        XCTAssertFalse(store.injectionGateAdmitsForTesting(id),
+                       "the premise: this tab is marked mid-injection")
+
+        // A second rename lands in that window. The gate refuses to type it now, so it sits
+        // in the queue as the newer name — which is what makes the first one superseded.
+        store.rename(id, to: "second")
+        XCTAssertEqual(store.pendingRenamesForTesting[id], "second")
+
+        pending.removeFirst()()
+
+        XCTAssertTrue(store.injectionGateAdmitsForTesting(id),
+                      "the mark is released on the superseded path too, or this tab never "
+                          + "accepts another rename or phone prompt again")
+        XCTAssertEqual(store.pendingRenamesForTesting[id], "second",
+                       "a superseded rename must not retire the replacement that superseded it")
+        XCTAssertEqual(spy.sent, [], "the superseded name itself is never typed")
+
+        // The payoff: the next registry scan drains the replacement, which is exactly what a
+        // wedged tab could never do.
+        store.injectionSettle = { $0() }
+        store.applyRegistry([1: entry(id, .idle, cwd: tmp.path)])
+        XCTAssertEqual(spy.sent, ["/rename second"])
+        XCTAssertNil(store.pendingRenamesForTesting[id], "typed, so retired")
     }
 
     /// Once drained, a later registry scan must not inject it a second time.

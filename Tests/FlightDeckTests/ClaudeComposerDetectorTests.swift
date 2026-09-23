@@ -4,7 +4,7 @@ import XCTest
 /// `ClaudeTextChannel.isComposerBox` — the gate `SessionStore.inject` now asks in place of the
 /// status-file activity it used to consult. See that type's doc comment for the rule itself:
 /// a `─` rule immediately above the `❯` marker line, AND the run it opens closed by another
-/// rule rather than a blank line.
+/// rule somewhere below — blank rows inside the box are skipped, not disqualifying.
 ///
 /// **Everything read through `captured(_:)` is a verbatim pty capture, not authored** — see
 /// `Fixtures/Claude/dialogs.captured.provenance.json` and `MidTurnDraftTests`'s doc comment for
@@ -71,15 +71,43 @@ final class ClaudeComposerDetectorTests: XCTestCase {
 
     // MARK: - The moment after submitting, before output arrives
 
-    /// **The one mid-turn window the gate does refuse, and correctly.** The box holds the
-    /// echoed prompt that just submitted, closed by a blank line rather than a rule — the run
-    /// scrolls straight into the transcript above it, with no footer rule beneath. It is brief:
-    /// `flushPromptQueue` retries on the next registry tick.
-    func testTheEchoOnlyScreenRightAfterSubmittingIsNotAComposer() throws {
-        XCTAssertFalse(ClaudeTextChannel.isComposerBox(try captured("busy-echo-only.captured")))
+    /// **This assertion used to read `XCTAssertFalse`, and its rationale was wrong about its own
+    /// fixture.** It claimed the box was "closed by a blank line rather than a rule — the run
+    /// scrolls straight into the transcript above it, with no footer rule beneath". Read the
+    /// capture: index 5 is the top rule, index 6 the `❯` line holding the echoed prompt, index 7
+    /// is blank, **index 8 is the footer rule**, and indices 9-11 are the same three rows of
+    /// status chrome `idle-empty-box` carries. The two captures are structurally identical apart
+    /// from the box being two rows tall here, its second row empty because the echo occupies the
+    /// first. Retracted rather than quietly deleted, because the claim is what kept the screen
+    /// refused for three releases.
+    ///
+    /// So this is a real composer and always was. `InputBar.read` has agreed all along —
+    /// `MidTurnDraftTests.testTheBoxHoldsTheRunningPromptJustAfterSubmitting` reads exactly one
+    /// row from this capture, which is what `submit` requires — and so has
+    /// `ClaudeDialogVetoTests`, which lists `busy-echo-only` among its `composers`. Only this
+    /// gate disagreed, and the disagreement cost a rename every time a submit was in flight.
+    func testTheEchoOnlyScreenRightAfterSubmittingIsAComposer() throws {
+        XCTAssertTrue(ClaudeTextChannel.isComposerBox(try captured("busy-echo-only.captured")))
     }
 
     // MARK: - Dialogs: draw one rule at most, never both
+
+    /// **The corpus assertion that stops the blank-row admission from widening into a hole.**
+    /// Admitting a blank row inside the box is safe only as long as no dialog reaches the loop
+    /// that reads it; all fifteen are refused earlier, by the rule-immediately-above test (13)
+    /// or for carrying no usable marker at all (`workspace-trust` has none,
+    /// `permission-write-row2` puts one on row 0). That is a property of today's corpus, not a
+    /// theorem, so it is asserted rather than assumed — and asserted against
+    /// `ClaudeDialogVetoTests.dialogs` rather than a second hand-typed list, so a dialog capture
+    /// added there is held to this predicate too.
+    func testEveryDialogCaptureIsRefused() throws {
+        for name in ClaudeDialogVetoTests.dialogs {
+            XCTAssertFalse(
+                ClaudeTextChannel.isComposerBox(try captured("\(name).captured")),
+                "\(name) must not read as a composer — injection here lands in a dialog"
+            )
+        }
+    }
 
     func testAPermissionPromptIsNotAComposer() throws {
         XCTAssertFalse(ClaudeTextChannel.isComposerBox(try captured("permission-bash.captured")))
@@ -101,7 +129,13 @@ final class ClaudeComposerDetectorTests: XCTestCase {
     /// **The row `AskUserQuestion` draws its own `❯` on that a real composer never does**, and
     /// the reason both halves of the rule are required. The list's closing rule sits directly
     /// above this row, so "a rule immediately above the marker" alone would pass it; nothing
-    /// closes the run *below* it but a blank line, which is what actually refuses it.
+    /// closes the run *below* it at all, which is what refuses it.
+    ///
+    /// **Which clause does the refusing changed, and this comment with it.** It used to be the
+    /// blank-row bail — the row under the marker is empty. That bail is gone (it also refused
+    /// `busy-echo-only`, a real composer), so this screen is now caught by the trailing
+    /// `return false`: the search runs off the bottom of the viewport without ever finding a
+    /// closing rule, because the dialog's footer is prose, not a rule.
     ///
     /// No capture in the fixture set holds the cursor on this exact row, so this is `question-
     /// single.captured` with the marker moved by hand from "1. Rust" onto "5. Chat about this" —

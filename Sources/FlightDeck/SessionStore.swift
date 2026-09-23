@@ -5101,18 +5101,22 @@ final class SessionStore: ObservableObject {
 
     /// One tab's turn at the input box.
     ///
-    /// **The head only, never the whole queue.** `inject` submits with a Return, so a second
-    /// entry in the same pass would be typed into a bar that has just started a turn. Right
-    /// after the submit the screen is an echo of the sent message, not a composer box, so on a
-    /// tab taking the legacy path `hasComposerBox` refuses the second entry (see
-    /// `ClaudeComposerDetectorTests.testTheEchoOnlyScreenRightAfterSubmittingIsNotAComposer`) —
-    /// but only after the settle, by which point the entry looks flushed to everything
-    /// upstream. **This loop's own rule is what makes that safe, and it no longer has that
-    /// backstop everywhere:** a tab whose agent has reported `.live` is gated on the dialog
-    /// veto, and an echo-only screen trips neither of its rules, so the head-only rule is now
-    /// the only thing standing between two queued prompts and one pass. One per pass, and the
-    /// next pass is a registry tick away — by which point the screen has moved on and the
-    /// second prompt is typed mid-turn, which claude queues, which is the point.
+    /// **The head only, never the whole queue — this loop's own rule, not the only thing left
+    /// enforcing it.** `inject` submits with a Return, so a second entry in the same pass would
+    /// be typed into a bar that has just started a turn. The screen right after a submit — the
+    /// echo, `busy-echo-only` — used to be refused by `hasComposerBox`, which gave the legacy
+    /// path an accidental backstop behind this rule. Both halves of that are gone: a tab
+    /// reporting `.live` is gated on the dialog veto, which an echo-only screen trips neither
+    /// rule of, and `hasComposerBox` now **accepts** that screen too, because it is a real
+    /// composer and refusing it lost renames (see
+    /// `ClaudeComposerDetectorTests.testTheEchoOnlyScreenRightAfterSubmittingIsAComposer`).
+    /// `injectionGate`'s own `guard !injecting.contains(id)` is a second, independent guard
+    /// against exactly the case this rule protects: the mark set before `inject` calls out is
+    /// held across the settle, so a second `inject` in the same pass is refused there too. That
+    /// makes it a backstop, not a design assumption this loop is allowed to lean on — the
+    /// head-only rule is what this loop actually relies on. One per pass, and the next pass is
+    /// a registry tick away — by which point the screen has moved on and the second prompt is
+    /// typed mid-turn, which claude queues, which is the point.
     private func flushPromptQueue(_ id: UUID) {
         // Expiry first, and it runs whether or not this tab can be typed into: a queue that
         // is never drained because its tab lost its surface must still empty itself.
@@ -5813,8 +5817,9 @@ final class SessionStore: ObservableObject {
     /// each step is shaped the way it is live with it in `ClaudeTextChannel`.
     ///
     /// `stillWanted` is re-checked after the first settle delay, because the request can be
-    /// replaced or cancelled while the agent repaints. `onSent` runs once the text has been
-    /// submitted, and is where the caller retires its pending entry.
+    /// replaced or cancelled while the agent repaints. `onSent` runs once the text has really
+    /// been submitted — and only then — and is where the caller retires its pending entry. A
+    /// drive that unwinds instead never reaches it, which is deliberate; see the wrapper below.
     @discardableResult
     private func inject(
         _ text: String,
@@ -5825,13 +5830,13 @@ final class SessionStore: ObservableObject {
         guard let gate = injectionGate(id) else { return false }
 
         // Marked before the channel is asked, and cleared again if it refuses: released in the
-        // wrapped `onSent` below, not tied to any one `settle` call — `AgentTextChannel.submit`
-        // now allows `settle` to fire more than once per drive (codex's Return needs a hop of
-        // its own, separate from its text; see `CodexTextChannel.submit`), so a mark released
-        // inside settle's own defer, as a single-settle contract once allowed, would reopen the
-        // tab mid-drive, between that text and its Return. `onSent` is `submit`'s one
-        // guaranteed-once signal instead, exactly as `onFinished` is `submitRename`'s below —
-        // this is that same pattern, not a new one.
+        // wrapped `onFinished` below, not tied to any one `settle` call —
+        // `AgentTextChannel.submit` now allows `settle` to fire more than once per drive
+        // (codex's Return needs a hop of its own, separate from its text; see
+        // `CodexTextChannel.submit`), so a mark released inside settle's own defer, as a
+        // single-settle contract once allowed, would reopen the tab mid-drive, between that
+        // text and its Return. `onFinished` is `submit`'s one guaranteed-once signal instead,
+        // exactly as it is `submitRename`'s below — this is that same pattern, not a new one.
         injecting.insert(id)
         let started = gate.channel.submit(
             text, into: gate.injector,
@@ -5845,9 +5850,19 @@ final class SessionStore: ObservableObject {
                 self.injectionSettle(work)
             },
             stillWanted: stillWanted,
-            onSent: { [weak self] in
+            onFinished: { [weak self] sent in
+                // **Two jobs, and only one of them is unconditional.** The mark comes off on
+                // every outcome: it exists to keep a second driver out of a half-typed box,
+                // and a drive that unwound is not typing into anything — a release that
+                // depended on text having gone out left the tab refusing every later rename
+                // and phone prompt for the life of the process, which is the defect this
+                // split fixes.
                 self?.injecting.remove(id)
-                onSent()
+                // Retiring the caller's pending entry is NOT unconditional, and collapsing
+                // the two would trade that wedged tab for a lost rename: `stillWanted`
+                // reading false means `pendingRenames[id]` already holds a NEWER name, and
+                // `onSent` is exactly the closure that clears it.
+                if sent { onSent() }
             }
         )
         if !started { injecting.remove(id) }
@@ -6033,11 +6048,11 @@ final class SessionStore: ObservableObject {
     /// Types a rename through an agent's two-stage modal, or defers. Codex's leg; claude
     /// declares no `renameTyping` and never arrives here. See `AgentRenameTyping`.
     ///
-    /// **The single difference from `inject` that matters is WHEN the `injecting` mark is
-    /// released, and it is the entire reason this method exists.** `inject` clears the mark
-    /// inside its settle wrapper, which is exactly right for a channel contracted to settle
-    /// once. `submitRename` settles three times on its success path — once per repaint it
-    /// must wait through — so clearing there would drop the mark while the modal was still
+    /// **The single difference from `inject` that matters is not WHEN the `injecting` mark is
+    /// released — both release it in `onFinished`, never inside a `settle` closure — but how
+    /// much has to happen before that fires.** `submitRename` nests five `settle` calls on its
+    /// success path, one per repaint across its two submissions, so the mark has to survive
+    /// every one of them: releasing it any earlier would drop it while the modal was still
     /// open and unnamed, and a rename arriving in that window would fire a second Ctrl+U into
     /// a half-driven modal. That is the race `injecting`'s own doc comment exists to close,
     /// reopened at a worse moment. So the mark is held across BOTH stages and released in

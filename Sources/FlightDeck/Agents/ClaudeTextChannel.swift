@@ -50,11 +50,13 @@ struct ClaudeTextChannel: AgentTextChannel {
 
     /// **The empirical fact everything here rests on: claude's composer is the FULL box.** A
     /// `─` rule sits on the line immediately above the `❯` marker, AND the run it opens is
-    /// closed by a rule rather than trailing into a blank line. Verified against every fixture
-    /// in `Fixtures/Claude/`: idle, mid-turn streaming, and the rotating placeholder hint all
-    /// carry both rules; every permission prompt and `AskUserQuestion` dialog — including the
-    /// tricky case where the cursor has been arrowed down to the list's last, unruled row —
-    /// carries at most one, and a bare shell's own `❯`-drawing prompt carries neither.
+    /// closed by a rule somewhere below rather than trailing off the bottom of the viewport.
+    /// Verified against every fixture in `Fixtures/Claude/`: idle, mid-turn streaming, the
+    /// just-submitted echo, and the rotating placeholder hint all carry both rules — the echo's
+    /// box simply holds a blank row between them, see below; every permission prompt and
+    /// `AskUserQuestion` dialog — including the tricky case where the cursor has been arrowed
+    /// down to the list's last, unruled row — carries at most one, and a bare shell's own
+    /// `❯`-drawing prompt carries neither.
     ///
     /// **Both rules, not one.** A dialog's own list is itself closed by a rule (`InputBar.read`
     /// relies on exactly that to end a reading), so checking only "closed by a rule" would pass
@@ -62,6 +64,24 @@ struct ClaudeTextChannel: AgentTextChannel {
     /// closing rule, so checking only "a rule immediately above" would pass on that row too.
     /// Only requiring both rejects every dialog shape while still accepting a real composer,
     /// whose second rule is the footer beneath it — never a dialog's list.
+    ///
+    /// **A blank row inside the box does not close it.** The search for the closing rule skips
+    /// blank rows rather than bailing on the first one, because claude's box grows a row the
+    /// instant a prompt is submitted: the echoed prompt sits on the `❯` row and the row beneath
+    /// it is empty, then the footer rule. `busy-echo-only.captured` is that screen — index 5
+    /// rule, index 6 echo, index 7 blank, index 8 rule, then the same status chrome
+    /// `idle-empty-box` carries.
+    /// Bailing on the blank row refused it, which lost a sidebar rename every time one landed
+    /// while a submit was in flight, and put this gate at odds with `InputBar.read` (which reads
+    /// the same capture as the one row `submit` requires) and with `isKnownNonComposer` (whose
+    /// tests list `busy-echo-only` as a composer).
+    ///
+    /// Stated honestly: **nothing in the corpus depends on the bail** — removing it changes
+    /// exactly one of the 21 `Fixtures/Claude` captures, this one, and all fifteen dialogs are
+    /// already refused above by the rule-immediately-above test or for carrying no usable marker
+    /// (`ClaudeComposerDetectorTests.testEveryDialogCaptureIsRefused` pins that). That is not the
+    /// same as the bail being provably unnecessary in general; it is why the corpus assertion
+    /// exists, so a future capture that *would* need it fails loudly instead of being admitted.
     ///
     /// **Presence, not emptiness.** This is `SessionStore.inject`'s gate now, replacing the
     /// status-file activity check — see `AgentTextChannel.hasComposerBox`. Whether the box is
@@ -77,10 +97,12 @@ struct ClaudeTextChannel: AgentTextChannel {
         else { return false }
         for line in lines[(start + 1)...] {
             if InputBar.isRule(line) { return true }
-            if line.trimmingCharacters(in: .whitespaces).isEmpty { return false }
         }
         // Ran off the bottom of the viewport without closing — not the shape a real composer
-        // ever leaves on screen, so refuse rather than guess.
+        // ever leaves on screen, so refuse rather than guess. This is now the only thing that
+        // refuses a dialog list whose cursor has been arrowed onto its last, unruled row (see
+        // `ClaudeComposerDetectorTests.testTheLastUnruledRowOfADialogListIsNotAComposer`): the
+        // blank line under that row used to refuse it, and no longer does.
         return false
     }
 
@@ -154,7 +176,7 @@ struct ClaudeTextChannel: AgentTextChannel {
         into injector: TextInjecting,
         settle: @escaping (@escaping () -> Void) -> Void,
         stillWanted: @escaping @MainActor () -> Bool,
-        onSent: @escaping @MainActor () -> Void
+        onFinished: @escaping @MainActor (Bool) -> Void
     ) -> Bool {
         guard let viewport = injector.readViewport(),
               let bar = InputBar.read(fromViewport: viewport),
@@ -188,9 +210,17 @@ struct ClaudeTextChannel: AgentTextChannel {
                 // a placeholder this yanks whatever is in Claude's kill-ring — usually nothing,
                 // and harmless since nothing was submitted from it.
                 if killedADraft { injector.sendYank() }
-                onSent()
-            } else if killedADraft {
-                injector.sendYank()
+                onFinished(true)
+            } else {
+                if killedADraft { injector.sendYank() }
+                // **Reported, not merely returned from.** This method has already committed
+                // to `true`, so `SessionStore.inject` has marked the tab mid-injection and is
+                // waiting here to release it. Falling off the end of this branch — which is
+                // what this used to do — left that mark set with no path left to clear it,
+                // and the tab then refused every later rename and phone prompt for the life
+                // of the process. `false` because nothing was submitted, which is also what
+                // stops the caller retiring a pending entry that now holds a newer request.
+                onFinished(false)
             }
         }
         return true
