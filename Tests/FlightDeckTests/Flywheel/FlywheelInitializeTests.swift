@@ -81,6 +81,11 @@ final class FlywheelInitializeTests: XCTestCase {
         let repo = plainRepo()
         try FileManager.default.createDirectory(at: repo.appendingPathComponent(".beads"), withIntermediateDirectories: true)
         try Data().write(to: repo.appendingPathComponent(".agent-mail.yaml"))
+        // `br agents --add` is gated on its own marker (AGENTS.md's fence), not on `.beads/` —
+        // without this the agents step would still fire even though the "already present" case
+        // this test means to cover is every marker present, not just the two bootstrap files.
+        try "before\n<!-- br-agent-instructions-v1 -->\nfenced\n<!-- end-br-agent-instructions -->\n"
+            .write(to: repo.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
         let fake = SimulatingFakeRunner()
         let setup = FlywheelSetup(runner: fake, amPath: "am", brPath: "br")
 
@@ -88,9 +93,67 @@ final class FlywheelInitializeTests: XCTestCase {
 
         XCTAssertFalse(fake.argv.contains { $0.first == "br" })
         XCTAssertFalse(fake.argv.contains { $0.dropFirst().first == "projects" })
-        XCTAssertFalse(steps.contains { $0.contains("br init") || $0.contains("discovery-init") })
+        XCTAssertFalse(steps.contains { $0.contains("br init") || $0.contains("discovery-init") || $0.contains("AGENTS.md") })
         // `enable`'s own steps still ran — bootstrap being done doesn't mean guard/hook are.
         XCTAssertTrue(steps.contains("am guard install"))
+    }
+
+    /// A repo whose `.beads/` already exists (so `br init` is skipped) but whose `AGENTS.md`
+    /// has no fenced section yet — the resume case Fix 1 exists for: `br agents --add` used to
+    /// be gated on the same `!status.hasBeads` as `br init`, so once `.beads/` existed the
+    /// agents step never ran again even if it had previously failed. It is gated on its own
+    /// marker now, so it still fires here.
+    func testAgentsStepRunsWhenBeadsExistsButAgentsSectionDoesNot() async throws {
+        let repo = plainRepo()
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent(".beads"), withIntermediateDirectories: true)
+        try Data().write(to: repo.appendingPathComponent(".agent-mail.yaml"))
+        let fake = SimulatingFakeRunner()
+        let setup = FlywheelSetup(runner: fake, amPath: "am", brPath: "br")
+
+        let steps = try await setup.initialize(repo: repo)
+
+        XCTAssertTrue(fake.argv.contains { $0.first == "br" && $0.dropFirst().first == "agents" })
+        XCTAssertTrue(steps.contains("AGENTS.md (br agents --add)"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent("AGENTS.md").path))
+    }
+
+    /// The full resume scenario: `br init` succeeds, `br agents --add` fails (so `initialize`
+    /// throws and `.beads/` is left behind), then a second `initialize` call — with a runner
+    /// that now succeeds — must still invoke `br agents --add` rather than treating `.beads/`
+    /// existing as proof the agents step already ran.
+    func testReRunAfterAgentsStepFailureStillInvokesAgentsAdd() async throws {
+        let repo = plainRepo()
+        let firstRun = SimulatingFakeRunner()
+        firstRun.failingArgv = ["br", "agents"]
+        let firstSetup = FlywheelSetup(runner: firstRun, amPath: "am", brPath: "br")
+
+        do {
+            _ = try await firstSetup.initialize(repo: repo)
+            XCTFail("expected the first run to throw")
+        } catch let error as FlywheelError {
+            guard case .initializeStep(let step, _, _) = error else {
+                XCTFail("expected .initializeStep, got \(error)")
+                return
+            }
+            XCTAssertEqual(step, "br agents --add")
+        }
+
+        // `.beads/` is on disk (br init succeeded) but AGENTS.md never got written, and
+        // `enable`'s own steps never ran — the failure happened before `initialize` reached them.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent(".beads").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.appendingPathComponent("AGENTS.md").path))
+        XCTAssertFalse(firstRun.argv.contains { $0.first == "am" })
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: repo.appendingPathComponent(".git/hooks/hooks.d/pre-commit/60-beads-sync.sh").path
+        ))
+
+        let secondRun = SimulatingFakeRunner()
+        let secondSetup = FlywheelSetup(runner: secondRun, amPath: "am", brPath: "br")
+
+        _ = try await secondSetup.initialize(repo: repo)
+
+        XCTAssertTrue(secondRun.argv.contains { $0.first == "br" && $0.dropFirst().first == "agents" })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent("AGENTS.md").path))
     }
 
     func testBrInitFailureThrowsAndSkipsLaterSteps() async {
@@ -113,6 +176,39 @@ final class FlywheelInitializeTests: XCTestCase {
         }
 
         XCTAssertFalse(fake.argv.contains { $0.first == "am" })
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: repo.appendingPathComponent(".git/hooks/hooks.d/pre-commit/60-beads-sync.sh").path
+        ))
+    }
+
+    /// A LATER step failing — `br init` and `br agents --add` both succeed, but `am projects
+    /// discovery-init` does not — must surface just as cleanly as an early-step failure: the
+    /// thrown error names that step specifically, and `enable`'s own steps (which run last,
+    /// after the bootstrap) never start.
+    func testAmProjectsDiscoveryInitFailureThrowsAndSkipsEnable() async {
+        let repo = plainRepo()
+        let fake = SimulatingFakeRunner()
+        fake.failingArgv = ["am", "projects", "discovery-init"]
+        let setup = FlywheelSetup(runner: fake, amPath: "am", brPath: "br")
+
+        do {
+            _ = try await setup.initialize(repo: repo)
+            XCTFail("expected initialize to throw")
+        } catch let error as FlywheelError {
+            guard case .initializeStep(let step, _, _) = error else {
+                XCTFail("expected .initializeStep, got \(error)")
+                return
+            }
+            XCTAssertEqual(step, "am projects discovery-init")
+        } catch {
+            XCTFail("expected FlywheelError, got \(error)")
+        }
+
+        // The two bootstrap steps ahead of the failing one did run...
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent(".beads").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent("AGENTS.md").path))
+        // ...but `enable` (am guard install, beads sync hook) never started.
+        XCTAssertFalse(fake.argv.contains { $0.first == "am" && $0.dropFirst().first == "guard" })
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: repo.appendingPathComponent(".git/hooks/hooks.d/pre-commit/60-beads-sync.sh").path
         ))
