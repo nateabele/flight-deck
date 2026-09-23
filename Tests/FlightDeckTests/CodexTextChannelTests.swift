@@ -81,7 +81,7 @@ final class CodexTextChannelTests: XCTestCase {
         let injector = FakeInjector(viewport: "› ls -la\n")
         XCTAssertFalse(channel.isComposerEmpty(injector))
         XCTAssertFalse(
-            channel.submit("x", into: injector, settle: { $0() }, stillWanted: { true }, onSent: {}),
+            channel.submit("x", into: injector, settle: { $0() }, stillWanted: { true }, onFinished: { _ in }),
             "no codex status line means this is not codex's composer"
         )
     }
@@ -139,7 +139,7 @@ final class CodexTextChannelTests: XCTestCase {
     func testSubmittingIntoAnEmptyComposerTypesAndReturnsWithoutRestoring() throws {
         let injector = FakeInjector(viewport: try viewport("tui-idle.captured"))
         let sent = channel.submit("ship it", into: injector,
-                                  settle: { $0() }, stillWanted: { true }, onSent: {})
+                                  settle: { $0() }, stillWanted: { true }, onFinished: { _ in })
         XCTAssertTrue(sent)
         XCTAssertEqual(injector.actions, [.killLine, .text("ship it"), .return],
                        "an empty composer needs no restore — the placeholder survives any kill")
@@ -160,7 +160,7 @@ final class CodexTextChannelTests: XCTestCase {
         let injector = FakeInjector(viewport: try viewport("tui-idle.captured"))
         var pending: [() -> Void] = []
         let sent = channel.submit("ship it", into: injector,
-                                  settle: { pending.append($0) }, stillWanted: { true }, onSent: {})
+                                  settle: { pending.append($0) }, stillWanted: { true }, onFinished: { _ in })
         XCTAssertTrue(sent)
 
         // Hop 1: fires after the kill, before anything is typed.
@@ -193,7 +193,7 @@ final class CodexTextChannelTests: XCTestCase {
         """
 
         XCTAssertTrue(channel.submit("ship it", into: injector,
-                                     settle: { $0() }, stillWanted: { true }, onSent: {}))
+                                     settle: { $0() }, stillWanted: { true }, onFinished: { _ in }))
         XCTAssertEqual(injector.actions,
                        [.killLine, .text("ship it"), .return, .text("half-written thought")],
                        "restore comes AFTER the Return, so a wrong guess can never submit it")
@@ -203,18 +203,87 @@ final class CodexTextChannelTests: XCTestCase {
     func testACancelledRequestTypesNothingAfterTheKill() throws {
         let injector = FakeInjector(viewport: try viewport("tui-idle.captured"))
         XCTAssertTrue(channel.submit("ship it", into: injector,
-                                     settle: { $0() }, stillWanted: { false }, onSent: {}))
+                                     settle: { $0() }, stillWanted: { false }, onFinished: { _ in }))
         XCTAssertEqual(injector.actions, [.killLine],
                        "a request replaced while codex repainted must not be typed")
     }
 
-    func testOnSentRunsExactlyOnceWhenTheChannelReturnsTrue() throws {
+    func testOnFinishedRunsExactlyOnceWithTrueWhenTheTextWasSubmitted() throws {
         let injector = FakeInjector(viewport: try viewport("tui-idle.captured"))
-        var sentCount = 0
+        var outcomes: [Bool] = []
         XCTAssertTrue(channel.submit("ship it", into: injector,
                                      settle: { $0() }, stillWanted: { true },
-                                     onSent: { sentCount += 1 }))
-        XCTAssertEqual(sentCount, 1, "the store clears its mid-injection mark in here")
+                                     onFinished: { outcomes.append($0) }))
+        XCTAssertEqual(outcomes, [true],
+                       "the store clears its mid-injection mark in here, and only a `true` "
+                           + "retires the caller's pending entry")
+    }
+
+    /// **The leak, and the draft this path used to destroy — two defects on one line.**
+    ///
+    /// `submit` commits to `true` before it kills anything, so `SessionStore.inject` has
+    /// already marked the tab mid-injection by the time the settle runs. The superseded path
+    /// used to `return` out of that settle bare: no completion, so the mark was never
+    /// released and that tab refused every later rename and phone prompt for the life of the
+    /// process. And the kill has already gone out by then, while the only restore lived in
+    /// the inner settle this path never reaches — so the user's half-written thought was
+    /// destroyed as well. Claude's channel yanked its draft back here from the start; codex
+    /// has no ring to yank from and has to re-type what it read, which is why the restore
+    /// moved above the branch rather than being duplicated inside it.
+    ///
+    /// `false`, not `true`: the store retires its pending entry only on `true`, and a
+    /// superseded rename's entry already holds the NEWER name.
+    func testASupersededRequestFinishesFalseExactlyOnceAndPutsTheDraftBack() throws {
+        let injector = FakeInjector(viewport: """
+        › half-written thought
+
+          gpt-5.6-sol default · /tmp/work
+        """)
+        // The kill empties the composer, which is what makes the change a CONFIRMED one.
+        injector.viewportAfterKill = """
+        › \(CodexTextChannel.placeholder)
+
+          gpt-5.6-sol default · /tmp/work
+        """
+
+        var outcomes: [Bool] = []
+        XCTAssertTrue(channel.submit("ship it", into: injector,
+                                     settle: { $0() }, stillWanted: { false },
+                                     onFinished: { outcomes.append($0) }))
+
+        XCTAssertEqual(outcomes, [false],
+                       "exactly once, and false -- the store releases its mark on every path "
+                           + "but retires its pending entry on none but a real submission")
+        XCTAssertEqual(injector.actions, [.killLine, .text("half-written thought")],
+                       "the superseded text is never typed, but the killed draft is put back")
+    }
+
+    /// The other half of the same restore rule: an unreadable screen after the kill means we
+    /// do not know whether anything was there, and typing a remembered string into a composer
+    /// that may never have held it is worse than leaving it gone. Unchanged from the submitted
+    /// path's rule — stated here because the superseded path now shares it.
+    ///
+    /// Pins `after != nil` specifically. `before` is a real draft here, exactly as in
+    /// `testASupersededRequestFinishesFalseExactlyOnceAndPutsTheDraftBack` above — a restore
+    /// would be the right call if the post-kill screen were readable — so what suppresses it
+    /// is `viewportUnreadableAfterKill`, not the placeholder clause that does the suppressing
+    /// in `testACancelledRequestTypesNothingAfterTheKill` below.
+    func testASupersededRequestRestoresNothingWhenTheScreenIsUnreadableAfterTheKill() throws {
+        let injector = FakeInjector(viewport: """
+        › half-written thought
+
+          gpt-5.6-sol default · /tmp/work
+        """)
+        injector.viewportUnreadableAfterKill = true
+
+        var outcomes: [Bool] = []
+        XCTAssertTrue(channel.submit("ship it", into: injector,
+                                     settle: { $0() }, stillWanted: { false },
+                                     onFinished: { outcomes.append($0) }))
+        XCTAssertEqual(outcomes, [false])
+        XCTAssertEqual(injector.actions, [.killLine],
+                       "a screen this build cannot read back after the kill is not proof the "
+                           + "draft is gone; nothing is put back")
     }
 
     // MARK: - submitRename
@@ -338,9 +407,8 @@ final class CodexTextChannelTests: XCTestCase {
         XCTAssertEqual(finished, false)
     }
 
-    /// `onFinished` is the one-shot guarantee `AgentRenameTyping` substitutes for `submit`'s
-    /// one-shot `settle` — it must fire exactly once on every one of the three ways this call
-    /// can end.
+    /// `onFinished` is what carries the one-shot guarantee instead of `settle` — it must fire
+    /// exactly once on every one of the three ways this call can end.
     func testOnFinishedRunsExactlyOnceOnSuccessAbortAndCancellation() throws {
         let success = FakeInjector(viewport: try viewport("tui-idle.captured"))
         success.script([try viewport("tui-idle.captured"), try viewport("tui-rename-modal.captured")])
@@ -423,8 +491,13 @@ final class CodexTextChannelTests: XCTestCase {
             case killLine, yank, `return`, text(String), arrowDown, arrowUp, escape
         }
 
-        private var viewport: String
+        private var viewport: String?
         var viewportAfterKill: String?
+        /// Makes `readViewport()` return nil once `sendKillLine()` has run, so a test can pin
+        /// `submit`'s "an unreadable screen means we do not know" clause without a fixture
+        /// that could also be read as an ordinary content change. Checked before
+        /// `viewportAfterKill`, since the two describe mutually exclusive scenarios.
+        var viewportUnreadableAfterKill = false
         private(set) var actions: [Action] = []
 
         /// A verbatim screen sequence that advances on `sendReturn()`, modelling `codex
@@ -458,7 +531,8 @@ final class CodexTextChannelTests: XCTestCase {
         }
         func sendKillLine() {
             actions.append(.killLine)
-            if let after = viewportAfterKill { viewport = after }
+            if viewportUnreadableAfterKill { viewport = nil }
+            else if let after = viewportAfterKill { viewport = after }
         }
         func sendYank() { actions.append(.yank) }
         func sendArrowDown() { actions.append(.arrowDown) }

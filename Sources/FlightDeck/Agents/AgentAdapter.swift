@@ -113,11 +113,11 @@ protocol AgentAdapter {
     /// refusal `ClaudeAdapter` states because it has no second stage to drive.**
     ///
     /// A separate capability from `textChannel` rather than a case inside `submit`, because
-    /// codex's `/rename` is a MODAL with two submissions and `AgentTextChannel.submit`'s
-    /// whole contract — settle exactly once iff this returns `true` — cannot carry that: the
-    /// caller releases its `injecting` mark inside that one settle, so a second stage that
-    /// needed a second settle would either leak the mark early or never fire at all. See
-    /// `AgentRenameTyping`'s doc comment for the rest of that reasoning.
+    /// codex's `/rename` is a MODAL with two submissions — `/rename`⏎ opens it, `<name>`⏎
+    /// commits it — and needs a read in between to confirm the modal actually opened before
+    /// the name is typed into it. `submit`'s shape has no room for that: one `text` parameter
+    /// and one submission cannot carry a gate that depends on what the second submission
+    /// reads off screen. See `AgentRenameTyping`'s doc comment for the rest of that reasoning.
     ///
     /// Read through `AgentID.renameTyping` below, which is what the store consults.
     static var renameTyping: AgentRenameTyping? { get }
@@ -371,53 +371,59 @@ protocol AgentTextChannel {
 
     /// Type `text` and submit it, preserving whatever draft was there — or refuse.
     ///
+    /// Returns false having sent nothing. Returns true and then runs `onFinished` EXACTLY ONCE
+    /// — on every path, including a request superseded mid-repaint. `onFinished(true)` means
+    /// the text was submitted; `onFinished(false)` means it never was, and the conformer has
+    /// unwound cleanly instead, putting back any draft its probe killed.
+    ///
     /// **`settle` may be called more than once — once per repaint the conformer must wait
-    /// through — and it is `onSent` that carries the one-shot guarantee the caller's
-    /// bookkeeping depends on, exactly as `onFinished` does for `AgentRenameTyping
-    /// .submitRename`.** A single settle was once the whole contract, and `ClaudeTextChannel`
-    /// still only ever needs the one; `CodexTextChannel` needs a second, later hop so its
-    /// Return is never issued in the same settle as the text before it — codex paste-detects
-    /// that burst and inserts a newline instead of submitting (see `CodexTextChannel.submit`'s
-    /// doc comment). `SessionStore` marks the tab mid-injection before calling and clears the
-    /// mark inside the `onSent` it supplies, so a channel that returned `true` without ever
-    /// running `onSent` would leave the tab refusing every later injection for the life of the
-    /// process — same failure mode `AgentRenameTyping`'s doc comment describes for
-    /// `onFinished`, now shared rather than reinvented per protocol.
+    /// through — and it is `onFinished` that carries that one-shot guarantee, exactly as it
+    /// does for `AgentRenameTyping.submitRename`.** A single settle was once the whole
+    /// contract, and `ClaudeTextChannel` still only ever needs the one; `CodexTextChannel`
+    /// needs a second, later hop so its Return is never issued in the same settle as the text
+    /// before it — codex paste-detects that burst and inserts a newline instead of submitting
+    /// (see `CodexTextChannel.submit`'s doc comment).
+    ///
+    /// **The `Bool` is not decoration, and the two halves of what the caller does with it are
+    /// not the same condition.** `SessionStore` marks the tab mid-injection before calling and
+    /// releases that mark in `onFinished` regardless of the outcome, because a channel that
+    /// returned `true` and then finished without saying so would leave the tab refusing every
+    /// later injection — renames and phone prompts alike — for the life of the process. That
+    /// was a live defect on both conformers' superseded paths, not a hypothetical. But the
+    /// caller's *pending entry* may only be retired on `true`: when a rename is superseded,
+    /// the entry already holds the NEWER name, so retiring it would silently drop the
+    /// replacement. Release is unconditional; retirement is not.
     ///
     /// `stillWanted` is re-checked after the first settle delay, because the request can be
-    /// replaced or cancelled while the agent repaints. `onSent` runs once the text has been
-    /// submitted, and is where the caller retires its pending entry.
+    /// replaced or cancelled while the agent repaints.
     func submit(
         _ text: String,
         into injector: TextInjecting,
         settle: @escaping (@escaping () -> Void) -> Void,
         stillWanted: @escaping @MainActor () -> Bool,
-        onSent: @escaping @MainActor () -> Void
+        onFinished: @escaping @MainActor (Bool) -> Void
     ) -> Bool
 }
 
 /// **The second stage of a rename that cannot be said in one shot.**
 ///
-/// `AgentTextChannel.submit` types one message and submits it, and its whole contract turns
-/// on a SINGLE settle: `SessionStore` marks a tab mid-injection before calling and clears
-/// that mark inside the one `settle` it is handed, so "returns `true`" and "settles" have to
-/// name the same moment or the mark either leaks (never cleared) or is cleared too early
-/// (cleared before the work it was guarding is done). That works for `submit` because typing
-/// a message is one repaint away from submitted.
+/// `AgentTextChannel.submit` types one message and submits it, and its guarantee already
+/// rides on `onFinished` rather than on a settle count: `CodexTextChannel.submit` needs two
+/// hops of its own, so its Return is never issued in the same settle as the text before it
+/// (see that type's doc comment), and `SessionStore` releases its `injecting` mark inside
+/// whichever `onFinished` the channel is handed — never inside a settle — so "returns `true`"
+/// and "settles" do not have to name the same moment.
 ///
-/// Codex's `/rename` is not: it is a MODAL with two submissions — `/rename`⏎ opens it,
-/// `<name>`⏎ commits it — so there are two screen repaints to wait through, and therefore
-/// two points where the caller needs to be told "the terminal has caught up, keep going."
-/// Reusing `submit`'s contract here would force a choice between two wrong answers: settle
-/// once after the first repaint and the caller's `injecting` mark is released while the
-/// modal is still open and unnamed, leaving the tab open to a second, concurrent rename
-/// mid-flight; or settle once after the second and the caller has no way to learn that the
-/// modal actually opened, which it needs to know before it can safely type the name.
+/// Codex's `/rename` pushes that further: it is a MODAL with two submissions — `/rename`⏎
+/// opens it, `<name>`⏎ commits it — so there are two screen repaints to wait through, plus a
+/// read in between to confirm the modal actually opened before the name is typed into it.
+/// `submit`'s shape has no room for that: one `text` parameter and one submission cannot
+/// carry a gate that depends on what the second submission reads off screen.
 ///
-/// So this protocol splits the two: `settle` may be called any number of times — once per
-/// stage that needs the terminal to catch up — and it is **`onFinished`** that carries the
-/// one-shot guarantee instead, firing exactly once on every path (success, a refused modal,
-/// or cancellation), which is the caller's cue that it may finally release its mark.
+/// So this protocol carries the same guarantee `submit` does, on the same terms: `settle`
+/// may be called any number of times — once per stage that needs the terminal to catch up —
+/// and it is **`onFinished`** that fires exactly once on every path (success, a refused
+/// modal, or cancellation), which is the caller's cue that it may finally release its mark.
 @MainActor
 protocol AgentRenameTyping {
     /// Returns false having sent nothing. Returns true and then runs `onFinished` EXACTLY ONCE —
