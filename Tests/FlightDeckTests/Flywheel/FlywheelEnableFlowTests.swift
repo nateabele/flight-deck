@@ -17,6 +17,31 @@ final class FlywheelEnableFlowTests: XCTestCase {
         }
     }
 
+    /// `setupFlywheel`'s bootstrap (`FlywheelSetup.initialize`) shells out to real `br`/`am`
+    /// commands that create `.beads/`, `AGENTS.md` and `.agent-mail.yaml` — this fake
+    /// simulates just enough of that so `testSetupFlywheelOnPlainRepo...` below can assert
+    /// on the filesystem the way `FlywheelInitializeTests` does, rather than only on argv.
+    private final class BootstrappingFakeRunner: FlywheelProcessRunner, @unchecked Sendable {
+        var exitCode: Int32
+        var failingArgv: [String]?
+        init(exitCode: Int32 = 0) { self.exitCode = exitCode }
+
+        func run(_ exe: String, _ args: [String], cwd: String?) async throws -> (stdout: String, exitCode: Int32) {
+            let full = [exe] + args
+            if let failingArgv, full.starts(with: failingArgv) { return ("boom", 1) }
+            guard let cwd else { return ("", exitCode) }
+            if args.first == "init" {
+                try? FileManager.default.createDirectory(
+                    at: URL(fileURLWithPath: cwd).appendingPathComponent(".beads"), withIntermediateDirectories: true
+                )
+            }
+            if args.first == "projects" {
+                try? Data().write(to: URL(fileURLWithPath: cwd).appendingPathComponent(".agent-mail.yaml"))
+            }
+            return ("", exitCode)
+        }
+    }
+
     private final class SpyReporter: AgentLaunchFailureReporting {
         var reported: [AgentLaunchError] = []
         func report(_ error: AgentLaunchError) { reported.append(error) }
@@ -108,5 +133,41 @@ final class FlywheelEnableFlowTests: XCTestCase {
 
         XCTAssertNotNil(store.flywheelSuggestion(for: flywheel))
         XCTAssertNil(store.flywheelSuggestion(for: plain))
+    }
+
+    /// `setupFlywheel` — the "Setup Flywheel…" menu item's target for a plain repo (no
+    /// cached suggestion, since `insertSession` never found `.beads`/`.agent-mail.yaml` in
+    /// it). Bootstraps those markers via `FlywheelSetup.initialize`, then runs the same
+    /// guard/hook install `enableFlywheel` does, then flips the flag — all three should be
+    /// visible afterward.
+    func testSetupFlywheelOnPlainRepoBootstrapsAndEnables() async throws {
+        let repo = plainRepo()
+        let preferences = PreferencesStore(persistence: nil)
+        let setup = FlywheelSetup(runner: BootstrappingFakeRunner(exitCode: 0), amPath: "am", brPath: "br")
+        let store = makeStore(preferences: preferences, setup: setup)
+
+        await store.setupFlywheel(for: repo)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.appendingPathComponent(".beads").path))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: repo.appendingPathComponent(".git/hooks/hooks.d/pre-commit/60-beads-sync.sh").path
+        ))
+        XCTAssertEqual(store.preferences?.projectSettings(repo.path).flywheelEnabled, true)
+        XCTAssertTrue(reporter.reported.isEmpty)
+    }
+
+    func testSetupFlywheelFailureLeavesFlagUnsetAndUninitialized() async throws {
+        let repo = plainRepo()
+        let preferences = PreferencesStore(persistence: nil)
+        let fake = BootstrappingFakeRunner(exitCode: 0)
+        fake.failingArgv = ["br", "init"]
+        let setup = FlywheelSetup(runner: fake, amPath: "am", brPath: "br")
+        let store = makeStore(preferences: preferences, setup: setup)
+
+        await store.setupFlywheel(for: repo)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.appendingPathComponent(".beads").path))
+        XCTAssertNotEqual(store.preferences?.projectSettings(repo.path).flywheelEnabled, true)
+        XCTAssertEqual(reporter.reported.count, 1)
     }
 }

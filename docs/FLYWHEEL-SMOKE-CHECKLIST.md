@@ -42,7 +42,10 @@ IDs (`agent 1: <id>`, `agent 2: <id>`).
 ### 2. Add the scratch repo to Flight Deck and enable Flywheel
 
 - In Flight Deck: add the printed scratch repo path as a project.
-- Project header menu → **"Enable Flywheel coordination…"** → confirm the setup
+- Project header menu → since `flywheel-new` already ran in step 1, this project is
+  detected as a flywheel project, so the item reads **"Enable Flywheel…"** (a plain
+  repo with no `.beads`/`.agent-mail.yaml` instead shows **"Setup Flywheel…"**, which
+  additionally bootstraps those before installing the guard) → confirm the setup
   dialog.
 
 **Expect:** the confirm dialog appears and completes without error; the project now
