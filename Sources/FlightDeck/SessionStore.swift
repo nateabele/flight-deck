@@ -5346,6 +5346,21 @@ final class SessionStore: ObservableObject {
             // to confirm the row against. All that can be required after the move is that the
             // marker is ON that row. A screen that renumbered its rows would satisfy that.
             // The two paths are not equally verified and must not be read as if they were.
+            //
+            // **And this is why `.allow` KEPT the `focusedRow` read that `.answers` no longer
+            // makes, which is deliberate rather than a job half done.** Two reasons, both
+            // specific to a permission dialog:
+            //
+            // 1. It has no label the Mac can check — see the paragraph above. Cursor position
+            //    is the only interlock this path has ever had, so dropping it would leave none.
+            // 2. The target is `allowRow` = 0, and the row below it is "Yes, and don't ask
+            //    again for …" — a DURABLE PERMISSION GRANT. A blind Return on a cursor somebody
+            //    moved would create one, silently, from a pocket. `.answers` is recoverable
+            //    (claude draws a review screen before anything commits, so a drive that stops
+            //    part-way leaves a dialog a human can still finish or cancel); this is not.
+            //
+            // A drive that refuses here leaves the dialog up for the person at the keyboard,
+            // which is the direction this path fails in on purpose.
             guard case .permission = open else {
                 recordEarlyAbort(.allowNotPermission, injector: injector)
                 return .unreadableScreen
@@ -5391,8 +5406,7 @@ final class SessionStore: ObservableObject {
             guard let plan = AnswerPlan.plan(
                 for: questions, answers: selections.map { $0.map(\.index) }
             ) else { return .unanswerable }
-            return drive(plan, questions: questions, driver: driver,
-                         injector: injector, id: id, token: token)
+            return drive(plan, driver: driver, injector: injector, id: id, token: token)
 
         case .option(let index, let label):
             // `option` indexes an `AskUserQuestion`'s own options, so a permission dialog —
@@ -5569,34 +5583,29 @@ final class SessionStore: ObservableObject {
         return .dispatched
     }
 
-    /// Move the selection, wait for the repaint, re-read, and only then submit.
-    ///
-    /// **Measured, not assumed, and the re-read is the whole safety property.** Arrows are
-    /// relative: a miscounted, dropped or late-repainted keystroke leaves the marker somewhere
-    /// this code cannot know about without looking again. `inject` kills first and compares
-    /// because the screen cannot be trusted to say whether the buffer was empty; this moves
-    /// first and confirms because the screen cannot be trusted to say whether the keystroke
-    /// arrived. Same idiom, same reason, and the consequence of skipping it is a Return on a
-    /// row nobody chose.
-    ///
-    /// A failed confirmation sends nothing further and reports nothing: the answer is already
-    /// `dispatched` to the client, the cursor has moved, and a moved cursor is recoverable by
-    /// the person at the keyboard in a way a wrong Return is not.
     /// Answer a whole set of questions in one drive.
     ///
-    /// **The plan is built first and the screen only ever CHECKS it.** `AnswerPlan` knows
-    /// every move and press from the transcript and the reader's choices, so this walks a
-    /// fixed program: before each press it confirms the cursor is where the plan says it
-    /// starts and that the row about to be pressed reads what the plan says it should. A
-    /// disagreement aborts — no further key is sent — rather than being counted from.
+    /// **The plan is built first and the screen is not read to decide anything.** `AnswerPlan`
+    /// knows every move and press from the transcript and the reader's choices, so this walks a
+    /// fixed program; all the screen is asked, once per step, is whether a select list is on it
+    /// at all. Nothing else here is derived from what is drawn.
     ///
-    /// **Nothing is committed until the last step.** claude shows a review screen listing every
-    /// question with its chosen answer and asks "Ready to submit your answers?", so an abort
-    /// part-way leaves a dialog the human can still finish or cancel. That is why this can be
-    /// driven at all: the failure mode is "stopped early", never "half an answer sent".
+    /// **The per-step cursor and label checks were removed because they refused a screen with
+    /// nothing wrong with it.** `ChoiceDialog.list()` needs a contiguous run of numbered rows,
+    /// and an option description that wraps onto a line beginning `0. ` breaks that run — so
+    /// `focusedRow` returned nil and every answer to that dialog was refused, deterministically,
+    /// for as long as it was on screen. The capture is
+    /// `Fixtures/Claude/question-numbered-description.captured.txt` and the drive over it is
+    /// `AnswerPromptTests.testASetIsDrivenOnAScreenWhoseDescriptionBreaksTheListParse`.
+    ///
+    /// **What makes that acceptable here and NOT on `.allow` — the asymmetry is deliberate.**
+    /// Nothing is committed until the last step: claude shows a review screen listing every
+    /// question with its chosen answer and asks "Ready to submit your answers?", so a drive that
+    /// goes wrong part-way leaves a dialog the human can still finish or cancel. `.allow` keeps
+    /// its `focusedRow` read for two reasons that belong to it alone, both written out at its
+    /// own call site above.
     private func drive(
         _ plan: AnswerPlan,
-        questions: [PromptQuestion],
         driver: any AgentDialogDriver,
         injector: TextInjecting,
         id: UUID,
@@ -5604,17 +5613,16 @@ final class SessionStore: ObservableObject {
     ) -> AnswerDispatch {
         remember(answered: token, for: id)
         injecting.insert(id)
-        perform(plan.steps, at: 0, questions: questions, driver: driver, injector: injector, id: id)
+        perform(plan.steps, at: 0, driver: driver, injector: injector, id: id)
         return .dispatched
     }
 
     /// One step, then the next from inside its settle. Recursive rather than a loop because
-    /// each press repaints asynchronously and the next step's checks are only meaningful once
-    /// the repaint has landed — the same 120ms seam `injectionSettle` is everywhere else.
+    /// each press repaints asynchronously and the next step is only meaningful once the
+    /// repaint has landed — the same 120ms seam `injectionSettle` is everywhere else.
     private func perform(
         _ steps: [AnswerPlan.Step],
         at index: Int,
-        questions: [PromptQuestion],
         driver: any AgentDialogDriver,
         injector: TextInjecting,
         id: UUID
@@ -5622,25 +5630,15 @@ final class SessionStore: ObservableObject {
         guard index < steps.count else { injecting.remove(id); return }
         let step = steps[index]
 
-        // One guard per check, where a single compound one would do. The conditions, their
-        // order and their short-circuiting are unchanged — what the split buys is a NAME for
-        // whichever one refused, because an abort sends no further key and is otherwise
-        // indistinguishable from a drive that finished.
+        // One guard per check, so that whichever one refused has a NAME: an abort sends no
+        // further key and is otherwise indistinguishable from a drive that finished.
         guard let screen = injector.readViewport() else {
             note(.unreadableBeforePress, step: index, step, viewport: nil)
             injecting.remove(id)
             return
         }
-        let focused = driver.focusedRow(inViewport: screen)
-        guard focused == step.from else {
-            note(.cursorBeforePress, step: index, step, focused: focused, viewport: screen)
-            injecting.remove(id)
-            return
-        }
-        let expected = Self.rowLabel(for: step, questions: questions)
-        guard let expected, driver.row(step.to, reads: expected, inViewport: screen) else {
-            note(.labelBeforePress, step: index, step, expected: expected,
-                 focused: focused, viewport: screen)
+        guard driver.hasSelectList(inViewport: screen) else {
+            note(.noDialogOnScreen, step: index, step, viewport: screen)
             injecting.remove(id)
             return
         }
@@ -5650,27 +5648,14 @@ final class SessionStore: ObservableObject {
             if distance > 0 { injector.sendArrowDown() } else { injector.sendArrowUp() }
         }
 
+        // The 120ms seam stays between the move and the press: the arrows are only processed
+        // once the TUI repaints, and a Return sent inside the same frame lands on the row the
+        // cursor had not left yet.
         injectionSettle { [weak self] in
             guard let self else { return }
-            // Re-read after the move: the row under the cursor must STILL be the one the plan
-            // named. This is the check that survives a human touching the terminal mid-drive.
-            guard let landed = injector.readViewport() else {
-                self.note(.unreadableAfterMove, step: index, step, expected: expected,
-                          viewport: nil)
-                self.injecting.remove(id)
-                return
-            }
-            let arrived = driver.focusedRow(inViewport: landed)
-            guard arrived == step.to else {
-                self.note(.landingAfterMove, step: index, step, expected: expected,
-                          focused: arrived, viewport: landed)
-                self.injecting.remove(id)
-                return
-            }
             injector.sendReturn()
             self.injectionSettle { [weak self] in
-                self?.perform(steps, at: index + 1, questions: questions,
-                              driver: driver, injector: injector, id: id)
+                self?.perform(steps, at: index + 1, driver: driver, injector: injector, id: id)
             }
         }
     }
@@ -5692,24 +5677,25 @@ final class SessionStore: ObservableObject {
         ))
     }
 
-    /// What the row a step is about must read, or `nil` when the plan is inconsistent with the
-    /// questions — which `AnswerPlan.plan` already refuses to produce, so it is a belt on a
-    /// brace.
-    static func rowLabel(
-        for step: AnswerPlan.Step, questions: [PromptQuestion]
-    ) -> String? {
-        switch step.purpose {
-        case .option(let question, let option):
-            guard questions.indices.contains(question),
-                  questions[question].options.indices.contains(option) else { return nil }
-            return questions[question].options[option].label
-        case .action(_, let isLast):
-            return AnswerPlan.actionLabel(isLast: isLast)
-        case .submit:
-            return AnswerPlan.submitAnswersLabel
-        }
-    }
-
+    /// Move the selection, wait for the repaint, re-read, and only then submit — the one-step
+    /// drive `.allow` and `.option` take.
+    ///
+    /// **Measured, not assumed, and the re-read is the whole safety property.** Arrows are
+    /// relative: a miscounted, dropped or late-repainted keystroke leaves the marker somewhere
+    /// this code cannot know about without looking again. `inject` kills first and compares
+    /// because the screen cannot be trusted to say whether the buffer was empty; this moves
+    /// first and confirms because the screen cannot be trusted to say whether the keystroke
+    /// arrived. Same idiom, same reason, and the consequence of skipping it is a Return on a
+    /// row nobody chose.
+    ///
+    /// A failed confirmation sends nothing further and reports nothing: the answer is already
+    /// `dispatched` to the client, the cursor has moved, and a moved cursor is recoverable by
+    /// the person at the keyboard in a way a wrong Return is not.
+    ///
+    /// **The planned drive above does NOT do this any more; see its own doc for why the two
+    /// differ.** The short version is that `.allow` commits a permission decision on the press
+    /// and has no label to check the row against, so its cursor read is the only interlock it
+    /// has ever had.
     private func drive(
         from current: Int,
         to target: Int,
@@ -8163,14 +8149,18 @@ final class SessionStore: ObservableObject {
 /// something unexpected or the parser misread something ordinary.
 struct AnswerAbort: Equatable {
     /// Which check refused, named apart rather than collapsed into "failed". The repairs are
-    /// unrelated: a cursor that did not start where the plan said is a screen that moved under
-    /// the plan, a label mismatch is this Mac's copy disagreeing with what is drawn, a landing
-    /// failure is a keystroke the TUI dropped or has yet to repaint, and an unreadable viewport
-    /// is not about the dialog at all.
+    /// unrelated: no select list on screen is a dialog that closed or was never there, a
+    /// landing failure is a keystroke the TUI dropped or has yet to repaint, and an unreadable
+    /// viewport is not about the dialog at all.
+    ///
+    /// **`pre-press-cursor` and `pre-press-label` were removed with the checks that filed
+    /// them** — the planned drive's per-step cursor and label reads, which refused a real
+    /// screen whose only fault was an option description that wrapped onto a line beginning
+    /// `0. `. Both `after-move` cases survive because `.allow` and `.option` still walk
+    /// `drive(from:to:confirm:)`, which reads the screen after its move and files them.
     enum Check: String, Equatable {
         case unreadableBeforePress = "unreadable-viewport-before-press"
-        case cursorBeforePress = "pre-press-cursor"
-        case labelBeforePress = "pre-press-label"
+        case noDialogOnScreen = "no-dialog-on-screen"
         case unreadableAfterMove = "unreadable-viewport-after-move"
         case landingAfterMove = "post-move-landing"
         case noInjector          = "no-injector"

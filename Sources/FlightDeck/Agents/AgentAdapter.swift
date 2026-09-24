@@ -460,6 +460,20 @@ protocol AgentDialogDriver {
     /// instead".
     func row(_ index: Int, reads label: String, inViewport viewport: String) -> Bool
 
+    /// **Is a select list on screen at all** — the one screen fact the planned answer drive
+    /// checks before each press.
+    ///
+    /// `AnswerPlan` has already computed every keystroke from the transcript and the reader's
+    /// choices, so the drive is a fixed program and the screen's only remaining job is to say
+    /// that the program still has something to type into. Deliberately looser than
+    /// `focusedRow`: it reads the last marker line and nothing else, so an option's own wrapped
+    /// description cannot defeat it — which `focusedRow` does, on
+    /// `Fixtures/Claude/question-numbered-description.captured.txt`.
+    ///
+    /// **No default here either, for `allowRow`'s reason.** Every conformer states its own
+    /// agent's marker; a defaulted one would apply claude's grammar to somebody else's screen.
+    func hasSelectList(inViewport viewport: String) -> Bool
+
     /// **The plain-approval row, and it has no default on purpose.**
     ///
     /// Both shipped agents order their approval dialogs the same way — plain yes, then a

@@ -272,6 +272,51 @@ final class AnswerPromptTests: XCTestCase {
         XCTAssertTrue(spy.events.isEmpty)
     }
 
+    // MARK: answers — a whole set, driven from a plan
+
+    /// **The refusal this file's interlock used to produce on a screen nothing was wrong with.**
+    ///
+    /// `question-numbered-description.captured.txt` is a live viewport lifted out of
+    /// `~/Library/Logs/flight-deck-answer.log` (`check=no-focused-row`, 2026-09-23). Option 1's
+    /// description wraps immediately after the word "Level", so a DESCRIPTION line begins `0. `
+    /// at column 5; `ChoiceDialog.list()` reads that as row number 0, the contiguous run breaks,
+    /// and `focusedRow` returns nil — see
+    /// `ChoiceDialogTests.testADescriptionBeginningWithANumberDefeatsTheListParse`, which pins
+    /// that. Every answer to this dialog was refused before a key moved, and would have been
+    /// forever: same options, same wrap, same refusal.
+    ///
+    /// **The drive never needed that parse.** `AnswerPlan` computes every keystroke from the
+    /// transcript and the reader's choices before one is pressed, so the screen's only remaining
+    /// job is to say a select list is up at all. It completes here.
+    ///
+    /// The review screen is scripted after the fixture because a press REPLACES the screen —
+    /// the fixture is a still image and cannot repaint itself into the submit step's screen.
+    func testASetIsDrivenOnAScreenWhoseDescriptionBreaksTheListParse() throws {
+        let (store, spy, id) = makeStore(activity: .waiting)
+        let options = ["Level 1: Observe", "Validate Level 0 first", "Level 2: Author",
+                       "Cleanup & consolidate"]
+        let questions = [PromptQuestion(
+            header: "Next batch", question: "What's the next batch of work?",
+            options: options.map { .init(label: $0) }
+        )]
+        spy.script([
+            try TimelineFixtureTests.text("question-numbered-description.captured", in: "Claude"),
+            try TimelineFixtureTests.text("question-two-review.captured", in: "Claude"),
+        ])
+
+        XCTAssertEqual(
+            store.answerPrompt(
+                .question(callID: "toolu_A", questions),
+                with: .answers([[AnswerSelection(index: 2, label: "Level 2: Author")]]),
+                in: id, token: UUID()
+            ),
+            .dispatched
+        )
+        XCTAssertEqual(spy.events, [.arrow(1), .arrow(1), .ret, .ret],
+                       "two rows down to 'Level 2: Author', press, then the review's submit")
+        XCTAssertEqual(spy.screensAdvanced, 2, "both presses landed on a screen")
+    }
+
     // MARK: deny — one Escape, no read
 
     /// **The property, asserted rather than described.** A denial reads nothing off the screen,
