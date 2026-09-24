@@ -51,6 +51,11 @@ struct CodexDialogDriver: AgentDialogDriver {
                          marker: ChoiceDialog.codexMarker)
     }
 
+    func hasSelectList(inViewport viewport: String) -> Bool {
+        ChoiceDialog.hasNumberedRowAtMarker(inViewport: viewport,
+                                            marker: ChoiceDialog.codexMarker)
+    }
+
     /// **Codex's own answer, read off codex's own screen — not inherited.**
     ///
     /// `approval-command.captured.txt` reads, in order:

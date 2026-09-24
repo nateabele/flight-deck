@@ -16,6 +16,11 @@ struct ClaudeDialogDriver: AgentDialogDriver {
                          marker: ChoiceDialog.claudeMarker)
     }
 
+    func hasSelectList(inViewport viewport: String) -> Bool {
+        ChoiceDialog.hasNumberedRowAtMarker(inViewport: viewport,
+                                            marker: ChoiceDialog.claudeMarker)
+    }
+
     /// **The first row, and only ever the first row.** Claude's permission dialog is ordered
     /// "Yes" / (sometimes) "Yes, and don't ask again for …" / "No, and tell Claude …", so row
     /// 0 is the plain approval and any middle row is a DURABLE GRANT. Checked against the six

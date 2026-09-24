@@ -19,12 +19,12 @@ final class ClaudeDialogVetoTests: XCTestCase {
         try TimelineFixtureTests.text("\(name).captured", in: "Claude")
     }
 
-    /// Fourteen of these fifteen carry `Esc to cancel`. `question-two-review` does not — its
+    /// Fifteen of these sixteen carry `Esc to cancel`. `question-two-review` does not — its
     /// footer is `❯ 1. Submit answers` / `  2. Cancel`, caught only by the
     /// marker-plus-numbered-row rule. See `ClaudeTextChannel.hasNumberedMarkerRow`.
     ///
     /// **Internal rather than private** so `ClaudeComposerDetectorTests` can hold the *other*
-    /// predicate to the same fifteen screens — see its `testEveryDialogCaptureIsRefused`. One
+    /// predicate to the same sixteen screens — see its `testEveryDialogCaptureIsRefused`. One
     /// hand-written list, asserted twice: a dialog added here is covered by both gates at once,
     /// which is the whole reason the list is shared instead of copied.
     static let dialogs = [
@@ -32,6 +32,7 @@ final class ClaudeDialogVetoTests: XCTestCase {
         "question-single", "question-single-247", "question-two", "question-two-answered",
         "question-two-review", "question-multi", "question-checkbox", "question-checkbox-toggled",
         "question-checkbox-submit-focused", "question-set-with-checkbox",
+        "question-numbered-description",
         "workspace-trust",
     ]
 
@@ -172,7 +173,7 @@ final class ClaudeDialogVetoTests: XCTestCase {
     /// **What it does NOT pin, stated so the next reader does not assume otherwise:
     /// case-sensitivity.** Lowercasing both sides of the comparison leaves this green, because
     /// `esc to interrupt` does not contain `esc to cancel` at any casing. Nor does any capture
-    /// pin it — the phrase appears only in the fourteen dialog footers. The comment here
+    /// pin it — the phrase appears only in the fifteen dialog footers. The comment here
     /// previously claimed this test guarded that; it did not, and that claim is the same
     /// defect class as the dead position check removed in `0744a9e`.
     func testEscToInterruptDoesNotMatchTheFooterToken() {
