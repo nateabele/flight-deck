@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "ISSUE_NOT_FOUND",
+    "message": "Issue not found: nonexistent-1",
+    "hint": "Run 'br list' to see available issues.",
+    "retryable": false,
+    "context": {
+      "searched_id": "nonexistent-1"
+    }
+  }
+}

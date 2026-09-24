@@ -1,0 +1,28 @@
+[
+  {
+    "id": 19,
+    "name": "LavenderDesert",
+    "program": "claude-code",
+    "model": "claude",
+    "task_description": "",
+    "inception_ts": "2026-09-22T16:57:34.483761Z",
+    "last_active_ts": "2026-09-22T16:57:34.483761Z",
+    "project_id": 11,
+    "attachments_policy": "auto",
+    "contact_policy": "auto",
+    "retired_at": null
+  },
+  {
+    "id": 18,
+    "name": "BlueGull",
+    "program": "claude-code",
+    "model": "claude",
+    "task_description": "",
+    "inception_ts": "2026-09-22T16:52:03.771832Z",
+    "last_active_ts": "2026-09-22T16:52:03.771832Z",
+    "project_id": 11,
+    "attachments_policy": "auto",
+    "contact_policy": "auto",
+    "retired_at": null
+  }
+]

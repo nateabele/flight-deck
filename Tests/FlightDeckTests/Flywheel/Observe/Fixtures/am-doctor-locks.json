@@ -1,0 +1,55 @@
+{
+  "schema_version": "doctor_locks.v1",
+  "inspected_at": "2026-09-24T22:27:20.647184+00:00",
+  "storage_root": "/Users/nate/.local/share/mcp-agent-mail/git_mailbox_repo",
+  "database_path": "/Users/nate/.local/share/mcp-agent-mail/git_mailbox_repo/storage.sqlite3",
+  "memory_database": false,
+  "disposition": "unowned",
+  "owner_state": {
+    "class": "stale",
+    "reason": "2 activity lock artifact(s) exist without a live holder",
+    "safe_next_command": "am doctor --dry-run --fix"
+  },
+  "detail": "no competing Agent Mail mailbox owners or live database holders detected",
+  "supervised_restart_required": false,
+  "storage_root_lock": {
+    "name": "storage_root",
+    "path": "/Users/nate/.local/share/mcp-agent-mail/git_mailbox_repo/.mailbox.activity.lock",
+    "exists": true,
+    "file_type": "file",
+    "age_seconds": 164937,
+    "mode": null,
+    "holder_pids": [],
+    "waiter_pids": [],
+    "proc_records": []
+  },
+  "sqlite_lock": {
+    "name": "sqlite",
+    "path": "/Users/nate/.local/share/mcp-agent-mail/git_mailbox_repo/storage.sqlite3.activity.lock",
+    "exists": true,
+    "file_type": "file",
+    "age_seconds": 164805,
+    "mode": null,
+    "holder_pids": [],
+    "waiter_pids": [],
+    "proc_records": []
+  },
+  "sidecars": [
+    {
+      "name": "wal",
+      "path": "/Users/nate/.local/share/mcp-agent-mail/git_mailbox_repo/storage.sqlite3-wal",
+      "exists": true,
+      "open_by_pids": []
+    },
+    {
+      "name": "shm",
+      "path": "/Users/nate/.local/share/mcp-agent-mail/git_mailbox_repo/storage.sqlite3-shm",
+      "exists": true,
+      "open_by_pids": []
+    }
+  ],
+  "processes": [],
+  "waiters": [],
+  "recommended_next_action": "Owner class stale: no live owner is visible; preview non-destructive doctor remediation before changing anything. Safe next command: `am doctor --dry-run --fix`.",
+  "read_only": true
+}

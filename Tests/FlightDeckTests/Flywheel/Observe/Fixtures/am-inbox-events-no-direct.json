@@ -1,0 +1,6 @@
+{
+  "status": "error",
+  "code": "inbox_events_unavailable",
+  "message": "transport failure calling http://127.0.0.1:8765/api/: Connection refused (os error 61)",
+  "details": {}
+}
