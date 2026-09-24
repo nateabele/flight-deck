@@ -59,11 +59,6 @@ struct SessionSnapshot: Codable, Equatable {
         var accountID: UUID?
         /// An absolute transcript path reported by the agent, mirroring `Session.transcriptPath`.
         var transcriptPath: String?
-        /// The flywheel Agent-Mail agent name this tab was booted with, mirroring
-        /// `Session.flywheelIdentity?.agentName`. Absent means non-flywheel. Optional for the same
-        /// load-bearing reason as the fields above: synthesized `Codable` decodes an optional with
-        /// `decodeIfPresent`, so every existing `sessions.json` still decodes.
-        var flywheelAgentName: String?
 
         init(
             id: UUID,
@@ -77,8 +72,7 @@ struct SessionSnapshot: Codable, Equatable {
             unread: Bool? = nil,
             agent: AgentID? = nil,
             accountID: UUID? = nil,
-            transcriptPath: String? = nil,
-            flywheelAgentName: String? = nil
+            transcriptPath: String? = nil
         ) {
             self.id = id
             self.title = title
@@ -92,7 +86,6 @@ struct SessionSnapshot: Codable, Equatable {
             self.agent = agent
             self.accountID = accountID
             self.transcriptPath = transcriptPath
-            self.flywheelAgentName = flywheelAgentName
         }
     }
 

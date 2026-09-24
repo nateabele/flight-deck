@@ -1473,26 +1473,6 @@ rather than by design:
   malformed multi-key payload — not in the published schema today, but nothing parses it away
   — would pick a `kind` non-deterministically rather than failing loudly.
 
-## Flywheel setup/enable (2026-09-22) — a known-corrupted repo from before `66fa004`
-
-- **A repo that ran "Enable/Setup Flywheel" during the window when `FlywheelSetup` appended
-  shell lines to `.git/hooks/pre-commit` has a permanently broken `pre-commit` — deliberately
-  not auto-repaired.** Before `66fa004`, `installBeadsSyncHook` appended `br sync
-  --flush-only` / `git add -A .beads` directly to `pre-commit`, which `am guard install`
-  writes as a Python chain-runner (`#!/usr/bin/env python3 ... sys.exit(first_failure)`) —
-  appending shell to it is a `SyntaxError` that fails every commit in that repo. `66fa004`
-  fixed the *install* path (beads-sync now lives as its own `hooks.d/pre-commit/` script and
-  never touches `pre-commit`), but neither it nor anything since detects or repairs a
-  `pre-commit` a pre-fix run already corrupted: re-running Enable installs the hooks.d script
-  correctly but leaves the bad append in `pre-commit` in place, since nothing in
-  `FlywheelSetup`/`FlywheelProjectProbe` reads that file's *contents* looking for the old
-  shell lines — only for the guard markers. Known scope: essentially just `~/fw-functest`
-  (already hand-repaired), since the buggy code path never shipped anywhere off this branch.
-  Manual fix, if another one turns up: remove the appended `br sync --flush-only` / `git add
-  -A .beads` lines from the end of `.git/hooks/pre-commit`, leaving the Python chain-runner
-  otherwise intact. Document, don't auto-heal, unless this recurs somewhere it can't be
-  hand-fixed once.
-
 ## From the rename-injection fix wave (2026-09-22)
 
 Whole-branch review of the two fixes that landed `f0399b6` (release the injection mark on
