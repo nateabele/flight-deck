@@ -12,21 +12,15 @@ struct ProjectSettings: Codable, Equatable {
     /// A missing key means that agent's default account — the top of its list.
     var accounts: [AgentID: UUID]
     var options: [AgentID: AgentOptions]
-    /// nil ⇒ not a flywheel project (the default). Optional so a settings record written
-    /// before this field still decodes — synthesized `Codable` uses `decodeIfPresent` for
-    /// optionals. Read as `flywheelEnabled == true`.
-    var flywheelEnabled: Bool?
 
     init(
         defaultAgent: AgentID? = nil,
         accounts: [AgentID: UUID] = [:],
-        options: [AgentID: AgentOptions] = [:],
-        flywheelEnabled: Bool? = nil
+        options: [AgentID: AgentOptions] = [:]
     ) {
         self.defaultAgent = defaultAgent
         self.accounts = accounts
         self.options = options
-        self.flywheelEnabled = flywheelEnabled
     }
 
     /// A record that says nothing is deleted rather than stored, matching how an emptied flag
@@ -34,7 +28,6 @@ struct ProjectSettings: Codable, Equatable {
     /// payload says nothing, so it does not keep the record alive.
     var isEmpty: Bool {
         defaultAgent == nil && accounts.isEmpty && options.values.allSatisfy(\.isEmpty)
-            && flywheelEnabled != true
     }
 }
 
