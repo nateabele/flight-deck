@@ -396,9 +396,13 @@ enum ChoiceDialog {
     /// named was `SessionStore.rowLabel`, deleted when the planned answer drive stopped reading
     /// rows: `row(_:reads:)`'s only production callers are now on the single-select `.option`
     /// path, which refuses a `multiSelect` question before it gets here. So a build that renders
-    /// something else in this position is PRESSED ON, not refused. What bounds that is the shape
-    /// of a checkbox screen — a press there toggles a box and does not commit — and not this
-    /// rule.
+    /// something else in this position is PRESSED ON, not refused — and nothing bounds that.
+    /// **Not the shape of a checkbox screen, in particular**, which an earlier version of this
+    /// paragraph offered: the row this rule admits is the one row of a checkbox screen that does
+    /// NOT toggle. It reads `Next` or `Submit` and advances the question, so a press that misses
+    /// it lands on a checkbox or on the unnumbered rows below, and the plan's final `.submit`
+    /// step presses again regardless. `SessionStore.drive(_:driver:injector:id:token:)` carries
+    /// the full account.
     private static func actionRow(_ line: String, after run: [Row], marker: Character) -> Row? {
         guard run.count >= 2, let last = run.last, run.allSatisfy(\.isCheckbox),
               last.continuations.isEmpty

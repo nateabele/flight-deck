@@ -5355,9 +5355,13 @@ final class SessionStore: ObservableObject {
             //    is the only interlock this path has ever had, so dropping it would leave none.
             // 2. The target is `allowRow` = 0, and the row below it is "Yes, and don't ask
             //    again for …" — a DURABLE PERMISSION GRANT. A blind Return on a cursor somebody
-            //    moved would create one, silently, from a pocket. `.answers` is recoverable
-            //    (claude draws a review screen before anything commits, so a drive that stops
-            //    part-way leaves a dialog a human can still finish or cancel); this is not.
+            //    moved would create one, silently, from a pocket. An `.answers` drive that
+            //    STOPS is recoverable — claude draws a review screen before anything commits,
+            //    so an abort part-way leaves a dialog a human can still finish or cancel — and
+            //    that is the whole of the claim: an `.answers` drive that continues onto the
+            //    wrong row commits a wrong answer, exactly as
+            //    `drive(_:driver:injector:id:token:)` sets out. What is not recoverable in
+            //    EITHER direction is a grant made here, which is why this path keeps its read.
             //
             // A drive that refuses here leaves the dialog up for the person at the keyboard,
             // which is the direction this path fails in on purpose.
@@ -5607,14 +5611,34 @@ final class SessionStore: ObservableObject {
     /// the one `cursorBeforePress` and `landingAfterMove` used to catch:
     ///
     /// - a cursor the plan did not expect (a human touched the terminal, or claude opened a
-    ///   dialog this Mac's transcript copy does not describe) selects a neighbouring option and
-    ///   the submit step commits it —
-    ///   `AnswerDiagnosticsTests.testACursorSomewhereElseCommitsTheWrongAnswer` asserts exactly
-    ///   that, on purpose, so the loss is pinned rather than implied;
+    ///   dialog this Mac's transcript copy does not describe) selects a neighbouring option, and
+    ///   the submit step presses again on whatever follows.
+    ///   `AnswerDiagnosticsTests.testACursorSomewhereElseCommitsTheWrongAnswer` pins as much of
+    ///   that as a fake can: a Return goes out while the marker sits on a row the reader did not
+    ///   choose, and nothing is filed. The spy models no review screen and no commit, so the
+    ///   press is what is asserted — the commit is this paragraph's reasoning, not the test's;
     /// - a dropped or unrepainted arrow does the same thing one row over.
     ///
-    /// What is genuinely bounded is the multiSelect case: a mis-landed press there toggles a
-    /// box and stays put, so it never reaches a commit on its own.
+    /// **And multiSelect is NOT the bounded case — it is the worse one.** A previous version of
+    /// this comment offered it as the consolation ("a mis-landed press only toggles a box"),
+    /// which is false of the step that matters. `AnswerPlan.plan` gives every multiSelect
+    /// question a `.action` step onto `actionRow(optionCount:)`, and that row is `Next`/`Submit`:
+    /// it advances the question rather than toggling anything, so a multiSelect drive contains a
+    /// committing press even when every keystroke lands. Two things make it worse than
+    /// single-select rather than better:
+    ///
+    /// - that `.action` press, landing one row off, hits a checkbox or one of the unnumbered
+    ///   `Type something` / `Chat about this` rows `ChoiceDialog` documents below it, and the
+    ///   unconditional `.submit` then fires a Return into whatever that opened —
+    ///   `AnswerDiagnosticsTests.testAMissingActionRowNoLongerStopsACheckboxDrive` is the
+    ///   sibling case, with the action row simply absent;
+    /// - the cursor CARRIES from step to step inside one multiSelect question (`AnswerPlan.plan`
+    ///   says so at the only place it does), so one bad landing displaces every later step of
+    ///   that question, where a single-select question's steps each start from row 0 afresh.
+    ///
+    /// Nothing here is more bounded than anything else; the honest summary is that the screen no
+    /// longer stops a plan that has gone wrong, and what remains is that a stopped drive still
+    /// leaves a dialog a person can finish.
     ///
     /// **`.allow` is not driven this way, and the asymmetry is deliberate**, for two reasons
     /// that belong to it alone — no label to check a row against, and a durable permission grant
@@ -5671,11 +5695,12 @@ final class SessionStore: ObservableObject {
         }
 
         // The 120ms seam stays between the move and the press, unchanged. It is the same
-        // `injectionSettle` every other keystroke path in this file waits out; what it is worth
-        // HERE was not measured when the re-read that used to sit inside it was removed, so
-        // nothing is claimed about what the TUI does with a Return that arrives sooner. It was
-        // kept because removing a delay nobody has measured, in front of an irreversible press,
-        // is not a change this task had evidence for.
+        // `injectionSettle` the other paths that drive a TUI wait out — `inject`, `rename`, and
+        // the one-step drive below; not every keystroke path in this file does, `sendToShell`
+        // types straight at a pty. What the seam is worth HERE was not measured when the re-read
+        // that used to sit inside it was removed, so nothing is claimed about what the TUI does
+        // with a Return that arrives sooner. It was kept because removing a delay nobody has
+        // measured, in front of an irreversible press, is not a change this task had evidence for.
         injectionSettle { [weak self] in
             guard let self else { return }
             injector.sendReturn()
