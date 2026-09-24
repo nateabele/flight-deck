@@ -129,10 +129,14 @@ final class SpyInjector: TextInjecting {
     /// after question one, then the review — with the marker back on row 0, which is what
     /// claude does and the invariant `AnswerPlan` rests on.
     ///
-    /// `scriptedScreens` below cannot serve a drive that MOVES: those are verbatim captures,
-    /// so their marker is frozen where the camera found it and any arrow is refused by the
-    /// drive's own landing check. A drive that both arrows and crosses screens — the shape a
-    /// whole set of questions takes — needs a list the fake still models.
+    /// `scriptedScreens` below is a still image per press: a verbatim capture's marker is frozen
+    /// where the camera found it, so an arrow sent at one changes nothing the next read can see.
+    /// That is fine for the PLANNED drive, which no longer re-reads after its move —
+    /// `AnswerPromptTests.testASetIsDrivenOnAScreenWhoseDescriptionBreaksTheListParse` arrows
+    /// twice across two captures — and it is exactly what the one-step `.allow`/`.option` drive
+    /// refuses, which is the property `testAllowOnACapturedClaudeDialogWillNotReturnUntilTheMarkerMoves`
+    /// is built on. A test that needs the marker to actually MOVE and the screen to advance
+    /// needs this modelled list instead.
     private var optionsAfterReturn: [[String]] = []
 
     func advanceOnReturn(to lists: [[String]]) { optionsAfterReturn = lists }

@@ -119,18 +119,30 @@ final class CodexDialogDriverTests: XCTestCase {
     /// provenance established the difference by codepoint dump, not by eye. A defaulted
     /// marker on `ChoiceDialog` would be claude's grammar quietly applied to this screen; the
     /// two halves below are what a default would have hidden.
+    /// `hasSelectList` is held to the same rule as `focusedRow` and for a sharper reason: it is
+    /// the ONLY screen check the planned answer drive makes, so a marker borrowed from the wrong
+    /// agent would be the whole interlock reading somebody else's grammar. Each half is asserted
+    /// against its own agent too — a `false` that came from the fixture rather than from the
+    /// marker would prove nothing.
     func testNeitherAgentsDriverReadsTheOthersScreens() throws {
         for name in ["approval-command.captured", "approval-command-row1.captured",
                      "workspace-trust.captured"] {
             XCTAssertNil(try claude.focusedRow(inViewport: captured(name)),
                          "claude's ❯ appears nowhere on \(name)")
+            XCTAssertFalse(try claude.hasSelectList(inViewport: captured(name)),
+                           "and claude's driver finds no list on \(name) either")
+            XCTAssertTrue(try driver.hasSelectList(inViewport: captured(name)),
+                          "while codex's own driver does — otherwise the line above is vacuous")
         }
         for name in ["permission-bash.captured", "permission-write.captured",
                      "question-single.captured", "workspace-trust.captured"] {
-            XCTAssertNil(
-                try driver.focusedRow(inViewport: TimelineFixtureTests.text(name, in: "Claude")),
-                "codex's › appears nowhere on claude's \(name)"
-            )
+            let screen = try TimelineFixtureTests.text(name, in: "Claude")
+            XCTAssertNil(driver.focusedRow(inViewport: screen),
+                         "codex's › appears nowhere on claude's \(name)")
+            XCTAssertFalse(driver.hasSelectList(inViewport: screen),
+                           "and codex's driver finds no list on claude's \(name) either")
+            XCTAssertTrue(claude.hasSelectList(inViewport: screen),
+                          "while claude's own driver does")
         }
     }
 
