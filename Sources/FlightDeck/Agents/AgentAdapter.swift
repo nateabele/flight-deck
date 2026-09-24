@@ -470,6 +470,17 @@ protocol AgentDialogDriver {
     /// description cannot defeat it — which `focusedRow` does, on
     /// `Fixtures/Claude/question-numbered-description.captured.txt`.
     ///
+    /// **The predicate is shared with the injection veto, and the cost of a wrong answer points
+    /// the OTHER WAY here.** `ChoiceDialog.hasNumberedRowAtMarker` is written loose on purpose
+    /// for `AgentTextChannel.isKnownNonComposer`, where being too strict types a message into a
+    /// live dialog and being too loose only refuses an injection somebody can retry. In this
+    /// duty the loose direction is the expensive one: a false "yes" — a one-row draft beginning
+    /// `1. `, the false positive that doc names and accepts — is a Return fired into a composer
+    /// holding somebody's unsent text. Nothing here tightens it, because the screen carries no
+    /// attributes that would tell the two apart and the earlier gates (`statuses[id] ==
+    /// .waiting`, the transcript's own open prompt) are what actually keep a composer out of
+    /// this path. Recorded so that the next person to widen it knows both duties are reading it.
+    ///
     /// **No default here either, for `allowRow`'s reason.** Every conformer states its own
     /// agent's marker; a defaulted one would apply claude's grammar to somebody else's screen.
     func hasSelectList(inViewport viewport: String) -> Bool

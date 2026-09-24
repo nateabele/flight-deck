@@ -5598,12 +5598,27 @@ final class SessionStore: ObservableObject {
     /// `Fixtures/Claude/question-numbered-description.captured.txt` and the drive over it is
     /// `AnswerPromptTests.testASetIsDrivenOnAScreenWhoseDescriptionBreaksTheListParse`.
     ///
-    /// **What makes that acceptable here and NOT on `.allow` — the asymmetry is deliberate.**
-    /// Nothing is committed until the last step: claude shows a review screen listing every
-    /// question with its chosen answer and asks "Ready to submit your answers?", so a drive that
-    /// goes wrong part-way leaves a dialog the human can still finish or cancel. `.allow` keeps
-    /// its `focusedRow` read for two reasons that belong to it alone, both written out at its
-    /// own call site above.
+    /// **What that costs, stated exactly, because the obvious sentence about it is wrong.**
+    /// claude shows a review screen listing every question with its chosen answer and asks
+    /// "Ready to submit your answers?" — and that screen bounds a drive that **STOPS**, not one
+    /// that continues wrong. The plan's last step is an unconditional `.submit`
+    /// (`AnswerPlan.plan`), so a press that landed on the wrong row is carried straight through
+    /// to the commit by the very next step. "Continues wrong" is the new failure mode and it is
+    /// the one `cursorBeforePress` and `landingAfterMove` used to catch:
+    ///
+    /// - a cursor the plan did not expect (a human touched the terminal, or claude opened a
+    ///   dialog this Mac's transcript copy does not describe) selects a neighbouring option and
+    ///   the submit step commits it —
+    ///   `AnswerDiagnosticsTests.testACursorSomewhereElseCommitsTheWrongAnswer` asserts exactly
+    ///   that, on purpose, so the loss is pinned rather than implied;
+    /// - a dropped or unrepainted arrow does the same thing one row over.
+    ///
+    /// What is genuinely bounded is the multiSelect case: a mis-landed press there toggles a
+    /// box and stays put, so it never reaches a commit on its own.
+    ///
+    /// **`.allow` is not driven this way, and the asymmetry is deliberate**, for two reasons
+    /// that belong to it alone — no label to check a row against, and a durable permission grant
+    /// one row below its target — both written out at its own call site above.
     private func drive(
         _ plan: AnswerPlan,
         driver: any AgentDialogDriver,
@@ -5632,6 +5647,13 @@ final class SessionStore: ObservableObject {
 
         // One guard per check, so that whichever one refused has a NAME: an abort sends no
         // further key and is otherwise indistinguishable from a drive that finished.
+        //
+        // **This read happens BEFORE the arrow burst and the settle, so it sits one settle plus
+        // N keystrokes ahead of the Return it is guarding.** The post-move re-read used to close
+        // that window; it was removed with the rest of the per-step screen reading, so a dialog
+        // that closes inside the seam is pressed into whatever replaced it. Stated rather than
+        // hidden — it is the same window `drive(from:to:confirm:)` below still closes for
+        // `.allow` and `.option`.
         guard let screen = injector.readViewport() else {
             note(.unreadableBeforePress, step: index, step, viewport: nil)
             injecting.remove(id)
@@ -5648,9 +5670,12 @@ final class SessionStore: ObservableObject {
             if distance > 0 { injector.sendArrowDown() } else { injector.sendArrowUp() }
         }
 
-        // The 120ms seam stays between the move and the press: the arrows are only processed
-        // once the TUI repaints, and a Return sent inside the same frame lands on the row the
-        // cursor had not left yet.
+        // The 120ms seam stays between the move and the press, unchanged. It is the same
+        // `injectionSettle` every other keystroke path in this file waits out; what it is worth
+        // HERE was not measured when the re-read that used to sit inside it was removed, so
+        // nothing is claimed about what the TUI does with a Return that arrives sooner. It was
+        // kept because removing a delay nobody has measured, in front of an irreversible press,
+        // is not a change this task had evidence for.
         injectionSettle { [weak self] in
             guard let self else { return }
             injector.sendReturn()
@@ -5661,19 +5686,23 @@ final class SessionStore: ObservableObject {
     }
 
     /// Files one abort against `answerAbortSink`. A method rather than the literal at each
-    /// site: the step is the source of every field except the one that failed, so only the
-    /// difference is written out where the drive can be read.
+    /// site: the step is the source of every field, so only the screen is written out where the
+    /// drive can be read.
+    ///
+    /// **`expected` and `focused` are always nil from here, so they are not parameters.** Both
+    /// checks left in `perform` are about the screen as a whole rather than a row — one found no
+    /// screen, the other found no list on it — and neither has a label it compared or a row it
+    /// read. The two row-shaped fields still exist on `AnswerAbort` because the early guards in
+    /// `answerPrompt` and the one-step drive do fill them.
     private func note(
         _ check: AnswerAbort.Check,
         step index: Int,
         _ step: AnswerPlan.Step,
-        expected: String? = nil,
-        focused: Int? = nil,
         viewport: String?
     ) {
         answerAbortSink(AnswerAbort(
             check: check, step: index, purpose: step.purpose, from: step.from, to: step.to,
-            expected: expected, focused: focused, viewport: viewport
+            expected: nil, focused: nil, viewport: viewport
         ))
     }
 

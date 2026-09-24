@@ -207,12 +207,19 @@ final class AnswerDiagnosticsTests: XCTestCase {
         XCTAssertTrue(spy.events.isEmpty, "and no key was sent")
     }
 
-    /// **The cursor somewhere else no longer refuses, and this is the record of that.** It used
-    /// to file `pre-press-cursor`: `focusedRow` disagreed with `step.from`, and the drive
-    /// stopped. It stopped on a real dialog too — a wrapped option description is enough to
-    /// make `focusedRow` nil — so the check went and the plan drives regardless. `AnswerPlan`
-    /// computed these keystrokes from the transcript; the screen is not consulted about them.
-    func testACursorSomewhereElseNoLongerStopsTheDrive() {
+    /// **The cursor somewhere else no longer refuses, and the wrong answer is COMMITTED. This
+    /// test exists to state that cost, not to approve of it.**
+    ///
+    /// It used to file `pre-press-cursor`: `focusedRow` disagreed with `step.from` and the drive
+    /// stopped. It stopped on perfectly good dialogs too — a wrapped option description is
+    /// enough to make `focusedRow` nil — so the check went and the plan drives regardless.
+    ///
+    /// Here the reader chose "Yes" (index 0) and the marker is sitting on "Maybe". The plan's
+    /// step is `0→0`, so no arrow is sent, Return selects the row the marker is actually on, and
+    /// the plan's unconditional `.submit` step presses again on the review screen that follows.
+    /// **"The review screen means nothing commits" bounds a drive that STOPS, not one that
+    /// continues wrong** — see `SessionStore.drive(_:driver:injector:id:token:)`.
+    func testACursorSomewhereElseCommitsTheWrongAnswer() {
         let (store, spy, id, log) = makeStore()
         spy.showOptions(["Yes", "No", "Maybe"], selected: 2)
         drive(store, single(["Yes", "No", "Maybe"]), [[0]], in: id)
@@ -221,6 +228,10 @@ final class AnswerDiagnosticsTests: XCTestCase {
         XCTAssertEqual(spy.events, [.ret, .ret],
                        "the plan's step 0 is 0→0, so it presses where it planned to, "
                        + "then presses again on the review")
+        XCTAssertEqual(spy.selected, 2, "no arrow moved the marker off the row it was on")
+        XCTAssertEqual(spy.options[spy.selected], "Maybe",
+                       "and 'Maybe' is what that Return answered, against a reader who chose "
+                       + "'Yes' — a wrong answer, committed by the submit step")
     }
 
     /// The same for the label: a row reading something else is no longer compared, so there is
