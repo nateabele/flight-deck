@@ -15,10 +15,20 @@ import Foundation
 /// carries no attributes to tell a dialog from prose that looks like one. Today the planned
 /// drive asks one thing per step — is a select list on screen (`AgentDialogDriver.hasSelectList`)
 /// — so a screen that disagrees with the plan is pressed on rather than refused, and the wrong
-/// press is carried to the commit by the unconditional `.submit` step below. The refusals that
-/// remain are the ones taken BEFORE any key moves (the phone's labels against this Mac's copy,
-/// and `plan` returning nil) and the one-step `.allow`/`.option` drive, which still re-reads
-/// after its move. `SessionStore.drive(_:driver:injector:id:token:)` carries the full account.
+/// press is carried to the commit by the unconditional `.submit` step below.
+///
+/// Three kinds of refusal remain, and only the first two are about the plan's own steps:
+///
+/// - before any key moves: the phone's labels against this Mac's copy, and `plan` returning nil;
+/// - **mid-drive, at every step**: a terminal that cannot be read at all, and a screen with no
+///   select list on it. Those fire after keys have already gone out — the step-1 case is pinned
+///   by `AnswerDiagnosticsTests.testAScreenThatGoesUnreadableAfterTheMoveStopsAtTheNextStep` —
+///   and they stop the drive where it stands;
+/// - the one-step `.allow`/`.option` drive, which is not a plan at all and still re-reads after
+///   its move.
+///
+/// What is gone is the per-step agreement between the plan and what is drawn.
+/// `SessionStore.drive(_:driver:injector:id:token:)` carries the full account.
 ///
 /// The invariant it rests on: **every question's screen opens with the cursor on row 0.**
 /// `ChoiceDialogTests.testEveryRealDialogOpensWithTheCursorOnItsFirstRow` asserts that over

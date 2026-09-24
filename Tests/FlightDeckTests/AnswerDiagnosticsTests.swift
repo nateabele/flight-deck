@@ -215,10 +215,14 @@ final class AnswerDiagnosticsTests: XCTestCase {
     /// enough to make `focusedRow` nil — so the check went and the plan drives regardless.
     ///
     /// Here the reader chose "Yes" (index 0) and the marker is sitting on "Maybe". The plan's
-    /// step is `0→0`, so no arrow is sent, Return selects the row the marker is actually on, and
-    /// the plan's unconditional `.submit` step presses again on the review screen that follows.
-    /// **"The review screen means nothing commits" bounds a drive that STOPS, not one that
-    /// continues wrong** — see `SessionStore.drive(_:driver:injector:id:token:)`.
+    /// step is `0→0`, so no arrow is sent and Return selects the row the marker is actually on.
+    /// The plan's unconditional `.submit` step then presses a second time — against this fake,
+    /// into the same rendered list, because nothing here scripts the review screen claude would
+    /// have drawn. **What is asserted is therefore the press, not the commit**: a Return went out
+    /// while the marker sat on a row the reader did not choose, and nothing was filed about it.
+    /// That is the strongest pin available from a fake that models no commit; the rest of the
+    /// account is in `SessionStore.drive(_:driver:injector:id:token:)`, including why "the review
+    /// screen means nothing commits" bounds a drive that STOPS and not one that continues wrong.
     func testACursorSomewhereElseCommitsTheWrongAnswer() {
         let (store, spy, id, log) = makeStore()
         spy.showOptions(["Yes", "No", "Maybe"], selected: 2)
