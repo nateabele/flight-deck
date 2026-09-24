@@ -1,0 +1,25 @@
+{
+  "_meta": {
+    "command": "robot reservations",
+    "timestamp": "2026-09-24T22:27:17.716028+00:00",
+    "format": "json",
+    "version": "1.0",
+    "project": "users-me-fw-functest"
+  },
+  "_alerts": [
+    {
+      "severity": "warn",
+      "summary": "live server mailbox configuration unavailable: transport failure calling http://127.0.0.1:8765/mail/ws-state?limit=1: connection failed: Connection refused (os error 61); local reservation read cannot attest freshness",
+      "action": "use MCP file-reservation tools before relying on this CLI result"
+    }
+  ],
+  "all_active": [],
+  "reservation_read_attestation": {
+    "state": "unattested",
+    "source": "local_config_unattested",
+    "database_matches_server": null,
+    "storage_root_matches_server": null,
+    "detail": "live server mailbox configuration unavailable: transport failure calling http://127.0.0.1:8765/mail/ws-state?limit=1: connection failed: Connection refused (os error 61); local reservation read cannot attest freshness",
+    "action": "use MCP file-reservation tools before relying on this CLI result"
+  }
+}
