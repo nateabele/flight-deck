@@ -71,9 +71,13 @@ fixtures, not per se "Observe reads," but they are what let every empty-live-dat
 above be schema-confirmed instead of guessed.
 
 **Minimal fields Observe needs**, from the confirmed schemas:
-- `ReadyIssue`/`IssueWithCounts`/`BlockedIssue` all share `id, title, status, priority,
-  issue_type, assignee` (assignee only on `IssueWithCounts`) — that's the "Working on"
-  lane.
+- `ReadyIssue`, `IssueWithCounts`, and `BlockedIssue` all share `id, title, status,
+  priority, issue_type`. `assignee: string | null` (optional, not in `required`) is on
+  **`ReadyIssue` and `IssueWithCounts`** — confirmed directly against
+  `br-schema-all.json`'s `properties`/`required` for each. **`BlockedIssue` has no
+  `assignee` field at all** (absent from both `properties` and `required`); its "who/why
+  blocked" data instead lives on `blocked_by: [String]` + `blocked_by_count` — that's
+  the "Working on" lane's field set.
 - `BlockedIssue.blocked_by: [String]` (+ `blocked_by_count`) is the immediate-dependency
   signal for the drawer's Dependency lane without needing `dep list`.
 - `TreeNode { id, title, depth, parent_id, status, priority }` is what the DAG overlay
