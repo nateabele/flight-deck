@@ -35,4 +35,23 @@ final class DependencyGraphLayoutTests: XCTestCase {
             nodeSize: .init(width: 132, height: 48), spacing: .init(width: 40, height: 80))
         XCTAssertEqual(l.rootCauseID, "bd-118")   // stalled, not blocked, deepest actionable node
     }
+
+    func testDuplicateBeadIDsDoesNotCrashAndDedupes() {
+        let l = DependencyGraphLayout.layout(beadIDs: ["bd-1","bd-1","bd-2"], edges: [],
+            statusByBead: [:], nodeSize: .init(width: 132, height: 48), spacing: .init(width: 40, height: 80))
+        XCTAssertEqual(l.nodes.count, 2)   // one node per distinct id, not a crash
+    }
+
+    func testRootCauseNeverReferencesNodeAbsentFromNodes() {
+        // bd-999 is outside beadIDs but reachable from the blocked bd-142 via an edge, and
+        // ranks deeper than in-set bd-118. rootCauseID must never point outside `nodes`.
+        let edgesWithExternal = edges + [.init(from: "bd-133", to: "bd-999", kind: .dependency)]
+        let l = DependencyGraphLayout.layout(
+            beadIDs: ["bd-142","bd-118","bd-133","bd-120"], edges: edgesWithExternal,
+            statusByBead: ["bd-142": .blocked, "bd-118": .stalled, "bd-999": .stalled],
+            nodeSize: .init(width: 132, height: 48), spacing: .init(width: 40, height: 80))
+        if let root = l.rootCauseID {
+            XCTAssertNotNil(l.nodes[root], "rootCauseID \(root) must reference a node in nodes")
+        }
+    }
 }

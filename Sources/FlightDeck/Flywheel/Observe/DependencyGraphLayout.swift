@@ -22,6 +22,13 @@ struct DependencyGraphLayout: Equatable {
     /// deepest rank and is placed exactly once, never once per incoming path.
     static func layout(beadIDs: [String], edges: [FlywheelProjection.DepEdge],
                         statusByBead: [String: AgentStatus], nodeSize: CGSize, spacing: CGSize) -> DependencyGraphLayout {
+        // A duplicate id is an upstream bug, not grounds to crash a read-only observation
+        // layer feeding UI — dedupe (first-seen order) rather than let
+        // Dictionary(uniqueKeysWithValues:) trap.
+        var seenIDs = Set<String>()
+        let beadIDs = beadIDs.filter { seenIDs.insert($0).inserted }
+        let beadIDSet = Set(beadIDs)
+
         // Longest-path rank via topological relaxation: repeatedly push a node's rank to
         // max(incoming source rank + 1) until nothing changes. Bounded by node count so a
         // cyclic input (which shouldn't occur for real dependency data) can't loop forever.
@@ -66,7 +73,7 @@ struct DependencyGraphLayout: Equatable {
         }
         let contentHash = hasher.finalize()
 
-        let rootCauseID = Self.rootCause(edges: sortedEdges, rank: rank, statusByBead: statusByBead)
+        let rootCauseID = Self.rootCause(edges: sortedEdges, rank: rank, statusByBead: statusByBead, beadIDs: beadIDSet)
 
         return DependencyGraphLayout(nodes: nodes, contentHash: contentHash, rootCauseID: rootCauseID)
     }
@@ -75,8 +82,12 @@ struct DependencyGraphLayout: Equatable {
     /// from some `.blocked` node — the deepest actionable cause on the critical path, as
     /// opposed to the blocked node itself (which is a symptom, not the thing to unblock).
     private static func rootCause(edges: [FlywheelProjection.DepEdge], rank: [String: Int],
-                                   statusByBead: [String: AgentStatus]) -> String? {
-        let blockedSources = statusByBead.filter { $0.value == .blocked }.map(\.key)
+                                   statusByBead: [String: AgentStatus], beadIDs: Set<String>) -> String? {
+        // `statusByBead` is caller-supplied and independent of `beadIDs` (a dependency chain
+        // can extend past the focused bead set) — intersect both ends with `beadIDs` so the
+        // result is always a key in `nodes` (never a dangling id a downstream `nodes[...]`
+        // lookup, e.g. the Canvas overlay, would silently get `nil` for).
+        let blockedSources = statusByBead.filter { $0.value == .blocked && beadIDs.contains($0.key) }.map(\.key)
         guard !blockedSources.isEmpty else { return nil }
 
         var adjacency: [String: [String]] = [:]
@@ -97,7 +108,9 @@ struct DependencyGraphLayout: Equatable {
             }
         }
 
-        let candidates = statusByBead.filter { $0.value == .stalled && reachable.contains($0.key) }
+        let candidates = statusByBead.filter { $0.value == .stalled && reachable.contains($0.key) && beadIDs.contains($0.key) }
+        // Greatest rank wins (deepest actionable cause); among equal-rank candidates the
+        // lexicographically-greatest id wins, a deterministic (if arbitrary) tie-break.
         return candidates.keys.max { lhs, rhs in
             let lhsRank = rank[lhs] ?? 0
             let rhsRank = rank[rhs] ?? 0
