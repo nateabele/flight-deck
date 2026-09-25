@@ -1088,6 +1088,16 @@ final class SessionStore: ObservableObject {
     /// Not `private`: `AppDelegate` reads this to wire the Tools menu to the same store.
     let preferences: PreferencesStore?
 
+    /// The local control socket every launched tab is pointed at, or nil when the control
+    /// socket is off. `FlightDeckApp` sets this (with `controlSecret`) when
+    /// `ControlEnvironment.isEnabled()`; left nil under a UITest reset so a GUI test's tabs
+    /// never learn a live socket. Read at launch time only, like `preferences`.
+    var controlSocket: URL?
+    /// The key each tab's `FLIGHT_DECK_CALLER` token is minted under — `FleetService`'s own
+    /// `controlSecret`, which `FlightDeckApp` copies here so the token a tab carries is one the
+    /// server that judges it can verify. Only consulted when `controlSocket` is also set.
+    var controlSecret: Data?
+
     /// The path calculator for `fd-abduco` sockets/pidfiles/binary — see its doc comment.
     /// Injected (default `SessionDaemon()`) so tests can point it at a temp directory with a
     /// fake executable, matching `daemonControl` below.
@@ -1370,12 +1380,21 @@ final class SessionStore: ObservableObject {
     ///
     /// Applied last for the same reason the account is: a variable typed into the Shell pane
     /// must not be able to repoint a tab's hook log at a directory nothing tails.
-    private func launchEnvironment(
+    ///
+    /// Internal rather than `private` only so `ControlLaunchEnvironmentTests` can read what a
+    /// tab would be launched with, without forking a shell to find out.
+    func launchEnvironment(
         for session: Session, adapter: AgentAdapter, orphaned: Bool
     ) -> [String: String] {
         var environment =
             preferences?.sessionEnvironment(for: orphaned ? nil : account(for: session)) ?? [:]
         for (key, value) in adapter.launchEnvironment { environment[key] = value }
+        // Last, like the adapter's half and for the same reason: a variable typed into the Shell
+        // pane must not repoint a tab at another app instance's socket or claim another tab.
+        if let controlSocket, let controlSecret {
+            for (key, value) in ControlEnvironment.variables(
+                for: session.id, socket: controlSocket, secret: controlSecret) { environment[key] = value }
+        }
         return environment
     }
 

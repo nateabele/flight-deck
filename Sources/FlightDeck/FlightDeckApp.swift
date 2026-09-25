@@ -168,6 +168,18 @@ struct FlightDeckApp: App {
                 logger.error("fleet listener failed to bind: \(String(describing: error), privacy: .public)")
             }
         }
+        // Its own start, never inside the `do` above: a phone listener that will not bind must
+        // not take the CLI down with it, and the reverse. After the reset guard on purpose, so a
+        // UITest run neither binds a live socket nor hands its tabs a path to one.
+        if ControlEnvironment.isEnabled() {
+            let url = ControlEnvironment.socketURL()
+            store.controlSocket = url
+            store.controlSecret = service.controlSecret
+            Task {
+                do { try await service.startLocal(at: url) }
+                catch { logger.error("control socket failed to bind: \(String(describing: error), privacy: .public)") }
+            }
+        }
         return service
     }
 
