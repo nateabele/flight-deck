@@ -7,8 +7,9 @@ import Foundation
 signal(SIGPIPE, SIG_IGN)
 
 // Every verb from the spec's command table (docs/superpowers/specs/2026-09-24-flightdeck-cli-
-// design.md), one line each — `--help`'s only output, and also what a usage error prints below
-// its own message.
+// design.md), one line each, then how `--` works, since a dash-led text is the one argument
+// shape the lines above cannot show. `--help`'s only output, and also what a usage error prints
+// below its own message.
 let usageLines = [
     "flightdeck ls [--project P]",
     "flightdeck tail [--session S] [--since SEQ] [--no-snapshot]",
@@ -33,6 +34,9 @@ let usageLines = [
     "flightdeck closed",
     "flightdeck options P",
     "flightdeck raw '<ClientFrame JSON>'",
+    "",
+    "Flags go before or after operands. Put -- before text that starts with -:",
+    "  flightdeck send S --wait -- \"- text\"",
 ]
 
 func writeStderr(_ line: String) {
