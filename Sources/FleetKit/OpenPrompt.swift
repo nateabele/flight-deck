@@ -73,7 +73,11 @@ public struct PromptQuestion: Equatable, Hashable, Sendable {
     /// state of a large tool input, per `TimelineItem.Body.text` — return nothing here instead
     /// of a question missing its last two options. Three of four choices is worse than none.
     ///
-    /// The shape, from `Fixtures/Claude/question-single.captured.jsonl` (claude 2.1.241):
+    /// The shape, from `Fixtures/Claude/question-single.captured.jsonl` (claude 2.1.241), and
+    /// re-derived on every matrix run by the `askUserQuestionShape` row in
+    /// `scripts/adapterprobe/capabilities.py` — which guards THIS parser against regressing, but
+    /// reads the same frozen capture, so it cannot see a newer claude emitting a different shape.
+    /// That half is `openPromptReader`'s job and is currently blocked; see the row's docstring:
     /// `{"questions":[{"question":…,"header":…,"multiSelect":false,
     ///   "options":[{"label":…,"description":…}]}]}`
     public init?(toolInput: String) {
