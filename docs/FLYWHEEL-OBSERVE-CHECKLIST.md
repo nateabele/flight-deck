@@ -127,18 +127,20 @@ just don't jump anywhere.)
 **Expect:** first click on a node selects + recenters; second click on the already-selected
 node jumps to its tab, or silently no-ops if no tab owns that bead.
 
-### 6. Persistent block notifies; a brief block does not
+### 6. Persistent block notification — dormant in Level 1, not live-verifiable
 
-Force an agent into `.blocked` status (per the scratch repo's own mechanism for that) and
-leave it blocked for **over 120 seconds** (the default `blockThreshold`). Confirm a system
-notification fires reading "`<agent>` is blocked" / "`<agent>` has been blocked for over
-120s and needs a human," and that clicking the notification focuses the correct tab.
+The block trigger is wired and unit-tested (`FlywheelNotifierTests`) but cannot fire against
+live data in Level 1: it needs an agent whose bead has `status == "blocked"`, and the only
+live bead read is `br list --status in_progress`, which by definition never returns a
+blocked bead. There is no live read path that could ever produce the `.blocked` agent state
+this trigger keys on — forcing an agent into `.blocked` in the scratch repo and waiting will
+never notify, no matter how long you wait, and that is not a bug to chase. See FOLLOWUPS.
 
-Separately, force a block that **clears within** 120 seconds. Confirm **no** notification
-ever fires for it — a transient block simply ages out with nothing sent.
+**Skip this step.** There is nothing to verify by hand here — the notifier path is covered
+by unit tests, and live verification waits until a future level wires a bead read that can
+surface `.blocked` agents.
 
-**Expect:** block held >120s notifies and routes correctly on click; block clearing <120s
-stays silent.
+**Expect:** N/A — not live-verifiable in Level 1 (unit-tested only; see FOLLOWUPS).
 
 ### 7. Stalled-holder collision notifies; active-holder collision does not
 
@@ -175,6 +177,6 @@ Monitor for that project (no live `FlywheelWatcher` polling it).
 - [ ] Step 3 — collapse/expand persists per project across relaunch
 - [ ] Step 4 — DAG renders whole graph, centered camera, working pan/zoom/minimap, aligned edges
 - [ ] Step 5 — first click selects/recenters, second click jumps or no-ops correctly
-- [ ] Step 6 — persistent block notifies + routes; brief block silent
+- [ ] Step 6 — **N/A today, block trigger dormant in Level 1** (unit-tested only; see `docs/FOLLOWUPS.md`)
 - [ ] Step 7 — stalled/dead-holder collision notifies; active-holder collision silent
 - [ ] Step 8 — **N/A today, no disable UI exists** (see `docs/FOLLOWUPS.md`)

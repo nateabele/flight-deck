@@ -76,7 +76,9 @@ struct FlywheelProjection: Equatable, Sendable {
         let beads = (snapshot.beads ?? []).map {
             Bead(id: $0.id, title: $0.title, status: $0.status, assignee: $0.assignee)
         }
-        let beadsByID = Dictionary(uniqueKeysWithValues: beads.map { ($0.id, $0) })
+        // A duplicate bead id (corrupt db, a br bug) must degrade, not crash the drawer —
+        // keep the last-seen row rather than trap via Dictionary(uniqueKeysWithValues:).
+        let beadsByID = Dictionary(beads.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
 
         let reservations = (snapshot.reservations ?? []).map {
             Reservation(file: $0.file, holder: $0.holder, since: $0.since, waiters: $0.waiters)

@@ -6,6 +6,13 @@ import Foundation
 /// persistent block, or a collision where the holder can't clear itself. Everything else
 /// (a transient block, an actively-worked collision) is deliberately silent — see
 /// `docs/superpowers/specs/2026-09-24-flywheel-observe` for the "don't cry wolf" rationale.
+///
+/// **Level 1 caveat:** all three triggers below are wired and unit-tested but dormant
+/// against live data. The block trigger needs an agent whose bead has `status ==
+/// "blocked"`, but the only live bead read (`br list --status in_progress`) never returns
+/// one; the collision and dependency-cycle triggers need the `reservations`/`depEdges`
+/// lanes, both permanent nil-stubs in Level 1 (see `docs/FOLLOWUPS.md`). So `evaluate(...)`
+/// is effectively a no-op on live projections until a later level wires those lanes.
 @MainActor
 final class FlywheelNotifier {
     /// One notification per distinct reason we'd wake a human, so the same agent can be
@@ -79,7 +86,9 @@ final class FlywheelNotifier {
     // MARK: - Collision needing a human
 
     private func evaluateCollisions(projectKey: String, projection: FlywheelProjection, observedKeys: inout Set<String>) {
-        let agentsByName = Dictionary(uniqueKeysWithValues: projection.agents.map { ($0.name, $0) })
+        // A duplicate agent name from a substrate hiccup must degrade, not crash the
+        // drawer — keep the last-seen row rather than trap via Dictionary(uniqueKeysWithValues:).
+        let agentsByName = Dictionary(projection.agents.map { ($0.name, $0) }, uniquingKeysWith: { _, last in last })
 
         for reservation in projection.reservations where !reservation.waiters.isEmpty {
             let holder = agentsByName[reservation.holder]
