@@ -2,9 +2,9 @@ import FleetKit
 import XCTest
 
 final class CLISessionResolverTests: XCTestCase {
-    /// Two sessions ("dup"/"dup2") share a UUID prefix (`BBBB`) so ambiguity has two distinct
-    /// triggers to cover — a shared prefix and a shared title — rather than one fixture
-    /// standing in for both. `session1`'s prefix (`AAAA`) is unique to it.
+    /// `session2` and `session3` share both a UUID prefix (`BBBB`) and a title (`dup`), so each
+    /// ambiguity trigger — a shared prefix, a shared title — has a fixture to fire on.
+    /// `session1`'s prefix (`AAAA`) and title (`alpha`) are unique to it.
     private let session1 = UUID(uuidString: "AAAA1111-0000-0000-0000-000000000001")!
     private let session2 = UUID(uuidString: "BBBB2222-0000-0000-0000-000000000002")!
     private let session3 = UUID(uuidString: "BBBB3333-0000-0000-0000-000000000003")!
@@ -104,5 +104,20 @@ final class CLISessionResolverTests: XCTestCase {
             CLISessionResolver.project("missing", in: makeFleet(), cwd: "/irrelevant"),
             .failure(.notFound("missing"))
         )
+    }
+    /// A tab titled `cafe` must never resolve to a different tab whose id happens to start
+    /// with `CAFE` — the title is what the user typed, the prefix is a coincidence.
+    func testAnExactTitleBeatsAUUIDPrefix() {
+        let prefixed = UUID(uuidString: "CAFE0000-0000-0000-0000-000000000001")!
+        let titled = UUID(uuidString: "EEEE0000-0000-0000-0000-000000000002")!
+        let fleet = FleetSnapshot(projects: [
+            WireProject(id: projectA, name: "a", path: "/w/a", sessions: [
+                WireSession(id: prefixed, title: "other", agent: "claude"),
+                WireSession(id: titled, title: "cafe", agent: "claude"),
+            ]),
+        ])
+        XCTAssertEqual(CLISessionResolver.session("cafe", in: fleet, selfID: nil), .success(titled))
+        XCTAssertEqual(CLISessionResolver.session("CAFE0", in: fleet, selfID: nil), .success(prefixed),
+                       "a prefix nothing is titled still resolves by prefix")
     }
 }

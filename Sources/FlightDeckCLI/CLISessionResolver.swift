@@ -14,8 +14,8 @@ public enum CLIResolveError: Error, Equatable {
     case ambiguous(String, [UUID])
 }
 
-/// Resolves the loose tokens a human types on a command line — `self`, a UUID, a prefix of
-/// one, a title, `.`/`here`, a path, a name — against a `FleetSnapshot`, to the one id (if any)
+/// Resolves the loose tokens a human types on a command line — `self`, a UUID, a title, a
+/// prefix of a UUID, `.`/`here`, a path, a name — against a `FleetSnapshot`, to the one id (if any)
 /// they name.
 public enum CLISessionResolver {
     /// The shortest prefix `flightdeck` will treat as a prefix search rather than requiring an
@@ -44,6 +44,16 @@ public enum CLISessionResolver {
             return .failure(.notFound(token))
         }
 
+        // Titles before prefixes: a tab titled `cafe` must resolve to itself, never to another
+        // tab whose id happens to start with `CAFE`. The title is what the user meant; a
+        // prefix match on it is a coincidence of hex spelling.
+        let titleMatches = sessions.filter { $0.title == token }
+        switch titleMatches.count {
+        case 1: return .success(titleMatches[0].id)
+        case let n where n > 1: return .failure(.ambiguous(token, titleMatches.map(\.id)))
+        default: break // fall through to prefix matching
+        }
+
         if token.count >= minimumPrefixLength {
             let lowered = token.lowercased()
             let prefixMatches = sessions.filter { $0.id.uuidString.lowercased().hasPrefix(lowered) }
@@ -51,16 +61,11 @@ public enum CLISessionResolver {
             case 1: return .success(prefixMatches[0].id)
             case let n where n > 1:
                 return .failure(.ambiguous(token, prefixMatches.map(\.id)))
-            default: break // fall through to title matching
+            default: break
             }
         }
 
-        let titleMatches = sessions.filter { $0.title == token }
-        switch titleMatches.count {
-        case 1: return .success(titleMatches[0].id)
-        case let n where n > 1: return .failure(.ambiguous(token, titleMatches.map(\.id)))
-        default: return .failure(.notFound(token))
-        }
+        return .failure(.notFound(token))
     }
 
     public static func project(
