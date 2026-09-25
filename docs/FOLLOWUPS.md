@@ -1528,7 +1528,10 @@ recorded rather than fixed in this pass.
 ## What actually sent CSI-u at a bare shell (2026-09-25)
 
 **Supersedes the entry written here on 2026-09-24**, which asked whether Claude's composer acts
-on `ESC[117;5u`. That question is moot: `TextInjecting.sendControl` does not send that sequence.
+on `ESC[117;5u`. That entry has been withdrawn, not left in place — its own claim was wrong, so
+it is not reproduced here; docs/HANDOFF-agent-surface-findings.md §4 keeps the record of what it
+said and why. The question it asked is moot regardless: `TextInjecting.sendControl` does not send
+that sequence.
 
 `sendControl` passes an explicit control byte via `text:`, and **that byte is what reaches the
 terminal, under the kitty keyboard protocol as well as the legacy encoding.** Traced link by link
@@ -1560,6 +1563,37 @@ which code path actually sent the keys, and must refuse to report a verdict if i
 establish both.** This is not boilerplate. This project has now produced four wrong conclusions
 from probes that asserted an outcome for a configuration they never established — including one
 where a bare pty left claude in *legacy* mode, so the probe exercised an encoder ghostty never
-uses in production, and including the 2026-09-24 correction above, which inverted the mechanism
-it was written to fix. A probe that cannot name its configuration must fail, not conclude. See
-docs/HANDOFF-agent-surface-findings.md §7.
+uses in production, and including the 2026-09-24 correction above (**withdrawn**, not restored —
+see docs/HANDOFF-agent-surface-findings.md §4, which keeps the record). A probe that cannot name
+its configuration must fail, not conclude. See docs/HANDOFF-agent-surface-findings.md §7.
+
+## Claude has no live coverage in the adapter suite (2026-09-25)
+
+This branch's stated top priority was `claude.openPromptReader` — "the one row that should have
+caught 2.1.281 and didn't" — so it was rewritten to drive a live `claude` instead of the frozen
+`question-single.captured.jsonl` fixture (claude 2.1.241) it used to parse. The rewrite works,
+but its verdict moved `ok` -> **`error`**: a sandboxed claude cannot authenticate. Claude Code
+keys its keychain credential to a hash of `CLAUDE_CONFIG_DIR` — the default home uses the service
+`Claude Code-credentials`, any other config dir uses `Claude Code-credentials-<hash>` — and
+`AgentSandbox` hands every run a fresh temp home whose hash has no entry, so the sandboxed session
+always comes up "Not logged in", regardless of what `.claude.json` was copied in. Unblocking it
+means extracting the user's real OAuth token out of the login keychain — a security-sensitive act,
+escalated rather than performed here.
+
+`claude.escapeDeniesPermission`, the other row this branch added, needs the same thing (a real
+approval dialog raised in a live, authenticated claude pty) and hits the identical guard. So
+**claude has no live coverage in this suite today** — both of its live-turn rows fail closed on
+sandbox auth rather than measuring anything — and a `--tier full` run against the committed
+baseline exits `3` (harness failure) on that account.
+
+Stated plainly rather than buried: the plan's own top priority is **not delivered.**
+`claude.openPromptReader` still cannot catch a 2.1.281-class change; the honest gap it can close
+is refusing to report a false `ok` the way the frozen fixture did. That is a real improvement over
+a green fixture that measures nothing live, but it is not the fix, and exit code `6` (version
+drift, see `scripts/adapterprobe/README.md`) is the compensating control that currently stands in
+for it — a version bump gets caught, a same-version behaviour change on claude still would not.
+
+Also unproven: both new full-tier rows (`claude.openPromptReader`'s live rewrite,
+`claude.escapeDeniesPermission`) have **never once run to completion against a live agent** — every
+attempt has stopped at the auth guard above. `baseline.json` is deliberately not refreshed against
+this branch; see `scripts/adapterprobe/README.md`'s baseline note for the resulting diff.
