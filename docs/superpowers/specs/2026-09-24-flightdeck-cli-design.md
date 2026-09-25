@@ -1,6 +1,6 @@
 # `flightdeck` CLI — local read-write control of the running app
 
-Date: 2026-09-24 · Status: design, awaiting review
+Date: 2026-09-24 · Status: implemented
 
 ## Goal
 
@@ -152,6 +152,7 @@ SessionStore
 | `flightdeck send S "text"` | `cmd session.prompt` (fresh token) |
 | `flightdeck new P [--agent A] [--account N]` | `cmd session.new` |
 | `flightdeck close S` · `reopen S` · `rename S "t"` · `read S` · `unread S` · `collapse P [--off]` | the matching `cmd` |
+| `flightdeck prompt S` | `req timeline` (latest page), then derives the open permission/question prompt from it |
 | `flightdeck answer S '[[0,1],[2]]' [--call C]` | `cmd prompt.answer` |
 | `flightdeck abort S` | `cmd prompt.abort` |
 | `flightdeck plan approve\|reject S [--feedback F]` · `plan annotate S "text" [--block N]` | `cmd plan.resolve` / `plan.annotate` |
