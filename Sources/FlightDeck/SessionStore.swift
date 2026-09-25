@@ -1119,6 +1119,12 @@ final class SessionStore: ObservableObject {
     /// `FlywheelSetup(runner: <fake>)`.
     private let flywheelSetup: FlywheelSetup
 
+    /// The `am`/`br` reader `observeService` shells out through. Injected the same defaulted
+    /// way `flywheelCoordinator`/`flywheelSetup` above are, so a `SessionStore`-level test can
+    /// hand it `FlywheelReadCommands(runner: <fake>)` and assert on argv without spawning real
+    /// `am`/`br` — see `ObserveServiceWiringTests`.
+    private let flywheelObserveReads: FlywheelReadCommands
+
     /// Detection results from `FlywheelProjectProbe`, cached at the moment a project is first
     /// added (`insertSession`'s new-repo branch) and consulted by `flywheelSuggestion(for:)` to
     /// drive the opt-in menu item — never recomputed on the spawn hot path. Keyed by the same
@@ -1140,7 +1146,7 @@ final class SessionStore: ObservableObject {
     /// before that assignment) — a closure that captured `flywheelNotifier`'s value up
     /// front would silently miss every notification for the rest of the run.
     private(set) lazy var observeService: FlywheelObserveService = {
-        let service = FlywheelObserveService(clock: clock)
+        let service = FlywheelObserveService(reads: flywheelObserveReads, clock: clock)
         service.onProjectionsChanged = { [weak self] projections in
             self?.flywheelNotifier?.evaluate(projectsByKey: projections)
         }
@@ -1158,6 +1164,13 @@ final class SessionStore: ObservableObject {
     /// first time ANY project turns Observe on, not unconditionally at launch — a user
     /// who has never opted into flywheel for any project should never see the system
     /// permission prompt just for launching the app.
+    ///
+    /// This is one of three overlapping auth-request gates in the flywheel path — the
+    /// others are `FlywheelNotifier`'s own `didRequestAuthorization` (guards the
+    /// notifier's `evaluate` entry point) and the enable flow itself. That's intentional
+    /// belt-and-suspenders, not redundancy to clean up: each gate guards a different
+    /// entry point into the same underlying request, and `UNUserNotificationCenter`
+    /// authorization is idempotent, so a double-request across gates is harmless.
     private var hasRequestedFlywheelAuth = false
 
     /// Owns the idle-session sleep/wake bookkeeping. Constructed lazily so its closures can
@@ -1701,7 +1714,8 @@ final class SessionStore: ObservableObject {
         daemon: SessionDaemon = SessionDaemon(),
         daemonControl: DaemonControlling? = nil,
         flywheelCoordinator: FlywheelCoordinator = FlywheelCoordinator(),
-        flywheelSetup: FlywheelSetup = FlywheelSetup()
+        flywheelSetup: FlywheelSetup = FlywheelSetup(),
+        flywheelObserveReads: FlywheelReadCommands = FlywheelReadCommands()
     ) {
         self.provider = provider
         self.persistence = persistence
@@ -1711,6 +1725,7 @@ final class SessionStore: ObservableObject {
         self.daemonControl = daemonControl ?? PosixDaemonControl(daemon: daemon)
         self.flywheelCoordinator = flywheelCoordinator
         self.flywheelSetup = flywheelSetup
+        self.flywheelObserveReads = flywheelObserveReads
         // Shell records land asynchronously, up to half a second after the tab they belong to
         // (see `SurfaceProcessRegistry`), so the `persist()` that `newSession`/`restore` already
         // ran is too early to contain them. Without this the snapshot names no shell for any
@@ -2279,6 +2294,15 @@ final class SessionStore: ObservableObject {
 
     // MARK: Observe (Level 1, read-only)
 
+    /// The shared `selectedSessionID → locate → session.flywheelIdentity` chain every
+    /// `focused*` Observe helper below needs — extracted so the three of them (and any
+    /// future one) share exactly one place that knows how to find "the identity the
+    /// focused tab booted under", rather than three copies that could drift.
+    private var focusedFlywheelIdentity: FlywheelIdentity? {
+        guard let id = selectedSessionID, let at = locate(id) else { return nil }
+        return repos[at.repo].sessions[at.session].flywheelIdentity
+    }
+
     /// `RootView`'s mount point: the currently selected tab's projected `Agent`, or nil
     /// when there is no selection, the selected tab never booted under a flywheel
     /// identity, or that identity's project has no live projection (not enabled, or no
@@ -2286,9 +2310,7 @@ final class SessionStore: ObservableObject {
     /// — the same key `observeService` stores under — so no separate
     /// `Session.workingDirectory` lookup is needed.
     func focusedObserveAgent() -> FlywheelProjection.Agent? {
-        guard let id = selectedSessionID, let at = locate(id) else { return nil }
-        let session = repos[at.repo].sessions[at.session]
-        guard let identity = session.flywheelIdentity,
+        guard let identity = focusedFlywheelIdentity,
               let proj = observeService.projection(forProject: identity.project) else { return nil }
         return proj.agent(for: identity)
     }
@@ -2298,19 +2320,26 @@ final class SessionStore: ObservableObject {
     /// `focusedObserveAgent()` is. Kept separate from that method rather than having the
     /// overlay derive it from a single agent, since the overlay draws the WHOLE graph.
     func focusedObserveProjection() -> FlywheelProjection? {
-        guard let id = selectedSessionID, let at = locate(id) else { return nil }
-        guard let identity = repos[at.repo].sessions[at.session].flywheelIdentity else { return nil }
+        guard let identity = focusedFlywheelIdentity else { return nil }
         return observeService.projection(forProject: identity.project)
     }
 
     /// The standardized project path backing every Observe helper below that reads or
     /// writes `ProjectSettings` — the focused tab's flywheel identity project, same key
-    /// `focusedObserveAgent()`/`focusedObserveProjection()` use. A private helper rather
-    /// than repeating the `selectedSessionID` → `locate` → `flywheelIdentity` chain at
-    /// each call site.
+    /// `focusedObserveAgent()`/`focusedObserveProjection()` use.
     private var focusedObserveProjectPath: String? {
-        guard let id = selectedSessionID, let at = locate(id) else { return nil }
-        return repos[at.repo].sessions[at.session].flywheelIdentity?.project
+        focusedFlywheelIdentity?.project
+    }
+
+    /// The shared `(project, agentName) → session` lookup: resolves a flywheel identity
+    /// back to the tab it booted, for whichever of this fleet's sessions carries it.
+    /// Shared by `selectObserveSession(forBeadID:)` below and `FlightDeckApp`'s
+    /// `FlywheelNotifier.route` closure, so a bead/notification resolves to a tab the
+    /// same way regardless of caller.
+    func session(project: String, agentName: String) -> Session? {
+        repos.flatMap(\.sessions).first {
+            $0.flywheelIdentity?.project == project && $0.flywheelIdentity?.agentName == agentName
+        }
     }
 
     /// `nil ⇒ drawer open` mirrors `ProjectSettings.drawerCollapsed`'s own doc comment —
@@ -2348,31 +2377,40 @@ final class SessionStore: ObservableObject {
         guard let path = focusedObserveProjectPath,
               let projection = observeService.projection(forProject: path),
               let owner = projection.agents.first(where: { $0.bead?.id == beadID })?.name,
-              let target = repos.flatMap(\.sessions).first(where: {
-                  $0.flywheelIdentity?.project == path && $0.flywheelIdentity?.agentName == owner
-              })
+              let target = session(project: path, agentName: owner)
         else { return }
         selectSession(target.id)
     }
 
-    /// The drawer's "jump to root cause" button. Best-effort ONE HOP: jumps to the tab of
-    /// whichever agent the focused agent is directly waiting on (its nearest reservation
-    /// holder), not a full DAG-walked transitive root cause — that needs
-    /// `DependencyGraphLayout.rootCause(...)`, which today only runs inside
-    /// `DependencyDAGOverlay`'s own body (Task 11), not against a bare `FlywheelProjection`
-    /// here. A no-op with no focused agent, no blocker, or no tab registered under the
-    /// blocker's name in this project.
-    /// TODO(observe): promote to the full transitive root cause once Task 13's GUI pass
-    /// confirms the one-hop version reads right in practice; see task-12-report.md.
+    /// The drawer's "jump to root cause" button. Computes the SAME root cause
+    /// `DependencyDAGOverlay` would show for this project — mirrors that view's
+    /// `buildLayout()` (`DependencyDAGOverlay.swift:107-122`) node-set/`statusByBead`
+    /// construction exactly, so the drawer's jump target and the DAG's highlighted node
+    /// always agree, rather than a cheaper approximation that could disagree with it.
+    /// Node/edge geometry (`nodeSize`/`spacing`) is irrelevant to `rootCauseID`, so `.zero`
+    /// is correct here. A no-op (selection unchanged) with no focused project, or when the
+    /// layout finds no root cause — which, with `depEdges` still a Task 2 nil-stub in the
+    /// live `am`/`br` read pipeline, is every projection assembled from real reads today;
+    /// see task-12-fix-1-report.md.
     func jumpToObserveRootCause() {
-        guard let path = focusedObserveProjectPath,
-              let agent = focusedObserveAgent(),
-              let blockerName = agent.waitsOn.first?.holder,
-              let target = repos.flatMap(\.sessions).first(where: {
-                  $0.flywheelIdentity?.project == path && $0.flywheelIdentity?.agentName == blockerName
-              })
-        else { return }
-        selectSession(target.id)
+        guard let projection = focusedObserveProjection() else { return }
+
+        var ids = Set(projection.beadsByID.keys)
+        for edge in projection.depEdges {
+            ids.insert(edge.from)
+            ids.insert(edge.to)
+        }
+
+        var statusByBead: [String: AgentStatus] = [:]
+        for agent in projection.agents {
+            if let bead = agent.bead { statusByBead[bead.id] = agent.status }
+            statusByBead[agent.name] = agent.status
+        }
+
+        let layout = DependencyGraphLayout.layout(beadIDs: Array(ids), edges: projection.depEdges,
+                                                    statusByBead: statusByBead, nodeSize: .zero, spacing: .zero)
+        guard let rootCauseID = layout.rootCauseID else { return }
+        selectObserveSession(forBeadID: rootCauseID)
     }
 
     /// The Accounts pane's "Sign In" / "Sign In Again" path: an ordinary tab, bound to a
