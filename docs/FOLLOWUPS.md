@@ -1620,6 +1620,25 @@ recorded rather than fixed in this pass.
   ("two shell-outs, not five," `FlywheelWatcher.swift:126-130`). This is the root cause of
   both nil-stub items above and is the one lane-availability fact
   `docs/FLYWHEEL-OBSERVE-CHECKLIST.md` step 2 calls out directly.
+- **All three `FlywheelNotifier` triggers (persistent block, stalled-holder collision,
+  dependency cycle) are inert against live data in Level 1.** Each is fully wired and
+  unit-tested against hand-built projections (`FlywheelNotifierTests`), but nothing live can
+  satisfy any of them today. The block trigger (`evaluateBlocks`, `FlywheelNotifier.swift:63-
+  77`) fires on `agent.status == .blocked`, which `FlywheelProjection.project(...)` derives
+  solely from `bead.status == "blocked"` (`FlywheelProjection.swift:107`) — but the only live
+  bead read is `br list --status in_progress` (`FlywheelWatcher.swift:126-130`), which by
+  definition never returns a blocked bead, so no live projection can ever carry a `.blocked`
+  agent. The stalled-holder collision trigger (`evaluateCollisions`) needs the
+  `reservations` lane, and the dependency-cycle trigger (`evaluateDependencyCycle`) needs the
+  `depEdges` lane — both permanent nil-stubs per the item above. `br blocked` was confirmed
+  available during the Task 1 probe
+  (`docs/superpowers/notes/2026-09-24-observe-command-shapes.md`, fixture
+  `Tests/FlightDeckTests/Flywheel/Observe/Fixtures/br-blocked.json`) but is deliberately not
+  wired: its `BlockedIssue` schema carries `blocked_by[]` but no `assignee`, so lighting up
+  the block lane is a design task (a join to figure out which agent a blocked bead belongs
+  to), not a one-liner — that fixture currently has no consumer. All three triggers are
+  ready to light up, unit-test-verified, the moment a future level wires the lanes/join they
+  need.
 - **`DependencyGraphLayout`'s longest-path ranking can over-rank a node reachable only
   through an out-of-set intermediate.** A chain A(in-set) → X(not in the polled bead/edge
   set) → C(in-set) still contributes `rank[X] = rank[A] + 1` during relaxation even though X
