@@ -1524,3 +1524,37 @@ recorded rather than fixed in this pass.
   an in-progress draft — claude restores and codex does not, because they travel different
   channels. AGENTS.md's "a feature shipped for one adapter is a defect" rule applies, but the
   window is two renames in flight inside ~600ms, and it predates this branch.
+
+## Whether Claude's composer acts on kitty-encoded Ctrl+U/Ctrl+E (2026-09-24)
+
+`TextInjecting.sendControl` (`Sources/FlightDeck/TextInjecting.swift`) passes an explicit
+control byte via `text:`, but that byte is only what reaches the terminal under the legacy
+keyboard encoding. Traced statically through `vendor/ghostty/src/input/key_encode.zig` (no
+probe — the code path is unconditional): under the kitty keyboard protocol, which Claude Code
+enables, the byte is discarded and ghostty encodes from `key` + `mods` instead, so `sendControl`
+actually sends `ESC[117;5u` for Ctrl+U and `ESC[101;5u` for Ctrl+E, not the raw control bytes
+the old comment claimed. Full derivation: docs/HANDOFF-agent-surface-findings.md §4.
+
+**Open and unresolved: whether Claude's composer treats `ESC[117;5u` as Ctrl+U at all.** This
+is the live candidate for the sidebar-rename-into-a-draft bug — a rename typed into a composer
+that already holds a draft submitted the draft instead of the rename, which is exactly what you
+would see if the kill-line pair never clears the box (injected text appends, then Return
+submits both). Corroborating evidence already in hand: quitting claude in a tab and renaming it
+left the literal text `;5u;5u/rename Rename 3` in the shell underneath — CSI-u fragments
+arriving at a receiver that cannot decode them.
+
+This must not be settled by assumption. **Any probe that reports a verdict on whether Claude's
+composer acts on `ESC[117;5u` must first detect that the kitty keyboard protocol is actually
+active in the session it is testing, and must refuse to report a verdict if it cannot confirm
+that.** This project has already produced three wrong conclusions from probes that asserted an
+outcome for a configuration they never established — including one where a bare pty left claude
+in *legacy* mode, so the probe exercised an encoder ghostty never uses in production and drew a
+confident wrong conclusion from it. A pty spawned for this specific probe is not guaranteed to
+be in kitty mode just because a real Ghostty-hosted session would be; the probe has to check,
+not assume.
+
+Suggested shape for that probe (not run here): put a draft in the composer, send both the
+legacy control byte and the equivalent `ESC[...;5u` sequence in separate trials, confirm via
+Claude Code's own protocol-detection response (or equivalent) which mode the session is in
+before trusting either result, and make the two trials self-diagnosing against each other rather
+than trusting either result in isolation.

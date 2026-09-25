@@ -14,11 +14,19 @@ protocol TextInjecting: AnyObject {
     func sendReturn()
 
     /// Ctrl+E then Ctrl+U: move to the end of the current logical line and kill it into
-    /// Claude Code's own deleted-text ring, from where `sendYank()` can restore it.
+    /// Claude Code's own deleted-text ring, from where `sendYank()` can restore it — this is
+    /// the effect under the legacy keyboard encoding, where these two calls put the literal
+    /// control bytes on the wire. Claude Code runs with the kitty keyboard protocol enabled,
+    /// under which `sendControl` (below) sends `ESC[101;5u` / `ESC[117;5u` instead — see its
+    /// comment for why. Whether Claude's composer honors that form as Ctrl+E/Ctrl+U is not
+    /// yet confirmed; see docs/HANDOFF-agent-surface-findings.md §4 and the matching
+    /// docs/FOLLOWUPS.md entry. If it does not, the box never clears and the next `sendText`
+    /// is appended to the surviving draft instead of replacing it.
     ///
-    /// Ctrl+E first is load-bearing — Ctrl+U deletes from the cursor to the line *start*,
-    /// so without it a draft's tail survives and the injected command is spliced into the
-    /// middle of it. On an empty line the pair is a no-op and pushes nothing onto the ring.
+    /// Ctrl+E first is load-bearing on the legacy path — Ctrl+U deletes from the cursor to
+    /// the line *start*, so without it a draft's tail survives and the injected command is
+    /// spliced into the middle of it. On an empty line the pair is a no-op and pushes nothing
+    /// onto the ring.
     func sendKillLine()
 
     /// Ctrl+Y: paste back the most recently killed text.
@@ -116,9 +124,19 @@ extension Ghostty.SurfaceView: TextInjecting {
     /// Control keys go the same route as Return, and for the same reason — a control byte
     /// inside a bracketed paste is inserted as content, not acted on.
     ///
-    /// The encoded byte is passed as `text` rather than left to the key encoder to derive
-    /// from key+modifier: it is what the terminal must actually receive, and stating it
-    /// here keeps the mapping visible next to the key it belongs to.
+    /// `byte` is only honored under the legacy keyboard encoding — it is not "what the
+    /// terminal must actually receive" in general. Under the kitty keyboard protocol, which
+    /// Claude Code enables, ghostty's encoder never looks at it: traced through
+    /// `vendor/ghostty/src/input/key_encode.zig` for `.u`, a non-functional key finds its
+    /// entry via `unshifted_codepoint` (`{code: 117, final: 'u'}`); the utf8 short-circuit is
+    /// `.enter`/`.backspace`-only so it doesn't fire; `plain_text` requires empty mods and
+    /// ctrl is set here, so that's skipped too; and the `orelse` fallback that would write
+    /// `event.utf8` (i.e. `byte`) is unreachable because an entry was found. It falls through
+    /// to `KittySequence` and goes out built from `key` + `mods` alone — Ctrl+U as
+    /// `ESC[117;5u`, discarding `byte` entirely. `byte` is kept as a parameter because it is
+    /// the real payload on the legacy path, and writing it beside the key documents that
+    /// mapping for a reader who has not traced the encoder. Full derivation:
+    /// docs/HANDOFF-agent-surface-findings.md §4.
     private func sendControl(_ key: Ghostty.Input.Key, byte: String) {
         guard let surfaceModel else { return }
         surfaceModel.sendKeyEvent(.init(key: key, action: .press, text: byte, mods: .ctrl))
