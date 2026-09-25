@@ -134,7 +134,14 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertTrue(message?.contains(#"flightdeck send S --wait -- "- text""#) == true,
                       "the hint names a form that works: \(message ?? "nil")")
         XCTAssertNotNil(usageMessage("send", "S", "hi", "--bogus"))
-        XCTAssertNotNil(usageMessage("close", "S", "--bogus"))
+        // main.swift prints "flightdeck: " before every usage message, so the message must
+        // name the verb, never the program a second time.
+        for verb in ["close", "read", "raw"] {
+            let printed = "flightdeck: " + (usageMessage(verb, "S", "--bogus") ?? "")
+            XCTAssertTrue(printed.hasPrefix("flightdeck: \(verb): "), printed)
+            XCTAssertTrue(printed.contains(#"unknown flag "--bogus""#), printed)
+            XCTAssertFalse(printed.contains("flightdeck: flightdeck"), printed)
+        }
         XCTAssertNotNil(usageMessage("search", "--limit", "--", "5"), "a flag's value never comes from past --")
     }
 }
