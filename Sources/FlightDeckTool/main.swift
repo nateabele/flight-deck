@@ -21,6 +21,7 @@ let usageLines = [
     "flightdeck read S",
     "flightdeck unread S",
     "flightdeck collapse P [--off]",
+    "flightdeck prompt S",
     "flightdeck answer S '[[0,1],[2]]' [--call C]",
     "flightdeck abort S",
     "flightdeck plan approve S [--feedback F]",
