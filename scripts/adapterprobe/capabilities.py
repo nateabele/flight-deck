@@ -342,8 +342,13 @@ def _open_prompt_reader(ctx, agent):
                 )
             out = ctx.probe(["open-prompt", "claude", "--activity", "waiting"], stdin=tail)
         kind = out.get("kind")
+        # `startswith("question(")`, not `is not None`: `OpenPrompt.find` returns a
+        # `.permission(...)` for any unanswered tool call, so a bare not-nil check would accept
+        # the wrong prompt KIND as proof the question reader works — a green cell for a
+        # capability never exercised. Same assertion the fixture-fed `askUserQuestionShape` row
+        # makes, for the same reason.
         return Observation(
-            declared=declared, observed=kind is not None,
+            declared=declared, observed=(kind or "").startswith("question("),
             detail=f"live AskUserQuestion dialog on screen; reader returned {kind!r} from "
                    f"{len(tail.splitlines())} transcript lines",
         )
@@ -762,7 +767,15 @@ def _rename(ctx, agent):
 # claude's permission dialog's own footer, read off `Fixtures/Claude/permission-bash
 # .captured.txt` — distinct from `_CLAUDE_SELECT_FOOTER`'s "Enter to select", which is the
 # `AskUserQuestion` select list's own footer, not this one.
-_CLAUDE_APPROVAL_FOOTER = "Esc to cancel"
+#
+# `Tab to amend`, NOT the `Esc to cancel` this used to wait on. "Esc to cancel" is in the footer
+# of EVERY claude dialog — permission, select list, and workspace trust — so it established
+# only "some dialog is up". That matters because a fresh sandbox home in an unseen cwd is
+# precisely the case that raises the **workspace-trust** prompt: the row would have escaped a
+# trust prompt, found no rejection record, and reported `broken` for a claim it never tested.
+# Checked across all 28 Claude fixtures: `Tab to amend` appears only in the `permission-*`
+# captures, so it discriminates where the other string does not.
+_CLAUDE_APPROVAL_FOOTER = "Tab to amend"
 
 
 def _escape_denies_permission(ctx, agent):
@@ -896,86 +909,123 @@ def _runtime_observation(ctx, agent):
 
 
 def _codex_paste_detects_same_burst_return(ctx, agent):
-    """`CodexTextChannel.submit`'s own doc comment: codex's TUI paste-detects, so a `\\r`
-    arriving in the SAME burst as the text before it is folded into that burst and inserted
-    as a literal newline rather than submitting — "live-isolated against codex-cli 0.153.4",
-    a version number nothing since has checked. This re-derives it directly rather than
-    trusting a comment to still be true: two resumes of the SAME thread, so both writes land
-    on an identical rollout file and "grew" means the same thing both times.
+    """`CodexTextChannel.submit`'s own doc comment: codex's TUI paste-detects, so a `\r`
+    arriving in the SAME burst as the text before it is folded into that burst and inserted as
+    a literal newline rather than submitting — "live-isolated against codex-cli 0.153.4", a
+    version number nothing since has checked. This re-derives it rather than trusting the
+    comment: two resumes of the SAME thread, so both writes land on one rollout and "submitted"
+    means the same thing both times.
 
     One write combines the marker and Return into a single `os.write()` (same burst,
     reproducing the failure the comment names) — codex should leave the marker typed and
-    unsent, so the rollout should NOT grow. The other splits them with a real sleep in
-    between (the gap `SessionStore.injectionSettle`'s 120ms opens in production) — codex
-    should submit and reply, so the rollout SHOULD grow. Needs two real turns, so `tier="full"`
-    — the one row in this suite that does, because nothing shorter can tell "typed but never
-    sent" apart from "sent".
+    UNSENT. The other splits them with a real gap (the one
+    `SessionStore.injectionSettle`'s 120ms opens in production) — codex should submit and
+    reply. Needs real turns, hence `tier="full"`: nothing shorter can tell "typed but never
+    sent" from "sent".
+
+    **Every verdict here is earned, and the three ways this row can decline to answer are the
+    point.** It reports `broken` only on a directly observed submission; `ok` only when the
+    split write proved a submission is observable at all; and `error` — not `ok` — whenever it
+    could not establish that the marker was typed, or that submitting works in this run. The
+    row this suite exists because of returned a confident `ok` from a frozen fixture, so a
+    cheap false pass here would reproduce the very defect the plan set out to remove.
     """
     prep = ctx.probe(["prepare", "codex", "--cwd", ctx.sandbox.root])
     cid = prep["conversationID"]
     rollout = prep.get("transcriptURL")
 
-    def size():
-        return os.path.getsize(rollout) if rollout and os.path.exists(rollout) else 0
+    # Matched in the ROLLOUT BODY, not by file size. Size was the wrong instrument in both
+    # directions: any unrelated write between launch and sample (codex's own session/meta line,
+    # if it lands after the up-marker) reads as growth and fakes a regression, and size can
+    # never separate "typed but never sent" from "never typed at all" — which is precisely the
+    # distinction this row's claim rests on.
+    marker_id = uuid.uuid4().hex[:8]
+    marker = f"adapterprobe-paste-{marker_id}: reply with exactly OK"
 
-    marker = f"adapterprobe-paste-{uuid.uuid4().hex[:8]}: reply with exactly OK"
+    def submitted():
+        """Did the marker reach the MODEL — i.e. did codex submit, not merely insert?"""
+        if not rollout or not os.path.exists(rollout):
+            return False
+        try:
+            with open(rollout, errors="replace") as f:
+                return marker_id in f.read()
+        except OSError:
+            return False
 
     text = ctx.probe(["launch-command", "codex", "--id", cid, "--cwd", ctx.sandbox.root])["text"]
     with ctx.pty("codex", [ctx.login_shell, "-lc", text]) as term:
         if not term.wait([_UP_MARKER["codex"]], 30):
             return Observation(declared=True, observed=None, detail="codex never came up")
-        before_combined = size()
         term.send((marker + "\r").encode())
-        term.pump(15)
-        after_combined = size()
-    combined_grew = after_combined > before_combined
+        # The two arms are NOT symmetric, and this is the asymmetry that matters: this one waits
+        # for an ABSENCE, so it must spend its whole window before concluding, while the control
+        # below waits for a PRESENCE and can stop the moment it sees one. Polled regardless, so
+        # a regression is caught in seconds and the full 60s is paid only when the claim holds.
+        # An earlier version gave this arm a flat 15s `pump` while the control got 90s of
+        # polling — a codex that regressed but answered slowly then read as `ok`, which is the
+        # one verdict this row must never produce by accident.
+        combined_deadline = time.time() + 60
+        while time.time() < combined_deadline and not submitted():
+            term.pump(2)
+        combined_submitted = submitted()
+        # The other half of "typed but never sent": that it was typed at all. Without this, a
+        # codex ignoring the write entirely is indistinguishable from one correctly holding it.
+        typed = marker_id in term.display()
+        combined_screen = term.display()
+
+    if combined_submitted:
+        # Directly observed regression, and self-validating: the marker reaching the rollout
+        # proves both that codex submitted a same-burst write and that a submission is
+        # observable in this run. The control has nothing left to establish, so it is not
+        # consulted — checking it first would throw this evidence away whenever the second turn
+        # also stalled.
+        return Observation(
+            declared=True, observed=False,
+            detail="combined write (marker and Return in one os.write) SUBMITTED: codex no "
+                   "longer paste-detects a same-burst Return, so the separate-hop Return in "
+                   "`CodexTextChannel.submit` is load-bearing for a different reason than its "
+                   "comment gives",
+        )
+
+    if not typed:
+        return Observation(
+            declared=True, observed=None,
+            detail=f"marker {marker_id!r} never appeared on screen after the combined write, so "
+                   f"this run cannot tell 'typed but held' (the claim) from 'never typed at "
+                   f"all' (codex not accepting input). Screen tail: "
+                   f"{_screen_tail(combined_screen)!r}",
+        )
 
     resume_text = ctx.probe(["resume-command", "codex", "--id", cid,
                               "--cwd", ctx.sandbox.root])["text"]
     with ctx.pty("codex", [ctx.login_shell, "-lc", resume_text]) as term:
         if not term.wait([_UP_MARKER["codex"]], 30):
             return Observation(declared=True, observed=None, detail="codex never resumed")
-        before_split = size()
         term.send(marker.encode())
         time.sleep(0.15)
         term.send(b"\r")
-        # Polled with a deadline rather than one fixed `pump`, and generously: this is the
-        # POSITIVE CONTROL, so time spent here buys interpretability, and it returns as soon
-        # as the rollout moves. A fixed 20s window made a merely-slow model turn look exactly
-        # like the regression this row exists to catch.
+        # The POSITIVE CONTROL: a split write with a real gap SHOULD submit. Waiting for a
+        # presence, so it returns as soon as the marker lands; only a stalled codex pays 90s.
         split_deadline = time.time() + 90
-        while time.time() < split_deadline and size() <= before_split:
+        while time.time() < split_deadline and not submitted():
             term.pump(2)
-        after_split = size()
-    split_grew = after_split > before_split
+        split_submitted = submitted()
 
-    # A failed positive control VOIDS the experiment; it does not fail the claim. If a normal
-    # split-burst turn never grew the rollout, this run never established that "grew" is even
-    # observable here — codex may be slow, rate-limited, or not answering — and the combined
-    # write's non-growth then carries no information, because non-growth is what BOTH arms do
-    # when nothing is happening. Reporting `broken` from that state is precisely the
-    # "assert an outcome for a configuration you never established" failure this whole plan
-    # exists to end, so it returns `error` (observed=None) and says which control failed.
-    # Order matters: a DIRECTLY OBSERVED regression outranks the control. If the combined
-    # write grew the rollout, codex submitted on a same-burst write — the exact failure this
-    # row exists to catch — and that growth is itself proof that growth was observable in this
-    # run, which is all the positive control was ever there to establish. Checking the control
-    # first would throw that evidence away as `error` whenever the second turn also stalled.
-    if not combined_grew and not split_grew:
+    if not split_submitted:
+        # A failed positive control VOIDS the experiment rather than failing the claim. Neither
+        # write submitted, so "the combined write did not submit" carries no information — it is
+        # equally what a rate-limited, stalled or unauthenticated codex produces.
         return Observation(
             declared=True, observed=None,
-            detail=f"positive control failed: neither write grew the rollout (the split-burst "
-                   f"write with a real gap did not grow it within 90s), so this run cannot tell "
-                   f"'typed but never sent' from 'nothing happened at all'",
+            detail="positive control failed: a split-burst write with a real 150ms gap did not "
+                   "submit within 90s either, so this run never established that a submission "
+                   "is observable at all. The combined write's non-submission proves nothing.",
         )
 
     return Observation(
-        declared=True, observed=not combined_grew,
-        detail=f"combined write grew rollout: {combined_grew}; split write (real gap) grew "
-               f"rollout: {split_grew}"
-               + ("" if split_grew else " -- control did not grow, but the combined write did, "
-                                        "which both proves the regression and proves growth was "
-                                        "observable here"),
+        declared=True, observed=True,
+        detail="combined write was typed but did not submit; the split write with a real gap "
+               "did submit (positive control held)",
     )
 
 

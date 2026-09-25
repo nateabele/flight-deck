@@ -142,6 +142,9 @@ class ExitCodeTests(unittest.TestCase):
                 "versions_changed": {"claude": ("2.1.263", "2.1.281")}}
         code, _ = run._exit_code(diff)
         self.assertNotIn(code, (0, 1, 3))
+        # Pinned exactly, not just "not one of the others": a future edit to `return 5` would
+        # satisfy the assertion above while silently colliding with the listing-churn code.
+        self.assertEqual(code, 6)
 
 
 if __name__ == "__main__":

@@ -219,8 +219,10 @@ protocol AgentAdapter {
     /// types `/rename`, then the name, at a pty (`CodexTextChannel.submitRename`), and
     /// `SessionStore` separately sends `thread/name/set`, which is what actually commits the
     /// thread. **A pty is not a shell** — the typing lands in a rename modal codex itself
-    /// drew, and `submitRename` escapes rather than typing at all when it cannot read that
-    /// modal — so a strip there never protected anything either; it only mangled the title.
+    /// drew, and when it cannot read that modal `submitRename` escapes rather than typing **the
+    /// name** (the fixed `/rename` literal has gone out by then; what the guard withholds is the
+    /// user-supplied string, the only part a strip would ever have touched) — so a strip there
+    /// never protected anything either; it only mangled the title.
     /// Both converge on `AgentTitle.sanitized` with an empty forbidden set; see its own doc
     /// comment.
     ///

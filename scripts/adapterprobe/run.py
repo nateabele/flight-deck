@@ -71,19 +71,21 @@ _OPEN_PROMPT_CLAUDE_CHAIN = (
 _ESCAPE_DENIES_CHAIN = (
     PROBE_TIMEOUT + PROBE_TIMEOUT + 30 + 60 + 15  # == 195
 )
-# The `90` is a polled positive control, not a dwell: it returns as soon as the rollout grows,
-# and only a genuinely stalled codex pays it in full. It is deliberately the longest single wait
-# in any row, because the alternative -- a short window -- made a slow turn indistinguishable
-# from the regression the row exists to catch. See `_codex_paste_detects_same_burst_return`.
+# Two long polled waits, not dwells, and both are long deliberately. The `90` is the positive
+# control: it returns the moment the marker reaches the rollout, so only a stalled codex pays it.
+# The `60` is the regression arm, and it has to be generous even though it usually runs to
+# completion -- it waits for an ABSENCE (a same-burst write that is NOT submitted), and a short
+# window there made a merely-slow codex read as `ok` for the exact regression the row exists to
+# catch. See `_codex_paste_detects_same_burst_return`.
 _CODEX_PASTE_CHAIN = (
-    PROBE_TIMEOUT + PROBE_TIMEOUT + 30 + 15 + PROBE_TIMEOUT + 30 + 90  # == 300
+    PROBE_TIMEOUT + PROBE_TIMEOUT + 30 + 60 + PROBE_TIMEOUT + 30 + 90  # == 345
 )
 _WORST_FULL_CHAIN = max(
     _RESUME_COMMAND_CHAIN,        # 275
     _OPEN_PROMPT_CLAUDE_CHAIN,    # 305
     _ESCAPE_DENIES_CHAIN,         # 195
-    _CODEX_PASTE_CHAIN,           # 300 -- within 5s of the max; extend the cap, not this row
-)  # == 305
+    _CODEX_PASTE_CHAIN,           # 345 -- now the worst chain; raise the cap, not this row
+)  # == 345
 
 ROW_TIMEOUT = {"cheap": 120, "full": 420}
 assert ROW_TIMEOUT["full"] > _WORST_FULL_CHAIN, (
