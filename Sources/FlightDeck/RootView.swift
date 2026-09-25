@@ -14,6 +14,13 @@ struct RootView: View {
     @StateObject private var overlayModel = ToolOverlayModel()
     @StateObject private var overlayMonitor = ToolOverlayInputMonitorBox()
 
+    /// Which node `DependencyDAGOverlay.onSelectNode` last picked, independent of the
+    /// focused tab's own bead — the overlay lets you browse the graph without jumping
+    /// tabs (`onSelectNode` vs `onJumpToTab`), so this has to be view state the store
+    /// doesn't own. Reset on dismiss so the next open starts centered on the focused
+    /// agent's own bead again, not wherever the last session left off.
+    @State private var observeDAGSelectedBeadID: String?
+
     var body: some View {
         NavigationSplitView {
             SessionSidebar(store: store, preferences: preferences,
@@ -21,25 +28,34 @@ struct RootView: View {
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
         } detail: {
             if let surface = store.selectedSessionID.flatMap({ store.surface(for: $0) }) {
-                TerminalPane(store: store)
-                    .frame(minWidth: 400, minHeight: 300)
-                    // Both float rather than shrinking the terminal: the grid would otherwise
-                    // reflow every time either one appeared. Stacked so the find bar and the
-                    // tool cluster never contend for the same corner.
-                    .overlay(alignment: .topTrailing) {
-                        VStack(alignment: .trailing, spacing: 0) {
-                            SearchOverlay(surface: surface)
-                            if let preferences {
-                                ToolOverlay(
-                                    store: store,
-                                    preferences: preferences,
-                                    model: overlayModel,
-                                    monitor: overlayMonitor.monitor,
-                                    launcher: ShellToolLauncher.configured(preferences)
-                                )
+                VStack(spacing: 0) {
+                    TerminalPane(store: store)
+                        .frame(minWidth: 400, minHeight: 300)
+                        // Both float rather than shrinking the terminal: the grid would otherwise
+                        // reflow every time either one appeared. Stacked so the find bar and the
+                        // tool cluster never contend for the same corner.
+                        .overlay(alignment: .topTrailing) {
+                            VStack(alignment: .trailing, spacing: 0) {
+                                SearchOverlay(surface: surface)
+                                if let preferences {
+                                    ToolOverlay(
+                                        store: store,
+                                        preferences: preferences,
+                                        model: overlayModel,
+                                        monitor: overlayMonitor.monitor,
+                                        launcher: ShellToolLauncher.configured(preferences)
+                                    )
+                                }
                             }
                         }
+                    if let agent = store.focusedObserveAgent() {
+                        ObserveDrawer(agent: agent,
+                                      collapsed: store.observeDrawerCollapsed,
+                                      onToggleCollapse: { store.toggleObserveDrawer() },
+                                      onJumpToRootCause: { store.jumpToObserveRootCause() },
+                                      onOpenDAG: { store.presentObserveDAG() })
                     }
+                }
             } else {
                 ContentUnavailableView {
                     Label("No Session", systemImage: "terminal")
@@ -56,5 +72,20 @@ struct RootView: View {
         // and nothing to keep in sync. Applied to the `NavigationSplitView` itself rather than
         // to either column, which is the placement SwiftUI resolves to the window.
         .navigationTitle(WindowTitle.text(project: store.currentProjectName))
+        // The drawer's "open DAG" button (`presentObserveDAG()`) flips this; `onClose`
+        // below clears it. Sourced from `focusedObserveProjection()` rather than a single
+        // agent, since the overlay draws the whole project's graph.
+        .sheet(isPresented: $store.observeDAGPresented, onDismiss: { observeDAGSelectedBeadID = nil }) {
+            if let projection = store.focusedObserveProjection() {
+                DependencyDAGOverlay(
+                    projection: projection,
+                    selectedBeadID: observeDAGSelectedBeadID ?? store.focusedObserveAgent()?.bead?.id,
+                    onSelectNode: { observeDAGSelectedBeadID = $0 },
+                    onJumpToTab: { store.selectObserveSession(forBeadID: $0) },
+                    onClose: { store.observeDAGPresented = false }
+                )
+                .frame(minWidth: 640, minHeight: 440)
+            }
+        }
     }
 }

@@ -245,6 +245,13 @@ final class SessionStore: ObservableObject {
     /// Transient, like `renameRequest`: never persisted, never in the snapshot.
     @Published var renamingSessionID: UUID?
 
+    /// Drives `RootView`'s `DependencyDAGOverlay` sheet — set by `presentObserveDAG()`
+    /// (the drawer's "open DAG" button), cleared by the overlay's own `onClose`. Transient
+    /// like `renameRequest`/`renamingSessionID` above: never persisted, never in the
+    /// snapshot — an Observe overlay left open across a relaunch would have nothing to
+    /// resolve `focusedObserveProjection()` against until the fleet reconnects anyway.
+    @Published var observeDAGPresented = false
+
     /// Weak: `GhosttyApp.shared` is a process-wide static that owns itself for the life of
     /// the process (see `GhosttyApp.shared`'s doc comment); the store must not co-own it.
     private weak var provider: SurfaceProvider?
@@ -1119,6 +1126,40 @@ final class SessionStore: ObservableObject {
     /// lookup by `repo.url` always agrees with how the entry was stored.
     private var flywheelSuggestions: [String: FlywheelStatus] = [:]
 
+    /// Owns the Observe (Level 1, read-only) watchers/projections for every
+    /// flywheel-enabled project. Lazily built — same reasoning as `sleepController`
+    /// below — so a fleet with nothing Observe-enabled never spins up a single watcher;
+    /// `startObserving(project:)` is the only thing that populates it. Registered on the
+    /// same shared `clock` every other poller in this store uses, so its watchers tick
+    /// alongside them rather than running their own timer.
+    ///
+    /// `onProjectionsChanged` reads `flywheelNotifier` through `self` at CALL time, not
+    /// at construction time: `FlightDeckApp` assigns `flywheelNotifier` right after
+    /// building this store, which is after this lazy var's first access could plausibly
+    /// have already happened (the startup replay in the convenience init below runs
+    /// before that assignment) — a closure that captured `flywheelNotifier`'s value up
+    /// front would silently miss every notification for the rest of the run.
+    private(set) lazy var observeService: FlywheelObserveService = {
+        let service = FlywheelObserveService(clock: clock)
+        service.onProjectionsChanged = { [weak self] projections in
+            self?.flywheelNotifier?.evaluate(projectsByKey: projections)
+        }
+        return service
+    }()
+
+    /// Built by `FlightDeckApp` immediately after this store, wrapping the SAME
+    /// `Notifying` instance `notifier` (below) wraps for ordinary session notifications
+    /// — see that factory's comment for why no second `Notifying` is constructed. `nil`
+    /// until then, and nil forever in a `SessionStore` built directly by a test.
+    var flywheelNotifier: FlywheelNotifier?
+
+    /// Guards the lazy notification-authorization request `startObserving(project:)`
+    /// makes: the underlying `Notifying.requestAuthorization()` should fire once, the
+    /// first time ANY project turns Observe on, not unconditionally at launch — a user
+    /// who has never opted into flywheel for any project should never see the system
+    /// permission prompt just for launching the app.
+    private var hasRequestedFlywheelAuth = false
+
     /// Owns the idle-session sleep/wake bookkeeping. Constructed lazily so its closures can
     /// capture `self` after `init` has finished assigning every property they read
     /// (`daemonControl`, `processInspector`, `statuses`, …).
@@ -1781,6 +1822,13 @@ final class SessionStore: ObservableObject {
                 seedInitialSession()
             }
         }
+        // Startup replay: a project already flywheel-enabled from a prior run (persisted
+        // in `ProjectSettings`) gets its Observe watcher back immediately rather than
+        // waiting for the next manual "Enable"/"Setup" click. After `restore()`/seeding
+        // above, so `repos` already holds every restored project.
+        for repo in repos where preferences?.projectSettings(repo.url.path).flywheelEnabled == true {
+            startObserving(project: repo.url.path)
+        }
         startStatusWatching()
         // Same idiom `SessionStatusWatcher`/`TranscriptWatcher` use to register themselves,
         // and the same lifecycle point as `startStatusWatching()` above. This IS reachable
@@ -2169,6 +2217,7 @@ final class SessionStore: ObservableObject {
             var settings = preferences?.projectSettings(repo.path) ?? ProjectSettings()
             settings.flywheelEnabled = true
             preferences?.setProjectSettings(repo.path, settings)
+            startObserving(project: repo.path)
         } catch {
             // `FlywheelError.guardInstall` (the only error `FlywheelSetup.enable` throws) is
             // already handled by `launchError(from:)`'s generic `default` branch — see its own
@@ -2191,9 +2240,139 @@ final class SessionStore: ObservableObject {
             var settings = preferences?.projectSettings(repo.path) ?? ProjectSettings()
             settings.flywheelEnabled = true
             preferences?.setProjectSettings(repo.path, settings)
+            startObserving(project: repo.path)
         } catch {
             launchFailureReporter.report(launchError(from: error))
         }
+    }
+
+    /// The `.beads` store's confirmed watch targets — the SQLite file plus its WAL
+    /// sidecar (`docs/superpowers/notes/2026-09-24-observe-command-shapes.md`, "Watch
+    /// targets (mtime-gate)"; the same two paths that survived a `br list`/`br ready`
+    /// read untouched there, confirmed by a before/after `stat`). Only the beads lane's
+    /// path is worth naming per-project: Agent-Mail's store is a single SQLite file
+    /// global to every project on the machine (same doc), so watching it here would just
+    /// make every enabled project repoll on every OTHER project's Agent-Mail write — no
+    /// more precise than the beads path alone — and only the `agents`/`beads` lanes are
+    /// live yet (`FlywheelWatcher.repollNow()`'s two shell-outs).
+    private static func observeWatchPaths(for project: String) -> [URL] {
+        let beadsDir = URL(fileURLWithPath: project, isDirectory: true).appendingPathComponent(".beads")
+        return [
+            beadsDir.appendingPathComponent("beads.db"),
+            beadsDir.appendingPathComponent("beads.db-wal"),
+        ]
+    }
+
+    /// Starts (idempotently — `FlywheelObserveService.enable` no-ops a second call) the
+    /// Observe watcher for a project that just turned `flywheelEnabled` on, and requests
+    /// notification authorization the first time ANY project does — see
+    /// `hasRequestedFlywheelAuth`'s doc comment for why that is gated rather than
+    /// unconditional. Shared by `enableFlywheel(for:)`, `setupFlywheel(for:)` (siblings
+    /// that both flip `ProjectSettings.flywheelEnabled`), and the startup replay below
+    /// that re-enables every already-flywheel-enabled project after a relaunch.
+    private func startObserving(project path: String) {
+        observeService.enable(project: path, watchPaths: Self.observeWatchPaths(for: path))
+        guard !hasRequestedFlywheelAuth else { return }
+        hasRequestedFlywheelAuth = true
+        notifier?.requestAuthorization()
+    }
+
+    // MARK: Observe (Level 1, read-only)
+
+    /// `RootView`'s mount point: the currently selected tab's projected `Agent`, or nil
+    /// when there is no selection, the selected tab never booted under a flywheel
+    /// identity, or that identity's project has no live projection (not enabled, or no
+    /// poll has landed yet). `FlywheelIdentity.project` IS the standardized project path
+    /// — the same key `observeService` stores under — so no separate
+    /// `Session.workingDirectory` lookup is needed.
+    func focusedObserveAgent() -> FlywheelProjection.Agent? {
+        guard let id = selectedSessionID, let at = locate(id) else { return nil }
+        let session = repos[at.repo].sessions[at.session]
+        guard let identity = session.flywheelIdentity,
+              let proj = observeService.projection(forProject: identity.project) else { return nil }
+        return proj.agent(for: identity)
+    }
+
+    /// `DependencyDAGOverlay`'s mount point: the focused tab's whole-project projection
+    /// (every agent/bead/edge the last poll saw), resolved the same way
+    /// `focusedObserveAgent()` is. Kept separate from that method rather than having the
+    /// overlay derive it from a single agent, since the overlay draws the WHOLE graph.
+    func focusedObserveProjection() -> FlywheelProjection? {
+        guard let id = selectedSessionID, let at = locate(id) else { return nil }
+        guard let identity = repos[at.repo].sessions[at.session].flywheelIdentity else { return nil }
+        return observeService.projection(forProject: identity.project)
+    }
+
+    /// The standardized project path backing every Observe helper below that reads or
+    /// writes `ProjectSettings` — the focused tab's flywheel identity project, same key
+    /// `focusedObserveAgent()`/`focusedObserveProjection()` use. A private helper rather
+    /// than repeating the `selectedSessionID` → `locate` → `flywheelIdentity` chain at
+    /// each call site.
+    private var focusedObserveProjectPath: String? {
+        guard let id = selectedSessionID, let at = locate(id) else { return nil }
+        return repos[at.repo].sessions[at.session].flywheelIdentity?.project
+    }
+
+    /// `nil ⇒ drawer open` mirrors `ProjectSettings.drawerCollapsed`'s own doc comment —
+    /// `false` (not collapsed) with no focused Observe project, same "nothing to say yet"
+    /// default every other per-project read here uses.
+    var observeDrawerCollapsed: Bool {
+        guard let path = focusedObserveProjectPath else { return false }
+        return preferences?.projectSettings(path).drawerCollapsed == true
+    }
+
+    /// Read-modify-write via `setProjectSettings`, the store's one write path for
+    /// `ProjectSettings` (see that method's doc comment) — matches how `enableFlywheel`/
+    /// `setupFlywheel` above flip `flywheelEnabled`. A no-op with no focused Observe
+    /// project (nothing to toggle).
+    func toggleObserveDrawer() {
+        guard let path = focusedObserveProjectPath else { return }
+        var settings = preferences?.projectSettings(path) ?? ProjectSettings()
+        settings.drawerCollapsed = !(settings.drawerCollapsed == true)
+        preferences?.setProjectSettings(path, settings)
+    }
+
+    /// The drawer's "open DAG" button. `RootView` presents `DependencyDAGOverlay` off
+    /// this flag, sourced from `focusedObserveProjection()` — GUI-verified in Task 13,
+    /// not unit-tested (AGENTS.md rule 2: no headless app host to drive it against).
+    func presentObserveDAG() {
+        observeDAGPresented = true
+    }
+
+    /// `DependencyDAGOverlay.onJumpToTab`'s target: the tab belonging to whichever agent
+    /// owns `beadID` in the focused project's last-polled projection. Best-effort and
+    /// silently a no-op when unresolvable — a bead can be unassigned, or assigned to an
+    /// agent with no live tab under this project (never booted, or already closed) —
+    /// matching the overlay's own "nothing to jump to" case. GUI-verified in Task 13.
+    func selectObserveSession(forBeadID beadID: String) {
+        guard let path = focusedObserveProjectPath,
+              let projection = observeService.projection(forProject: path),
+              let owner = projection.agents.first(where: { $0.bead?.id == beadID })?.name,
+              let target = repos.flatMap(\.sessions).first(where: {
+                  $0.flywheelIdentity?.project == path && $0.flywheelIdentity?.agentName == owner
+              })
+        else { return }
+        selectSession(target.id)
+    }
+
+    /// The drawer's "jump to root cause" button. Best-effort ONE HOP: jumps to the tab of
+    /// whichever agent the focused agent is directly waiting on (its nearest reservation
+    /// holder), not a full DAG-walked transitive root cause — that needs
+    /// `DependencyGraphLayout.rootCause(...)`, which today only runs inside
+    /// `DependencyDAGOverlay`'s own body (Task 11), not against a bare `FlywheelProjection`
+    /// here. A no-op with no focused agent, no blocker, or no tab registered under the
+    /// blocker's name in this project.
+    /// TODO(observe): promote to the full transitive root cause once Task 13's GUI pass
+    /// confirms the one-hop version reads right in practice; see task-12-report.md.
+    func jumpToObserveRootCause() {
+        guard let path = focusedObserveProjectPath,
+              let agent = focusedObserveAgent(),
+              let blockerName = agent.waitsOn.first?.holder,
+              let target = repos.flatMap(\.sessions).first(where: {
+                  $0.flywheelIdentity?.project == path && $0.flywheelIdentity?.agentName == blockerName
+              })
+        else { return }
+        selectSession(target.id)
     }
 
     /// The Accounts pane's "Sign In" / "Sign In Again" path: an ordinary tab, bound to a

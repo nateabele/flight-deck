@@ -234,6 +234,19 @@ struct FlightDeckApp: App {
         if resetState, Self.isSeedingSecondProject {
             store.newSession(in: FileManager.default.temporaryDirectory)
         }
+
+        // Wraps the SAME `Notifying` instance `notifier` above wraps for ordinary session
+        // notifications — no second `Notifying` is constructed, and no extra launch-time
+        // `requestAuthorization()` call is added here: `SessionStore.startObserving(project:)`
+        // requests it lazily, the first time any project actually turns Observe on.
+        let flywheelNotifier = FlywheelNotifier(notifier: notifier)
+        flywheelNotifier.route = { [weak store] project, agentName in
+            store?.repos.flatMap(\.sessions).first {
+                $0.flywheelIdentity?.project == project && $0.flywheelIdentity?.agentName == agentName
+            }?.id
+        }
+        store.flywheelNotifier = flywheelNotifier
+
         return store
     }
 
