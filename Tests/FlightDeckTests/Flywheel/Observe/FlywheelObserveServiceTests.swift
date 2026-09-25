@@ -34,4 +34,16 @@ final class FlywheelObserveServiceTests: XCTestCase {
         try? await Task.sleep(for: .milliseconds(200))
         XCTAssertGreaterThan(fired, 0)
     }
+
+    func testDisableBeforePrimingPollDoesNotResurrectProjection() async {
+        let fake = MultiRunner(); fake.responses["am agents list"] = ("[]", 0)
+        let svc = FlywheelObserveService(reads: FlywheelReadCommands(runner: fake, amPath: "am", brPath: "br"), clock: nil)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        svc.enable(project: dir.path, watchPaths: [])
+        svc.disable(project: dir.path)                       // synchronous, before the unawaited priming Task runs its body
+        try? await Task.sleep(for: .milliseconds(150))       // let the in-flight repoll complete
+        XCTAssertNil(svc.projection(forProject: dir.path),
+                     "a repoll in flight at disable time must not resurrect a disabled projection")
+    }
 }
