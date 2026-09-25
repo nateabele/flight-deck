@@ -58,7 +58,6 @@ _FIX = os.path.join(_REPO, "Tests", "FlightDeckTests", "Fixtures")
 _CLAUDE_TRANSCRIPT = os.path.join(_FIX, "Claude", "transcript.captured.jsonl")
 _CLAUDE_IDLE_SCREEN = os.path.join(_FIX, "Claude", "idle-empty-box.captured.txt")
 _CLAUDE_APPROVAL_SCREEN = os.path.join(_FIX, "Claude", "permission-bash.captured.txt")
-_CLAUDE_OPEN_PROMPT_TAIL = os.path.join(_FIX, "Claude", "question-single.captured.jsonl")
 _CODEX_ROLLOUT = os.path.join(_FIX, "Codex", "rollout.captured.jsonl")
 _CODEX_IDLE_SCREEN = os.path.join(_FIX, "Codex", "tui-idle.captured.txt")
 _CODEX_APPROVAL_SCREEN = os.path.join(_FIX, "Codex", "approval-command.captured.txt")
@@ -67,6 +66,32 @@ _UP_MARKER = {"claude": "Claude Code", "codex": "OpenAI Codex"}
 # The row that already carries the "Yes" affirmative in each agent's own approval dialog —
 # read straight off the captured screens above, not guessed.
 _APPROVE_LABEL = {"claude": "Yes", "codex": "Yes, proceed"}
+
+# What `_open_prompt_reader`'s claude arm types, and the two things it then requires to be on
+# screen before it will read the transcript at all. The labels are dictated to the model in the
+# prompt so the on-screen check can be a literal string match rather than a guess at whatever
+# wording it would otherwise invent; "Do nothing else" keeps the turn to a single tool call.
+_CLAUDE_QUESTION_OPTIONS = ("Crimson", "Viridian", "Cobalt")
+_CLAUDE_QUESTION_PROMPT = (
+    b"Use the AskUserQuestion tool to ask me which colour I prefer. Use exactly these three "
+    b"option labels: Crimson, Viridian, Cobalt. Do nothing else, just ask.\r"
+)
+# The select-list dialog's own footer, read off `Fixtures/Claude/question-single.captured.txt`
+# rather than guessed. It is the discriminator, not just a marker: claude's permission prompt
+# footer is "Esc to cancel · Tab to amend" and workspace trust's is "Enter to confirm", so
+# neither can satisfy this while looking like a question.
+_CLAUDE_SELECT_FOOTER = "Enter to select"
+# Claude Code's own status-line wording for an unauthenticated session, read off a live
+# sandboxed launch. See `_open_prompt_reader`'s claude arm for why this is checked at all.
+_CLAUDE_NOT_LOGGED_IN = "Not logged in"
+
+
+def _screen_tail(screen, lines=12):
+    """The last non-blank rows of a rendered screen, for a detail string. A wedged or
+    unexpected screen is the only evidence a failed `establish` step leaves behind, and a
+    detail that says only "it didn't happen" has thrown that evidence away."""
+    kept = [ln.rstrip() for ln in screen.splitlines() if ln.strip()]
+    return "\n".join(kept[-lines:])
 
 
 def _agent_home(ctx, agent):
@@ -211,14 +236,113 @@ def _dialog_driver(ctx, agent):
 
 def _open_prompt_reader(ctx, agent):
     if agent == "claude":
-        # `OpenPrompt.find` (`Sources/FleetKit/OpenPrompt.swift:218`) opens only when
-        # `activity == "waiting"` — without the flag the subcommand returns null
+        # Drives a LIVE claude to an `AskUserQuestion` dialog and reads that session's own
+        # transcript while the dialog is still on screen. Deliberately not a fixture, and the
+        # one row where that distinction has already cost production: this arm used to feed
+        # the probe `Fixtures/Claude/question-single.captured.jsonl`, captured at claude
+        # 2.1.241, and reported `ok` straight through the 2.1.281 regression, which moved when
+        # the `AskUserQuestion` `tool_use` record is written — from dialog-RAISE to
+        # dialog-RESOLVE. A captured tail is by construction a *resolved* dialog's file, so it
+        # still parses perfectly and can never catch that move; only a live agent with an
+        # unanswered dialog up can. Costs a real turn, which is why this row is `tier="full"`.
+        #
+        # `--activity waiting` because `OpenPrompt.find` (`Sources/FleetKit/OpenPrompt.swift`)
+        # opens only for a waiting session — without the flag the subcommand returns null
         # unconditionally, which would misrecord a working reader as `broken`.
         declared = ctx.probe(["declare", "claude"])["openPromptReader"]
-        with open(_CLAUDE_OPEN_PROMPT_TAIL) as f:
-            tail = f.read()
-        out = ctx.probe(["open-prompt", "claude", "--activity", "waiting"], stdin=tail)
-        return Observation(declared=declared, observed=out.get("kind") is not None)
+        prep = ctx.probe(["prepare", "claude", "--cwd", ctx.sandbox.root])
+        cid = prep["conversationID"]
+        transcript = prep.get("transcriptURL")
+        if not transcript:
+            return Observation(declared=declared, observed="error",
+                               detail="prepare returned no transcriptURL")
+        text = ctx.probe(["launch-command", "claude", "--id", cid,
+                          "--cwd", ctx.sandbox.root])["text"]
+        with ctx.pty("claude", [ctx.login_shell, "-lc", text]) as term:
+            if not term.wait([_UP_MARKER["claude"]], 30):
+                return Observation(declared=declared, observed="error",
+                                   detail="claude never came up within 30s")
+            # Checked BEFORE typing, because an unauthenticated claude answers a question
+            # prompt with silence, which is indistinguishable on screen from a model that
+            # declined to call the tool — and costs the full 120s wait to find out.
+            #
+            # This is a live harness precondition, not a hypothetical. Claude Code keys its
+            # keychain credential to the config dir: the default home uses the service
+            # "Claude Code-credentials", any other `CLAUDE_CONFIG_DIR` uses
+            # "Claude Code-credentials-<hash of that path>". `AgentSandbox` hands every run a
+            # fresh tmpdir home, so its hash never has an entry and the session comes up
+            # "Not logged in" no matter what `.claude.json` was copied in. Copying
+            # `~/.claude.json` is NOT enough — that file carries account metadata, not the
+            # token. (`$CLAUDE_CONFIG_DIR/.credentials.json` is read as a fallback when the
+            # keychain misses — verified live — so that is where a fix belongs, but writing
+            # it means extracting the user's OAuth token from their login keychain, which is
+            # `sandbox.py`'s call to make and not this row's.)
+            up_screen = term.display()
+            if _CLAUDE_NOT_LOGGED_IN in up_screen:
+                return Observation(
+                    declared=declared, observed="error",
+                    detail="the sandboxed claude is not authenticated, so no turn can run and "
+                           "no dialog can be raised; this row cannot say anything about the "
+                           "reader. AgentSandbox's per-run CLAUDE_CONFIG_DIR gets its own "
+                           "keychain service 'Claude Code-credentials-<hash>' with no entry "
+                           "in it. Screen tail: " + repr(_screen_tail(up_screen)),
+                )
+            term.send(_CLAUDE_QUESTION_PROMPT)
+            # The dialog has to be provably ON SCREEN when the transcript is read — that is
+            # the whole row, and the failure this establishes away is a confident `broken`
+            # recorded for a configuration that was never reached: a model that simply
+            # declined to call the tool leaves exactly the same empty transcript a genuinely
+            # broken reader does.
+            raised = term.wait([_CLAUDE_SELECT_FOOTER], 120)
+            screen = term.display()
+            # `Enter to select` is the select-list footer and alone rules out the two other
+            # dialogs a fresh sandbox can raise — a permission prompt reads
+            # "Esc to cancel · Tab to amend" and workspace trust reads "Enter to confirm"
+            # (both captured under `Tests/FlightDeckTests/Fixtures/Claude/`). The label check
+            # on top of it is what makes the dialog demonstrably OURS rather than some other
+            # select list, so a `broken` below can only mean the reader missed a question that
+            # was visibly up.
+            if not raised or not any(o in screen for o in _CLAUDE_QUESTION_OPTIONS):
+                return Observation(
+                    declared=declared, observed="error",
+                    detail=f"no AskUserQuestion dialog within 120s (footer "
+                           f"{_CLAUDE_SELECT_FOOTER!r} seen: {raised}); the row cannot "
+                           f"distinguish a broken reader from a model that never called the "
+                           f"tool. Screen tail: {_screen_tail(screen)!r}",
+                )
+            # Polled here and NOT before the launch: `prepare` only names the path claude will
+            # write to, it does not create it — a pre-launch existence poll always times out,
+            # which is what leaves `claude.rename` recording `error` in `baseline.json` for a
+            # reason that has nothing to do with renaming. By this point a real turn has run,
+            # so a missing file is a genuine harness precondition failure, not a race.
+            if not _poll(lambda: os.path.exists(transcript), 15):
+                return Observation(
+                    declared=declared, observed="error",
+                    detail=f"the dialog was up but transcript {transcript!r} never appeared "
+                           f"within 15s; there is nothing for the reader to be right or wrong "
+                           f"about",
+                )
+            # The WHOLE file, not a window: `PromptService` widens its tail when a narrow read
+            # finds nothing, so anything narrower here could fail for want of records rather
+            # than for want of the record. Strictly more generous than production — a null
+            # from this is the reader, never the window.
+            with open(transcript) as f:
+                tail = f.read()
+            # Re-checked after the read, inside the `with`, so "the dialog was up" covers the
+            # instant the bytes were taken and not merely some earlier moment.
+            if not term.wait([_CLAUDE_SELECT_FOOTER], 5):
+                return Observation(
+                    declared=declared, observed="error",
+                    detail="the dialog left the screen while the transcript was being read; "
+                           "this run cannot say what was open when those bytes were written",
+                )
+            out = ctx.probe(["open-prompt", "claude", "--activity", "waiting"], stdin=tail)
+        kind = out.get("kind")
+        return Observation(
+            declared=declared, observed=kind is not None,
+            detail=f"live AskUserQuestion dialog on screen; reader returned {kind!r} from "
+                   f"{len(tail.splitlines())} transcript lines",
+        )
 
     # codex declares this nil for a *reason*, not a bare absence: "codex writes nothing to
     # its rollout when its own approval list is up." Trusting that forever is exactly the
@@ -664,9 +788,13 @@ ROWS = [
         kind="fact"),
     Row("textChannel", "declarations", BOTH, "cheap", (), _text_channel),
     Row("dialogDriver", "declarations", BOTH, "cheap", ("sandbox-config",), _dialog_driver),
-    # The one deliberate tier exception among the declarations: see `_open_prompt_reader`'s
-    # own comment for why probing codex's stated reason needs a real approval list, not a
-    # captured screen. Also the one row that keeps `kind="capability"` and uses
+    # The one deliberate tier exception among the declarations, and now on BOTH arms: see
+    # `_open_prompt_reader`'s own comment for why probing codex's stated reason needs a real
+    # approval list rather than a captured screen, and why claude's needs a real unanswered
+    # `AskUserQuestion` dialog rather than a captured transcript — a captured one is a
+    # resolved dialog's file and parses forever, which is how this row stayed green through
+    # the 2.1.281 regression it exists to catch. Both arms spend a live turn.
+    # Also the one row that keeps `kind="capability"` and uses
     # `absent_reason_holds` — it is a genuine refusal with a stated reason, not a symmetric
     # fact like the three rows above.
     Row("openPromptReader", "declarations", BOTH, "full", ("sandbox-config",),
