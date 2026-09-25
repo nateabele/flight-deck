@@ -768,9 +768,11 @@ def _rename(ctx, agent):
 # .captured.txt` — distinct from `_CLAUDE_SELECT_FOOTER`'s "Enter to select", which is the
 # `AskUserQuestion` select list's own footer, not this one.
 #
-# `Tab to amend`, NOT the `Esc to cancel` this used to wait on. "Esc to cancel" is in the footer
-# of EVERY claude dialog — permission, select list, and workspace trust — so it established
-# only "some dialog is up". That matters because a fresh sandbox home in an unseen cwd is
+# `Tab to amend`, NOT the `Esc to cancel` this used to wait on. "Esc to cancel" does not
+# discriminate: it is in the footer of the permission dialog, the select list AND workspace trust
+# (fourteen of the fifteen dialog captures carry it — every one but `question-two-review`, per
+# `ClaudeTextChannel`), so waiting on it established only "some dialog is up". That matters
+# because a fresh sandbox home in an unseen cwd is
 # precisely the case that raises the **workspace-trust** prompt: the row would have escaped a
 # trust prompt, found no rejection record, and reported `broken` for a claim it never tested.
 # Checked across all 28 Claude fixtures: `Tab to amend` appears only in the `permission-*`

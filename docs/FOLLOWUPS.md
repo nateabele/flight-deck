@@ -1593,7 +1593,20 @@ a green fixture that measures nothing live, but it is not the fix, and exit code
 drift, see `scripts/adapterprobe/README.md`) is the compensating control that currently stands in
 for it — a version bump gets caught, a same-version behaviour change on claude still would not.
 
-Also unproven: both new full-tier rows (`claude.openPromptReader`'s live rewrite,
-`claude.escapeDeniesPermission`) have **never once run to completion against a live agent** — every
-attempt has stopped at the auth guard above. `baseline.json` is deliberately not refreshed against
-this branch; see `scripts/adapterprobe/README.md`'s baseline note for the resulting diff.
+Also unproven: **all three** new full-tier rows have never once run to completion against a live
+agent. The two claude rows (`claude.openPromptReader`'s live rewrite,
+`claude.escapeDeniesPermission`) stop at the auth guard above.
+`codex.codexPasteDetectsSameBurstReturn` is not blocked by auth but has simply never been run —
+`baseline.json` was last written before this branch and holds no cell for it, so no comment may
+cite it as evidence yet. `baseline.json` is deliberately not refreshed against this branch; see
+`scripts/adapterprobe/README.md`'s baseline note for the resulting diff.
+
+**Two premises inside the codex paste row are untested, and both fail SAFE — to `error`, never to
+a wrong verdict — which is also why its expected first live result is `error` rather than `ok`.**
+(1) It establishes "typed" by looking for the marker in `term.display()`, which assumes codex
+renders a detected paste literally rather than as a `[Pasted N chars]` placeholder; no codex
+fixture captures a pasted composer, so this is unverified. (2) It reads the rollout path `prepare`
+returned, which requires `codex resume <id>` to append to that same file — and this suite already
+records `codex.resumeCommand` as **broken** (history not reattached). Whoever runs `--tier full`
+first should expect to debug the row before trusting a verdict from it, and should read an `error`
+here as "the row could not establish its configuration", which is what it is designed to say.
