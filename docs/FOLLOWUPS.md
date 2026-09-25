@@ -1623,9 +1623,9 @@ recorded rather than fixed in this pass.
 - **All three `FlywheelNotifier` triggers (persistent block, stalled-holder collision,
   dependency cycle) are inert against live data in Level 1.** Each is fully wired and
   unit-tested against hand-built projections (`FlywheelNotifierTests`), but nothing live can
-  satisfy any of them today. The block trigger (`evaluateBlocks`, `FlywheelNotifier.swift:63-
-  77`) fires on `agent.status == .blocked`, which `FlywheelProjection.project(...)` derives
-  solely from `bead.status == "blocked"` (`FlywheelProjection.swift:107`) — but the only live
+  satisfy any of them today. The block trigger (`evaluateBlocks`, `FlywheelNotifier.swift:70-
+  84`) fires on `agent.status == .blocked`, which `FlywheelProjection.project(...)` derives
+  solely from `bead.status == "blocked"` (`FlywheelProjection.swift:109`) — but the only live
   bead read is `br list --status in_progress` (`FlywheelWatcher.swift:126-130`), which by
   definition never returns a blocked bead, so no live projection can ever carry a `.blocked`
   agent. The stalled-holder collision trigger (`evaluateCollisions`) needs the
