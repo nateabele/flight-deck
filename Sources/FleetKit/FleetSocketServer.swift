@@ -310,9 +310,11 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// connection the instance holds. Sharing one would drop every `flightdeck tail` whenever a
     /// phone paired.
     ///
-    /// Authorization is the file: `0600`, inside the user's `~/Library`. `NWConnection` exposes
-    /// no socket descriptor to read `getpeereid` from, which is the argument
-    /// `AnswerTriggerSocket` already makes.
+    /// Authorization is the filesystem: the file is `0600`, and in the default location it sits
+    /// inside the user's `~/Library` (0700), which is the boundary that holds even during the
+    /// moment between bind and chmod. A state dir outside `~/Library` relies on the mode alone,
+    /// so a chmod that fails fails the start. `NWConnection` exposes no socket descriptor to
+    /// read `getpeereid` from, which is the argument `AnswerTriggerSocket` already makes.
     ///
     /// The same one-`queue.async`-inside-one-continuation shape as `start`, for the reason its
     /// doc comment gives.
@@ -372,11 +374,20 @@ public final class FleetSocketServer: @unchecked Sendable {
                     case .ready:
                         resumed = true
                         timeout.cancel()
-                        // Owner-only before any caller can learn the path is up. The file is
-                        // created with the process umask, which already denies group/other
-                        // write — and connecting needs write — so this narrows a window that
-                        // was closed, rather than closing an open one.
-                        chmod(path, 0o600)
+                        // Owner-only before `startLocal` returns, so before anything that
+                        // advertises the path runs. This is set *after* bind: between the two,
+                        // the file has whatever the process umask gave it. In the default
+                        // location that window is harmless, because the real boundary is
+                        // `~/Library` itself (0700) — nobody else can traverse to the file.
+                        // A `-FlightDeckStateDir` outside `~/Library` has no such parent, and
+                        // there this mode IS the authorization, so a failed chmod must not
+                        // leave a listener up on a file other users may be able to open.
+                        guard chmod(path, 0o600) == 0 else {
+                            let code = POSIXErrorCode(rawValue: errno) ?? .EPERM
+                            abandon()
+                            unlink(path)
+                            return continuation.resume(throwing: POSIXError(code))
+                        }
                         continuation.resume()
                     case .failed(let error):
                         resumed = true

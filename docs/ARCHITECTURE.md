@@ -744,8 +744,11 @@ that never sends a newline cannot grow the receive buffer without bound). Everyt
 transport — frame types, handlers, the event/timeline/request plumbing — is unchanged; only
 `FleetSocketServer.startLocal(path:)` (server side) and `FleetClient(localCaller:)` /
 `connect(toLocal:lastSeq:)` (client side, used by the CLI) dial line parameters instead of
-TLS-PSK and WebSocket. Authorization is the socket file's mode (`0600`, inside
-`~/Library/Application Support/Flight Deck/`) — `NWConnection` exposes no descriptor to run
+TLS-PSK and WebSocket. Authorization is the filesystem: the socket file is `0600`, and by
+default it sits inside `~/Library` (0700), which is the real boundary — the mode is set after
+bind, so for a moment the file has only the umask's. A `-FlightDeckStateDir` outside
+`~/Library` relies on the mode alone, which is why a failed `chmod` fails `startLocal` rather
+than leaving the listener up. `NWConnection` exposes no descriptor to run
 `getpeereid` against, the same argument `AnswerTriggerSocket` already makes for the answer
 trigger. A live socket file is refused (`FleetSocketError.inUse`), never unlinked, so a second
 app instance sharing the state directory cannot steal the first one's path; a dead file is
