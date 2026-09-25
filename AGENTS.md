@@ -43,6 +43,7 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 ./scripts/build-boringssl.sh    # once, BEFORE ANY BUILD — see below
 ./scripts/build.sh              # xcodegen generate + xcodebuild → Debug "Flight Deck.app"
 ./scripts/test-unit.sh          # headless unit suite — your normal TDD loop
+./scripts/test-adapters.sh      # re-derives the adapter capability matrix against live claude/codex, exits non-zero on drift; default tier `cheap` spends no tokens (see scripts/adapterprobe/README.md for `--tier full`)
 ./scripts/smoke.sh              # GUI UITest, ends "SMOKE PASS" (see rule 4)
 
 # Flake hunting — loops one suspect sequence 20x in a single launch (rule 4).

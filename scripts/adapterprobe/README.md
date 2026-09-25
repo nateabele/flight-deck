@@ -84,12 +84,21 @@ transcript under `scripts/adapterprobe/corpus/` and prints which version it came
 So a `corpus stale` print is a prompt to go capture and review, not something `--capture` alone
 resolves, and not something to silence by editing this file directly.
 
-Exit code: `0` clean (matches `baseline.json`), `1` capability drift (a cell changed or is new),
-`3` a harness failure (a cell that used to read something else now reads `error`, or a brand-new
-cell reads `error` outright — always outranks plain drift), `4` the sandbox guard refused to run
-at all (see below), `5` the real `~/.codex/sessions` or `~/.claude/projects` listing changed
-during the run — spec invariant 9, checked unconditionally around the whole sandbox lifetime,
-never just trusted.
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Clean — matches `baseline.json`. |
+| `1` | Capability drift — a cell changed, was newly added, or was removed. |
+| `2` | `build-probe.sh` failed; no row ran at all. |
+| `3` | Harness failure — a cell that used to read something else now reads `error`, or a brand-new cell reads `error` outright. `error` never counts as passing, so this always outranks plain drift (`1`) and version drift (`6`). |
+| `4` | The sandbox guard refused to run at all — see [Safety](#safety) below. |
+| `5` | The real `~/.codex/sessions` or `~/.claude/projects` listing changed during the run — spec invariant 9, checked unconditionally around the whole sandbox lifetime, never just trusted. |
+| `6` | Version drift — the live agent's version no longer matches the one recorded in `baseline.json`'s `versions` map, even though every cell it was checked against still agrees. This is the exact bug that shipped to production: Claude Code 2.1.281 silently changed when a transcript record is written, and the row covering it kept reading `ok` for nineteen versions because it read a fixture frozen at 2.1.241 — with no code of its own, a version bump with unchanged cells used to fall through to plain `0`. Ranked below `1`/`3` (an observed cell difference is stronger, more actionable evidence than a version number alone moving) and above `0` (a run must never call itself clean while sitting on an agent build its baseline has never seen). See `run.py`'s `_exit_code` docstring for the full reasoning. |
+
+`2`, `4`, and `5` are early exits — nothing is diffed against `baseline.json` at all. `1`, `3`, and
+`6` are the three possible outcomes of that diff, and only one is ever returned per run, ranked
+`3` > `1` > `6` > `0`.
 
 **`baseline.json` was captured at `--tier full`, and records each cell's own tier alongside its
 verdict.** A bare `./scripts/test-adapters.sh` (cheap only) diffs cleanly against it: a
@@ -101,9 +110,17 @@ visible rather than silent.
 
 **`--tier full` spends real API tokens and creates real threads** (inside the sandbox, which is
 deleted afterwards) — four rows per agent need a live model turn, and `ROW_TIMEOUT["full"]` is
-420 seconds per row. Budget up to ~30 minutes for a full run. **Do not loop it.** Run it once,
-read the result, and only re-run if you have a specific reason to believe the environment
-changed (a new agent version, a config edit) — not to "make sure".
+420 seconds per row. Budget up to ~30 minutes for a full run. This is exactly why it is not folded
+into `./scripts/test-adapters.sh`'s default tier or into `test-unit.sh`: `cheap` spends no tokens
+and is safe to run on every loop; `full` costs real money and must be a deliberate, occasional act.
+
+**Cadence: run `--tier full --update-baseline` after every `claude`/`codex` upgrade** — not on a
+timer, and not to "make sure". You do not have to remember to check whether one is overdue: a
+bare `cheap`-tier run already tells you, by exiting `6` the moment the installed agent's version
+no longer matches what `baseline.json` last recorded, even when every `cheap`-tier cell still
+agrees (see the exit-code table above). **`baseline.json`'s own `versions` map is where "last run
+at version X" is recorded** — do not add a second changelog for the same fact; re-running
+`--tier full --update-baseline` is what keeps that map current. **Do not loop `--tier full`.**
 
 ## Safety
 
