@@ -89,6 +89,35 @@ carried forward on trust.
   by *QR* still gets one endpoint, from the code. If typed pairing ever needs to survive leaving
   the LAN, the fix is the phone recording the address it actually connected on — not widening
   the seal.
+- **Flywheel Observe polls on `WatchClock`-registered, mtime-gated `stat`s, not FSEvents,**
+  though the design spec called for FSEvents. `FlywheelWatcher`
+  (`Sources/FlightDeck/Flywheel/Observe/FlywheelWatcher.swift`) mirrors
+  `SessionStatusWatcher`'s own documented stance against vnode/FSEvents watches
+  (`SessionStatusWatcher.swift:13-16`): both `.beads/beads.db` (SQLite-WAL) and git's own
+  write pattern touch a file through create-temp-then-rename or multi-file-then-fsync
+  sequences that vnode watches observe unreliably. A `stat` per watched path every
+  `WatchClock` beat is orders of magnitude cheaper than a subprocess spawn, so `drain()` pays
+  that cost every tick and only shells out to `am`/`br` (`repollNow()`) once a watched path's
+  mtime has actually moved — the spec's real intent ("don't poll `am`/`br` on a dumb timer")
+  is preserved, just on a cheaper, already-established, already-tested watcher shape instead
+  of FSEvents.
+- **`FlywheelNotifier.blockThreshold` (default 120s) and `FlywheelObserveService.stallThreshold`
+  (default 600s) are compile-time constants, not user preferences.** Both are constructor
+  parameters with defaults (`FlywheelNotifier.swift:43`, `FlywheelObserveService.swift:25`),
+  and the real app wiring (`FlightDeckApp.swift`, `SessionStore.swift`) uses those defaults
+  with no override surface anywhere in `Preferences`. Nothing about the notifier/service
+  design blocks surfacing either as a per-project or global preference later — there's just
+  no UI for it yet.
+- **A refreshed reservation lease is treated as stall continuity, not release+reacquire.**
+  `FlywheelObserveService.enable`'s poll closure passes the previous projection into
+  `FlywheelProjection.project(..., previous:)` on every poll, and the projection carries a
+  held file's stall clock forward across a lease refresh rather than resetting it —
+  deliberate, so an agent that keeps renewing a lease on a file it's silently stuck on still
+  reads as stalled after the renewal, instead of the renewal resetting the "how long has this
+  really been held" clock to zero. `FlywheelNotifier` tracks its own separate `firstSeen`
+  clock per cause key on top of that (see its doc comment) — the two clocks answer different
+  questions ("has this condition been continuously true" vs. "when did we first see it") and
+  must not be conflated.
 
 ## Minor cleanups (safe to defer; optional wrap-up commit)
 
@@ -1544,3 +1573,73 @@ recorded rather than fixed in this pass.
   an in-progress draft — claude restores and codex does not, because they travel different
   channels. AGENTS.md's "a feature shipped for one adapter is a defect" rule applies, but the
   window is two renames in flight inside ~600ms, and it predates this branch.
+
+## From Flywheel Observe Level 1 (2026-09-25)
+
+- **There is no UI path to disable Flywheel once enabled.** `ProjectSettings.flywheelEnabled`
+  is only ever set `true` — `ProjectHeaderRow.swift:161`'s enabled-state menu item is
+  `Button("Flywheel coordination enabled") {}.disabled(true)`, a genuinely inert label, not a
+  toggle. `FlywheelObserveService.disable(project:)` (`FlywheelObserveService.swift:72-77`)
+  is fully implemented and unit-tested but has zero call sites in `Sources/`. No runtime
+  defect follows from this — a project can only ever be enabled, and enabled works — but it
+  means `docs/FLYWHEEL-OBSERVE-CHECKLIST.md` step 8 (disable → drawer gone, no watcher) is
+  not yet testable. Surfacing a real disable control is the follow-up.
+- **`SessionStore.jumpToObserveRootCause()` is a live no-op today.** Its root-cause
+  computation is correct and exercises the same `DependencyGraphLayout` the DAG overlay
+  draws from (`SessionStore.swift:2395-2414`), but `FlywheelWatcher.repollNow()` hardcodes
+  `depEdges: nil` in every `FlywheelSnapshot` it produces (`FlywheelWatcher.swift:145-149`,
+  see the transport/lane note above), so `DependencyGraphLayout.layout`'s `rootCauseID`
+  has no edges to reason over and is `nil` for every projection assembled from real reads —
+  `jumpToObserveRootCause()` guards on exactly that and returns without moving selection.
+  The wiring (drawer button → store method → layout → jump) is correct and covered by unit
+  tests against hand-built projections; only the live `depEdges` data source is absent. See
+  `task-12-fix-1-report.md`.
+- **`ObserveDrawer` never threads `FlywheelProjection.lanesUnavailable` through to
+  `ObserveLaneModel`.** `FlywheelProjection.project(...)` does compute a real
+  `lanesUnavailable` set from which snapshot lanes came back nil
+  (`FlywheelProjection.swift:54-74`), and `ObserveLaneModel.row(...)` does know how to render
+  a degraded lane as the literal text "unavailable" (`ObserveDrawer.swift:59-65`) — but
+  `ObserveDrawer.expanded(_:)` calls `ObserveLaneModel.lanes(for: agent, unavailable: [])`
+  with a hardcoded empty set (`ObserveDrawer.swift:150`), so that path is exercised only at
+  the unit-test level (`ObserveLaneModelTests`), never through the live view. Concretely:
+  because `reservations`/`depEdges`/`events` are also permanent nil-stubs at the read-command
+  layer (next item), Files/Dependency/Activity always render their own "nothing here" copy
+  ("no held or waited-on files", "no blocking dependency", "no recent activity") rather than
+  "unavailable" — cosmetically different from what the design intended, not a data-loss bug.
+  Flagged for this exact follow-up in `.superpowers/sdd/2026-09-24-flywheel-observe/
+  progress.md`'s Task 10 ruling; one-line fix (pass `projection.lanesUnavailable` through)
+  once there's a projection worth degrading against.
+- **`FlywheelReadCommands.reservations`/`.depEdges`/`.events` are permanent nil-stubs**, not
+  conditional on `am`/`br` being installed or reachable — they never attempt a subprocess
+  call at all (`FlywheelReadCommands.swift:79-102`). Task 1's live probe confirmed each
+  command's argv and envelope shape but never captured a positive-path row (an empty
+  `all_active`, a `dep list` that needs a real issue id, an empty `events` array), so the
+  per-row/per-event Decodable shapes are unconfirmed and were deliberately left un-guessed
+  rather than risk silently decoding nothing — or garbage — forever. `FlywheelWatcher`
+  therefore only ever shells out to `am agents list` and `br list --status in_progress`
+  ("two shell-outs, not five," `FlywheelWatcher.swift:126-130`). This is the root cause of
+  both nil-stub items above and is the one lane-availability fact
+  `docs/FLYWHEEL-OBSERVE-CHECKLIST.md` step 2 calls out directly.
+- **`DependencyGraphLayout`'s longest-path ranking can over-rank a node reachable only
+  through an out-of-set intermediate.** A chain A(in-set) → X(not in the polled bead/edge
+  set) → C(in-set) still contributes `rank[X] = rank[A] + 1` during relaxation even though X
+  is never placed as a node, which can push C's rank deeper than a same-length in-set-only
+  path would. Parked during the Task 4 layout work as a real but narrow edge case (needs an
+  edge into a bead outside the current poll's known set, which the live nil-stub `depEdges`
+  makes unreachable today regardless) — noted here per
+  `.superpowers/sdd/2026-09-24-flywheel-observe/progress.md`'s flag for this task.
+- **`DAGCamera` has two unguarded degenerate-input cases**, both latent rather than currently
+  reachable given the same `depEdges` nil-stub: `graphPoint(fromViewPoint:viewport:)` calls
+  `.inverted()` on the view→graph transform with no `scale == 0` guard
+  (`DAGCamera.swift:26-28`) — Core Graphics returns the original (non-inverted) transform
+  rather than crashing on a singular matrix, so the failure mode is a silently wrong
+  hit-test, not a crash; and `fitting(_:viewport:padding:)` divides `viewport` by `rect`'s
+  width/height with no zero guard (`DAGCamera.swift:38-42`), so a bounds rect that is zero on
+  both axes would produce an infinite-scale camera. In the current `DependencyDAGOverlay`,
+  the minimap's bounds always include each node's non-zero `nodeSize`, so this doesn't fire
+  from the shipped drawing path today — but `SessionStore.jumpToObserveRootCause()` builds a
+  layout with `nodeSize: .zero, spacing: .zero` (geometry is irrelevant to that call's
+  `rootCauseID`-only use), so any future code path that fed *that* layout's node positions
+  into a `DAGCamera.fitting` call would hit it. Parked per
+  `.superpowers/sdd/2026-09-24-flywheel-observe/progress.md`'s flag for this task, alongside
+  the Task 4 rank-leakage item above.
