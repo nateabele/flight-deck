@@ -1525,36 +1525,41 @@ recorded rather than fixed in this pass.
   channels. AGENTS.md's "a feature shipped for one adapter is a defect" rule applies, but the
   window is two renames in flight inside ~600ms, and it predates this branch.
 
-## Whether Claude's composer acts on kitty-encoded Ctrl+U/Ctrl+E (2026-09-24)
+## What actually sent CSI-u at a bare shell (2026-09-25)
 
-`TextInjecting.sendControl` (`Sources/FlightDeck/TextInjecting.swift`) passes an explicit
-control byte via `text:`, but that byte is only what reaches the terminal under the legacy
-keyboard encoding. Traced statically through `vendor/ghostty/src/input/key_encode.zig` (no
-probe — the code path is unconditional): under the kitty keyboard protocol, which Claude Code
-enables, the byte is discarded and ghostty encodes from `key` + `mods` instead, so `sendControl`
-actually sends `ESC[117;5u` for Ctrl+U and `ESC[101;5u` for Ctrl+E, not the raw control bytes
-the old comment claimed. Full derivation: docs/HANDOFF-agent-surface-findings.md §4.
+**Supersedes the entry written here on 2026-09-24**, which asked whether Claude's composer acts
+on `ESC[117;5u`. That question is moot: `TextInjecting.sendControl` does not send that sequence.
 
-**Open and unresolved: whether Claude's composer treats `ESC[117;5u` as Ctrl+U at all.** This
-is the live candidate for the sidebar-rename-into-a-draft bug — a rename typed into a composer
-that already holds a draft submitted the draft instead of the rename, which is exactly what you
-would see if the kill-line pair never clears the box (injected text appends, then Return
-submits both). Corroborating evidence already in hand: quitting claude in a tab and renaming it
-left the literal text `;5u;5u/rename Rename 3` in the shell underneath — CSI-u fragments
-arriving at a receiver that cannot decode them.
+`sendControl` passes an explicit control byte via `text:`, and **that byte is what reaches the
+terminal, under the kitty keyboard protocol as well as the legacy encoding.** Traced link by link
+through ghostty's encoder: Flight Deck never sets `unshiftedCodepoint` (it defaults to 0 and
+nothing in `Sources/` assigns it), ghostty's kitty table holds no plain letters, and
+`key_encode.zig:132` synthesizes a fallback entry only when `unshifted_codepoint > 0` — so no
+entry is found and the `:217` fallback writes `event.utf8` verbatim. `KittySequence` is built
+only *after* that point. Full derivation, and the correction of the earlier wrong claim, in
+docs/HANDOFF-agent-surface-findings.md §4.
 
-This must not be settled by assumption. **Any probe that reports a verdict on whether Claude's
-composer acts on `ESC[117;5u` must first detect that the kitty keyboard protocol is actually
-active in the session it is testing, and must refuse to report a verdict if it cannot confirm
-that.** This project has already produced three wrong conclusions from probes that asserted an
-outcome for a configuration they never established — including one where a bare pty left claude
-in *legacy* mode, so the probe exercised an encoder ghostty never uses in production and drew a
-confident wrong conclusion from it. A pty spawned for this specific probe is not guaranteed to
-be in kitty mode just because a real Ghostty-hosted session would be; the probe has to check,
-not assume.
+**The open question is now an observation nothing explains.** Live test #3 left the literal text
+`;5u;5u/rename Rename 3` at a zsh prompt after claude was killed in that tab — two CSI-u tails,
+matching Ctrl-E then Ctrl-U. The traced path cannot emit them, and `git log -S` shows `text: byte`
+entered in 6c2a39d and never changed, so the code under test did carry it. Either some other path
+sent those keys, or an assumption in the trace is wrong. **Unexplained.**
 
-Suggested shape for that probe (not run here): put a draft in the composer, send both the
-legacy control byte and the equivalent `ESC[...;5u` sequence in separate trials, confirm via
-Claude Code's own protocol-detection response (or equivalent) which mode the session is in
-before trusting either result, and make the two trials self-diagnosing against each other rather
-than trusting either result in isolation.
+**Two things must not be inferred from this.**
+
+- **The draft-rename bug has no identified cause.** A rename into a composer holding a draft
+  submits the draft; the "Ctrl-U leaves as CSI-u so the box never clears" hypothesis is dead, and
+  nothing has replaced it.
+- The byte's survival is **an unguarded invariant, not a guarantee.** Any caller that supplies an
+  unshifted codepoint — as the real `NSEvent` path derives for a human keypress — flips the same
+  call to `ESC[117;5u` and discards the byte. Nothing in the suite can catch that: no test stands
+  on a real surface.
+
+**Binding on any probe that settles this.** It **must record which keyboard mode was active and
+which code path actually sent the keys, and must refuse to report a verdict if it cannot
+establish both.** This is not boilerplate. This project has now produced four wrong conclusions
+from probes that asserted an outcome for a configuration they never established — including one
+where a bare pty left claude in *legacy* mode, so the probe exercised an encoder ghostty never
+uses in production, and including the 2026-09-24 correction above, which inverted the mechanism
+it was written to fix. A probe that cannot name its configuration must fail, not conclude. See
+docs/HANDOFF-agent-surface-findings.md §7.
