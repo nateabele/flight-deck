@@ -120,8 +120,10 @@ surfaceModel.sendKeyEvent(.init(key: key, action: .press, text: byte, mods: .ctr
 **That byte is what the terminal receives, under kitty as well as legacy.** Every link traced in
 source (static trace, no probe):
 
-1. `Ghostty.Input.KeyEvent.init` defaults `unshiftedCodepoint` to `0`; `sendControl` never
-   passes it, and **nothing in `Sources/` ever sets it.**
+1. `Ghostty.Input.KeyEvent.init` defaults `unshiftedCodepoint` to `0`, and `sendControl` builds
+   its event without passing it. (Narrow claim, deliberately: it is this *call* that leaves the
+   field at zero. An earlier draft of this section said "nothing in `Sources/` ever sets it",
+   which is false — see item 4.)
 2. `withCValue` copies it to the C struct unchanged (`Ghostty.Input.swift:209`), and `text`
    becomes `keyEvent.text`. `sendKeyEvent` has exactly one definition — a trivial pass-through
    to `ghostty_surface_key` (`Ghostty.Surface.swift:60-64`).
@@ -132,8 +134,15 @@ source (static trace, no probe):
    `ghostty_surface_key_is_binding`, and the extern `CAPI.KeyEvent`'s `keyEvent()` at `:1255`,
    which is the one `ghostty_surface_key` actually takes. Reading `core()` by name is how the
    original trace went wrong.
-4. There is **no write to `unshifted_codepoint` anywhere on the macOS/embedded path.** The only
-   real derivation in ghostty is `apprt/gtk/class/surface.zig:1406`.
+4. Nothing on *this* path writes `unshifted_codepoint`, and within ghostty itself the only
+   derivation is `apprt/gtk/class/surface.zig:1406` (GTK, not macOS). **But Flight Deck's own
+   human-keypress path does derive one:** `NSEvent+Extension.swift:40-44` sets
+   `key_ev.unshifted_codepoint` from `characters(byApplyingModifiers: [])`, writing the C struct
+   field directly rather than the Swift `KeyEvent` property. That is not a counterexample — it
+   is exactly the invariant stated below, and it is why the invariant is fragile rather than
+   guaranteed. (This item previously claimed there was no such write anywhere on the macOS path.
+   That was a reassuring absolute falsified by one grep, in the section the rest of this file
+   cites — §7's lesson, a fifth time.)
 5. `kitty.zig`'s `raw_entries` holds only functional, keypad and modifier keys — **no plain
    letters.** `.u` and `.e` never match it.
 6. So the table lookup misses, and `key_encode.zig:132` synthesizes an entry only
