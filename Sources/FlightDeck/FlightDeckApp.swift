@@ -241,9 +241,7 @@ struct FlightDeckApp: App {
         // requests it lazily, the first time any project actually turns Observe on.
         let flywheelNotifier = FlywheelNotifier(notifier: notifier)
         flywheelNotifier.route = { [weak store] project, agentName in
-            store?.repos.flatMap(\.sessions).first {
-                $0.flywheelIdentity?.project == project && $0.flywheelIdentity?.agentName == agentName
-            }?.id
+            store?.session(project: project, agentName: agentName)?.id
         }
         store.flywheelNotifier = flywheelNotifier
 
