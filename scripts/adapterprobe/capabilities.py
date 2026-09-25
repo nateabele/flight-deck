@@ -956,18 +956,26 @@ def _codex_paste_detects_same_burst_return(ctx, agent):
     # when nothing is happening. Reporting `broken` from that state is precisely the
     # "assert an outcome for a configuration you never established" failure this whole plan
     # exists to end, so it returns `error` (observed=None) and says which control failed.
-    if not split_grew:
+    # Order matters: a DIRECTLY OBSERVED regression outranks the control. If the combined
+    # write grew the rollout, codex submitted on a same-burst write — the exact failure this
+    # row exists to catch — and that growth is itself proof that growth was observable in this
+    # run, which is all the positive control was ever there to establish. Checking the control
+    # first would throw that evidence away as `error` whenever the second turn also stalled.
+    if not combined_grew and not split_grew:
         return Observation(
             declared=True, observed=None,
-            detail=f"positive control failed: a split-burst write with a real gap did not grow "
-                   f"the rollout within 90s, so this run cannot tell 'typed but never sent' "
-                   f"from 'nothing happened'. combined write grew: {combined_grew}",
+            detail=f"positive control failed: neither write grew the rollout (the split-burst "
+                   f"write with a real gap did not grow it within 90s), so this run cannot tell "
+                   f"'typed but never sent' from 'nothing happened at all'",
         )
 
     return Observation(
         declared=True, observed=not combined_grew,
         detail=f"combined write grew rollout: {combined_grew}; split write (real gap) grew "
-               f"rollout: {split_grew} (positive control held)",
+               f"rollout: {split_grew}"
+               + ("" if split_grew else " -- control did not grow, but the combined write did, "
+                                        "which both proves the regression and proves growth was "
+                                        "observable here"),
     )
 
 
