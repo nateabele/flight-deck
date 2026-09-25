@@ -15,8 +15,10 @@ This suite is the same idea at the scope of a whole adapter: `capabilities.py` d
 **row** per claim `AgentAdapter` makes, and `run.py` derives a **verdict** for each row against
 both `claude` and `codex` — sometimes against a checked-in corpus (cheap, no agent spawned),
 sometimes against a live agent driven through a real pty inside a throwaway sandbox (`full`,
-spends real API tokens). The output is a matrix: 21 rows × 2 agents = 42 cells, refreshed on
-demand rather than trusted forever.
+spends real API tokens). The output is a matrix: 24 rows (most checked against both agents,
+three — `askUserQuestionShape`, `escapeDeniesPermission`, `codexPasteDetectsSameBurstReturn` —
+checked against only the one they claim something about) = 45 cells, refreshed on demand rather
+than trusted forever.
 
 ## Verdict vocabulary
 
@@ -105,11 +107,11 @@ verdict.** A bare `./scripts/test-adapters.sh` (cheap only) diffs cleanly agains
 full-tier-only cell this run never attempted is reported as "not exercised", not "removed", and
 does not affect the exit code. Only a cell whose own tier this run *did* run, and that vanished
 from the matrix anyway, is real drift. The full-tier-only count is printed above the matrix
-(e.g. `8 full-tier cells not exercised (run --tier full to check them)`) so the gap stays
+(e.g. `10 full-tier cells not exercised (run --tier full to check them)`) so the gap stays
 visible rather than silent.
 
 **`--tier full` spends real API tokens and creates real threads** (inside the sandbox, which is
-deleted afterwards) — four rows per agent need a live model turn, and `ROW_TIMEOUT["full"]` is
+deleted afterwards) — five rows per agent need a live model turn, and `ROW_TIMEOUT["full"]` is
 420 seconds per row. Budget up to ~30 minutes for a full run. This is exactly why it is not folded
 into `./scripts/test-adapters.sh`'s default tier or into `test-unit.sh`: `cheap` spends no tokens
 and is safe to run on every loop; `full` costs real money and must be a deliberate, occasional act.
