@@ -566,6 +566,17 @@ def _ask_user_question_shape(ctx, agent):
     option or a description would still return a non-nil `kind`, which is why
     `test_claude_derives_an_open_prompt_once_activity_is_threaded_through`'s bare
     not-None check is a different, weaker claim than this row makes.
+
+    **What this row CANNOT catch, stated because its name invites the opposite reading.** It
+    never runs a live claude, so it cannot see the hazard that motivated this whole suite: a
+    NEW claude emitting a DIFFERENT shape. Against a frozen capture it will keep passing
+    forever, which is exactly how `openPromptReader` sat at `ok` across the 2.1.281 change.
+    What it does catch is the other direction — OUR parser regressing away from a shape claude
+    really did emit. That is worth a row, but it is a regression guard, not a drift detector.
+    Closing the live-drift half is `openPromptReader`'s job, and that row is currently blocked
+    on authenticating a sandboxed claude; until it lands, this claim has no live coverage and
+    the version number in `PromptQuestion`'s comment remains unverified against any newer
+    binary. Do not read a green cell here as "the shape still matches claude".
     """
     with open(_CLAUDE_QUESTION_SHAPE_FIXTURE) as f:
         tail = f.read()
@@ -928,15 +939,35 @@ def _codex_paste_detects_same_burst_return(ctx, agent):
         term.send(marker.encode())
         time.sleep(0.15)
         term.send(b"\r")
-        term.pump(20)
+        # Polled with a deadline rather than one fixed `pump`, and generously: this is the
+        # POSITIVE CONTROL, so time spent here buys interpretability, and it returns as soon
+        # as the rollout moves. A fixed 20s window made a merely-slow model turn look exactly
+        # like the regression this row exists to catch.
+        split_deadline = time.time() + 90
+        while time.time() < split_deadline and size() <= before_split:
+            term.pump(2)
         after_split = size()
     split_grew = after_split > before_split
 
-    observed = (not combined_grew) and split_grew
+    # A failed positive control VOIDS the experiment; it does not fail the claim. If a normal
+    # split-burst turn never grew the rollout, this run never established that "grew" is even
+    # observable here — codex may be slow, rate-limited, or not answering — and the combined
+    # write's non-growth then carries no information, because non-growth is what BOTH arms do
+    # when nothing is happening. Reporting `broken` from that state is precisely the
+    # "assert an outcome for a configuration you never established" failure this whole plan
+    # exists to end, so it returns `error` (observed=None) and says which control failed.
+    if not split_grew:
+        return Observation(
+            declared=True, observed=None,
+            detail=f"positive control failed: a split-burst write with a real gap did not grow "
+                   f"the rollout within 90s, so this run cannot tell 'typed but never sent' "
+                   f"from 'nothing happened'. combined write grew: {combined_grew}",
+        )
+
     return Observation(
-        declared=True, observed=observed,
+        declared=True, observed=not combined_grew,
         detail=f"combined write grew rollout: {combined_grew}; split write (real gap) grew "
-               f"rollout: {split_grew}",
+               f"rollout: {split_grew} (positive control held)",
     )
 
 
