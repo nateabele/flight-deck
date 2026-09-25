@@ -69,20 +69,26 @@ final class FlywheelWatcher {
         debounceTask?.cancel()
     }
 
+    /// One watched path's current mtime, or `nil` if the store doesn't exist yet. Shared by
+    /// `drain()`'s comparison and `recordBaselineMtimes()`'s unconditional snapshot so there
+    /// is exactly one place that knows how to ask the file system for this.
+    ///
+    /// `resourceValues` rather than `attributesOfItem`, same reasoning as
+    /// `SessionStatusWatcher`: one date out of a dictionary the file system would otherwise
+    /// build in full, and this runs per path per tick.
+    private func currentMtime(of url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    }
+
     /// One scheduled beat: a `stat` per watched path, no subprocess unless something moved.
     /// Synchronous so tests need no expectations — same shape as `SessionStatusWatcher.drain()`.
     func drain() {
         var changed = false
         for url in watchPaths {
-            // `resourceValues` rather than `attributesOfItem`, same reasoning as
-            // `SessionStatusWatcher`: one date out of a dictionary the file system would
-            // otherwise build in full, and this runs per path per tick.
-            let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate
             // A nil mtime means the store doesn't exist yet (not-yet-created beads.db, a
             // project that hasn't run `am`/`br` once) — treated as "unchanged" so a tab
             // watching a store that never materializes doesn't thrash a repoll every beat.
-            guard let mtime else { continue }
+            guard let mtime = currentMtime(of: url) else { continue }
             if mtimes[url] != mtime {
                 mtimes[url] = mtime
                 changed = true
@@ -94,15 +100,11 @@ final class FlywheelWatcher {
     }
 
     /// Snapshots every watched path's current mtime into the gate without comparing against
-    /// what was there before. `repollNow()` calls this once its reads land, so an unconditional
-    /// poll (the `start()`/focus prime, or one this method's own debounce just fired) also
-    /// establishes the gate's baseline — otherwise the *next* `drain()` would see an empty
-    /// cache against a real mtime, read that as "moved", and fire a second, redundant repoll
-    /// for data the prime just fetched.
+    /// what was there before. `repollNow()` calls this at its *top*, before issuing the reads
+    /// — see the comment there for why the ordering is load-bearing, not incidental.
     private func recordBaselineMtimes() {
         for url in watchPaths {
-            if let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate {
+            if let mtime = currentMtime(of: url) {
                 mtimes[url] = mtime
             }
         }
@@ -131,12 +133,20 @@ final class FlywheelWatcher {
         isPolling = true
         defer { isPolling = false }
 
+        // Snapshot the baseline BEFORE issuing the reads, not after. The reads are a real
+        // subprocess round-trip with an async gap the mtime gate has no visibility into — if a
+        // genuine external write lands during that gap, recording the baseline afterward would
+        // stat the *new* mtime and silently fold that write into "already seen", even though
+        // the snapshot just delivered reflects data from before it. The gate must err toward
+        // one redundant repoll, never toward dropping a change: recording here means that write
+        // leaves a newer mtime than what's cached, so the very next `drain()` still catches it.
+        recordBaselineMtimes()
+
         async let agents = reads.agents(project: project)
         async let beads = reads.inProgressBeads(project: project)
         let snapshot = await FlywheelSnapshot(
             agents: agents, beads: beads, reservations: nil, depEdges: nil, events: nil
         )
-        recordBaselineMtimes()
         onChange(snapshot)
     }
 }
