@@ -45,7 +45,13 @@ final class FlywheelObserveService: ObservableObject {
 
         let watcher = FlywheelWatcher(project: path, watchPaths: watchPaths, reads: reads,
                                        clock: clock) { [weak self] snapshot in
-            guard let self else { return }
+            // `disable(project:)` stops the watcher but cannot cancel a priming
+            // `repollNow()` already in flight (its subprocess round-trip is a real async
+            // gap `stop()` has no visibility into) — a repoll that lands after disable
+            // must not resurrect a torn-down projection. `watchers[key]` is the liveness
+            // source of truth: once `disable` has run, the entry is gone and this closure
+            // drops the late result instead of writing it back into the maps.
+            guard let self, self.watchers[key] != nil else { return }
             let projection = FlywheelProjection.project(snapshot, now: self.now(),
                                                           stallThreshold: self.stallThreshold,
                                                           previous: self.projections[key])
