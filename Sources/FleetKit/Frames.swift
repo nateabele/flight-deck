@@ -461,7 +461,11 @@ public enum ClientFrame: Codable, Equatable, Sendable {
     /// `ServerFrame.phoneRequest` — see `FleetCapability`. Defaulted so every existing
     /// construction site compiles unchanged, exactly as `FleetEvent.activityChanged`'s
     /// `openPromptCall` is.
-    case hello(lastSeq: Int, device: String?, caps: [String] = [])
+    ///
+    /// `caller` is optional and omitted when nil, for the same reason `device` is: a client
+    /// with nothing to claim must put the same bytes on the wire it always did. Only a
+    /// local-mode server honours it — see Task 3 — a socket-paired phone has no caller to name.
+    case hello(lastSeq: Int, device: String?, caps: [String] = [], caller: String? = nil)
     case cmd(cid: Int, FleetCommand)
     /// Ask, rather than tell. See `FleetRequest` for why this is not a `cmd`.
     case req(cid: Int, FleetRequest)
@@ -480,14 +484,14 @@ public enum ClientFrame: Codable, Equatable, Sendable {
     /// rule `FleetRequestError.server` states for the other direction.
     case refused(cid: Int, code: String)
 
-    enum CodingKeys: String, CodingKey { case t, lastSeq, device, caps, cid, logs, code }
+    enum CodingKeys: String, CodingKey { case t, lastSeq, device, caps, cid, logs, code, caller }
 
     private enum Tag: String, Codable { case hello, cmd, req, logs, refused }
 
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .hello(let lastSeq, let device, let caps):
+        case .hello(let lastSeq, let device, let caps, let caller):
             try c.encode(Tag.hello, forKey: .t)
             try c.encode(lastSeq, forKey: .lastSeq)
             // `encodeIfPresent`, so a client with no name to claim emits the same two-key
@@ -497,6 +501,9 @@ public enum ClientFrame: Codable, Equatable, Sendable {
             // claiming nothing must put the same bytes on the wire it always did, so an older
             // Mac reading a dump sees the frame it has always seen.
             if !caps.isEmpty { try c.encode(caps, forKey: .caps) }
+            // `encodeIfPresent`, same reason as `device`: the phone never sets this, and must
+            // keep putting the same bytes on the wire it always did.
+            try c.encodeIfPresent(caller, forKey: .caller)
         case .cmd(let cid, let command):
             try c.encode(Tag.cmd, forKey: .t)
             try c.encode(cid, forKey: .cid)
@@ -534,10 +541,11 @@ public enum ClientFrame: Codable, Equatable, Sendable {
             // Mac would otherwise stop talking to every already-paired device on upgrade.
             // `caps` is read the same way and for the same reason, one feature later: every
             // phone in the field today sends a `hello` without it, and "claims nothing" is
-            // exactly what an empty list means.
+            // exactly what an empty list means. `caller` follows suit, one feature later still.
             self = .hello(lastSeq: try c.decode(Int.self, forKey: .lastSeq),
                           device: try c.decodeIfPresent(String.self, forKey: .device),
-                          caps: try c.decodeIfPresent([String].self, forKey: .caps) ?? [])
+                          caps: try c.decodeIfPresent([String].self, forKey: .caps) ?? [],
+                          caller: try c.decodeIfPresent(String.self, forKey: .caller))
         case .cmd:
             self = .cmd(cid: try c.decode(Int.self, forKey: .cid),
                         try FleetCommand(from: decoder))
@@ -730,5 +738,20 @@ public enum ServerFrame: Codable, Equatable, Sendable {
         }
         self = .event(seq: try c.decode(Int.self, forKey: .seq),
                       try FleetEvent(from: decoder))
+    }
+}
+
+public extension ServerFrame {
+    /// The `cid` a reply answers, or nil for the two sequenced state frames. What `flightdeck raw`
+    /// correlates on. A switch rather than a decode of `FleetSocket.CorrelatedFrame` so that a new
+    /// reply case cannot compile until someone decides whether it is correlated.
+    var correlationID: Int? {
+        switch self {
+        case .snapshot, .event: return nil
+        case .ack(let cid), .err(let cid, _), .page(let cid, _), .newSessionOptions(let cid, _),
+             .macEndpoints(let cid, _), .recentlyClosed(let cid, _), .conversations(let cid, _),
+             .searchHits(let cid, _), .session(let cid, _), .phoneRequest(let cid, _):
+            return cid
+        }
     }
 }
