@@ -28,7 +28,7 @@ command or request added for the phone reaches the CLI with no extra work, and v
 
 | | Transport | Verdict |
 |---|---|---|
-| **A (chosen)** | Second listener on `FleetSocketServer`: unix socket, `0600`, peer-uid check, same frames | Same handlers, no pairing ceremony, trust = file permissions (the argument `AnswerTriggerSocket` already makes) |
+| **A (chosen)** | Second `FleetSocketServer` instance in local mode: unix socket, `0600`, same frames | Same handlers, no pairing ceremony, trust = file permissions (the argument `AnswerTriggerSocket` already makes) |
 | B | CLI pairs as a "local device" over loopback TLS-PSK | Zero new server code, but the CLI needs TLS-PSK, and a local slot pollutes arming, revocation and presence |
 | C | Separate local JSON-RPC / HTTP API | Fails the one-interface requirement |
 
@@ -47,9 +47,9 @@ JSON**, framed by a small `NWProtocolFramer` so both ends still get whole messag
 flightdeck (CLI, Swift, links FleetKit)
    │  NDJSON ClientFrame/ServerFrame over unix socket
    ▼
-<state dir>/control.sock  (0600, peer uid == our uid)
+<state dir>/control.sock  (0600; control-debug.sock for Debug)
    │
-FleetSocketServer ── second listener, same accept/attach/replay path
+FleetSocketServer (local instance) ── same accept/attach/replay code
    │  onHello / onCommand / onRequest   (unchanged closures)
    ▼
 FleetService.apply / request switch  ── + ControlScope check for local callers
@@ -64,39 +64,59 @@ SessionStore
   make the reader grow a buffer indefinitely.
 - `FleetSocket` gains a transport choice (`.webSocket` / `.lines`) at the one place parameters
   are built; send/receive stay one code path over `NWConnection` messages.
-- `FleetSocketServer.startLocal(path:)` binds a second `NWListener` at `.unix(path:)`. Refuses
-  paths over 103 bytes (same `sockaddr_un` limit and message as `AnswerTriggerSocket`).
-  `unlink`s a stale file before binding, `chmod 0600` after, `unlink`s on `stop()`.
-- **Peer check on accept:** read `LOCAL_PEERCRED` / `getpeereid` from the connection's socket;
-  drop anything whose uid ≠ `getuid()`. Also record `LOCAL_PEERPID` for logs only.
-- `FleetAttachment` gains `origin: .paired(slot: UUID?) | .local(pid: pid_t?)`. Local
-  attachments are **excluded** from everything phone-shaped: `attachedSlots`, the "phone
-  attached" UI, `phoneRequest` asks (`logs`), `viewing` presence (a local `viewing` is acked
-  and ignored), and the client count passed to `promptLifecycle.observe` — without this, a
-  `flightdeck tail` would count as a phone watching a prompt, which it is not.
+- `FleetSocketServer.startLocal(path:)` starts an instance in **local mode**: one `NWListener`
+  at `.unix(path:)` over line parameters. **A separate instance, not a second listener on the
+  phone's.** The phone instance's `stop()`, which every arm, expiry and revocation calls
+  through `reloadKeys`, cancels every connection it holds. Sharing it would drop every
+  `flightdeck tail` whenever a phone paired.
+  - It refuses paths over 103 bytes (the `sockaddr_un` limit `AnswerTriggerSocket` enforces).
+  - It probes an existing file by connecting to it. **A live socket is refused
+    (`FleetSocketError.inUse`), never unlinked**, so a second app instance sharing the state
+    directory cannot take over the first one's socket. A dead file is unlinked.
+  - It sets the file to `chmod 0600` after binding and unlinks the file on `stop()`.
+- **No peer-uid check.** `NWConnection` does not expose its socket descriptor, so
+  `getpeereid` cannot be called. Authorization is the file mode inside the user's
+  `~/Library`, the same argument `AnswerTriggerSocket` makes.
+- `FleetAttachment` gains `isLocal: Bool` and `caller: String?`. The local instance sets both.
+  The phone instance ignores any `caller` a peer sends. `FleetService` keeps local attachments
+  out of everything phone-shaped:
+  - `attachedSlots` and the prompt-lifecycle client counts. These come only from the phone
+    instance, so this holds by construction.
+  - `phoneRequest` asks. Same: they go only through the phone instance.
+  - `viewing` presence. A local `viewing` is acked and ignored. Otherwise a
+    `flightdeck tail` would light the phone badge.
 - `ClientFrame.hello` gains an optional `caller: String?` (the scope token, below). Additive
   and optional, so every existing phone's `hello` still decodes.
 
 ### 2. App: listener, environment, scope
 
-- `FleetService` starts the local listener at `<state dir>/control.sock` whenever it runs, and
-  independently of pairing state. Preference `FlightDeckControlSocket` (default **on**) turns
-  it off.
+- `FleetService` owns a second `FleetSocketServer` for local mode and starts it at
+  `<state dir>/control.sock` (`control-debug.sock` in a Debug build, so the two builds never
+  compete for one path). It runs independently of pairing state. Preference
+  `FlightDeckControlSocket` (default **on**) turns it off. Replicator events are broadcast to
+  both instances, and both share the same `onHello`/`onCommand`/`onRequest` closures.
 - **Tab environment** (in `SessionStore.launchEnvironment`, applied with the adapter's half so
   the Shell pane cannot override it):
   - `FLIGHT_DECK_SESSION_ID` — the tab's UUID.
   - `FLIGHT_DECK_CONTROL_SOCKET` — the absolute socket path. With this, a tab always reaches
     the app instance that launched it, even when Debug and Release share a state directory.
-  - `FLIGHT_DECK_CALLER` — a random per-session token, held in memory only and regenerated at
-    launch.
+  - `FLIGHT_DECK_CALLER` — `<session-uuid>.<hex HMAC-SHA256(install secret, session-uuid)>`.
+    **Derived, not stored or regenerated.** Detached sessions (fd-abduco) outlive an app
+    relaunch and keep the environment they were launched with, so a token minted per launch
+    would be stale in every surviving tab after a restart. The install secret is 32 random
+    bytes kept in `FlightDeckControlSecret` in the app's defaults, and verifying a token needs
+    no registry.
 - **`ControlScope`** — a pure value type, unit-tested on its own:
   - Preference `FlightDeckAgentControlScope`: `full` (default) · `ownSession` · `readOnly`.
-  - Applies only to local connections whose `hello` presented a known `caller` token. The
-    token resolves to the calling session. A local connection with no token (a human's shell)
-    is always `full`.
-  - `full`: everything. `ownSession`: requests are allowed; commands are allowed only when the
-    target `id` is the caller's own session; `newSession`, `reopenClosed`, `openConversation`
-    and `setProjectCollapsed` are refused. `readOnly`: every `cmd` is refused.
+  - At level `full`, everything is permitted, whoever the caller is.
+  - Otherwise: a valid token scopes the connection to its session. **No token means a human's
+    shell and is `full`.** A token that is present but fails verification **fails closed**:
+    every command and every writing request is refused.
+  - `ownSession`: read requests are allowed. Commands are allowed only when their target
+    session is the caller's own. `newSession`, `reopenClosed`, `setProjectCollapsed` and the
+    `openConversation` request are refused, because the last one opens a tab. `viewing` is
+    always acked. `readOnly`: every command except `viewing` is refused, and so is
+    `openConversation`.
   - Refusal is `err(cid, "out_of_scope")`, checked in `FleetService` before `apply`, so there is
     one enforcement point and `apply` itself is unchanged.
   - **This is a guardrail, not a sandbox, and the preference UI says so.** Any process running
@@ -161,12 +181,12 @@ badly.
 
 All headless, in `test-unit.sh`. No GUI, no smoke run.
 - `FleetLineFramer`: split lines, partial reads, oversize rejection.
-- `FleetSocketServer` local listener, in-process: bind under a short temp path, hello → snapshot
-  → event replay, a peer from a wrong uid (seam) is dropped, a stale socket file is replaced,
-  the 103-byte limit is enforced.
-- `FleetAttachment.origin`: local attachments are absent from `attachedSlots`, phone presence,
-  `phoneRequest` routing, and the prompt-lifecycle client count. Confirm each test fails
-  against the unguarded code first.
+- `FleetSocketServer` local mode, in-process: bind under a short temp path, hello → snapshot
+  → event replay, a dead socket file is replaced, a live one is refused, the file mode is
+  `0600`, and the 103-byte limit is enforced.
+- Local attachments are absent from `attachedSlots` and phone presence, and a phone key
+  reload does not drop a local connection. Confirm each test fails against the unguarded code
+  first.
 - `ControlScope`: the whole matrix of scope × command × own/other session, and "no token ⇒
   full".
 - CLI: argument parsing and session resolution (`self`, prefix, title, ambiguity) as pure
