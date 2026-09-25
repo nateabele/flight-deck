@@ -126,6 +126,11 @@ targets:
     type: bundle.unit-test
     platform: macOS
     sources:
+      # The flightdeck CLI's pure core (argument parsing, session/project resolution) has no
+      # dependency of its own — it needs no `flightdeck` executable target to be exercised, and
+      # compiling it straight into the test bundle is what lets its tests `import FleetKit` and
+      # use `CLI`-prefixed types directly rather than reaching for `@testable import FlightDeck`.
+      - path: Sources/FlightDeckCLI
       # `Fixtures` is carved out into its own folder-reference entry below so its
       # subdirectory structure (e.g. `Fixtures/Codex/notifications.json`) survives into the
       # test bundle's Resources. Left in the plain group above, xcodegen's default "Copy
