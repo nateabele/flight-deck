@@ -16,17 +16,23 @@ struct ProjectSettings: Codable, Equatable {
     /// before this field still decodes — synthesized `Codable` uses `decodeIfPresent` for
     /// optionals. Read as `flywheelEnabled == true`.
     var flywheelEnabled: Bool?
+    /// nil ⇒ drawer open (the default). Persists the per-project collapsed state of the
+    /// Observe drawer. Optional so a record written before this field still decodes.
+    /// Read as `drawerCollapsed == true`.
+    var drawerCollapsed: Bool?
 
     init(
         defaultAgent: AgentID? = nil,
         accounts: [AgentID: UUID] = [:],
         options: [AgentID: AgentOptions] = [:],
-        flywheelEnabled: Bool? = nil
+        flywheelEnabled: Bool? = nil,
+        drawerCollapsed: Bool? = nil
     ) {
         self.defaultAgent = defaultAgent
         self.accounts = accounts
         self.options = options
         self.flywheelEnabled = flywheelEnabled
+        self.drawerCollapsed = drawerCollapsed
     }
 
     /// A record that says nothing is deleted rather than stored, matching how an emptied flag
@@ -34,7 +40,7 @@ struct ProjectSettings: Codable, Equatable {
     /// payload says nothing, so it does not keep the record alive.
     var isEmpty: Bool {
         defaultAgent == nil && accounts.isEmpty && options.values.allSatisfy(\.isEmpty)
-            && flywheelEnabled != true
+            && flywheelEnabled != true && drawerCollapsed != true
     }
 }
 
