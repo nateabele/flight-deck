@@ -724,6 +724,76 @@ reason that a simulator has no camera. See [docs/MOBILE.md](MOBILE.md) for the c
 [NETWORKING.md](NETWORKING.md) for what a cross-process run does and does not prove — the
 distinction matters here more than anywhere else in the codebase.
 
+### Local control socket (`flightdeck` CLI)
+
+Design: [specs/2026-09-24-flightdeck-cli-design.md](superpowers/specs/2026-09-24-flightdeck-cli-design.md).
+A second, independent `FleetSocketServer` instance — `FleetService.localServer` — listens on
+a unix socket at `<state dir>/control.sock` (`control-debug.sock` in a Debug build, so the two
+builds never fight over one path) and speaks exactly the phone's frames (`ClientFrame` /
+`ServerFrame`) through the same `onHello`/`onCommand`/`onRequest` closures the paired instance
+uses. **Same server type, separate instance, never a second listener on the phone's**: the
+phone instance's `stop()` — which every arm, expiry and revocation reaches through
+`reloadKeys()` — cancels every connection it holds, and sharing an instance would drop every
+`flightdeck tail` whenever a phone paired or was revoked.
+
+**Not WebSocket.** `NWProtocolWebSocket` over a `.unix(path:)` endpoint aborts the client with
+`ECONNABORTED` before `.ready` (probed 2026-09-24, recorded in the spec). `FleetSocket.lineParameters()`
+builds newline-delimited framing instead, via `FleetLineFramer` (an `NWProtocolFramerImplementation`
+that splits on `\n` and fails the connection over `TimelineLimits.maximumMessageSize`, so a peer
+that never sends a newline cannot grow the receive buffer without bound). Everything above the
+transport — frame types, handlers, the event/timeline/request plumbing — is unchanged; only
+`FleetSocketServer.startLocal(path:)` (server side) and `FleetClient(localCaller:)` /
+`connect(toLocal:lastSeq:)` (client side, used by the CLI) dial line parameters instead of
+TLS-PSK and WebSocket. Authorization is the socket file's mode (`0600`, inside
+`~/Library/Application Support/Flight Deck/`) — `NWConnection` exposes no descriptor to run
+`getpeereid` against, the same argument `AnswerTriggerSocket` already makes for the answer
+trigger. A live socket file is refused (`FleetSocketError.inUse`), never unlinked, so a second
+app instance sharing the state directory cannot steal the first one's path; a dead file is
+unlinked and rebound.
+
+**A local connection is invisible to everything phone-shaped**, by construction rather than by
+filtering: `FleetAttachment.isLocal` and `.caller` are set only by the local instance (a phone's
+own `caller` in `hello` is ignored), and `attachedSlots`, the prompt-lifecycle client counts,
+and `phoneRequest` are all sourced only from the paired instance's attachments. A local `viewing`
+is acked and dropped rather than recorded, so `flightdeck tail` never lights the phone's presence
+badge.
+
+**`ControlEnvironment`** (`Sources/FlightDeck/Fleet/ControlEnvironment.swift`) is the socket's
+address and a tab's identity on it. `FlightDeckControlSocket` (UserDefaults, default **on**,
+read once at launch like `FlightDeckAnswerTrigger`) gates whether `FlightDeckApp` starts the
+local listener at all. Every tab Flight Deck launches gets three environment variables — set in
+`SessionStore.launchEnvironment` on the adapter's own half, so a Shell pane cannot override
+them:
+
+- `FLIGHT_DECK_SESSION_ID` — the tab's UUID.
+- `FLIGHT_DECK_CONTROL_SOCKET` — the absolute path, so a tab always reaches the instance that
+  launched it, even when a Debug and a Release build share one state directory.
+- `FLIGHT_DECK_CALLER` — `<session-uuid>.<hex HMAC-SHA256(secret, session-uuid)>`. **Derived,
+  not minted and stored per launch**: a detached (fd-abduco) session outlives an app relaunch
+  and keeps the environment it was launched with, so a freshly-minted token would go stale in
+  every surviving tab after a restart. The 32-byte secret lives in `FlightDeckControlSecret`
+  in `UserDefaults`, generated once and read back thereafter, so re-deriving the token for a
+  given session id always agrees with what was handed out at launch.
+
+**`ControlScope`** (`Sources/FlightDeck/Fleet/ControlScope.swift`) is the pure policy `FleetService`
+checks before `apply`, for local callers only — a paired phone is always fully privileged, and
+a human shell that presents no `caller` token is never scoped either. The preference
+`FlightDeckAgentControlScope` (`ControlScopeLevel`: `full` default · `ownSession` · `readOnly`)
+is read fresh on every command via `FleetService.scopeLevel()`, so the Preferences picker (the
+Devices tab's "Command Line" section) takes effect immediately, with no listener restart. A
+token that fails to verify is `.invalid`, not `.human` — it fails closed under a scoped level
+rather than falling back to a human's trust. Refusal is `err(cid, "out_of_scope")`. **This is a
+guardrail, not a sandbox**, and both the preference caption and the code comments say so: any
+process running as the user can already read the environment or the defaults domain and mint
+its own token.
+
+The CLI itself lives in `Sources/FlightDeckCLI` (the pure core: argument parsing, session
+resolution, the runner that drives `FleetClient`) and `Sources/FlightDeckTool` (the executable's
+`main.swift` — kept out of `Sources/flightdeck` because that name collides with `Sources/FlightDeck`
+on case-insensitive APFS). The xcodegen target is `FlightDeckCLI`, its product is `flightdeck`,
+embedded at `Flight Deck.app/Contents/MacOS/flightdeck` — already on every tab's `PATH` as
+`GHOSTTY_BIN_DIR` — so running it never boots the app.
+
 ## Search (`⌘K`, `Sources/FlightDeck/Search/`)
 
 `⌘K` opens a floating overlay (`SearchPanel`, an `NSPanel` added as a child window over the

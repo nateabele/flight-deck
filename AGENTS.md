@@ -57,6 +57,8 @@ TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.s
 # runs a real model turn that costs real tokens. Never loop it; run it only when you
 # have a specific reason to.
 ./scripts/test-codex-live.sh
+
+flightdeck ls                   # drive Flight Deck itself from a tab's own shell — see docs/HANDOFF.md
 ```
 
 **`build-boringssl.sh` is a prerequisite for *every* target, not just the iOS ones.** The

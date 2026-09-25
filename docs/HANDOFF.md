@@ -86,6 +86,23 @@ open "DerivedData/Build/Products/Debug/Flight Deck.app"   # a live terminal
 
 Full details, prerequisites, and troubleshooting: **[BUILD.md](BUILD.md)**.
 
+## Driving Flight Deck from a shell (`flightdeck`)
+
+Every tab ships a CLI that speaks the same protocol as a paired phone, over a local socket
+instead of the network — so an agent running *inside* a tab can see and drive the rest of the
+fleet without going through the UI. It's already on `PATH` (`Contents/MacOS`, alongside
+Ghostty's own bin dir), so no absolute path is needed from inside a tab:
+
+```bash
+flightdeck ls                          # every session, grouped by project
+flightdeck tail --session self         # stream this tab's own timeline live
+flightdeck send <tab> "run the tests"  # type into another tab
+flightdeck wait <tab> --for idle       # block until a tab goes idle (or waiting, or gone)
+flightdeck prompt <tab>                # print the open question/permission prompt a tab is blocked on
+```
+
+Full command table, wire mapping, and the `--help` output: **[design spec](superpowers/specs/2026-09-24-flightdeck-cli-design.md)**. What each tab is allowed to reach — any session, only its own, or nothing — is set per-Mac in Preferences → Devices → "Command Line"; see **[ARCHITECTURE.md](ARCHITECTURE.md)**, "Local control socket".
+
 ## How the code is laid out
 
 The spine is `FlightDeckApp → RootWindow → TerminalPane → GhosttyApp → Ghostty.SurfaceView`. Flight Deck's own code is small; the terminal surface is adapt-copied from Ghostty and decoupled from its app shell. Component map and key files: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
