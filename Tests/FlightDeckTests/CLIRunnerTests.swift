@@ -36,9 +36,16 @@ final class CLIRunnerTests: XCTestCase {
         ])
     }
 
-    private func runner(_ args: String..., transport: FakeTransport, selfID: UUID? = nil) -> CLIRunner {
-        let r = CLIRunner(invocation: try! CLIArguments.parse(args), transport: transport,
-                          context: CLIContext(selfID: selfID, cwd: "/w/a", json: true, isTTY: false),
+    private func runner(_ args: String..., transport: FakeTransport, selfID: UUID? = nil,
+                        json: Bool = true, isTTY: Bool = false) -> CLIRunner {
+        // A parse failure is a test failure, not a crash that takes the rest of the suite with it.
+        let invocation: CLIInvocation
+        do { invocation = try CLIArguments.parse(args) } catch {
+            XCTFail("parse \(args): \(error)")
+            invocation = CLIInvocation(command: .help)
+        }
+        let r = CLIRunner(invocation: invocation, transport: transport,
+                          context: CLIContext(selfID: selfID, cwd: "/w/a", json: json, isTTY: isTTY),
                           out: { self.out.append($0) }, err: { self.err.append($0) },
                           finish: { self.code = $0 }, schedule: { self.scheduled.append(($0, $1)) })
         r.run()
@@ -313,12 +320,184 @@ final class CLIRunnerTests: XCTestCase {
 
     func testOpenPrintsTheSessionID() {
         let t = FakeTransport()
-        _ = runner("open", "conv-1", "/w/a", transport: t)
+        _ = runner("open", "conv-1", "--project", "/w/a", transport: t)
         t.push(.snapshot(seq: 1, fleet: fleet(), reason: .initial))
         guard case .req(let cid, .openConversation("conv-1", "/w/a")) = t.sent.last else { return XCTFail("\(t.sent)") }
         let opened = UUID()
         t.push(.session(cid: cid, opened))
         XCTAssertEqual(code, 0)
         XCTAssertEqual(out, [opened.uuidString])
+    }
+    // MARK: Final-review fixes
+
+    private func activityChanged(_ seq: Int, _ value: String) -> ServerFrame {
+        .event(seq: seq, .activityChanged(id: a, activity: value, waitingFor: nil,
+                                          subagentCount: 0, hasBackgroundWork: false))
+    }
+
+    private func options(_ cid: Int) -> ServerFrame {
+        .newSessionOptions(cid: cid, WireNewSessionOptions(project: project, options: [
+            WireNewSessionOption(agent: "claude", agentName: "Claude", index: 0, accountName: nil, isDefault: true),
+            WireNewSessionOption(agent: "codex", agentName: "Codex", index: 0, accountName: "work", isDefault: true),
+            WireNewSessionOption(agent: "codex", agentName: "Codex", index: 1, accountName: "home", isDefault: false),
+        ]))
+    }
+
+    /// `--agent` alone is account 0, and it is checked against the project's real menu before
+    /// anything is asked for: FleetService reads a row it cannot match as a plain `+`.
+    func testNewWithAnAgentChecksTheOptionsThenSendsAccountZero() {
+        let t = FakeTransport()
+        _ = runner("new", "/w/a", "--agent", "codex", transport: t)
+        t.push(.snapshot(seq: 1, fleet: fleet(), reason: .initial))
+        guard case .req(let cid, .newSessionOptions(project)) = t.sent.last else { return XCTFail("\(t.sent)") }
+        t.push(options(cid))
+        guard case .cmd(_, .newSession(project, "codex", 0)) = t.sent.last else { return XCTFail("\(t.sent)") }
+        XCTAssertNil(code)
+    }
+
+    func testNewWithNoMatchingAgentAccountIsTwoAndNeverAsks() {
+        let t = FakeTransport()
+        _ = runner("new", "/w/a", "--agent", "codex", "--account", "3", transport: t)
+        t.push(.snapshot(seq: 1, fleet: fleet(), reason: .initial))
+        guard case .req(let cid, .newSessionOptions) = t.sent.last else { return XCTFail("\(t.sent)") }
+        t.push(options(cid))
+        XCTAssertEqual(code, 2)
+        XCTAssertEqual(t.sent.count, 1, "no session.new went out")
+        let message = err.joined(separator: "\n")
+        XCTAssertTrue(message.contains("no such agent/account for this project"), message)
+        XCTAssertTrue(message.contains("codex 1"), "the available rows are listed: \(message)")
+    }
+
+    // `send --wait`: the tab is still idle when the send is acked, so a bare `wait` after
+    // `send` returns at once. These pin the three-step gate that replaces it.
+
+    private func sendWait(_ extra: String..., t: FakeTransport) -> UUID? {
+        let args = ["send", "self", "hi", "--wait"] + extra
+        let invocation: CLIInvocation
+        do { invocation = try CLIArguments.parse(args) } catch {
+            XCTFail("parse: \(error)"); return nil
+        }
+        let r = CLIRunner(invocation: invocation, transport: t,
+                          context: CLIContext(selfID: a, cwd: "/w/a", json: true, isTTY: false),
+                          out: { self.out.append($0) }, err: { self.err.append($0) },
+                          finish: { self.code = $0 }, schedule: { self.scheduled.append(($0, $1)) })
+        r.run()
+        t.push(.snapshot(seq: 1, fleet: fleet(activity: "idle"), reason: .initial))
+        guard case .cmd(let cid, .prompt(a, let token, "hi")) = t.sent.last else {
+            XCTFail("\(t.sent)"); return nil
+        }
+        t.push(.ack(cid: cid))
+        XCTAssertNil(code, "the ack is not the turn")
+        return token
+    }
+
+    func testSendWaitFinishesWhenTheTurnItStartedEnds() {
+        let t = FakeTransport()
+        guard let token = sendWait(t: t) else { return }
+        t.push(.event(seq: 2, .promptTyped(id: a, token: token)))
+        t.push(activityChanged(3, "busy"))
+        XCTAssertNil(code)
+        t.push(activityChanged(4, "idle"))
+        XCTAssertEqual(code, 0)
+        XCTAssertTrue(out.last?.contains(a.uuidString) == true, "\(out)")
+    }
+
+    func testSendWaitIgnoresActivityBeforeItsPromptIsTyped() {
+        let t = FakeTransport()
+        guard let token = sendWait(t: t) else { return }
+        t.push(activityChanged(2, "busy"))
+        t.push(activityChanged(3, "idle"))
+        XCTAssertNil(code, "nothing counts before our text is typed")
+        t.push(.event(seq: 4, .promptTyped(id: a, token: UUID())))
+        t.push(activityChanged(5, "busy"))
+        t.push(activityChanged(6, "idle"))
+        XCTAssertNil(code, "someone else's prompt being typed is not ours")
+        t.push(.event(seq: 7, .promptTyped(id: a, token: token)))
+        t.push(activityChanged(8, "busy"))
+        t.push(activityChanged(9, "waiting"))
+        XCTAssertEqual(code, 0)
+    }
+
+    func testSendWaitIgnoresAnIdleBeforeAnyBusy() {
+        let t = FakeTransport()
+        guard let token = sendWait(t: t) else { return }
+        t.push(.event(seq: 2, .promptTyped(id: a, token: token)))
+        t.push(activityChanged(3, "idle"))
+        XCTAssertNil(code, "an idle before the turn started is the old state")
+        t.push(activityChanged(4, "busy"))
+        t.push(activityChanged(5, "idle"))
+        XCTAssertEqual(code, 0)
+    }
+
+    func testSendWaitPromptExpiredIsOne() {
+        let t = FakeTransport()
+        guard let token = sendWait(t: t) else { return }
+        t.push(.event(seq: 2, .promptExpired(id: a, token: UUID())))
+        XCTAssertNil(code, "another prompt's expiry is not ours")
+        t.push(.event(seq: 3, .promptExpired(id: a, token: token)))
+        XCTAssertEqual(code, 1)
+        XCTAssertTrue(err.joined().contains("prompt_expired"))
+    }
+
+    func testSendWaitGoneIsOne() {
+        let t = FakeTransport()
+        guard sendWait(t: t) != nil else { return }
+        t.push(.event(seq: 2, .sessionRemoved(id: a)))
+        XCTAssertEqual(code, 1)
+        XCTAssertTrue(err.joined().contains("gone"))
+    }
+
+    func testSendWaitTimeoutIsOne() {
+        let t = FakeTransport()
+        guard sendWait("--timeout", "5", t: t) != nil else { return }
+        XCTAssertEqual(scheduled.map(\.0), [5])
+        scheduled.first?.1()
+        XCTAssertEqual(code, 1)
+        XCTAssertTrue(err.joined().contains("timed_out"))
+    }
+
+    /// `wait` outlives an app restart the way `tail` does: it resumes from its last seq and
+    /// still sees the change it is waiting on.
+    func testWaitReconnectsAndResumesFromLastSeq() {
+        let t = FakeTransport()
+        _ = runner("wait", "alpha", "--for", "idle", transport: t)
+        t.push(.snapshot(seq: 5, fleet: fleet(activity: "busy"), reason: .initial))
+        t.push(.event(seq: 6, .unreadChanged(id: a, isUnread: true)))
+        t.onDisconnect?(nil)
+        XCTAssertNil(code, "a restart is not the end of a wait")
+        XCTAssertEqual(scheduled.count, 1)
+        guard let reconnect = scheduled.first else { return }
+        reconnect.1()
+        XCTAssertEqual(t.connects, [0, 6])
+        t.push(activityChanged(7, "idle"))
+        XCTAssertEqual(code, 0)
+    }
+
+    // The spec: a pipe gets JSON. `prompt` and `new` followed only `--json`.
+
+    func testPromptPrintsJSONToAPipeAndTextToATerminal() {
+        for (isTTY, expectJSON) in [(false, true), (true, false)] {
+            out = []
+            let t = FakeTransport()
+            _ = runner("prompt", "alpha", transport: t, json: false, isTTY: isTTY)
+            t.push(.snapshot(seq: 1, fleet: fleet(activity: "waiting"), reason: .initial))
+            guard case .req(let cid, _) = t.sent.last else { return XCTFail() }
+            t.push(.page(cid: cid, questionPage()))
+            XCTAssertEqual(out.first?.hasPrefix("{"), expectJSON, "isTTY \(isTTY): \(out)")
+        }
+    }
+
+    func testNewPrintsJSONToAPipeAndTheIDToATerminal() {
+        for (isTTY, expectJSON) in [(false, true), (true, false)] {
+            out = []
+            let t = FakeTransport()
+            _ = runner("new", "/w/a", transport: t, json: false, isTTY: isTTY)
+            t.push(.snapshot(seq: 1, fleet: fleet(), reason: .initial))
+            guard case .cmd(let cid, _) = t.sent.last else { return XCTFail() }
+            let ours = WireSession(id: UUID(), title: "new", agent: "claude")
+            t.push(.event(seq: 2, .sessionAdded(ours, project: project, at: 1)))
+            t.push(.ack(cid: cid))
+            XCTAssertEqual(out, [expectJSON ? CLIOutput.json(ours) : ours.id.uuidString], "isTTY \(isTTY)")
+        }
     }
 }

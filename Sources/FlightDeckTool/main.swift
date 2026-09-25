@@ -12,9 +12,9 @@ signal(SIGPIPE, SIG_IGN)
 let usageLines = [
     "flightdeck ls [--project P]",
     "flightdeck tail [--session S] [--since SEQ] [--no-snapshot]",
-    "flightdeck wait S --for idle|waiting|gone [--timeout D]",
-    "flightdeck send S \"text\"",
-    "flightdeck new P [--agent A] [--account N]",
+    "flightdeck wait S --for idle|busy|waiting|gone [--timeout D]",
+    "flightdeck send S \"text\" [--wait [--timeout D]]",
+    "flightdeck new P [--agent A [--account N]]",
     "flightdeck close S",
     "flightdeck reopen S",
     "flightdeck rename S \"t\"",
