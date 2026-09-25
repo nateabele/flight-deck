@@ -422,12 +422,35 @@ def _capture(ctx):
 
 
 def _exit_code(diff):
-    """0 clean, 1 capability drift, 3 harness failure -- and `error` never satisfies any
-    baseline expectation, so it always outranks plain drift. That has to hold whether the
-    `error` cell shows up in `changed` (something that used to read `ok` now reads `error`) or
-    in `added` (a cell with no baseline entry at all reads `error`) -- the latter is this
-    repo's exact current state before any `baseline.json` exists, and a wholly broken harness
-    must not be reported as mere "capability drift"."""
+    """0 clean, 1 capability drift, 3 harness failure, 6 version drift -- and `error` never
+    satisfies any baseline expectation, so it always outranks every other signal, plain drift
+    included. That has to hold whether the `error` cell shows up in `changed` (something that
+    used to read `ok` now reads `error`) or in `added` (a cell with no baseline entry at all
+    reads `error`) -- the latter is this repo's exact current state before any `baseline.json`
+    exists, and a wholly broken harness must not be reported as mere "capability drift".
+
+    6 is version drift: `diff["versions_changed"]` is non-empty -- the live agent this run
+    talked to is not the one `baseline.json` was recorded against -- but no cell actually
+    differs. This is the exact bug this code exists to close: Claude Code 2.1.281 silently
+    changed when a transcript record is written, and the row covering that capability kept
+    reading `ok` for nineteen versions because it reads a fixture frozen at 2.1.241 that still
+    parses -- so with no code of its own, a version bump with unchanged cells used to fall
+    through to plain `0`, indistinguishable from an actually-clean run. Ranked below capability
+    drift (1): an observed cell difference is concrete evidence something changed, a stronger
+    and more actionable signal than merely knowing the version number moved with no cell to
+    show for it, so if both are true in the same run 1 wins -- the version bump is still visible
+    in the printed diff either way. Ranked above clean (0): a run must never call itself clean
+    while sitting on an agent build its baseline has never seen, cells notwithstanding.
+
+    `corpus_staleness` (the checked-in grammar corpus vs. the live agent's version) is a
+    related but deliberately advisory-only signal, printed by `main()` and never folded in here.
+    Promoting a capture into that corpus is a manual, reviewed step (see `CORPUS_CAPTURE_DIR`'s
+    comment) with no fixed cadence, so failing the run merely because nobody has re-captured it
+    since the last agent bump would make the exit code permanently red for reasons no code
+    change here can fix. `versions_changed` above already fails the run on the fact that
+    actually caused the incident -- the live agent baseline.json was recorded against moved --
+    so real drift still gets caught; corpus staleness stays a nudge to go recapture, not a gate.
+    """
     harness_failures = {k: v for k, v in diff["changed"].items()
                          if v[1] == "error" and v[0] != "error"}
     harness_failures.update({k: v for k, v in diff["added"].items() if v == "error"})
@@ -435,6 +458,8 @@ def _exit_code(diff):
         return 3, harness_failures
     if diff["changed"] or diff["added"] or diff["removed"]:
         return 1, harness_failures
+    if diff.get("versions_changed"):
+        return 6, harness_failures
     return 0, harness_failures
 
 
