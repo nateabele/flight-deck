@@ -111,7 +111,7 @@ public enum CLIArguments {
         let command = try parseVerb(verb, &body)
         // One check for every verb: an operand nothing consumed is refused by name. Dropping
         // it is how `open CONVO --project PATH` once sent the literal "--project" as a path.
-        try body.end()
+        try body.end(verb: verb)
         return CLIInvocation(command: command, json: json, socket: socket)
     }
 
@@ -405,8 +405,11 @@ public enum CLIArguments {
         /// Every token consumed. Called once, after the verb has read all it takes: a verb with
         /// no flag loop leaves any flag here, and an operand nothing asked for is refused by
         /// name rather than dropped.
-        func end() throws {
-            if flagIndex < flags.count { throw Cursor.unknownFlag(flags[flagIndex], in: "flightdeck") }
+        ///
+        /// Named for `verb`, like every other usage error: main.swift already prints
+        /// "flightdeck: " in front, so naming the program here would print it twice.
+        func end(verb: String) throws {
+            if flagIndex < flags.count { throw Cursor.unknownFlag(flags[flagIndex], in: verb) }
             guard operandIndex < operands.count else { return }
             throw CLIUsageError("unexpected argument \"\(operands[operandIndex])\"")
         }
