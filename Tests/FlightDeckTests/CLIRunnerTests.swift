@@ -2,6 +2,7 @@ import FleetKit
 import XCTest
 
 final class FakeTransport: CLITransport {
+    var onReady: (() -> Void)?
     var onFrame: ((ServerFrame) -> Void)?
     var onDisconnect: ((Error?) -> Void)?
     var connects: [Int] = []
@@ -13,6 +14,9 @@ final class FakeTransport: CLITransport {
     func send(raw frame: ClientFrame) { sent.append(frame) }
     func disconnect() {}
     func push(_ frame: ServerFrame) { onFrame?(frame) }
+    /// The socket reaching `.ready`. Never fired by `connect` itself, so a test says whether
+    /// the Mac was reachable rather than getting it for free.
+    func ready() { onReady?() }
 }
 
 final class CLIRunnerTests: XCTestCase {
@@ -179,5 +183,142 @@ final class CLIRunnerTests: XCTestCase {
         XCTAssertNil(code)
         t.push(.recentlyClosed(cid: 99, []))
         XCTAssertEqual(code, 0)
+    }
+
+    // MARK: Behaviour beyond the brief's table
+
+    /// A caught-up resume is answered with an empty replay, so a quiet fleet sends no frame at
+    /// all. Reachability has to come from `onReady`, or an app restart ends `tail` with 69.
+    func testTailSinceSurvivesARestartWhenNothingWasReplayed() {
+        let t = FakeTransport()
+        _ = runner("tail", "--since", "6", transport: t)
+        t.ready()
+        t.onDisconnect?(nil)
+        XCTAssertNil(code, "tail never finishes on its own")
+        XCTAssertEqual(scheduled.count, 1)
+        guard let reconnect = scheduled.first else { return } // not a crash that ends the suite
+        reconnect.1()
+        XCTAssertEqual(t.connects, [6, 6])
+    }
+
+    func testRawParseErrorIsTwoAndNeverConnects() {
+        let t = FakeTransport()
+        _ = runner("raw", "not json", transport: t)
+        XCTAssertEqual(code, 2)
+        XCTAssertTrue(t.connects.isEmpty)
+    }
+
+    func testTailSinceWithATitleIsTwo() {
+        let t = FakeTransport()
+        _ = runner("tail", "--session", "alpha", "--since", "3", transport: t)
+        XCTAssertEqual(code, 2)
+        XCTAssertTrue(t.connects.isEmpty)
+    }
+
+    func testDisconnectAfterAFrameIsOneForACommand() {
+        let t = FakeTransport()
+        _ = runner("close", "alpha", transport: t)
+        t.push(.snapshot(seq: 1, fleet: fleet(), reason: .initial))
+        t.onDisconnect?(nil)
+        XCTAssertEqual(code, 1)
+        XCTAssertTrue(err.joined().contains("disconnected"))
+    }
+
+    func testWaitTimeoutIsOne() {
+        let t = FakeTransport()
+        _ = runner("wait", "alpha", "--for", "idle", "--timeout", "5", transport: t)
+        t.push(.snapshot(seq: 1, fleet: fleet(activity: "busy"), reason: .initial))
+        XCTAssertNil(code)
+        XCTAssertEqual(scheduled.map(\.0), [5])
+        scheduled[0].1()
+        XCTAssertEqual(code, 1)
+        XCTAssertTrue(err.joined().contains("timed_out"))
+    }
+
+    func testWaitForAnActivityOnARemovedSessionIsGone() {
+        let t = FakeTransport()
+        _ = runner("wait", "alpha", "--for", "idle", transport: t)
+        t.push(.snapshot(seq: 1, fleet: fleet(activity: "busy"), reason: .initial))
+        t.push(.event(seq: 2, .sessionRemoved(id: a)))
+        XCTAssertEqual(code, 1)
+        XCTAssertTrue(err.joined().contains("gone"))
+    }
+
+    func testNewTimeoutIsLaunchUnconfirmed() {
+        let t = FakeTransport()
+        _ = runner("new", "/w/a", transport: t)
+        t.push(.snapshot(seq: 1, fleet: fleet(), reason: .initial))
+        guard case .cmd(let cid, _) = t.sent.last else { return XCTFail() }
+        t.push(.ack(cid: cid))
+        XCTAssertEqual(scheduled.map(\.0), [30])
+        scheduled[0].1()
+        XCTAssertEqual(code, 1)
+        XCTAssertTrue(err.joined().contains("launch_unconfirmed"))
+    }
+
+    /// The replicator can emit the event while the command is still being applied, before the
+    /// ack is written, so the two are accepted in either order.
+    func testNewAcceptsTheSessionAddedBeforeTheAck() {
+        let t = FakeTransport()
+        _ = runner("new", "/w/a", transport: t)
+        t.push(.snapshot(seq: 1, fleet: fleet(), reason: .initial))
+        guard case .cmd(let cid, _) = t.sent.last else { return XCTFail() }
+        let ours = WireSession(id: UUID(), title: "new", agent: "claude")
+        t.push(.event(seq: 2, .sessionAdded(ours, project: project, at: 1)))
+        XCTAssertNil(code, "not done until the Mac acks")
+        t.push(.ack(cid: cid))
+        XCTAssertEqual(code, 0)
+        XCTAssertTrue(out.joined().contains(ours.id.uuidString))
+    }
+
+    func testAnswerCountMismatchIsTwoAndSendsNothing() {
+        let t = FakeTransport()
+        _ = runner("answer", "alpha", "[[1],[0]]", transport: t)
+        t.push(.snapshot(seq: 1, fleet: fleet(activity: "waiting"), reason: .initial))
+        guard case .req(let cid, _) = t.sent.last else { return XCTFail() }
+        t.push(.page(cid: cid, questionPage()))
+        XCTAssertEqual(code, 2)
+        XCTAssertEqual(t.sent.count, 1, "only the timeline request went out")
+    }
+
+    func testAllowAgainstAQuestionIsTwo() {
+        let t = FakeTransport()
+        _ = runner("answer", "alpha", "allow", transport: t)
+        t.push(.snapshot(seq: 1, fleet: fleet(activity: "waiting"), reason: .initial))
+        guard case .req(let cid, _) = t.sent.last else { return XCTFail() }
+        t.push(.page(cid: cid, questionPage()))
+        XCTAssertEqual(code, 2)
+        XCTAssertEqual(t.sent.count, 1, "only the timeline request went out")
+    }
+
+    func testPlanWithNoGateIsOne() {
+        let t = FakeTransport()
+        _ = runner("plan", "approve", "alpha", transport: t)
+        t.push(.snapshot(seq: 1, fleet: fleet(), reason: .initial))
+        XCTAssertEqual(code, 1)
+        XCTAssertTrue(err.joined().contains("no_plan_gate"))
+        XCTAssertTrue(t.sent.isEmpty)
+    }
+
+    func testTimelinePrintsThePage() {
+        let t = FakeTransport()
+        _ = runner("timeline", "alpha", transport: t)
+        t.push(.snapshot(seq: 1, fleet: fleet(), reason: .initial))
+        guard case .req(let cid, .timeline(a, .latest, 40)) = t.sent.last else { return XCTFail("\(t.sent)") }
+        let page = questionPage()
+        t.push(.page(cid: cid, page))
+        XCTAssertEqual(code, 0)
+        XCTAssertEqual(out, [CLIOutput.json(page)])
+    }
+
+    func testOpenPrintsTheSessionID() {
+        let t = FakeTransport()
+        _ = runner("open", "conv-1", "/w/a", transport: t)
+        t.push(.snapshot(seq: 1, fleet: fleet(), reason: .initial))
+        guard case .req(let cid, .openConversation("conv-1", "/w/a")) = t.sent.last else { return XCTFail("\(t.sent)") }
+        let opened = UUID()
+        t.push(.session(cid: cid, opened))
+        XCTAssertEqual(code, 0)
+        XCTAssertEqual(out, [opened.uuidString])
     }
 }
