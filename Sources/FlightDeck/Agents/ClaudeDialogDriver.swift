@@ -31,6 +31,10 @@ struct ClaudeDialogDriver: AgentDialogDriver {
 
     /// Escape is a real denial and not a dismissal: the transcript closes the call
     /// `is_error=True "The user doesn't want to proceed with this tool use. The tool use was
-    /// rejected"`, measured against claude 2.1.241.
+    /// rejected"`, measured against claude 2.1.241 — and no longer only measured: the
+    /// `escapeDeniesPermission` row in `scripts/adapterprobe/capabilities.py` re-derives it
+    /// against the installed binary at `--tier full`, so a claude that stops recording the
+    /// rejection fails the matrix instead of silently turning every phone denial into a
+    /// dismissal.
     func deny(_ injector: TextInjecting) { injector.sendEscape() }
 }
