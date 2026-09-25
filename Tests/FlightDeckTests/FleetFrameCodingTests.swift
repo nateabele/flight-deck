@@ -394,4 +394,31 @@ final class FleetFrameCodingTests: XCTestCase {
             XCTAssertEqual(try JSONDecoder().decode(FleetEvent.self, from: data), event)
         }
     }
+
+    // MARK: A hello names its caller, and a reply correlates
+
+    func testHelloCarriesCallerOnlyWhenPresent() throws {
+        let with = try fields(of: ClientFrame.hello(lastSeq: 3, device: nil, caps: [], caller: "abc.def"))
+        XCTAssertEqual(with["caller"] as? String, "abc.def")
+        let without = try fields(of: ClientFrame.hello(lastSeq: 3, device: nil))
+        XCTAssertNil(without["caller"], "a phone must keep putting the bytes it always did on the wire")
+    }
+
+    func testHelloWithoutCallerStillDecodes() throws {
+        let frame = try JSONDecoder().decode(ClientFrame.self, from: Data(#"{"t":"hello","lastSeq":9}"#.utf8))
+        XCTAssertEqual(frame, .hello(lastSeq: 9, device: nil, caps: [], caller: nil))
+    }
+
+    func testHelloCallerRoundTrips() throws {
+        let frame = ClientFrame.hello(lastSeq: 1, device: "x", caps: ["logs"], caller: "tok")
+        XCTAssertEqual(try JSONDecoder().decode(ClientFrame.self, from: JSONEncoder().encode(frame)), frame)
+    }
+
+    func testCorrelationIDIsTheCidForRepliesAndNilForState() {
+        XCTAssertEqual(ServerFrame.ack(cid: 4).correlationID, 4)
+        XCTAssertEqual(ServerFrame.err(cid: 5, code: "x").correlationID, 5)
+        XCTAssertEqual(ServerFrame.session(cid: 6, UUID()).correlationID, 6)
+        XCTAssertNil(ServerFrame.snapshot(seq: 1, fleet: FleetSnapshot(), reason: .initial).correlationID)
+        XCTAssertNil(ServerFrame.event(seq: 1, .projectRemoved(id: UUID())).correlationID)
+    }
 }

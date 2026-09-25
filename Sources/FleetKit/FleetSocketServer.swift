@@ -27,14 +27,26 @@ public struct FleetAttachment: Equatable, Sendable {
     /// *claimed*, never authenticated — but the consequence of trusting it wrongly is a frame
     /// the peer ignores rather than any authority it did not have.
     public let caps: Set<String>
+    /// Whether this connection came in over the local control socket (Task 3) rather than the
+    /// paired-phone TLS-PSK listener. Local callers skip pairing entirely, so this is what a
+    /// consumer checks before trusting anything that only a local caller could claim.
+    public let isLocal: Bool
+    /// What a local client called itself in its `hello`'s `caller` field. `nil` off the local
+    /// socket, and for any client that claimed nothing. Same kind of fact as `name` — merely
+    /// *claimed*, never authenticated — verified by the app, never trusted.
+    public let caller: String?
 
     /// `caps` defaults to empty — "claims nothing" — because that is a real wire state the
-    /// server has to handle anyway, not a convenience for callers.
-    public init(id: UUID, slot: UUID?, name: String?, caps: Set<String> = []) {
+    /// server has to handle anyway, not a convenience for callers. `isLocal` defaults to false
+    /// and `caller` to nil so every existing construction site compiles unchanged.
+    public init(id: UUID, slot: UUID?, name: String?, caps: Set<String> = [],
+                isLocal: Bool = false, caller: String? = nil) {
         self.id = id
         self.slot = slot
         self.name = name
         self.caps = caps
+        self.isLocal = isLocal
+        self.caller = caller
     }
 }
 
@@ -686,7 +698,7 @@ public final class FleetSocketServer: @unchecked Sendable {
             dispatchPrecondition(condition: .onQueue(self.queue))
             // Recorded before the attachment is built, so the `hello` that carries the claim
             // is itself attributed with it rather than only the frames after it.
-            if case .hello(_, let device, let caps) = frame {
+            if case .hello(_, let device, let caps, _) = frame {
                 if let device { self.names[id] = device }
                 // Recorded even when empty, so a re-`hello` on the same socket cannot leave a
                 // stale claim from an earlier one standing.
@@ -697,7 +709,7 @@ public final class FleetSocketServer: @unchecked Sendable {
                 caps: self.caps[id] ?? []
             )
             switch frame {
-            case .hello(let lastSeq, _, _):
+            case .hello(let lastSeq, _, _, _):
                 if self.attached[id] == nil {
                     self.pending.removeValue(forKey: id)
                     self.attached[id] = connection
