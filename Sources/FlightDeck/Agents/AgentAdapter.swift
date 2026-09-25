@@ -215,15 +215,21 @@ protocol AgentAdapter {
     /// claude — but `SessionStore.inject` now gates on a rule-sandwiched composer box
     /// actually being on screen (see `ClaudeTextChannel`), a bare shell never draws that, and
     /// with the gate load-bearing the strip only cost the user their punctuation. Codex's
-    /// rename is `thread/name/set` over JSON-RPC — no shell, no pty, no quoting — so a strip
-    /// there never protected anything to begin with. Both converge on `AgentTitle.sanitized`
-    /// with an empty forbidden set; see its own doc comment.
+    /// rename travels TWO channels and neither one is a shell: `CodexAdapter.renameTyping`
+    /// types `/rename`, then the name, at a pty (`CodexTextChannel.submitRename`), and
+    /// `SessionStore` separately sends `thread/name/set`, which is what actually commits the
+    /// thread. **A pty is not a shell** — the typing lands in a rename modal codex itself
+    /// drew, and `submitRename` escapes rather than typing at all when it cannot read that
+    /// modal — so a strip there never protected anything either; it only mangled the title.
+    /// Both converge on `AgentTitle.sanitized` with an empty forbidden set; see its own doc
+    /// comment.
     ///
     /// Control characters ARE stripped for EVERY agent — `AgentTitle.sanitized`, which holds
     /// the half both agents share — so a newline still cannot be smuggled into either agent's
     /// modal. Do not reintroduce a shell-metacharacter strip for either agent: the hazard it
-    /// guarded against (a name reaching a shell prompt) is closed by the injection gate above,
-    /// not by this function.
+    /// guarded against is a name reaching a **shell prompt**, and for claude that is closed by
+    /// the injection gate above rather than by this function, while for codex the name never
+    /// had a shell to reach. Typing at a pty is not the hazard; typing at a *shell* is.
     nonisolated static func sanitizedTitle(_ raw: String) -> String?
 
     /// **A conversation's own name, read out of its transcript** — for a tab that repointed
