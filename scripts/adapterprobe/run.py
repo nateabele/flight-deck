@@ -53,12 +53,22 @@ GLYPH = {"ok": "✓", "broken": "✗", "by-design": "⊘", "rotted": "!",
 # (not hung) agent gets force-recorded as `error` on exactly the rows this suite exists to
 # measure, and the next task pins that wrong verdict into `baseline.json`.
 #
-# `_resume_command` (full tier) is the worst case: `prepare` (<= PROBE_TIMEOUT) + `seed_one_turn`
-# (its own launch-command probe <= PROBE_TIMEOUT, plus two 30s `term.wait`s, plus a fixed 20s
+# `_resume_command` (full tier): `prepare` (<= PROBE_TIMEOUT) + `seed_one_turn` (its own
+# launch-command probe <= PROBE_TIMEOUT, plus two 30s `term.wait`s, plus a fixed 20s
 # `term.pump`) + its own `resume-command` probe (<= PROBE_TIMEOUT) + a 60s attach `term.wait`.
+#
+# `_open_prompt_reader`'s claude arm is the worst case, and it is longer because it waits on a
+# MODEL, not on a file: `prepare` (<= PROBE_TIMEOUT) + `launch-command` (<= PROBE_TIMEOUT) + a
+# 30s up-marker `term.wait` + a 120s wait for the AskUserQuestion dialog to actually be raised +
+# a 15s transcript-existence `_poll` + a 5s re-check that the dialog is still up + `open-prompt`
+# (<= PROBE_TIMEOUT).
 PROBE_TIMEOUT = 45  # ProbeContext.__init__'s own default `timeout=`
 _SEED_ONE_TURN_CHAIN = PROBE_TIMEOUT + 30 + 30 + 20  # == 125
-_WORST_FULL_CHAIN = PROBE_TIMEOUT + _SEED_ONE_TURN_CHAIN + PROBE_TIMEOUT + 60  # == 275
+_RESUME_COMMAND_CHAIN = PROBE_TIMEOUT + _SEED_ONE_TURN_CHAIN + PROBE_TIMEOUT + 60  # == 275
+_OPEN_PROMPT_CLAUDE_CHAIN = (
+    PROBE_TIMEOUT + PROBE_TIMEOUT + 30 + 120 + 15 + 5 + PROBE_TIMEOUT  # == 305
+)
+_WORST_FULL_CHAIN = max(_RESUME_COMMAND_CHAIN, _OPEN_PROMPT_CLAUDE_CHAIN)  # == 305
 
 ROW_TIMEOUT = {"cheap": 120, "full": 420}
 assert ROW_TIMEOUT["full"] > _WORST_FULL_CHAIN, (
