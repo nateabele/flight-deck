@@ -100,4 +100,41 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertEqual(try? parse("send", "s", "hi", "--wait", "--timeout", "60").command,
                        .send(session: "s", text: "hi", wait: true, timeout: 60))
     }
+    // MARK: Flags anywhere before `--`
+
+    /// A verb's flags may come before or after its operands, and `--` ends flag parsing — so
+    /// text starting with `-` combines with any flag instead of excluding them all.
+    func testSendFlagsMayComeBeforeOrAfterTheTextAndDoubleDashEndsThem() throws {
+        XCTAssertEqual(try parse("send", "S", "--wait", "--", "- fix the tests").command,
+                       .send(session: "S", text: "- fix the tests", wait: true))
+        XCTAssertEqual(try parse("send", "S", "text", "--wait").command,
+                       .send(session: "S", text: "text", wait: true))
+        XCTAssertEqual(try parse("send", "S", "--wait", "text").command,
+                       .send(session: "S", text: "text", wait: true))
+        XCTAssertEqual(try parse("send", "S", "--", "--json").command,
+                       .send(session: "S", text: "--json"))
+        XCTAssertEqual(try parse("send", "S", "--timeout", "5", "--wait", "--", "-x").command,
+                       .send(session: "S", text: "-x", wait: true, timeout: 5))
+    }
+
+    func testOtherVerbsTakeFlagsWithADashLedOperandAfterDoubleDash() throws {
+        XCTAssertEqual(try parse("search", "--limit", "5", "--", "-x").command, .search(query: "-x", limit: 5))
+        XCTAssertEqual(try parse("plan", "annotate", "S", "--block", "3", "--", "- note").command,
+                       .planAnnotate(session: "S", text: "- note", block: 3))
+        XCTAssertEqual(try parse("timeline", "--before", "-1", "--", "-s").command,
+                       .timeline(session: "-s", anchor: .before(-1), limit: 40))
+        XCTAssertEqual(try parse("ls", "--project", "P").command, .ls(project: "P"))
+        XCTAssertEqual(try parse("ls", "P").command, .ls(project: "P"))
+    }
+
+    /// An unknown flag before `--` is never read as text: it would be typed into an agent.
+    func testAnUnknownFlagBeforeDoubleDashIsStillAUsageError() {
+        let message = usageMessage("send", "S", "-x")
+        XCTAssertNotNil(message)
+        XCTAssertTrue(message?.contains(#"flightdeck send S --wait -- "- text""#) == true,
+                      "the hint names a form that works: \(message ?? "nil")")
+        XCTAssertNotNil(usageMessage("send", "S", "hi", "--bogus"))
+        XCTAssertNotNil(usageMessage("close", "S", "--bogus"))
+        XCTAssertNotNil(usageMessage("search", "--limit", "--", "5"), "a flag's value never comes from past --")
+    }
 }

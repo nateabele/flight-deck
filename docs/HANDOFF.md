@@ -105,6 +105,8 @@ flightdeck prompt <tab>                        # print the open question/permiss
 `--no-snapshot` its first line is a snapshot of the whole fleet, even with `--session`. Use
 `send --wait` rather than `send` then `wait --for idle`: the tab is still idle when the send is
 acked, because the Mac has not typed the text yet, so a bare `wait` right after returns at once.
+Put `--` before text that starts with `-`: `flightdeck send S --wait -- "- text"`. Flags may go
+before or after operands, but never after `--`.
 
 Full command table, wire mapping, and the `--help` output: **[design spec](superpowers/specs/2026-09-24-flightdeck-cli-design.md)**. What each tab is allowed to reach — any session, only its own, or nothing — is set per-Mac in Preferences → Devices → "Command Line"; see **[ARCHITECTURE.md](ARCHITECTURE.md)**, "Local control socket".
 

@@ -143,9 +143,12 @@ SessionStore
   candidates.
 - **Output:** a table on a TTY, JSON when stdout is not a TTY or with `--json` (`ls`, `prompt`
   and `new` alike). `tail` always writes NDJSON.
-- **Arguments:** an operand nothing consumed is a usage error naming it. `--` ends options:
-  after it, nothing is read as a flag or a global, and a dash-led operand before it is refused
-  (`send S -- --json`).
+- **Arguments:** a verb's flags may come before or after its operands, anywhere before `--`.
+  `--` ends flag parsing: after it, nothing is read as a flag, a flag's value or a global.
+  Before it, a dash-led token is a flag, so an unknown one is a usage error rather than text
+  typed into an agent. Text that starts with `-` therefore goes after `--`:
+  `send S --wait -- "- fix the tests"`, `send S -- --json`. An operand nothing consumed is a
+  usage error naming it.
 - **Exit codes:** `0` ok · `1` refused by the app (the wire `err` code on stderr, e.g.
   `unknown_session`, `out_of_scope`) · `2` usage error · `69` (`EX_UNAVAILABLE`) cannot
   connect.
