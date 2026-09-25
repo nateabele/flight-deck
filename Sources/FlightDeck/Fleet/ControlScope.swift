@@ -4,10 +4,13 @@ import Foundation
 /// How much of the fleet a `flightdeck` CLI caller may reach, from a persisted preference.
 ///
 /// `full` is the default — a plain `defaults` domain with nothing set, or a value this build
-/// no longer recognises, both resolve to it — because the socket is off by default
-/// (`ControlEnvironment.isEnabled`) and a caller who reached it at all already opted in by
-/// launching the CLI. Scoping down is something the user chooses, not something a stale or
-/// mistyped preference should silently impose.
+/// no longer recognises, both resolve to it — because that is the decision the user made:
+/// full reach by default, with scoping as an option. Not because the socket is gated
+/// elsewhere: it is ON by default (`ControlEnvironment.isEnabled`), so every tab can reach it
+/// with no opt-in at all. The scope is a guardrail against an agent wandering into another
+/// tab, not a sandbox: a caller that presents no token is a human shell and unscoped (see
+/// `ControlScope.permits`), so it narrows well-behaved callers only. Scoping down is something the user chooses, not something a stale or mistyped
+/// preference should silently impose.
 enum ControlScopeLevel: String, CaseIterable, Identifiable {
     /// No restriction: any caller reaches any command or request.
     case full
