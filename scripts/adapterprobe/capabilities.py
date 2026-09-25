@@ -58,6 +58,10 @@ _FIX = os.path.join(_REPO, "Tests", "FlightDeckTests", "Fixtures")
 _CLAUDE_TRANSCRIPT = os.path.join(_FIX, "Claude", "transcript.captured.jsonl")
 _CLAUDE_IDLE_SCREEN = os.path.join(_FIX, "Claude", "idle-empty-box.captured.txt")
 _CLAUDE_APPROVAL_SCREEN = os.path.join(_FIX, "Claude", "permission-bash.captured.txt")
+# The exact capture `PromptQuestion.init?(toolInput:)`'s own doc comment cites for the shape
+# it expects — see `_ask_user_question_shape` below, which re-derives that claim instead of
+# leaving it a version number nothing checks.
+_CLAUDE_QUESTION_SHAPE_FIXTURE = os.path.join(_FIX, "Claude", "question-single.captured.jsonl")
 _CODEX_ROLLOUT = os.path.join(_FIX, "Codex", "rollout.captured.jsonl")
 _CODEX_IDLE_SCREEN = os.path.join(_FIX, "Codex", "tui-idle.captured.txt")
 _CODEX_APPROVAL_SCREEN = os.path.join(_FIX, "Codex", "approval-command.captured.txt")
@@ -531,17 +535,50 @@ def _timeline_items(ctx, agent):
 
 
 def _sanitized_title(ctx, agent):
+    """Neither agent strips shell metacharacters any more — this row used to assert claude
+    did, which is the same stale claim `AgentAdapter.sanitizedTitle`'s own doc comment carried
+    until this task corrected it (production dropped the strip once `SessionStore.inject`
+    started gating on a live composer box; see that comment). Both agents now run through
+    `AgentTitle.sanitized` with an empty forbidden set: `;` survives for both, a control
+    character (`\\n`, `\\t`) survives for neither.
+    """
     hostile = "a; rm -rf / \n\t<script>evil()</script>"
     out = ctx.probe(["sanitize", agent, hostile])
     sanitized = out.get("sanitized")
-    if agent == "claude":
-        # Claude types straight into a pty that may be a bare shell, so the strip is
-        # load-bearing here in a way it is nowhere else (see `ClaudeAdapter.sanitizedTitle`).
-        observed = sanitized is not None and ";" not in sanitized and "\n" not in sanitized
-    else:
-        # Codex goes over JSON-RPC, not a shell — nothing to strip.
-        observed = sanitized == hostile
-    return Observation(declared=True, observed=observed)
+    observed = (
+        sanitized is not None and ";" in sanitized
+        and "\n" not in sanitized and "\t" not in sanitized
+    )
+    return Observation(declared=True, observed=observed,
+                        detail="" if observed else f"sanitized={sanitized!r}")
+
+
+def _ask_user_question_shape(ctx, agent):
+    """`PromptQuestion.init?(toolInput:)`'s doc comment pins the exact shape it expects —
+    `{"questions":[{"question":…,"header":…,"multiSelect":false,
+    "options":[{"label":…,"description":…}]}]}` — to `Fixtures/Claude/question-single
+    .captured.jsonl (claude 2.1.241)`, a version number nothing checked. This is a cheap
+    (fixture, no live turn) re-derivation off that same capture: feed the real tool_use
+    record through the real reader (`probe open-prompt`, the same subcommand
+    `openPromptReader` exercises) and require every field the doc comment names to still be
+    there — the question's three options, in order, each carrying its `description` as
+    `detail`, and `multiSelect` still read as `false`. A parser that silently dropped an
+    option or a description would still return a non-nil `kind`, which is why
+    `test_claude_derives_an_open_prompt_once_activity_is_threaded_through`'s bare
+    not-None check is a different, weaker claim than this row makes.
+    """
+    with open(_CLAUDE_QUESTION_SHAPE_FIXTURE) as f:
+        tail = f.read()
+    out = ctx.probe(["open-prompt", "claude", "--activity", "waiting"], stdin=tail)
+    kind = out.get("kind") or ""
+    observed = (
+        kind.startswith("question(")
+        and 'multiSelect: false' in kind
+        and all(f'label: "{label}"' in kind for label in ("Rust", "Go", "Swift"))
+        and kind.count("Option(label:") == 3
+        and kind.count("detail: Optional(") == 3
+    )
+    return Observation(declared=True, observed=observed, detail=kind)
 
 
 # --- Live operations: including both reported symptoms. -------------------------------------
@@ -711,6 +748,77 @@ def _rename(ctx, agent):
                         detail=f"inbound: transcript reads {inbound.get('title')!r}")
 
 
+# claude's permission dialog's own footer, read off `Fixtures/Claude/permission-bash
+# .captured.txt` — distinct from `_CLAUDE_SELECT_FOOTER`'s "Enter to select", which is the
+# `AskUserQuestion` select list's own footer, not this one.
+_CLAUDE_APPROVAL_FOOTER = "Esc to cancel"
+
+
+def _escape_denies_permission(ctx, agent):
+    """`SessionStore.answerPrompt`'s `.deny` case (`ClaudeDialogDriver.deny`) sends one raw
+    Escape and reads nothing back — no viewport, no confirmation pass — on the strength of a
+    claim about what claude itself then does: the transcript closes the call `is_error=true`
+    with claude's own rejection wording ("The user doesn't want to proceed with this tool
+    use. The tool use was rejected"), measured against claude 2.1.241 in Task 3. That claim
+    had nothing checking it before this row. Needs a real approval dialog and a real Escape,
+    so `tier="full"`.
+    """
+    declared = True
+    prep = ctx.probe(["prepare", "claude", "--cwd", ctx.sandbox.root])
+    cid = prep["conversationID"]
+    transcript = prep.get("transcriptURL")
+    if not transcript:
+        return Observation(declared=declared, observed="error",
+                            detail="prepare returned no transcriptURL")
+    text = ctx.probe(["launch-command", "claude", "--id", cid, "--cwd", ctx.sandbox.root])["text"]
+    with ctx.pty("claude", [ctx.login_shell, "-lc", text]) as term:
+        if not term.wait([_UP_MARKER["claude"]], 30):
+            return Observation(declared=declared, observed="error",
+                                detail="claude never came up within 30s")
+        # Checked before typing, same discipline as `_open_prompt_reader`'s claude arm and
+        # for the same reason: an unauthenticated claude answers silently, which this row
+        # cannot tell apart from a genuinely broken dialog without wasting the full wait.
+        up_screen = term.display()
+        if _CLAUDE_NOT_LOGGED_IN in up_screen:
+            return Observation(
+                declared=declared, observed="error",
+                detail="the sandboxed claude is not authenticated, so no tool call can run "
+                       "and no approval dialog can be raised; see openPromptReader's own "
+                       "comment for the keychain reason. Screen tail: "
+                       + repr(_screen_tail(up_screen)),
+            )
+        term.send(b"Run the shell command: echo probe-deny-marker\r")
+        raised = term.wait([_CLAUDE_APPROVAL_FOOTER], 60)
+        screen = term.display()
+        if not raised:
+            return Observation(
+                declared=declared, observed="error",
+                detail=f"no approval dialog within 60s (footer "
+                       f"{_CLAUDE_APPROVAL_FOOTER!r} seen: {raised}); the row cannot "
+                       f"distinguish a broken dialog from a model that ran the command "
+                       f"without asking. Screen tail: {_screen_tail(screen)!r}",
+            )
+        term.send(b"\x1b")
+
+        # Polled, not dwelled — the same discipline `_rename`'s outbound half uses: an
+        # arbitrary wait for the transcript write to land is exactly as unconfirmed as an
+        # arbitrary wait for text to appear on screen, just failing quietly instead of loudly.
+        def rejected():
+            if not os.path.exists(transcript):
+                return False
+            with open(transcript) as f:
+                content = f.read()
+            return '"is_error":true' in content and "tool use was rejected" in content
+
+        found = _poll(rejected, 15)
+    return Observation(
+        declared=declared, observed=found,
+        detail="" if found else
+               f"transcript {transcript!r} never closed the call with is_error=true and "
+               f"claude's rejection wording after Escape",
+    )
+
+
 def _login_invocation(ctx, agent):
     # The sandbox is authenticated on purpose (§3.3) — an honest login probe would mean
     # destroying that. The weaker "binary exists and advertises the subcommand" check is
@@ -776,6 +884,62 @@ def _runtime_observation(ctx, agent):
     return Observation(declared=True, observed=observed)
 
 
+def _codex_paste_detects_same_burst_return(ctx, agent):
+    """`CodexTextChannel.submit`'s own doc comment: codex's TUI paste-detects, so a `\\r`
+    arriving in the SAME burst as the text before it is folded into that burst and inserted
+    as a literal newline rather than submitting — "live-isolated against codex-cli 0.153.4",
+    a version number nothing since has checked. This re-derives it directly rather than
+    trusting a comment to still be true: two resumes of the SAME thread, so both writes land
+    on an identical rollout file and "grew" means the same thing both times.
+
+    One write combines the marker and Return into a single `os.write()` (same burst,
+    reproducing the failure the comment names) — codex should leave the marker typed and
+    unsent, so the rollout should NOT grow. The other splits them with a real sleep in
+    between (the gap `SessionStore.injectionSettle`'s 120ms opens in production) — codex
+    should submit and reply, so the rollout SHOULD grow. Needs two real turns, so `tier="full"`
+    — the one row in this suite that does, because nothing shorter can tell "typed but never
+    sent" apart from "sent".
+    """
+    prep = ctx.probe(["prepare", "codex", "--cwd", ctx.sandbox.root])
+    cid = prep["conversationID"]
+    rollout = prep.get("transcriptURL")
+
+    def size():
+        return os.path.getsize(rollout) if rollout and os.path.exists(rollout) else 0
+
+    marker = f"adapterprobe-paste-{uuid.uuid4().hex[:8]}: reply with exactly OK"
+
+    text = ctx.probe(["launch-command", "codex", "--id", cid, "--cwd", ctx.sandbox.root])["text"]
+    with ctx.pty("codex", [ctx.login_shell, "-lc", text]) as term:
+        if not term.wait([_UP_MARKER["codex"]], 30):
+            return Observation(declared=True, observed=None, detail="codex never came up")
+        before_combined = size()
+        term.send((marker + "\r").encode())
+        term.pump(15)
+        after_combined = size()
+    combined_grew = after_combined > before_combined
+
+    resume_text = ctx.probe(["resume-command", "codex", "--id", cid,
+                              "--cwd", ctx.sandbox.root])["text"]
+    with ctx.pty("codex", [ctx.login_shell, "-lc", resume_text]) as term:
+        if not term.wait([_UP_MARKER["codex"]], 30):
+            return Observation(declared=True, observed=None, detail="codex never resumed")
+        before_split = size()
+        term.send(marker.encode())
+        time.sleep(0.15)
+        term.send(b"\r")
+        term.pump(20)
+        after_split = size()
+    split_grew = after_split > before_split
+
+    observed = (not combined_grew) and split_grew
+    return Observation(
+        declared=True, observed=observed,
+        detail=f"combined write grew rollout: {combined_grew}; split write (real gap) grew "
+               f"rollout: {split_grew}",
+    )
+
+
 BOTH = ("claude", "codex")
 
 ROWS = [
@@ -806,6 +970,11 @@ ROWS = [
     Row("titleFromTranscript", "grammars", BOTH, "cheap", (), _title_from_transcript),
     Row("timelineItems", "grammars", BOTH, "cheap", (), _timeline_items),
     Row("sanitizedTitle", "grammars", BOTH, "cheap", (), _sanitized_title),
+    # The shape `PromptQuestion.init?(toolInput:)`'s own doc comment pins to a captured
+    # transcript (claude 2.1.241) — a fixture re-check, so `cheap`, not the live-turn
+    # `openPromptReader` above.
+    Row("askUserQuestionShape", "grammars", ("claude",), "cheap", (),
+        _ask_user_question_shape),
     # Live operations
     Row("prepare", "live", BOTH, "cheap", (), _prepare),
     Row("binding", "live", BOTH, "cheap", (), _binding),
@@ -814,9 +983,17 @@ ROWS = [
     Row("resumeCommand", "live", BOTH, "full", (), _resume_command),
     Row("rebind", "live", BOTH, "cheap", (), _rebind),
     Row("rename", "live", BOTH, "full", (), _rename),
+    # A real approval dialog and a real Escape; see `_escape_denies_permission`'s own
+    # comment for what claude 2.1.241 was measured to do that nothing has checked since.
+    Row("escapeDeniesPermission", "live", ("claude",), "full", (),
+        _escape_denies_permission),
     Row("loginInvocation", "live", BOTH, "cheap", (), _login_invocation),
     Row("runtimeObservation", "live", BOTH, "full", ("sandbox-config",),
         _runtime_observation),
+    # Two real turns, not one — see the row's own comment for why nothing shorter can tell
+    # "typed but never sent" apart from "sent".
+    Row("codexPasteDetectsSameBurstReturn", "live", ("codex",), "full", (),
+        _codex_paste_detects_same_burst_return),
 ]
 
-assert len(ROWS) == 21, f"expected exactly 21 rows, found {len(ROWS)}"
+assert len(ROWS) == 24, f"expected exactly 24 rows, found {len(ROWS)}"
