@@ -1610,3 +1610,32 @@ returned, which requires `codex resume <id>` to append to that same file — and
 records `codex.resumeCommand` as **broken** (history not reattached). Whoever runs `--tier full`
 first should expect to debug the row before trusting a verdict from it, and should read an `error`
 here as "the row could not establish its configuration", which is what it is designed to say.
+
+## adapterprobe: two harness gaps found while wiring the drift gate (2026-09-25)
+
+Both found incidentally during the durable-control-surface work, both verified against the code
+at `d85a40f`, and both are pre-existing rather than introduced by it.
+
+**1. `seed_one_turn` never confirms a model turn completed, so no claude row has ever exercised
+one.** `run.py:333-349` types a marker, waits for **its own echo** (`term.wait([seeded_marker])` —
+which matches the instant the typed line is echoed, regardless of whether the model ever answers),
+then dwells `pump(20)` and tears the pty down. Its docstring is candid that it does not depend on
+the model replying. So a row that asks for "prior history to attach to" can proceed against a
+transcript holding a user line and no assistant turn. This is the *deeper* reason the
+`openPromptReader` row sat green through claude 2.1.281 — the frozen fixture was the visible half;
+the other half is that the suite's claude arms never completed a live turn at all. Fixing it means
+waiting on something only a real reply produces, which costs tokens, so it is a `--tier full`
+concern and wants a positive control of its own (see the codex paste row for the shape).
+
+**2. `ANTHROPIC_BASE_URL` leaks into the sandboxed agent.** `sandbox.py:24-29`'s
+`_CLAUDE_SESSION_MARKERS` strips the `CLAUDE_CODE_*` family so a probe running *inside* a Claude
+Code session does not inherit transcript-disabling state — a good guard — but it does not strip
+`ANTHROPIC_BASE_URL`. That variable is set in this machine's environment
+(`http://localhost:8787`), so a sandboxed `claude` points at a local inference gateway rather than
+the real API, and every live claude row silently measures whatever that gateway does. Add it to the
+strip list. Two consequences worth separating: it is a **sandbox-hygiene bug** regardless, and it
+independently answers spike B7 in the control-surface plan, which recorded the proxy route as
+"unresolved, needs execution" — the base URL *is* honoured and a gateway is already running, so a
+proxy tier would be far cheaper than the plan assumed. That does not make the proxy a good idea
+(it is observation, never control, and blind to everything client-side); it just removes the
+feasibility unknown.
