@@ -8,9 +8,12 @@ import Foundation
 /// by a test, with no socket and no Flight Deck running. The real conformer is the binary's
 /// `LocalFleetTransport`, and it is the only file that touches a socket.
 protocol CLITransport: AnyObject {
+    /// The socket is connected and `hello` has gone out — `FleetClient.onReady`. The only
+    /// proof of reachability when the Mac has nothing to send, as on a caught-up resume.
+    var onReady: (() -> Void)? { get set }
     var onFrame: ((ServerFrame) -> Void)? { get set }
     /// Fired for a refused connect as well as a dropped one — the runner tells the two apart
-    /// by whether any frame ever arrived, since a CLI has no other signal that it got through.
+    /// by whether `onReady` or any frame came first.
     var onDisconnect: ((Error?) -> Void)? { get set }
     func connect(lastSeq: Int)
     /// Returns the `cid` the command went out under, which its `ack`/`err` will echo.

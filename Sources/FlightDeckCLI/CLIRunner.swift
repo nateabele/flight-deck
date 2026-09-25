@@ -42,9 +42,10 @@ final class CLIRunner {
 
     private var fleet = FleetSnapshot.empty
     private var lastSeq = 0
-    /// Any frame at all has arrived. Before that, a disconnect is an unreachable Mac (69);
-    /// after it, a dropped connection. The transport gives no other signal that a connect
-    /// actually got through.
+    /// The socket reached `.ready`, or any frame arrived. Before that, a disconnect is an
+    /// unreachable Mac (69); after it, a dropped connection. `onReady` is needed as well as
+    /// frames: a caught-up `tail --since` resume is answered with an empty replay, so a quiet
+    /// fleet sends nothing at all, and judging by frames alone turned an app restart into 69.
     private var reachedMac = false
     private var dispatched = false
     /// Every exit path goes through `finish`, and this makes a second one a no-op — a late
@@ -110,6 +111,7 @@ final class CLIRunner {
         default:
             break
         }
+        transport.onReady = { self.reachedMac = true }
         transport.onFrame = { self.handle($0) }
         transport.onDisconnect = { self.disconnected($0) }
         transport.connect(lastSeq: lastSeq)
