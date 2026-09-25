@@ -73,7 +73,9 @@ SessionStore
   - It probes an existing file by connecting to it. **A live socket is refused
     (`FleetSocketError.inUse`), never unlinked**, so a second app instance sharing the state
     directory cannot take over the first one's socket. A dead file is unlinked.
-  - It sets the file to `chmod 0600` after binding and unlinks the file on `stop()`.
+  - It sets the file to `chmod 0600` after binding and unlinks the file on `stop()`. A failed
+    `chmod` abandons the listener, unlinks the file and throws: outside `~/Library` the mode
+    is the only boundary.
 - **No peer-uid check.** `NWConnection` does not expose its socket descriptor, so
   `getpeereid` cannot be called. Authorization is the file mode inside the user's
   `~/Library`, the same argument `AnswerTriggerSocket` makes.
@@ -136,10 +138,14 @@ SessionStore
   `$FLIGHT_DECK_STATE_DIR/control.sock` → the default state dir. It sends `FLIGHT_DECK_CALLER`
   in `hello` when that variable is set.
 - **`self`** resolves to `$FLIGHT_DECK_SESSION_ID` wherever a session is expected. Sessions are
-  also accepted by UUID prefix or exact title; an ambiguous match fails and lists the
+  also accepted by exact title or UUID prefix, in that order (a tab titled `cafe` never
+  resolves to another tab whose id starts `CAFE`); an ambiguous match fails and lists the
   candidates.
-- **Output:** a table on a TTY, JSON when stdout is not a TTY or with `--json`. `tail` always
-  writes NDJSON.
+- **Output:** a table on a TTY, JSON when stdout is not a TTY or with `--json` (`ls`, `prompt`
+  and `new` alike). `tail` always writes NDJSON.
+- **Arguments:** an operand nothing consumed is a usage error naming it. `--` ends options:
+  after it, nothing is read as a flag or a global, and a dash-led operand before it is refused
+  (`send S -- --json`).
 - **Exit codes:** `0` ok · `1` refused by the app (the wire `err` code on stderr, e.g.
   `unknown_session`, `out_of_scope`) · `2` usage error · `69` (`EX_UNAVAILABLE`) cannot
   connect.
@@ -148,9 +154,9 @@ SessionStore
 |---|---|
 | `flightdeck ls [--project P]` | `hello(lastSeq: 0)` → `snapshot`, then disconnect |
 | `flightdeck tail [--session S] [--since SEQ] [--no-snapshot]` | `hello(lastSeq:)`, stream `event(seq,…)` as NDJSON until killed; reconnects and resumes from the last seq it printed |
-| `flightdeck wait S --for idle\|waiting\|gone [--timeout D]` | `tail`, folded with FleetKit's event fold; exits when the condition holds |
-| `flightdeck send S "text"` | `cmd session.prompt` (fresh token) |
-| `flightdeck new P [--agent A] [--account N]` | `cmd session.new` |
+| `flightdeck wait S --for idle\|busy\|waiting\|gone [--timeout D]` | `tail`, folded with FleetKit's event fold; exits when the condition holds; reconnects and resumes across an app restart like `tail` |
+| `flightdeck send S "text" [--wait [--timeout D]]` | `cmd session.prompt` (fresh token). `--wait` then waits for `prompt.typed` with that token, then a non-idle `session.activity`, then the next `idle`/`waiting`, and prints the session. `prompt.expired` for the token → `prompt_expired` (1). A bare `wait` after `send` returns at once, because the tab is still idle at the ack |
+| `flightdeck new P [--agent A [--account N]]` | `cmd session.new`. With `--agent` (account defaults to 0), `req newSessionOptions` first; no matching row → exit 2 listing the rows, nothing sent. `--account` alone is a usage error |
 | `flightdeck close S` · `reopen S` · `rename S "t"` · `read S` · `unread S` · `collapse P [--off]` | the matching `cmd` |
 | `flightdeck prompt S` | `req timeline` (latest page), then derives the open permission/question prompt from it |
 | `flightdeck answer S '[[0,1],[2]]' [--call C]` | `cmd prompt.answer` |

@@ -8,8 +8,9 @@ struct CLIContext {
     /// For `.`/`here` project resolution.
     var cwd: String
     var json: Bool
-    /// Only a terminal gets `ls`'s table: a pipe gets JSON even without `--json`, so a script
-    /// that forgot the flag still reads something parseable.
+    /// Only a terminal gets human output (`ls`'s table, `prompt`'s numbered list, `new`'s bare
+    /// id): a pipe gets JSON even without `--json`, so a script that forgot the flag still
+    /// reads something parseable.
     var isTTY: Bool
 }
 
@@ -25,7 +26,7 @@ struct CLIContext {
 /// the command would silently never happen. A CLI process exits on `finish`, which is what
 /// ends the cycle.
 final class CLIRunner {
-    /// Between a dropped `tail` and its reconnect. Long enough not to spin against a Flight
+    /// Between a dropped `tail`/`wait` and its reconnect. Long enough not to spin against a Flight
     /// Deck that is still relaunching, short enough that a restart loses no visible time.
     private static let reconnectDelay: TimeInterval = 1
     /// How long `new` waits for its tab to appear after asking. `ack` means dispatched, not
@@ -64,7 +65,7 @@ final class CLIRunner {
     private var tailSawSnapshot = false
     private var rawFrame: ClientFrame?
 
-    private var wantsJSON: Bool { context.json || invocation.json }
+    private var wantsJSON: Bool { context.json || invocation.json || !context.isTTY }
 
     init(invocation: CLIInvocation, transport: CLITransport, context: CLIContext,
          out: @escaping (String) -> Void, err: @escaping (String) -> Void,
@@ -106,7 +107,7 @@ final class CLIRunner {
                     return usage("tail: --since with --session needs a full session id or self")
                 }
             }
-        case .wait(_, _, let timeout?):
+        case .wait(_, _, let timeout?), .send(_, _, true, let timeout?):
             schedule(timeout) { self.fail("timed_out") }
         default:
             break
@@ -154,16 +155,20 @@ final class CLIRunner {
         guard !finished else { return }
         // The 69 message names the socket path, which only the main program knows.
         guard reachedMac else { return finish(69) }
-        if case .tail = invocation.command {
-            // `tail` outlives an app restart: resume from the last sequence it printed, so a
-            // consumer sees either the missed events or an explicit re-snapshot, never a gap.
+        switch invocation.command {
+        case .tail, .wait:
+            // Both outlive an app restart: resume from the last sequence seen, so `tail`'s
+            // consumer sees either the missed events or an explicit re-snapshot, never a gap,
+            // and `wait` re-evaluates against them rather than dying on the very restart an
+            // orchestrator may be waiting out. `dispatched` stays set, so the replay reaches
+            // `wait`'s own `onEvent`/`onSnapshot` rather than dispatching it a second time.
             schedule(Self.reconnectDelay) {
                 guard !self.finished else { return }
                 self.transport.connect(lastSeq: self.lastSeq)
             }
-            return
+        default:
+            fail("disconnected")
         }
-        fail("disconnected")
     }
 
     private func dispatch() {
@@ -174,7 +179,8 @@ final class CLIRunner {
             ls(project)
         case .wait(let token, let condition, _):
             wait(token, condition)
-        case .send(let token, let text):
+        case .send(let token, let text, let wait, _):
+            if wait { return sendAndWait(token, text) }
             command(on: token) { .prompt(id: $0, token: UUID(), text: text) }
         case .close(let token):
             command(on: token) { .closeSession(id: $0) }
@@ -285,8 +291,70 @@ final class CLIRunner {
         evaluate()
     }
 
+    /// `send --wait`. A bare `wait --for idle` straight after `send` returns at once: the ack
+    /// means the Mac took the text, not that the agent has started, so the tab is still idle.
+    /// This waits for three things in order instead, each keyed so nothing earlier or
+    /// unrelated can satisfy it:
+    ///
+    /// 1. `promptTyped` with **our** token — the Mac actually typed the text (it may queue it
+    ///    behind a busy composer first). Registered before the send, because the Mac can type
+    ///    and emit before the ack is written.
+    /// 2. A non-idle `activityChanged` after that — the turn began. An idle arriving before it
+    ///    is the old state still settling, not the turn's end.
+    /// 3. The next `idle` or `waiting` — the turn ended, or it needs a human.
+    private func sendAndWait(_ token: String, _ text: String) {
+        guard let id = sessionID(token) else { return }
+        let promptToken = UUID()
+        var typed = false
+        var started = false
+        onEvent = { event in
+            switch event {
+            case .promptTyped(id, promptToken):
+                typed = true
+            case .promptExpired(id, promptToken):
+                // Dropped from the Mac's bounded queue: the text will never be typed.
+                self.fail("prompt_expired")
+            case .sessionRemoved(id):
+                self.fail("gone")
+            case .activityChanged(id, let activity, _, _, _, _, _) where typed:
+                guard started else { started = activity != nil && activity != "idle"; return }
+                guard activity == "idle" || activity == "waiting", let current = self.session(id) else { return }
+                self.out(CLIOutput.json(current))
+                self.finish(0)
+            default:
+                break
+            }
+        }
+        // A reset snapshot carries no removal event; a tab absent from it is gone all the same.
+        onSnapshot = { _ in if self.session(id) == nil { self.fail("gone") } }
+        let cid = transport.send(.prompt(id: id, token: promptToken, text: text))
+        replies[cid] = { frame in
+            if case .err(_, let code) = frame { self.fail(code) }
+        }
+    }
+
+    /// With `--agent`, the row is checked against the project's own menu first: FleetService
+    /// reads an agent/account it cannot match as a plain `+`, so an unchecked typo would open
+    /// the project's default agent and exit 0 as if it had worked.
     private func new(_ token: String, agent: String?, account: Int?) {
         guard let projectID = project(token) else { return }
+        guard let agent, let account else { return launch(projectID, agent: nil, account: nil) }
+        let cid = transport.send(.newSessionOptions(project: projectID))
+        replies[cid] = { frame in
+            guard case .newSessionOptions(_, let menu) = frame else {
+                if case .err(_, let code) = frame { return self.fail(code) }
+                return self.fail("unexpected_reply")
+            }
+            guard menu.options.contains(where: { $0.agent == agent && $0.index == account }) else {
+                let rows = menu.options.map { "  \($0.agent) \($0.index)" + ($0.accountName.map { "  \($0)" } ?? "") }
+                return self.usage((["no such agent/account for this project: \(agent) \(account); available:"]
+                                   + (rows.isEmpty ? ["  (none)"] : rows)).joined(separator: "\n"))
+            }
+            self.launch(projectID, agent: agent, account: account)
+        }
+    }
+
+    private func launch(_ projectID: UUID, agent: String?, account: Int?) {
         // Two facts, in either order: the ack (the Mac took it) and the tab itself. The event
         // may beat the ack onto the wire, so neither is assumed to come first.
         var acked = false

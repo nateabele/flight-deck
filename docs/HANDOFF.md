@@ -94,12 +94,17 @@ fleet without going through the UI. It's already on `PATH` (`Contents/MacOS`, al
 Ghostty's own bin dir), so no absolute path is needed from inside a tab:
 
 ```bash
-flightdeck ls                          # every session, grouped by project
-flightdeck tail --session self         # stream this tab's own timeline live
-flightdeck send <tab> "run the tests"  # type into another tab
-flightdeck wait <tab> --for idle       # block until a tab goes idle (or waiting, or gone)
-flightdeck prompt <tab>                # print the open question/permission prompt a tab is blocked on
+flightdeck ls                                  # every session, grouped by project
+flightdeck tail --session self --no-snapshot   # stream this tab's fleet events (activity, unread, rename, …) as NDJSON
+flightdeck send <tab> "run the tests" --wait   # type into another tab, then block until that turn ends
+flightdeck wait <tab> --for idle               # block until a tab is idle (or busy, waiting, gone)
+flightdeck prompt <tab>                        # print the open question/permission prompt a tab is blocked on
 ```
+
+`tail` streams fleet events, not the transcript (use `timeline` for that), and without
+`--no-snapshot` its first line is a snapshot of the whole fleet, even with `--session`. Use
+`send --wait` rather than `send` then `wait --for idle`: the tab is still idle when the send is
+acked, because the Mac has not typed the text yet, so a bare `wait` right after returns at once.
 
 Full command table, wire mapping, and the `--help` output: **[design spec](superpowers/specs/2026-09-24-flightdeck-cli-design.md)**. What each tab is allowed to reach — any session, only its own, or nothing — is set per-Mac in Preferences → Devices → "Command Line"; see **[ARCHITECTURE.md](ARCHITECTURE.md)**, "Local control socket".
 
