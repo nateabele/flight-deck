@@ -141,6 +141,10 @@ targets:
       # compiling it straight into the test bundle is what lets its tests `import FleetKit` and
       # use `CLI`-prefixed types directly rather than reaching for `@testable import FlightDeck`.
       - path: Sources/FlightDeckCLI
+      # The real transport, and only it — `main.swift` is top-level code that would run at
+      # load. `CLIEndToEndTests` drives `CLIRunner` through it against a real local socket,
+      # the one place a dropped `onReady`/`onFrame`/`onDisconnect` forward shows up.
+      - path: Sources/FlightDeckTool/LocalFleetTransport.swift
       # `Fixtures` is carved out into its own folder-reference entry below so its
       # subdirectory structure (e.g. `Fixtures/Codex/notifications.json`) survives into the
       # test bundle's Resources. Left in the plain group above, xcodegen's default "Copy
