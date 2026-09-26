@@ -568,6 +568,7 @@ extension View {
         renameRow: @escaping (Int) -> Void,
         renameSelected: @escaping () -> Bool,
         toggleRow: @escaping (Int) -> Void,
+        selectRow: @escaping (Int) -> Void,
         rowIdentity: @escaping (Int) -> String?
     ) -> some View {
         self
@@ -575,6 +576,7 @@ extension View {
                 monitor.renameRow = renameRow
                 monitor.renameSelected = renameSelected
                 monitor.toggleRow = toggleRow
+                monitor.selectRow = selectRow
                 monitor.rowIdentity = rowIdentity
                 monitor.start()
             }

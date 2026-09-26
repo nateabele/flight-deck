@@ -377,26 +377,27 @@ struct SessionSidebar: View {
     var body: some View {
         let conflicted = store.conflictedSessionIDs
         let mismatched = store.accountMismatchedSessionIDs
-        // TEMPORARY DIAGNOSTIC INSTRUMENTATION — double-click session-swap investigation
-        // (`.superpowers/sdd/quiet-foraging-babbage/task-2-brief.md`). In Debug, wraps the
-        // plain `$store.selectedSessionID` binding just to tag the write with a reason before
-        // it lands, since `SessionStore.selectionChangeReason` is private. In Release this
-        // whole `#if` compiles out and `selectionBinding` is exactly `$store.selectedSessionID`
-        // — no new code in the shipped path. Revert to `$store.selectedSessionID` directly
-        // once the real fix lands — see the full removal checklist on `SessionStore.swift`'s
-        // `selectedSessionID` `didSet` comment, which also covers `beginRename()`'s
-        // `tagNextSelectionChange` call just above in this file.
-        #if DEBUG
+        // The `List`'s one `UUID?` selection now routes to either a project or a session,
+        // since `ProjectHeaderRow` carries a `.tag(repo.id)` alongside `SessionRow`'s
+        // `.tag(session.id)` — see `SidebarSelection`.
+        //
+        // The inner `#if DEBUG` tag call is TEMPORARY DIAGNOSTIC INSTRUMENTATION from the
+        // double-click session-swap investigation (`.superpowers/sdd/quiet-foraging-babbage/
+        // task-2-brief.md`), unrelated to the routing above — see the removal checklist on
+        // `SessionStore.swift`'s `selectedSessionID` `didSet` comment, which also covers
+        // `beginRename()`'s `tagNextSelectionChange` call just above in this file.
         let selectionBinding = Binding<UUID?>(
-            get: { store.selectedSessionID },
+            get: { store.selectedProjectID ?? store.selectedSessionID },
             set: { newValue in
+                #if DEBUG
                 store.tagNextSelectionChange("List(selection:) binding")
-                store.selectedSessionID = newValue
+                #endif
+                switch SidebarSelection.route(newValue, projectIDs: Set(store.repos.map(\.id))) {
+                case .project(let id): store.selectProject(id)
+                case .session(let id): store.selectedSessionID = id
+                }
             }
         )
-        #else
-        let selectionBinding = $store.selectedSessionID
-        #endif
         return List(selection: selectionBinding) {
             // One flat ForEach rather than a Section per project: `.onMove` is not supported
             // on a ForEach that yields Sections, and this is what lets one gesture reorder
@@ -408,7 +409,7 @@ struct SessionSidebar: View {
                         ProjectHeaderRow(store: store, repo: repo) {
                             close(projectAt: projectID)
                         }
-                        .selectionDisabled()
+                        .tag(repo.id)
                     }
 
                 case .session(let sessionID, let projectID):
@@ -488,6 +489,15 @@ struct SessionSidebar: View {
                 guard case .project(let id) = store.sidebarRows[index] else { return }
                 store.setCollapsed(!(store.repos.first { $0.id == id }?.isCollapsed ?? false),
                                    forProjectAt: id)
+            },
+            // Fallback for when `NSTableView` refuses the click itself — e.g. while a drag is
+            // being set up. `toggleRow`'s guard above and this one both drop anything that is
+            // not `case .project`, since a click on a session row is handled by `List`'s own
+            // selection binding.
+            selectRow: { index in
+                guard index >= 0, index < store.sidebarRows.count else { return }
+                guard case .project(let id) = store.sidebarRows[index] else { return }
+                store.selectProject(id)
             },
             // How the monitor proves the row it decides about is the row that was pressed. A
             // session closing in another project removes a row, and every index below it shifts;

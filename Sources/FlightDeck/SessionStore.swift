@@ -130,9 +130,9 @@ final class SessionStore: ObservableObject {
     //       fallback, and `reopenLastClosed(project:)`.
     //   In `SessionSidebar.swift`:
     //     - `beginRename()`'s `store.tagNextSelectionChange("beginRename()")` call.
-    //     - `SessionSidebar.body`'s `#if DEBUG` comment block and the custom `selectionBinding`
-    //       it defines (revert `List(selection:)` to `$store.selectedSessionID` directly, which
-    //       is already what the `#else` branch does).
+    //     - `SessionSidebar.body`'s custom `selectionBinding` now also routes project vs.
+    //       session selection (see `SidebarSelection`), so it stays — only the inner
+    //       `#if DEBUG store.tagNextSelectionChange(...) #endif` line comes out.
     //   In `GhosttyEmbed/SurfaceView_AppKit.swift`:
     //     - `SurfaceView`'s `#if DEBUG` block: `mouseDebugLogger`, `wallClockTimestamp(for:)`,
     //       and `debugSessionID`.
@@ -171,6 +171,11 @@ final class SessionStore: ObservableObject {
     /// cannot recurse.
     @Published var selectedSessionID: UUID? {
         didSet {
+            // A session and a project are mutually exclusive detail-column contents: selecting
+            // one implicitly deselects the other. `didSet` fires on every assignment (see the
+            // comment above), so a session reselected onto itself still clears a stray project
+            // selection rather than leaving `RootView` showing both a project and a session.
+            if selectedSessionID != nil { selectedProjectID = nil }
             #if DEBUG
             Self.selectionDebugLogger.debug(
                 "selectedSessionID old=\(oldValue?.uuidString ?? "nil", privacy: .public) new=\(self.selectedSessionID?.uuidString ?? "nil", privacy: .public) reason=\(self.selectionChangeReason, privacy: .public) t=\(Date().timeIntervalSince1970, privacy: .public)"
@@ -205,6 +210,13 @@ final class SessionStore: ObservableObject {
             persist()
         }
     }
+
+    /// The project whose per-project view fills the detail column, or nil when a session's
+    /// terminal does. Deliberately NOT persisted: relaunch lands on the last session, which is
+    /// what every existing restore path expects.
+    @Published private(set) var selectedProjectID: UUID?
+
+    func selectProject(_ id: UUID) { selectedProjectID = id }
 
     /// Sessions that finished while the user was not looking at them, rendered as the unread
     /// dot in the sidebar. See `SessionReadPolicy`.
