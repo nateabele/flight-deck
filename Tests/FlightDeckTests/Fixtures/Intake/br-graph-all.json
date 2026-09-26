@@ -1,0 +1,1 @@
+{"components":[{"nodes":[{"id":"t-lqw","title":"A","status":"in_progress","priority":2,"depth":0},{"id":"t-5mi","title":"B","status":"open","priority":2,"depth":1}],"edges":[["t-5mi","t-lqw"]],"roots":["t-lqw"]}],"total_nodes":2,"total_components":1}

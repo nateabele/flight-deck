@@ -1,0 +1,5 @@
+{"issues":[
+ {"id":"t-5mi","title":"B","description":"desc","acceptance_criteria":"ac","status":"open","priority":2,"issue_type":"task","created_at":"2026-09-26T20:44:02.260570Z","created_by":"nate","updated_at":"2026-09-26T20:44:02.260570Z","labels":["x","y"],"dependency_count":1,"dependent_count":0},
+ {"id":"t-lqw","title":"A","status":"in_progress","priority":2,"issue_type":"task","assignee":"BlueFalcon","created_at":"2026-09-26T20:44:02.107546Z","created_by":"nate","updated_at":"2026-09-26T20:44:02.195290Z","dependency_count":0,"dependent_count":1},
+ {"id":"t-c1","title":"Old","status":"closed","priority":2,"issue_type":"task","created_at":"2026-09-20T10:00:00Z","created_by":"nate","updated_at":"2026-09-21T10:00:00Z","dependency_count":0,"dependent_count":0}
+],"total":3,"limit":0,"offset":0,"has_more":false}
