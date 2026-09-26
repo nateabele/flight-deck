@@ -279,6 +279,11 @@ targets:
     settings:
       base:
         PRODUCT_NAME: flightdeck
+        # The module name otherwise defaults to PRODUCT_NAME ("flightdeck"), which on this
+        # case-insensitive APFS volume is the same DerivedData path as the app's "FlightDeck"
+        # module: the two builds overwrite each other's .swiftdoc/.abi.json and
+        # `@testable import FlightDeck` stops compiling. The binary keeps its name.
+        PRODUCT_MODULE_NAME: FlightDeckCLITool
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
         DEVELOPMENT_TEAM: 2T9E3N27J8
