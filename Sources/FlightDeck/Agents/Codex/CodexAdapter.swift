@@ -98,12 +98,18 @@ struct CodexAdapter: AgentAdapter {
     /// deliberate change to shipped behaviour.**
     ///
     /// `SessionStore.rename` used to run every agent's title through
-    /// `ClaudeSession.sanitizedName`, whose metacharacter strip exists because claude's
-    /// rename is *typed at a pty that may be a bare shell*. Codex's rename is
-    /// `thread/name/set` over JSON-RPC: no shell, no pty, no quoting, at any point on the
-    /// path. The strip therefore bought nothing and cost the user their punctuation —
-    /// `fix build (part 2)` became `fix build part 2` in codex's own thread list, in
-    /// `session_index.jsonl`, and in the sidebar.
+    /// `ClaudeSession.sanitizedName`, whose metacharacter strip existed because claude's
+    /// rename is *typed at a pty that may be a bare shell*. **Codex's name also reaches a
+    /// pty** — `renameTyping` above is a `CodexTextChannel`, and its `submitRename` types
+    /// `/rename` and then the name itself — but never a *shell*: it types into a rename modal
+    /// codex drew, and escapes rather than typing **the name** when it cannot read that modal
+    /// (the fixed `/rename` literal is already out; the guard withholds the user's own string,
+    /// the only part a strip would have touched), while
+    /// `thread/name/set` over JSON-RPC is what actually commits the name. It is the absence of
+    /// a shell on the path, not the absence of a pty, that made the strip pointless — so it
+    /// bought nothing and cost the user their punctuation: `fix build (part 2)` became
+    /// `fix build part 2` in codex's own thread list, in `session_index.jsonl`, and in the
+    /// sidebar.
     ///
     /// Control characters are still stripped, and that is not the shell rule under another
     /// name: a newline in a title breaks a sidebar row whatever the channel. See `AgentTitle`.
