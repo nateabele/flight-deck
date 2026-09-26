@@ -392,9 +392,13 @@ struct SessionSidebar: View {
                 #if DEBUG
                 store.tagNextSelectionChange("List(selection:) binding")
                 #endif
-                switch SidebarSelection.route(newValue, projectIDs: Set(store.repos.map(\.id))) {
+                switch SidebarSelection.route(
+                    newValue, projectIDs: Set(store.repos.map(\.id)),
+                    currentProject: store.selectedProjectID
+                ) {
                 case .project(let id): store.selectProject(id)
                 case .session(let id): store.selectedSessionID = id
+                case .clearProject: store.deselectProject()
                 }
             }
         )
