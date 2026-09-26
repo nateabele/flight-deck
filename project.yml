@@ -78,6 +78,8 @@ targets:
         embed: false
       - target: FleetKit
         embed: true
+      - target: IntakeKit
+        embed: true
       - sdk: libsqlite3.tbd
       # Embeds the `flightdeck` CLI tool (xcodegen target `FlightDeckCLI`, defined below next
       # to `FleetKit` — see its comment for why the target name and product name differ) at
@@ -175,6 +177,8 @@ targets:
       # one that loads at runtime. See the DYLD_FRAMEWORK_PATH note in scripts/test-unit.sh.
       - target: FleetKit
         embed: false
+      - target: IntakeKit
+        embed: false
       # Linked here as well as in FleetKit, and it has to be: libcrypto is a STATIC archive,
       # so the linker pulls in only the objects something references. FleetKit's own Swift
       # sources do not call SPAKE2 yet, so FleetKit.framework contains none of it, and a test
@@ -239,6 +243,20 @@ targets:
         # note in scripts/build-boringssl.sh — this is the setting that keeps them apart.
         # SWIFT_INCLUDE_PATHS (the module search path itself) is set project-wide, above.
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
+
+  # Pure intake engine: change sets, validation, drift, apply planning, harness command
+  # building/parsing, storage. Foundation-only so the app and the `flightdeck intake run`
+  # runner (next plan) share one implementation; Swift 6 like FleetKit, since nothing in
+  # it touches vendored Ghostty.
+  IntakeKit:
+    type: framework
+    platform: macOS
+    sources: [Sources/IntakeKit]
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        PRODUCT_MODULE_NAME: IntakeKit
+        GENERATE_INFOPLIST_FILE: "YES"
 
   # The `flightdeck` CLI: a real command-line tool, embedded into `Flight Deck.app/Contents/
   # MacOS` right next to the app binary itself (see the `flightdeck` dependency on the
