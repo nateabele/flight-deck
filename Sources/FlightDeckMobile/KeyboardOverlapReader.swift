@@ -36,12 +36,16 @@ import UIKit
 struct KeyboardOverlapReader: UIViewRepresentable {
     /// Called with the keyboard's `overlap` and whether it is `settled`.
     ///
-    /// `settled == true` is where a show, hide or height change will END, delivered once per
-    /// `keyboardWillChangeFrame` inside a `withAnimation` matched to the keyboard's duration —
-    /// the value to lay out by. `settled == false` is one frame of an interactive drag,
-    /// delivered unanimated — a value to track the finger with, not to lay out by. A consumer
-    /// should treat every report as the current position and only a settled one as the new
-    /// resting place.
+    /// `settled == true` is the value to lay out by, and it comes from two places. Mostly it is
+    /// where a show, hide or height change will END, delivered once per `keyboardWillChangeFrame`
+    /// **that arrives while the host is in a window**, inside a `withAnimation` matched to the
+    /// keyboard's duration. The other is the probe's FIRST report after the host enters a
+    /// window, delivered unanimated: a notification that landed while the screen was out of the
+    /// window (a detail row pushed over it) was dropped, and that report is the only thing that
+    /// can correct a settled value it left stale. `settled == false` is one frame of an
+    /// interactive drag, delivered unanimated — a value to track the finger with, not to lay out
+    /// by. A consumer should treat every report as the current position and only a settled one
+    /// as the new resting place.
     ///
     /// Drag reports arrive only when the overlap differs from the last one reported. That
     /// equality gate is what keeps this out of a loop: setting SwiftUI state re-renders the
@@ -57,6 +61,27 @@ struct KeyboardOverlapReader: UIViewRepresentable {
     /// rather than pushing the composer down into the home indicator.
     static func overlap(probeHeight: CGFloat, safeBottom: CGFloat) -> CGFloat {
         max(0, probeHeight - safeBottom)
+    }
+
+    /// The same lift, from `keyboardWillChangeFrame`'s end frame — already converted into the
+    /// window's coordinates — rather than from the probe.
+    ///
+    /// **Only a DOCKED keyboard lifts anything.** The app ships on iPad, where a floating or
+    /// split keyboard ends mid-screen and an undocked one can report `CGRect.zero`. Measured as
+    /// "window height minus the frame's top", either reads as a keyboard nearly the height of
+    /// the window: the composer thrown off the top of the screen and the `List` padded by a
+    /// screen until the next docked event. So a frame counts only if it is non-empty and
+    /// reaches the window's bottom edge (within a point, for rounding in the conversion).
+    ///
+    /// **Only the part inside the window counts.** A Stage Manager window is not at the screen
+    /// origin, so a converted keyboard can spill past its sides and bottom; the intersection is
+    /// what actually covers the composer. The home-indicator inset is taken off for the same
+    /// reason `overlap(probeHeight:safeBottom:)` takes it off.
+    static func overlap(keyboardEnd: CGRect, windowBounds: CGRect, safeBottom: CGFloat) -> CGFloat {
+        let docked = !keyboardEnd.isEmpty && keyboardEnd.maxY >= windowBounds.maxY - 1
+        guard docked else { return 0 }
+        let covered = windowBounds.intersection(keyboardEnd)
+        return covered.isNull ? 0 : max(0, covered.height - safeBottom)
     }
 
     func makeUIView(context: Context) -> HostView {
@@ -91,6 +116,12 @@ struct KeyboardOverlapReader: UIViewRepresentable {
         /// keyboard slides. A probe report outside this window is the interactive drag, which
         /// must be applied unanimated so the field tracks the finger 1:1.
         private var animateUntil: CFTimeInterval = 0
+        /// Whether the probe's next report is the first since the host entered a window, and so
+        /// must be reported SETTLED. Notifications are dropped while the host has no window;
+        /// push a detail row with the keyboard up and the hide lands while the timeline is off
+        /// screen. On the pop, a merely live report would correct `live` alone and leave
+        /// `settled` at the keyboard's height — the last message floating over a blank gap.
+        private var needsSettle = false
 
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -121,11 +152,15 @@ struct KeyboardOverlapReader: UIViewRepresentable {
             // above an empty gap.
             if let window, let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
                 as? NSValue)?.cgRectValue {
-                let top = window.convert(end, from: window.screen.coordinateSpace).minY
                 let overlap = KeyboardOverlapReader.overlap(
-                    probeHeight: window.bounds.height - top,
+                    keyboardEnd: window.convert(end, from: window.screen.coordinateSpace),
+                    windowBounds: window.bounds,
                     safeBottom: window.safeAreaInsets.bottom)
                 lastReported = overlap
+                // This notification settled the value itself, so the probe's first report no
+                // longer has a missed one to make up for — and landing mid-animation, it would
+                // cut this animated move short.
+                needsSettle = false
                 guard let onChange else { return }
                 // A spring close to the keyboard's own curve, which SwiftUI cannot be handed
                 // directly — the notification's curve is a private `UIView.AnimationCurve` (7).
@@ -143,6 +178,7 @@ struct KeyboardOverlapReader: UIViewRepresentable {
             probe?.removeFromSuperview()
             probe = nil
             lastReported = nil
+            needsSettle = window != nil
             guard let window else { return }
 
             let probe = ProbeView()
@@ -173,7 +209,18 @@ struct KeyboardOverlapReader: UIViewRepresentable {
         /// is reported from `keyboardWillChangeFrame` with its settled target, and the probe's
         /// own report of that same move — one jump inside UIKit's animation block — is ignored
         /// until the animation window closes, or it would cut the animated move short.
+        ///
+        /// The exception is the first report after entering a window (`needsSettle`), which
+        /// goes out settled and ahead of the `animateUntil` gate: an animation window opened by
+        /// a notification the host was not there to apply must not swallow the one report that
+        /// re-syncs it.
         private func report(_ overlap: CGFloat) {
+            if needsSettle {
+                needsSettle = false
+                lastReported = overlap
+                onChange?(overlap, true)
+                return
+            }
             guard CACurrentMediaTime() >= animateUntil else { return }
             guard overlap != lastReported else { return }
             lastReported = overlap
