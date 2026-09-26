@@ -5,7 +5,7 @@ import XCTest
 /// A read that follows a keystroke must describe the screen that keystroke made.
 ///
 /// **This is the bug these tests exist for.** `readViewport()` is served from a `CachedValue`
-/// that holds a screen for 500ms, and the answer drive presses a key, waits 120ms for the
+/// that holds a screen for 500ms, and a one-step answer drive presses a key, waits 120ms for the
 /// repaint and reads back to confirm the cursor moved. Those numbers do not compose: the
 /// re-read could be answered from before the press, so the drive saw the marker on the row it
 /// had just left, concluded the key never landed, and abandoned a dialog with one box already
@@ -15,8 +15,9 @@ import XCTest
 ///
 /// The drives below run against `SpyInjector.cacheViewport()`, which puts the production
 /// `CachedValue` in front of the fake's screen with a duration no test can outlive. Take the
-/// invalidation away — `clearedByInjection: false`, the third test — and they abort exactly
-/// where the real drive did.
+/// invalidation away — `clearedByInjection: false`, the third test — and the `.option` drive
+/// aborts exactly where the real one did. The planned `.answers` drive no longer re-reads at
+/// all, so it is the `.option` path that carries this property now; see the first test's doc.
 @MainActor
 final class ViewportFreshnessTests: XCTestCase {
     private var projectsRoot: URL!
@@ -70,12 +71,18 @@ final class ViewportFreshnessTests: XCTestCase {
 
     // MARK: The drive
 
-    /// **The captured failure, with the cache in place.** Two questions, the first answered on
-    /// its second row, so the drive has to arrow, re-read, press, and then find question two
-    /// where question one was. Every one of those reads follows a keystroke of its own.
+    /// **The captured failure's own shape, with the cache in place.** Two questions, the first
+    /// answered on its second row, so the drive has to arrow, press, and then find question two
+    /// where question one was. Every read it makes follows a keystroke of its own.
     ///
-    /// Served from a stale cache the first re-read says the marker never moved and the drive
-    /// stops after one arrow; served fresh it walks all three steps and commits on the review.
+    /// **What this no longer falsifies, said plainly.** It was written when the planned drive
+    /// re-read after every move: a stale cache made the first re-read report the marker where it
+    /// had been, and the drive stopped after one arrow. That re-read is gone — the plan is
+    /// executed and the screen is only asked whether a list is up — so a stale screen would
+    /// answer that the same way a fresh one does and this test would pass either way. It stays
+    /// as the end-to-end walk of a whole set through the cache; the freshness property itself is
+    /// falsified by `testADriveReadingACacheNoKeystrokeClearsRefusesAfterTheMove` below, on the
+    /// `.option` path, which still re-reads.
     func testASetIsDrivenToItsCommitWithTheScreenServedFromACache() {
         let (store, spy, id, log) = makeStore()
         let questions = [question("Which language?", ["Rust", "Go"]),

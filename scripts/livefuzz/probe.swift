@@ -6,6 +6,12 @@
 //
 //   probe focused                 < screen   prints the focused row, or -1
 //   probe reads <N> <label...>    < screen   prints true or false
+//   probe hasdialog               < screen   prints true or false
+//
+// All three wrap calls production still makes: `focused` and `reads` are the one-step
+// `.allow`/`.option` drive's interlock, and `hasdialog` is the whole per-step interlock of the
+// planned answer drive (`SessionStore.perform` → `AgentDialogDriver.hasSelectList`), which is
+// what `fuzz.py` exercises.
 //
 // The screen is read from stdin; the operation and its arguments come from argv. Always
 // `ChoiceDialog.claudeMarker` — the harness only ever drives claude.
@@ -16,7 +22,8 @@ struct Probe {
     static func main() {
         let args = CommandLine.arguments.dropFirst()
         guard let op = args.first else {
-            FileHandle.standardError.write(Data("usage: probe focused|reads <N> <label...>\n".utf8))
+            FileHandle.standardError.write(
+                Data("usage: probe focused|reads <N> <label...>|hasdialog\n".utf8))
             exit(2)
         }
 
@@ -36,6 +43,12 @@ struct Probe {
             let label = rest.dropFirst().joined(separator: " ")
             let result = ChoiceDialog.row(
                 index, reads: label, inViewport: viewport, marker: ChoiceDialog.claudeMarker
+            )
+            print(result)
+
+        case "hasdialog":
+            let result = ChoiceDialog.hasNumberedRowAtMarker(
+                inViewport: viewport, marker: ChoiceDialog.claudeMarker
             )
             print(result)
 

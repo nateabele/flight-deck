@@ -144,15 +144,17 @@ struct PromptComposer: View {
                 .lineLimit(1...6)
                 .textFieldStyle(.plain)
                 .font(.body)
-                // Autocorrect ON, autocapitalisation OFF, and the split is deliberate.
+                // Autocorrect and sentence capitalisation both ON, like every other iOS text
+                // field, because what gets typed here is prose to an agent, not a shell word.
                 //
                 // Both used to be off, on the reasoning that this text goes into a terminal
-                // and an autocorrected file path is a message that means something else. That
-                // holds for capitalisation — a flag turned into `-Rf` by a capital is silently
-                // a different command — and does not hold for the rest: most of what gets
-                // typed here is a sentence to an agent, not a shell word, and typing prose on
-                // a phone with autocorrect off is its own kind of wrong message.
-                .textInputAutocapitalization(.never)
+                // and a capital can turn a flag like `-rf` into `-Rf`, a different command.
+                // Autocorrect came back first, and capitalisation followed: `.sentences`
+                // capitalises only the first letter of a sentence, so a flag in the middle of a
+                // message is left alone, and a lowercase start was the thing that made every
+                // message look wrong. Someone who does want a literal lowercase start can undo
+                // the capital the same way they would in Messages.
+                .textInputAutocapitalization(.sentences)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
                 .background(

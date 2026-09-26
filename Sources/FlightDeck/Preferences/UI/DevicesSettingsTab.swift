@@ -41,6 +41,15 @@ struct DevicesSettingsTab: View {
     @State private var editingSlot: UUID?
     @State private var editingName = ""
 
+    /// Read at launch, like `FlightDeckAnswerTrigger`: a socket that appeared and vanished
+    /// under a running app would be a second lifetime to reason about, so the toggle only
+    /// takes effect at relaunch even though `@AppStorage` could push it live.
+    @AppStorage(ControlEnvironment.enabledKey) private var controlSocketEnabled = true
+    /// Unlike the toggle above, this takes effect immediately: `FleetService.scopeLevel()`
+    /// calls `ControlScope.level()` fresh on every command, so there is no running listener
+    /// state for a changed preference to get out of sync with.
+    @AppStorage(ControlScope.defaultsKey) private var scopeRaw = ControlScopeLevel.full.rawValue
+
     /// Provisional slots are an open pairing window, not a paired device — they belong on
     /// the sheet's countdown, not in a list the user reads as "who can reach this Mac".
     private var devices: [PairedDevice] {
@@ -116,6 +125,20 @@ struct DevicesSettingsTab: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section("Command Line") {
+                // Read at launch, like `FlightDeckAnswerTrigger`: a socket that appeared and
+                // vanished under a running app would be a second lifetime to reason about.
+                Toggle("Enable the flightdeck control socket (takes effect at relaunch)",
+                       isOn: $controlSocketEnabled)
+                Picker("Agents in tabs may control", selection: $scopeRaw) {
+                    Text("Any tab").tag(ControlScopeLevel.full.rawValue)
+                    Text("Only their own tab").tag(ControlScopeLevel.ownSession.rawValue)
+                    Text("Nothing (read only)").tag(ControlScopeLevel.readOnly.rawValue)
+                }
+                Text("A guardrail, not a sandbox: it stops a well-behaved agent reaching past its own tab by mistake. Any program running as you can bypass it. Your own shell is never restricted.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

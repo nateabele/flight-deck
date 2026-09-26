@@ -79,6 +79,16 @@ targets:
       - target: FleetKit
         embed: true
       - sdk: libsqlite3.tbd
+      # Embeds the `flightdeck` CLI tool (xcodegen target `FlightDeckCLI`, defined below next
+      # to `FleetKit` — see its comment for why the target name and product name differ) at
+      # `Contents/MacOS/flightdeck`, next to the app's own binary — `destination: executables`
+      # is the Copy Files phase for that location, as distinct from `frameworks` or
+      # `resources`.
+      - target: FlightDeckCLI
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
     settings:
       base:
         # `productName:` above only renames the product *reference* (and the
@@ -126,6 +136,15 @@ targets:
     type: bundle.unit-test
     platform: macOS
     sources:
+      # The flightdeck CLI's pure core (argument parsing, session/project resolution) has no
+      # dependency of its own — it needs no `flightdeck` executable target to be exercised, and
+      # compiling it straight into the test bundle is what lets its tests `import FleetKit` and
+      # use `CLI`-prefixed types directly rather than reaching for `@testable import FlightDeck`.
+      - path: Sources/FlightDeckCLI
+      # The real transport, and only it — `main.swift` is top-level code that would run at
+      # load. `CLIEndToEndTests` drives `CLIRunner` through it against a real local socket,
+      # the one place a dropped `onReady`/`onFrame`/`onDisconnect` forward shows up.
+      - path: Sources/FlightDeckTool/LocalFleetTransport.swift
       # `Fixtures` is carved out into its own folder-reference entry below so its
       # subdirectory structure (e.g. `Fixtures/Codex/notifications.json`) survives into the
       # test bundle's Resources. Left in the plain group above, xcodegen's default "Copy
@@ -220,6 +239,51 @@ targets:
         # note in scripts/build-boringssl.sh — this is the setting that keeps them apart.
         # SWIFT_INCLUDE_PATHS (the module search path itself) is set project-wide, above.
         HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
+
+  # The `flightdeck` CLI: a real command-line tool, embedded into `Flight Deck.app/Contents/
+  # MacOS` right next to the app binary itself (see the `flightdeck` dependency on the
+  # `FlightDeck` target above). `Contents/MacOS` is already on every tab's `PATH` — it is
+  # `GHOSTTY_BIN_DIR` — so a script running inside a Flight Deck tab can call `flightdeck`
+  # with no setup. The product name deliberately stays lowercase and one word, nowhere close
+  # to `Flight Deck`: AGENTS.md rule 2 is that launching the *app* bundle from anywhere but
+  # /Applications boots a second full instance and forks Claude's pid-keyed name registry —
+  # a similar-looking binary name would put that mistake one typo away.
+  #
+  # Compiles `Sources/FlightDeckCLI` directly (same as `FlightDeckTests`, see its comment
+  # below) rather than linking it as a library: that module has no target of its own, and the
+  # CLI's whole transport-agnostic design point is that its core has no socket dependency to
+  # link against in the first place — only this target's own LocalFleetTransport.swift does.
+  #
+  # The xcodegen *target* is `FlightDeckCLI`, not `flightdeck`, even though the shipped binary
+  # is named `flightdeck` (via `PRODUCT_NAME` below): a target literally named `flightdeck`
+  # collided with `FlightDeck` under xcodebuild's per-target intermediates directory
+  # (`.build/Debug/flightdeck.build` vs `.build/Debug/FlightDeck.build`), which macOS's
+  # default case-insensitive APFS treats as the same path — the two targets' build plans
+  # merged and the app's own sources started compiling "in target 'flightdeck'". The product
+  # name is a separate knob from the target name and is unaffected by this.
+  #
+  # For the identical reason, this tool's own sources live in `Sources/FlightDeckTool`, not
+  # `Sources/flightdeck` as first tried: that folder name is, on the same case-insensitive
+  # APFS, the same directory entry as `Sources/FlightDeck` (the app's own source tree) — files
+  # written there landed inside the live app sources instead of a new folder, and this
+  # `sources:` list then pulled the whole 75-file app tree into this target along with them.
+  FlightDeckCLI:
+    type: tool
+    platform: macOS
+    sources:
+      - Sources/FlightDeckTool
+      - Sources/FlightDeckCLI
+    dependencies:
+      - target: FleetKit
+        embed: false
+    settings:
+      base:
+        PRODUCT_NAME: flightdeck
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/boringssl-artifacts/include
+        DEVELOPMENT_TEAM: 2T9E3N27J8
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
 
   # Same sources, iOS slice. This target ships nothing on its own — it is the enforcement
   # mechanism for "FleetKit imports Foundation and Network only". An `import AppKit` that

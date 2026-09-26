@@ -139,9 +139,14 @@ struct CodexTextChannel: AgentTextChannel, AgentRenameTyping {
     /// **The text and the Return are two settle hops, not one.** codex's TUI paste-detects: a
     /// `\r` arriving in the same burst as the text before it is folded into that paste and
     /// inserted as a literal newline, so the turn sits typed but never sent — live-isolated
-    /// against codex-cli 0.153.4 by varying only this (`scripts/adapterprobe/ptyscreen.py`'s
-    /// `submit()`: a combined write leaves a one-line rollout, a split write with a real gap
-    /// produces a fourteen-line one). `sendReturn()` already goes through a real key event
+    /// against codex-cli 0.153.4 by varying only this: a combined write left the marker typed
+    /// and unsent, a split write with a real gap submitted it. That version number is now
+    /// machine-CHECKABLE rather than merely trusted — `scripts/adapterprobe/capabilities.py`'s
+    /// `codexPasteDetectsSameBurstReturn` row re-derives it at `--tier full`, and reports
+    /// `error` rather than a verdict when it cannot establish that the marker was typed at all.
+    /// **It has not yet been run against a live codex**, so it is not evidence for this comment
+    /// today; it is the thing that will be. (The earlier pointer here, to a `submit()`
+    /// in `ptyscreen.py`, named a function that does not exist.) `sendReturn()` already goes through a real key event
     /// rather than `sendText`'s paste (see `TextInjecting.sendReturn()`), which is necessary
     /// but not sufficient here: codex's detector keys on *arrival timing*, not on which of
     /// ghostty's two send paths carried the byte, so the two calls landing in the same run-loop

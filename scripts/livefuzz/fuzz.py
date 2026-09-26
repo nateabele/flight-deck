@@ -7,8 +7,21 @@ reads the transcript back to check the answers claude RECORDED are the ones we a
 that they are the ones actually chosen — not merely that some answer was recorded.
 
 Unlike a plan reimplemented purely in Python, an interlock failure here means what it means in
-production: the driver refused a step because the screen did not read what it expected, and
-`FAIL` names exactly which step and why.
+production: the driver refused a step because there was no select list on the screen it was
+about to press, and `FAIL` names exactly which step.
+
+**The interlock this mirrors is ONE check per step, not three.** `SessionStore.perform` used to
+require the cursor to be on `step.from`, the row at `step.to` to read the expected label, and
+the marker to have landed on `step.to` after the arrows; all three were removed, because the
+first two refused real dialogs whose only fault was an option description wrapping onto a line
+beginning `0. `. What is left is `AgentDialogDriver.hasSelectList` — `ChoiceDialog.
+hasNumberedRowAtMarker` — asked once, before the arrows.
+
+That makes this harness's END-OF-RUN check the load-bearing one, not a formality: production
+can now press a row nobody chose and carry it to the commit (`AnswerPlan.plan` appends its
+`.submit` step unconditionally, so a mis-aimed press is submitted rather than stopped —
+`AnswerDiagnosticsTests.testACursorSomewhereElseCommitsTheWrongAnswer`). `answer_mismatch`
+below is the only thing in either the Swift suite or this harness that can see that happen.
 """
 import json, os, glob, re, subprocess, sys, tempfile, time
 from datetime import datetime, timezone
@@ -45,40 +58,29 @@ def build_probe():
     )
 
 
-def probe_focused(screen_text):
-    """`ChoiceDialog.focusedRow`, or -1 when it returns nil — mirrors `probe focused`."""
-    build_probe()
-    out = subprocess.run([PROBE_BIN, "focused"], input=screen_text,
-                          capture_output=True, text=True)
-    return int(out.stdout.strip())
+def probe_hasdialog(screen_text):
+    """`AgentDialogDriver.hasSelectList` — `ChoiceDialog.hasNumberedRowAtMarker` under claude's
+    marker, via `probe hasdialog`. The ENTIRE per-step interlock of the planned answer drive.
 
-
-def probe_reads(screen_text, index, label):
-    """`ChoiceDialog.row(_:reads:)` — mirrors `probe reads <N> <label...>`.
+    `probe focused` and `probe reads` are still there and still wrap live production calls (the
+    one-step `.allow`/`.option` drive's interlock), but this harness does not drive that path, so
+    nothing here calls them; the planned drive stopped asking either question in `dea5a45`.
 
     Anything but the literal `true` on stdout is False, INCLUDING a probe that never ran — a
     missing binary, a swiftc failure, a rebuild racing another process on the fixed temp path.
     Such a run aborts with text identical to a genuine interlock refusal, so a FAIL naming a
-    step and a label is not, on its own, evidence the parser refused anything. That is this
-    module's usual bias — a false FAIL rather than a false PASS, see `answer_mismatch` — and it
-    is left as is deliberately: the alternative is raising on a non-zero exit, which turns a
-    transient into a crash mid-drive with a live claude still holding a dialog open.
+    step is not, on its own, evidence the parser refused anything. That is this module's usual
+    bias — a false FAIL rather than a false PASS, see `answer_mismatch` — and it is left as is
+    deliberately: the alternative is raising on a non-zero exit, which turns a transient into a
+    crash mid-drive with a live claude still holding a dialog open.
     """
     build_probe()
-    out = subprocess.run([PROBE_BIN, "reads", str(index), label], input=screen_text,
+    out = subprocess.run([PROBE_BIN, "hasdialog"], input=screen_text,
                           capture_output=True, text=True)
     return out.stdout.strip() == "true"
 
 
 # --- AnswerPlan, in Python ------------------------------------------------------------------
-
-def action_label(is_last):
-    """`AnswerPlan.actionLabel`."""
-    return "Submit" if is_last else "Next"
-
-
-SUBMIT_ANSWERS_LABEL = "Submit answers"  # AnswerPlan.submitAnswersLabel
-
 
 def plan(questions, answers):
     """`AnswerPlan.plan`, in Python — its STEP ARITHMETIC, and none of its refusals.
@@ -97,9 +99,15 @@ def plan(questions, answers):
     choice, duplicate indices, an index outside the question's options, or a single-select given
     more than one. None of those guards exist here, so this function is no evidence about them.
     Two of the cases crash the run instead, which is the loud direction: an empty choice dies on
-    `chosen[0]`, and an index past the options claude actually rendered dies in `expected_label`
-    — the realistic one, since the option COUNT is claude's to invent, not the caller's. The
-    other two diverge quietly, planning steps where production would have refused.
+    `chosen[0]`, and an index past the options claude actually rendered dies in
+    `answer_mismatch` — the realistic one, since the option COUNT is claude's to invent, not the
+    caller's. The other two diverge quietly, planning steps where production would have refused.
+
+    **That second crash moved LATER when the interlock shrank.** It used to fire in
+    `expected_label` before step 0 sent a key; with no per-step label to compute, the out-of-range
+    index is not touched until the recorded answer is checked, so the drive arrows onto a row
+    claude never rendered and presses first. Still loud, still a crash and never a silent PASS —
+    but after the keystrokes, not before them.
     """
     steps = []
     last = len(questions) - 1
@@ -125,16 +133,13 @@ def plan(questions, answers):
     return steps
 
 
-def expected_label(step, questions):
-    """`SessionStore.rowLabel` — what the row a step is about must read."""
-    kind = step["purpose"][0]
-    if kind == "option":
-        _, qi, oi = step["purpose"]
-        return questions[qi]["options"][oi]["label"]
-    if kind == "action":
-        _, _, is_last = step["purpose"]
-        return action_label(is_last)
-    return SUBMIT_ANSWERS_LABEL
+# There is deliberately no `expected_label()` here any more, and no mirror of
+# `AnswerPlan.actionLabel` / `submitAnswersLabel` either. They existed to serve one caller — the
+# per-step label check — and its Swift original, `SessionStore.rowLabel`, was deleted in `dea5a45`
+# along with the `questions` parameter it needed. A row's label is never compared to anything
+# during a planned drive now, in production or here. The only place this harness still reads an
+# option's wording is `answer_mismatch()` below, off the RECORDED result, after the fact — which
+# is the check that matters, since a mis-aimed press is no longer refused at the row.
 
 
 # claude's own tool_result names each question and its recorded answer as a quoted pair, e.g.
@@ -195,11 +200,15 @@ def drive(prompt, answers, timeout=200):
     WORDING is never known up front (claude invents it), so it is read back from the transcript
     once the dialog appears, the same record `PromptQuestion` is built from in production.
 
-    Returns `(final_screen, abort, result)`. `abort` names the step and reason a check failed,
-    or is `None` only when every interlock step passed, Return was sent for `("submit",)`, a
-    fresh `tool_result` was found, AND that result names the labels actually chosen — not merely
-    that keys were sent, and not merely that SOME answer was recorded. `result` is the recorded
+    Returns `(final_screen, abort, result)`. `abort` names the step a check failed at, or is
+    `None` only when every interlock step passed, Return was sent for `("submit",)`, a fresh
+    `tool_result` was found, AND that result names the labels actually chosen — not merely that
+    keys were sent, and not merely that SOME answer was recorded. `result` is the recorded
     tool_result text when available, else None.
+
+    That last clause is stricter than the interlock on purpose, and deliberately so since the
+    interlock shrank to one check: the screen no longer stops a plan that has gone wrong, so the
+    recorded answer is the only remaining evidence that the right rows were pressed.
     """
     os.makedirs(WD, exist_ok=True)
     # The harness reuses one throwaway workspace across every run in a batch, so a stale
@@ -254,35 +263,28 @@ def drive(prompt, answers, timeout=200):
             return disp(), _stale_abort("AskUserQuestion", run_started), None
 
         for i, step in enumerate(plan(questions, answers)):
-            label = expected_label(step, questions)
-
-            # 1. the cursor must be where the plan believes it starts.
-            focused = probe_focused(disp())
-            if focused != step["frm"]:
-                abort = (f"step {i} {step['purpose']}: expected focus {step['frm']}, "
-                         f"saw {focused}")
+            # 1. the ONLY check, and it is about the screen as a whole rather than any row:
+            #    is a select list on it at all. `SessionStore.perform`'s three row-shaped
+            #    checks — cursor on `step.from`, `step.to` reading the expected label, and the
+            #    post-move landing re-read — are all gone (`dea5a45`), so a screen that
+            #    disagrees with the plan is pressed on here exactly as it is in production.
+            #    Production's other per-step refusal, `unreadable-viewport-before-press`, has no
+            #    counterpart: a pyte display is always readable, so there is nothing to mirror.
+            if not probe_hasdialog(disp()):
+                abort = f"step {i} {step['purpose']}: no select list on screen (no-dialog-on-screen)"
                 break
 
-            # 2. the row about to be pressed must read what the plan says it should.
-            if not probe_reads(disp(), step["to"], label):
-                abort = f"step {i} {step['purpose']}: row {step['to']} does not read {label!r}"
-                break
-
-            # 3. move.
+            # 2. move.
             distance = step["to"] - step["frm"]
             key = b"\x1b[B" if distance > 0 else b"\x1b[A"
             for _ in range(abs(distance)):
                 write(key)
-            pump(0.6)
+            pump(0.6)  # `perform`'s `injectionSettle` between the move and the press.
 
-            # 4. re-read: the move must have landed exactly where the plan says.
-            landed = probe_focused(disp())
-            if landed != step["to"]:
-                abort = (f"step {i} {step['purpose']}: expected to land on {step['to']}, "
-                         f"saw {landed}")
-                break
-
-            # 5. press, and settle before the next step's checks.
+            # 3. press, and settle before the next step's check. Nothing is read between the
+            #    arrows and this Return — that read was the interlock's fourth step and it went
+            #    with the rest, which is why the answer check at the end of this function is now
+            #    the only thing that can catch a drive that pressed cleanly onto the wrong row.
             write(b"\r")
             pump(0.8)
 
@@ -361,7 +363,7 @@ def _record_timestamp(record):
 
 def _stale_abort(what, since):
     """The one, unmistakable abort text for 'nothing fresh enough turned up' — distinct on its
-    face from a `step N (...): row X does not read '<label>'` interlock refusal, so a reader
+    face from a `step N (...): no select list on screen` interlock refusal, so a reader
     never has to guess whether a FAIL means the parser refused or the transcript never caught
     up. See the module docstring above: this is the fix for that exact confusion.
     """

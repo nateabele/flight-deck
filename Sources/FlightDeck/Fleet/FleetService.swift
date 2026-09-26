@@ -35,6 +35,19 @@ final class FleetService: ObservableObject {
     private let preferences: PreferencesStore
     private let armer: PairingArmer
     private let server: FleetSocketServer
+    /// The local control socket's server (`flightdeck`). Its own instance, never `server`:
+    /// every arm, expiry and revocation reloads the phone's keys with `server.stop()` and a
+    /// fresh `start`, which cancels every connection that server holds — a CLI tailing a tab
+    /// would be dropped each time a phone was paired.
+    private let localServer = FleetSocketServer()
+    /// The key each tab's `FLIGHT_DECK_CALLER` token is minted and verified under. Injected so
+    /// a test can mint a token without reading or writing the real defaults; `FlightDeckApp`
+    /// copies it onto `SessionStore.controlSecret` so tabs carry tokens this service accepts.
+    let controlSecret: Data
+    /// The scope a local caller is judged at. A closure rather than a stored level so a change
+    /// in Settings applies to the next command without restarting the socket, and so tests can
+    /// pin a level without touching `UserDefaults`.
+    var scopeLevel: () -> ControlScopeLevel = { ControlScope.level() }
     private let replicator: FleetReplicator
     /// Answers history requests. Held here rather than built per request because it holds the
     /// store, and because there is exactly one of it — a request carries its own session id,
@@ -95,8 +108,12 @@ final class FleetService: ObservableObject {
     /// why its results are partial instead of a silent undercount.
     var indexingProgress: SearchIndexBuilder.Progress?
 
-    init(store: SessionStore, preferences: PreferencesStore, armer: PairingArmer) {
+    init(
+        store: SessionStore, preferences: PreferencesStore, armer: PairingArmer,
+        controlSecret: Data = ControlEnvironment.secret()
+    ) {
         self.store = store
+        self.controlSecret = controlSecret
         self.preferences = preferences
         self.armer = armer
         self.server = FleetSocketServer()
@@ -338,6 +355,7 @@ final class FleetService: ObservableObject {
             guard let self else { return }
             for entry in batch {
                 self.server.broadcast(.event(seq: entry.seq, entry.event))
+                self.localServer.broadcast(.event(seq: entry.seq, entry.event))
             }
             // After the sends, never before: a record that says a closure was pushed to one
             // client is only true once it has been. The client count is read here for the
@@ -345,161 +363,26 @@ final class FleetService: ObservableObject {
             // across the loop above.
             self.promptLifecycle.observe(batch, clients: self.server.attachedCount)
         }
-        server.onHello = { [weak self] attachment, lastSeq in
-            guard let self else { return [] }
-            self.noteAttached(attachment)
-            return self.frames(resumingFrom: lastSeq)
-        }
-        server.onCommand = { [weak self] client, cid, command, reply in
-            guard let self else { return reply(.err(cid: cid, code: "stopped")) }
-            // The ONLY command that can need to wait, and only when its project still
-            // exists and the display is not already drawable — which is to say, almost
-            // never. Gated on `store.projectPath(project) != nil` too: `apply`'s own
-            // `.newSession` arm checks the project before the terminal on purpose (see its
-            // comment), so a stale phone naming a project the Mac no longer has must still
-            // get `unknown_project` without this ever waking the screen or asking the waker
-            // anything. Every other command, and every creation on an awake Mac or against a
-            // dead project, still answers on the way out of the frame handler exactly as
-            // before.
-            if case .newSession(let project, _, _) = command,
-               self.store.projectPath(project) != nil,
-               !self.store.canCreateTerminal {
-                Task { @MainActor in
-                    guard await self.store.awaitTerminalCreatable() else {
-                        return reply(.err(cid: cid, code: "terminal_unavailable"))
-                    }
-                    reply(self.apply(command, from: client, cid: cid))
-                }
-                return
+        // Both servers share one set of handlers: the local control socket speaks the phone's
+        // protocol verbatim, and a second copy of these bodies would be a second opinion about
+        // what a command does. What differs for a local caller — no presence, no resume
+        // observation, a scope check — is decided inside the handlers off `isLocal`.
+        //
+        // `localServer.onAttachedSlotsChanged` is deliberately NOT wired: attached slots, the
+        // sleep assertion and presence pruning are all about paired phones, and a CLI
+        // connection has no slot to report.
+        for server in [server, localServer] {
+            server.onHello = { [weak self] attachment, lastSeq in
+                guard let self else { return [] }
+                return self.handleHello(attachment, lastSeq)
             }
-            reply(self.apply(command, from: client, cid: cid))
-        }
-        server.onRequest = { [weak self] _, cid, request, reply in
-            guard let self else { return reply(.err(cid: cid, code: "stopped")) }
-            switch request {
-            case .timeline(let session, let anchor, let limit):
-                // A `Task` rather than a synchronous answer, because reading a page is file
-                // I/O: `TimelineService` hands the parse to a detached task and resumes here
-                // on the main actor, which is `queue`. `reply` is therefore called on
-                // `queue`, as `onRequest` requires — and after an await, which is exactly the
-                // case `FleetSocketServer`'s deferred-send guard is written for.
-                //
-                // Nothing here writes: the answer is composed from the transcript on disk and
-                // the store is only ever asked to resolve the tab. That is what keeps the
-                // history channel out of the fleet event log entirely — no `FleetEvent`, no
-                // broadcast, and nothing new for `FleetReplicator`'s drift check to guard.
-                Task { @MainActor in
-                    switch await self.timeline.page(
-                        session: session, anchor: anchor, limit: limit
-                    ) {
-                    case .success(let page): reply(.page(cid: cid, page))
-                    // `.code` is the wire spelling, verbatim — see `TimelineErrorCode`.
-                    case .failure(let code): reply(.err(cid: cid, code: code.code))
-                    }
-                }
-            case .newSessionOptions(let project):
-                // Answered synchronously: this reads preferences and the project list, both of
-                // which are already on this actor. No file I/O, so nothing to hop for.
-                //
-                // Nothing here writes and nothing enters `FleetSnapshot` — which is the whole
-                // design. Menu rows come from preferences, preferences emit no fleet events,
-                // and a snapshot that changed without one is what `FleetReplicator`'s drift
-                // assertion catches. It caught it once already; see the spec.
-                guard let options = self.newSessionOptions(for: project) else {
-                    return reply(.err(cid: cid, code: "unknown_project"))
-                }
-                reply(.newSessionOptions(cid: cid, options))
-            case .recentlyClosed:
-                // Answered synchronously, the same as `newSessionOptions` and `macEndpoints`:
-                // the stack is in memory on this actor, so there is nothing to hop a `Task`
-                // for and `reply` lands on `queue` as `onRequest` requires.
-                //
-                // Nothing here writes and nothing enters `FleetSnapshot` — the history is not
-                // rebuildable from fleet events at all (`sessionRemoved` carries an id and
-                // nothing else), which is the sharpest version of the shape
-                // `FleetReplicator`'s drift assertion catches.
-                //
-                // An empty list is a real answer and is sent as one: it means nothing has been
-                // closed this run. The phone renders no section, which is the same outcome as
-                // never having asked — but this end has no reason to distinguish them.
-                reply(.recentlyClosed(
-                    cid: cid,
-                    ClosedSessionProjection.rows(for: self.store.recentlyClosedSessions)
-                ))
-            case .macEndpoints:
-                // Answered synchronously: enumerating interfaces is a syscall, not file I/O,
-                // so there is nothing to hop a `Task` for and `reply` lands on `queue` as
-                // `onRequest` requires.
-                //
-                // Nothing here writes and nothing enters `FleetSnapshot` — addresses change
-                // with no event recorded, which is exactly the shape `FleetReplicator`'s
-                // drift assertion catches.
-                guard let boundPort = self.boundPort else {
-                    return reply(.err(cid: cid, code: "not_listening"))
-                }
-                reply(.macEndpoints(
-                    cid: cid,
-                    LocalEndpoints.routable(port: boundPort.rawValue, limit: 4)
-                ))
-            case .conversations:
-                // Answered synchronously, the same as `newSessionOptions` and `macEndpoints`:
-                // `SQLiteSearchIndex` is already called this way off a debounce timer in
-                // `SearchModel`, on this same actor — see `AppDelegate.presentSearch`. Nothing
-                // here writes and nothing enters `FleetSnapshot`.
-                //
-                // `nil` — no index, or the read threw — is refused rather than answered with an
-                // empty catalogue; see `conversationCatalogue`'s doc comment.
-                guard let catalogue = self.conversationCatalogue() else {
-                    return reply(.err(cid: cid, code: "index_unavailable"))
-                }
-                reply(.conversations(cid: cid, catalogue))
-            case .search(let query, let limit):
-                // A query FTS5 cannot match — empty or all whitespace — is not a failure. It
-                // is a query with nothing to match, and an empty hit list is the honest
-                // answer, not `err`.
-                guard let match = FTS5Query.match(for: query) else {
-                    return reply(.searchHits(cid: cid, WireSearchHits(hits: [], indexing: nil)))
-                }
-                // No index yet, or a genuinely failed read, is refused rather than answered
-                // with an empty hit list — folding "not open" and "threw" into `[]` would tell
-                // the phone "No Results", a claim about the corpus this Mac is in no position
-                // to make (§9). This is the one state `SearchLimits` and the empty-query guard
-                // above do not cover: a query FTS5 *can* match, but there is nothing to ask.
-                guard let index = self.store.searchIndex else {
-                    return reply(.err(cid: cid, code: "index_unavailable"))
-                }
-                // Clamped with `SearchLimits.maxHits`, not `SearchModel.transcriptLimit`:
-                // that property is `@MainActor`-isolated for `SearchModel`'s own state, and
-                // `FleetKit` gives both sides the same ceiling with no actor to cross.
-                let capped = min(limit, SearchLimits.maxHits)
-                guard let hits = try? index.search(
-                    match, projects: self.openProjectPaths(), limit: capped
-                ) else {
-                    return reply(.err(cid: cid, code: "index_unavailable"))
-                }
-                // `nil` outside a backfill — an absent `indexingProgress` means "not
-                // indexing", not "0 of 0", and reporting the latter would put a meaningless
-                // footer on the phone permanently. See `indexingProgress`'s doc comment for
-                // where this is set.
-                let indexing = self.indexingProgress.map {
-                    WireIndexingProgress(done: $0.indexed, total: $0.total)
-                }
-                reply(.searchHits(cid: cid, WireSearchHits(hits: hits, indexing: indexing)))
-            case .openConversation(let conversationID, let projectPath):
-                switch self.openConversation(conversationID: conversationID, projectPath: projectPath) {
-                case .success(let id):
-                    reply(.session(cid: cid, id))
-                case .failure(.unknownConversation):
-                    reply(.err(cid: cid, code: "unknown_conversation"))
-                case .failure(.launchFailed):
-                    // The conversation is real; launching it is what failed — a dangling or
-                    // relocated account, the same refusal `SessionStore.openConversation`
-                    // reports to `launchFailureReporter` on the desktop. A distinct code, not
-                    // `unknown_conversation`, so the phone can tell "no such conversation"
-                    // from "found it, could not open it" rather than folding both into one
-                    // dead end.
-                    reply(.err(cid: cid, code: "launch_failed"))
-                }
+            server.onCommand = { [weak self] client, cid, command, reply in
+                guard let self else { return reply(.err(cid: cid, code: "stopped")) }
+                self.handleCommand(client, cid, command, reply)
+            }
+            server.onRequest = { [weak self] client, cid, request, reply in
+                guard let self else { return reply(.err(cid: cid, code: "stopped")) }
+                self.handleRequest(client, cid, request, reply)
             }
         }
         server.onAttachedSlotsChanged = { [weak self] slots in
@@ -554,6 +437,190 @@ final class FleetService: ObservableObject {
         }
     }
 
+    /// A phone's hello files it as attached and observes what it was handed on resume; a local
+    /// caller's does neither — see `framesForLocal(resumingFrom:)`.
+    private func handleHello(_ attachment: FleetAttachment, _ lastSeq: Int) -> [ServerFrame] {
+        if attachment.isLocal { return framesForLocal(resumingFrom: lastSeq) }
+        noteAttached(attachment)
+        return frames(resumingFrom: lastSeq)
+    }
+
+    private func handleCommand(
+        _ client: FleetAttachment, _ cid: Int, _ command: FleetCommand,
+        _ reply: @escaping (ServerFrame) -> Void
+    ) {
+        // Only a local caller is scoped: a phone proved itself with a paired key, and a tab's
+        // agent proves only which tab it runs in. No token is `.human`, never scoped; a forged
+        // or stale one is `.invalid` and fails closed — see `ControlScope.caller`.
+        if client.isLocal {
+            let caller = ControlScope.caller(token: client.caller, secret: controlSecret)
+            guard ControlScope.permits(command, level: scopeLevel(), caller: caller) else {
+                return reply(.err(cid: cid, code: "out_of_scope"))
+            }
+            // Presence is a phone's, and a CLI tailing a tab is not a phone looking at it.
+            if case .viewing = command { return reply(.ack(cid: cid)) }
+        }
+        // The ONLY command that can need to wait, and only when its project still
+        // exists and the display is not already drawable — which is to say, almost
+        // never. Gated on `store.projectPath(project) != nil` too: `apply`'s own
+        // `.newSession` arm checks the project before the terminal on purpose (see its
+        // comment), so a stale phone naming a project the Mac no longer has must still
+        // get `unknown_project` without this ever waking the screen or asking the waker
+        // anything. Every other command, and every creation on an awake Mac or against a
+        // dead project, still answers on the way out of the frame handler exactly as
+        // before.
+        if case .newSession(let project, _, _) = command,
+           self.store.projectPath(project) != nil,
+           !self.store.canCreateTerminal {
+            Task { @MainActor in
+                guard await self.store.awaitTerminalCreatable() else {
+                    return reply(.err(cid: cid, code: "terminal_unavailable"))
+                }
+                reply(self.apply(command, from: client, cid: cid))
+            }
+            return
+        }
+        reply(self.apply(command, from: client, cid: cid))
+    }
+
+    private func handleRequest(
+        _ client: FleetAttachment, _ cid: Int, _ request: FleetRequest,
+        _ reply: @escaping (ServerFrame) -> Void
+    ) {
+        // The same guard `handleCommand` opens with, for the same reason.
+        if client.isLocal {
+            let caller = ControlScope.caller(token: client.caller, secret: controlSecret)
+            guard ControlScope.permits(request, level: scopeLevel(), caller: caller) else {
+                return reply(.err(cid: cid, code: "out_of_scope"))
+            }
+        }
+        switch request {
+        case .timeline(let session, let anchor, let limit):
+            // A `Task` rather than a synchronous answer, because reading a page is file
+            // I/O: `TimelineService` hands the parse to a detached task and resumes here
+            // on the main actor, which is `queue`. `reply` is therefore called on
+            // `queue`, as `onRequest` requires — and after an await, which is exactly the
+            // case `FleetSocketServer`'s deferred-send guard is written for.
+            //
+            // Nothing here writes: the answer is composed from the transcript on disk and
+            // the store is only ever asked to resolve the tab. That is what keeps the
+            // history channel out of the fleet event log entirely — no `FleetEvent`, no
+            // broadcast, and nothing new for `FleetReplicator`'s drift check to guard.
+            Task { @MainActor in
+                switch await self.timeline.page(
+                    session: session, anchor: anchor, limit: limit
+                ) {
+                case .success(let page): reply(.page(cid: cid, page))
+                // `.code` is the wire spelling, verbatim — see `TimelineErrorCode`.
+                case .failure(let code): reply(.err(cid: cid, code: code.code))
+                }
+            }
+        case .newSessionOptions(let project):
+            // Answered synchronously: this reads preferences and the project list, both of
+            // which are already on this actor. No file I/O, so nothing to hop for.
+            //
+            // Nothing here writes and nothing enters `FleetSnapshot` — which is the whole
+            // design. Menu rows come from preferences, preferences emit no fleet events,
+            // and a snapshot that changed without one is what `FleetReplicator`'s drift
+            // assertion catches. It caught it once already; see the spec.
+            guard let options = self.newSessionOptions(for: project) else {
+                return reply(.err(cid: cid, code: "unknown_project"))
+            }
+            reply(.newSessionOptions(cid: cid, options))
+        case .recentlyClosed:
+            // Answered synchronously, the same as `newSessionOptions` and `macEndpoints`:
+            // the stack is in memory on this actor, so there is nothing to hop a `Task`
+            // for and `reply` lands on `queue` as `onRequest` requires.
+            //
+            // Nothing here writes and nothing enters `FleetSnapshot` — the history is not
+            // rebuildable from fleet events at all (`sessionRemoved` carries an id and
+            // nothing else), which is the sharpest version of the shape
+            // `FleetReplicator`'s drift assertion catches.
+            //
+            // An empty list is a real answer and is sent as one: it means nothing has been
+            // closed this run. The phone renders no section, which is the same outcome as
+            // never having asked — but this end has no reason to distinguish them.
+            reply(.recentlyClosed(
+                cid: cid,
+                ClosedSessionProjection.rows(for: self.store.recentlyClosedSessions)
+            ))
+        case .macEndpoints:
+            // Answered synchronously: enumerating interfaces is a syscall, not file I/O,
+            // so there is nothing to hop a `Task` for and `reply` lands on `queue` as
+            // `onRequest` requires.
+            //
+            // Nothing here writes and nothing enters `FleetSnapshot` — addresses change
+            // with no event recorded, which is exactly the shape `FleetReplicator`'s
+            // drift assertion catches.
+            guard let boundPort = self.boundPort else {
+                return reply(.err(cid: cid, code: "not_listening"))
+            }
+            reply(.macEndpoints(
+                cid: cid,
+                LocalEndpoints.routable(port: boundPort.rawValue, limit: 4)
+            ))
+        case .conversations:
+            // Answered synchronously, the same as `newSessionOptions` and `macEndpoints`:
+            // `SQLiteSearchIndex` is already called this way off a debounce timer in
+            // `SearchModel`, on this same actor — see `AppDelegate.presentSearch`. Nothing
+            // here writes and nothing enters `FleetSnapshot`.
+            //
+            // `nil` — no index, or the read threw — is refused rather than answered with an
+            // empty catalogue; see `conversationCatalogue`'s doc comment.
+            guard let catalogue = self.conversationCatalogue() else {
+                return reply(.err(cid: cid, code: "index_unavailable"))
+            }
+            reply(.conversations(cid: cid, catalogue))
+        case .search(let query, let limit):
+            // A query FTS5 cannot match — empty or all whitespace — is not a failure. It
+            // is a query with nothing to match, and an empty hit list is the honest
+            // answer, not `err`.
+            guard let match = FTS5Query.match(for: query) else {
+                return reply(.searchHits(cid: cid, WireSearchHits(hits: [], indexing: nil)))
+            }
+            // No index yet, or a genuinely failed read, is refused rather than answered
+            // with an empty hit list — folding "not open" and "threw" into `[]` would tell
+            // the phone "No Results", a claim about the corpus this Mac is in no position
+            // to make (§9). This is the one state `SearchLimits` and the empty-query guard
+            // above do not cover: a query FTS5 *can* match, but there is nothing to ask.
+            guard let index = self.store.searchIndex else {
+                return reply(.err(cid: cid, code: "index_unavailable"))
+            }
+            // Clamped with `SearchLimits.maxHits`, not `SearchModel.transcriptLimit`:
+            // that property is `@MainActor`-isolated for `SearchModel`'s own state, and
+            // `FleetKit` gives both sides the same ceiling with no actor to cross.
+            let capped = min(limit, SearchLimits.maxHits)
+            guard let hits = try? index.search(
+                match, projects: self.openProjectPaths(), limit: capped
+            ) else {
+                return reply(.err(cid: cid, code: "index_unavailable"))
+            }
+            // `nil` outside a backfill — an absent `indexingProgress` means "not
+            // indexing", not "0 of 0", and reporting the latter would put a meaningless
+            // footer on the phone permanently. See `indexingProgress`'s doc comment for
+            // where this is set.
+            let indexing = self.indexingProgress.map {
+                WireIndexingProgress(done: $0.indexed, total: $0.total)
+            }
+            reply(.searchHits(cid: cid, WireSearchHits(hits: hits, indexing: indexing)))
+        case .openConversation(let conversationID, let projectPath):
+            switch self.openConversation(conversationID: conversationID, projectPath: projectPath) {
+            case .success(let id):
+                reply(.session(cid: cid, id))
+            case .failure(.unknownConversation):
+                reply(.err(cid: cid, code: "unknown_conversation"))
+            case .failure(.launchFailed):
+                // The conversation is real; launching it is what failed — a dangling or
+                // relocated account, the same refusal `SessionStore.openConversation`
+                // reports to `launchFailureReporter` on the desktop. A distinct code, not
+                // `unknown_conversation`, so the phone can tell "no such conversation"
+                // from "found it, could not open it" rather than folding both into one
+                // dead end.
+                reply(.err(cid: cid, code: "launch_failed"))
+            }
+        }
+    }
+
     private func publishPhonePresence() {
         phoneActiveSessions = Set(viewingByClient.values)
     }
@@ -602,14 +669,7 @@ final class FleetService: ObservableObject {
     /// re-snapshot is the point: silently resuming from wherever the server happens to be is
     /// how a phone ends up confidently displaying a fleet that no longer exists.
     private func frames(resumingFrom lastSeq: Int) -> [ServerFrame] {
-        let answer: [ServerFrame]
-        switch replicator.resume(from: lastSeq) {
-        case .replay(let events):
-            answer = events.map { .event(seq: $0.seq, $0.event) }
-        case .resnapshot(let reason):
-            let current = replicator.snapshot()
-            answer = [.snapshot(seq: current.seq, fleet: current.fleet, reason: reason)]
-        }
+        let answer = resumeFrames(from: lastSeq)
         // A phone that was away across a dialog closing learns about it from this answer and
         // from nothing later, so what it was handed is the other half of any stale-card
         // question — see `PromptLifecycleObserver.observeResume`.
@@ -618,6 +678,28 @@ final class FleetService: ObservableObject {
         )
         return answer
     }
+
+    /// What `frames(resumingFrom:)` answers a local caller with, minus the resume observation:
+    /// a CLI is not a phone that was away, so there is no stale card for that record to
+    /// explain, and filing one would log a resume no phone ever made.
+    private func framesForLocal(resumingFrom lastSeq: Int) -> [ServerFrame] {
+        resumeFrames(from: lastSeq)
+    }
+
+    /// The replicator half both hellos share.
+    private func resumeFrames(from lastSeq: Int) -> [ServerFrame] {
+        switch replicator.resume(from: lastSeq) {
+        case .replay(let events):
+            return events.map { .event(seq: $0.seq, $0.event) }
+        case .resnapshot(let reason):
+            let current = replicator.snapshot()
+            return [.snapshot(seq: current.seq, fleet: current.fleet, reason: reason)]
+        }
+    }
+
+    /// The local control socket (`flightdeck`). Independent of pairing: a Mac nobody has paired
+    /// with still has a CLI. See `FleetSocketServer.startLocal` for why it is its own instance.
+    func startLocal(at url: URL) async throws { try await localServer.startLocal(path: url.path) }
 
     /// `async` because `FleetSocketServer.start` awaits the OS reporting its bound port
     /// rather than polling for it — the polling version blocked its caller for up to five
@@ -712,6 +794,9 @@ final class FleetService: ObservableObject {
         // which fires `onAttachedSlotsChanged` itself — see `wireHandlers()` — so
         // `attachedSlots` is already empty by the time this returns; nothing to clear here.
         server.stop()
+        // Unlinks the socket file too, so the next launch binds cleanly instead of finding a
+        // stale path.
+        localServer.stop()
     }
 
     /// Restarts the listener so a changed key set takes effect. Every arm, expiry and

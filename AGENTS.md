@@ -43,6 +43,7 @@ or revert blind — check `git status` and leave changes that aren't yours alone
 ./scripts/build-boringssl.sh    # once, BEFORE ANY BUILD — see below
 ./scripts/build.sh              # xcodegen generate + xcodebuild → Debug "Flight Deck.app"
 ./scripts/test-unit.sh          # headless unit suite — your normal TDD loop
+./scripts/test-adapters.sh      # re-derives the adapter capability matrix against live claude/codex, exits non-zero on drift; default tier `cheap` spends no tokens (see scripts/adapterprobe/README.md for `--tier full` — and its baseline note before assuming a red run is your bug)
 ./scripts/smoke.sh              # GUI UITest, ends "SMOKE PASS" (see rule 4)
 
 # Flake hunting — loops one suspect sequence 20x in a single launch (rule 4).
@@ -57,6 +58,8 @@ TEST_RUNNER_FLIGHTDECK_FLAKE_HUNT=1 FLIGHTDECK_TEST_THROTTLE=0 ./scripts/smoke.s
 # runs a real model turn that costs real tokens. Never loop it; run it only when you
 # have a specific reason to.
 ./scripts/test-codex-live.sh
+
+flightdeck ls                   # drive Flight Deck itself from a tab's own shell — see docs/HANDOFF.md
 ```
 
 **`build-boringssl.sh` is a prerequisite for *every* target, not just the iOS ones.** The

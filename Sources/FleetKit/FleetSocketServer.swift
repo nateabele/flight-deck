@@ -27,14 +27,26 @@ public struct FleetAttachment: Equatable, Sendable {
     /// *claimed*, never authenticated — but the consequence of trusting it wrongly is a frame
     /// the peer ignores rather than any authority it did not have.
     public let caps: Set<String>
+    /// Whether this connection came in over the local control socket (Task 3) rather than the
+    /// paired-phone TLS-PSK listener. Local callers skip pairing entirely, so this is what a
+    /// consumer checks before trusting anything that only a local caller could claim.
+    public let isLocal: Bool
+    /// What a local client called itself in its `hello`'s `caller` field. `nil` off the local
+    /// socket, and for any client that claimed nothing. Same kind of fact as `name` — merely
+    /// *claimed*, never authenticated — verified by the app, never trusted.
+    public let caller: String?
 
     /// `caps` defaults to empty — "claims nothing" — because that is a real wire state the
-    /// server has to handle anyway, not a convenience for callers.
-    public init(id: UUID, slot: UUID?, name: String?, caps: Set<String> = []) {
+    /// server has to handle anyway, not a convenience for callers. `isLocal` defaults to false
+    /// and `caller` to nil so every existing construction site compiles unchanged.
+    public init(id: UUID, slot: UUID?, name: String?, caps: Set<String> = [],
+                isLocal: Bool = false, caller: String? = nil) {
         self.id = id
         self.slot = slot
         self.name = name
         self.caps = caps
+        self.isLocal = isLocal
+        self.caller = caller
     }
 }
 
@@ -215,6 +227,14 @@ public final class FleetSocketServer: @unchecked Sendable {
     /// the connection for the reason `names` is: a client says what it can do once, in its
     /// `hello`, and every later decision about it reads this rather than asking again.
     private var caps: [UUID: Set<String>] = [:]
+    /// What each local connection's `hello` named as its caller, by connection id. Kept for
+    /// the reason `names` is. Only ever filed in local mode: a phone that sends `caller` has it
+    /// ignored, so nothing off the local socket can claim to be a local caller.
+    private var callers: [UUID: String] = [:]
+    /// The unix socket path when this instance was started by `startLocal`, and `nil` in the
+    /// paired (TLS-PSK) mode. `stop()` unlinks it. Confined to `queue`.
+    private var localPath: String?
+    private var isLocal: Bool { localPath != nil }
     /// Outstanding `phoneRequest`s, by connection id and then by this server's own `cid`.
     ///
     /// **Its own `cid` space, minted by `nextAskCID`, and it cannot collide with a client's.**
@@ -261,6 +281,10 @@ public final class FleetSocketServer: @unchecked Sendable {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
                 dispatchPrecondition(condition: .onQueue(queue))
+                // `startLocal` and this must never share an instance — see `startLocal`.
+                // Checked here rather than on `listener`, because this method restarts its
+                // own listener on every arm, expiry and revocation.
+                precondition(localPath == nil, "one mode per FleetSocketServer")
                 // `stop()`'s `listener?.cancel()` is fire-and-forget — Network.framework
                 // releases the port asynchronously, on its own schedule. `reloadKeys()`
                 // restarts this listener on the *same* port on every arm, expiry and
@@ -274,6 +298,129 @@ public final class FleetSocketServer: @unchecked Sendable {
                 releaseListenerOnQueue { [self] in
                     bind(keys: keys, port: port, serviceName: serviceName, continuation: continuation)
                 }
+            }
+        }
+    }
+
+    /// Local mode: the control socket `flightdeck` talks to. The frames and every handler are
+    /// the phone's, over `FleetSocket.lineParameters()` instead of TLS-PSK and WebSocket.
+    ///
+    /// **A separate instance from the phone's, never a second listener on it.** `stop()`, which
+    /// every arm, expiry and revocation reaches through `FleetService.reloadKeys`, cancels every
+    /// connection the instance holds. Sharing one would drop every `flightdeck tail` whenever a
+    /// phone paired.
+    ///
+    /// Authorization is the filesystem: the file is `0600`, and in the default location it sits
+    /// inside the user's `~/Library` (0700), which is the boundary that holds even during the
+    /// moment between bind and chmod. A state dir outside `~/Library` relies on the mode alone,
+    /// so a chmod that fails fails the start. `NWConnection` exposes no socket descriptor to
+    /// read `getpeereid` from, which is the argument `AnswerTriggerSocket` already makes.
+    ///
+    /// The same one-`queue.async`-inside-one-continuation shape as `start`, for the reason its
+    /// doc comment gives.
+    public func startLocal(path: String) async throws {
+        // `sockaddr_un.sun_path` is 104 bytes including the NUL, and `bind` fails rather than
+        // truncating. Refused here by name rather than surfacing as EINVAL.
+        guard path.utf8.count <= 103 else { throw FleetSocketError.pathTooLong(path.utf8.count) }
+        // Probe before unlinking. A crash leaves a dead file that must be cleared, but a live one
+        // belongs to another instance on the same state directory, and unlinking it would
+        // silently orphan every client that instance has.
+        if FileManager.default.fileExists(atPath: path) {
+            guard !Self.socketIsLive(path) else { throw FleetSocketError.inUse }
+            unlink(path)
+        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async { [self] in
+                dispatchPrecondition(condition: .onQueue(queue))
+                // Inside `queue`: `listener` and `localPath` are confined to it.
+                precondition(listener == nil && localPath == nil, "one mode per FleetSocketServer")
+                let parameters = FleetSocket.lineParameters()
+                parameters.requiredLocalEndpoint = .unix(path: path)
+                let listener: NWListener
+                do { listener = try NWListener(using: parameters) }
+                catch { return continuation.resume(throwing: error) }
+                localPath = path
+                self.listener = listener
+                listener.newConnectionHandler = { [weak self] in self?.accept($0) }
+                // Every failure path forgets the listener and the path before resuming, so a
+                // later `stop()` cannot unlink a file this instance never owned — a bind that
+                // lost a race to another instance leaves that instance's live socket there.
+                // Guarded on identity because a caller may `stop()` and start again before a
+                // stale timeout below fires.
+                // `nonisolated(unsafe)` for the reason `timeout` is: captured by `@Sendable`
+                // handlers that Network.framework and `queue` only ever run on `queue`.
+                nonisolated(unsafe) let abandon: () -> Void = { [weak self, weak listener] in
+                    guard let self, let listener, self.listener === listener else { return }
+                    listener.cancel()
+                    self.listener = nil
+                    self.localPath = nil
+                }
+                // Same single-resume guard and `nonisolated(unsafe)` argument as `bind`'s:
+                // the state handler and the timeout both run only on `queue`.
+                nonisolated(unsafe) var resumed = false
+                // Bounded for `bind`'s reason: `.waiting` is a state that may never resolve,
+                // and an unbounded wait here is an app launch that never gets its control
+                // socket and never says so. A unix bind is a local syscall, so five seconds
+                // is only ever reached by something that was not going to succeed.
+                nonisolated(unsafe) let timeout = DispatchWorkItem {
+                    guard !resumed else { return }
+                    resumed = true
+                    abandon()
+                    continuation.resume(throwing: FleetSocketError.didNotBind)
+                }
+                listener.stateUpdateHandler = { state in
+                    guard !resumed else { return }
+                    switch state {
+                    case .ready:
+                        resumed = true
+                        timeout.cancel()
+                        // Owner-only before `startLocal` returns, so before anything that
+                        // advertises the path runs. This is set *after* bind: between the two,
+                        // the file has whatever the process umask gave it. In the default
+                        // location that window is harmless, because the real boundary is
+                        // `~/Library` itself (0700) — nobody else can traverse to the file.
+                        // A `-FlightDeckStateDir` outside `~/Library` has no such parent, and
+                        // there this mode IS the authorization, so a failed chmod must not
+                        // leave a listener up on a file other users may be able to open.
+                        guard chmod(path, 0o600) == 0 else {
+                            let code = POSIXErrorCode(rawValue: errno) ?? .EPERM
+                            abandon()
+                            unlink(path)
+                            return continuation.resume(throwing: POSIXError(code))
+                        }
+                        continuation.resume()
+                    case .failed(let error):
+                        resumed = true
+                        timeout.cancel()
+                        abandon()
+                        continuation.resume(throwing: error)
+                    case .cancelled:
+                        resumed = true
+                        timeout.cancel()
+                        abandon()
+                        continuation.resume(throwing: FleetSocketError.didNotBind)
+                    default:
+                        break
+                    }
+                }
+                listener.start(queue: queue)
+                queue.asyncAfter(deadline: .now() + 5, execute: timeout)
+            }
+        }
+    }
+
+    /// Whether something answers on `path`. A blocking `connect(2)` on a unix socket succeeds
+    /// or fails immediately, with no network round trip to wait on.
+    static func socketIsLive(_ path: String) -> Bool {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        _ = path.withCString { strncpy(&address.sun_path.0, $0, 103) }
+        return withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
             }
         }
     }
@@ -388,6 +535,12 @@ public final class FleetSocketServer: @unchecked Sendable {
         cancelConnections()
         listener?.cancel()
         listener = nil
+        // A unix socket's file outlives its listener; left behind, it is what the next launch
+        // has to probe and clear. Cleared here too, so a stopped instance is back to no mode.
+        if let localPath {
+            unlink(localPath)
+            self.localPath = nil
+        }
     }
 
     /// Shared by `stop()` and `releaseListenerOnQueue`: every attached and pending connection
@@ -415,6 +568,7 @@ public final class FleetSocketServer: @unchecked Sendable {
         slots.removeAll()
         names.removeAll()
         caps.removeAll()
+        callers.removeAll()
         ready.removeAll()
         identities.removeAll()
         // Drained, not merely dropped, and the distinction is the whole rule `asks` states: a
@@ -558,7 +712,10 @@ public final class FleetSocketServer: @unchecked Sendable {
     public var attachments: [FleetAttachment] {
         dispatchPrecondition(condition: .onQueue(queue))
         return attached.keys.map {
-            FleetAttachment(id: $0, slot: slots[$0], name: names[$0], caps: caps[$0] ?? [])
+            FleetAttachment(
+                id: $0, slot: slots[$0], name: names[$0], caps: caps[$0] ?? [],
+                isLocal: isLocal, caller: isLocal ? callers[$0] : nil
+            )
         }
     }
 
@@ -686,18 +843,25 @@ public final class FleetSocketServer: @unchecked Sendable {
             dispatchPrecondition(condition: .onQueue(self.queue))
             // Recorded before the attachment is built, so the `hello` that carries the claim
             // is itself attributed with it rather than only the frames after it.
-            if case .hello(_, let device, let caps) = frame {
+            if case .hello(_, let device, let caps, let caller) = frame {
                 if let device { self.names[id] = device }
                 // Recorded even when empty, so a re-`hello` on the same socket cannot leave a
                 // stale claim from an earlier one standing.
                 self.caps[id] = Set(caps)
+                // Local mode only, and assigned (not `if let`) for the reason `caps` is. A
+                // phone that sends `caller` has it ignored: it is a claim that only means
+                // something from behind the `0600` file.
+                if self.isLocal { self.callers[id] = caller }
             }
+            // `slot(of:)` is never consulted in local mode: there is no TLS metadata to read,
+            // and no paired slot a local caller could be attributed to.
             let attachment = FleetAttachment(
-                id: id, slot: self.slot(of: connection, id: id), name: self.names[id],
-                caps: self.caps[id] ?? []
+                id: id, slot: self.isLocal ? nil : self.slot(of: connection, id: id),
+                name: self.names[id], caps: self.caps[id] ?? [],
+                isLocal: self.isLocal, caller: self.isLocal ? self.callers[id] : nil
             )
             switch frame {
-            case .hello(let lastSeq, _, _):
+            case .hello(let lastSeq, _, _, _):
                 if self.attached[id] == nil {
                     self.pending.removeValue(forKey: id)
                     self.attached[id] = connection
@@ -830,6 +994,7 @@ public final class FleetSocketServer: @unchecked Sendable {
         slots.removeValue(forKey: id)
         names.removeValue(forKey: id)
         caps.removeValue(forKey: id)
+        callers.removeValue(forKey: id)
         // Drained, not cleared, and before the `attached` check for the reason `slots` is
         // removed before it: a connection can be asked and then die without ever reaching the
         // arm below. Removed from the table BEFORE the loop, so a completion that re-enters —
@@ -846,4 +1011,10 @@ public final class FleetSocketServer: @unchecked Sendable {
 
 public enum FleetSocketError: Error {
     case didNotBind
+    /// The local socket path does not fit `sockaddr_un.sun_path`, where `bind` would fail with
+    /// a bare `EINVAL` rather than truncate. Carries the path's UTF-8 length.
+    case pathTooLong(Int)
+    /// Something is already answering on the local socket path — another instance on the same
+    /// state directory, whose clients would be orphaned if this one unlinked it.
+    case inUse
 }

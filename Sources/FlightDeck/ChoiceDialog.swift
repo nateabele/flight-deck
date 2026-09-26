@@ -387,10 +387,22 @@ enum ChoiceDialog {
     ///    the AskUserQuestion tool …` is a marker with no number too, but it sits above the
     ///    dialog and never one line under a row.
     ///
-    /// **No label is matched here, deliberately.** `Submit` and `Next` are claude's words, not
-    /// this file's; `row(_:reads:)`'s caller checks them against `AnswerPlan.actionLabel`. A
-    /// build that renders something else in this position is refused and the drive aborts —
-    /// the same failure as before this rule existed, and never a wrong keypress.
+    /// **No label is matched here, deliberately** — `Submit` and `Next` are claude's words, not
+    /// this file's.
+    ///
+    /// **And nothing else checks them any more either.** That sentence used to end "…
+    /// `row(_:reads:)`'s caller checks them against `AnswerPlan.actionLabel`, so a build that
+    /// renders something else in this position is refused and the drive aborts". The caller it
+    /// named was `SessionStore.rowLabel`, deleted when the planned answer drive stopped reading
+    /// rows: `row(_:reads:)`'s only production callers are now on the single-select `.option`
+    /// path, which refuses a `multiSelect` question before it gets here. So a build that renders
+    /// something else in this position is PRESSED ON, not refused — and nothing bounds that.
+    /// **Not the shape of a checkbox screen, in particular**, which an earlier version of this
+    /// paragraph offered: the row this rule admits is the one row of a checkbox screen that does
+    /// NOT toggle. It reads `Next` or `Submit` and advances the question, so a press that misses
+    /// it lands on a checkbox or on the unnumbered rows below, and the plan's final `.submit`
+    /// step presses again regardless. `SessionStore.drive(_:driver:injector:id:token:)` carries
+    /// the full account.
     private static func actionRow(_ line: String, after run: [Row], marker: Character) -> Row? {
         guard run.count >= 2, let last = run.last, run.allSatisfy(\.isCheckbox),
               last.continuations.isEmpty

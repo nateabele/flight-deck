@@ -1095,6 +1095,16 @@ final class SessionStore: ObservableObject {
     /// Not `private`: `AppDelegate` reads this to wire the Tools menu to the same store.
     let preferences: PreferencesStore?
 
+    /// The local control socket every launched tab is pointed at, or nil when the control
+    /// socket is off. `FlightDeckApp` sets this (with `controlSecret`) when
+    /// `ControlEnvironment.isEnabled()`; left nil under a UITest reset so a GUI test's tabs
+    /// never learn a live socket. Read at launch time only, like `preferences`.
+    var controlSocket: URL?
+    /// The key each tab's `FLIGHT_DECK_CALLER` token is minted under — `FleetService`'s own
+    /// `controlSecret`, which `FlightDeckApp` copies here so the token a tab carries is one the
+    /// server that judges it can verify. Only consulted when `controlSocket` is also set.
+    var controlSecret: Data?
+
     /// The path calculator for `fd-abduco` sockets/pidfiles/binary — see its doc comment.
     /// Injected (default `SessionDaemon()`) so tests can point it at a temp directory with a
     /// fake executable, matching `daemonControl` below.
@@ -1457,7 +1467,10 @@ final class SessionStore: ObservableObject {
     ///
     /// Applied last for the same reason the account is: a variable typed into the Shell pane
     /// must not be able to repoint a tab's hook log at a directory nothing tails.
-    private func launchEnvironment(
+    ///
+    /// Internal rather than `private` only so `ControlLaunchEnvironmentTests` can read what a
+    /// tab would be launched with, without forking a shell to find out.
+    func launchEnvironment(
         for session: Session, adapter: AgentAdapter, orphaned: Bool
     ) -> [String: String] {
         var environment =
@@ -1465,6 +1478,12 @@ final class SessionStore: ObservableObject {
                 for: orphaned ? nil : account(for: session), flywheel: session.flywheelIdentity
             ) ?? [:]
         for (key, value) in adapter.launchEnvironment { environment[key] = value }
+        // Last, like the adapter's half and for the same reason: a variable typed into the Shell
+        // pane must not repoint a tab at another app instance's socket or claim another tab.
+        if let controlSocket, let controlSecret {
+            for (key, value) in ControlEnvironment.variables(
+                for: session.id, socket: controlSocket, secret: controlSecret) { environment[key] = value }
+        }
         return environment
     }
 
@@ -5563,6 +5582,25 @@ final class SessionStore: ObservableObject {
             // to confirm the row against. All that can be required after the move is that the
             // marker is ON that row. A screen that renumbered its rows would satisfy that.
             // The two paths are not equally verified and must not be read as if they were.
+            //
+            // **And this is why `.allow` KEPT the `focusedRow` read that `.answers` no longer
+            // makes, which is deliberate rather than a job half done.** Two reasons, both
+            // specific to a permission dialog:
+            //
+            // 1. It has no label the Mac can check — see the paragraph above. Cursor position
+            //    is the only interlock this path has ever had, so dropping it would leave none.
+            // 2. The target is `allowRow` = 0, and the row below it is "Yes, and don't ask
+            //    again for …" — a DURABLE PERMISSION GRANT. A blind Return on a cursor somebody
+            //    moved would create one, silently, from a pocket. An `.answers` drive that
+            //    STOPS is recoverable — claude draws a review screen before anything commits,
+            //    so an abort part-way leaves a dialog a human can still finish or cancel — and
+            //    that is the whole of the claim: an `.answers` drive that continues onto the
+            //    wrong row commits a wrong answer, exactly as
+            //    `drive(_:driver:injector:id:token:)` sets out. What is not recoverable in
+            //    EITHER direction is a grant made here, which is why this path keeps its read.
+            //
+            // A drive that refuses here leaves the dialog up for the person at the keyboard,
+            // which is the direction this path fails in on purpose.
             guard case .permission = open else {
                 recordEarlyAbort(.allowNotPermission, injector: injector)
                 return .unreadableScreen
@@ -5608,8 +5646,7 @@ final class SessionStore: ObservableObject {
             guard let plan = AnswerPlan.plan(
                 for: questions, answers: selections.map { $0.map(\.index) }
             ) else { return .unanswerable }
-            return drive(plan, questions: questions, driver: driver,
-                         injector: injector, id: id, token: token)
+            return drive(plan, driver: driver, injector: injector, id: id, token: token)
 
         case .option(let index, let label):
             // `option` indexes an `AskUserQuestion`'s own options, so a permission dialog —
@@ -5786,7 +5823,152 @@ final class SessionStore: ObservableObject {
         return .dispatched
     }
 
-    /// Move the selection, wait for the repaint, re-read, and only then submit.
+    /// Answer a whole set of questions in one drive.
+    ///
+    /// **The plan is built first and the screen is not read to decide anything.** `AnswerPlan`
+    /// knows every move and press from the transcript and the reader's choices, so this walks a
+    /// fixed program; all the screen is asked, once per step, is whether a select list is on it
+    /// at all. Nothing else here is derived from what is drawn.
+    ///
+    /// **The per-step cursor and label checks were removed because they refused a screen with
+    /// nothing wrong with it.** `ChoiceDialog.list()` needs a contiguous run of numbered rows,
+    /// and an option description that wraps onto a line beginning `0. ` breaks that run — so
+    /// `focusedRow` returned nil and every answer to that dialog was refused, deterministically,
+    /// for as long as it was on screen. The capture is
+    /// `Fixtures/Claude/question-numbered-description.captured.txt` and the drive over it is
+    /// `AnswerPromptTests.testASetIsDrivenOnAScreenWhoseDescriptionBreaksTheListParse`.
+    ///
+    /// **What that costs, stated exactly, because the obvious sentence about it is wrong.**
+    /// claude shows a review screen listing every question with its chosen answer and asks
+    /// "Ready to submit your answers?" — and that screen bounds a drive that **STOPS**, not one
+    /// that continues wrong. The plan's last step is an unconditional `.submit`
+    /// (`AnswerPlan.plan`), so a press that landed on the wrong row is carried straight through
+    /// to the commit by the very next step. "Continues wrong" is the new failure mode and it is
+    /// the one `cursorBeforePress` and `landingAfterMove` used to catch:
+    ///
+    /// - a cursor the plan did not expect (a human touched the terminal, or claude opened a
+    ///   dialog this Mac's transcript copy does not describe) selects a neighbouring option, and
+    ///   the submit step presses again on whatever follows.
+    ///   `AnswerDiagnosticsTests.testACursorSomewhereElseCommitsTheWrongAnswer` pins as much of
+    ///   that as a fake can: a Return goes out while the marker sits on a row the reader did not
+    ///   choose, and nothing is filed. The spy models no review screen and no commit, so the
+    ///   press is what is asserted — the commit is this paragraph's reasoning, not the test's;
+    /// - a dropped or unrepainted arrow does the same thing one row over.
+    ///
+    /// **And multiSelect is NOT the bounded case — it is the worse one.** A previous version of
+    /// this comment offered it as the consolation ("a mis-landed press only toggles a box"),
+    /// which is false of the step that matters. `AnswerPlan.plan` gives every multiSelect
+    /// question a `.action` step onto `actionRow(optionCount:)`, and that row is `Next`/`Submit`:
+    /// it advances the question rather than toggling anything, so a multiSelect drive contains a
+    /// committing press even when every keystroke lands. Two things make it worse than
+    /// single-select rather than better:
+    ///
+    /// - that `.action` press, landing one row off, hits a checkbox or one of the unnumbered
+    ///   `Type something` / `Chat about this` rows `ChoiceDialog` documents below it, and the
+    ///   unconditional `.submit` then fires a Return into whatever that opened —
+    ///   `AnswerDiagnosticsTests.testAMissingActionRowNoLongerStopsACheckboxDrive` is the
+    ///   sibling case, with the action row simply absent;
+    /// - the cursor CARRIES from step to step inside one multiSelect question (`AnswerPlan.plan`
+    ///   says so at the only place it does), so one bad landing displaces every later step of
+    ///   that question, where a single-select question's steps each start from row 0 afresh.
+    ///
+    /// Nothing here is more bounded than anything else; the honest summary is that the screen no
+    /// longer stops a plan that has gone wrong, and what remains is that a stopped drive still
+    /// leaves a dialog a person can finish.
+    ///
+    /// **`.allow` is not driven this way, and the asymmetry is deliberate**, for two reasons
+    /// that belong to it alone — no label to check a row against, and a durable permission grant
+    /// one row below its target — both written out at its own call site above.
+    private func drive(
+        _ plan: AnswerPlan,
+        driver: any AgentDialogDriver,
+        injector: TextInjecting,
+        id: UUID,
+        token: UUID
+    ) -> AnswerDispatch {
+        remember(answered: token, for: id)
+        injecting.insert(id)
+        perform(plan.steps, at: 0, driver: driver, injector: injector, id: id)
+        return .dispatched
+    }
+
+    /// One step, then the next from inside its settle. Recursive rather than a loop because
+    /// each press repaints asynchronously and the next step is only meaningful once the
+    /// repaint has landed — the same 120ms seam `injectionSettle` is everywhere else.
+    private func perform(
+        _ steps: [AnswerPlan.Step],
+        at index: Int,
+        driver: any AgentDialogDriver,
+        injector: TextInjecting,
+        id: UUID
+    ) {
+        guard index < steps.count else { injecting.remove(id); return }
+        let step = steps[index]
+
+        // One guard per check, so that whichever one refused has a NAME: an abort sends no
+        // further key and is otherwise indistinguishable from a drive that finished.
+        //
+        // **This read happens BEFORE the arrow burst and the settle, so it sits one settle plus
+        // N keystrokes ahead of the Return it is guarding.** The post-move re-read used to close
+        // that window; it was removed with the rest of the per-step screen reading, so a dialog
+        // that closes inside the seam is pressed into whatever replaced it. Stated rather than
+        // hidden — it is the same window `drive(from:to:confirm:)` below still closes for
+        // `.allow` and `.option`.
+        guard let screen = injector.readViewport() else {
+            note(.unreadableBeforePress, step: index, step, viewport: nil)
+            injecting.remove(id)
+            return
+        }
+        guard driver.hasSelectList(inViewport: screen) else {
+            note(.noDialogOnScreen, step: index, step, viewport: screen)
+            injecting.remove(id)
+            return
+        }
+
+        let distance = step.to - step.from
+        for _ in 0..<abs(distance) {
+            if distance > 0 { injector.sendArrowDown() } else { injector.sendArrowUp() }
+        }
+
+        // The 120ms seam stays between the move and the press, unchanged. It is the same
+        // `injectionSettle` the other paths that drive a TUI wait out — `inject`, `rename`, and
+        // the one-step drive below; not every keystroke path in this file does, `sendToShell`
+        // types straight at a pty. What the seam is worth HERE was not measured when the re-read
+        // that used to sit inside it was removed, so nothing is claimed about what the TUI does
+        // with a Return that arrives sooner. It was kept because removing a delay nobody has
+        // measured, in front of an irreversible press, is not a change this task had evidence for.
+        injectionSettle { [weak self] in
+            guard let self else { return }
+            injector.sendReturn()
+            self.injectionSettle { [weak self] in
+                self?.perform(steps, at: index + 1, driver: driver, injector: injector, id: id)
+            }
+        }
+    }
+
+    /// Files one abort against `answerAbortSink`. A method rather than the literal at each
+    /// site: the step is the source of every field, so only the screen is written out where the
+    /// drive can be read.
+    ///
+    /// **`expected` and `focused` are always nil from here, so they are not parameters.** Both
+    /// checks left in `perform` are about the screen as a whole rather than a row — one found no
+    /// screen, the other found no list on it — and neither has a label it compared or a row it
+    /// read. The two row-shaped fields still exist on `AnswerAbort` because the early guards in
+    /// `answerPrompt` and the one-step drive do fill them.
+    private func note(
+        _ check: AnswerAbort.Check,
+        step index: Int,
+        _ step: AnswerPlan.Step,
+        viewport: String?
+    ) {
+        answerAbortSink(AnswerAbort(
+            check: check, step: index, purpose: step.purpose, from: step.from, to: step.to,
+            expected: nil, focused: nil, viewport: viewport
+        ))
+    }
+
+    /// Move the selection, wait for the repaint, re-read, and only then submit — the one-step
+    /// drive `.allow` and `.option` take.
     ///
     /// **Measured, not assumed, and the re-read is the whole safety property.** Arrows are
     /// relative: a miscounted, dropped or late-repainted keystroke leaves the marker somewhere
@@ -5799,134 +5981,11 @@ final class SessionStore: ObservableObject {
     /// A failed confirmation sends nothing further and reports nothing: the answer is already
     /// `dispatched` to the client, the cursor has moved, and a moved cursor is recoverable by
     /// the person at the keyboard in a way a wrong Return is not.
-    /// Answer a whole set of questions in one drive.
     ///
-    /// **The plan is built first and the screen only ever CHECKS it.** `AnswerPlan` knows
-    /// every move and press from the transcript and the reader's choices, so this walks a
-    /// fixed program: before each press it confirms the cursor is where the plan says it
-    /// starts and that the row about to be pressed reads what the plan says it should. A
-    /// disagreement aborts — no further key is sent — rather than being counted from.
-    ///
-    /// **Nothing is committed until the last step.** claude shows a review screen listing every
-    /// question with its chosen answer and asks "Ready to submit your answers?", so an abort
-    /// part-way leaves a dialog the human can still finish or cancel. That is why this can be
-    /// driven at all: the failure mode is "stopped early", never "half an answer sent".
-    private func drive(
-        _ plan: AnswerPlan,
-        questions: [PromptQuestion],
-        driver: any AgentDialogDriver,
-        injector: TextInjecting,
-        id: UUID,
-        token: UUID
-    ) -> AnswerDispatch {
-        remember(answered: token, for: id)
-        injecting.insert(id)
-        perform(plan.steps, at: 0, questions: questions, driver: driver, injector: injector, id: id)
-        return .dispatched
-    }
-
-    /// One step, then the next from inside its settle. Recursive rather than a loop because
-    /// each press repaints asynchronously and the next step's checks are only meaningful once
-    /// the repaint has landed — the same 120ms seam `injectionSettle` is everywhere else.
-    private func perform(
-        _ steps: [AnswerPlan.Step],
-        at index: Int,
-        questions: [PromptQuestion],
-        driver: any AgentDialogDriver,
-        injector: TextInjecting,
-        id: UUID
-    ) {
-        guard index < steps.count else { injecting.remove(id); return }
-        let step = steps[index]
-
-        // One guard per check, where a single compound one would do. The conditions, their
-        // order and their short-circuiting are unchanged — what the split buys is a NAME for
-        // whichever one refused, because an abort sends no further key and is otherwise
-        // indistinguishable from a drive that finished.
-        guard let screen = injector.readViewport() else {
-            note(.unreadableBeforePress, step: index, step, viewport: nil)
-            injecting.remove(id)
-            return
-        }
-        let focused = driver.focusedRow(inViewport: screen)
-        guard focused == step.from else {
-            note(.cursorBeforePress, step: index, step, focused: focused, viewport: screen)
-            injecting.remove(id)
-            return
-        }
-        let expected = Self.rowLabel(for: step, questions: questions)
-        guard let expected, driver.row(step.to, reads: expected, inViewport: screen) else {
-            note(.labelBeforePress, step: index, step, expected: expected,
-                 focused: focused, viewport: screen)
-            injecting.remove(id)
-            return
-        }
-
-        let distance = step.to - step.from
-        for _ in 0..<abs(distance) {
-            if distance > 0 { injector.sendArrowDown() } else { injector.sendArrowUp() }
-        }
-
-        injectionSettle { [weak self] in
-            guard let self else { return }
-            // Re-read after the move: the row under the cursor must STILL be the one the plan
-            // named. This is the check that survives a human touching the terminal mid-drive.
-            guard let landed = injector.readViewport() else {
-                self.note(.unreadableAfterMove, step: index, step, expected: expected,
-                          viewport: nil)
-                self.injecting.remove(id)
-                return
-            }
-            let arrived = driver.focusedRow(inViewport: landed)
-            guard arrived == step.to else {
-                self.note(.landingAfterMove, step: index, step, expected: expected,
-                          focused: arrived, viewport: landed)
-                self.injecting.remove(id)
-                return
-            }
-            injector.sendReturn()
-            self.injectionSettle { [weak self] in
-                self?.perform(steps, at: index + 1, questions: questions,
-                              driver: driver, injector: injector, id: id)
-            }
-        }
-    }
-
-    /// Files one abort against `answerAbortSink`. A method rather than the literal at each
-    /// site: the step is the source of every field except the one that failed, so only the
-    /// difference is written out where the drive can be read.
-    private func note(
-        _ check: AnswerAbort.Check,
-        step index: Int,
-        _ step: AnswerPlan.Step,
-        expected: String? = nil,
-        focused: Int? = nil,
-        viewport: String?
-    ) {
-        answerAbortSink(AnswerAbort(
-            check: check, step: index, purpose: step.purpose, from: step.from, to: step.to,
-            expected: expected, focused: focused, viewport: viewport
-        ))
-    }
-
-    /// What the row a step is about must read, or `nil` when the plan is inconsistent with the
-    /// questions — which `AnswerPlan.plan` already refuses to produce, so it is a belt on a
-    /// brace.
-    static func rowLabel(
-        for step: AnswerPlan.Step, questions: [PromptQuestion]
-    ) -> String? {
-        switch step.purpose {
-        case .option(let question, let option):
-            guard questions.indices.contains(question),
-                  questions[question].options.indices.contains(option) else { return nil }
-            return questions[question].options[option].label
-        case .action(_, let isLast):
-            return AnswerPlan.actionLabel(isLast: isLast)
-        case .submit:
-            return AnswerPlan.submitAnswersLabel
-        }
-    }
-
+    /// **The planned drive above does NOT do this any more; see its own doc for why the two
+    /// differ.** The short version is that `.allow` commits a permission decision on the press
+    /// and has no label to check the row against, so its cursor read is the only interlock it
+    /// has ever had.
     private func drive(
         from current: Int,
         to target: Int,
@@ -8380,14 +8439,18 @@ final class SessionStore: ObservableObject {
 /// something unexpected or the parser misread something ordinary.
 struct AnswerAbort: Equatable {
     /// Which check refused, named apart rather than collapsed into "failed". The repairs are
-    /// unrelated: a cursor that did not start where the plan said is a screen that moved under
-    /// the plan, a label mismatch is this Mac's copy disagreeing with what is drawn, a landing
-    /// failure is a keystroke the TUI dropped or has yet to repaint, and an unreadable viewport
-    /// is not about the dialog at all.
+    /// unrelated: no select list on screen is a dialog that closed or was never there, a
+    /// landing failure is a keystroke the TUI dropped or has yet to repaint, and an unreadable
+    /// viewport is not about the dialog at all.
+    ///
+    /// **`pre-press-cursor` and `pre-press-label` were removed with the checks that filed
+    /// them** — the planned drive's per-step cursor and label reads, which refused a real
+    /// screen whose only fault was an option description that wrapped onto a line beginning
+    /// `0. `. Both `after-move` cases survive because `.allow` and `.option` still walk
+    /// `drive(from:to:confirm:)`, which reads the screen after its move and files them.
     enum Check: String, Equatable {
         case unreadableBeforePress = "unreadable-viewport-before-press"
-        case cursorBeforePress = "pre-press-cursor"
-        case labelBeforePress = "pre-press-label"
+        case noDialogOnScreen = "no-dialog-on-screen"
         case unreadableAfterMove = "unreadable-viewport-after-move"
         case landingAfterMove = "post-move-landing"
         case noInjector          = "no-injector"

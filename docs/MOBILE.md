@@ -531,6 +531,40 @@ page.
       of dead space at the top of every session on the phone.
     - **Gone.** Let the retry succeed, or interrupt the agent's turn on the Mac. The strip
       disappears on its own, with no reopen needed.
+74. **Drag the keyboard away through the conversation, slowly.** Tap the composer, then drag
+    down through the list. The field must stay glued to the keyboard's top edge the whole way,
+    Messages-style — not sit still above a widening gap and snap down when the finger lifts,
+    which is what SwiftUI's own keyboard avoidance did (its keyboard safe area only moves on
+    show/hide notifications, and a drag posts none until it ends). Then the shapes around it:
+    - **Smooth at both speeds.** Drag slowly, then flick fast. The field must move without
+      judder either way. Jerkiness here means a per-frame value is reaching LAYOUT again —
+      `KeyboardLiftedInset` pads only by the settled overlap and offsets by the live one;
+      padding by the drag re-lays the whole `List` out under your finger on every frame.
+    - **Release halfway.** The keyboard springs back up and the field rides it, no gap and no
+      jump when it lands.
+    - **Tap to raise.** Tap the field with the keyboard down: it slides up with the keyboard,
+      no jump at either end. A field left UNDER the keyboard means the probe is not tracking —
+      it must be pinned to the root view controller's view's `keyboardLayoutGuide`, not the
+      window's, which on iOS 18.3.1 never moves.
+    - With the keyboard up the last message is not hidden behind the composer, and a blocked
+      `PromptCard` rides above the field throughout.
+    - **Height change with the keyboard up.** Switch to the emoji keyboard and back, and toggle
+      the predictive bar. The field follows each height change with the keyboard, no gap and
+      no overlap once it settles.
+    - **Push and pop with the keyboard up.** With the field focused, open a detail row, come
+      back. The field and the last message sit where the keyboard now is — no blank gap under
+      the conversation. A gap means the hide notification that landed while the timeline was
+      off screen was not made up for by the probe's first settled report on re-entry.
+    - **iPad: floating keyboard, and a hardware keyboard.** Pinch the keyboard to float it,
+      then undock/split it: the field drops to the bottom and stays there, never thrown up the
+      screen. With a hardware keyboard attached, only the shortcut bar shows — the field sits
+      just above it. A field flung upward means an undocked end frame was counted as a docked
+      keyboard (`KeyboardOverlapReader.overlap(keyboardEnd:windowBounds:safeBottom:)`).
+
+    A snap at the end of a drag means the probe in `KeyboardOverlapReader` is not being laid
+    out on every frame of it. The fallback, if it ever is not, is a `CADisplayLink` sampling
+    the root view's `keyboardLayoutGuide.layoutFrame` for as long as the drag lasts, in that
+    same file.
 
 ## A second checklist: the iOS plumbing
 
