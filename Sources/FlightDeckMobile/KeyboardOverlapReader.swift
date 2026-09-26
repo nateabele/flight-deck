@@ -19,7 +19,9 @@ import UIKit
 ///
 /// Used by `SessionTimelineScreen`, which turns SwiftUI's keyboard avoidance OFF
 /// (`.ignoresSafeArea(.keyboard)`) and pads its composer by this value instead — both halves
-/// are needed; with only this one, the composer would be lifted twice.
+/// are needed; with the padding alone, the composer would be lifted twice. **Host it in the
+/// smallest view that uses the value** (there, `KeyboardLiftedInset`): it reports at display
+/// rate through a drag, and every report re-runs the body of whichever view owns the state.
 struct KeyboardOverlapReader: UIViewRepresentable {
     /// Called with the new overlap, only when it differs from the last one reported. The
     /// equality gate is what keeps this out of a loop: setting SwiftUI state re-renders the
