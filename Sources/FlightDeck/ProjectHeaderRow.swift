@@ -38,9 +38,14 @@ struct ProjectHeaderRow: View {
             // and then decides whether that press was a click only once the press is over. It
             // cannot watch the mouse-up: `NSTableView` swallows that one inside its own tracking
             // loop, where no local monitor can see it. That file's doc comment has the
-            // measurements. The upshot here is that the entire row toggles on a click AND drags
-            // to reorder. Finder and the Xcode navigator toggle from the whole label too, so
-            // this is also the conventional behaviour.
+            // measurements. The upshot here is that only a click landing in the chevron's zone
+            // (`SidebarClickIntent.chevronZoneWidth`, measured from the row's leading edge)
+            // collapses the row; a click anywhere else on it selects the project instead — opens
+            // the per-project view, wired in a later task — and a drag anywhere on the row still
+            // reorders. Finder and the Xcode navigator toggle from the whole label, so that
+            // precedent no longer applies: this row now has two things a click can mean, not
+            // one, and only geometry (not a view Finder's chevron has and this one doesn't) can
+            // tell them apart.
             //
             // For VoiceOver this row is not actuatable, and the context menu's Expand/Collapse
             // is the accessible route to collapsing a project.
@@ -62,12 +67,14 @@ struct ProjectHeaderRow: View {
                 // layout instead would knock every project name out of alignment as sessions
                 // come and go.
                 //
-                // The row still TOGGLES while empty, which the `Button` this replaced did not —
-                // it was hit-test-disabled there. Deliberate: the context menu's
-                // Expand/Collapse was never gated on emptiness either, so the row now matches
-                // it, and collapsing an empty project does something real — it drops the
-                // `.empty` placeholder row, whose whole job is to tell expanded-empty apart
-                // from collapsed (see `SidebarRow`). Only the chevron has nothing to say,
+                // The chevron's ZONE still collapses the row while empty, which the `Button`
+                // this replaced did not — it was hit-test-disabled there. Geometry, not this
+                // `Image`, is what decides the zone (`SidebarClickIntent.chevronZoneWidth`), so
+                // making the glyph invisible does not also disable it. Deliberate: the context
+                // menu's Expand/Collapse was never gated on emptiness either, so the row now
+                // matches it, and collapsing an empty project does something real — it drops the
+                // `.empty` placeholder row, whose whole job is to tell expanded-empty apart from
+                // collapsed (see `SidebarRow`). Only the chevron GLYPH has nothing to say,
                 // because there is nothing to disclose.
                 .opacity(repo.sessions.isEmpty ? 0 : 1)
                 // Decorative — the row's own label says "collapsed"/"expanded" in words — and
