@@ -191,6 +191,28 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertTrue(store.unreadIdle.contains(s.id))
     }
 
+    /// Fix round 1, finding 1: `applyReadState`'s `isViewed` used to be just
+    /// `active && selectedSessionID == transition.id`, so a session finishing while its
+    /// *project* view covers the detail column — its terminal literally not on screen — was
+    /// still treated as viewed and never marked. `selectedProjectID == nil` is the other half
+    /// of `isViewed` that makes it track what is actually rendered, not just what is
+    /// "selected" underneath.
+    func testFinishingWhileItsProjectViewIsShowingStillMarksUnread() {
+        let store = SessionStore(provider: StubProvider())
+        store.appIsActive = { true }
+        let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))
+        guard let project = store.repos.first?.id else { return XCTFail("expected a repo") }
+        // `s` stays `selectedSessionID` throughout — selecting a project does not clear it,
+        // only the other direction does (see `SidebarSelectionTests`) — which is exactly what
+        // makes the buggy `isViewed` check believe `s` is still being looked at.
+        store.selectProject(project)
+
+        store.applyRegistry([1: row(s, activity: .busy)])
+        store.applyRegistry([1: row(s, activity: .idle)])
+
+        XCTAssertTrue(store.unreadIdle.contains(s.id))
+    }
+
     func testClosingASessionDropsItsMark() {
         let store = SessionStore(provider: StubProvider())
         let s = store.newSession(in: URL(fileURLWithPath: "/work/foo", isDirectory: true))

@@ -218,6 +218,12 @@ final class SessionStore: ObservableObject {
 
     func selectProject(_ id: UUID) { selectedProjectID = id }
 
+    /// The counterpart `SidebarSelection.Route.clearProject` routes to: ⌘-clicking the
+    /// selected project row deselects the row, not the session underneath it, so this leaves
+    /// `selectedSessionID` alone — the terminal that was selected before the project view
+    /// opened is still what the detail column falls back to.
+    func deselectProject() { selectedProjectID = nil }
+
     /// Sessions that finished while the user was not looking at them, rendered as the unread
     /// dot in the sidebar. See `SessionReadPolicy`.
     ///
@@ -7746,7 +7752,12 @@ final class SessionStore: ObservableObject {
         for transition in transitions {
             switch SessionReadPolicy.change(
                 old: transition.old, new: transition.new,
-                isViewed: active && selectedSessionID == transition.id
+                // `selectedProjectID == nil` matters as much as the session match: while a
+                // project view covers the detail column, `selectedSessionID` still names the
+                // session that will reappear when the project view closes, but that
+                // session's terminal is not on screen right now, so a completion under it
+                // must not be swallowed as "viewed".
+                isViewed: active && selectedProjectID == nil && selectedSessionID == transition.id
             ) {
             case .none:
                 continue
